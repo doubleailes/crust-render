@@ -29,7 +29,7 @@ if [ -z "$DIR" ]; then
     exit 2
 fi
 
-BIN=target/release/crust-render
+BIN=target/release/crust
 if [ ! -x "$BIN" ]; then
     cargo build --release -p crust-render
 fi
@@ -49,7 +49,7 @@ scene_paths() {
 if [ "$MODE" = record ]; then
     mkdir -p "$DIR"
     while IFS=$'\t' read -r name path; do
-        "$BIN" -i "$path" -o "$DIR/$name.exr" -s "$SPP" -l error >/dev/null 2>&1 \
+        "$BIN" render -i "$path" -o "$DIR/$name.exr" -s "$SPP" -l error >/dev/null 2>&1 \
             && echo "recorded $name" || echo "FAILED   $name"
     done < <(scene_paths)
     exit 0
@@ -65,7 +65,7 @@ while IFS=$'\t' read -r name path; do
         printf '%-22s %s\n' "$name" "NO GOLDEN"
         continue
     fi
-    if ! "$BIN" -i "$path" -o "$WORK/$name.exr" -s "$SPP" -l error >/dev/null 2>&1; then
+    if ! "$BIN" render -i "$path" -o "$WORK/$name.exr" -s "$SPP" -l error >/dev/null 2>&1; then
         printf '%-22s %s\n' "$name" "RENDER FAILED"
         fail=1
         continue

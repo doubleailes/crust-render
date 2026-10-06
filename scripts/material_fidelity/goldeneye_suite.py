@@ -61,7 +61,7 @@ def toml_str(s):
 def render(argv):
     """The profile's render command: crust, then the EXR rewritten for FLIP.
 
-    crust-render neither creates the output's directory (usdrender does; Goldeneye
+    crust neither creates the output's directory (usdrender does; Goldeneye
     expects `{output_path}` below a fresh `_output/run-NNNN`) nor writes scanline
     EXRs, and FLIP's EXR reader (tinyexr) crashes on crust's tiled ones. So the
     image is rewritten as a scanline EXR with the same pixels.
@@ -75,7 +75,7 @@ def render(argv):
     args.output.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, **({"RAYON_NUM_THREADS": str(args.threads)} if args.threads else {}))
     tiled = args.output.with_name(args.output.stem + ".tiled.exr")
-    proc = subprocess.run([str(args.binary), "-i", str(args.usd), "-o", str(tiled), "-l", "warn"], env=env)
+    proc = subprocess.run([str(args.binary), "render", "-i", str(args.usd), "-o", str(tiled), "-l", "warn"], env=env)
     if proc.returncode != 0:
         return proc.returncode
     suite.write_exr_rgb(args.output, suite.read_exr_rgb(tiled))
@@ -157,7 +157,7 @@ def main():
     # regression tolerance between two runs of one renderer; against another
     # renderer's reference crust needs more.
     ap.add_argument("--flip-threshold", type=float, default=0.1)
-    ap.add_argument("--binary", type=Path, default=suite.REPO / "target/release/crust-render")
+    ap.add_argument("--binary", type=Path, default=suite.REPO / "target/release/crust")
     ap.add_argument("--threads", type=int, help="RAYON_NUM_THREADS for each render (default: all)")
     ap.add_argument("--clean", action="store_true", help="remove previously exported fixtures first")
     ap.add_argument("--expect-failures", type=Path, metavar="REPORT",

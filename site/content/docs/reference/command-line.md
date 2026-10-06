@@ -1,6 +1,6 @@
 +++
 title = "Command line"
-description = "Every crust-render command-line flag."
+description = "Every crust command and flag."
 date = 2026-10-01T08:00:00+00:00
 updated = 2026-10-01T08:00:00+00:00
 draft = false
@@ -9,7 +9,7 @@ sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Every <code>crust-render</code> flag: what it does, its default, and the USD attribute it overrides.'
+lead = 'Every <code>crust</code> command and flag: what it does, its default, and the USD attribute it overrides.'
 toc = true
 top = false
 +++
@@ -17,16 +17,26 @@ top = false
 ## Synopsis
 
 ```bash
-crust-render [OPTIONS]
+crust render [OPTIONS]              # render a scene
+crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materials
 ```
 
-From a source checkout, put `cargo run --release --` in front of the flags:
+| command | what it does |
+|---------|--------------|
+| `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` belongs to it. |
+| [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line. |
+
+`-l, --level` applies to every command, and can go before or after it. `--log-file` belongs to
+`render`: its directory is optional, so anywhere else it could take the next word as one.
+
+From a source checkout, put `cargo run --release --` in front of the command:
 
 ```bash
-cargo run --release -- -i samples/cornellbox.usda -o out.exr
+cargo run --release -- render -i samples/cornellbox.usda -o out.exr
 ```
 
-`crust-render --help` lists every flag, and `crust-render --version` prints the version.
+`crust --help` lists the commands, `crust render --help` every render flag, and
+`crust --version` prints the version.
 
 Many flags override a `crust:*` attribute on the stage's `RenderSettings` prim. A flag you
 pass wins over the attribute. A flag you leave out keeps the scene's value, or the default
@@ -34,6 +44,8 @@ if the scene sets none. See [Render settings](@/docs/usd/render-settings.md) for
 attributes.
 
 ## Summary
+
+The flags of `crust render`:
 
 | flag | value | default | overrides |
 |------|-------|---------|-----------|
@@ -92,10 +104,10 @@ Where to write the image. What it does depends on whether the stage authors
 With products, the PNG is made from the first product's beauty and written beside it.
 
 ```bash
-crust-render -i shot.usda -o renders/shot.0001.exr
+crust render -i shot.usda -o renders/shot.0001.exr
 # without products: writes renders/shot.0001.exr and renders/shot.0001.png
 
-crust-render -i samples/aovs.usda
+crust render -i samples/aovs.usda
 # writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr
 ```
 
@@ -139,8 +151,8 @@ renders: animated attributes hold their first or last time sample. `nan` and `in
 refused as usage errors.
 
 ```bash
-crust-render -i samples/animation.usda -f 12 -o anim.0012.exr
-crust-render -i shot.usda -f 1001.5 -o shot.1001_5.exr    # a subframe
+crust render -i samples/animation.usda -f 12 -o anim.0012.exr
+crust render -i shot.usda -f 1001.5 -o shot.1001_5.exr    # a subframe
 ```
 
 ### camera
@@ -156,6 +168,8 @@ relationship. If there is none, it uses the first camera on the stage.
 The two cases fail differently. If the `--camera` path isn't a camera on the stage, the
 render stops with an error. If the `RenderSettings` camera is missing, the render logs a
 warning and falls back to the first camera.
+
+[`crust ls camera`](#ls) lists the paths `--camera` accepts.
 
 ## Geometry
 
@@ -207,7 +221,7 @@ so one mesh can be fine near the camera and coarse far away. Overrides
 The value must be a positive number. `--stats` reports how many meshes got each level.
 
 ```bash
-crust-render -i scene.usda --camera /cam --subdiv-edge-length 2
+crust render -i scene.usda --camera /cam --subdiv-edge-length 2
 ```
 
 ## Light transport
@@ -270,7 +284,7 @@ finite. Overrides
 filter has its own default radius (see the table above).
 
 ```bash
-crust-render -i scene.usda --filter gaussian --filter-radius 2
+crust render -i scene.usda --filter gaussian --filter-radius 2
 ```
 
 ### indirect-clamp
@@ -307,8 +321,8 @@ studio config does. A config that can't be loaded, or lacks one of them, is an e
 whether the flag or `OCIO` named it.
 
 ```bash
-crust-render -i scene.usda --ocio-config /studio/config.ocio --working-space acescg
-OCIO=/studio/config.ocio crust-render -i scene.usda --working-space acescg
+crust render -i scene.usda --ocio-config /studio/config.ocio --working-space acescg
+OCIO=/studio/config.ocio crust render -i scene.usda --working-space acescg
 ```
 
 ### working-space
@@ -327,7 +341,7 @@ in the builtin config and in the ACES studio configs; to render in it, name it h
 `renderingColorSpace`.
 
 ```bash
-crust-render -i scene.usda --working-space acescg -o beauty.exr
+crust render -i scene.usda --working-space acescg -o beauty.exr
 ```
 
 The EXR is written in the working space, and its header says which (see
@@ -350,7 +364,7 @@ scene-linear range instead. A display or view the config doesn't define is an er
 reported before the render starts. The EXR is never affected.
 
 ```bash
-crust-render -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nits (Rec.709)"
+crust render -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nits (Rec.709)"
 ```
 
 ## Textures
@@ -427,7 +441,7 @@ Crust Render tells you it didn't use something the scene asked for.
 `--log-file [<DIR>]`
 
 Also write the log to a file named for the time the run started,
-`crust-render-<UTC timestamp>.log`, for example `crust-render-20261001T142530Z.log`.
+`crust-<UTC timestamp>.log`, for example `crust-20261001T142530Z.log`.
 
 - Bare `--log-file` writes into the current directory.
 - `--log-file <DIR>` writes into that directory, and creates it if needed.
@@ -436,36 +450,87 @@ The file receives the same lines as the terminal, without colour codes. Combine 
 `-l debug` to keep a full record of a render:
 
 ```bash
-crust-render -i scene.usda -l debug --log-file logs
+crust render -i scene.usda -l debug --log-file logs
 ```
 
 If the file can't be created, the run stops before loading the scene.
 
+## ls
+
+`crust ls <KIND> -i <SCENE>`
+
+Prints the stage's prims of one kind, one absolute prim path per line, in namespace
+order. `KIND` is one of:
+
+| kind | lists |
+|------|-------|
+| `camera` | the cameras a render can go through: the paths `--camera` accepts |
+| `light` | the lights the render reads (sphere, rect, disk, cylinder, distant, dome) |
+| `material` | the `Material` prims a binding can reach, whether or not anything binds them |
+
+The plurals (`cameras`, `lights`, `materials`) work too.
+
+```bash
+$ crust ls camera -i samples/cornellbox.usda
+/scene/camera1
+$ crust ls light -i samples/cornellbox.usda
+/scene/Sky
+```
+
+The prims are found the way the render finds them, without importing anything else, so
+the list is what a render would use:
+
+- Nothing under an inactive ancestor is listed, of any kind.
+- A camera or light under a `class` or proxy- or guide-purpose ancestor, inside an
+  instance's prototype, or beneath a `PointInstancer` is not listed, since a render never
+  uses it.
+- Under an invisible ancestor, a camera is listed (its visibility only hides it in a
+  viewport) and a light is not (it lights nothing).
+- A light is listed whatever its values. One the render then refuses, such as a sphere
+  light of radius 0 or one whose transform scales it to nothing, is skipped with a
+  warning when you render: whether a light is usable depends on the frame, and `ls`
+  reads none.
+- A material is listed wherever a binding can reach it: only one inside an instance's
+  prototype is left out.
+
+The log goes to stderr, so stdout holds only the list and can be piped:
+
+```bash
+for cam in $(crust ls camera -i shot.usda); do
+    crust render -i shot.usda --camera "$cam" -o "renders/$(basename "$cam").exr"
+done
+```
+
+A stage with nothing of that kind prints nothing and logs a warning. A stage that can't
+be opened is an error.
+
 ## Exit status
 
-`crust-render` exits with `0` when the images are written. It exits with a non-zero status
-when the arguments are invalid, the scene or the requested camera can't be loaded, the log
+`crust render` exits with `0` when the images are written, and `crust ls` when the list
+is printed. It exits with a non-zero status
+when the arguments are invalid (a missing command included), the scene or the requested
+camera can't be loaded, the log
 file can't be created, or an image can't be written.
 
 ## Examples
 
 ```bash
 # quick preview
-crust-render -i scene.usda -s 16 -o preview.exr
+crust render -i scene.usda -s 16 -o preview.exr
 
 # final frame of a shot, through the shot camera
-crust-render -i shot.usdc -f 1048 --camera /shot/cam/renderCam -o shot.1048.exr
+crust render -i shot.usdc -f 1048 --camera /shot/cam/renderCam -o shot.1048.exr
 
 # unbiased reference
-crust-render -i scene.usda -s 4096 --indirect-clamp 0 -o reference.exr
+crust render -i scene.usda -s 4096 --indirect-clamp 0 -o reference.exr
 
 # compare MIS against each strategy alone
-crust-render -i samples/veach_mis.usda --strategy light -o light.exr
-crust-render -i samples/veach_mis.usda --strategy bsdf  -o bsdf.exr
+crust render -i samples/veach_mis.usda --strategy light -o light.exr
+crust render -i samples/veach_mis.usda --strategy bsdf  -o bsdf.exr
 
 # many lights, mostly hidden
-crust-render -i interior.usda --light-selection learned
+crust render -i interior.usda --light-selection learned
 
 # textured asset: build the .tx files once, stream them afterwards
-crust-render -i asset.usda --auto-tx --stats
+crust render -i asset.usda --auto-tx --stats
 ```

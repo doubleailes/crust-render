@@ -107,7 +107,7 @@ def render_one(mtlx, args, shots):
         # `pool.map` before results.json is written.
         try:
             proc = subprocess.run(
-                [str(args.binary), "-i", str(shot), "-o", str(exr), "-l", "warn"],
+                [str(args.binary), "render", "-i", str(shot), "-o", str(exr), "-l", "warn"],
                 capture_output=True, text=True, env=env, timeout=args.timeout,
             )
         except subprocess.TimeoutExpired:
@@ -177,7 +177,7 @@ def main():
     ap.add_argument("--compare", action="append",
                     default=["materialx-osl", "blender-new", "blender-nodes", "threejs-new"],
                     help="also score these renderers' published images")
-    ap.add_argument("--binary", type=Path, default=suite.REPO / "target/release/crust-render")
+    ap.add_argument("--binary", type=Path, default=suite.REPO / "target/release/crust")
     ap.add_argument("--out", type=Path, default=Path("fidelity-out"), help="shots, shader ball, results.json")
     args = ap.parse_args()
 

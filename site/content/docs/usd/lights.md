@@ -29,6 +29,13 @@ Crust Render reads these UsdLux light types with their standard `inputs:intensit
 | `DistantLight` | `inputs:angle` |
 | `DomeLight` | `inputs:texture:file`, a lat-long environment map (`inputs:texture:format` unauthored, `latlong` or `automatic`) |
 
+A lat-long dome is oriented as the UsdLux schema specifies (the OpenEXR convention): in
+the light's own frame the top row is +Y, the centre of the image faces **+Z**, a quarter
+of the way in faces +X and three quarters faces −X. The prim's transform then rotates
+that sky, so other UsdLux renderers place an HDRI's sun in the same direction. Releases
+before 0.5.2 put −Z at the image centre. A scene whose dome rotation was tuned on those
+releases needs 180° more about Y to keep its sun where it was.
+
 `inputs:color` and `inputs:shaping:focusTint` are in the
 [working colour space](@/docs/usd/render-settings.md#renderingcolorspace), as UsdLux
 specifies, unless a colour space is authored for them: `colorSpace` metadata on the
@@ -54,8 +61,17 @@ warning.
 
 By default the **camera doesn't see the surface of an area light**, which is the usual
 convention in Arnold, RenderMan and Karma. A light can sit inside the frame without
-showing up, while it still lights the scene. Shadow and indirect rays still see the
-surface: it casts shadows, and appears in reflections.
+showing up, while it still lights the scene.
+
+Such a **hidden light** is an emitter and nothing else, as in the OpenUSD reference
+renderer (hdEmbree): its surface casts no shadow, so two hidden lights never shadow each
+other and whatever is behind one is lit as if it were not there. A ray bouncing through
+it picks up its light and carries on past it, so it still appears in reflections and
+still lights the scene indirectly.
+
+A light the camera **does** see (`crust:light:cameraVisible = 1`) is solid, like a lamp
+bulb: it casts shadows and blocks whatever is behind it. To keep a light hidden from the
+camera but solid, author [`crust:rayMask = 6`](#crust-raymask-on-a-light).
 
 Lights at infinity (dome and distant lights) are the opposite: the camera **does** see
 them by default, as the sky behind the scene.
@@ -94,18 +110,25 @@ on the `RenderSettings` prim.
 
 ### crust:rayMask on a light
 
-`int`, default: bits 1 and 2 (shadow and indirect), plus bit 0 (camera) when the light is
-camera-visible.
+`int`, default: bit 2 (indirect) for a hidden light, all three bits (camera, shadow and
+indirect) for a camera-visible one.
 
 [`crust:rayMask`](@/docs/usd/geometry.md#crust-raymask) works on the surface of an area
-light too. When it is authored, it replaces the visibility above completely, and
-`crust:light:cameraVisible` is ignored:
+light too. When it is authored, it replaces the visibility above completely,
+`crust:light:cameraVisible` is ignored, and the surface is **solid** whatever bits the mask
+leaves: a ray that reaches it stops there.
 
 ```usda
 def SphereLight "Masked"
 {
     float inputs:radius = 0.3
     int crust:rayMask = 7      # camera, shadow and indirect: fully visible
+}
+
+def SphereLight "HiddenButSolid"
+{
+    float inputs:radius = 0.3
+    int crust:rayMask = 6      # hidden from the camera, but it casts shadows
 }
 ```
 

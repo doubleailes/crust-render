@@ -26,7 +26,7 @@ in the repository.
 ## The crates
 
 ```text
-                    crust-render  (the CLI binary)
+                    crust-render  (the CLI; binary `crust`)
                      │         │
                      │         ▼
                      │    crust-assets ──► ptex-rs

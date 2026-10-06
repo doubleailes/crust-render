@@ -2,7 +2,7 @@ use crate::RenderSettings;
 use crate::camera::Camera;
 use crate::light::{AreaLight, LightList, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
-use crate::ray::{MASK_INDIRECT, MASK_SHADOW};
+use crate::ray::MASK_INDIRECT;
 use crate::rt_world::{World, WorldBuilder};
 use crust_rt::Geometry;
 use glam::Vec3A;
@@ -15,9 +15,11 @@ fn add_sphere(world: &mut WorldBuilder, center: Vec3A, radius: f32, material: Ar
 
 /// Adds a sphere light to the scene: emissive sphere geometry in `world`
 /// plus an `AreaLight` over the same surface in `lights`, tied together by
-/// the geometry id (one surface, both roles). The geometry is masked out
-/// of camera rays — the industry default for light sources — while shadow
-/// and indirect rays still see it (occlusion and the bounce side of MIS).
+/// the geometry id (one surface, both roles). The camera does not see it,
+/// so it is a transparent emitter, as an imported hidden light is: no shadow
+/// ray meets it and a bounce through it collects its emission and goes on
+/// (lighting design record, "Hidden lights are transparent emitters").
+/// One-sided, as that requires.
 fn add_sphere_light(
     world: &mut WorldBuilder,
     lights: &mut LightList,
@@ -25,12 +27,13 @@ fn add_sphere_light(
     center: Vec3A,
     radius: f32,
 ) {
-    let material = Arc::new(Emissive::new(color));
+    let material = Arc::new(Emissive::light(color, None));
     let geom_id = world.attach_masked(
         Geometry::Sphere { center, radius },
         material.clone(),
-        MASK_INDIRECT | MASK_SHADOW,
+        MASK_INDIRECT,
     );
+    world.set_transparent_emitter(geom_id, true);
     lights.add(AreaLight::new(
         SphereShape { center, radius },
         material,

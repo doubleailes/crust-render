@@ -478,6 +478,12 @@ impl PatternMaterial for PreviewSurface {
         (!self.emission_textured).then_some(&self.base)
     }
 
+    /// A thin-walled base: its transmission may be textured (a translucent
+    /// `opacity`), so whether it is non-zero is only known per hit.
+    fn pattern_has_straight_transmission(&self) -> bool {
+        self.base.geometry_thin_walled
+    }
+
     fn pattern_has_cutout(&self) -> bool {
         self.cutout.is_some() || self.base.has_cutout()
     }

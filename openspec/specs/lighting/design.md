@@ -91,8 +91,10 @@
   emissive geometry — masked out of **camera** rays by default (the industry convention:
   a light in frame does not show its source; `crust:light:cameraVisible` opts back in,
   then RenderMan's `primvars:ri:attributes:visibility:camera` (an int, non-zero
-  visible) when the crust attribute is not authored, an authored `crust:rayMask` wins
-  outright, and shadow/indirect rays always see it) —
+  visible) when the crust attribute is not authored, and an authored `crust:rayMask` wins
+  outright). A source the camera does not see is a **transparent emitter**: shadow rays
+  do not see it and bounce rays cross it (see "Hidden lights are transparent emitters"
+  below); a camera-visible one is seen by every ray and is solid —
   the `AreaLight` records the geometry's `geom_id`, which is how the integrator
   attributes a bounce-hit emissive surface to its light (`LightList::find_index_by_geom_at`).
   **NEE samples one light per vertex**, picked by the `LightList`'s selection,
@@ -235,7 +237,19 @@
   temperature's blackbody; `normalize` does not apply to a dome) times an optional
   lat-long `EnvironmentMap`; only `latlong`/`automatic` `texture:format` is supported and
   anything else warns and falls back to the uniform colour. The prim's *rotation* orients
-  the sky (a dome is at infinity, so its translation and scale are meaningless). The map
+  the sky (a dome is at infinity, so its translation and scale are meaningless).
+  **Orientation follows the UsdLux schema**, which adopts the OpenEXR lat-long
+  convention ("latitude 0, longitude 0 points into positive z direction; and latitude 0,
+  longitude pi/2 points into positive x direction", longitude running from +π at the left
+  edge to −π at the right): in the light's own frame +Y is the top row, **+Z the image
+  centre**, +X at u = ¼ and −X at u = ¾ (`environment.rs`, `u = ½ − atan2(x, z)/2π`). This
+  is Typhoon's `_DirectionToLatLongUv` exactly, pinned by
+  `mapping_matches_the_reference_delegate`. *History:* crust used to put −Z at the centre
+  (`u = ½ + atan2(x, −z)/2π`, reasoning that a USD camera looks down −Z). That turned every
+  textured dome 180° about its +Y. On the OpenPBR Shader Playground the HDRI's sun then
+  landed behind the room instead of shining through its window. The four samples whose
+  `sky_env.exr` dome was rotated by eye under the old convention now author
+  `rotateY = 200` instead of 20, which keeps their sun where it was. The map
   is importance-sampled by luminance × sinθ — the Jacobian matters, without it polar
   texels are over-sampled — which is what keeps a small bright sun in an HDRI from
   becoming a firefly farm.
@@ -274,8 +288,8 @@
     **now includes the transform's scale**, which it used to ignore. `treatAsPoint` /
     `treatAsLine` are ignored (hints for renderers without area lights, which the schema
     lets an area-light renderer ignore).
-  The source geometry is camera-invisible by default (`light_ray_mask`) — see the
-  `crust:rayMask` bullet above for the opt-ins. Sample: `samples/light_visibility.usda`.
+  The source geometry is camera-invisible by default (`light_ray_mask`), and then a
+  transparent emitter — see the `crust:rayMask` bullet above for the opt-ins. Sample: `samples/light_visibility.usda`.
   `PortalLight`, `GeometryLight` / `MeshLightAPI`, `VolumeLightAPI` and light filters
   are not read. Light and shadow linking are, as below.
 - **Camera visibility of lights at infinity.** A dome or distant light is visible to
@@ -359,6 +373,80 @@
   would show the island's two skies added together. Its linking is receiver-based on
   Hydra categories, judged against the previous vertex for bounces, which is the
   model crust's light linking takes.
+
+## Hidden lights are transparent emitters
+
+A rect, sphere, disk or cylinder light whose source the camera does not see — the
+default — is an emitter and nothing else. `light_ray_mask` gives its geometry
+`MASK_INDIRECT` alone, so no shadow ray meets it, and marks it
+(`WorldBuilder::set_transparent_emitter`). A bounce segment that meets a marked
+geometry collects its emission and continues along the same line as if the source were
+absent: `pass_cutouts` / `pass_walls` record a `Crossing` and restart past it, sharing
+the 256-crossing budget with cutouts and thin walls; past the budget the source is met
+as a solid emitter. A crossing spends no depth, records no vertex, and leaves the
+previous vertex's MIS record to whatever the segment reaches. Its emission goes to the
+record of the vertex the segment left, weighted by `bounce_emission_weight_at` for its
+own light (whole after a carried-medium scatter, which has no MIS record), and
+attenuated by what the segment carried to it: thin-wall passes, the carried medium
+(`medium_arrival`) and the volume regions, which `volume_event_crossing` samples a piece
+at a time between the crossings — a scatter before a crossing means it was never
+reached. Past the depth limit the last segment collects them with ratio-tracked
+transmittance (`K_CROSS`). `VertexRec` holds the crossings' weighted sum (`crossed`,
+plus `crossed_raw` for guiding training) so the gather adds one term; the light path
+expressions keep each crossing apart (`Route::cross`), one `L` after the pass-through
+events before it, and `C.*[LO]` stays the beauty bit for bit.
+
+- **Why both sides.** Dropping `MASK_SHADOW` alone makes NEE count a light hidden
+  behind another while the bounce stops at the nearer one, so the bounce share of the
+  farther light is lost: bias. Typhoon (hdEmbree, OpenUSD `typhoon/main` 70c45e8) builds
+  geometry for a light only when it is `visibleInPrimaryRay` (default false), so a
+  hidden light occludes nothing; its bounce side picks the nearest finite light
+  analytically, so there a nearer light still hides a farther one. crust passes through
+  on both sides.
+- **The measurement that forced it.** `samples/veach_mis_portable.usda` (four hidden
+  sphere lights in a row): before, the four-light render was darker than the sum of the
+  four single-light renders by up to 31% (G) at the wall's right edge and 3% (B) at its
+  left — the big sphere shadowing its neighbour and the reverse — and 1.0000 in the
+  middle. After, summed over twelve column bands of the wall's top 100 rows, the
+  ratio is 1.000 everywhere (largest deviation 0.0005 at 64 spp), and its RMS falls
+  0.00040 → 0.00024 → 0.00009 at 16 → 64 → 256 spp: noise, not bias. `veach_mis.usda`
+  itself authors `crust:light:cameraVisible = 1`, so its spheres stay solid and it is
+  unchanged.
+- **Cost.** A world with no hidden source never enters the walk
+  (`World::has_bounce_pass_throughs`). Cornellbox (a dome only) renders bit-identically
+  at +0.12% instructions (callgrind, 1 thread, 2 spp: 4 231.7 M → 4 236.8 M): the two
+  `VertexRec` sums and one add per vertex in the gather. The larger `trace_path` first
+  pushed `ShadingPoint::scatter_importance` out of line (+0.30%); it is
+  `inline(always)` for that reason.
+- **What moved.** `scripts/check_images.sh` against goldens of the renderer before
+  this change: the 15 samples with no hidden area light are bit-identical (with
+  `rectlight` and `light_visibility`, whose single one-sided source has nothing behind
+  it), and the 22 with one move. relMSE of the new image against the old, both at
+  1024 spp, unclamped: `light_linking` 3·10⁻⁹, `thin_window` 1·10⁻⁷, `aovs_lpe`,
+  `hair`, `aovs`, `usdpreview_textured`, `materialx_basic`, `animation`,
+  `materialx_subsurface`, `curves`, `motionblur` 3·10⁻⁵–2·10⁻⁴; `usdlux` 4·10⁻⁴,
+  `materialx_cutout` 6·10⁻⁴, `materialx_lion` 7·10⁻⁴, `materialx_teapot` 1.5·10⁻³,
+  `instancing` 1.7·10⁻³, `subdivision` 1.8·10⁻³, `nested_instancing` 3·10⁻³;
+  `cornellbox_guided` 0.013, `materialx_showcase` 0.019, `fog` 0.037, `smoke` 0.17. The
+  last four have a source just below a ceiling or wall the camera sees: the patch behind
+  it, which bounces used to reach only through the source's dark back, was black and is
+  now lit (`smoke`'s top row goes 0.19 → 0.49) — the relative error of a black pixel
+  turning grey. On `fog` and `smoke` light-only agrees with power MIS within 0.1% at
+  512 spp; BSDF-only reads ~1% high on both, exactly as it did before this change.
+- **Solid on request.** A camera-visible source (`crust:light:cameraVisible = 1`,
+  RenderMan's camera visibility) is solid and occludes, like a lamp bulb. An authored
+  `crust:rayMask` decides the mask and keeps the source solid on the bounce side
+  whatever bits it clears: `crust:rayMask = 6` is a hidden light that occludes, as
+  every hidden light did before.
+- **Shadow linking.** A hidden source has no `MASK_SHADOW`, so `encode_shadows` gives it
+  no class bit and no shadow ray, restricted or not, meets it.
+- **One-sided only.** A bounce through a closed source meets it twice; the inside wall,
+  which NEE never samples, must emit nothing. Imported sources are one-sided
+  (`Emissive::light`); a hand-built transparent emitter must be too.
+- **Trap: the light cache's receivers.** The learned selection's training walk stops at a
+  hidden source it hits (an emitter does not scatter). Its visibility is
+  `surface_visibility`, so the shadow side is consistent; only the placement of its
+  receivers differs, which steers selection and moves no expectation.
 
 ## Known gaps: light sampling
 

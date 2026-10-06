@@ -27,7 +27,7 @@ context: |
       the MaterialX→OpenPBR adapter, lights, volumes, path guiding, USD import).
     - crust-assets: host-side decoders implementing crust_core::AssetLoader
       (EXR/LDR environment maps, Ptex, UV/UDIM textures) over exr, image, ptex-rs.
-    - crust-render: the thin CLI binary (main.rs only; writes EXR + PNG, decodes
+    - crust-render: the thin CLI binary `crust` (main.rs only; writes EXR + PNG, decodes
       nothing) — clap args, builds a Scene with crust_assets::FileAssets, runs the Renderer.
     - utils: stateless math helpers (sampling warps, MIS heuristics, luminance, align_to_normal, Lerp).
   - Key deps: glam (Vec3A/Mat4), rayon (parallelism), exr + image (output and decoding),

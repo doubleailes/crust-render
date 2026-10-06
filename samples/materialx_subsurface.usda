@@ -9,7 +9,7 @@
 
     A/B against the diffuse approximation that preceded the walk:
 
-      cargo run --release -- -i samples/materialx_subsurface.usda -o sss.exr --stats
+      cargo run --release -- render -i samples/materialx_subsurface.usda -o sss.exr --stats
 
     `--stats` reports the walks, the share that found an exit and their mean
     length.
@@ -92,7 +92,9 @@ def Xform "World"
         float inputs:intensity = 0.4
         asset inputs:texture:file = @sky_env.exr@
         token inputs:texture:format = "latlong"
-        float xformOp:rotateY = 20
+        # 200, not 20: authored when crust put -Z at the lat-long centre;
+        # UsdLux puts +Z there, and 180 more keeps the sun where it was.
+        float xformOp:rotateY = 200
         uniform token[] xformOpOrder = ["xformOp:rotateY"]
     }
 

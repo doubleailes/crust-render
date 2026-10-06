@@ -146,6 +146,9 @@ fn interface_iors(ior: f32, entering: bool) -> (f32, f32) {
 /// after a diffuse bounce there is no footprint left worth tracking, which is
 /// why indirect illumination reads a coarse mip in every renderer that does
 /// this.
+// Forced inline: once `scatter_with` grew its `STRAIGHT` instantiations LLVM
+// kept this out of line (+0.1% of cornellbox's instructions as a call).
+#[inline(always)]
 pub(super) fn lobe_spread(m: &OpenPBR, lobe: Lobe) -> f32 {
     let from_alpha = |(ax, ay): (f32, f32)| (ax + ay).min(crate::RayCone::MAX_SPREAD);
     match lobe {

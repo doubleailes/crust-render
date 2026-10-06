@@ -147,8 +147,9 @@ fn assert_resolve_matches(name: &str, mat: &dyn Material) {
     }
 }
 
-#[test]
-fn resolve_matches_per_query_shading_for_every_material() {
+/// Every material the tests below shade: one of each kind the renderer
+/// has, and the thin-walled transmissive ones.
+fn materials() -> Vec<(String, Arc<dyn Material>)> {
     let ptex = Some(PtexRef(Arc::new(Gradient)));
     let coated_emitter = OpenPBR {
         coat_weight: 0.6,
@@ -162,9 +163,32 @@ fn resolve_matches_per_query_shading_for_every_material() {
         ..OpenPBR::glass(1.5)
     };
 
+    let thin_glass = OpenPBR {
+        geometry_thin_walled: true,
+        transmission_color: Vec3A::new(0.9, 0.6, 0.3),
+        ..OpenPBR::glass(1.5)
+    };
+
     let mut materials: Vec<(String, Arc<dyn Material>)> = vec![
         ("OpenPBR".into(), Arc::new(OpenPBR::default())),
         ("OpenPBR glass".into(), Arc::new(deep_glass.clone())),
+        ("OpenPBR thin glass".into(), Arc::new(thin_glass.clone())),
+        (
+            "OpenPBR thin glass + Ptex".into(),
+            Arc::new(OpenPBR {
+                base_color_ptex: ptex.clone(),
+                ..thin_glass.clone()
+            }),
+        ),
+        (
+            "PreviewSurface (textured opacity over thin glass)".into(),
+            Arc::new(PreviewSurface::new(
+                "t".into(),
+                thin_glass.clone(),
+                vec![(Target::Opacity, uv_input(TexOutput::R))],
+                None,
+            )),
+        ),
         (
             "OpenPBR + Ptex under an emissive coat".into(),
             Arc::new(OpenPBR {
@@ -232,6 +256,8 @@ fn resolve_matches_per_query_shading_for_every_material() {
         ("hair.mtlx", "mtlx_hair_mix"),
         ("hair.mtlx", "mtlx_hair_clear"),
         ("hair.mtlx", "mtlx_hair_translucent_mix"),
+        ("materialx_thin_walled.mtlx", "mtlx_openpbr_window"),
+        ("materialx_thin_walled.mtlx", "mtlx_standard_film"),
     ] {
         let loaded = materialx::load(
             &sample(file),
@@ -241,8 +267,69 @@ fn resolve_matches_per_query_shading_for_every_material() {
         .unwrap_or_else(|e| panic!("{node} compiles: {e:?}"));
         materials.push((format!("MaterialX {node}"), loaded.material));
     }
+    materials
+}
 
-    for (name, mat) in &materials {
+#[test]
+fn resolve_matches_per_query_shading_for_every_material() {
+    for (name, mat) in &materials() {
         assert_resolve_matches(name, mat.as_ref());
     }
+}
+
+/// The straight transmittance comes out of the resolved BSDF, so it is the
+/// one the vertex would shade with: a material reporting any at a hit says
+/// so up front (or the world never passes it), and the resolution without
+/// it keeps every value of the whole — only the delta straight line leaves
+/// its sampling, and the density renormalises over what stays.
+#[test]
+fn straight_transmission_is_declared_and_split_from_the_resolution() {
+    let rec = hit();
+    let mut thin = 0;
+    for (name, mat) in &materials() {
+        for dir in [
+            Vec3A::new(0.3, -0.2, -1.0).normalize(),
+            Vec3A::new(-0.7, 0.1, -0.4).normalize(),
+        ] {
+            let r_in = Ray::new(rec.p - dir, dir);
+            let cos = dir.dot(rec.normal).abs();
+            let sp = ShadingPoint::new(mat.as_ref(), &r_in, &rec, cos);
+            let mut t = Vec3A::ZERO;
+            for k in 0..64 {
+                t += sp.straight_transmittance(&r_in, PathSampler::new(0, 0, 0, k));
+            }
+            if t == Vec3A::ZERO {
+                continue;
+            }
+            thin += 1;
+            assert!(
+                mat.has_straight_transmission(),
+                "{name}: straight transmission at a hit, but not declared"
+            );
+            let mut rest = ShadingPoint::new(mat.as_ref(), &r_in, &rec, cos);
+            rest.exclude_straight();
+            assert_eq!(
+                rest.straight_transmittance(&r_in, PathSampler::new(0, 0, 0, 1)),
+                Vec3A::ZERO,
+                "{name}: excluded"
+            );
+            for k in 0..64 {
+                if let Some(x) = rest.scatter_importance(&r_in, PathSampler::new(0, 0, 0, k)) {
+                    let straight = x.ray.direction().normalize().dot(dir) > 1.0 - 1e-6;
+                    assert!(!(x.delta && straight), "{name}: a straight delta remains");
+                }
+            }
+            for wi in [
+                Vec3A::new(0.2, 0.3, 0.9).normalize(),
+                Vec3A::new(0.1, 0.2, -0.9).normalize(),
+            ] {
+                let (Some((va, _)), Some((vb, _))) = (sp.eval(&r_in, wi), rest.eval(&r_in, wi))
+                else {
+                    panic!("{name}: eval answers with or without the straight lobe");
+                };
+                assert_eq!(bits(va), bits(vb), "{name}: eval value toward {wi}");
+            }
+        }
+    }
+    assert_eq!(thin, 2 * 5, "every thin-walled material, both directions");
 }
