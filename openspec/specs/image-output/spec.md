@@ -32,12 +32,14 @@ multi-channel EXR per render product".
 
 ### Requirement: Tone-mapped sRGB PNG conversion next to the EXR
 
-After writing the EXR, the tool SHALL produce a viewable PNG. It does this by
-clamping the beauty's linear values to [0,1], applying the sRGB transfer
-curve, and quantizing to 8-bit. The PNG is saved next to the EXR at the same
-path with a `.png` extension. With products, the PNG SHALL be made from the
-first product's beauty var and saved beside that product. A first product
-without a beauty var SHALL produce no PNG.
+After writing the EXR, the tool SHALL produce a viewable PNG by encoding the
+beauty through the OCIO config's display and view (`--display`, `--view`;
+default `sRGB - Display` / `Un-tone-mapped`, which clamps to [0,1] and applies
+the sRGB curve) and quantizing to 8-bit. The PNG is saved next to the EXR at
+the same path with a `.png` extension. With products, the PNG SHALL be made
+from the first product's beauty var and saved beside that product. A first
+product without a beauty var SHALL produce no PNG. A display or view the
+config cannot make SHALL be an error before the render.
 
 #### Scenario: PNG is produced from the render
 
@@ -134,3 +136,18 @@ differs from the render's, SHALL be skipped with one warning naming it.
 - **WHEN** a product authors `productType = "deepRaster"`
 - **THEN** a warning is logged and no file is written for it, while the other
   products are written
+
+### Requirement: EXRs record the working space
+
+Every product EXR SHALL carry `colorInteropID` set to the working space's ASWF
+Color Interop ID. When the working space is not linear Rec.709, every EXR —
+products and the single beauty — SHALL also carry the space's
+`chromaticities` where its interop ID has standard primaries. In linear
+Rec.709 the single beauty EXR SHALL keep the header and pixels of the output before
+AOV support.
+
+#### Scenario: An ACEScg render
+
+- **WHEN** a stage without products renders with `--working-space acescg`
+- **THEN** the EXR's header has `chromaticities` of AP1 with the ACES white
+  and `colorInteropID = lin_ap1_scene`

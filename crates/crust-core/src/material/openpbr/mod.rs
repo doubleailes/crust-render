@@ -318,8 +318,12 @@ impl OpenPBR {
 /// It answers the BSDF queries and nothing else — no emission method, because
 /// emission is read from the parameters before resolution. The parameters
 /// themselves stay readable ([`ResolvedOpenPBR::params`]) for probes.
+///
+/// The flag is whether the thin-walled straight transmission is still part
+/// of the lobe set: `false` once the integrator has taken it over as a
+/// pass-through ([`ResolvedOpenPBR::exclude_straight`]).
 #[derive(Debug, Clone)]
-pub struct ResolvedOpenPBR(OpenPBR);
+pub struct ResolvedOpenPBR(OpenPBR, bool);
 
 impl ResolvedOpenPBR {
     /// The resolved parameters, for probes and tests.
@@ -335,13 +339,93 @@ impl ResolvedOpenPBR {
         rec: &HitRecord,
         sampler: PathSampler,
     ) -> Option<ScatterSample> {
-        self.0.scatter_resolved(r_in, rec, sampler)
+        if self.1 {
+            self.0.scatter_resolved(r_in, rec, sampler)
+        } else {
+            self.scatter_without_straight(r_in, rec, sampler)
+        }
+    }
+
+    /// [`ResolvedOpenPBR::scatter`] once the straight transmission is
+    /// excluded. Out of line, so the common side keeps its inlining: with
+    /// both instantiations in the arm, `ShadingPoint::scatter_importance`
+    /// stopped being inlined and cornellbox, which has no thin wall, ran
+    /// 0.5% more instructions.
+    #[cold]
+    #[inline(never)]
+    fn scatter_without_straight(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+    ) -> Option<ScatterSample> {
+        self.0
+            .scatter_with::<false, false>(r_in, rec, sampler, None)
+    }
+
+    /// [`OpenPBR::scatter_split`] on the resolved parameters.
+    pub(crate) fn scatter_split(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+        out: &mut crate::lpe::LobeSplit,
+    ) -> Option<ScatterSample> {
+        out.clear();
+        if self.1 {
+            self.0
+                .scatter_with::<true, true>(r_in, rec, sampler, Some(out))
+        } else {
+            self.0
+                .scatter_with::<true, false>(r_in, rec, sampler, Some(out))
+        }
     }
 
     /// [`Material::eval`] on the resolved parameters.
     #[inline]
     pub(crate) fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
-        self.0.eval_resolved(r_in, rec, wi)
+        if self.1 {
+            self.0.eval_resolved(r_in, rec, wi)
+        } else {
+            self.eval_without_straight(r_in, rec, wi)
+        }
+    }
+
+    /// [`ResolvedOpenPBR::eval`] once the straight transmission is excluded,
+    /// out of line for the reason [`ResolvedOpenPBR::scatter_without_straight`]
+    /// is.
+    #[cold]
+    #[inline(never)]
+    fn eval_without_straight(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        wi: Vec3A,
+    ) -> Option<(Vec3A, f32)> {
+        self.0.eval_with::<false>(r_in, rec, wi)
+    }
+
+    /// [`OpenPBR::straight_transmittance`], zero once excluded.
+    pub(crate) fn straight_transmittance(&self, r_in: &Ray, rec: &HitRecord) -> Vec3A {
+        if self.1 {
+            self.0.straight_transmittance(r_in, rec)
+        } else {
+            Vec3A::ZERO
+        }
+    }
+
+    /// Drops the thin-walled straight transmission from the lobe set: what a
+    /// path meeting a thin wall it could have passed scatters through, with
+    /// the selection mass and the matching density renormalised over the
+    /// other lobes.
+    pub(crate) fn exclude_straight(&mut self) {
+        self.1 = false;
+    }
+
+    /// The parameters as they stand, with every lobe: for an `OpenPBR` with
+    /// no per-hit work, which the integrator otherwise queries in place.
+    pub(crate) fn of_plain(params: &OpenPBR) -> Self {
+        ResolvedOpenPBR(params.clone(), true)
     }
 
     /// [`Material::make_ray`] on the resolved parameters.
@@ -361,7 +445,7 @@ impl OpenPBR {
     /// when nothing is textured and `self` can be used directly.
     ///
     /// Resolving here, once, keeps every lobe downstream oblivious to
-    /// texturing: `LobePmf::from_params` then derives its lobe-selection
+    /// texturing: `LobePmf::selecting` then derives its lobe-selection
     /// probabilities from the *textured* albedo for free, which matters —
     /// sampling a black region as though it had a mid-grey diffuse lobe would
     /// be unbiased but needlessly noisy.
@@ -379,7 +463,7 @@ impl OpenPBR {
     pub fn into_resolved(self, rec: &HitRecord) -> ResolvedOpenPBR {
         match self.shaded(rec) {
             Some(m) => m,
-            None => ResolvedOpenPBR(self),
+            None => ResolvedOpenPBR(self, true),
         }
     }
 
@@ -398,11 +482,14 @@ impl OpenPBR {
             return None;
         };
         let (u, v) = face.uv;
-        Some(ResolvedOpenPBR(OpenPBR {
-            base_color: tex.eval(face.id, u, v, rec.face_width),
-            base_color_ptex: None,
-            ..self.clone()
-        }))
+        Some(ResolvedOpenPBR(
+            OpenPBR {
+                base_color: tex.eval(face.id, u, v, rec.face_width),
+                base_color_ptex: None,
+                ..self.clone()
+            },
+            true,
+        ))
     }
 
     pub(crate) fn scatter_resolved(
@@ -411,16 +498,17 @@ impl OpenPBR {
         rec: &HitRecord,
         sampler: PathSampler,
     ) -> Option<ScatterSample> {
-        self.scatter_with::<false>(r_in, rec, sampler, None)
+        self.scatter_with::<false, true>(r_in, rec, sampler, None)
     }
 
     /// The sampling behind [`OpenPBR::scatter_resolved`] and
     /// [`OpenPBR::scatter_split`]. With `SPLIT`, a continuous sample's value
     /// is also split by lobe into `split`, at the local direction just
     /// drawn; without, every `if SPLIT` compiles away and this is the
-    /// scatter it always was.
+    /// scatter it always was. Without `STRAIGHT` the thin-walled delta
+    /// transmission is not in the lobe set ([`LobePmf::selecting`]).
     #[inline(always)]
-    fn scatter_with<const SPLIT: bool>(
+    fn scatter_with<const SPLIT: bool, const STRAIGHT: bool>(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
@@ -443,7 +531,7 @@ impl OpenPBR {
         let s = sampler.draw_sample_f32::<4>();
         let dir_uv = [s[1], s[2]];
 
-        let pmf = LobePmf::from_params(self);
+        let pmf = LobePmf::selecting::<STRAIGHT>(self);
         let lobe = pmf.pick(s[0]);
 
         if matches!(lobe, Lobe::Transmission) {
@@ -479,6 +567,11 @@ impl OpenPBR {
                 });
             }
 
+            // Without its share, the CDF's last slot still takes what rounding
+            // leaves above the other lobes' sum — an ulp of mass, lost.
+            if !STRAIGHT {
+                return None;
+            }
             // Thin-walled transmission stays a delta lobe (placeholder pdf,
             // never mixed with a continuous density).
             let (scattered, throughput, pdf) = sample_transmission_thin(self, r_in, rec);
@@ -559,6 +652,19 @@ impl OpenPBR {
         rec: &HitRecord,
         wi: Vec3A,
     ) -> Option<(Vec3A, f32)> {
+        self.eval_with::<true>(r_in, rec, wi)
+    }
+
+    /// [`OpenPBR::eval_resolved`]; without `STRAIGHT`, with the density of
+    /// the lobe set that excludes the thin-walled delta transmission (the
+    /// value is the same: a delta lobe has none toward any direction).
+    #[inline(always)]
+    fn eval_with<const STRAIGHT: bool>(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        wi: Vec3A,
+    ) -> Option<(Vec3A, f32)> {
         // Evaluates the continuous component over the full sphere: the
         // reflection lobes above the ray-facing hemisphere and — for thick
         // transmissive surfaces, dispersive or not — the Walter BTDF below
@@ -572,7 +678,7 @@ impl OpenPBR {
             return None;
         }
         let l_local = frame.to_local(wi.normalize());
-        let pmf = LobePmf::from_params(self);
+        let pmf = LobePmf::selecting::<STRAIGHT>(self);
         let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
         Some((
             eval_all(self, v_local, l_local, rec.front_face) * l_local.z.abs(),
@@ -621,7 +727,35 @@ impl OpenPBR {
         out: &mut crate::lpe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
-        self.scatter_with::<true>(r_in, rec, sampler, Some(out))
+        self.scatter_with::<true, true>(r_in, rec, sampler, Some(out))
+    }
+
+    /// The weight this BSDF gives the ray `r_in` continuing straight
+    /// through: the thin-walled window transmission, exactly the value its
+    /// delta sample carries before the lobe-selection compensation. Zero for
+    /// a surface that is not thin-walled and transmissive.
+    ///
+    /// The integrator passes thin walls with it ([`crate::ShadingPoint`]),
+    /// and scatters a path that meets one through the other lobes alone.
+    pub(crate) fn straight_transmittance(&self, r_in: &Ray, rec: &HitRecord) -> Vec3A {
+        if !self.has_straight_lobe() {
+            return Vec3A::ZERO;
+        }
+        // `scatter_with` refuses a ray from behind the shading normal, delta
+        // lobe and all.
+        if Frame::new(rec.normal)
+            .to_local(-r_in.direction().normalize())
+            .z
+            <= 0.0
+        {
+            return Vec3A::ZERO;
+        }
+        sample_transmission_thin(self, r_in, rec).1
+    }
+
+    /// Whether the lobe set holds a thin-walled delta transmission.
+    pub(crate) fn has_straight_lobe(&self) -> bool {
+        self.geometry_thin_walled && self.transmission_weight > 0.0
     }
 
     /// The event of a delta sample: OpenPBR's only delta lobe is thin-walled
@@ -678,6 +812,10 @@ impl Material for OpenPBR {
     /// opaque.
     fn has_cutout(&self) -> bool {
         self.geometry_opacity < 1.0
+    }
+
+    fn has_straight_transmission(&self) -> bool {
+        self.has_straight_lobe()
     }
 
     fn opacity(&self, _r_in: &Ray, _rec: &HitRecord) -> f32 {

@@ -146,7 +146,7 @@ fn main() {
     }
 }
 
-/// One tile, through the same conversion `crust-render --auto-tx` runs
+/// One tile, through the same conversion `crust --auto-tx` runs
 /// (`crust_assets::make_tx`), written beside the source.
 fn convert(
     src: &Path,

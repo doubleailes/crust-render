@@ -49,11 +49,84 @@ geometry SHALL be invisible to camera rays by default. An authored
   `primvars:ri:attributes:visibility:camera = 1`
 - **THEN** its source geometry is invisible to camera rays
 
+### Requirement: Hidden light sources do not occlude
+
+The source geometry of a rect, sphere, disk or cylinder light that is invisible
+to camera rays (see "Area lights") SHALL NOT occlude a shadow ray toward any
+light, at surface or volume vertices, with or without shadow linking. It SHALL
+NOT be a caster in any shadow-link class.
+
+#### Scenario: Hidden lights do not shadow one another
+
+- **WHEN** two camera-invisible sphere lights stand side by side over a diffuse
+  floor, so that from parts of the floor one sphere covers part of the other
+- **THEN** the floor's radiance equals the sum of the two single-light renders,
+  everywhere, within noise that falls as 1/√N
+
+#### Scenario: What lies behind a hidden light is lit
+
+- **WHEN** a camera-invisible sphere light hangs just below a diffuse ceiling
+  lit by a second light
+- **THEN** the ceiling patch above the sphere is lit by the second light as if
+  the sphere were absent
+
+### Requirement: Rays cross hidden light sources
+
+A non-camera ray that crosses a hidden light source SHALL collect its emission,
+weighted as "One density for both MIS strategies" requires for that light. It
+SHALL then continue along the same line as if the source were absent, spending
+no path depth, recording no vertex, and leaving the previous vertex's MIS record
+to whatever the segment reaches next. When one segment crosses several hidden
+sources, each SHALL contribute with its own weight.
+
+#### Scenario: Every strategy agrees across hidden lights
+
+- **WHEN** the two-sphere scene is rendered with power-MIS, light sampling alone
+  and BSDF sampling alone
+- **THEN** the three estimates of the floor agree within noise
+
+#### Scenario: A bounce collects every hidden light it crosses
+
+- **WHEN** a BSDF-sampled ray from the floor crosses the source of one hidden
+  light and then reaches a second one
+- **THEN** the path collects both emissions, each with its own MIS weight, and
+  the light path expression `C.*[LO]` still equals the beauty bit for bit
+
+#### Scenario: Bounce light reaches through a hidden light
+
+- **WHEN** a camera-invisible sphere light hangs just below a lit diffuse
+  ceiling, above a diffuse floor
+- **THEN** the floor below receives the ceiling patch's bounce light through
+  the sphere
+
+### Requirement: Visible and masked light sources stay solid
+
+A light whose source is camera-visible SHALL keep a solid source that occludes
+shadow rays and ends the rays that reach it. An authored `crust:rayMask` SHALL
+decide a source's ray visibility outright, as "Area lights" states. A source
+the mask leaves visible to shadow rays SHALL occlude them.
+
+#### Scenario: A visible lamp still casts a shadow
+
+- **WHEN** a sphere light authors `crust:light:cameraVisible = 1` and stands
+  between the floor and a second light
+- **THEN** it occludes the second light, as before this change
+
+#### Scenario: Scenes without hidden area lights are unchanged
+
+- **WHEN** a scene's only lights are infinite lights and area lights whose
+  sources are camera-visible
+- **THEN** the image is bit-identical to the renderer without this change
+
 ### Requirement: Infinite lights
 
 `UsdLuxDistantLight` SHALL become a finite-cone distant light and
 `UsdLuxDomeLight` an environment light. A dome's lat-long map SHALL be
-importance-sampled by luminance × sin θ. The renderer SHALL have no built-in
+importance-sampled by luminance × sin θ, and SHALL be oriented as the UsdLux
+`DomeLight` schema specifies (the OpenEXR lat-long convention), in the light's
+own frame before its prim transform: the top row is +Y, the image centre
+(u = ½) faces +Z, u = ¼ faces +X, u = ¾ faces −X and the left and right edges
+meet at −Z. The renderer SHALL have no built-in
 sky: an escaping ray that no infinite light answers SHALL collect black,
 including in a stage with no infinite light at all.
 
@@ -115,6 +188,15 @@ any other ray.
   a stage with an HDRI dome and a backdrop dome
 - **THEN** camera rays that escape collect black, and surfaces are still lit by
   the HDRI
+
+#### Scenario: A lat-long dome is oriented as UsdLux specifies
+
+- **WHEN** an untransformed `DomeLight` carries a lat-long texture of four
+  quarter-width column bands, red, green, blue and white from left to right,
+  and escaping rays leave horizontally along (+1, 0, +1), (−1, 0, +1),
+  (+1, 0, −1) and (−1, 0, −1)
+- **THEN** they collect green, blue, red and white respectively (u = ⅜, ⅝, ⅛
+  and ⅞)
 
 ### Requirement: Light selection
 

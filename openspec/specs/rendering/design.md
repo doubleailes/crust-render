@@ -132,7 +132,7 @@ consumed as ordinary dependencies:
      through is no vertex — no depth, no emission, no MIS record — and the previous
      vertex's record meets whatever the segment does reach, so bounce-hit emission
      behind a cutout keeps its weight. The shadow side is its twin
-     (`cutout_through`, under `cutout_shadow`): `Π(1 − opacity)` over every crossing,
+     (`cutout_through`, under `shadow_transmittance`): `Π(1 − opacity)` over every crossing,
      deterministic, and 0 at the first opaque hit. The two estimate the same
      visibility, which is what keeps NEE and the bounce side describing one integrand
      (`every_sampling_strategy_agrees_through_a_cutout`, in
@@ -154,7 +154,9 @@ consumed as ordinary dependencies:
      (`restarted`, the subsurface walk's trick) — short of the hit by the 0.001 offset,
      since restarted *on* it that offset stepped over any surface within 0.001 behind
      a cutout and a layered card leaked light
-     (`a_surface_just_behind_a_cutout_is_not_skipped`); an `if` yielding the hit from
+     (`a_surface_just_behind_a_cutout_is_not_skipped`) — and that restart assumes the
+     kernel's `t` is accurate to better than its 1e-5·t step, which the analytic
+     sphere's was not (below); an `if` yielding the hit from
      either arm copied the whole `Option<WorldHit>` at every vertex (+0.8%), so the
      hit is patched in place; and the extra code tipped `trace_path` over LLVM's
      inline threshold (+1.4% out of line), so it is `#[inline(always)]` into
@@ -162,6 +164,113 @@ consumed as ordinary dependencies:
      against that tree with the same attribute, which on its own saved 0.4%);
      `materialx_basic` runs +0.64%, of which 0.13% is the per-leaf rotation check in
      the closure collapse walk. Every sample scene without a cutout renders bit-identically.
+   - **A pass-through crosses each surface once** (`LastCrossing`, in every walk on
+     both sides). A hidden sphere light 8 units from a diffuse plane was collected
+     twice on a third of the bounces that crossed it: the sphere's textbook
+     discriminant `half_b² − a·c` cancelled two terms of order |oc|² to leave one of
+     order r², and the reported `t` was 1e-4 to 2e-3 short of the surface — more than
+     `resume_before`'s 1e-5·t step past it — so the restarted segment met the entry
+     again, front-facing and emitting (BSDF-only 1.04×, 1.34× and 1.64× light-only at
+     distance/radius 40, 160 and 200; veach_mis's smoothest plate 16.6% bright under
+     LightTiny alone). The kernel is fixed (closest-approach discriminant for spheres
+     and cylinders, intersection-kernel design record), and the walks keep a backstop
+     for every primitive: each records the crossing it last accepted
+     `(geom_id, prim_id, placement, side, t)`, and a hit on the same surface, from
+     the same side, within `1e-3 · max(|t|, 1)` of it is its rounding, not a surface
+     — no closed or single-sided surface is entered twice in a row from the same side
+     — so the walk steps past it without counting it, and without spending a crossing
+     of the budget. The guard alone also covered the old sphere at these distances
+     (`every_strategy_agrees_on_a_small_far_hidden_light`, which is 2.000× without
+     either). It is not only spheres: on `materialx_showcase` (hidden rect lights, no
+     sphere) the guard skips some eighty re-hits of a light's triangle per 16-spp
+     frame, reported 1e-5 to 1.9e-4·t past the first hit (2.5e-4 on
+     `openpbr_showcase`) — watertight triangles lose that much at grazing incidence —
+     and the image moves by 1e-6 on 32 of 2 M pixels. Widening `resume_before`
+     instead would re-open the skipped-surface leak above. The surface identity
+     carries the kernel's `placement` (`RayHit::placement`, an identity per instance
+     placement chain) because `(geom_id, prim_id)` alone is not one surface: inside a
+     nested prototype every placement of a leaf part reports one id
+     (`InstanceHitId::As`), and a second instanced card stacked within the window
+     read as the first met again and was passed for free
+     (`stacked_placements_sharing_an_id_are_both_crossed`, half a millimetre apart:
+     one card's attenuation instead of `(1 − 0.5)²`). Two cards on different
+     primitives that close are both crossed too
+     (`two_cards_close_together_are_both_crossed`).
+   - **Thin walls are pass-throughs** (`Material::has_straight_transmission`:
+     `crust:openpbr` `geometryThinWalled` with `transmissionWeight > 0`, a MaterialX
+     surface whose `thin_walled` reaches a transmitting dielectric or generalized
+     Schlick leaf, a `UsdPreviewSurface` over a thin-walled base). A thin wall's
+     transmission is a delta lobe that keeps the ray's direction, so it is a cutout
+     with a coloured pass, which is exact in crust's model: the BSDF splits as
+     `f = f_rest + T(ω)·δ(straight)`, and with opacity `α` the fraction of a ray
+     continuing straight is `P = (1 − α) + α·T`. That is Typhoon's
+     `_CombinePresenceAndTransmissionVisibility` (hdEmbree on OpenUSD `typhoon/main`
+     70c45e8, `integrator/visibility.cpp`: "thin-walled transmission always uses
+     straight RGB shadow attenuation"). The shadow side multiplies `P` over every
+     crossing (`walls_through`, behind `cutout_through`); the bounce side passes with
+     `q = max_c P_c` carrying `P / q`, and otherwise meets the wall carrying
+     `α / (1 − q)`, to scatter through `f_rest` alone (`pass_walls`, behind
+     `pass_cutouts`, draws off `K_THIN` per crossing). For a grey `P` that is the
+     cutout rule exactly. A world with thin walls takes `pass_walls`/`walls_through`,
+     one without takes the cutout loops verbatim, and one with neither neither.
+     - **`T` comes out of the resolved BSDF** (`ShadingPoint::straight_transmittance`),
+       so it is the one the vertex would shade with. Native OpenPBR returns the window
+       model's delta value before its selection compensation (`tint^(1/cos θt) ·
+       (1 − R)/(1 + R) · transmission_weight`, `straight_transmittance_is_the_delta_samples_weight`).
+       A MaterialX thin leaf transmits `tint·(1 − F(v·h))` at a microfacet normal its
+       VNDF draws, and the mean of that over the microfacets has no closed form for a
+       rough leaf: `T` is an **unbiased one-draw estimate** (`K_NEE_THIN` per shadow
+       crossing, `K_THIN` on the bounce side). The pass stays unbiased with a random
+       `T`, since `q` is a function of the same draw: `E[1{u<q}·P/q | T] = P(T)`, and
+       the meet carries `α f_rest` whatever `T` was drawn.
+     - **A met wall scatters without its straight lobe** (`ShadingPoint::exclude_straight`).
+       Native OpenPBR drops the thin transmission's selection mass
+       (`LobePmf::selecting::<false>`); the closure drops its transmission-only thin
+       leaves and samples a thin `RT` leaf as `R`. Both renormalise, and `eval`'s pdf
+       follows, so NEE at a met wall weighs against the sampling the bounce does
+       (`the_reduced_lobe_set_samples_what_eval_reports`); `T` plus the rest's albedo is
+       the whole BSDF's (`straight_transmittance_plus_the_rest_is_the_whole_bsdf`, and
+       its closure twin on `open_pbr_surface` and `standard_surface`).
+     - **Everything past a wall carries its pass weight, nothing before it does.** With
+       volume regions, the segment is sampled a piece at a time between the walls
+       (`volume_event_past_walls`; delta tracking is memoryless, so the pieces are the
+       same process as the whole), each piece's transmittance, emission and scatter
+       weight carrying the walls before it. The meet weight is folded into the
+       transmittance of a segment that reaches its wall, not applied at the vertex.
+     - **Events and AOVs.** A thin-wall pass is a `TS` `'transmission'` event, the event
+       its delta vertex was, so `C<TS>…` keeps its meaning; a cutout pass stays `Ts`.
+       A segment with walls names its events in order (`Route::arrival_through`).
+       `C.*[LO]` stays the beauty bit for bit through a window
+       (`the_full_path_expression_is_the_beauty_bitwise`, `light_through_a_window_is_a_specular_transmission`).
+       The data AOVs keep the first wall passed as the camera's first hit (`first_wall`;
+       glass is not a hole: `a_thin_window_is_the_first_hit_whether_passed_or_met`),
+       with its geometric normal, and the albedo carries the pass weights as it carried
+       the delta sample's throughput. The learned light cache trains on the luminance of
+       `P` (the value itself where `P` is grey, so a cutout world trains as it did).
+     - **Measured** on `samples/thin_window.usda` (a sphere light over a tinted native
+       pane and a MaterialX window, `--indirect-clamp 0`, adaptive sampling off), against
+       an 8192-spp reference at another seed: relMSE before 141 / 37.3 / 8.72 / 1.99 at
+       16 / 64 / 256 / 1024 spp (0.067 at 16384), after 2.3e-4 / 5.6e-5 / 1.4e-5 /
+       3.9e-6. Both fall as 1/N with no plateau, and the image means agree (before at
+       16384 spp 0.21506 / 0.12728 / 0.05929, after 0.21477 / 0.12709 / 0.05919; light-only
+       0.21477 and BSDF-only 0.21481 after). A sample costs 1.35–1.45× here (shadow rays
+       walk the sheets; a MaterialX wall runs its program per crossing), so at equal time
+       after is ~5·10⁵ lower in relMSE (64 spp in 0.44 s against before's ~27 at that
+       time). Before, light-only rendered exactly the power-MIS image: NEE found nothing,
+       and every bit of light came from bounces through the delta sheet, which carry full
+       weight under any strategy. The default firefly clamp also darkened it, since through
+       a sheet the light is a deeper vertex.
+     - **Cost without thin walls** (callgrind, 2 spp, one thread): cornellbox +0.30%,
+       `materialx_cutout` +0.42%, `aovs_lpe` +0.42%. What is left is the per-vertex
+       `walls` flag, two branches and the registers they hold. Each trap below was measured
+       on the way: both `ResolvedOpenPBR` instantiations in one match arm un-inlined
+       `ShadingPoint::scatter_importance` (+0.5%, so the reduced side is `#[cold]`);
+       `lobe_spread` went out of line (+0.1%, now forced); `t_surf.min(t_med)` hoisted to
+       every vertex (+0.2%, now computed where used); returning the shading point from an
+       `if` to exclude the straight lobe copied it at every vertex (+1.6%, so it is
+       patched in place); one loop for cutouts and walls cost `materialx_cutout` 0.7%,
+       so the two are apart; and walking an empty event slice at every arrival cost the
+       LPE gather 1.3%. Every sample scene without a thin wall renders bit-identically.
    - **Volume regions** (`volume.rs`): free-standing smoke/fog/absorption/fire volumes
      held on `Renderer.volumes`, *outside* the surface BVH so their bounds never occlude
      shadow rays. Each `VolumeRegion` is an oriented box (composed prim xform) with a
@@ -418,9 +527,10 @@ randomness use `openqmc::pcg::Rng`.
   Cauchy/Abbe-derived IOR (`cauchy_ior`, anchored at the Fraunhofer d line), sampling
   picks one channel's IOR uniformly, and evaluation runs three per-channel
   BTDF evaluations whose sampling pdfs average into the channel-mixture density. Only
-  thin-walled transmission remains a per-sample delta lobe (`ScatterSample::delta`),
-  excluded from continuous mixtures — carrying window-model energy
-  (`(1−R)/(1+R)` transmittance, boosted `2R/(1+R)` reflection, view-dependent tint). The guide-vs-BSDF selection probability is fixed (no learned α), and
+  thin-walled transmission remains a delta lobe (`ScatterSample::delta`), excluded
+  from continuous mixtures — carrying window-model energy (`(1−R)/(1+R)`
+  transmittance, boosted `2R/(1+R)` reflection, view-dependent tint) — which the
+  integrator takes over as a pass-through (above), so the guide never sees it. The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
 
 ## Known gaps: volume regions
@@ -436,6 +546,30 @@ randomness use `openqmc::pcg::Rng`.
   light-list entries: fire is found only by phase/BSDF-sampled paths (firefly risk near
   bright emission), never by NEE. Carried-medium (subsurface) scatter vertices run no
   NEE. Region overlap uses summed extinction (exact) with a σₛ-weighted phase mixture.
+
+## Known gaps: thin walls and glass shadows
+
+- **Thick glass still blocks shadow rays.** A closed dielectric (a bottle, a glass jar)
+  refracts what crosses it, so a straight shadow through it would be biased; it stays
+  an occluder, and its interior and what lies behind it are lit by refracted paths
+  alone. Typhoon offers the straight shadow only with caustics off
+  (`ty:enableCaustics = false`). It could come to crust the same way, behind an
+  explicit opt-in, never by default.
+- **A closed thin-walled object keeps paths inside it longer.** A path leaves through a
+  wall with probability `q = max P`, below the selection probability the delta
+  transmission had as a lobe (a soap bubble at `transmissionWeight` 0.4: 0.22 against
+  0.43). Inside, each meet samples the specular lobe with the mass `LobePmf` gives it
+  from `F0` — far below the window reflectance `2R/(1 + R)`, more so under a thin
+  film — so a chain of specular bounces carries `value/pdf ≈ 8` per bounce. Unbiased,
+  but a rare heavy sample: `openpbr_showcase`'s bubble shows a single ~7000-weight
+  sample in some 1024-spp renders (trimmed relMSE is lower than before at every sample
+  count; the default firefly clamp catches it). The fix is the thin wall's specular
+  selection weight, which changes those materials' sampling and needs its own A/B.
+- **The first-hit AOVs see a passed wall's geometric normal.** A wall passed through is
+  never shaded, so a normal map on it does not reach `N`.
+- **Two branches per vertex remain** in a world without thin walls (+0.30% of
+  cornellbox's instructions). Removing them would mean swapping a met wall's material
+  for a precomputed twin without its straight lobe, which was not judged worth it.
 
 ## History: Henyey-Greenstein convention and carried-medium fixes
 

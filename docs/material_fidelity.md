@@ -85,7 +85,7 @@ turns the latest run's failures into per-case expected failures
 how Goldeneye carries known gaps. After that a run fails only on a case that
 passed before.
 
-The profile's render command is `goldeneye_suite.py render`, not `crust-render`
+The profile's render command is `goldeneye_suite.py render`, not `crust`
 directly, for two reasons. crust does not create the output's directory, which
 `usdrender` does. And FLIP's EXR reader (tinyexr) crashes on crust's tiled EXRs,
 so the wrapper rewrites each one as a scanline EXR with the same pixels.

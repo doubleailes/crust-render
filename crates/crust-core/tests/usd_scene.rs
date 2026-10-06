@@ -458,11 +458,28 @@ fn light_geometry_camera_visibility() {
     assert!((hit_t(0.0, crust_core::MASK_CAMERA) - 2.5).abs() < 1e-3);
     assert!((hit_t(3.0, crust_core::MASK_CAMERA) - 2.5).abs() < 1e-3);
 
-    // Shadow and indirect rays see all three light surfaces.
+    // Indirect rays see all three light surfaces; shadow rays only the two
+    // the camera sees — the hidden one is a transparent emitter.
     for x in [-3.0, 0.0, 3.0] {
-        assert!((hit_t(x, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
         assert!((hit_t(x, crust_core::MASK_INDIRECT) - 2.5).abs() < 1e-3);
     }
+    assert!((hit_t(-3.0, crust_core::MASK_SHADOW) - 5.0).abs() < 1e-3);
+    assert!((hit_t(0.0, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
+    assert!((hit_t(3.0, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
+    let geom = |x: f32| {
+        scene
+            .world
+            .intersect(
+                &down(x).with_mask(crust_core::MASK_INDIRECT),
+                0.001,
+                f32::INFINITY,
+            )
+            .expect("a light")
+            .geom_id
+    };
+    assert!(scene.world.is_transparent_emitter(geom(-3.0)));
+    assert!(!scene.world.is_transparent_emitter(geom(0.0)));
+    assert!(!scene.world.is_transparent_emitter(geom(3.0)));
 }
 
 #[test]
@@ -3323,4 +3340,156 @@ fn skipping_stage_teardown_leaves_the_render_unchanged() {
         assert_eq!(a, b, "{}", path.display());
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `Scene::list_usd` lists what the render would use of each kind, in
+/// namespace order. Cameras: one under an invisible ancestor is listed (it is
+/// still rendered through), one the render never meets — inactive, abstract,
+/// proxy-purpose, inside a prototype or beneath a PointInstancer — is not, and
+/// every listed path is one `UsdImportOptions::camera` accepts. Lights: an
+/// invisible one is pruned too, as it lights nothing. Materials: everything a
+/// binding can reach, bound or not. Both import modes: two top-level subtrees
+/// import as one stage, and the Cornell box's many stream.
+#[test]
+fn list_usd_lists_what_a_render_uses() {
+    use crust_core::{ListKind, UsdImportOptions};
+
+    let dir = std::env::temp_dir().join("crust_list_usd");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("listing.usda");
+    std::fs::write(
+        &path,
+        r#"#usda 1.0
+class Xform "Proto"
+{
+    def Camera "InClass" {}
+    def SphereLight "ClassLight" {}
+    def Material "ClassLook" {}
+}
+def Xform "W"
+{
+    def Camera "Main" {}
+    def RectLight "Key" {}
+    def Scope "Looks"
+    {
+        def Material "Bound" {}
+        def Material "Unbound" {}
+    }
+    def Xform "Hidden"
+    {
+        token visibility = "invisible"
+        def Camera "Witness" {}
+        def DistantLight "Parked" {}
+        def Material "HiddenLook" {}
+        def Xform "HiddenInst" (instanceable = true references = </Proto>) {}
+    }
+    def Xform "Off" (active = false)
+    {
+        def Camera "Disabled" {}
+        def DomeLight "Off" {}
+        def Material "OffLook" {}
+    }
+    def Xform "Proxy"
+    {
+        uniform token purpose = "proxy"
+        def Camera "ProxyCam" {}
+        def DiskLight "ProxyLight" {}
+    }
+    def Xform "Inst" (instanceable = true references = </Proto>) {}
+    def PointInstancer "Scatter"
+    {
+        rel prototypes = [</W/Scatter/P>]
+        int[] protoIndices = [0]
+        point3f[] positions = [(0, 0, 0)]
+        def Xform "P"
+        {
+            def Camera "InInstancer" {}
+            def CylinderLight "InInstancer" {}
+        }
+    }
+    def Camera "Last" {}
+    def DomeLight "Sky" {}
+    def SphereLight "Degenerate" { float inputs:radius = 0 }
+}
+"#,
+    )
+    .expect("write stage");
+
+    let list = |kind| Scene::list_usd(&path, kind).expect("lists");
+    let cameras = list(ListKind::Camera);
+    assert_eq!(cameras, ["/W/Main", "/W/Hidden/Witness", "/W/Last"]);
+    // Every listed camera is one the import renders through.
+    for camera in &cameras {
+        Scene::from_usd_with_options(
+            &path,
+            &crust_core::NoAssets,
+            &UsdImportOptions {
+                camera: Some(camera.clone()),
+                ..UsdImportOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{camera}: {e}"));
+    }
+    let lights = list(ListKind::Light);
+    assert_eq!(lights, ["/W/Key", "/W/Sky", "/W/Degenerate"]);
+    // What the import puts in the light list, but for the light its values
+    // make it refuse: validity is evaluated at a time code, a listing at none.
+    let scene = Scene::from_usd(&path).expect("loads");
+    assert_eq!(scene.lights.count(), lights.len() - 1);
+    assert_eq!(
+        list(ListKind::Material),
+        [
+            "/Proto/ClassLook",
+            "/W/Looks/Bound",
+            "/W/Looks/Unbound",
+            "/W/Hidden/HiddenLook",
+        ]
+    );
+
+    let cornell = sample("cornellbox.usda");
+    assert_eq!(
+        Scene::list_usd(&cornell, ListKind::Camera).expect("lists"),
+        ["/scene/camera1"]
+    );
+    assert_eq!(
+        Scene::list_usd(&cornell, ListKind::Light).expect("lists"),
+        ["/scene/Sky"]
+    );
+    assert!(matches!(
+        Scene::list_usd(&dir.join("missing.usda"), ListKind::Camera),
+        Err(crust_core::Error::UsdOpen { .. })
+    ));
+    // Only USD is read, by extension: a USD layer under another name is
+    // refused before a byte of it is parsed.
+    let disguised = dir.join("listing.obj");
+    std::fs::copy(&path, &disguised).expect("copy");
+    assert!(matches!(
+        Scene::list_usd(&disguised, ListKind::Camera),
+        Err(crust_core::Error::UsdOpen { .. })
+    ));
+
+    // A sole top-level prim with four children streams them as chunks, and
+    // every chunk's mask keeps it: it is walked once per chunk, and listed once.
+    let solo = dir.join("solo.usda");
+    std::fs::write(
+        &solo,
+        r#"#usda 1.0
+def Camera "Rig"
+{
+    def Xform "A" {}
+    def Xform "B" { def Material "Look" {} }
+    def Xform "C" { def Camera "Inner" {} }
+    def Xform "D" {}
+}
+"#,
+    )
+    .expect("write stage");
+    assert_eq!(
+        Scene::list_usd(&solo, ListKind::Camera).expect("lists"),
+        ["/Rig", "/Rig/C/Inner"]
+    );
+    assert_eq!(
+        Scene::list_usd(&solo, ListKind::Material).expect("lists"),
+        ["/Rig/B/Look"]
+    );
 }

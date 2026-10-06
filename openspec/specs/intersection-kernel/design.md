@@ -176,6 +176,65 @@
   the measurements, and why `std::simd` is not used by default (nightly-only; the
   opt-in `bvh8` experiment below is the one place it is).
 
+## Analytic sphere and cylinder precision
+
+- **The textbook quadratic loses the sphere's distance from far away.** `SpherePrim::hit`
+  computed the discriminant as `half_b² − a·c`. Seen from 8 units, both terms are about
+  64 while their difference is of order r² — 0.0025 for a radius of 0.05 — and the f32
+  cancellation left about 1e-4 of error on the reported `t` (worst 1.4e-6·t over 2000
+  probe rays, 2e-3 absolute at the extreme in the renderer's unnormalised segments). The
+  renderer's pass-through walks restart a segment `t − 0.001 + 1e-5·t` past a hit and
+  ask `(0.001, ∞)` again, so a `t` short by more than 1e-5·t had the restarted ray meet
+  the same entry again, and a hidden sphere light was collected twice on a third of
+  the bounces that crossed it (rendering design record, "A pass-through crosses each
+  surface once"). The fix is the closest-approach form (Haines, Günther, Akenine-Möller,
+  *Ray Tracing Gems* ch. 7, "Precision Improvements for Ray/Sphere Intersection"):
+  with `l = oc − (oc·d/a) d` the vector from the centre to the ray's closest approach,
+  `disc = a·(r² − |l|²)`, then the stable root pair `q = −half_b − sign(half_b)·√disc`,
+  roots `c/q` and `q/a`. Every term is of order r², so the error scales with the sphere,
+  not its distance: the worst error over the same rays is below 1e-6·t at radius 0.05
+  from 8 units and 0.01 from 2 (`a_small_far_sphere_reports_an_accurate_distance`),
+  and no restarted ray meets its entry again
+  (`a_restart_short_of_a_sphere_hit_finds_the_far_side`, 200 of 2000 did before).
+  `CylinderPrim::hit` is the same quadratic in the plane perpendicular to the axis,
+  had the same error (8.6e-6·t worst), and takes the same form
+  (`a_small_far_cylinder_reports_an_accurate_distance`). A root is accepted by
+  `t > t_min && t < t_max`, from below, so the NaN a zero direction produces is
+  rejected where the old `root <= t_min` let it through; `q == 0` (a tangent through
+  the origin, both roots at 0) returns no hit as before. Disks are a plane test with no
+  cancellation; curves keep their rounded-cone test.
+- **A hit names its placement.** `RayHit::placement` is 0 on top-level geometry and
+  otherwise an identity of the instance placement chain the hit lies in: each
+  `InstancePrim` carries its slot plus one (in its padding; the 96-byte pin holds) and
+  mixes it over the inner hit's on the way out (`inner · 0x9E3779B1 ^ own`). It exists
+  for the renderer's pass-through walks, whose "same surface" test needs to tell two
+  placements of one prototype apart when `InstanceHitId::As` gives them one `geom_id`
+  — an identity to compare, never an index to look up. `PrimHit` had the padding
+  (52 → 64 bytes), so it costs no memory and one store per instance level.
+- **Cost.** The closest-approach form is a vector subtract, a dot and a division more per
+  sphere test. callgrind (1 thread, 2 spp): `openpbr_showcase` (twelve spheres and a
+  thin-walled bubble) 2 361.70 M → 2 366.48 M (+0.20 %); in an intermediate build
+  without the placement field `Bvh::scalar_hit`, where the sphere test inlines, went
+  68.9 M → 85.2 M (+16.2 M) while `pass_walls` fell 65.1 M → 46.2 M — the bubble is a
+  sphere, and a third of its crossings had been re-hit and re-shaded. `cornellbox` (no
+  sphere) 4 236.88 M → 4 233.35 M (−0.08 %, bit-identical image). Interleaved
+  wall-clock (`scripts/bench_ab.sh`, 6 reps, min / mean): cornellbox +0.8 % / +0.4 %,
+  openpbr_showcase +1.3 % / +0.0 %, veach_mis +0.4 % / −0.7 % — inside the run-to-run
+  spread, as a +0.2 % instruction change should be.
+- **Images.** 19 of the 38 sample scenes move, every one with a sphere or cylinder in
+  it, and `materialx_showcase` (33 of 2 M pixels), whose hidden rect lights the
+  pass-through guard touches (rendering design record); the other 19 are bit-identical
+  at 16 spp. The difference is
+  not pure noise and does not fall as 1/√N: it carries the corrected sphere positions.
+  `light_linking` (six sphere lights) holds a flat relMSE of 5e-10 (max abs 2e-4) at 16,
+  64 and 256 spp — a fixed, ulp-scale shift of every sphere hit; `openpbr_showcase`
+  falls 2.09e-6 → 1.57e-6 → 1.03e-6 onto a floor of 3.1e-7 trimmed, the bubble's no
+  longer squared transmittance; `materialx_cutout` 2.5e-5 → 5.1e-6 → 2.8e-6 (cutout
+  decisions that flip at a moved hit point). A binary with the kernel fix alone renders
+  `light_linking` bit-identically to the full change, so there the guard is inert. The `Tri4`
+  ↔ scalar pin and the SIMD matrix are untouched (`scripts/test_simd_matrix.sh -p
+  crust-rt`, four codegens, no contraction).
+
 ## Curve hits: span parameter, tangent, and passing out of tubes
 
 Added for MaterialX hair (`add-chiang-hair-bsdf`; the materials record has the fibre

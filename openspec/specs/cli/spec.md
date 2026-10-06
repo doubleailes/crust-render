@@ -2,13 +2,63 @@
 
 ## Purpose
 
-The command-line entry point (`crust-render` binary, `main.rs`). It parses
+The command-line entry point (the `crust` binary of the `crust-render` crate, `main.rs`). It parses
 arguments, builds a `Scene` from USD or a procedural fallback, runs the renderer,
-and writes the output image. This is the only user-facing surface of the tool.
+and writes the output image (`crust render`), or lists what a stage holds
+(`crust ls`). This is the only user-facing surface of the tool.
 ## Requirements
+### Requirement: Subcommands
+
+The CLI SHALL require a subcommand: `render`, which renders, or `ls`, which
+lists. The render flags, `--log-file` among them, SHALL belong to `render`;
+`-l/--level` SHALL be accepted by every subcommand, before or after its name.
+`--log-file`'s directory is optional, so it SHALL NOT be accepted where it
+could take a subcommand's name or a positional as that directory.
+
+#### Scenario: No subcommand
+
+- **WHEN** the user runs `crust -i scene.usda`
+- **THEN** the arguments are refused as a usage error and nothing is loaded
+
+### Requirement: Listing what a stage holds
+
+`crust ls <kind> -i <scene>` SHALL print the stage's prims of `kind`, one
+absolute path per line on stdout, in namespace order, found by the render's
+own walk so that the list is what a render would use. `kind` SHALL be one of
+`camera`, `light` or `material`, each also accepted in the plural:
+
+- `camera`: exactly the cameras the render can go through — none under an
+  inactive, abstract or proxy- / guide-purpose ancestor, inside an instance's
+  prototype or beneath a `PointInstancer`; those under an invisible ancestor
+  included.
+- `light`: the UsdLux lights the import reads (sphere, rect, disk, cylinder,
+  distant, dome), pruned as geometry is, invisibility included. A light the
+  import refuses for its evaluated values (a zero radius or size, a transform
+  that collapses it) SHALL still be listed: `ls` evaluates at no time code.
+- Each path SHALL be listed once, however many streamed chunks contain it.
+- `material`: every `UsdShadeMaterial` a binding can reach — all but those
+  under an inactive ancestor or inside an instance's prototype.
+
+Its log SHALL go to stderr, so stdout holds only the list.
+
+#### Scenario: Listing the cameras of a stage
+
+- **WHEN** the user runs `crust ls camera -i samples/cornellbox.usda`
+- **THEN** stdout is `/scene/camera1` and the exit status is 0
+
+#### Scenario: An unknown kind
+
+- **WHEN** the user runs `crust ls mesh -i scene.usda`
+- **THEN** the arguments are refused as a usage error naming the valid kinds
+
+#### Scenario: A stage that cannot be opened
+
+- **WHEN** the input does not exist
+- **THEN** an error is logged and the exit status is non-zero
+
 ### Requirement: Command-line argument parsing
 
-The CLI SHALL accept the following flags:
+`crust render` SHALL accept the following flags:
 
 - `-i/--input`: the USD scene path.
 - `-o/--output`: the output path. When the stage authors RenderProducts, this
@@ -27,7 +77,7 @@ lines, and SHALL have no effect.
 
 #### Scenario: Rendering a scene file
 
-- **WHEN** the user runs the binary with `-i <scene.usda>`
+- **WHEN** the user runs `crust render -i <scene.usda>`
 - **THEN** the scene is loaded from that USD file and rendered
 
 #### Scenario: Tiled rendering is the default
@@ -150,3 +200,26 @@ render with the same per-vertex work as before the section existed.
 - **WHEN** `samples/cornellbox.usda` is rendered with `--profile`
 - **THEN** no `Subsurface` row appears, and without `--profile` the render
   executes the same instructions as before the section within 0.01%
+
+### Requirement: Colour-management flags
+
+The CLI SHALL accept `--ocio-config <CONFIG>` (an OCIO config file, archive or
+`ocio://` URI, installed before any colour is converted; an error when it
+cannot be loaded or lacks the spaces crust needs; without the flag, the
+non-empty `OCIO` environment variable names the config, else the builtin ACES
+CG config is used), `--working-space <SPACE>`
+(overriding `renderingColorSpace`), and `--display` / `--view` for the PNG
+preview.
+
+#### Scenario: An unknown view
+
+- **WHEN** `--view "no such view"` is given
+- **THEN** the tool exits with an error before rendering
+
+#### Scenario: The OCIO variable as the fallback
+
+- **WHEN** `OCIO` names a config and `--ocio-config` is not given
+- **THEN** that config is installed, and one that cannot be loaded is an error
+  naming `$OCIO`
+- **WHEN** both are given
+- **THEN** `--ocio-config` is used and `OCIO` is ignored

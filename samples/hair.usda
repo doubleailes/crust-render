@@ -12,7 +12,7 @@
     tracer's absolute ray epsilon (0.001 units) is then 10 µm, below a hair's
     width, so neighbouring strands shadow and light each other.
 
-      cargo run --release -- -i samples/hair.usda -o hair.exr
+      cargo run --release -- render -i samples/hair.usda -o hair.exr
     """
     defaultPrim = "World"
     metersPerUnit = 0.01

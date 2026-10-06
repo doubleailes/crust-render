@@ -12,7 +12,7 @@ the page to read first.
 
 ```mermaid
 graph TD
-    render["crust-render<br/><i>CLI binary</i>"]
+    render["crust-render<br/><i>CLI binary <code>crust</code></i>"]
     assets["crust-assets<br/><i>file decoders, texture streaming</i>"]
     core["crust-core<br/><i>engine: import, integrator, materials, lights</i>"]
     rt["crust-rt<br/><i>intersection kernel</i>"]
@@ -67,7 +67,7 @@ Two properties of this graph are deliberate and worth keeping:
 ## A render, end to end
 
 ```
-crust-render::main
+crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list_usd)
  ├─ FileAssets::new()                        crust-assets: residency policy from CRUST_* env
  ├─ Scene::from_usd_with_options(path, &assets, opts)
  │   └─ scene::usd_import::load_scene        crust-core
@@ -140,15 +140,30 @@ other. The pairs:
   (`bounce_emission_weight`, `escaped_emission`), and both go through
   `SamplingStrategy` and `LightList::density` / the `*_at` lookups. Surface
   NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`, guided mixture pdf ↔ NEE.
+- **Hidden light sources.** A source the camera does not see is invisible to
+  shadow rays (`light_ray_mask`) *and* crossed by bounce rays, which collect its
+  emission and continue (`World::is_transparent_emitter`, `pass_cutouts`,
+  `collect_crossings`). Change one side alone and NEE counts a light another
+  hides while the bounce stops at the nearer one: biased MIS. The crossing's
+  weight is `bounce_emission_weight_at`, its `L` event `Route::cross`.
 - **Light radiance.** `Emissive::radiance_toward` is the one answer to "what
   does this light emit toward here", read by `AreaLight::sample_li` and by
   `Material::emitted_at`.
-- **Cutouts.** A hit a path passes through (`pass_cutouts`, probability
-  `1 − opacity`) and a shadow ray's `Π(1 − opacity)` (`cutout_through`, behind
-  `cutout_shadow` and the light cache's training) are one visibility: both ask
-  `Material::opacity` point-sampled, both follow at most 256 crossings, both
-  are gated on `World::has_cutouts`; change one and NEE and the bounce side
-  disagree.
+- **Pass-throughs (cutouts and thin walls).** A hit a path passes through
+  (`pass_cutouts` / `pass_walls`: probability `q = max P`, weight `P / q`, else
+  a meet weighted `α / (1 − q)` on the BSDF without its straight lobe) and a
+  shadow ray's `Π P` (`cutout_through` / `walls_through`, behind
+  `shadow_transmittance` and the light cache's training) are one visibility,
+  with `P = (1 − α) + α·T` — `α` the opacity, `T` the thin wall's straight
+  transmittance (`ShadingPoint::straight_transmittance`), so `1 − opacity` at a
+  cutout. Both ask `Material::opacity` and `T` point-sampled, both follow at
+  most 256 crossings, both are gated on `World::has_pass_throughs`, and both
+  cross each surface once (`LastCrossing`: a hit on the same
+  `(geom_id, prim_id, placement)` from the same side within 1e-3·t of the
+  crossing just made is the kernel's rounding, not a surface); change one and
+  NEE and the bounce side disagree. The met wall's lobe set without `T`
+  (`ShadingPoint::exclude_straight`) must renormalise its sampling and `eval`'s
+  pdf together.
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
   `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔
@@ -162,6 +177,13 @@ other. The pairs:
 - **Import cache keys.** Anything keyed on a prototype path is scoped by the
   stage epoch (`ImportCaches::epoch`), because `/__Prototype_N` is renumbered
   per masked stage.
+- **Stage listing.** `crust ls` (`Scene::list_usd`, `usd_import/listing.rs`)
+  walks the stage apart from `traverse_into`, and must meet exactly the
+  cameras and lights it meets: the same chunks, `prune_reason` (invisible
+  subtrees walked for cameras only), instances and `PointInstancer`s not
+  entered. A light type the import learns must join `listing::is_kind`.
+  Pinned by `list_usd_lists_what_a_render_uses`, which renders through every
+  camera listed and counts the lights against the import's light list.
 - **Colour spaces.** Every colour input states its space; the per-input
   inventory is `docs/color_management.md`. Every curve is the OCIO config's
   (`crust-core/src/color.rs`). Every heuristic weighs a colour by the working
@@ -269,6 +291,11 @@ CI (`.github/workflows/rust.yml`) runs `cargo fmt --check`,
 toolchain is pinned in `rust-toolchain.toml`, which the `fmt` job checks against
 `RUST_VERSION`, and dependencies in the committed `Cargo.lock`. `rust-version` (1.96, set
 by cranelift) is the oldest toolchain that builds the workspace.
+`.github/workflows/nightly.yml` repeats clippy and the tests on a pinned and on the latest
+nightly, and its daily run publishes the rolling `nightly` pre-release: the CLI built with
+the latest nightly for Linux (musl), macOS (both architectures) and Windows (MSVC). Each
+binary renders the Cornell box before it ships, and the release is replaced only when every
+`latest` leg (clippy, tests, `bvh8`) passed on the same compiler.
 
 ## Technical debt register
 

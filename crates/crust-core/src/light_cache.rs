@@ -244,13 +244,24 @@ pub(crate) fn train(
                                 // The integrator's visibility, cutouts included:
                                 // a light seen through a leaf card is trained at
                                 // the share the card lets through.
+                                // A thin wall's colour steers selection by its
+                                // luminance; the estimate itself never sees it.
+                                // Grey — open, blocked, cutouts — it is that
+                                // value as it stands, which luminance weights
+                                // summing to 1 only up to rounding would move.
                                 let through = crate::tracer::surface_visibility(
                                     world,
                                     &shadow,
                                     ls.distance,
+                                    vertex.new_domain(8 + (k * LIGHT_SAMPLES + s) as i32),
                                     &mut crate::stats::RayStats::default(),
                                 );
-                                if through == 0.0 {
+                                let through = if through == Vec3A::splat(through.x) {
+                                    through.x
+                                } else {
+                                    lights.luma().of(through)
+                                };
+                                if through <= 0.0 {
                                     continue;
                                 }
                                 let e = through * lights.luma().of(c) / ls.pdf.get();

@@ -8,9 +8,9 @@ use crust_core::closure::{self, Lobe, Prepared};
 use crust_core::materialx::{self, Loaded};
 use crust_core::rt::Geometry;
 use crust_core::{
-    AreaLight, Emissive, HitRecord, LightList, MASK_INDIRECT, MASK_SHADOW, Material, OpenPBR,
-    PathSampler, Ray, RayCone, SamplingStrategy, ScatterSample, SphereShape, UvMap, Vec3A, Volumes,
-    World, WorldBuilder, ray_color,
+    AreaLight, Emissive, HitRecord, LightList, MASK_ALL, MASK_INDIRECT, MASK_SHADOW, Material,
+    OpenPBR, PathSampler, Ray, RayCone, SamplingStrategy, ScatterSample, SphereShape, UvMap, Vec3A,
+    Volumes, World, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 
@@ -801,6 +801,95 @@ fn a_surface_just_behind_a_cutout_is_not_skipped() {
     for s in [SamplingStrategy::LightOnly, SamplingStrategy::BsdfOnly] {
         let (_, m) = floor_under_light(pair, s, 1024, RayCone::default());
         assert!(m < 0.01 * open, "{s:?}: {m} vs {open} unoccluded");
+    }
+}
+
+/// Two distinct surfaces, however close, are both crossed. Two half-opaque
+/// black cards on different primitives, half a millimetre apart: both sides
+/// attenuate the light by `(1 − 0.5)²`. The re-hit guard that keeps a walk
+/// from crossing one surface twice (the same primitive, the same side,
+/// within 1e-4·t) must not take the second card for the first met again.
+#[test]
+fn two_cards_close_together_are_both_crossed() {
+    let pair = |w: &mut WorldBuilder| {
+        let mesh = |y: f32| {
+            let (vertices, indices) = sheets(1, y, 0.0, 50.0);
+            Geometry::TriangleMesh {
+                vertices,
+                indices,
+                normals: None,
+            }
+        };
+        let half = OpenPBR {
+            geometry_opacity: 0.5,
+            ..OpenPBR::diffuse(Vec3A::ZERO)
+        };
+        w.attach(mesh(2.5), Arc::new(half.clone()));
+        w.attach(mesh(2.5005), Arc::new(half));
+    };
+    let (_, open) = floor_under_light(|_| {}, SamplingStrategy::PowerMis, 256, RayCone::default());
+    for (s, n, tol) in [
+        (SamplingStrategy::LightOnly, 256, 1e-3),
+        (SamplingStrategy::BsdfOnly, 16_384, 0.05),
+    ] {
+        let (_, m) = floor_under_light(pair, s, n, RayCone::default());
+        let expected = 0.25 * open;
+        assert!(
+            (m - expected).abs() < tol * expected,
+            "{s:?}: {m} vs {expected} through two half cards ({open} open)"
+        );
+    }
+}
+
+/// Two placements of one half-opaque card prototype, labelled to report the
+/// same hit id as a nested prototype's leaf parts are
+/// (`InstanceHitId::As`), half a millimetre apart and facing the same way:
+/// both are crossed on both sides, `(1 − 0.5)²`. The re-hit guard tells
+/// them apart by their placement; on ids alone the second read as the first
+/// met again and was passed for free.
+#[test]
+fn stacked_placements_sharing_an_id_are_both_crossed() {
+    use crust_core::rt::{InstanceHitId, SceneBuilder};
+    use glam::Affine3A;
+    let pair = |w: &mut WorldBuilder| {
+        let (vertices, indices) = sheets(1, 0.0, 0.0, 50.0);
+        let mut proto = SceneBuilder::new();
+        proto.attach(Geometry::TriangleMesh {
+            vertices,
+            indices,
+            normals: None,
+        });
+        let proto = Arc::new(proto.commit());
+        let half = Arc::new(OpenPBR {
+            geometry_opacity: 0.5,
+            ..OpenPBR::diffuse(Vec3A::ZERO)
+        });
+        // Both placements report the first one's id, which binds the material.
+        let first = w.count() as u32;
+        for y in [2.5, 2.5005] {
+            w.attach_labelled(
+                Geometry::Instance {
+                    scene: proto.clone(),
+                    transform: Affine3A::from_translation(glam::Vec3::new(0.0, y, 0.0)),
+                    transform_end: None,
+                },
+                half.clone(),
+                MASK_ALL,
+                InstanceHitId::As(first),
+            );
+        }
+    };
+    let (_, open) = floor_under_light(|_| {}, SamplingStrategy::PowerMis, 256, RayCone::default());
+    for (s, n, tol) in [
+        (SamplingStrategy::LightOnly, 256, 1e-3),
+        (SamplingStrategy::BsdfOnly, 16_384, 0.05),
+    ] {
+        let (_, m) = floor_under_light(pair, s, n, RayCone::default());
+        let expected = 0.25 * open;
+        assert!(
+            (m - expected).abs() < tol * expected,
+            "{s:?}: {m} vs {expected} through two stacked placements ({open} open)"
+        );
     }
 }
 

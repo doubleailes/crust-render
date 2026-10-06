@@ -20,10 +20,10 @@ with a high-spp reference *of itself*". Render a reference at high spp, then
 compare a 16 spp render against it with cones on and off:
 
     python3 scripts/gen_texture_alias_scene.py /tmp/alias
-    B=target/release/crust-render
-    $B -i /tmp/alias/alias.usda -o /tmp/alias/ref.exr   -s 1024 -l error
-    $B -i /tmp/alias/alias.usda -o /tmp/alias/mip.exr   -s 16   -l error
-    CRUST_RAY_CONES=0 $B -i /tmp/alias/alias.usda -o /tmp/alias/flat.exr -s 16 -l error
+    B=target/release/crust
+    $B render -i /tmp/alias/alias.usda -o /tmp/alias/ref.exr   -s 1024 -l error
+    $B render -i /tmp/alias/alias.usda -o /tmp/alias/mip.exr   -s 16   -l error
+    CRUST_RAY_CONES=0 $B render -i /tmp/alias/alias.usda -o /tmp/alias/flat.exr -s 16 -l error
     target/release/examples/exr_diff /tmp/alias/ref.exr /tmp/alias/mip.exr
     target/release/examples/exr_diff /tmp/alias/ref.exr /tmp/alias/flat.exr
 
@@ -196,7 +196,7 @@ def render(scene, out, spp, env=None):
     e = dict(os.environ)
     e.update(env or {})
     subprocess.run(
-        ["target/release/crust-render", "-i", scene, "-o", out,
+        ["target/release/crust", "render", "-i", scene, "-o", out,
          "-s", str(spp), "-l", "error"],
         check=True,
         env=e,

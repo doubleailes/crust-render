@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use tracing::Level;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -66,6 +67,16 @@ pub(crate) fn get_logger_level(level: LoggerLevel) -> Level {
     }
 }
 
+/// Which terminal stream the log is written to.
+#[derive(Clone, Copy)]
+pub(crate) enum Terminal {
+    /// A render's, as it always was.
+    Stdout,
+    /// A command whose stdout is its result (`crust ls`), so the log cannot
+    /// interleave with what a script reads.
+    Stderr,
+}
+
 /// Installs the process's subscriber: the terminal, and `--log-file`'s file
 /// when one was asked for. The error is the message to print.
 ///
@@ -79,9 +90,17 @@ pub(crate) fn get_logger_level(level: LoggerLevel) -> Level {
 /// the process-global one, which is never dropped, so a `BufWriter` would never
 /// be flushed and would lose exactly the last lines — the ones explaining why a
 /// run stopped. A log at these volumes is not worth a flush guard.
-pub(crate) fn init(level: LoggerLevel, log_dir: Option<&Path>) -> Result<(), String> {
+pub(crate) fn init(
+    level: LoggerLevel,
+    log_dir: Option<&Path>,
+    terminal: Terminal,
+) -> Result<(), String> {
     let log_file = log_dir.map(open_log_file).transpose()?;
     let level = get_logger_level(level);
+    let terminal = match terminal {
+        Terminal::Stdout => BoxMakeWriter::new(std::io::stdout),
+        Terminal::Stderr => BoxMakeWriter::new(std::io::stderr),
+    };
     tracing_subscriber::registry()
         // `-l` for everything except the `--stats` report, which the user
         // asked for by flag and which therefore is not the log level's to
@@ -89,7 +108,7 @@ pub(crate) fn init(level: LoggerLevel, log_dir: Option<&Path>) -> Result<(), Str
         .with(filter_fn(move |meta| {
             event_enabled(meta.target(), meta.level(), level)
         }))
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(terminal))
         .with(log_file.map(|f| fmt::layer().with_ansi(false).with_writer(Mutex::new(f))))
         .init();
     Ok(())
@@ -138,7 +157,7 @@ pub(crate) fn utc_stamp(t: std::time::SystemTime) -> String {
 /// produced no file would be discovered only after the render it was meant to
 /// record. The error is the message to print.
 fn open_log_file(dir: &Path) -> std::result::Result<std::fs::File, String> {
-    let path = dir.join(format!("crust-render-{}.log", utc_stamp(SystemTime::now())));
+    let path = dir.join(format!("crust-{}.log", utc_stamp(SystemTime::now())));
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = std::fs::create_dir_all(parent)

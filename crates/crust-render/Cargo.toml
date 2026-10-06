@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The package keeps the repository's name; the executable is `crust`.
+[[bin]]
+name = "crust"
+path = "src/main.rs"
+
 [features]
 # Print per-ray BVH traversal counts in --stats. Diagnostic: the counters
 # are global atomics, so counts are trustworthy and timings are not.

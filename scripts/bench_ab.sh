@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interleaved A/B of two crust-render binaries.
+# Interleaved A/B of two crust binaries.
 #
 # Why this exists rather than "run bench_scenes.sh, change the code, run it
 # again": on a shared or busy machine that method is simply wrong. Measuring
@@ -15,10 +15,10 @@
 # when load is symmetric).
 #
 # Build the two binaries with e.g.:
-#     cp target/release/crust-render /tmp/bin_before
+#     cp target/release/crust /tmp/bin_before
 #     ...make the change...
 #     cargo build --release -p crust-render
-#     cp target/release/crust-render /tmp/bin_after
+#     cp target/release/crust /tmp/bin_after
 #     scripts/bench_ab.sh -a /tmp/bin_before -b /tmp/bin_after cornellbox veach_mis
 #
 # Usage: scripts/bench_ab.sh -a <binA> -b <binB> [-n reps] [-p phase] [-x args] [scene ...]
@@ -55,6 +55,15 @@ if [ ! -x "$BIN_A" ] || [ ! -x "$BIN_B" ]; then
     echo "error: -a and -b must both name executables" >&2
     exit 2
 fi
+
+# A binary from before the `render` subcommand takes the render flags bare;
+# asking clap for the subcommand's help tells the two apart, so a new build
+# can still be compared against an old one.
+render_cmd() {
+    if "$1" help render >/dev/null 2>&1; then echo render; fi
+}
+CMD_A="$(render_cmd "$BIN_A")"
+CMD_B="$(render_cmd "$BIN_B")"
 
 SCENES=("$@")
 if [ ${#SCENES[@]} -eq 0 ]; then
@@ -94,12 +103,13 @@ for scene in "${SCENES[@]}"; do
     for _ in $(seq "$REPS"); do
         # A then B, back to back, so a load spike hits both.
         for side in a b; do
-            bin="$BIN_A"; [ "$side" = b ] && bin="$BIN_B"
+            bin="$BIN_A"; cmd="$CMD_A"
+            [ "$side" = b ] && { bin="$BIN_B"; cmd="$CMD_B"; }
             # `|| true`: under `set -e` with `pipefail` a single transient
             # render failure in a 50-run sweep would otherwise abort the whole
             # comparison. Drop the sample and carry on instead.
-            # shellcheck disable=SC2086  # EXTRA is deliberately word-split
-            t="$("$bin" -i "$path" -o "$WORK/o.exr" --stats -l error $EXTRA 2>/dev/null \
+            # shellcheck disable=SC2086  # EXTRA and cmd are deliberately word-split
+            t="$("$bin" $cmd -i "$path" -o "$WORK/o.exr" --stats -l error $EXTRA 2>/dev/null \
                 | phase_seconds || true)"
             [ -n "$t" ] || continue
             if [ "$side" = a ]; then a_times+=("$t"); else b_times+=("$t"); fi

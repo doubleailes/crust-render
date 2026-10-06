@@ -70,6 +70,11 @@ pub(crate) trait PatternMaterial: Send + Sync {
         false
     }
 
+    /// [`Material::has_straight_transmission`].
+    fn pattern_has_straight_transmission(&self) -> bool {
+        false
+    }
+
     /// [`Material::opacity`].
     fn pattern_opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
         let _ = (r_in, rec);
@@ -136,6 +141,10 @@ impl<T: PatternMaterial> Material for T {
 
     fn opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
         self.pattern_opacity(r_in, rec)
+    }
+
+    fn has_straight_transmission(&self) -> bool {
+        self.pattern_has_straight_transmission()
     }
 
     fn emitted(&self) -> Vec3A {

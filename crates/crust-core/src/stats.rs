@@ -189,11 +189,12 @@ pub struct RayStats {
     pub sss_exits: u64,
     pub sss_steps: u64,
     pub sss_rays: u64,
-    /// Cutouts (`Material::opacity`): the hits a path passed straight
-    /// through, and the closest-hit queries cutouts cost beyond the ones the
-    /// integrator makes anyway — the query past each hit passed through, and
-    /// every query of a shadow ray the any-hit test found blocked in a world
-    /// with cutouts. Counted apart from `closest_hit`, like `sss_rays`, and
+    /// Pass-throughs — cutouts (`Material::opacity`) and thin-walled
+    /// straight transmission (`Material::has_straight_transmission`): the
+    /// hits a path passed straight through, and the closest-hit queries they
+    /// cost beyond the ones the integrator makes anyway — the query past
+    /// each hit passed through, and every query of a shadow ray the any-hit
+    /// test found blocked in a world with either. Counted apart from `closest_hit`, like `sss_rays`, and
     /// folded into `total_rays`.
     pub cutout_passes: u64,
     pub cutout_rays: u64,

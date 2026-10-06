@@ -204,6 +204,10 @@ is what compositors expect from a `Z` channel.
   normals and UVs keep their clear value; `alpha` is 0.
 - **Cutouts**: a surface the camera ray passes through is not a hit. The AOVs describe
   what is behind it, as the beauty does.
+- **Thin glass** (a thin-walled transmissive surface): the camera ray may pass straight
+  through it, but it is still the first hit. Depth, positions, normals and UVs describe
+  the glass, as they would for any other surface in front of the camera. Light seen
+  through it is a `TS` event in light path expressions.
 
 ## Accumulation
 

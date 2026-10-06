@@ -704,3 +704,63 @@ fn a_volume_excluded_by_a_light_link_is_not_lit() {
         );
     }
 }
+
+/// A hidden light's source is in no shadow class: shadow rays toward a
+/// restricted light (which carry class bits) and toward an unrestricted one
+/// both pass it, while the occluder the restricted light does not exclude
+/// still blocks it, and a camera-visible source still blocks both.
+#[test]
+fn a_hidden_light_source_is_no_caster_under_shadow_linking() {
+    let mut body = String::new();
+    // Two occluders, so the restricted light has a class to ignore and one
+    // to be blocked by.
+    body += &sphere("Kept", 50.0, "");
+    body += &sphere("Dropped", 30.0, "");
+    body += &sphere_light(
+        "Restricted",
+        100.0,
+        "prepend rel collection:shadowLink:excludes = </World/Dropped>",
+    );
+    body += &sphere_light("Free", 200.0, "");
+    // The sources under test, at y = 10 (the occluders are at y = 0).
+    for (name, x, extra) in [
+        ("Hidden", 3.0, ""),
+        ("Visible", 6.0, "int crust:light:cameraVisible = 1"),
+    ] {
+        body += &format!(
+            r#"    def SphereLight "{name}"
+    {{
+        float inputs:radius = 0.5
+        {extra}
+        double3 xformOp:translate = ({x}, 10, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+"#
+        );
+    }
+    let scene = load("hidden_source_classes", &body, "");
+    let restricted = light_above(&scene, 100.0);
+    let free = light_above(&scene, 200.0);
+    assert!(scene.lights.nee_only(restricted), "the link was encoded");
+    let blocked = |x: f32, light: usize| {
+        let ray =
+            Ray::new(Vec3A::new(x, -5.0, 0.0), Vec3A::Y).with_mask(scene.lights.shadow_mask(light));
+        scene.world.occluded(&ray, 1e-3, 24.0)
+    };
+    for light in [restricted, free] {
+        assert!(!blocked(3.0, light), "a hidden source blocks light {light}");
+        assert!(
+            blocked(6.0, light),
+            "a visible source lets light {light} through"
+        );
+        assert!(
+            blocked(50.0, light),
+            "the kept occluder lets light {light} through"
+        );
+    }
+    assert!(!blocked(30.0, restricted), "the excluded occluder blocks");
+    assert!(
+        blocked(30.0, free),
+        "the excluded occluder still blocks others"
+    );
+}

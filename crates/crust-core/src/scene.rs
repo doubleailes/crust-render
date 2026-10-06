@@ -135,6 +135,39 @@ impl Scene {
     ) -> Result<Scene, crate::Error> {
         usd_import::load_scene(path, assets, options)
     }
+
+    /// The `kind` prims of the USD stage at `path` — cameras, lights or
+    /// materials — as absolute prim paths in namespace order, without
+    /// importing anything else.
+    ///
+    /// They are found by the import's own walk, so what is listed is what a
+    /// render would use (see [`ListKind`] for each kind's rules): a camera
+    /// listed is a path [`UsdImportOptions::camera`] accepts.
+    pub fn list_usd(path: &std::path::Path, kind: ListKind) -> Result<Vec<String>, crate::Error> {
+        usd_import::list_prims(path, kind)
+    }
+}
+
+/// What [`Scene::list_usd`] lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKind {
+    /// `UsdGeomCamera` prims the render can go through: none under an
+    /// inactive, abstract or proxy- / guide-purpose ancestor, inside an
+    /// instance's prototype or beneath a `PointInstancer`; those under an
+    /// invisible ancestor included, as a hidden camera still renders.
+    Camera,
+    /// The UsdLux lights the import reads (sphere, rect, disk, cylinder,
+    /// distant, dome): pruned like geometry, so an invisible light, and a
+    /// light inside a prototype or beneath a `PointInstancer`, is not listed.
+    /// Whether the import then accepts one is a property of its values at
+    /// the rendered time code and its composed transform — a zero radius or
+    /// size, a transform that collapses it — which a listing evaluates at no
+    /// frame; such a light is listed, and the render skips it with a warning.
+    Light,
+    /// `UsdShadeMaterial` prims a binding can reach: all but those under an
+    /// inactive ancestor or inside an instance's prototype, whether or not
+    /// anything binds them.
+    Material,
 }
 
 /// Choices a host makes about how a USD stage is imported.

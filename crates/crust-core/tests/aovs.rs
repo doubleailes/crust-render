@@ -295,3 +295,76 @@ fn a_beauty_only_request_returns_an_empty_film() {
     // The beauty's channels still come out of an empty film.
     assert_eq!(film.var_channels(&b, &req.products[0].vars[0]).len(), 3);
 }
+
+/// A thin-walled window filling the frame one unit in front of the camera:
+/// a path passes it straight through or meets it, but either way it is the
+/// camera's first hit — glass, not a hole — so every pixel's depth is the
+/// window's, closest and filtered alike, and its alpha is full.
+#[test]
+fn a_thin_window_is_the_first_hit_whether_passed_or_met() {
+    let mut world = WorldBuilder::new();
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::new(0.0, 0.0, 2.0),
+            radius: 1.0,
+        },
+        Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+    );
+    world.attach(
+        Geometry::TriangleMesh {
+            vertices: vec![
+                [-50.0, -50.0, 4.0],
+                [50.0, -50.0, 4.0],
+                [50.0, 50.0, 4.0],
+                [-50.0, 50.0, 4.0],
+            ],
+            indices: vec![[0, 1, 2], [0, 2, 3]],
+            normals: None,
+        },
+        Arc::new(OpenPBR {
+            geometry_thin_walled: true,
+            transmission_color: Vec3A::new(0.9, 0.7, 0.5),
+            ..OpenPBR::glass(1.5)
+        }),
+    );
+    let world = world.commit();
+    assert!(world.has_straight_transmission());
+    let mut lights = LightList::new();
+    lights.add(DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY));
+    let camera = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        60.0,
+        W as f32 / H as f32,
+        0.0,
+        5.0,
+    );
+    let settings = RenderSettings::default()
+        .with_resolution(W, H)
+        .with_samples_per_pixel(16)
+        .with_max_depth(4)
+        .with_adaptive_sampling(16, 0.0);
+    let r = Renderer::new(camera, world, lights, settings);
+    let mut filtered = var("depth_filtered", AovSource::Depth);
+    filtered.accumulation = Accumulation::Filtered;
+    let vars = vec![
+        var("depth", AovSource::Depth),
+        filtered,
+        var("alpha", AovSource::Alpha),
+    ];
+    let (beauty, film) = render(&r, true, &request(vars.clone()));
+    for v in &vars[..2] {
+        for &d in &film.var_channels(&beauty, v)[0] {
+            assert!((d - 1.0).abs() < 1e-4, "{}: {d}", v.name);
+        }
+    }
+    assert!(
+        film.var_channels(&beauty, &vars[2])[0]
+            .iter()
+            .all(|&a| a == 1.0)
+    );
+    // And the ball behind it is seen through it.
+    let centre = (H / 2) * W + W / 2;
+    assert!(beauty.get_pixel(W / 2, H / 2).x > 0.0, "{centre}");
+}
