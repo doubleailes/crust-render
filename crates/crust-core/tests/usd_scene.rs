@@ -458,11 +458,28 @@ fn light_geometry_camera_visibility() {
     assert!((hit_t(0.0, crust_core::MASK_CAMERA) - 2.5).abs() < 1e-3);
     assert!((hit_t(3.0, crust_core::MASK_CAMERA) - 2.5).abs() < 1e-3);
 
-    // Shadow and indirect rays see all three light surfaces.
+    // Indirect rays see all three light surfaces; shadow rays only the two
+    // the camera sees — the hidden one is a transparent emitter.
     for x in [-3.0, 0.0, 3.0] {
-        assert!((hit_t(x, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
         assert!((hit_t(x, crust_core::MASK_INDIRECT) - 2.5).abs() < 1e-3);
     }
+    assert!((hit_t(-3.0, crust_core::MASK_SHADOW) - 5.0).abs() < 1e-3);
+    assert!((hit_t(0.0, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
+    assert!((hit_t(3.0, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
+    let geom = |x: f32| {
+        scene
+            .world
+            .intersect(
+                &down(x).with_mask(crust_core::MASK_INDIRECT),
+                0.001,
+                f32::INFINITY,
+            )
+            .expect("a light")
+            .geom_id
+    };
+    assert!(scene.world.is_transparent_emitter(geom(-3.0)));
+    assert!(!scene.world.is_transparent_emitter(geom(0.0)));
+    assert!(!scene.world.is_transparent_emitter(geom(3.0)));
 }
 
 #[test]

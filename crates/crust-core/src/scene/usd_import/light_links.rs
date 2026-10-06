@@ -505,6 +505,8 @@ fn encode_shadows(
         let base = mask.0 & !CLASS_BITS;
         if base & MASK_SHADOW.0 == 0 {
             // Not a shadow caster: no class bit, so no shadow ray matches it.
+            // Every hidden light source is one (`light_ray_mask`): a class
+            // bit would let a restricted light's shadow rays see it again.
             return RayMask(base);
         }
         match bit_of[class] {
@@ -593,6 +595,8 @@ fn demote(lights: &mut LightList, world: &mut WorldBuilder, index: usize, path: 
     } else if let Some(id) = light.geom_id() {
         let mask = world.mask(id) & MASK_CAMERA;
         world.set_mask(id, mask);
+        // No longer a light: nothing for a bounce to collect there.
+        world.set_transparent_emitter(id, false);
         if mask.sees(MASK_CAMERA) {
             "camera-visible geometry only"
         } else {

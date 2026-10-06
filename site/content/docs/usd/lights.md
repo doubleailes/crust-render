@@ -61,8 +61,17 @@ warning.
 
 By default the **camera doesn't see the surface of an area light**, which is the usual
 convention in Arnold, RenderMan and Karma. A light can sit inside the frame without
-showing up, while it still lights the scene. Shadow and indirect rays still see the
-surface: it casts shadows, and appears in reflections.
+showing up, while it still lights the scene.
+
+Such a **hidden light** is an emitter and nothing else, as in the OpenUSD reference
+renderer (hdEmbree): its surface casts no shadow, so two hidden lights never shadow each
+other and whatever is behind one is lit as if it were not there. A ray bouncing through
+it picks up its light and carries on past it, so it still appears in reflections and
+still lights the scene indirectly.
+
+A light the camera **does** see (`crust:light:cameraVisible = 1`) is solid, like a lamp
+bulb: it casts shadows and blocks whatever is behind it. To keep a light hidden from the
+camera but solid, author [`crust:rayMask = 6`](#crust-raymask-on-a-light).
 
 Lights at infinity (dome and distant lights) are the opposite: the camera **does** see
 them by default, as the sky behind the scene.
@@ -101,18 +110,25 @@ on the `RenderSettings` prim.
 
 ### crust:rayMask on a light
 
-`int`, default: bits 1 and 2 (shadow and indirect), plus bit 0 (camera) when the light is
-camera-visible.
+`int`, default: bit 2 (indirect) for a hidden light, all three bits (camera, shadow and
+indirect) for a camera-visible one.
 
 [`crust:rayMask`](@/docs/usd/geometry.md#crust-raymask) works on the surface of an area
-light too. When it is authored, it replaces the visibility above completely, and
-`crust:light:cameraVisible` is ignored:
+light too. When it is authored, it replaces the visibility above completely,
+`crust:light:cameraVisible` is ignored, and the surface is **solid** whatever bits the mask
+leaves: a ray that reaches it stops there.
 
 ```usda
 def SphereLight "Masked"
 {
     float inputs:radius = 0.3
     int crust:rayMask = 7      # camera, shadow and indirect: fully visible
+}
+
+def SphereLight "HiddenButSolid"
+{
+    float inputs:radius = 0.3
+    int crust:rayMask = 6      # hidden from the camera, but it casts shadows
 }
 ```
 
