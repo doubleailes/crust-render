@@ -203,16 +203,28 @@
   rejected where the old `root <= t_min` let it through; `q == 0` (a tangent through
   the origin, both roots at 0) returns no hit as before. Disks are a plane test with no
   cancellation; curves keep their rounded-cone test.
+- **A hit names its placement.** `RayHit::placement` is 0 on top-level geometry and
+  otherwise an identity of the instance placement chain the hit lies in: each
+  `InstancePrim` carries its slot plus one (in its padding; the 96-byte pin holds) and
+  mixes it over the inner hit's on the way out (`inner · 0x9E3779B1 ^ own`). It exists
+  for the renderer's pass-through walks, whose "same surface" test needs to tell two
+  placements of one prototype apart when `InstanceHitId::As` gives them one `geom_id`
+  — an identity to compare, never an index to look up. `PrimHit` had the padding
+  (52 → 64 bytes), so it costs no memory and one store per instance level.
 - **Cost.** The closest-approach form is a vector subtract, a dot and a division more per
   sphere test. callgrind (1 thread, 2 spp): `openpbr_showcase` (twelve spheres and a
-  thin-walled bubble) 2 361.70 M → 2 369.56 M (+0.33 %), of which `Bvh::scalar_hit`,
-  where the sphere test inlines, 68.9 M → 85.2 M (+16.2 M) while `pass_walls` fell
-  65.1 M → 46.2 M: the bubble is a sphere, and a third of its crossings had been
-  re-hit and re-shaded. `cornellbox` (no sphere) 4 236.88 M → 4 236.77 M (−0.003 %,
-  bit-identical image).
+  thin-walled bubble) 2 361.70 M → 2 366.48 M (+0.20 %); in an intermediate build
+  without the placement field `Bvh::scalar_hit`, where the sphere test inlines, went
+  68.9 M → 85.2 M (+16.2 M) while `pass_walls` fell 65.1 M → 46.2 M — the bubble is a
+  sphere, and a third of its crossings had been re-hit and re-shaded. `cornellbox` (no
+  sphere) 4 236.88 M → 4 233.35 M (−0.08 %, bit-identical image). Interleaved
+  wall-clock (`scripts/bench_ab.sh`, 6 reps, min / mean): cornellbox +0.8 % / +0.4 %,
+  openpbr_showcase +1.3 % / +0.0 %, veach_mis +0.4 % / −0.7 % — inside the run-to-run
+  spread, as a +0.2 % instruction change should be.
 - **Images.** 19 of the 38 sample scenes move, every one with a sphere or cylinder in
-  it, and `materialx_showcase`, whose hidden rect lights the pass-through guard touches
-  (rendering design record); the other 19 are bit-identical at 16 spp. The difference is
+  it, and `materialx_showcase` (33 of 2 M pixels), whose hidden rect lights the
+  pass-through guard touches (rendering design record); the other 19 are bit-identical
+  at 16 spp. The difference is
   not pure noise and does not fall as 1/√N: it carries the corrected sphere positions.
   `light_linking` (six sphere lights) holds a flat relMSE of 5e-10 (max abs 2e-4) at 16,
   64 and 256 spp — a fixed, ulp-scale shift of every sphere hit; `openpbr_showcase`

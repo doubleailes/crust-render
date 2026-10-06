@@ -175,20 +175,27 @@ consumed as ordinary dependencies:
      LightTiny alone). The kernel is fixed (closest-approach discriminant for spheres
      and cylinders, intersection-kernel design record), and the walks keep a backstop
      for every primitive: each records the crossing it last accepted
-     `(geom_id, prim_id, side, t)`, and a hit on the same primitive, from the same
-     side, within `1e-4 · max(|t|, 1)` of it is its rounding, not a surface — no
-     closed or single-sided surface is entered twice in a row from the same side — so
-     the walk steps past it without counting it, and without spending a crossing of
-     the budget. The guard alone also covered the old sphere at these distances
+     `(geom_id, prim_id, placement, side, t)`, and a hit on the same surface, from
+     the same side, within `1e-3 · max(|t|, 1)` of it is its rounding, not a surface
+     — no closed or single-sided surface is entered twice in a row from the same side
+     — so the walk steps past it without counting it, and without spending a crossing
+     of the budget. The guard alone also covered the old sphere at these distances
      (`every_strategy_agrees_on_a_small_far_hidden_light`, which is 2.000× without
      either). It is not only spheres: on `materialx_showcase` (hidden rect lights, no
-     sphere) the guard skips a few dozen re-hits of a light's triangle per 16-spp
-     frame, reported 2–5e-5·t past the first hit — watertight triangles lose that much
-     at grazing incidence — and the image moves by 1e-6 on 32 of 2 M pixels. Widening
-     `resume_before` instead would re-open the skipped-surface leak above, and the
-     window is narrow for the reason in the known gaps below. Two cards
-     on different primitives half a millimetre apart are still both crossed
-     (`two_cards_close_together_are_both_crossed`, `(1 − 0.5)²` on both sides).
+     sphere) the guard skips some eighty re-hits of a light's triangle per 16-spp
+     frame, reported 1e-5 to 1.9e-4·t past the first hit (2.5e-4 on
+     `openpbr_showcase`) — watertight triangles lose that much at grazing incidence —
+     and the image moves by 1e-6 on 32 of 2 M pixels. Widening `resume_before`
+     instead would re-open the skipped-surface leak above. The surface identity
+     carries the kernel's `placement` (`RayHit::placement`, an identity per instance
+     placement chain) because `(geom_id, prim_id)` alone is not one surface: inside a
+     nested prototype every placement of a leaf part reports one id
+     (`InstanceHitId::As`), and a second instanced card stacked within the window
+     read as the first met again and was passed for free
+     (`stacked_placements_sharing_an_id_are_both_crossed`, half a millimetre apart:
+     one card's attenuation instead of `(1 − 0.5)²`). Two cards on different
+     primitives that close are both crossed too
+     (`two_cards_close_together_are_both_crossed`).
    - **Thin walls are pass-throughs** (`Material::has_straight_transmission`:
      `crust:openpbr` `geometryThinWalled` with `transmissionWeight > 0`, a MaterialX
      surface whose `thin_walled` reaches a transmitting dielectric or generalized
@@ -560,23 +567,6 @@ randomness use `openqmc::pcg::Rng`.
   selection weight, which changes those materials' sampling and needs its own A/B.
 - **The first-hit AOVs see a passed wall's geometric normal.** A wall passed through is
   never shaded, so a normal map on it does not reach `N`.
-- **A nested prototype's placements share a hit id under the re-hit guard.** Inside a
-  nested prototype every placement of a leaf part reports one `geom_id`
-  (`InstanceHitId::As(first)`, `usd_import/instancing.rs`), so two placements of one
-  cutout card stacked within `1e-4 · t` of each other (2 mm at t = 20), facing the same
-  way and met on the same triangle index, read to a pass-through walk as one surface
-  met twice, and the second is passed for free. That is the thickness of a coplanar
-  overlap; the window was 1e-3 in a first draft, which would have been 2 cm. The real
-  fix is a placement identity on the hit, which the kernel does not carry.
-- **A few grazing triangle re-hits fall past the window.** Counting every consecutive
-  same-primitive, same-side hit within 1e-2·t (all of them re-hits, by the argument
-  above) in a 16-spp frame: `materialx_showcase` 80, of which 1 lies past 1e-4·t
-  (1.9e-4); `openpbr_showcase` 39, of which 2 (worst 2.5e-4); `usdlux` none. Those
-  are hidden rect lights crossed nearly edge-on, where the watertight triangle test's
-  `t` is ill-conditioned, and each slips through as a double count of a grazing
-  contribution — the 1e-6-level pixels in the golden diff. Widening the window to
-  cover them trades against the shared-id gap above; a precision fix for grazing
-  triangle distances would retire both.
 - **Two branches per vertex remain** in a world without thin walls (+0.30% of
   cornellbox's instructions). Removing them would mean swapping a met wall's material
   for a precomputed twin without its straight lobe, which was not judged worth it.

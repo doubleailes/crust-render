@@ -767,6 +767,10 @@ pub struct WorldHit<'a> {
     pub mat: &'a dyn Material,
     pub geom_id: u32,
     pub prim_id: u32,
+    /// The instance placement the hit lies in (`crust_rt::RayHit::placement`):
+    /// 0 at top level, and otherwise an identity that tells apart two
+    /// placements whose `geom_id`s are one. Compared, never indexed.
+    pub placement: u32,
 }
 
 /// The committed scene geometry the renderer traces against.
@@ -868,6 +872,7 @@ impl World {
             mat: self.materials[h.geom_id as usize].as_ref(),
             geom_id: h.geom_id,
             prim_id: h.prim_id,
+            placement: h.placement,
         })
     }
 

@@ -36,10 +36,12 @@ transmittance.
   the same form.
 - **Each surface is crossed once.** Every pass-through walk (hidden light sources,
   cutouts, thin walls, on the bounce and the shadow side) drops a hit on the same
-  geometry, from the same side, within a relative distance (1e-4) of the crossing it has
-  just recorded. That is a numerical re-hit, not a surface: no closed or single-sided
-  surface can be entered twice in a row from the same side. This guards every primitive,
-  not only spheres.
+  surface — geometry, primitive and instance placement — from the same side, within a
+  relative distance (1e-3) of the crossing it has just recorded. That is a numerical
+  re-hit, not a surface: no closed or single-sided surface can be entered twice in a row
+  from the same side. This guards every primitive, not only spheres. The kernel's hit
+  gains the placement (`RayHit::placement`) so two placements of one prototype that
+  share a `geom_id` are two surfaces.
 - **Images:** the over-count disappears. Scenes with analytic spheres or cylinders
   (sphere and cylinder lights, `Sphere` prims) change at the ulp level wherever one is
   hit, and by noise alone otherwise. Scenes without them and without pass-throughs stay
@@ -64,8 +66,10 @@ should land on its branch before that change merges.
 
 - `crates/crust-rt/src/prim.rs`: `SpherePrim::hit` and `CylinderPrim::hit`. The
   instanced unit shapes go through the same functions in local space.
+- `crates/crust-rt/src/scene/mod.rs`, `prim.rs`, `bvh/mod.rs`: `RayHit::placement`,
+  carried from `InstancePrim` through `PrimHit` (both in existing padding).
 - `crates/crust-core/src/tracer/path.rs`: `pass_cutouts`, `pass_walls`, `cutout_through`
-  and the shadow-side thin-wall walk gain the one-crossing guard.
+  and the shadow-side thin-wall walk gain the one-crossing guard; `WorldHit::placement`.
 - Tests: a kernel precision test, a re-hit test for the pass-through walk, and the
   strategy-agreement repro as an integration test.
 - Performance: the closest-approach form costs a few more flops per sphere or cylinder

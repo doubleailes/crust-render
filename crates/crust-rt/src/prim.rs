@@ -27,6 +27,10 @@ pub(crate) struct PrimHit {
     pub u: f32,
     pub v: f32,
     pub geom_id: u32,
+    /// Which instance placement the hit lies in — see
+    /// [`RayHit::placement`](crate::RayHit::placement). 0 from every
+    /// primitive; each instance level mixes its own in on the way out.
+    pub placement: u32,
     pub prim_id: u32,
 }
 
@@ -165,6 +169,7 @@ pub(crate) fn triangle_hit_from_barycentric(
         v,
         geom_id: rec.geom_id,
         prim_id: rec.prim_id,
+        placement: 0,
     })
 }
 
@@ -227,6 +232,7 @@ impl Prim for SpherePrim {
             v: 0.0,
             geom_id: self.geom_id,
             prim_id: 0,
+            placement: 0,
         })
     }
 
@@ -278,6 +284,7 @@ impl Prim for DiskPrim {
             v: 0.0,
             geom_id: self.geom_id,
             prim_id: 0,
+            placement: 0,
         })
     }
 
@@ -358,6 +365,7 @@ impl Prim for CylinderPrim {
                 v: 0.0,
                 geom_id: self.geom_id,
                 prim_id: 0,
+                placement: 0,
             });
         }
         None
@@ -410,6 +418,7 @@ impl Prim for CurvePrim {
             v: 0.0,
             geom_id: self.geom_id,
             prim_id: self.prim_id,
+            placement: 0,
         })
     }
 
@@ -471,6 +480,7 @@ impl Prim for CubicCurvePrim {
             v: 0.0,
             geom_id: self.geom_id,
             prim_id: self.prim_id,
+            placement: 0,
         })
     }
 
@@ -505,6 +515,11 @@ pub(crate) struct InstancePrim {
     /// What a hit inside reports when `id_offset` is [`NO_ID_OFFSET`]: the
     /// instance's own id, or the id [`crate::InstanceHitId::As`] asked for.
     pub geom_id: u32,
+    /// This placement among its scene's: its slot plus one, so a hit can
+    /// tell two placements of one prototype apart where their `geom_id`s
+    /// cannot ([`crate::InstanceHitId::As`]). Mixed into
+    /// [`PrimHit::placement`] on the way out. In the padding (pinned).
+    pub placement: u32,
     /// [`crate::InstanceHitId::Offset`]'s base, added to the inner hit's id;
     /// [`NO_ID_OFFSET`] when the instance reports `geom_id` instead. Fits in
     /// the padding the 16-byte-aligned transform already leaves, so
@@ -653,6 +668,10 @@ impl InstancePrim {
             // Cannot overflow: commit refuses an offset that could.
             self.id_offset + hit.geom_id
         };
+        // An identity for the placement chain: this level's over the
+        // inner's, spread by an odd constant so nested levels do not
+        // cancel. Never an index.
+        hit.placement = hit.placement.wrapping_mul(0x9E37_79B1) ^ self.placement;
         Some(hit)
     }
 
