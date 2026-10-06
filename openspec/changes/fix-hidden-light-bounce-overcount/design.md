@@ -1,0 +1,67 @@
+## Context
+
+See proposal.md (Why). The walk that passes hidden light sources, cutouts and thin walls
+(`pass_cutouts` / `pass_walls` on the bounce side, `cutout_through` and the thin-wall
+visibility on the shadow side) restarts each segment just short of the surface it passed
+(`resume_before`), then asks the world for the next hit with the tracer's `t_min`
+(0.001). `resume_before` was introduced so a surface lying within 0.001 *behind* a cutout
+card is not skipped (`a_surface_just_behind_a_cutout_is_not_skipped`). Its relative step
+(1e-5·t) assumes the reported `t` is accurate to better than that.
+
+Measured on the repro (radius 0.05, 8 units away): the first hit's `t` and the re-hit's
+differ by 1e-4 to 2e-3, and 37% of hits are recorded twice.
+
+## Goals / Non-Goals
+
+**Goals**
+
+- Every pass-through surface is crossed exactly once, whatever the primitive and
+  however imprecise its hit distance.
+- Sphere hit distances accurate enough that the guard is a backstop, not the fix.
+- Keep the cutout fix that motivated `resume_before`: a surface 0.001 behind a card is
+  still found.
+
+**Non-Goals**
+
+- Changing `resume_before`'s margin. A larger step would re-open the skipped-surface bug.
+- Precision work on cylinders, disks or curves, beyond what the guard covers.
+
+## Decisions
+
+### D1. Closest-approach sphere test
+
+Write `l = oc − (oc·d) d / a`, the vector from the sphere centre to the ray's closest
+approach. Then `disc = a·(r² − |l|²)`, the near root is `q = −half_b − sign(half_b)·√disc`,
+and the roots are `c/q` and `q/a`. Both quantities are of the order of r², not of |oc|²,
+so the f32 error scales with the sphere's size instead of its distance. This is the
+standard remedy (Haines, Günther, Akenine-Möller, *Ray Tracing Gems* ch. 7, "Precision
+Improvements for Ray/Sphere Intersection"). Alternative: an f64 sphere test. That is
+exact enough, but it is slower in the BVH inner loop and does not help other primitives.
+
+### D2. One crossing per surface: a structural guard
+
+The walk records the last crossing it accepted: `(geom_id, prim id, side, t)`. A new hit
+with the same geometry and primitive, from the **same side**, within `t_prev + ε·t_prev`
+(ε = 1e-3), is a numerical re-hit and is skipped: the walk restarts past it without
+recording it. A genuine second surface on the same geometry is either the other side (an
+exit) or farther than ε·t (a different part of a concave mesh). This holds for every
+primitive, so it also covers triangles, disks and cylinders, whose precision D1 does not
+touch. The bounce and the shadow side share the rule, so their visibility stays one
+estimate.
+
+### D3. Both, not either
+
+D1 alone leaves the walk exposed to the next imprecise primitive. D2 alone would hide a
+1e-4 sphere distance error that also affects where NEE and the bounce side place a hit on
+the sphere. They are cheap and independent, so the change ships both, with separate tests.
+
+## Risks / Trade-offs
+
+- [The sphere test change moves bits in every scene with a sphere] → Expected and
+  bounded. `scripts/check_images.sh` lists the moving samples, and for three of them the
+  difference is shown to fall as 1/√N.
+- [The guard could skip a real surface] → Only a hit on the same primitive, from the same
+  side, within 1e-3·t. A real surface needs an exit between two entries, so this cannot
+  happen for closed or single-sided geometry. A unit test with two coplanar-close cards on
+  *different* primitives checks both are still crossed.
+- [`Tri4` ↔ scalar bit-identity] → Unaffected: the change touches spheres only.
