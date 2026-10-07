@@ -205,11 +205,11 @@ struct RouteVertex {
     arrival: Arrival,
     /// The emission counted here (`emit_here`): its light, or `O`.
     emit: u16,
-    /// The light NEE sampled here.
-    nee_light: u16,
-    /// NEE's share per lobe, and the bounce's continuation factor per lobe
-    /// (ranges into `Route::entries`).
+    /// NEE's share per light sample and lobe, and the bounce's
+    /// continuation factor per lobe (ranges into `Route::entries`). Each NEE
+    /// entry's light is the entry at the same offset of `Route::nee_lights`.
     nee: (u32, u32),
+    nee_lights: (u32, u32),
     bounce: (u32, u32),
     /// The emission the bounce found at the next vertex (`next_emit`).
     next_emit: u16,
@@ -224,6 +224,8 @@ struct RouteVertex {
 pub(crate) struct Route {
     vertices: Vec<RouteVertex>,
     entries: Vec<Entry>,
+    /// Per NEE entry, in order, the `L` symbol of the light it sampled.
+    nee_lights: Vec<u16>,
     /// Pass-through events on the segment after the last vertex.
     terminal_arrival: Arrival,
     /// The ordered pass-through events [`Arrival`]s with thin walls name.
@@ -258,6 +260,8 @@ pub(crate) struct Route {
     levels: Vec<Vec<u16>>,
     tables: Vec<Vec<Vec3A>>,
     masks: Vec<u64>,
+    /// Per NEE entry: where its share's `L` ends.
+    nee_masks: Vec<u64>,
     /// Per lobe, then per crossing: where each crossed light's `L` ends.
     cross_masks: Vec<u64>,
 }
@@ -267,6 +271,7 @@ impl Route {
     pub(crate) fn begin(&mut self) {
         self.vertices.clear();
         self.entries.clear();
+        self.nee_lights.clear();
         self.terminal.clear();
         self.terminal_arrival = Arrival::default();
         self.arrivals.clear();
@@ -297,12 +302,13 @@ impl Route {
     /// Opens the record of a new vertex, reached through `arrival`.
     pub(crate) fn vertex(&mut self, arrival: Arrival) {
         let at = self.entries.len() as u32;
+        let lights = self.nee_lights.len() as u32;
         let crossed = self.crossings.len() as u32;
         self.vertices.push(RouteVertex {
             arrival,
             emit: NO_EVENT,
-            nee_light: NO_EVENT,
             nee: (at, at),
+            nee_lights: (lights, lights),
             bounce: (at, at),
             next_emit: NO_EVENT,
             crossed: (crossed, crossed),
@@ -317,16 +323,22 @@ impl Route {
         self.current().emit = sym;
     }
 
-    /// The light NEE sampled at the current vertex, and its share per
-    /// lobe. Must be called once, before any bounce entry.
+    /// One light sample's NEE at the current vertex: the light it sampled
+    /// and its share per lobe. Called once per light sample that
+    /// contributes, all before any bounce entry; the samples' entries run on
+    /// from the vertex's opening.
     pub(crate) fn nee(&mut self, light: u16, shares: impl Iterator<Item = (u16, Vec3A)>) {
         let start = self.entries.len() as u32;
         self.entries
             .extend(shares.map(|(sym, value)| Entry { sym, value }));
         let end = self.entries.len() as u32;
+        self.nee_lights
+            .extend(std::iter::repeat_n(light, (end - start) as usize));
+        let lights = self.nee_lights.len() as u32;
         let v = self.current();
-        v.nee_light = light;
-        v.nee = (start, end);
+        debug_assert_eq!(v.bounce, (v.nee.1, v.nee.1), "NEE after a bounce entry");
+        v.nee.1 = end;
+        v.nee_lights.1 = lights;
         v.bounce = (end, end);
     }
 
@@ -511,6 +523,7 @@ impl Route {
                 .get(k + 1)
                 .map_or(self.terminal_arrival, |n| n.arrival);
             let nee = &self.entries[v.nee.0 as usize..v.nee.1 as usize];
+            let nee_lights = &self.nee_lights[v.nee_lights.0 as usize..v.nee_lights.1 as usize];
             let bounce = &self.entries[v.bounce.0 as usize..v.bounce.1 as usize];
             let crossed = &self.crossings[v.crossed.0 as usize..v.crossed.1 as usize];
             let crossed_at = &self.crossing_arrivals[v.crossed.0 as usize..v.crossed.1 as usize];
@@ -532,16 +545,20 @@ impl Route {
                 } else {
                     lpe.accepts(lpe.step(a, v.emit))
                 };
-                // Per lobe (at most `MAX_SPLIT`, so on the stack): where NEE's
-                // share ends, the state the bounce leads to, its row in the
-                // next vertex's table, and where the next emission ends.
-                let mut nee_masks = [0u64; MAX_SPLIT];
-                for (m, e) in nee_masks.iter_mut().zip(nee) {
-                    if v.nee_light != NO_EVENT {
-                        *m = lpe.accepts(lpe.step(after(a, e.sym), v.nee_light));
+                // Per NEE entry (a light sample's lobe share), where it ends;
+                // per lobe (at most `MAX_SPLIT`, so on the stack): the state
+                // the bounce leads to, its row in the next vertex's table, and
+                // where the next emission ends.
+                let nee_masks = &mut self.nee_masks;
+                nee_masks.clear();
+                nee_masks.extend(nee.iter().zip(nee_lights).map(|(e, &light)| {
+                    if light == NO_EVENT {
+                        0
+                    } else {
+                        lpe.accepts(lpe.step(after(a, e.sym), light))
                     }
-                }
-                let nee_masks = &nee_masks[..nee.len()];
+                }));
+                let nee_masks = &*nee_masks;
                 let mut targets = [0u16; MAX_SPLIT];
                 let mut rows = [None; MAX_SPLIT];
                 let mut ne_masks = [0u64; MAX_SPLIT];

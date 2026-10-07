@@ -188,6 +188,9 @@ pub struct Config {
     pub tex_stream: bool,
     /// `CRUST_TEX_CACHE_MB`: the `.tx` tile cache budget, in MiB.
     pub tex_cache_mb: NonZeroU64,
+    /// `CRUST_TEX_MAX_OPEN_FILES`: idle `.tx` readers the tile cache keeps
+    /// open across all files. `0`: keep every reader, as before the cap.
+    pub tex_max_open_files: usize,
     /// `CRUST_PTEX`: load Ptex textures (`false`: decline every one).
     pub ptex: bool,
     /// `CRUST_PTEX_MAX_LOG2`: the per-face resolution cap as a log2 edge in
@@ -219,6 +222,11 @@ pub struct Config {
 /// locality window — wants.
 pub const DEFAULT_CACHE_MB: usize = 1024;
 
+/// Default cap on the `.tx` tile cache's idle open files. It leaves the
+/// default 1024-descriptor soft limit room for the threads' checked-out
+/// readers, Ptex streaming, the USD stage and the outputs.
+pub const DEFAULT_TEX_MAX_OPEN_FILES: usize = 256;
+
 /// Default preloaded UV tile edge cap, in pixels.
 pub const DEFAULT_TEX_MAX: usize = 1024;
 
@@ -244,6 +252,7 @@ impl Default for Config {
             tex_mip: true,
             tex_stream: true,
             tex_cache_mb: NonZeroU64::new(DEFAULT_CACHE_MB as u64).unwrap(),
+            tex_max_open_files: DEFAULT_TEX_MAX_OPEN_FILES,
             ptex: true,
             ptex_max_log2: None,
             ptex_mip: true,
@@ -293,6 +302,12 @@ impl Config {
                 "CRUST_TEX_CACHE_MB",
                 d.tex_cache_mb,
                 "a positive integer",
+            ),
+            tex_max_open_files: env_parse(
+                &lookup,
+                "CRUST_TEX_MAX_OPEN_FILES",
+                d.tex_max_open_files,
+                "an integer",
             ),
             ptex: flag("CRUST_PTEX", d.ptex),
             // Ptex resolutions are log2-encoded in an i8; 14 is 16384, well
@@ -487,6 +502,19 @@ mod tests {
             with(&[("CRUST_TEX_MAX", "big")]).tex_max.get(),
             DEFAULT_TEX_MAX
         );
+    }
+
+    #[test]
+    fn the_open_file_cap_admits_zero_as_unbounded() {
+        assert_eq!(with(&[]).tex_max_open_files, DEFAULT_TEX_MAX_OPEN_FILES);
+        let c = with(&[("CRUST_TEX_MAX_OPEN_FILES", "0")]);
+        assert_eq!(c.tex_max_open_files, 0);
+        let c = with(&[("CRUST_TEX_MAX_OPEN_FILES", "64")]);
+        assert_eq!(c.tex_max_open_files, 64);
+        for bad in ["lots", "-1"] {
+            let c = with(&[("CRUST_TEX_MAX_OPEN_FILES", bad)]);
+            assert_eq!(c.tex_max_open_files, DEFAULT_TEX_MAX_OPEN_FILES, "{bad}");
+        }
     }
 
     #[test]

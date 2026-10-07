@@ -511,7 +511,14 @@ since OpenQMC's pixel decorrelation tiles at 256), draws the camera dims from a 
 domain, and hands the root to `trace_path`. Each path vertex derives `path.new_domain(depth)`
 and each sampling event a further keyed sub-domain (`K_NEE`, `K_BSDF`, `K_GUIDE`, `K_PHASE`,
 …, keys defined atop `tracer/path.rs`); materials draw one 4D block from the `SobolSampler` domain
-they are handed. Unbounded/incidental draws — Russian roulette, volume delta-tracking,
+they are handed. With several light samples at a vertex (`crust:lightSamples` /
+`crust:lightSamplesIndirect`), the first sample draws its pick, point and shadow ray
+off `v` itself, as the one sample always did, and sample `i ≥ 1` off
+`v.new_domain(K_NEE_SAMPLES).new_domain(i)`; each pick coordinate is stratified by
+hand to `(i + u) / N`
+(`stratified_pick`), since the pick is a monotone CDF inversion and the point
+dimensions must stay independent of the slice (lighting's design record, "Several
+light samples per vertex"). Unbounded/incidental draws — Russian roulette, volume delta-tracking,
 carried-medium free flight, the guide's quadtree descent — use `draw_rnd` or a `pcg::Rng` seeded from a domain
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
 randomness use `openqmc::pcg::Rng`.

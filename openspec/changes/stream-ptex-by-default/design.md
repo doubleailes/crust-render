@@ -151,6 +151,15 @@ Other rules:
   small to hold one derived block degrades to re-deriving per lookup: slow, but
   correct. The `evictions` line shows it, as it does for tiles.
 
+- **File descriptors.** A streamed `.ptx` holds one descriptor for the render
+  (`ptex::SharedReader`), and `CRUST_TEX_MAX_OPEN_FILES` does not cover it. Measured by
+  `bound-texture-open-files` on the island under `ulimit -n 1024`: 952 streamed files
+  peak at 956 descriptors; with all 3 618 admitted, import runs out at 1 024 and the
+  render aborts (`docs/moana_profile.md`). Streaming by default with a lower admission
+  floor, or a larger budget, crosses this limit.
+  → Bound the open files in `ptex-rs` (close idle, reopen on miss) before or with this
+  change, or keep the admission count under the soft limit and say so.
+
 ## Migration Plan
 
 1. Land `DerivedLevels` in `ptex-rs` with its own tests (derive determinism, budget

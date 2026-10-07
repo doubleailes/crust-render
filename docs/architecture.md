@@ -140,6 +140,11 @@ other. The pairs:
   (`bounce_emission_weight`, `escaped_emission`), and both go through
   `SamplingStrategy` and `LightList::density` / the `*_at` lookups. Surface
   NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`, guided mixture pdf ↔ NEE.
+  `LightList::density` takes the vertex's light sample count (`crust:lightSamples`
+  / `crust:lightSamplesIndirect`): NEE both weights with and divides by
+  `count · density` (the division is the average over the samples — do not
+  divide by the count again), and the bounce side weights with the count
+  `PrevVertex` carries from the vertex it left.
 - **Hidden light sources.** A source the camera does not see is invisible to
   shadow rays (`light_ray_mask`) *and* crossed by bounce rays, which collect its
   emission and continue (`World::is_transparent_emitter`, `pass_cutouts`,
@@ -255,6 +260,7 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_TEX_MIP` | on | `crust-assets/uv_texture/` | `0`: no mip pyramid on UV textures |
 | `CRUST_TEX_STREAM` | on | `crust-assets/lib.rs` | `0`: preload even when a `.tx` exists |
 | `CRUST_TEX_CACHE_MB` | 1024 | `crust-assets/tiled/cache.rs` | `.tx` tile cache budget |
+| `CRUST_TEX_MAX_OPEN_FILES` | 256 | `crust-assets/tiled/cache.rs` | idle `.tx` files kept open (peak: cap + threads); `0`: never close one |
 | `CRUST_PTEX` | on | `crust-assets/lib.rs` | `0`: decline every Ptex texture |
 | `CRUST_PTEX_MAX_LOG2` | 5 (preload) / uncapped (stream) | `crust-assets/ptex_texture.rs` | per-face resolution cap, log2 edge |
 | `CRUST_PTEX_MIP` | on | `crust-assets/ptex_texture.rs` | `0`: no per-face mip pyramid |

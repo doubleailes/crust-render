@@ -33,6 +33,8 @@ pub(super) const K_CAMERA: i32 = 0; // off root: jitter (0,1) + lens uv (2,3)
 const K_PATH: i32 = 1; // off root: the bounce subtree
 pub(super) const K_TIME: i32 = 2; // off root: shutter time for motion blur
 const K_NEE: i32 = 0; // off vertex: light pick (0) + area uv (1,2)
+#[cfg(test)]
+pub(super) const K_NEE_TEST: i32 = K_NEE;
 const K_NEE_SHADOW: i32 = 1; // off vertex: shadow-ray volume transmittance
 const K_BSDF: i32 = 2; // off vertex: material scatter block
 const K_GUIDE: i32 = 3; // off vertex: guide coin (0) + its rng() for the descent
@@ -45,6 +47,48 @@ const K_CUTOUT: i32 = 9; // off vertex: presence at each cutout the segment meet
 const K_THIN: i32 = 10; // off vertex, per crossing: thin wall's T estimate (0) + pass coin (1)
 const K_NEE_THIN: i32 = 11; // off vertex, per crossing: a shadow ray's thin-wall T estimates
 const K_CROSS: i32 = 12; // off vertex: volume transmittance to hidden lights crossed past the depth
+const K_NEE_SAMPLES: i32 = 13; // off vertex: light sample i of several hangs off .new_domain(i)
+
+/// The sampler light sample `index` at a vertex draws its pick, its point
+/// on the light and its shadow ray from: the vertex itself for the first
+/// sample, so a one-sample render is the renderer before counts existed, bit
+/// for bit; a sub-domain of its own under [`K_NEE_SAMPLES`] for every later
+/// sample, so the samples' draws are independent of one another (the pick is
+/// then stratified by [`stratified_pick`]).
+#[inline(always)]
+pub(super) fn nee_sampler(vertex: PathSampler, index: u32) -> PathSampler {
+    if index == 0 {
+        vertex
+    } else {
+        vertex.new_domain(K_NEE_SAMPLES).new_domain(index as i32)
+    }
+}
+
+/// The light-pick coordinate of light sample `index` of `count` at a vertex:
+/// `(index + u) / count`, so the `count` samples' picks each fall in their
+/// own slice of `[0, 1)` and, the pick being a monotone CDF inversion, a
+/// light of selection probability `p` is picked `count · p` times, give or
+/// take one, instead of a binomial number of times. One sample's coordinate
+/// is `u` itself. Only the pick is stratified: a point-on-light coordinate
+/// tied to the same slice would make which part of a light is sampled
+/// depend on which light was picked, which is a bias, not a stratification.
+///
+/// The last slice's `(count − 1 + u) / count` rounds to exactly 1.0 for a
+/// `u` within an ulp of 1, and a pick coordinate of 1.0 lands past every CDF
+/// entry — on the last light, which may be one of zero probability that the
+/// CDF never gives a slice (a zero-power light), and whose `1e-6` density
+/// floor would then divide a real contribution. The pick stays below 1.
+#[inline(always)]
+pub(super) fn stratified_pick(u: f32, count: u32, index: u32) -> f32 {
+    if count == 1 {
+        u
+    } else {
+        ((index as f32 + u) / count as f32).min(BELOW_ONE)
+    }
+}
+
+/// The largest `f32` below 1: `1 − 2⁻²⁴`.
+const BELOW_ONE: f32 = 1.0 - f32::EPSILON / 2.0;
 
 /// The white Lambertian every random walk exits through.
 static SSS_EXIT: ExitLambertian = ExitLambertian;
@@ -114,8 +158,14 @@ pub(super) struct PathContext<'a> {
     pub(super) indirect_clamp: Option<f32>,
     /// The guiding field and whether this pass trains it.
     pub(super) guiding: Option<&'a GuidingContext<'a>>,
+    /// Light samples NEE takes at the first vertex of a path, and at every
+    /// later surface or volume vertex (each at least 1).
+    pub(super) light_samples: u32,
+    pub(super) light_samples_indirect: u32,
 }
 
+/// One camera path's radiance, with one light sample per vertex — see
+/// [`ray_color_with_light_samples`].
 pub fn ray_color(
     r: &Ray,
     world: &World,
@@ -123,6 +173,24 @@ pub fn ray_color(
     volumes: &Volumes,
     depth: i32,
     strategy: SamplingStrategy,
+    sampler: PathSampler,
+) -> Vec3A {
+    ray_color_with_light_samples(r, world, lights, volumes, depth, strategy, (1, 1), sampler)
+}
+
+/// One camera path's radiance: the one-shot entry point for tests and
+/// benches, with `light_samples` NEE samples at the (camera, later) vertices
+/// as [`RenderSettings::with_light_samples`](super::RenderSettings::with_light_samples)
+/// takes them. Unclamped, unguided.
+#[allow(clippy::too_many_arguments)]
+pub fn ray_color_with_light_samples(
+    r: &Ray,
+    world: &World,
+    lights: &LightList,
+    volumes: &Volumes,
+    depth: i32,
+    strategy: SamplingStrategy,
+    light_samples: (u32, u32),
     sampler: PathSampler,
 ) -> Vec3A {
     let mut no_training = Vec::new();
@@ -138,6 +206,8 @@ pub fn ray_color(
         strategy,
         indirect_clamp: None,
         guiding: None,
+        light_samples: light_samples.0.max(1),
+        light_samples_indirect: light_samples.1.max(1),
     };
     trace_path::<false, false>(r, &cx, sampler, &mut no_training, &mut scratch, &mut stats)
 }
@@ -443,6 +513,10 @@ pub(super) struct PrevBounce<'a> {
     /// The light-link class of the surface this bounce left: the receiver
     /// whose links decide what the bounce may collect.
     pub(super) class: u16,
+    /// How many light samples NEE took at that surface: the bounce competes
+    /// against all of them (multi-sample MIS), so the light density it is
+    /// weighted against is this many times the per-sample density.
+    pub(super) nee_count: u32,
     /// What a fresh `eval` would be asked, kept only to check the claim
     /// above in debug builds.
     #[cfg(debug_assertions)]
@@ -483,6 +557,8 @@ pub(super) enum PrevVertex<'a> {
         pdf: PdfSolidAngle,
         /// The light-link class of the volume region scattered in.
         class: u16,
+        /// The light samples `volume_nee` took there (see `PrevBounce`).
+        nee_count: u32,
     },
 }
 
@@ -522,9 +598,14 @@ fn bounce_emission_weight_at(
     // The receiver is the vertex the bounce left, and its links apply
     // whatever the bounce's lobe: a light that does not illuminate it gives
     // nothing on this side, exactly as NEE there skips it.
-    let (from, class, competing) = match prev {
-        PrevVertex::Surface(p) => (p.pos, p.class, p.continuous().then_some(p.pdf)),
-        PrevVertex::Phase { pos, pdf, class } => (*pos, *class, Some(*pdf)),
+    let (from, class, competing, nee_count) = match prev {
+        PrevVertex::Surface(p) => (p.pos, p.class, p.continuous().then_some(p.pdf), p.nee_count),
+        PrevVertex::Phase {
+            pos,
+            pdf,
+            class,
+            nee_count,
+        } => (*pos, *class, Some(*pdf), *nee_count),
     };
     // Nothing competes after a delta bounce, and without links nothing can
     // filter it either: skip the light lookup, as before links existed.
@@ -555,7 +636,7 @@ fn bounce_emission_weight_at(
         let Some(point_pdf) = light.pdf_at_point(from, point) else {
             return strategy.unopposed_weight();
         };
-        let light_pdf = lights.density(point_pdf, pmf).max(1e-6);
+        let light_pdf = lights.density(point_pdf, pmf, nee_count).max(1e-6);
         strategy.bounce_weight(bounce_pdf, light_pdf)
     } else {
         strategy.unopposed_weight()
@@ -603,8 +684,13 @@ pub(super) fn escaped_emission(
     // means NEE could not have found this light, so there is no competing
     // strategy and the emission is taken whole.
     let competing = match prev {
-        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf)),
-        Some(PrevVertex::Phase { pos, pdf, .. }) => Some((*pos, *pdf)),
+        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf, p.nee_count)),
+        Some(PrevVertex::Phase {
+            pos,
+            pdf,
+            nee_count,
+            ..
+        }) => Some((*pos, *pdf, *nee_count)),
         // Primary rays, and rays leaving a carried-medium scatter, run no
         // NEE — full weight, exactly as `prev = None` means elsewhere.
         None => None,
@@ -616,7 +702,7 @@ pub(super) fn escaped_emission(
         Some(PrevVertex::Phase { class, .. }) => *class,
         None => EVERY_CLASS,
     };
-    let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
+    let from = competing.map_or(Vec3A::ZERO, |(p, _, _)| p);
     // The pmf at the vertex the escaping ray left: the one its NEE picked with.
     // Only lights at infinity can answer `escaped`; the rest are skipped.
     for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
@@ -631,8 +717,8 @@ pub(super) fn escaped_emission(
             continue;
         };
         let weight = match (competing, pdf) {
-            (Some((_, bounce_pdf)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
-                let light_pdf = lights.density(pdf, pmf).max(1e-6);
+            (Some((_, bounce_pdf, count)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
+                let light_pdf = lights.density(pdf, pmf, count).max(1e-6);
                 strategy.bounce_weight(bounce_pdf, light_pdf)
             }
             // No NEE ran for this vertex, the strategy does not sample lights
@@ -671,8 +757,13 @@ fn escaped_split(
         return;
     }
     let competing = match prev {
-        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf)),
-        Some(PrevVertex::Phase { pos, pdf, .. }) => Some((*pos, *pdf)),
+        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf, p.nee_count)),
+        Some(PrevVertex::Phase {
+            pos,
+            pdf,
+            nee_count,
+            ..
+        }) => Some((*pos, *pdf, *nee_count)),
         None => None,
     };
     let class = match prev {
@@ -680,7 +771,7 @@ fn escaped_split(
         Some(PrevVertex::Phase { class, .. }) => *class,
         None => EVERY_CLASS,
     };
-    let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
+    let from = competing.map_or(Vec3A::ZERO, |(p, _, _)| p);
     for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
         if !lights.illuminates(index, class) {
             continue;
@@ -692,8 +783,8 @@ fn escaped_split(
             continue;
         };
         let weight = match (competing, pdf) {
-            (Some((_, bounce_pdf)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
-                let light_pdf = lights.density(pdf, pmf).max(1e-6);
+            (Some((_, bounce_pdf, count)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
+                let light_pdf = lights.density(pdf, pmf, count).max(1e-6);
                 strategy.bounce_weight(bounce_pdf, light_pdf)
             }
             _ => strategy.unopposed_weight(),
@@ -1541,6 +1632,12 @@ fn collect_crossings(
 /// phase function (value == pdf for the HG mixture) in place of
 /// `brdf·cos`, and the same phase pdf as the competing bounce density that
 /// `bounce_emission_weight`'s `Phase` arm uses.
+///
+/// `count` light samples, averaged, each weighted against the phase bounce
+/// with the count times the light density (`LightList::density`), as the
+/// surface block does. With light path expressions each sample is its own
+/// `L` event at the open route vertex, so `route.vertex` must have been
+/// called first.
 #[allow(clippy::too_many_arguments)]
 fn volume_nee<const PROFILE: bool>(
     p: Vec3A,
@@ -1551,52 +1648,303 @@ fn volume_nee<const PROFILE: bool>(
     volumes: &Volumes,
     lights: &LightList,
     strategy: SamplingStrategy,
+    count: u32,
     vertex: PathSampler,
     time: f32,
+    routing: Option<&RouteCtx>,
+    route: &mut Route,
     stats: &mut RayStats,
 ) -> Vec3A {
     if !strategy.samples_lights() {
         return Vec3A::ZERO;
     }
     let _p = profile::scope_if::<PROFILE>(Section::VolumeLighting);
-    let nee = vertex.new_domain(K_NEE).draw_sample_f32::<4>();
-    // As at a surface: a light that does not illuminate this region gives
-    // nothing, and its pick probability stays what it was.
-    let Some((index, pmf)) = lights.pick_index_at(p, nee[0]) else {
-        return Vec3A::ZERO;
-    };
-    if !lights.illuminates(index, class) {
-        return Vec3A::ZERO;
+    let mut total = Vec3A::ZERO;
+    for i in 0..count {
+        let sampler = nee_sampler(vertex, i);
+        let nee = sampler.new_domain(K_NEE).draw_sample_f32::<4>();
+        // As at a surface: a light that does not illuminate this region gives
+        // nothing, and its pick probability stays what it was.
+        let Some((index, pmf)) = lights.pick_index_at(p, stratified_pick(nee[0], count, i)) else {
+            continue;
+        };
+        if !lights.illuminates(index, class) {
+            continue;
+        }
+        let light = lights.light(index);
+        let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
+            continue;
+        };
+        stats.light_samples += 1;
+        // As at a surface vertex: no shadow ray for a connection already known
+        // to carry nothing (a one-sided light seen from behind). Bit-identical,
+        // since the ray's own draws come from `K_NEE_SHADOW`.
+        let phase_val = phase.pdf(wi.dot(s.direction));
+        if s.radiance * phase_val == Vec3A::ZERO {
+            continue;
+        }
+        let shadow_ray = Ray::new(p, s.direction)
+            .with_time(time)
+            .with_mask(lights.shadow_mask(index));
+        let tr = shadow_transmittance::<PROFILE>(
+            world,
+            volumes,
+            &shadow_ray,
+            s.distance,
+            sampler,
+            stats,
+        );
+        if tr == Vec3A::ZERO {
+            continue;
+        }
+        // `count` times the per-sample density: dividing by it is what
+        // averages the `count` samples (Veach's multi-sample estimator sums
+        // `w · f / (n_i · p_i)`), so no further `1/count` is applied.
+        let light_pdf = lights.density(s.pdf, pmf, count).max(1e-6);
+        // The phase function is its own pdf, in solid angle. A shadow-linked
+        // light has no competing bounce strategy (see `bounce_emission_weight`).
+        let weight = if lights.nee_only(index) {
+            1.0
+        } else {
+            strategy.light_weight(light_pdf, PdfSolidAngle::from_measure(phase_val))
+        };
+        let contribution = s.radiance * phase_val * tr * weight / light_pdf.get();
+        total += contribution;
+        if let Some(ctx) = routing {
+            route.nee(
+                ctx.light(index),
+                std::iter::once((ctx.volume(), contribution)),
+            );
+        }
     }
-    let light = lights.light(index);
-    let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
-        return Vec3A::ZERO;
-    };
-    stats.light_samples += 1;
-    // As at a surface vertex: no shadow ray for a connection already known
-    // to carry nothing (a one-sided light seen from behind). Bit-identical,
-    // since the ray's own draws come from `K_NEE_SHADOW`.
-    let phase_val = phase.pdf(wi.dot(s.direction));
-    if s.radiance * phase_val == Vec3A::ZERO {
-        return Vec3A::ZERO;
+    total
+}
+
+/// One light sample at a surface vertex, drawn from `nee_v` with its pick
+/// coordinate `pick_u`: the sample's share of the vertex's NEE term, and its
+/// `L` event when routed. `nee_count` is the vertex's light sample count
+/// (the MIS density's factor), `class_here` the receiver's light-link class,
+/// `exiting` a subsurface walk's exit (no lobe event of its own).
+///
+/// `inline(always)`: the vertex's first sample is this block as it stood
+/// before several samples existed, straight-line in `trace_path`. Wrapping
+/// the block in a `for` over the count cost cornellbox 0.57% of its
+/// instructions at one sample (callgrind, 2 spp: the range iterator and the
+/// `then` closure inside it stopped folding), so the extra samples loop in
+/// [`extra_surface_light_samples`] over another inlined copy instead. The
+/// inputs are plain parameters, not a struct: a struct built per vertex and
+/// handed to that out-of-line loop was materialised in memory and reloaded
+/// at every vertex, loop taken or not (+0.96%; by reference, +1.4%).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn surface_light_sample<const PROFILE: bool>(
+    world: &World,
+    volumes: &Volumes,
+    lights: &LightList,
+    strategy: SamplingStrategy,
+    ray: &Ray,
+    rec: &HitRecord,
+    sp: &ShadingPoint<'_>,
+    class_here: u16,
+    guiding_here: Option<&GuidingContext<'_>>,
+    nee_count: u32,
+    exiting: bool,
+    routing: Option<&RouteCtx>,
+    nee_v: PathSampler,
+    pick_u: f32,
+    nee_s: [f32; 4],
+    route: &mut Route,
+    split: &mut LobeSplit,
+    stats: &mut RayStats,
+) -> Vec3A {
+    let mut nee = Vec3A::ZERO;
+    // `sample_li` returns `None` when the light cannot be reached from
+    // this point at all — below a dome's horizon, or a degenerate
+    // coincident point.
+    // A picked light that does not illuminate this receiver contributes
+    // nothing, and its pick probability stays what it was, so the bounce
+    // side, which zeroes the same light, still describes one strategy.
+    // Plain `if let` chains, no closures: this function is inlined twice
+    // (the vertex's first sample, and the cold loop for the rest), and a
+    // closure with two call sites is one LLVM no longer inlines — the pick
+    // and the visibility test below each became an out-of-line call per
+    // sample, 0.65% of cornellbox's instructions apiece (callgrind, 2 spp).
+    if strategy.samples_lights()
+        && let Some((light_index, pmf)) = lights.pick_index_at(rec.p, pick_u)
+        && lights.illuminates(light_index, class_here)
+        && let Some(ls) = lights
+            .light(light_index)
+            .sample_li(rec.p, nee_s[1], nee_s[2])
+    {
+        stats.light_samples += 1;
+        let light_dir_unit = ls.direction;
+
+        // A connection carries light only if the light's radiance, the
+        // BSDF and the visibility toward it are all non-zero, and the
+        // three tests run cheapest first. Radiance is free (a shaped
+        // light outside its cone carries zero). The BSDF — delta and
+        // transmissive materials return None from `eval`, since they
+        // cannot see a light-sampled direction and pick up emission via
+        // BSDF sampling instead, and a light below the horizon gets a
+        // zero value — is cheaper than the shadow ray: the shading point
+        // already ran any pattern network, so `eval` reads no texture.
+        // (Before that split a textured `eval` went after the ray, so an
+        // occluded light never paid for the network.) Either order is
+        // bit-identical: a skipped test's contribution would be exactly
+        // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
+        // which nothing else reads.
+        let connection = if ls.radiance != Vec3A::ZERO
+            && let Some((f, pdf)) = sp.eval(ray, light_dir_unit)
+            && ls.radiance * f != Vec3A::ZERO
+        {
+            let shadow_ray = Ray::new(rec.p, light_dir_unit)
+                .with_time(ray.time())
+                .with_mask(lights.shadow_mask(light_index))
+                .with_curve_exits_ignored(sp.passes_out_of_curves());
+            let tr = shadow_transmittance::<PROFILE>(
+                world,
+                volumes,
+                &shadow_ray,
+                ls.distance,
+                nee_v,
+                stats,
+            );
+            if tr != Vec3A::ZERO {
+                Some((f, pdf, tr))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
+            // Toward a light on the tube's far side, a fibre sharing the
+            // closure with a transmitting leaf needs a second answer: the
+            // ray above passed out of the strand (the fibre's light); the
+            // other leaf's meets the far wall. A ray that passes sees a
+            // subset of the hits one that does not sees, so the connection
+            // already stands or falls with it. Rare, so out of line — the
+            // common path stays the expression it always was.
+            let mixed = if sp.mixes_hair() && rec.normal.dot(light_dir_unit) < 0.0 {
+                Some(mixed_hair_shadow::<PROFILE>(
+                    sp,
+                    world,
+                    volumes,
+                    Ray::new(rec.p, light_dir_unit)
+                        .with_time(ray.time())
+                        .with_mask(lights.shadow_mask(light_index)),
+                    ls.distance,
+                    shadow_tr,
+                    nee_v,
+                    stats,
+                ))
+            } else {
+                None
+            };
+            let light_pdf = lights.density(ls.pdf, pmf, nee_count).max(1e-6);
+            // The competing strategy for this MIS weight is the
+            // bounce sampler, whose density toward the light is the
+            // guide/BSDF mixture whenever guiding is available at
+            // this vertex — using the plain BSDF pdf here while the
+            // bounce side weights with the mixture makes the two
+            // weights sum past one and double-counts emission.
+            let bounce_pdf = PdfSolidAngle::from_measure(match guiding_here {
+                Some(g) if g.field.trained_at(rec.p) => {
+                    let alpha = g.field.config().guide_prob;
+                    alpha * g.field.pdf(rec.p, light_dir_unit) + (1.0 - alpha) * brdf_pdf
+                }
+                _ => brdf_pdf,
+            });
+            // A shadow-linked light is NEE's alone here: the bounce side
+            // collects none of it at a continuous vertex.
+            let weight = if lights.nee_only(light_index) {
+                1.0
+            } else {
+                strategy.light_weight(light_pdf, bounce_pdf)
+            };
+            // `brdf_value` already carries the geometric cosine —
+            // `Material::eval` returns `brdf · |cos|` (unsigned, so a
+            // continuous transmission lobe can see a light behind the
+            // ray-facing normal). Applying it again here is what used
+            // to make this an integral of `brdf · cos²`.
+            nee = match &mixed {
+                None => ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get(),
+                Some(m) => ls.radiance * m.shaded * weight / light_pdf.get(),
+            };
+            if let Some(ctx) = routing {
+                // Each lobe's share, in the beauty's own expression. A
+                // walk's exit is part of the walk's event: no event here.
+                sp.eval_lobes(ray, light_dir_unit, split);
+                let light_pdf = light_pdf.get();
+                route.nee(
+                    ctx.light(light_index),
+                    split.iter().enumerate().map(|(i, (e, f))| {
+                        let tr = mixed.as_ref().map_or(shadow_tr, |m| m.tr(i));
+                        (
+                            if exiting { NO_EVENT } else { ctx.lobe(e) },
+                            ls.radiance * f * tr * weight / light_pdf,
+                        )
+                    }),
+                );
+            }
+        }
     }
-    let shadow_ray = Ray::new(p, s.direction)
-        .with_time(time)
-        .with_mask(lights.shadow_mask(index));
-    let tr =
-        shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, s.distance, vertex, stats);
-    if tr == Vec3A::ZERO {
-        return Vec3A::ZERO;
+    nee
+}
+
+/// Light samples 1 … `count − 1` of a surface vertex, each from its own
+/// sub-domain with its stratified pick (`nee_sampler`, `stratified_pick`):
+/// their summed share of the vertex's NEE term. Out of line and cold, so the
+/// one-sample vertex never sees the loop; its parameters are
+/// [`surface_light_sample`]'s.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn extra_surface_light_samples<const PROFILE: bool>(
+    world: &World,
+    volumes: &Volumes,
+    lights: &LightList,
+    strategy: SamplingStrategy,
+    ray: &Ray,
+    rec: &HitRecord,
+    sp: &ShadingPoint<'_>,
+    class_here: u16,
+    guiding_here: Option<&GuidingContext<'_>>,
+    nee_count: u32,
+    exiting: bool,
+    routing: Option<&RouteCtx>,
+    v: PathSampler,
+    route: &mut Route,
+    split: &mut LobeSplit,
+    stats: &mut RayStats,
+) -> Vec3A {
+    let mut total = Vec3A::ZERO;
+    for index in 1..nee_count {
+        let nee_v = nee_sampler(v, index);
+        let nee_s = nee_v.new_domain(K_NEE).draw_sample_f32::<4>();
+        let pick_u = stratified_pick(nee_s[0], nee_count, index);
+        total += surface_light_sample::<PROFILE>(
+            world,
+            volumes,
+            lights,
+            strategy,
+            ray,
+            rec,
+            sp,
+            class_here,
+            guiding_here,
+            nee_count,
+            exiting,
+            routing,
+            nee_v,
+            pick_u,
+            nee_s,
+            route,
+            split,
+            stats,
+        );
     }
-    let light_pdf = lights.density(s.pdf, pmf).max(1e-6);
-    // The phase function is its own pdf, in solid angle. A shadow-linked
-    // light has no competing bounce strategy (see `bounce_emission_weight`).
-    let weight = if lights.nee_only(index) {
-        1.0
-    } else {
-        strategy.light_weight(light_pdf, PdfSolidAngle::from_measure(phase_val))
-    };
-    s.radiance * phase_val * tr * weight / light_pdf.get()
+    total
 }
 
 /// The integrator: an iterative path tracer in two passes. The forward walk
@@ -1636,6 +1984,8 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         strategy,
         indirect_clamp,
         guiding,
+        light_samples,
+        light_samples_indirect,
     } = *cx;
     let training = guiding.is_some_and(|g| g.training);
     // The bounce subtree; each vertex derives its own domain off this by depth.
@@ -1883,6 +2233,16 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
                 let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
+                // The routed vertex opens before its NEE events: `V`, then
+                // each light sample's `L`.
+                if routing.is_some() {
+                    route.vertex(arrival_ts);
+                }
+                let nee_count = if records.is_empty() {
+                    light_samples
+                } else {
+                    light_samples_indirect
+                };
                 let nee = volume_nee::<PROFILE>(
                     p,
                     wi,
@@ -1892,8 +2252,11 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     volumes,
                     lights,
                     strategy,
+                    nee_count,
                     v,
                     ray.time(),
+                    routing,
+                    route,
                     stats,
                 );
 
@@ -1922,14 +2285,8 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     vrec.factor = Vec3A::ZERO;
                 }
                 if let Some(ctx) = routing {
-                    // `V`, then the light NEE picked — the same draw
-                    // `volume_nee` made, so the same light.
-                    route.vertex(arrival_ts);
-                    let pick = v.new_domain(K_NEE).draw_sample_f32::<4>();
-                    let light = lights
-                        .pick_index_at(p, pick[0])
-                        .map_or(NO_EVENT, |(i, _)| ctx.light(i));
-                    route.nee(light, std::iter::once((ctx.volume(), vrec.nee)));
+                    // The vertex and its NEE events were recorded by
+                    // `volume_nee`; the bounce leaves through the phase.
                     route.bounce(std::iter::once((ctx.volume(), vrec.factor)));
                 }
                 if albedo_on {
@@ -1944,6 +2301,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     pos: p,
                     pdf: PdfSolidAngle::from_measure(phase_pdf),
                     class,
+                    nee_count,
                 });
                 stats.vertices += 1;
                 records.push(vrec);
@@ -2192,132 +2550,63 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // density is `light.pdf · pmf`. `bounce_emission_weight` evaluates
         // the same expression for a bounce-hit light — both MIS weights must
         // describe the same strategy or emission is double-counted.
-        let mut nee = Vec3A::ZERO;
+        //
+        // `nee_count` light samples here — N at the first vertex of the path,
+        // M after it — each from its own sub-domain, with their picks
+        // stratified (`stratified_pick`), and each weighted against the
+        // bounce with, and divided by, the count times the light density
+        // (multi-sample MIS, `LightList::density`: Veach's estimator sums
+        // `w · f / (n_i · p_i)`, so the division is also the average). With
+        // one sample the loop is the block it always was, bit for bit.
         let lighting = profile::scope_if::<PROFILE>(Section::SurfaceLighting);
+        let nee_count = if records.is_empty() {
+            light_samples
+        } else {
+            light_samples_indirect
+        };
+        // The first sample draws from the vertex itself, as the one sample
+        // always did; the others, when there are any, from their own
+        // sub-domains in `extra_surface_light_samples`.
         let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
-        // `sample_li` returns `None` when the light cannot be reached from
-        // this point at all — below a dome's horizon, or a degenerate
-        // coincident point.
-        // A picked light that does not illuminate this receiver contributes
-        // nothing, and its pick probability stays what it was, so the bounce
-        // side, which zeroes the same light, still describes one strategy.
-        if let Some((light_index, pmf)) = strategy
-            .samples_lights()
-            .then(|| lights.pick_index_at(rec.p, nee_s[0]))
-            .flatten()
-            && lights.illuminates(light_index, class_here)
-            && let Some(ls) = lights
-                .light(light_index)
-                .sample_li(rec.p, nee_s[1], nee_s[2])
-        {
-            stats.light_samples += 1;
-            let light_dir_unit = ls.direction;
-
-            // A connection carries light only if the light's radiance, the
-            // BSDF and the visibility toward it are all non-zero, and the
-            // three tests run cheapest first. Radiance is free (a shaped
-            // light outside its cone carries zero). The BSDF — delta and
-            // transmissive materials return None from `eval`, since they
-            // cannot see a light-sampled direction and pick up emission via
-            // BSDF sampling instead, and a light below the horizon gets a
-            // zero value — is cheaper than the shadow ray: the shading point
-            // already ran any pattern network, so `eval` reads no texture.
-            // (Before that split a textured `eval` went after the ray, so an
-            // occluded light never paid for the network.) Either order is
-            // bit-identical: a skipped test's contribution would be exactly
-            // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
-            // which nothing else reads.
-            let mut visibility = || {
-                let shadow_ray = Ray::new(rec.p, light_dir_unit)
-                    .with_time(ray.time())
-                    .with_mask(lights.shadow_mask(light_index))
-                    .with_curve_exits_ignored(sp.passes_out_of_curves());
-                let tr = shadow_transmittance::<PROFILE>(
-                    world,
-                    volumes,
-                    &shadow_ray,
-                    ls.distance,
-                    v,
-                    stats,
-                );
-                (tr != Vec3A::ZERO).then_some(tr)
-            };
-            let connection = if ls.radiance == Vec3A::ZERO {
-                None
-            } else {
-                sp.eval(&ray, light_dir_unit)
-                    .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
-                    .and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
-            };
-            if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
-                // Toward a light on the tube's far side, a fibre sharing the
-                // closure with a transmitting leaf needs a second answer: the
-                // ray above passed out of the strand (the fibre's light); the
-                // other leaf's meets the far wall. A ray that passes sees a
-                // subset of the hits one that does not sees, so the connection
-                // already stands or falls with it. Rare, so out of line — the
-                // common path stays the expression it always was.
-                let mixed = (sp.mixes_hair() && rec.normal.dot(light_dir_unit) < 0.0).then(|| {
-                    mixed_hair_shadow::<PROFILE>(
-                        &sp,
-                        world,
-                        volumes,
-                        Ray::new(rec.p, light_dir_unit)
-                            .with_time(ray.time())
-                            .with_mask(lights.shadow_mask(light_index)),
-                        ls.distance,
-                        shadow_tr,
-                        v,
-                        stats,
-                    )
-                });
-                let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
-                // The competing strategy for this MIS weight is the
-                // bounce sampler, whose density toward the light is the
-                // guide/BSDF mixture whenever guiding is available at
-                // this vertex — using the plain BSDF pdf here while the
-                // bounce side weights with the mixture makes the two
-                // weights sum past one and double-counts emission.
-                let bounce_pdf = PdfSolidAngle::from_measure(match guiding_here {
-                    Some(g) if g.field.trained_at(rec.p) => {
-                        let alpha = g.field.config().guide_prob;
-                        alpha * g.field.pdf(rec.p, light_dir_unit) + (1.0 - alpha) * brdf_pdf
-                    }
-                    _ => brdf_pdf,
-                });
-                // A shadow-linked light is NEE's alone here: the bounce side
-                // collects none of it at a continuous vertex.
-                let weight = if lights.nee_only(light_index) {
-                    1.0
-                } else {
-                    strategy.light_weight(light_pdf, bounce_pdf)
-                };
-                // `brdf_value` already carries the geometric cosine —
-                // `Material::eval` returns `brdf · |cos|` (unsigned, so a
-                // continuous transmission lobe can see a light behind the
-                // ray-facing normal). Applying it again here is what used
-                // to make this an integral of `brdf · cos²`.
-                nee += match &mixed {
-                    None => ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get(),
-                    Some(m) => ls.radiance * m.shaded * weight / light_pdf.get(),
-                };
-                if let Some(ctx) = routing {
-                    // Each lobe's share, in the beauty's own expression. A
-                    // walk's exit is part of the walk's event: no event here.
-                    sp.eval_lobes(&ray, light_dir_unit, split);
-                    let light_pdf = light_pdf.get();
-                    route.nee(
-                        ctx.light(light_index),
-                        split.iter().enumerate().map(|(i, (e, f))| {
-                            let tr = mixed.as_ref().map_or(shadow_tr, |m| m.tr(i));
-                            (
-                                if exiting { NO_EVENT } else { ctx.lobe(e) },
-                                ls.radiance * f * tr * weight / light_pdf,
-                            )
-                        }),
-                    );
-                }
-            }
+        let mut nee = surface_light_sample::<PROFILE>(
+            world,
+            volumes,
+            lights,
+            strategy,
+            &ray,
+            &rec,
+            &sp,
+            class_here,
+            guiding_here,
+            nee_count,
+            exiting,
+            routing,
+            v,
+            stratified_pick(nee_s[0], nee_count, 0),
+            nee_s,
+            route,
+            split,
+            stats,
+        );
+        if nee_count > 1 {
+            nee += extra_surface_light_samples::<PROFILE>(
+                world,
+                volumes,
+                lights,
+                strategy,
+                &ray,
+                &rec,
+                &sp,
+                class_here,
+                guiding_here,
+                nee_count,
+                exiting,
+                routing,
+                v,
+                route,
+                split,
+                stats,
+            );
         }
         drop(lighting);
 
@@ -2458,6 +2747,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     pdf: PdfSolidAngle::from_measure(sample.pdf),
                     delta: sample.delta,
                     class: class_here,
+                    nee_count,
                     #[cfg(debug_assertions)]
                     check: (ray.clone(), rec, mat, dir),
                     #[cfg(not(debug_assertions))]

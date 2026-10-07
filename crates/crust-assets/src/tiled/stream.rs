@@ -391,7 +391,10 @@ mod tests {
     fn streaming_and_preloading_agree_bit_for_bit() {
         let (png, tx) = pair("agree", 256, 192, crust_core::ResolvedColorSpace::SRGB);
         let pre = UvTexture::open_with(&png, crust_core::ColorSpace::SRGB, true).expect("preload");
-        let cache = Arc::new(TileCache::new(64 * 1024 * 1024));
+        let cache = Arc::new(TileCache::new(
+            64 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
         let stream =
             StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache).expect("stream");
 
@@ -421,7 +424,10 @@ mod tests {
     fn agreement_holds_across_clipped_edge_tiles() {
         let (png, tx) = pair("clipped", 150, 100, crust_core::ResolvedColorSpace::RAW);
         let pre = UvTexture::open_with(&png, crust_core::ColorSpace::RAW, true).expect("preload");
-        let cache = Arc::new(TileCache::new(16 * 1024 * 1024));
+        let cache = Arc::new(TileCache::new(
+            16 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
         let stream =
             StreamingTexture::open(&tx, crust_core::ColorSpace::RAW, cache).expect("stream");
 
@@ -450,7 +456,7 @@ mod tests {
         // the cache's 1 MiB floor, so the sweep really runs.
         let (png, tx) = pair("thrash", 1024, 1024, crust_core::ResolvedColorSpace::SRGB);
         let pre = UvTexture::open_with(&png, crust_core::ColorSpace::SRGB, true).expect("preload");
-        let cache = Arc::new(TileCache::new(1));
+        let cache = Arc::new(TileCache::new(1, crust_core::DEFAULT_TEX_MAX_OPEN_FILES));
         let stream = StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache.clone())
             .expect("stream");
 
@@ -528,7 +534,10 @@ mod tests {
             .expect("write tx");
 
         let pre = UvTexture::open_with(&hdr, crust_core::ColorSpace::RAW, true).expect("preload");
-        let cache = Arc::new(TileCache::new(8 * 1024 * 1024));
+        let cache = Arc::new(TileCache::new(
+            8 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
         let stream =
             StreamingTexture::open(&tx, crust_core::ColorSpace::RAW, cache).expect("stream");
         assert!(stream.is_linear(), "an EXR backing pages in half tiles");
@@ -596,7 +605,10 @@ mod tests {
         crate::tiled::write_tx_exr(&tx, &src, w, h, crust_core::ResolvedColorSpace::SRGB)
             .expect("write");
 
-        let cache = Arc::new(TileCache::new(4 * 1024 * 1024));
+        let cache = Arc::new(TileCache::new(
+            4 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
         assert_eq!(
             TiledFile::open(&tx).expect("open").mip_space(),
             Some("srgb_texture")
@@ -628,7 +640,10 @@ mod tests {
         let acescg = crust_core::color::working_space("acescg").expect("acescg");
         let auto = crust_core::ColorSpace::AUTO.into_working(acescg);
         let pre = UvTexture::open_with(&exr, auto, false).expect("preload");
-        let cache = Arc::new(TileCache::new(4 * 1024 * 1024));
+        let cache = Arc::new(TileCache::new(
+            4 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
         let stream = StreamingTexture::open(&exr, auto, cache).expect("stream");
         let gamut =
             crust_core::ResolvedColorSpace::new(crust_core::color::Space::SRGB_TEXTURE, acescg)
@@ -678,7 +693,10 @@ mod tests {
     #[test]
     fn a_mismatched_mip_space_declines_instead_of_reading_the_wrong_levels() {
         let (png, tx) = pair("space", 128, 128, crust_core::ResolvedColorSpace::SRGB);
-        let cache = Arc::new(TileCache::new(4 * 1024 * 1024));
+        let cache = Arc::new(TileCache::new(
+            4 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
 
         // Same space: opens.
         assert!(StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache.clone()).is_some());
@@ -723,7 +741,10 @@ mod tests {
     /// the caller can fall back to the preload path.
     #[test]
     fn a_missing_or_stripped_file_declines() {
-        let cache = Arc::new(TileCache::new(1024 * 1024));
+        let cache = Arc::new(TileCache::new(
+            1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
         assert!(
             StreamingTexture::open(
                 std::path::Path::new("/definitely/not/here.tx"),

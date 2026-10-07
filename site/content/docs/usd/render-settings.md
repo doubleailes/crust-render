@@ -38,6 +38,8 @@ def Scope "Render"
         # light transport
         token crust:samplingStrategy = "power"
         token crust:lightSelection = "learned"
+        int crust:lightSamples = 4
+        int crust:lightSamplesIndirect = 1
         float crust:indirectClamp = 0
 
         # reconstruction
@@ -176,6 +178,27 @@ How light sampling picks which light to sample.
 | `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
 
 An unknown name logs a warning and uses `power`.
+
+### crust:lightSamples
+
+`int`, default **1**. CLI: [`--light-samples`](@/docs/reference/command-line.md#light-samples).
+
+How many light samples (shadow rays) light sampling takes at the first vertex of each
+camera path. The samples spread over the lights in proportion to their selection
+probabilities and are combined with BSDF sampling by multi-sample multiple importance
+sampling, so the image is the same in expectation at every count; direct-light noise
+falls about as 1/N. A value below 1 is refused with a warning, and 1 is used; a value
+above 1024 is clamped to 1024 with a warning. At 1 the image is bit-identical to a
+render before this setting existed.
+
+### crust:lightSamplesIndirect
+
+`int`, default **1**. CLI: [`--light-samples-indirect`](@/docs/reference/command-line.md#light-samples-indirect).
+
+The same count at every later vertex of a path, surface and volume alike. It is paid at
+every bounce, so it costs more per unit of noise removed than `crust:lightSamples`. A
+value below 1 is refused with a warning, and 1 is used; a value above 1024 is clamped to
+1024 with a warning.
 
 ## Pixel filter
 

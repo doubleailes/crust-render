@@ -1230,11 +1230,21 @@ Production renderers split there:
 
 k light samples at depth 0, each weighted `1/k` inside the same MIS, cost k − 1
 extra shadow rays and **no** extra camera paths. That is roughly k× less
-first-bounce direct variance, modulo visibility. With OpenQMC they should be k
-indices of one padded `K_NEE` domain so that they stratify against each other.
-The MIS bookkeeping for k light samples against one BSDF sample is Veach's
-multi-sample model: the light strategy's effective density is `k · P · p_ℓ` in
-both weights.
+first-bounce direct variance, modulo visibility. The MIS bookkeeping for k light
+samples against one BSDF sample is Veach's multi-sample model: the light
+strategy's effective density is `k · P · p_ℓ` in both weights.
+
+**Implemented** as `crust:lightSamples` / `--light-samples` (the camera vertex)
+and `crust:lightSamplesIndirect` / `--light-samples-indirect` (every later
+vertex), both default 1. Each sample draws from its own sub-domain
+(`K_NEE_SAMPLES`), the pick coordinate alone is stratified to `(i + u) / k`
+(stratifying the point-on-light coordinates by the same slice would bias which
+part of a light each sample sees), and `LightList::density` takes the count so
+both MIS halves use `k · P · p_ℓ`; NEE divides by that density, which is also
+the `1/k`. Measured at equal time (lighting design record, "Several light samples
+per vertex"): 4 camera-vertex samples are 1.59× more efficient on `veach_mis` and
+1.46× on ALab, and a 10–30% loss on dome-lit, glossy and volume scenes, so the
+defaults stay at 1 and the adaptive split is what would move them.
 
 The learned version is Rath, Grittmann, Herholz, Weier & Slusallek, *EARS:
 Efficiency-Aware Russian Roulette and Splitting*, SIGGRAPH 2022.
@@ -1380,7 +1390,8 @@ tracking.
   spread evenly, because the pure form measured worse (§3.8).
 
 **(k) Camera-vertex splitting.** `crust:lightSamples` (int, default 1) as a render
-setting, applied at depth 0 only, MIS'd as in §7.4.
+setting, applied at depth 0 only, MIS'd as in §7.4. **Done**, with
+`crust:lightSamplesIndirect` for the later vertices (§7.4).
 
 **(l) Per-vertex RIS** over (j)'s source pdf, with the proxy-density MIS of §6.6.
 `crust:lightCandidates` (default 1 = off).

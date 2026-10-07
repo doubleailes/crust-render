@@ -64,7 +64,7 @@ pub use aov::{
 };
 pub use buffer::Buffer;
 pub use camera::Camera;
-pub use config::{Config, PtexMipSpace, TriPackets, config};
+pub use config::{Config, DEFAULT_TEX_MAX_OPEN_FILES, PtexMipSpace, TriPackets, config};
 
 /// What every kernel scene commits with — the `CRUST_TRI_PACKETS` switch,
 /// read once.
@@ -106,8 +106,9 @@ pub use stats::{
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};
 pub use tracer::{
-    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderSettings,
-    Renderer, SamplingStrategy, ray_color,
+    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, DEFAULT_LIGHT_SAMPLES,
+    MAX_LIGHT_SAMPLES, ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color,
+    ray_color_with_light_samples,
 };
 pub use utils::Luma;
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};

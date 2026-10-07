@@ -153,8 +153,9 @@
     - everything else within 1%;
     - time within noise.
 
-  The light strategy's MIS density is `light.pdf · pmf`, computed by
-  `LightList::density` on **both** sides. `pick`, `find_index_by_geom_at` and `iter` all hand
+  The light strategy's MIS density is `light.pdf · pmf`, times the vertex's light
+  sample count, computed by `LightList::density(pdf, pmf, samples)` on **both** sides
+  (see "Several light samples per vertex" below). `pick`, `find_index_by_geom_at` and `iter` all hand
   back the same `pmf` for the same light. Under uniform, `density` is the historical
   division `pdf / n`, not `pdf · (1/n)`, which rounds differently when n is not a power
   of two; that is what keeps the A/B exact. A light with `pmf = 0` keeps its bounce
@@ -175,6 +176,171 @@
 
   Emissive geometry with no light-list entry is handled: the bounce keeps its emission
   at full weight.
+
+## Several light samples per vertex
+
+`crust:lightSamples` / `--light-samples` (N, the first vertex of each path, whatever
+kind of vertex it is) and `crust:lightSamplesIndirect` / `--light-samples-indirect`
+(M, every later surface or volume vertex, a subsurface walk's exit included), both
+default 1 and from 1 to 1024 (`RenderSettings::with_light_samples`, which clamps;
+`DEFAULT_LIGHT_SAMPLES`, `MAX_LIGHT_SAMPLES`; a stage value outside the range is
+clamped with a `WARN`, the CLI refuses it as a usage error — a count multiplies every
+vertex's shadow rays, so a mistyped huge one would be a render that never ends). The motivation is in
+`docs/light_sampling.md` §7.4: direct lighting at the camera vertex is the largest and
+most visible term at 16 spp, a shadow ray costs about 0.27 µs against about 1.5 µs per
+shading point, and N light samples there cost N − 1 shadow rays and no extra camera
+paths, for direct-light variance falling about as 1/N.
+
+- **The estimator** (`tracer/path.rs`): the surface block is `surface_light_sample`,
+  one light sample at a vertex, `inline(always)`; the vertex calls it straight-line for
+  its first sample, exactly the block as it stood before counts existed, and
+  `extra_surface_light_samples` (cold, out of line) loops it for samples 1 … N−1.
+  Getting there cost five builds (callgrind on cornellbox, 2 spp, one sample): a
+  `for i in 0..count` around the block, +0.57%; its multi-sample arms as cold calls,
+  +0.90%; the block as an inlined function taking a per-vertex context struct by
+  reference, +1.4% (the struct's address escapes into the cold call, so it and `ray`,
+  `rec`, `sp` live in memory — the trap `PathContext` documents), by value +0.96%,
+  as plain parameters +1.0% — and pinning the count to 1 still left +0.76%, which
+  is what finally pointed away from the count: two closures in the block (the pick
+  under `then`, and the shadow-ray `visibility`) had become out-of-line functions,
+  0.65% apiece, because the cold copy gave each a second call site and LLVM stopped
+  inlining them. The block is now closure-free `if let` chains. Lesson: a block that
+  is inlined twice must contain no closure worth inlining. `volume_nee` is already
+  out of line and simply loops.
+  Sample `i` draws its pick, point and shadow-ray randomness from
+  `nee_sampler(v, i)` — the vertex's own domain for the first sample, so the
+  one-sample render is bit-identical, and `v.new_domain(K_NEE_SAMPLES).new_domain(i)`
+  for the rest. The pick coordinate is
+  `stratified_pick(u, count, i) = (i + u) / count`: the pick is a monotone CDF inversion,
+  so a light with selection probability `p` is picked `count · p` times, give or take
+  one (pinned by `stratified_picks_sample_each_light_count_times_its_probability`:
+  pmfs 0.5/0.25/0.25 and N = 4 give 2/1/1 at every vertex), where independent picks
+  would give a binomial count that leaves a bright light unsampled far too often. The
+  last slice is clamped below 1: `(count − 1 + u) / count` rounds to exactly 1.0 for a
+  `u` within an ulp of 1, and a pick of 1.0 lands past the whole CDF on the last light
+  even when that light has probability zero and a `1e-6` density floor.
+  **Only the pick is stratified.** The proposal's first draft stratified the
+  point-on-light coordinates by the same slice; with those pmfs the third light is only
+  ever picked by slice 3 and its point would only ever come from the top quarter of its
+  `(u, v)` square — a bias. The point coordinates are each sample's own draw.
+- **Multi-sample MIS** (Veach 1997 §9.2): with `count` light samples against one bounce
+  sample, each strategy's weight uses its sample count times its density, so the light
+  side's effective density is `count · pdf · pmf`. That count is a parameter of
+  `LightList::density(pdf, pmf, samples)`, so every caller — both MIS halves — states
+  it: NEE weights each sample with it against the bounce pdf (the guide/BSDF mixture
+  where guiding competes) **and divides the sample by it**, since Veach's estimator is
+  `Σ_i w_i · f / (n_i · p_i)` and the division is also the average over the `count`
+  samples. The first implementation divided by `count · p` and then by `count` again;
+  the strategy-agreement test caught it as a floor at 38% of its reference, so do not
+  add a `1/count` anywhere. The bounce side (`bounce_emission_weight`,
+  `escaped_emission` / `escaped_split`, the hidden-light crossings through
+  `bounce_emission_weight_at`) weights with the count `PrevVertex` carries from the
+  vertex the ray left (`PrevBounce::nee_count`, `PrevVertex::Phase::nee_count`), so N
+  at the first vertex and M after it both pair correctly.
+- **Light path expressions**: one `L` event per contributing light sample. The route
+  records each NEE entry's light (`Route::nee_lights`) rather than one light per vertex,
+  `Route::nee` may be called once per sample, `volume_nee` records its own events (so
+  the route's vertex opens before it, and the phase vertex no longer re-draws `K_NEE` to
+  learn which light NEE picked), and the gather's per-entry masks moved from a
+  `MAX_SPLIT` stack array to a reusable `Vec`. `C.*[LO]` stays pinned bitwise to the
+  beauty at (4, 2), (4, 4) and (2, 3) (`the_full_path_expression_is_the_beauty_bitwise`),
+  and a partition still sums to it.
+- **Pinned**: strategy agreement (light-only, BSDF-only, power and balance MIS, and the
+  one-sample renderer) on a diffuse floor under a sphere light, a rect light and a dome
+  at (4, 4), (4, 1), (1, 4) and (3, 2), and in `samples/fog.usda` at (1, 4) and (4, 4)
+  (`crust-core/tests/light_samples.rs`); the one-sample draws
+  (`one_light_sample_draws_as_before`); the import and the CLI parse, a refused 0
+  included.
+- **Learned light selection** keeps its own training pass and sample count; the
+  per-cell pick is a monotone CDF inversion too, so the stratification applies to it
+  as it does to the power table.
+
+- **Measured, equal-time** (2026-10-06, 72 threads; the harness: a 1024 spp reference per
+  scene with adaptive sampling off and `--indirect-clamp 0`, then for each (N, M) one
+  16 spp unclamped render per seed — four seeds through `-f 0..3`, which seeds the
+  sampler, for the static scenes; one for ALab, whose frame is its animation — with
+  the six configurations interleaved within each seed so load lands on all alike;
+  time is the minimum `Render` phase over the seeds, relMSE the mean of
+  `exr_diff`'s 0.1%-trimmed value against the reference, and efficiency
+  `1 / (time · relMSE)` relative to (1, 1). The untrimmed relMSE is unusable here: with
+  the clamp off it is firefly-dominated and varies 10 000× between seeds on the
+  Playground. `Kitchen_set` has no light and measures nothing. ALab is one seed, so
+  its relMSE carries that seed's fireflies, which is why (1, 2) reads above (1, 1).)
+
+  | scene | (N, M) | Render s | shadow rays / vertex | relMSE | time × | relMSE × | efficiency × |
+  |---|---|---|---|---|---|---|---|
+  | cornellbox | (1, 1) | 0.16 | 0.50 | 0.01003 | 1.00 | 1.00 | **1.00** |
+  | cornellbox | (2, 1) | 0.18 | 0.69 | 0.00983 | 1.13 | 0.98 | **0.90** |
+  | cornellbox | (4, 1) | 0.22 | 1.05 | 0.01003 | 1.38 | 1.00 | **0.73** |
+  | cornellbox | (1, 2) | 0.20 | 0.82 | 0.00813 | 1.23 | 0.81 | **1.00** |
+  | cornellbox | (2, 2) | 0.22 | 1.00 | 0.00793 | 1.35 | 0.79 | **0.94** |
+  | cornellbox | (4, 2) | 0.26 | 1.37 | 0.00814 | 1.59 | 0.81 | **0.78** |
+  | openpbr_showcase | (1, 1) | 0.10 | 0.74 | 0.00267 | 1.00 | 1.00 | **1.00** |
+  | openpbr_showcase | (2, 1) | 0.12 | 1.43 | 0.00257 | 1.23 | 0.97 | **0.84** |
+  | openpbr_showcase | (4, 1) | 0.15 | 2.80 | 0.00252 | 1.51 | 0.95 | **0.70** |
+  | openpbr_showcase | (1, 2) | 0.11 | 0.79 | 0.00253 | 1.07 | 0.95 | **0.99** |
+  | openpbr_showcase | (2, 2) | 0.13 | 1.48 | 0.00244 | 1.30 | 0.91 | **0.84** |
+  | openpbr_showcase | (4, 2) | 0.17 | 2.85 | 0.00238 | 1.65 | 0.89 | **0.68** |
+  | veach_mis | (1, 1) | 0.28 | 0.90 | 0.00681 | 1.00 | 1.00 | **1.00** |
+  | veach_mis | (2, 1) | 0.35 | 1.52 | 0.00385 | 1.22 | 0.56 | **1.45** |
+  | veach_mis | (4, 1) | 0.47 | 2.78 | 0.00262 | 1.64 | 0.38 | **1.59** |
+  | veach_mis | (1, 2) | 0.31 | 1.17 | 0.00681 | 1.10 | 1.00 | **0.91** |
+  | veach_mis | (2, 2) | 0.38 | 1.80 | 0.00384 | 1.33 | 0.56 | **1.34** |
+  | veach_mis | (4, 2) | 0.51 | 3.05 | 0.00261 | 1.78 | 0.38 | **1.47** |
+  | instancing | (1, 1) | 0.07 | 0.71 | 0.00526 | 1.00 | 1.00 | **1.00** |
+  | instancing | (2, 1) | 0.09 | 1.27 | 0.00486 | 1.28 | 0.92 | **0.84** |
+  | instancing | (4, 1) | 0.12 | 2.40 | 0.00459 | 1.65 | 0.87 | **0.70** |
+  | instancing | (1, 2) | 0.08 | 0.85 | 0.00488 | 1.14 | 0.93 | **0.94** |
+  | instancing | (2, 2) | 0.09 | 1.42 | 0.00449 | 1.31 | 0.85 | **0.89** |
+  | instancing | (4, 2) | 0.12 | 2.54 | 0.00422 | 1.72 | 0.80 | **0.73** |
+  | nested_instancing | (1, 1) | 0.08 | 0.71 | 0.00248 | 1.00 | 1.00 | **1.00** |
+  | nested_instancing | (2, 1) | 0.10 | 1.37 | 0.00182 | 1.20 | 0.73 | **1.14** |
+  | nested_instancing | (4, 1) | 0.13 | 2.67 | 0.00143 | 1.61 | 0.58 | **1.08** |
+  | nested_instancing | (1, 2) | 0.08 | 0.77 | 0.00238 | 1.04 | 0.96 | **1.01** |
+  | nested_instancing | (2, 2) | 0.10 | 1.43 | 0.00171 | 1.22 | 0.69 | **1.19** |
+  | nested_instancing | (4, 2) | 0.13 | 2.73 | 0.00133 | 1.59 | 0.53 | **1.17** |
+  | smoke | (1, 1) | 0.26 | 0.91 | 0.1115 | 1.00 | 1.00 | **1.00** |
+  | smoke | (2, 1) | 0.28 | 1.13 | 0.1112 | 1.11 | 1.00 | **0.90** |
+  | smoke | (4, 1) | 0.32 | 1.57 | 0.1111 | 1.26 | 1.00 | **0.80** |
+  | smoke | (1, 2) | 0.37 | 1.59 | 0.1088 | 1.44 | 0.98 | **0.71** |
+  | smoke | (2, 2) | 0.41 | 1.81 | 0.1086 | 1.62 | 0.97 | **0.63** |
+  | smoke | (4, 2) | 0.47 | 2.26 | 0.1084 | 1.84 | 0.97 | **0.56** |
+  | fog | (1, 1) | 0.08 | 0.86 | 0.0634 | 1.00 | 1.00 | **1.00** |
+  | fog | (2, 1) | 0.09 | 1.11 | 0.0634 | 1.12 | 1.00 | **0.89** |
+  | fog | (4, 1) | 0.10 | 1.63 | 0.0631 | 1.25 | 0.99 | **0.80** |
+  | fog | (1, 2) | 0.09 | 1.46 | 0.0619 | 1.22 | 0.98 | **0.84** |
+  | fog | (2, 2) | 0.10 | 1.71 | 0.0619 | 1.36 | 0.98 | **0.76** |
+  | fog | (4, 2) | 0.12 | 2.23 | 0.0615 | 1.53 | 0.97 | **0.68** |
+  | OpenPBR Shader Playground, `renderCam_main` | (1, 1) | 1.07 | 0.64 | 0.1868 | 1.00 | 1.00 | **1.00** |
+  | Playground | (2, 1) | 1.17 | 0.86 | 0.1743 | 1.10 | 0.93 | **0.97** |
+  | Playground | (4, 1) | 1.42 | 1.28 | 0.1696 | 1.33 | 0.91 | **0.83** |
+  | Playground | (1, 2) | 1.38 | 1.07 | 0.1500 | 1.29 | 0.80 | **0.96** |
+  | Playground | (2, 2) | 1.49 | 1.29 | 0.1377 | 1.39 | 0.74 | **0.98** |
+  | Playground | (4, 2) | 1.69 | 1.71 | 0.1328 | 1.58 | 0.71 | **0.89** |
+  | ALab frame 1004 (one seed) | (1, 1) | 3.92 | 0.42 | 0.873 | 1.00 | 1.00 | **1.00** |
+  | ALab | (2, 1) | 3.97 | 0.58 | 0.768 | 1.01 | 0.88 | **1.12** |
+  | ALab | (4, 1) | 4.18 | 0.88 | 0.560 | 1.07 | 0.64 | **1.46** |
+  | ALab | (1, 2) | 4.02 | 0.70 | 1.002 | 1.02 | 1.15 | **0.85** |
+  | ALab | (2, 2) | 4.15 | 0.85 | 0.868 | 1.06 | 0.99 | **0.95** |
+  | ALab | (4, 2) | 4.25 | 1.16 | 0.634 | 1.08 | 0.73 | **1.27** |
+
+  What it says. The camera count pays where direct light from area lights is the
+  noise and the first hit is diffuse: `veach_mis` (4, 1) is **1.59×** more efficient,
+  ALab (4, 1) **1.46×** (relMSE 0.64× for 7% more time: ALab's shadow rays are cheap
+  beside its shading, 0.42 per vertex at one sample), `nested_instancing` 1.08–1.19×.
+  It loses where the direct term is not the noise: dome-lit `cornellbox` (76% of its
+  shadow rays occluded), the glossy `openpbr_showcase` and `instancing` (0.70× at
+  (4, 1)), and the volume scenes `smoke` and `fog`, whose noise is the medium's (0.80×),
+  and on the Playground, whose first hits are mostly glass and glossy spheres: there
+  the camera count buys little and the indirect count more ((2, 2) 0.98×, since the
+  first diffuse vertex is behind the glass), but neither pays. The indirect count M
+  never pays on its own: it multiplies along the path for a smaller share of the
+  noise, and only helps when the camera count is also raised. **Both defaults stay
+  at 1** (the design's rule: positive everywhere or not at all); `--light-samples 4`
+  is the recommendation for interiors and area-lit sets with diffuse first hits, and
+  no default-change proposal follows from this measurement. What would move the
+  default is an adaptive split (Rath et al. 2022, `docs/light_sampling.md` §7.4),
+  which would take the extra samples only where the (4, 1) column is above 1.
 
 ## UsdLux import
 
@@ -455,7 +621,10 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   RenderMan, Arnold, Hyperion) with a ranked roadmap and a measured baseline. In
   short: the light pick is by power, defensively (4.6× lower relMSE on a key among dim
   fills, 6% higher on `veach_mis`, §3.8 there; `--light-selection uniform` is the
-  bit-identical A/B); sphere lights now sample their visible cone
+  bit-identical A/B); several light samples per vertex are a setting, not the default
+  (`crust:lightSamples`, "Several light samples per vertex" above: 1.46–1.59× at equal
+  time on ALab and `veach_mis`, a loss on dome-lit, glossy and volume scenes);
+  sphere lights now sample their visible cone
   (1.3–12.9× lower relMSE at 16 spp on the five sphere-lit samples for ~8% more time
   per sample, §3.7 there),
   and rect lights their spherical rectangle (1.4–1.5× lower relMSE on near panels and

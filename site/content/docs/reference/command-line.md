@@ -58,6 +58,8 @@ The flags of `crust render`:
 | [`--subdiv-edge-length`](#subdiv-edge-length) | pixels | scene / off | `crust:subdivisionEdgeLength` |
 | [`--strategy`](#strategy) | name | scene / `power` | `crust:samplingStrategy` |
 | [`--light-selection`](#light-selection) | name | scene / `power` | `crust:lightSelection` |
+| [`--light-samples`](#light-samples) | count | scene / 1 | `crust:lightSamples` |
+| [`--light-samples-indirect`](#light-samples-indirect) | count | scene / 1 | `crust:lightSamplesIndirect` |
 | [`--filter`](#filter) | name | scene / `triangle` | `crust:pixelFilter` |
 | [`--filter-radius`](#filter-radius) | pixels | per filter | `crust:pixelFilterRadius` |
 | [`--indirect-clamp`](#indirect-clamp) | number | scene / 10 | `crust:indirectClamp` |
@@ -259,6 +261,36 @@ How light sampling picks which light to sample at each vertex. Overrides
 `learned` helps scenes with many lights where the brightest ones are often hidden, for
 example a room lit through its windows.
 
+### light-samples
+
+`--light-samples <N>`
+
+How many light samples (shadow rays) light sampling takes at the first vertex of each
+camera path. It must be from 1 to 1024. Overrides
+[`crust:lightSamples`](@/docs/usd/render-settings.md#crust-lightsamples) (default 1).
+
+The N samples spread over the lights in proportion to their selection probabilities
+(a light with probability 0.5 gets two of four samples, not a random number of them),
+and each is combined with BSDF sampling by multi-sample multiple importance sampling,
+so the image is the same in expectation at every N. Direct-light noise falls about as
+1/N for N times the shadow rays at that vertex. With both counts at 1 the image is
+bit-identical to a render before the counts existed.
+
+### light-samples-indirect
+
+`--light-samples-indirect <M>`
+
+The same count at every later vertex of a path — surface and volume alike. It must be
+from 1 to 1024. Overrides
+[`crust:lightSamplesIndirect`](@/docs/usd/render-settings.md#crust-lightsamplesindirect)
+(default 1). Paid at every bounce, so it multiplies the shadow rays along the whole
+path for a smaller share of the image's noise than the camera vertex's count.
+
+```bash
+# four shadow rays at the first hit, one afterwards
+crust render -i interior.usda --light-samples 4
+```
+
 ### filter
 
 `--filter <FILTER>`
@@ -404,6 +436,14 @@ nothing: tiles are the default.
 
 When the render finishes, print render statistics and a per-phase profile: the time and
 memory of parsing, building, rendering and writing the output, plus scene statistics.
+For streamed textures it reports the tile cache's memory and hit rates, and how many `.tx`
+files were open at the peak against
+[`CRUST_TEX_MAX_OPEN_FILES`](@/docs/reference/environment-variables.md#crust-tex-max-open-files),
+with the reopens that cap cost.
+
+Whether or not `--stats` is on, a texture tile that can't be read is reported: its file is
+named once in a warning, and the render ends with one warning counting the failed reads.
+Those lookups use the texture's fallback colour.
 
 The report always prints, whatever `-l` is set to. It also goes to `--log-file` if one is
 open.
