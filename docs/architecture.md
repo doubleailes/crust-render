@@ -296,6 +296,9 @@ nightly, and its daily run publishes the rolling `nightly` pre-release: the CLI 
 the latest nightly for Linux (musl), macOS (both architectures) and Windows (MSVC). Each
 binary renders the Cornell box before it ships, and the release is replaced only when every
 `latest` leg (clippy, tests, `bvh8`) passed on the same compiler.
+Neither workflow starts for a push or pull request that touches only documentation
+(`openspec/`, `docs/`, `site/`, `images/`, `logo/`, `.claude/`, any `*.md`): no crate reads
+those paths. `site/` is built by `.github/workflows/docs.yml` instead.
 
 ## Technical debt register
 
