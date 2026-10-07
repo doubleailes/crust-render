@@ -1,16 +1,12 @@
-//! Prim transforms: the local `xformOp:*` composer and the conversions to glam.
+//! Prim transforms: openusd's `UsdGeomXformable` composition, reached for any
+//! prim type, and the conversion to glam.
 
-use glam::{Mat4 as GMat4, Vec3};
+use glam::Mat4 as GMat4;
 use openusd::gf::Matrix4d;
-use openusd::sdf;
-use openusd::usd::{Prim, Stage};
-use openusd_schemas::geom::{
-    Camera as UsdCamera, Mesh as UsdMesh, Sphere as UsdSphere, Xform, Xformable,
-};
-use openusd_schemas::lux::{RectLight, SphereLight};
+use openusd::usd::{Prim, SchemaBase, SchemaKind};
+use openusd_schemas::geom::{Imageable, Xformable};
 use tracing::warn;
 
-use super::attrs::{decode_f32, decode_vec3, prim_value};
 use super::time::xform_time;
 
 /// USD authors 4x4 matrices as row-vector row-major (translation in the
@@ -19,210 +15,202 @@ use super::time::xform_time;
 /// column-major layout of the transposed matrix — which is what we want
 /// for M * v evaluation.
 fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
-    let a = m.0;
-    GMat4::from_cols_array(&[
-        a[0] as f32,
-        a[1] as f32,
-        a[2] as f32,
-        a[3] as f32,
-        a[4] as f32,
-        a[5] as f32,
-        a[6] as f32,
-        a[7] as f32,
-        a[8] as f32,
-        a[9] as f32,
-        a[10] as f32,
-        a[11] as f32,
-        a[12] as f32,
-        a[13] as f32,
-        a[14] as f32,
-        a[15] as f32,
-    ])
+    GMat4::from_cols_array(&m.0.map(|v| v as f32))
 }
 
-/// Local-to-parent transform of `prim`, composed from its authored
-/// `xformOp:*` attributes by [`compose_xform_ops`].
+/// Any prim, viewed as `UsdGeomXformable`.
 ///
-/// This deliberately does NOT use openusd's `local_to_parent_transform`:
-/// openusd 0.5.0 composes multi-op `xformOpOrder` stacks in the wrong
-/// order (the authored translate comes back multiplied by the scale — e.g.
-/// cornellbox's `pCube1`, translate `(0,2,0)` · scale 4, yielded
-/// translation `(0,8,0)`), which made `samples/cornellbox.usda` render as
-/// floating objects against sky. Stacks with an op we cannot decode fall
-/// back to openusd's composition with a warning, so unusual scenes behave
-/// no worse than before.
-fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
-    match compose_xform_ops(prim) {
-        Some(m) => m,
-        None => {
+/// openusd 0.7 reaches its transform composition only through the
+/// `Xformable` trait, implemented per typed schema whose `get` checks the
+/// prim's type. Every method this module calls is a default method over
+/// `prim()`, so this one view composes the stack on every prim type — the
+/// scope crust has always given `xformOp`s — instead of a list of types
+/// that drifts (a type missing from it composed to identity).
+struct AnyXformable<'a>(&'a Prim);
+
+impl SchemaBase for AnyXformable<'_> {
+    const KIND: SchemaKind = SchemaKind::AbstractTyped;
+
+    fn prim(&self) -> &Prim {
+        self.0
+    }
+}
+
+impl Imageable for AnyXformable<'_> {}
+
+impl Xformable for AnyXformable<'_> {}
+
+/// Every op kind `UsdGeomXformOp` defines. openusd 0.7 composes any other
+/// kind as identity without a word; C++ USD rejects it. This list decides a
+/// warning only, never a matrix.
+const XFORM_OP_KINDS: &[&str] = &[
+    "translate",
+    "translateX",
+    "translateY",
+    "translateZ",
+    "scale",
+    "scaleX",
+    "scaleY",
+    "scaleZ",
+    "rotateX",
+    "rotateY",
+    "rotateZ",
+    "rotateXYZ",
+    "rotateXZY",
+    "rotateYXZ",
+    "rotateYZX",
+    "rotateZXY",
+    "rotateZYX",
+    "orient",
+    "transform",
+];
+
+/// The kind of an `xformOpOrder` entry (`!invert!xformOp:translate:pivot` →
+/// `translate`), or `None` when the entry is not an `xformOp:` name at all.
+fn op_kind(entry: &str) -> Option<&str> {
+    let name = entry.strip_prefix("!invert!").unwrap_or(entry);
+    name.strip_prefix("xformOp:")?.split(':').next()
+}
+
+/// Local-to-parent transform of `prim`, composed by openusd in `f64` and
+/// cast once. An unknown op kind contributes identity (one warning naming
+/// every such op); a stack openusd refuses — a `!resetXformStack!` after
+/// the first entry, a value it cannot read — is identity, with a warning.
+fn local_matrix(xf: &AnyXformable<'_>) -> GMat4 {
+    if let Ok(Some(order)) = xf.xform_op_order() {
+        let unknown: Vec<&str> = order
+            .iter()
+            .filter(|e| e.as_str() != "!resetXformStack!")
+            .filter(|e| !op_kind(e).is_some_and(|k| XFORM_OP_KINDS.contains(&k)))
+            .map(String::as_str)
+            .collect();
+        if !unknown.is_empty() {
             warn!(
-                "could not decode the xformOp stack at {} — falling back to openusd's \
-                 composition (known to be wrong for multi-op stacks)",
-                prim.path()
+                "{}: xformOpOrder lists {} — not a UsdGeomXformOp kind, read as identity",
+                xf.0.path(),
+                unknown.join(", ")
             );
-            local_matrix_via_openusd(stage, prim)
         }
     }
-}
-
-/// Composes the prim's `xformOpOrder` stack into a local-to-parent matrix.
-///
-/// UsdGeomXformable semantics, in the column-vector convention used here:
-/// for `xformOpOrder = [op1, op2, …, opN]` a point transforms as
-/// `p' = M(op1)·M(op2)·…·M(opN)·p` — the last-listed op is applied to the
-/// point first and the first-listed is outermost. (Maya's
-/// `["xformOp:translate", "xformOp:scale"]` therefore scales points first
-/// and translates last: the composed translation equals the authored
-/// translate.)
-///
-/// Returns `None` if any op token or value cannot be decoded.
-fn compose_xform_ops(prim: &Prim) -> Option<GMat4> {
-    let order = match prim_value(prim, "xformOpOrder") {
-        Some(sdf::Value::TokenVec(order)) => order,
-        Some(_) => return None,
-        // No order authored: authored xformOp attrs (if any) do not apply.
-        _ => return Some(GMat4::IDENTITY),
-    };
-
-    let mut local = GMat4::IDENTITY;
-    for token in &order {
-        // Not a transform op: it truncates the inherited stack, which
-        // `resets_xform_stack_at` reports separately.
-        if token == "!resetXformStack!" {
-            continue;
+    match xf.local_to_parent_transform(xform_time()) {
+        Ok(m) => usd_mat_to_glam(m),
+        Err(e) => {
+            warn!(
+                "{}: could not compose its xformOp stack ({e}) — its local transform is \
+                 identity",
+                xf.0.path()
+            );
+            GMat4::IDENTITY
         }
-        let (name, inverted) = match token.strip_prefix("!invert!") {
-            Some(rest) => (rest, true),
-            None => (token.as_str(), false),
-        };
-        let mut m = xform_op_matrix(prim, name)?;
-        if inverted {
-            m = m.inverse();
-        }
-        local *= m;
     }
-    Some(local)
-}
-
-/// Matrix of a single `xformOp:<kind>[:<suffix>]` attribute on `prim`, or
-/// `None` for op kinds/value types we do not support.
-fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
-    let kind = name.strip_prefix("xformOp:")?;
-    // Suffixes name op instances (`xformOp:translate:pivot`); the kind is
-    // the first segment.
-    let kind = kind.split(':').next().unwrap_or(kind);
-    let value = prim_value(prim, name)?;
-    let vec3 = |v: sdf::Value| decode_vec3(v).map(Vec3::from);
-    let degrees = |v: sdf::Value| decode_f32(v).map(f32::to_radians);
-
-    match kind {
-        "translate" => Some(GMat4::from_translation(vec3(value)?)),
-        "scale" => Some(GMat4::from_scale(vec3(value)?)),
-        "transform" => match value {
-            sdf::Value::Matrix4d(m) => Some(usd_mat_to_glam(m)),
-            _ => None,
-        },
-        "orient" => match value {
-            sdf::Value::Quatf(q) => Some(GMat4::from_quat(
-                glam::Quat::from_xyzw(q.x, q.y, q.z, q.w).normalize(),
-            )),
-            sdf::Value::Quatd(q) => Some(GMat4::from_quat(
-                glam::Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize(),
-            )),
-            _ => None,
-        },
-        "rotateX" => Some(GMat4::from_rotation_x(degrees(value)?)),
-        "rotateY" => Some(GMat4::from_rotation_y(degrees(value)?)),
-        "rotateZ" => Some(GMat4::from_rotation_z(degrees(value)?)),
-        // Euler triples: the vector components are always the X/Y/Z-axis
-        // angles in degrees; the op name gives the application order, first
-        // named axis applied to the point first (so it sits rightmost).
-        "rotateXYZ" | "rotateXZY" | "rotateYXZ" | "rotateYZX" | "rotateZXY" | "rotateZYX" => {
-            let v = vec3(value)?;
-            let rx = GMat4::from_rotation_x(v.x.to_radians());
-            let ry = GMat4::from_rotation_y(v.y.to_radians());
-            let rz = GMat4::from_rotation_z(v.z.to_radians());
-            Some(match kind {
-                "rotateXYZ" => rz * ry * rx,
-                "rotateXZY" => ry * rz * rx,
-                "rotateYXZ" => rz * rx * ry,
-                "rotateYZX" => rx * rz * ry,
-                "rotateZXY" => ry * rx * rz,
-                _ => rx * ry * rz, // rotateZYX
-            })
-        }
-        _ => None,
-    }
-}
-
-/// openusd's own composition, kept as the fallback for op stacks
-/// `compose_xform_ops` cannot decode. Known to compose multi-op stacks in
-/// the wrong order (see `local_matrix_at`).
-fn local_matrix_via_openusd(stage: &Stage, prim: &Prim) -> GMat4 {
-    if let Ok(Some(x)) = Xform::get(stage, prim.path().clone())
-        && let Ok(m) = x.local_to_parent_transform(xform_time())
-    {
-        return usd_mat_to_glam(m);
-    }
-    if let Ok(Some(m)) = UsdMesh::get(stage, prim.path().clone())
-        && let Ok(mat) = m.local_to_parent_transform(xform_time())
-    {
-        return usd_mat_to_glam(mat);
-    }
-    if let Ok(Some(s)) = UsdSphere::get(stage, prim.path().clone())
-        && let Ok(mat) = s.local_to_parent_transform(xform_time())
-    {
-        return usd_mat_to_glam(mat);
-    }
-    if let Ok(Some(c)) = UsdCamera::get(stage, prim.path().clone())
-        && let Ok(mat) = c.local_to_parent_transform(xform_time())
-    {
-        return usd_mat_to_glam(mat);
-    }
-    if let Ok(Some(l)) = SphereLight::get(stage, prim.path().clone())
-        && let Ok(mat) = l.local_to_parent_transform(xform_time())
-    {
-        return usd_mat_to_glam(mat);
-    }
-    if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone())
-        && let Ok(mat) = l.local_to_parent_transform(xform_time())
-    {
-        return usd_mat_to_glam(mat);
-    }
-    GMat4::IDENTITY
 }
 
 /// `prim`'s transform given its parent's: `parent · local`, or `local` alone
-/// when the prim authors `!resetXformStack!` — the one composition rule every
-/// walk (the traversal, the placement count, the prototype walk, a camera's
-/// ancestor chain) applies.
-pub(super) fn compose_with_parent(stage: &Stage, prim: &Prim, parent: GMat4) -> GMat4 {
-    let local = local_matrix_at(stage, prim);
-    if resets_xform_stack_at(stage, prim) {
+/// when the prim authors a leading `!resetXformStack!` — the one composition
+/// rule every walk (the traversal, the placement count, the prototype walk,
+/// a camera's ancestor chain) applies. The pseudo-root, where every walk
+/// starts, owns no properties and passes `parent` through.
+pub(super) fn compose_with_parent(prim: &Prim, parent: GMat4) -> GMat4 {
+    if prim.path().as_str() == "/" {
+        return parent;
+    }
+    let xf = AnyXformable(prim);
+    let local = local_matrix(&xf);
+    if xf.resets_xform_stack().unwrap_or(false) {
         local
     } else {
         parent * local
     }
 }
 
-fn resets_xform_stack_at(stage: &Stage, prim: &Prim) -> bool {
-    if let Ok(Some(x)) = Xform::get(stage, prim.path().clone()) {
-        return x.resets_xform_stack().unwrap_or(false);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+    use openusd::sdf;
+    use openusd::usd::Stage;
+
+    /// `/W/P` of a stage whose `P` authors `ops` under a parent `W`
+    /// translated by `(0, 0, 7)`, with its world transform.
+    fn world_of(name: &str, ops: &str) -> GMat4 {
+        let dir = std::env::temp_dir().join("crust_xform_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("{name}.usda"));
+        std::fs::write(
+            &path,
+            format!(
+                "#usda 1.0\ndef Xform \"W\"\n{{\n    double3 xformOp:translate = (0, 0, 7)\n    \
+                 uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    \
+                 def Xform \"P\"\n    {{\n{ops}\n    }}\n}}\n"
+            ),
+        )
+        .expect("write stage");
+        let stage = Stage::builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        [
+            sdf::Path::abs_root(),
+            sdf::path("/W").unwrap(),
+            sdf::path("/W/P").unwrap(),
+        ]
+        .into_iter()
+        .map(|p| super::super::prim_at(&stage, p))
+        .fold(GMat4::IDENTITY, |acc, p| compose_with_parent(&p, acc))
     }
-    if let Ok(Some(m)) = UsdMesh::get(stage, prim.path().clone()) {
-        return m.resets_xform_stack().unwrap_or(false);
+
+    fn assert_near(a: GMat4, b: GMat4) {
+        assert!(a.abs_diff_eq(b, 1e-5), "expected\n{b}\ngot\n{a}");
     }
-    if let Ok(Some(s)) = UsdSphere::get(stage, prim.path().clone()) {
-        return s.resets_xform_stack().unwrap_or(false);
+
+    #[test]
+    fn an_unknown_op_kind_is_identity_and_the_rest_composes() {
+        let m = world_of(
+            "unknown_kind",
+            r#"        double3 xformOp:translate = (1, 2, 3)
+        double3 xformOp:bogus = (5, 5, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:bogus"]"#,
+        );
+        assert_near(m, GMat4::from_translation(Vec3::new(1.0, 2.0, 10.0)));
     }
-    if let Ok(Some(c)) = UsdCamera::get(stage, prim.path().clone()) {
-        return c.resets_xform_stack().unwrap_or(false);
+
+    /// openusd 0.7 refuses a reset after the first entry; the prim's local
+    /// transform is then identity and the parent's is still inherited.
+    #[test]
+    fn a_mid_stack_reset_is_identity_and_keeps_the_parent() {
+        let m = world_of(
+            "mid_stack_reset",
+            r#"        double3 xformOp:translate = (1, 2, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate", "!resetXformStack!"]"#,
+        );
+        assert_near(m, GMat4::from_translation(Vec3::new(0.0, 0.0, 7.0)));
     }
-    if let Ok(Some(l)) = SphereLight::get(stage, prim.path().clone()) {
-        return l.resets_xform_stack().unwrap_or(false);
+
+    #[test]
+    fn a_leading_reset_drops_the_parent() {
+        let m = world_of(
+            "leading_reset",
+            r#"        double3 xformOp:translate = (1, 2, 3)
+        uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"]"#,
+        );
+        assert_near(m, GMat4::from_translation(Vec3::new(1.0, 2.0, 3.0)));
     }
-    if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone()) {
-        return l.resets_xform_stack().unwrap_or(false);
+
+    /// The pivot pair, `!invert!` and a three-axis rotation, against the
+    /// matrix C++ USD computes for the same stack (row-vector:
+    /// `0 2 0 0 / -2 0 0 0 / 0 0 2 0 / 5 2 0 1`).
+    #[test]
+    fn a_pivot_stack_matches_cpp_usd() {
+        let m = world_of(
+            "pivot",
+            r#"        double3 xformOp:translate = (2, 3, 0)
+        double3 xformOp:translate:pivot = (1, 1, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 90)
+        float3 xformOp:scale = (2, 2, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:translate:pivot", "xformOp:rotateXYZ", "xformOp:scale", "!invert!xformOp:translate:pivot"]"#,
+        );
+        let cpp = GMat4::from_cols_array(&[
+            0.0, 2.0, 0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 5.0, 2.0, 0.0, 1.0,
+        ]);
+        assert_near(m, GMat4::from_translation(Vec3::new(0.0, 0.0, 7.0)) * cpp);
     }
-    false
 }

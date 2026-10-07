@@ -180,7 +180,32 @@ pub(super) fn collect_proto_parts(
         if prototype_prunes(&prim, root, true) {
             continue;
         }
-        let this_local = part_local(stage, &prim, root, parent_local);
+        let this_local = part_local(&prim, root, parent_local);
+
+        // A native instance nested in this prototype: splice its prototype's
+        // parts in, placed by this prim, rather than walking its proxy
+        // subtree — the inner prototype is built once (cached like any
+        // other) and its kernel scenes are shared by every outer placement.
+        // Always the shared version: `count_placements` does not descend
+        // into instances, so nothing says this placement is the only one.
+        // Each part keeps its own mask, as at a top-level instance.
+        if prim.path() != root.path() && prim.is_instance().unwrap_or(false) {
+            match prim.prototype() {
+                Ok(Some(inner)) => {
+                    let inner_parts = prototype_parts(stage, &inner, caches, depth + 1);
+                    parts.extend(inner_parts.iter().map(|part| ProtoPart {
+                        local: this_local * part.local,
+                        ..part.clone()
+                    }));
+                    continue;
+                }
+                _ => warn!(
+                    "Prim {} is instanceable but has no prototype — importing directly",
+                    prim.path()
+                ),
+            }
+        }
+
         let mask = prim_ray_mask(&prim);
 
         if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
@@ -307,9 +332,7 @@ pub(super) fn collect_proto_parts(
 
 /// Whether the prototype walk leaves `prim` and its subtree out: the same
 /// pruning as the top-level traversal ([`prune_reason`], abstractness
-/// aside), plus a native instance nested inside the prototype, which
-/// openusd cannot read. `report` logs why; the placement count's walk passes `false`,
-/// so a skipped prim is reported once.
+/// aside). `report` logs why.
 fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
     // Visibility counts from the prototype root down, as UsdImaging
     // computes it for a prototype: an invisible part of a prototype is
@@ -325,36 +348,6 @@ fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
         }
         return true;
     }
-    // Checked before any schema lookup, because a schema `get()` reads
-    // the prim's type name and that is exactly what aborts here.
-    //
-    // A natively-instanced prim *inside* a prototype is unreachable
-    // with openusd 0.5.0: resolving its prototype, or reading the type
-    // of any prim beneath it, trips an internal assertion
-    // (`pcp/instancing.rs`: "materialized prototype root's
-    // instanceable must be inert"), which aborts debug builds. The
-    // prim itself is safe to inspect; its contents are not. So there
-    // is no route to the geometry — not the prototype, not the proxy
-    // subtree — and the honest response is to say so and move on
-    // rather than abort. Nested *PointInstancer* is unaffected and is
-    // expanded below.
-    //
-    // Four-line repro and the full diagnosis live in
-    // `nested_native_instance_degrades_gracefully` in
-    // `crates/crust-core/tests/usd_scene.rs`. Delete this arm when
-    // upstream is fixed; `collect_proto_parts` can then splice the
-    // inner prototype's parts in with composed transforms.
-    if prim.path() != root.path() && prim.is_instance().unwrap_or(false) {
-        if report {
-            warn!(
-                "Nested native instance at {} skipped: openusd 0.5 cannot read \
-                 an instanceable prim's contents inside a prototype. Author it \
-                 as a PointInstancer, or flatten the inner instance.",
-                prim.path()
-            );
-        }
-        return true;
-    }
     false
 }
 
@@ -363,11 +356,11 @@ fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
 /// The prototype root's own transform is deliberately excluded: a
 /// `PointInstancer` prototype is placed entirely by its per-instance
 /// transform, and a native prototype root carries none.
-fn part_local(stage: &Stage, prim: &Prim, root: &Prim, parent_local: GMat4) -> GMat4 {
+fn part_local(prim: &Prim, root: &Prim, parent_local: GMat4) -> GMat4 {
     if prim.path() == root.path() {
         GMat4::IDENTITY
     } else {
-        compose_with_parent(stage, prim, parent_local)
+        compose_with_parent(prim, parent_local)
     }
 }
 
