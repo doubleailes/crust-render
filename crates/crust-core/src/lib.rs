@@ -107,7 +107,7 @@ pub use stats::{
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};
 pub use tracer::{
     DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderSettings,
-    Renderer, SamplingStrategy, ray_color,
+    Renderer, SamplingStrategy, ray_color, ray_color_with_light_samples,
 };
 pub use utils::Luma;
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};

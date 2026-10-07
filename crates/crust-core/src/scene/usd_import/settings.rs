@@ -2,7 +2,7 @@
 //! which camera the render was told to use.
 
 use openusd::sdf;
-use openusd::usd::Stage;
+use openusd::usd::{Prim, Stage};
 use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
 use tracing::{debug, warn};
 
@@ -224,6 +224,12 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         None => crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
     };
 
+    // Light samples per vertex: at the camera vertex and at every later one.
+    // Fewer than one is no estimator at all, so it is refused rather than
+    // clamped without a word.
+    let light_samples = light_sample_count(&prim, "crust:lightSamples");
+    let light_samples_indirect = light_sample_count(&prim, "crust:lightSamplesIndirect");
+
     // What the stage asked for, before the CLI's own overrides. Every field
     // here silently falls back to a default when unauthored, so this is the
     // line that separates "the scene set it" from "nobody did".
@@ -231,7 +237,8 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         "RenderSettings at {}: {w}x{h}, {spp} spp (min {min_spp}, variance threshold \
          {variance}, neighbour tolerance {neighbour_tolerance}), max depth {max_depth}, \
          frame {frame}, strategy {strategy:?}, \
-         light selection {light_selection:?}, filter {} radius {}, indirect clamp {}, guiding {}",
+         light selection {light_selection:?}, light samples {light_samples} camera / \
+         {light_samples_indirect} indirect, filter {} radius {}, indirect clamp {}, guiding {}",
         prim.path(),
         filter.name(),
         filter.radius(),
@@ -257,6 +264,21 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         .with_pixel_filter(filter)
         .with_indirect_clamp(indirect_clamp)
         .with_adaptive_neighbour_tolerance(neighbour_tolerance)
+        .with_light_samples(light_samples, light_samples_indirect)
+}
+
+/// A per-vertex light sample count off the `RenderSettings` prim: the
+/// authored value when it is at least 1, else the default of 1 with a
+/// warning. Unauthored is 1.
+fn light_sample_count(prim: &Prim, name: &str) -> u32 {
+    match custom_i32(prim, name) {
+        Some(n) if n >= 1 => n as u32,
+        Some(n) => {
+            warn!("{name} = {n} is below 1 — taking one light sample");
+            1
+        }
+        None => 1,
+    }
 }
 
 /// Warns when `time` lies outside the stage's authored

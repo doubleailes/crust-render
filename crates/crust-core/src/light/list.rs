@@ -376,18 +376,30 @@ impl LightList {
 
     /// The light strategy's solid-angle density for a light chosen with
     /// probability `pmf` (from [`LightList::pick`], [`LightList::find_index_by_geom_at`]
-    /// or [`LightList::iter`]) whose own `sample_li` density is `light_pdf`:
-    /// their product. Both MIS halves route through here, so they cannot
-    /// disagree on it. Under uniform selection it is the division
+    /// or [`LightList::iter`]) whose own `sample_li` density is `light_pdf`,
+    /// at a vertex where NEE takes `samples` light samples: their product,
+    /// times the count. Both MIS halves route through here, so they cannot
+    /// disagree on it — the count is a parameter rather than a field so that
+    /// every caller states the vertex's count (the bounce side carries the
+    /// count of the vertex it left). Under uniform selection it is the division
     /// `light_pdf / n` it always was, not a multiplication by `1/n`, which
     /// rounds differently when `n` is not a power of two — so the default
-    /// renders bit-identically to the renderer before selection was a choice.
-    pub fn density(&self, light_pdf: PdfSolidAngle, pmf: f32) -> PdfSolidAngle {
-        PdfSolidAngle::from_measure(if self.pmf.is_empty() {
+    /// renders bit-identically to the renderer before selection was a choice;
+    /// and one sample multiplies by exactly 1.
+    ///
+    /// With `samples` light samples and one bounce sample, Veach's
+    /// multi-sample balance and power heuristics weigh each strategy by
+    /// its sample count times its density, so the light side's effective
+    /// density is `samples · light_pdf · pmf` on both halves: NEE averages
+    /// its `samples` contributions, each weighted against the bounce with
+    /// this density, and the bounce weighs a light it hits against it too.
+    pub fn density(&self, light_pdf: PdfSolidAngle, pmf: f32, samples: u32) -> PdfSolidAngle {
+        let one = if self.pmf.is_empty() {
             light_pdf.get() / self.lights.len() as f32
         } else {
             light_pdf.get() * pmf
-        })
+        };
+        PdfSolidAngle::from_measure(one * samples as f32)
     }
 
     /// Picks a light from one `[0, 1)` sample `u`, with the probability it
