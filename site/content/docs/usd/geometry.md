@@ -77,7 +77,16 @@ This is the only kind of motion blur. There is no deformation (per-vertex) blur,
 animated `xformOp`s are read at the render frame only: they don't blur. A mesh with a non-invertible transform (for example, a scale of zero on
 one axis) can't move. Its `crust:motion:translate` is ignored with a warning.
 
+The blur can be turned off for the whole render with
+[`disableMotionBlur`](@/docs/usd/render-settings.md#disablemotionblur) on the
+`RenderSettings` prim (or its first `RenderProduct`). The prim then renders sharp at its
+authored position, and the translation is still available to the
+[`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV, so the blur can be added in
+compositing instead.
+
 `samples/motionblur.usda` shows both `crust:motion:translate` and `crust:rayMask = 6`.
+`samples/motionvector.usda` renders the same kind of motion sharp, with its motion
+vectors.
 
 ## crust:displacementBound
 

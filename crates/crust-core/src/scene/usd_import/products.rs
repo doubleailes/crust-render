@@ -28,15 +28,15 @@ use tracing::{debug, warn};
 
 use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
 
-use super::attrs::{custom_bool, custom_token, decode_number, prim_value, value_at};
+use super::attrs::{custom_bool, custom_token, decode_bool, decode_number, prim_value, value_at};
 use super::prim_at;
 use super::settings::render_settings_path;
 
 const DRIVER_PARAMETERS: &str = "driver:parameters:";
 
-/// The stage's products, and the camera and resolution the render takes from
-/// the first of them.
-#[derive(Debug, Default)]
+/// The stage's products, and the camera, resolution and motion-blur switch
+/// the render takes from the first of them.
+#[derive(Debug)]
 pub(super) struct RenderProducts {
     pub(super) request: AovRequest,
     /// The first product's resolved camera — the settings' own when the
@@ -45,15 +45,36 @@ pub(super) struct RenderProducts {
     /// The first product's resolved resolution, when the settings or the
     /// product author one.
     pub(super) resolution: Option<(usize, usize)>,
+    /// Whether moving geometry is motion blurred: `false` when the first
+    /// product (else the settings prim) authors `disableMotionBlur = true`
+    /// or its deprecated synonym `instantaneousShutter = true`. The stage's
+    /// motion stays in the scene either way (`RenderSettings::with_motion_blur`).
+    pub(super) motion_blur: bool,
+}
+
+/// Hand-written for one field: a stage that authors nothing blurs.
+impl Default for RenderProducts {
+    fn default() -> Self {
+        RenderProducts {
+            request: AovRequest::default(),
+            camera: None,
+            resolution: None,
+            motion_blur: true,
+        }
+    }
 }
 
 /// The base attributes a product inherits from the settings and may
-/// override — the two crust renders with. The other `RenderSettingsBase`
+/// override — the ones crust renders with. The other `RenderSettingsBase`
 /// attributes are not honoured (see [`warn_unhonoured`]).
 #[derive(Debug, Clone, PartialEq)]
 struct Base {
     camera: Option<sdf::Path>,
     resolution: Option<(usize, usize)>,
+    /// `disableMotionBlur` and `instantaneousShutter`, each resolved on its
+    /// own: a product that authors one of them inherits the other.
+    disable_motion_blur: bool,
+    instantaneous_shutter: bool,
 }
 
 fn read_resolution(view: &impl RenderSettingsBase) -> Option<(usize, usize)> {
@@ -66,12 +87,34 @@ fn read_camera(view: &impl RenderSettingsBase) -> Option<sdf::Path> {
 }
 
 impl Base {
+    /// Nothing authored anywhere: the first camera, the default resolution,
+    /// motion blur on.
+    fn unauthored() -> Base {
+        Base {
+            camera: None,
+            resolution: None,
+            disable_motion_blur: false,
+            instantaneous_shutter: false,
+        }
+    }
+
     /// `view`'s authored opinions over `fallback`.
     fn resolve(view: &impl RenderSettingsBase, fallback: &Base) -> Base {
         Base {
             camera: read_camera(view).or_else(|| fallback.camera.clone()),
             resolution: read_resolution(view).or(fallback.resolution),
+            disable_motion_blur: value_at(&view.disable_motion_blur_attr())
+                .and_then(decode_bool)
+                .unwrap_or(fallback.disable_motion_blur),
+            instantaneous_shutter: value_at(&view.instantaneous_shutter_attr())
+                .and_then(decode_bool)
+                .unwrap_or(fallback.instantaneous_shutter),
         }
+    }
+
+    /// Whether the render blurs moving geometry: either flag turns it off.
+    fn motion_blur(&self) -> bool {
+        !(self.disable_motion_blur || self.instantaneous_shutter)
     }
 }
 
@@ -89,16 +132,11 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         .products_rel()
         .forwarded_targets()
         .unwrap_or_default();
-    let base = Base::resolve(
-        &settings,
-        &Base {
-            camera: None,
-            resolution: None,
-        },
-    );
+    let base = Base::resolve(&settings, &Base::unauthored());
     if targets.is_empty() {
         return RenderProducts {
             request: AovRequest::default(),
+            motion_blur: base.motion_blur(),
             camera: base.camera,
             resolution: base.resolution,
         };
@@ -109,6 +147,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         request: AovRequest::default(),
         camera: base.camera.clone(),
         resolution: base.resolution,
+        motion_blur: base.motion_blur(),
     };
     // The render's own base: the first accepted product's.
     let mut render_base: Option<Base> = None;
@@ -218,6 +257,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         });
     }
     if let Some(first) = render_base {
+        out.motion_blur = first.motion_blur();
         out.camera = first.camera;
         out.resolution = first.resolution;
     }
@@ -240,6 +280,8 @@ fn describe_resolution(resolution: Option<(usize, usize)>) -> String {
 /// `RenderSettingsBase` attributes crust does not honour, warned about only
 /// when authored with a value that would change the image — Houdini authors
 /// every one of them at its fallback, and those need no word.
+/// `disableMotionBlur` and `instantaneousShutter` are honoured ([`Base`]),
+/// so they are not here.
 fn warn_unhonoured(prim: &Prim) {
     let mut ignored = Vec::new();
     let value = |name: &str| prim_value(prim, name);
@@ -257,14 +299,8 @@ fn warn_unhonoured(prim: &Prim) {
             w.x, w.y, w.z, w.w
         ));
     }
-    for flag in [
-        "disableMotionBlur",
-        "instantaneousShutter",
-        "disableDepthOfField",
-    ] {
-        if custom_bool(prim, flag) == Some(true) {
-            ignored.push(format!("{flag} = true"));
-        }
+    if custom_bool(prim, "disableDepthOfField") == Some(true) {
+        ignored.push("disableDepthOfField = true".to_owned());
     }
     if !ignored.is_empty() {
         warn!(

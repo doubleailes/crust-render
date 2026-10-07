@@ -60,6 +60,8 @@ parentheses.
 - `rawLight` (`RawLighting`, `rawLighting`), `rawGI` (`RawGI`) and
   `rawTotalLight` (`RawTotalLighting`): diffuse light without the surface
   colour (see "Raw light AOVs").
+- `motionvector` (no aliases): the first hit's forward 2D screen-space
+  displacement over the shutter, in pixels (see "Motion vector AOV").
 
 **Refused as not yet supported:** the geometric normal `Ng`, and the identity
 sources `primId` (`id`, `ID`, `Object Index`), `instanceId` (`id2`) and
@@ -103,7 +105,7 @@ Each AOV SHALL be accumulated in one of two modes:
 The default mode SHALL come from the source:
 
 - colour, LPE, alpha, normal, albedo and UV are filtered;
-- depth, distance, position and IDs are closest.
+- depth, distance, position, motion vectors and IDs are closest.
 
 The default SHALL be overridden by `driver:parameters:aov:multiSampled`
 (true → filtered, false → closest), and then by Arnold `arnold:filter`, Karma

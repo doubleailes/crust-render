@@ -230,9 +230,22 @@ other. The pairs:
   value by 0.2%); `escaped_emission` ↔ `escaped_split` (asserted bitwise in
   debug builds). The indirect clamp's factor is the beauty's, applied to
   every expression's continuation.
-- **Products ↔ settings.** The render's camera and resolution are the first
+- **Products ↔ settings.** The render's camera, resolution and motion-blur
+  switch (`disableMotionBlur` / `instantaneousShutter`) are the first
   `RenderProduct`'s (`import_render_products`), applied before the camera is
   imported; a product that differs is refused rather than resampled.
+- **Motion blur ↔ the motion-vector AOV.** The `motionvector` AOV reads the
+  same `transform_end` the kernel interpolates: `WorldBuilder` derives a
+  per-`geom_id` translation from every `Geometry::Instance` it is given
+  (`MotionRecord::of`, read back by `World::motion`), so the importer never
+  states a prim's motion twice and the vector cannot fall out of step with the
+  blur. A producer of a new kind of motion (a rotating end transform, nested
+  motion) gets a vector of zero and one summarised `WARN` at commit, not a
+  silently wrong one; extend `MotionRecord` rather than adding a second table.
+  `disableMotionBlur` gates only the shutter draw (`Renderer::shutter`, decided
+  once per pass in `PassConfig`),
+  never the records, so the vector is the same with blur on and off
+  (`sample_value` rebases the hit to shutter open by the sample's `time`).
 
 ## Environment switches
 

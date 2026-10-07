@@ -55,6 +55,10 @@ pub enum AovSource {
     /// The colour of the diffuse lobes of the surface the camera ray hits —
     /// what the raw light AOVs divide by.
     DiffuseFilter,
+    /// The first hit's forward 2D screen-space motion over the shutter, in
+    /// pixels: `u` right, `v` up (Nuke's conventions, Arnold's raw
+    /// `motionvector`). Zero on static geometry, in volumes and on escapes.
+    MotionVector,
 }
 
 /// `(name, source)` for every canonical name and alias a `raw` var may ask
@@ -105,6 +109,10 @@ const RAW_NAMES: &[(&str, AovSource)] = &[
     ("diffuse_albedo", AovSource::DiffuseFilter),
     ("DiffuseFilter", AovSource::DiffuseFilter),
     ("diffuseFilter", AovSource::DiffuseFilter),
+    // No aliases: the other renderers' 2D motion names (`velocity`,
+    // `Vector`, `motionFore`) each encode the vector their own way, and an
+    // alias would be a plausible but wrong channel.
+    ("motionvector", AovSource::MotionVector),
 ];
 
 /// The raw light sources: a name, and the light path expression whose
@@ -158,6 +166,9 @@ pub enum ChannelKind {
     Vector,
     /// `U`, `V`.
     Uv,
+    /// `u`, `v`, lowercase: Nuke's names for its `forward` / `backward`
+    /// layers' channels, so a var named `forward` lands on that layer.
+    Motion,
     /// One channel named after the layer.
     Scalar,
 }
@@ -190,6 +201,7 @@ impl AovSource {
             AovSource::Lpe => "lpe",
             AovSource::Albedo => "albedo",
             AovSource::DiffuseFilter => "diffuse_albedo",
+            AovSource::MotionVector => "motionvector",
         }
     }
 
@@ -205,7 +217,7 @@ impl AovSource {
             | AovSource::Lpe
             | AovSource::Albedo
             | AovSource::DiffuseFilter => 3,
-            AovSource::St => 2,
+            AovSource::St | AovSource::MotionVector => 2,
             AovSource::Alpha
             | AovSource::Depth
             | AovSource::Distance
@@ -223,6 +235,7 @@ impl AovSource {
                 ChannelKind::Vector
             }
             AovSource::St => ChannelKind::Uv,
+            AovSource::MotionVector => ChannelKind::Motion,
             AovSource::Alpha
             | AovSource::Depth
             | AovSource::Distance
@@ -232,12 +245,17 @@ impl AovSource {
     }
 
     /// The accumulation a var gets unless it authors one: data that must
-    /// never be blended across an edge is closest, the rest filtered.
+    /// never be blended across an edge is closest, the rest filtered. A
+    /// motion vector blended at an edge would have VectorBlur smear the
+    /// foreground into the background (Arnold users pair `motionvector`
+    /// with `closest_filter` for the same reason).
     pub fn default_accumulation(self) -> Accumulation {
         match self {
-            AovSource::Depth | AovSource::Distance | AovSource::P | AovSource::Peye => {
-                Accumulation::Closest
-            }
+            AovSource::Depth
+            | AovSource::Distance
+            | AovSource::P
+            | AovSource::Peye
+            | AovSource::MotionVector => Accumulation::Closest,
             _ => Accumulation::Filtered,
         }
     }
@@ -433,6 +451,9 @@ pub(crate) struct AovLayout {
     /// Whether a var needs the diffuse filter of the camera ray's first
     /// hit: a raw light AOV, or `diffuse_albedo`.
     pub(crate) diffuse_filter: bool,
+    /// Whether a var asks for the motion vector, so the integrator looks up
+    /// the first hit's motion at all.
+    pub(crate) motion: bool,
     /// The compiled expressions and event symbols, built by the renderer
     /// (it needs the lights' tags) when `lpes` or `albedo` ask for routing.
     pub(crate) route: Option<std::sync::Arc<crate::tracer::RouteCtx>>,
@@ -470,6 +491,7 @@ impl AovLayout {
             .any(|v| v.raw || v.source == AovSource::DiffuseFilter);
         layout.sample_count = request.vars().any(|v| v.source == AovSource::SampleCount);
         layout.variance = request.vars().any(|v| v.source == AovSource::Variance);
+        layout.motion = request.vars().any(|v| v.source == AovSource::MotionVector);
         layout
     }
 }
@@ -484,14 +506,17 @@ const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
 };
 
 /// What one camera sample carries for the AOVs besides its first hit: the
-/// light each expression selected, and the albedo. Empty and unused unless
-/// the render asks for them.
+/// light each expression selected, the albedo, and the shutter time it was
+/// traced at. Empty and unused unless the render asks for them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SampleExtras<'a> {
     pub(crate) lpe: &'a [Vec3A],
     pub(crate) albedo: Vec3A,
     /// The diffuse filter of the camera ray's first hit (0 off a surface).
     pub(crate) diffuse_filter: Vec3A,
+    /// The sample's shutter time in `[0, 1)`: 0 unless the scene moves and
+    /// motion blur is on. The motion vector rebases the hit by it.
+    pub(crate) time: f32,
 }
 
 /// What the camera ray met at the path's first vertex, recorded by the
@@ -508,17 +533,32 @@ pub(crate) enum FirstHit {
         /// The shading normal (after bump and normal map), facing the ray.
         n: Vec3A,
         uv: Option<(f32, f32)>,
+        /// The world-space translation the hit geometry moves through over
+        /// the shutter ([`World::motion`](crate::World::motion)); zero when
+        /// it does not move, or when no var asks for the motion vector.
+        motion: Vec3A,
     },
 }
 
-/// The camera's frame, for the camera-space sources. Camera space is the
-/// USD camera's: `u` right, `v` up, looking down `−w`.
+/// The camera's frame, for the camera-space sources, and its image plane,
+/// for the screen-space ones. Camera space is the USD camera's: `u` right,
+/// `v` up, looking down `−w`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CameraFrame {
     pub(crate) origin: Vec3A,
     pub(crate) u: Vec3A,
     pub(crate) v: Vec3A,
     pub(crate) w: Vec3A,
+    /// The image plane `Camera::get_ray` aims at: its lower-left corner
+    /// relative to `origin`, and its two extents (`lower_left_corner −
+    /// origin`, `horizontal`, `vertical`). `horizontal` is along `u`,
+    /// `vertical` along `v`.
+    pub(crate) lower_left: Vec3A,
+    pub(crate) horizontal: Vec3A,
+    pub(crate) vertical: Vec3A,
+    /// The image resolution, in pixels.
+    pub(crate) width: f32,
+    pub(crate) height: f32,
 }
 
 impl CameraFrame {
@@ -531,6 +571,67 @@ impl CameraFrame {
     fn depth(&self, p: Vec3A) -> f32 {
         -(p - self.origin).dot(self.w)
     }
+
+    /// The pinhole inverse of `Camera::get_ray` at the lens centre: the
+    /// viewport coordinates `(s, t)` whose ray passes through `p` — in
+    /// `[0, 1]²` on the frame, outside it off the frame, `t` growing along
+    /// `v` (up). Depth of field is ignored on purpose: the vector built on
+    /// this describes the in-focus image. `p` must be in front of the camera
+    /// (depth > 0); callers clip first.
+    fn proj(&self, p: Vec3A) -> (f32, f32) {
+        let d = p - self.origin;
+        // The plane lies `f` in front of the origin, and the ray through
+        // `(s, t)` lands on it at `lower_left + s·horizontal + t·vertical`,
+        // so scaling `d` onto the plane by depth gives that point.
+        let f = -self.lower_left.dot(self.w);
+        let on_plane = d * (f / self.depth(p));
+        let rel = on_plane - self.lower_left;
+        (
+            rel.dot(self.u) / self.horizontal.length(),
+            rel.dot(self.v) / self.vertical.length(),
+        )
+    }
+}
+
+/// The `motionvector` value: where the point hit at `p` at shutter time
+/// `time` moves on screen from shutter open to shutter close, in pixels,
+/// `u` right and `v` up.
+///
+/// The hit is rebased to its shutter-open position `P0 = p − time·v` first
+/// (exact: the kernel's interpolation moves every point by `v` at constant
+/// speed), so the value does not depend on which shutter time the sample
+/// drew, and therefore not on whether the beauty is blurred. The segment
+/// `[P0, P0 + v]` is then clipped to camera depth `≥ 1e-3 · max(z0, z1)` —
+/// the camera has no near plane, and a projection at or behind depth 0
+/// blows up or flips sign — and both ends are projected. The visible hit
+/// lies on the segment in front of the camera, so `max(z0, z1) > 0` and at
+/// most one end is clipped; the result is finite and points the way the
+/// visible part moves. The limit depends only on the path, never on `time`,
+/// so clipping keeps the independence from blur.
+fn motion_vector(cam: &CameraFrame, p: Vec3A, v: Vec3A, time: f32) -> (f32, f32) {
+    if v == Vec3A::ZERO {
+        return (0.0, 0.0);
+    }
+    let p0 = p - time * v;
+    let p1 = p0 + v;
+    let (z0, z1) = (cam.depth(p0), cam.depth(p1));
+    let z_max = z0.max(z1);
+    if z_max.is_nan() || z_max <= 0.0 {
+        // Nothing of the path is in front of the camera: a degenerate hit
+        // (at the origin itself, or non-finite), which has no projection.
+        return (0.0, 0.0);
+    }
+    let z_near = 1e-3 * z_max;
+    let clip = |a: Vec3A, za: f32, b: Vec3A, zb: f32| {
+        if za >= z_near {
+            a
+        } else {
+            a + (b - a) * ((z_near - za) / (zb - za))
+        }
+    };
+    let (s0, t0) = cam.proj(clip(p0, z0, p1, z1));
+    let (s1, t1) = cam.proj(clip(p1, z1, p0, z0));
+    ((s1 - s0) * cam.width, (t1 - t0) * cam.height)
 }
 
 /// One sample's value for `key`'s source, written into `out` (as many
@@ -572,6 +673,11 @@ fn sample_value(
         }
         (AovSource::Normal, FirstHit::Surface { n, .. }) => put3(out, *n),
         (AovSource::Neye, FirstHit::Surface { n, .. }) => put3(out, cam.eye(*n)),
+        (AovSource::MotionVector, FirstHit::Surface { p, motion, .. }) => {
+            let (u, v) = motion_vector(cam, *p, *motion, extras.time);
+            out[0] = u;
+            out[1] = v;
+        }
         (
             AovSource::St,
             FirstHit::Surface {
@@ -1014,7 +1120,24 @@ mod tests {
         lpe: &[],
         albedo: Vec3A::ZERO,
         diffuse_filter: Vec3A::ZERO,
+        time: 0.0,
     };
+
+    /// A camera at the origin looking down −Z with a 90° square frame one
+    /// unit away, on a 100×100 image: one unit of `x` at depth 1 is 50 px.
+    fn frame() -> CameraFrame {
+        CameraFrame {
+            origin: Vec3A::ZERO,
+            u: Vec3A::X,
+            v: Vec3A::Y,
+            w: Vec3A::Z,
+            lower_left: Vec3A::new(-1.0, -1.0, -1.0),
+            horizontal: Vec3A::new(2.0, 0.0, 0.0),
+            vertical: Vec3A::new(0.0, 2.0, 0.0),
+            width: 100.0,
+            height: 100.0,
+        }
+    }
 
     fn var(source: AovSource, accumulation: Accumulation) -> AovVar {
         AovVar {
@@ -1054,12 +1177,7 @@ mod tests {
             }],
         };
         let layout = AovLayout::new(&request);
-        let cam = CameraFrame {
-            origin: Vec3A::ZERO,
-            u: Vec3A::X,
-            v: Vec3A::Y,
-            w: Vec3A::Z,
-        };
+        let cam = frame();
         let at = |z: f32| FirstHit::Volume {
             p: Vec3A::new(0.0, 0.0, -z),
         };
@@ -1088,12 +1206,7 @@ mod tests {
             }],
         };
         let layout = AovLayout::new(&request);
-        let cam = CameraFrame {
-            origin: Vec3A::ZERO,
-            u: Vec3A::X,
-            v: Vec3A::Y,
-            w: Vec3A::Z,
-        };
+        let cam = frame();
         let mut unit = UnitAov::new(&layout, cam, 1);
         let near = FirstHit::Volume {
             p: Vec3A::new(0.0, 0.0, -1.0),
@@ -1120,16 +1233,12 @@ mod tests {
             }],
         };
         let layout = AovLayout::new(&request);
-        let cam = CameraFrame {
-            origin: Vec3A::ZERO,
-            u: Vec3A::X,
-            v: Vec3A::Y,
-            w: Vec3A::Z,
-        };
+        let cam = frame();
         let surface = FirstHit::Surface {
             p: Vec3A::new(0.0, 0.0, -1.0),
             n: Vec3A::Z,
             uv: None,
+            motion: Vec3A::ZERO,
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
         unit.add(&surface, &NONE, 0.5, 0.5, 3.0);
@@ -1152,12 +1261,7 @@ mod tests {
             }],
         };
         let layout = AovLayout::new(&request);
-        let cam = CameraFrame {
-            origin: Vec3A::ZERO,
-            u: Vec3A::X,
-            v: Vec3A::Y,
-            w: Vec3A::Z,
-        };
+        let cam = frame();
         let at = |z: f32| FirstHit::Volume {
             p: Vec3A::new(0.0, 0.0, -z),
         };
@@ -1200,12 +1304,7 @@ mod tests {
             }],
         };
         let layout = AovLayout::new(&request);
-        let cam = CameraFrame {
-            origin: Vec3A::ZERO,
-            u: Vec3A::X,
-            v: Vec3A::Y,
-            w: Vec3A::Z,
-        };
+        let cam = frame();
         let unit = UnitAov::new(&layout, cam, 1);
         let mut one_spp = AovFilm::new(&layout, 1, 1);
         one_spp.store(&unit, 0, 0, 0, 1.0, 1, f64::INFINITY);
@@ -1234,5 +1333,180 @@ mod tests {
         request.products[0].vars[0] = beauty;
         assert!(request.needs_film(), "color4f needs the alpha slot");
         assert!(!AovRequest::default().needs_film());
+    }
+
+    #[test]
+    fn motion_vector_resolves_with_two_closest_components_and_no_aliases() {
+        assert_eq!(
+            AovSource::from_raw("motionvector"),
+            Some(AovSource::MotionVector)
+        );
+        assert_eq!(AovSource::MotionVector.name(), "motionvector");
+        assert_eq!(AovSource::MotionVector.components(), 2);
+        assert_eq!(AovSource::MotionVector.channel_kind(), ChannelKind::Motion);
+        assert_eq!(
+            AovSource::MotionVector.default_accumulation(),
+            Accumulation::Closest
+        );
+        assert_eq!(AovSource::MotionVector.default_clear(), 0.0);
+        assert!(AovSource::MotionVector.accepts_accumulation());
+        // Other renderers' names stay unknown, not aliases.
+        for name in [
+            "velocity",
+            "Vector",
+            "motionFore",
+            "motionBack",
+            "MotionVector",
+        ] {
+            assert_eq!(AovSource::from_raw(name), None, "{name}");
+            assert!(!AovSource::is_planned(name), "{name}");
+        }
+        let layout = AovLayout::new(&AovRequest {
+            products: vec![AovProduct {
+                prim_path: "/p".into(),
+                name: "a.exr".into(),
+                vars: vec![var(AovSource::MotionVector, Accumulation::Closest)],
+                attributes: Vec::new(),
+            }],
+        });
+        assert!(layout.motion);
+        assert!(!AovLayout::new(&AovRequest::default()).motion);
+    }
+
+    /// `proj` is `Camera::get_ray`'s inverse at the lens centre: a point at
+    /// any depth along the ray through `(s, t)` projects back to `(s, t)`.
+    #[test]
+    fn proj_inverts_get_ray_at_any_depth() {
+        let cameras = [
+            crate::Camera::new(
+                Vec3A::new(0.0, 0.0, 5.0),
+                Vec3A::ZERO,
+                Vec3A::Y,
+                60.0,
+                16.0 / 9.0,
+                0.0,
+                5.0,
+            ),
+            // Off-axis, tilted up vector, a focus distance that is not 1.
+            crate::Camera::new(
+                Vec3A::new(3.0, 2.0, -4.0),
+                Vec3A::new(-1.0, 0.5, 2.0),
+                Vec3A::new(0.2, 1.0, 0.1),
+                35.0,
+                1.5,
+                0.0,
+                7.5,
+            ),
+        ];
+        for camera in &cameras {
+            let cam = camera.frame(320, 180);
+            for &s in &[0.0, 0.13, 0.5, 0.87, 1.0] {
+                for &t in &[0.0, 0.21, 0.5, 0.79, 1.0] {
+                    let ray = camera.get_ray(s, t, [0.5, 0.5], 0.0);
+                    for &k in &[0.05, 0.5, 1.0, 3.0, 20.0] {
+                        let (ps, pt) = cam.proj(ray.at(k));
+                        assert!(
+                            (ps - s).abs() < 1e-5 && (pt - t).abs() < 1e-5,
+                            "({s}, {t}) at {k}: ({ps}, {pt})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same point of a moving object, hit at different shutter times,
+    /// gives one vector: the hit is rebased to shutter open first.
+    #[test]
+    fn the_motion_vector_does_not_depend_on_the_shutter_time() {
+        let cam = frame();
+        let p0 = Vec3A::new(-0.4, 0.2, -2.0);
+        let v = Vec3A::new(0.6, -0.3, 0.5);
+        let at_open = motion_vector(&cam, p0, v, 0.0);
+        for time in [0.3, 0.9] {
+            let (u, w) = motion_vector(&cam, p0 + time * v, v, time);
+            assert!(
+                (u - at_open.0).abs() < 1e-4 && (w - at_open.1).abs() < 1e-4,
+                "time {time}: ({u}, {w}) vs {at_open:?}"
+            );
+        }
+        // Rightwards and upwards motion is positive `u` and `v`; one unit
+        // of `x` at depth 2 is 25 px here.
+        let (u, w) = motion_vector(
+            &cam,
+            Vec3A::new(0.0, 0.0, -2.0),
+            Vec3A::new(1.0, 0.5, 0.0),
+            0.0,
+        );
+        assert!(
+            (u - 25.0).abs() < 1e-3 && (w - 12.5).abs() < 1e-3,
+            "({u}, {w})"
+        );
+        assert_eq!(motion_vector(&cam, p0, Vec3A::ZERO, 0.4), (0.0, 0.0));
+    }
+
+    /// A path crossing the camera plane, in either direction, is measured
+    /// over its part in front of the camera: finite, along the visible
+    /// motion.
+    #[test]
+    fn a_path_crossing_the_camera_plane_gives_a_finite_vector_along_the_visible_motion() {
+        let cam = frame();
+        // Through the camera: from 2 in front, rightwards, to 2 behind.
+        let (u, v) = motion_vector(
+            &cam,
+            Vec3A::new(0.0, 0.0, -2.0),
+            Vec3A::new(1.0, 0.0, 4.0),
+            0.0,
+        );
+        assert!(u.is_finite() && v.is_finite(), "({u}, {v})");
+        assert!(u > 0.0 && v.abs() < 1e-3, "({u}, {v})");
+        // Arriving from behind, leftwards, hit at time 0.9 (in front).
+        let p0 = Vec3A::new(1.0, 0.0, 2.0);
+        let v3 = Vec3A::new(-1.0, 0.0, -4.0);
+        let (u, v) = motion_vector(&cam, p0 + 0.9 * v3, v3, 0.9);
+        assert!(u.is_finite() && v.is_finite(), "({u}, {v})");
+        assert!(u < 0.0 && v.abs() < 1e-3, "({u}, {v})");
+    }
+
+    /// Only a surface has a motion vector; a volume scatter and an escape
+    /// hold the clear value.
+    #[test]
+    fn volumes_and_escapes_take_the_motion_vectors_clear_value() {
+        let mut v = var(AovSource::MotionVector, Accumulation::Closest);
+        v.clear = 7.0;
+        let key = v.slot_key(&[]).expect("slotted");
+        let cam = frame();
+        let mut out = [0.0f32; 3];
+        sample_value(
+            &key,
+            &FirstHit::Volume {
+                p: Vec3A::new(0.0, 0.0, -1.0),
+            },
+            &NONE,
+            &cam,
+            &mut out,
+        );
+        assert_eq!(out[..2], [7.0, 7.0]);
+        sample_value(&key, &FirstHit::Escaped, &NONE, &cam, &mut out);
+        assert_eq!(out[..2], [7.0, 7.0]);
+        let moving = FirstHit::Surface {
+            p: Vec3A::new(0.0, 0.0, -2.0),
+            n: Vec3A::Z,
+            uv: None,
+            motion: Vec3A::new(1.0, 0.0, 0.0),
+        };
+        sample_value(&key, &moving, &NONE, &cam, &mut out);
+        assert!(
+            (out[0] - 25.0).abs() < 1e-3 && out[1].abs() < 1e-3,
+            "{out:?}"
+        );
+        let still = FirstHit::Surface {
+            p: Vec3A::new(0.0, 0.0, -2.0),
+            n: Vec3A::Z,
+            uv: None,
+            motion: Vec3A::ZERO,
+        };
+        sample_value(&key, &still, &NONE, &cam, &mut out);
+        assert_eq!(out[..2], [0.0, 0.0]);
     }
 }

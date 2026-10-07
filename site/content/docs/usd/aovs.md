@@ -116,6 +116,7 @@ A var is one layer of channels named `<layer>.<component>`. The layer is the var
 | colour | `<layer>.R`, `.G`, `.B` (and `.A` for a 4-channel type) |
 | vector (positions, normals) | `<layer>.X`, `.Y`, `.Z` |
 | UV | `<layer>.U`, `.V` |
+| motion vector | `<layer>.u`, `.v` (lowercase, Nuke's names: a var named `forward` lands on Nuke's built-in `forward` layer) |
 | scalar | one channel named `<layer>` |
 
 The product's first beauty var is written without a prefix: `R`, `G`, `B`[, `A`]. Every
@@ -138,8 +139,8 @@ warning.
 | `int` | UINT; `-1` is written as `0xFFFFFFFF` |
 
 The type must fit the source: three or four channels for the beauty, three for positions
-and normals, two for UVs, one for scalars. An integer type is accepted only for
-`sampleCount`. A var whose type does not fit is skipped with a warning.
+and normals, two for UVs and motion vectors, one for scalars. An integer type is accepted
+only for `sampleCount`. A var whose type does not fit is skipped with a warning.
 
 ### Source types
 
@@ -177,6 +178,7 @@ case-sensitive.
 | `rawLight` | `RawLighting`, `rawLighting` | `color3f` / `color4f` | filtered | Direct diffuse light without the surface's colour. See [Raw light](#raw-light). |
 | `rawGI` | `RawGI` | `color3f` / `color4f` | filtered | Indirect diffuse light without the surface's colour. |
 | `rawTotalLight` | `RawTotalLighting` | `color3f` / `color4f` | filtered | Both. |
+| `motionvector` | none | `float2` / `half2` | closest | The first hit's forward 2D motion over the shutter, in pixels, `+v` up. See [Motion vectors](#motion-vectors). |
 
 Any other name is skipped with a warning, and no channel is written for it. Crust Render
 never writes a black channel that looks valid.
@@ -201,7 +203,7 @@ is what compositors expect from a `Z` channel.
   AOVs keep their clear value. A visible dome is colour without coverage, as compositing
   expects.
 - **Volume scatter**: `depth`, `distance`, `P` and `Peye` are the scatter point; the
-  normals and UVs keep their clear value; `alpha` is 0.
+  normals, UVs and motion vectors keep their clear value; `alpha` is 0.
 - **Cutouts**: a surface the camera ray passes through is not a hit. The AOVs describe
   what is behind it, as the beauty does.
 - **Thin glass** (a thin-walled transmissive surface): the camera ray may pass straight
@@ -221,9 +223,9 @@ A pixel takes many samples. Each AOV combines them in one of two ways.
   A clear value that is not a finite number (depth and distance clear to `+inf`) cannot
   be averaged in. A filtered var with such a clear value averages only the samples that
   hit something, and keeps the clear value where none did.
-- **closest**: the value of the sample nearest the camera. Depth, distance and positions
-  use it by default. It never blends two surfaces, so a depth or position pass has no
-  in-between values at an edge.
+- **closest**: the value of the sample nearest the camera. Depth, distance, positions and
+  motion vectors use it by default. It never blends two surfaces, so a depth or position
+  pass has no in-between values at an edge.
 
   Only samples that land inside the pixel's own square count: the default triangle
   filter places samples up to one pixel outside it, and those would fatten edges. A
@@ -424,6 +426,68 @@ write `<RD'diffuse'>` for the label.
 alone, at the first surface; `albedo` is unchanged.
 {% end %}
 
+## Motion vectors
+
+`motionvector` is the pass a compositor adds motion blur with: Nuke's VectorBlur reads it
+and blurs a sharp beauty along it. Its definition is Arnold's raw `motionvector`:
+
+- **forward**: where the point the camera ray hit will be at shutter close, relative to
+  where it was at shutter open;
+- **2D, in pixels of the rendered image**, measured through a pinhole at the lens centre
+  (depth of field is ignored: the vector describes the in-focus image);
+- **`u` right, `v` up**, Nuke's conventions, in channels named `u` and `v`;
+- **per shutter**: the authored
+  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) is the
+  displacement over the shutter, and that is what the vector measures. The camera's
+  `shutter:open` / `shutter:close` are not read;
+- **closest** by default (see [Accumulation](#accumulation)), with a clear value of `0`:
+  a pixel at an object's edge holds the object's vector or the background's, never a
+  blend that VectorBlur would smear across the edge;
+- `(0, 0)` on static geometry, in volumes and where the camera ray escapes.
+
+The vector is the same whether or not the beauty is motion blurred: a hit made at a later
+shutter time is measured from where that point was at shutter open. The intended workflow
+is a sharp beauty, with
+[`disableMotionBlur`](@/docs/usd/render-settings.md#disablemotionblur) on the render
+settings, and the blur added in Nuke. Blurring a beauty crust has already blurred doubles
+the blur.
+
+```usda
+def RenderVar "forward"
+{
+    uniform token dataType = "float2"
+    uniform string sourceName = "motionvector"
+}
+```
+
+A var named `forward` writes `forward.u` and `forward.v`, which Nuke reads as its built-in
+`forward` layer, so VectorBlur2's `uv channels` knob finds it without any renaming. Any
+other var name gives a `<name>.u` / `<name>.v` layer that the same knob can select. The
+type must have two floating-point components: `float2`, `half2` or `texCoord2f`. A
+one- or three-component type, and an integer type (`int2`, `uint2`: unsigned samples
+could not hold leftward or downward motion), are refused with a warning.
+
+In VectorBlur2, select the layer in `uv channels`, choose the forward motion-vector type
+(crust writes no backward vector), and set the blur scale to the fraction of the shutter
+you want blurred: `1` blurs over the whole authored translation. VectorBlur clamps very
+long vectors with its own maximum; an object passing close to the camera produces such
+vectors, finite but large.
+
+Across one object the vector is not constant even though every point of the object moves
+by the same amount: a point closer to the camera covers more pixels for the same world
+displacement. This is perspective, not interpolation. A straight path in the scene still
+projects to a straight segment on screen, the one VectorBlur blurs along; only the speed
+along it varies.
+
+Other renderers' names for a 2D motion pass (`velocity`, `Vector`, `motionFore`, …) are
+not accepted as other names of `motionvector`. Each encodes the vector its own way
+(Cycles packs four components, V-Ray and RenderMan have their own conventions), and
+accepting the name while writing a different encoding would produce a plausible but
+wrong channel.
+
+`samples/motionvector.usda` renders two spheres and a plane moving in different
+directions, sharp, with a `forward` var.
+
 ## The EXR files
 
 Each product is one single-part, scanline, ZIP-compressed EXR. The header carries
@@ -457,9 +521,10 @@ Each of these is refused with a warning when authored, never ignored silently:
 - the geometric normal `Ng`;
 - deep output (`productType = "deepRaster"`);
 - more than one camera or resolution in a render;
-- `pixelAspectRatio`, `dataWindowNDC`, `disableMotionBlur`, `instantaneousShutter` and
-  `disableDepthOfField` (warned only when authored with a value that would change the
-  image).
+- `pixelAspectRatio`, `dataWindowNDC` and `disableDepthOfField` (warned only when
+  authored with a value that would change the image). `disableMotionBlur` and
+  `instantaneousShutter` are honoured: see
+  [Render settings](@/docs/usd/render-settings.md#disablemotionblur).
 
 The `resolution` fallback is crust's 640×360, not the schema's 2048×1080, so scenes
 without a `resolution` keep their size.

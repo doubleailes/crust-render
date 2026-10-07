@@ -798,3 +798,342 @@ fn raw_light_sources_and_the_diffuse_filter_resolve() {
     );
     assert!(scene.aovs.products[0].vars[2].with_alpha());
 }
+
+// ---------------------------------------------------------------------------
+// disableMotionBlur / instantaneousShutter
+// ---------------------------------------------------------------------------
+
+/// A `tracing` subscriber that keeps every WARN message, so a test can say
+/// which warnings a stage produced and which it did not.
+struct Warnings(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+struct Message(String);
+
+impl tracing::field::Visit for Message {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
+impl tracing::Subscriber for Warnings {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Loads `render` while recording the import's warnings.
+fn load_warnings(name: &str, render: &str) -> (Scene, Vec<String>) {
+    let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scene =
+        tracing::subscriber::with_default(Warnings(warnings.clone()), || load(name, render));
+    let warnings = warnings.lock().unwrap().clone();
+    (scene, warnings)
+}
+
+const FORWARD_PRODUCT: &str = r#"
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/beauty>]
+    }
+    def RenderVar "beauty"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }
+"#;
+
+#[test]
+fn motion_blur_is_on_unless_the_settings_disable_it() {
+    let scene = load(
+        "blur_default",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform int2 resolution = (64, 36)
+    }
+"#,
+    );
+    assert!(scene.settings.motion_blur());
+
+    // Settings only, no products: the settings prim decides.
+    let scene = load(
+        "blur_settings_only",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform bool disableMotionBlur = 1
+    }
+"#,
+    );
+    assert!(!scene.settings.motion_blur());
+
+    // The deprecated synonym means the same.
+    let scene = load(
+        "blur_synonym",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform bool instantaneousShutter = 1
+    }
+"#,
+    );
+    assert!(!scene.settings.motion_blur());
+
+    // An authored `false` is the default, not a disable.
+    let scene = load(
+        "blur_false",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform bool disableMotionBlur = 0
+        uniform bool instantaneousShutter = 0
+    }
+"#,
+    );
+    assert!(scene.settings.motion_blur());
+}
+
+#[test]
+fn the_first_product_overrides_the_settings_motion_blur() {
+    // The settings disable it, the product re-enables it.
+    let scene = load(
+        "blur_product_on",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        uniform bool disableMotionBlur = 1
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        )
+        .replace(
+            "token productName",
+            "uniform bool disableMotionBlur = 0\n        token productName",
+        ),
+    );
+    assert!(scene.settings.motion_blur());
+
+    // The product disables it, the settings say nothing.
+    let scene = load(
+        "blur_product_off",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        )
+        .replace(
+            "token productName",
+            "uniform bool disableMotionBlur = 1\n        token productName",
+        ),
+    );
+    assert!(!scene.settings.motion_blur());
+
+    // Each flag inherits on its own: a product authoring only
+    // `disableMotionBlur = false` still inherits the settings' synonym.
+    let scene = load(
+        "blur_product_inherits_synonym",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        uniform bool instantaneousShutter = 1
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        )
+        .replace(
+            "token productName",
+            "uniform bool disableMotionBlur = 0\n        token productName",
+        ),
+    );
+    assert!(!scene.settings.motion_blur());
+}
+
+#[test]
+fn the_motion_blur_flags_are_no_longer_warned_about() {
+    let (scene, warnings) = load_warnings(
+        "blur_warnings",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        uniform bool disableMotionBlur = 1
+        uniform bool instantaneousShutter = 1
+        uniform bool disableDepthOfField = 1
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        ),
+    );
+    assert!(!scene.settings.motion_blur());
+    let unhonoured: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("not honoured"))
+        .collect();
+    assert_eq!(unhonoured.len(), 1, "{warnings:?}");
+    assert!(
+        unhonoured[0].contains("disableDepthOfField = true"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|w| !w.contains("disableMotionBlur") && !w.contains("instantaneousShutter")),
+        "{warnings:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// motionvector
+// ---------------------------------------------------------------------------
+
+/// `motionvector` takes two floating-point components, through the type
+/// spellings the resolver already knows; everything else is refused and gets
+/// no channel. `int2` / `uint2` because unsigned samples cannot hold leftward
+/// or downward motion, `vector2f` because `vector` is 3-component only in
+/// USD, `float` and `color3f` because the count is wrong.
+#[test]
+fn motion_vector_vars_take_two_float_components_only() {
+    let mut vars = String::new();
+    for (name, ty) in [
+        ("f2", "float2"),
+        ("h2", "half2"),
+        ("st2", "texCoord2f"),
+        ("f1", "float"),
+        ("c3", "color3f"),
+        ("i2", "int2"),
+        ("u2", "uint2"),
+        ("v2", "vector2f"),
+    ] {
+        vars.push_str(&format!(
+            r#"
+    def RenderVar "{name}"
+    {{
+        uniform token dataType = "{ty}"
+        uniform string sourceName = "motionvector"
+    }}
+"#
+        ));
+    }
+    let scene = load(
+        "motionvector_types",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/p>]
+    }}
+    def RenderProduct "p"
+    {{
+        token productName = "p.exr"
+        rel orderedVars = [</Render/f2>, </Render/h2>, </Render/st2>, </Render/f1>,
+                           </Render/c3>, </Render/i2>, </Render/u2>, </Render/v2>]
+    }}
+{vars}"#
+        ),
+    );
+    let got: Vec<_> = scene.aovs.products[0]
+        .vars
+        .iter()
+        .map(|v| {
+            (
+                v.name.as_str(),
+                v.source,
+                v.components,
+                v.precision,
+                v.accumulation,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "f2",
+                AovSource::MotionVector,
+                2,
+                Precision::Float,
+                Accumulation::Closest
+            ),
+            (
+                "h2",
+                AovSource::MotionVector,
+                2,
+                Precision::Half,
+                Accumulation::Closest
+            ),
+            (
+                "st2",
+                AovSource::MotionVector,
+                2,
+                Precision::Float,
+                Accumulation::Closest
+            ),
+        ]
+    );
+    assert_eq!(scene.aovs.products[0].vars[0].clear, 0.0);
+}
+
+/// The other renderers' names for a motion pass are not aliases: each is
+/// refused as unknown, with no channel.
+#[test]
+fn other_renderers_motion_names_are_refused() {
+    let scene = load(
+        "motionvector_aliases",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/velocity>, </Render/Vector>, </Render/motionFore>, </Render/ok>]
+    }
+    def RenderVar "velocity"
+    {
+        uniform token dataType = "float2"
+        uniform string sourceName = "velocity"
+    }
+    def RenderVar "Vector"
+    {
+        uniform token dataType = "float2"
+    }
+    def RenderVar "motionFore"
+    {
+        uniform token dataType = "float2"
+        uniform string sourceName = "motionFore"
+    }
+    def RenderVar "ok"
+    {
+        uniform token dataType = "half2"
+        uniform string sourceName = "motionvector"
+    }
+"#,
+    );
+    assert_eq!(
+        sources(&scene.aovs, 0),
+        [("ok".to_owned(), AovSource::MotionVector)]
+    );
+}

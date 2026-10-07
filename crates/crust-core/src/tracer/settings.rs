@@ -177,6 +177,11 @@ pub struct RenderSettings {
     // `crust:lightSamplesIndirect` / `--light-samples-indirect`). At least 1.
     pub(super) light_samples: u32,
     pub(super) light_samples_indirect: u32,
+    // Whether camera rays sample the shutter at all (see `with_motion_blur`;
+    // `disableMotionBlur` / `instantaneousShutter` on the render settings).
+    // Off, every ray is traced at shutter open and moving geometry renders
+    // sharp at its authored position; its motion stays in the scene.
+    pub(super) motion_blur: bool,
 }
 /// The settings a stage that authors none renders with: 640×360 at 128 spp,
 /// paths up to 32 vertices, adaptive sampling stopping no earlier than 32
@@ -203,6 +208,7 @@ impl Default for RenderSettings {
             indirect_clamp: Some(DEFAULT_INDIRECT_CLAMP),
             light_samples: DEFAULT_LIGHT_SAMPLES,
             light_samples_indirect: DEFAULT_LIGHT_SAMPLES,
+            motion_blur: true,
         }
     }
 }
@@ -359,6 +365,24 @@ impl RenderSettings {
     /// Light samples per later surface or volume vertex (at least 1).
     pub fn light_samples_indirect(&self) -> u32 {
         self.light_samples_indirect
+    }
+
+    /// Whether moving geometry (`crust:motion:translate`) is motion blurred.
+    /// On by default. Off (`disableMotionBlur` or `instantaneousShutter` on
+    /// the render settings), every camera ray is traced at shutter open: the
+    /// beauty and every AOV show moving geometry sharp at its authored
+    /// position, no shutter sample is drawn (the other sample dimensions are
+    /// the ones a static scene draws), and the motion stays in the scene,
+    /// so the `motionvector` AOV is still produced.
+    pub fn with_motion_blur(mut self, on: bool) -> Self {
+        self.motion_blur = on;
+        self
+    }
+
+    /// Whether moving geometry is motion blurred — see
+    /// [`RenderSettings::with_motion_blur`].
+    pub fn motion_blur(&self) -> bool {
+        self.motion_blur
     }
 
     pub fn min_samples_per_pixel(&self) -> u32 {

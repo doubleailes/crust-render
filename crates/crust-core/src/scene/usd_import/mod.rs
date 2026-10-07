@@ -808,6 +808,7 @@ pub(crate) fn load_scene(
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }
+    settings = settings.with_motion_blur(products.motion_blur);
     let domes_seen_by_camera = dome_light_camera_visibility(&index);
     // The working colour space, before any colour is read: every texture
     // request and authored colour is converted into it.
