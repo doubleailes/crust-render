@@ -20,7 +20,7 @@ mod settings;
 
 use path::{K_CAMERA, K_TIME, PathContext, ray_cones_enabled, trace_path};
 
-pub use path::ray_color;
+pub use path::{ray_color, ray_color_with_light_samples};
 pub use settings::{
     DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, RenderSettings, SamplingStrategy,
 };
@@ -894,6 +894,8 @@ impl Renderer {
             strategy: self.settings.sampling_strategy,
             indirect_clamp: self.settings.indirect_clamp,
             guiding: gctx,
+            light_samples: self.settings.light_samples,
+            light_samples_indirect: self.settings.light_samples_indirect,
         };
         for sample in state.taken..target {
             let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);

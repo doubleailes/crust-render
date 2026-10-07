@@ -83,6 +83,8 @@ struct Opts {
     /// A tinted thin-walled window over the left of the frame, between the
     /// camera and the key light on one side and the scene on the other.
     window: bool,
+    /// Light samples at the (camera, later) vertices.
+    light_samples: (u32, u32),
 }
 
 impl Default for Opts {
@@ -109,6 +111,7 @@ impl Default for Opts {
             guiding: false,
             filter: PixelFilter::default(),
             window: false,
+            light_samples: (1, 1),
         }
     }
 }
@@ -229,7 +232,8 @@ fn scene(o: &Opts) -> Renderer {
         .with_indirect_clamp(o.clamp)
         .with_sampling_strategy(o.strategy)
         .with_guiding(o.guiding, 1, 0.5)
-        .with_pixel_filter(o.filter);
+        .with_pixel_filter(o.filter)
+        .with_light_samples(o.light_samples.0, o.light_samples.1);
     Renderer::new(camera, world.commit(), lights, settings)
 }
 
@@ -257,24 +261,29 @@ fn mean(plane: &[f32]) -> f64 {
 
 #[test]
 fn the_full_path_expression_is_the_beauty_bitwise() {
-    for (clamp, guiding, window, hidden) in [
-        (0.0, false, false, false),
-        (10.0, false, false, false),
-        (0.5, false, false, false),
-        (0.0, true, false, false),
-        (0.0, false, true, false),
-        (10.0, false, true, false),
+    for (clamp, guiding, window, hidden, light_samples) in [
+        (0.0, false, false, false, (1, 1)),
+        (10.0, false, false, false, (1, 1)),
+        (0.5, false, false, false, (1, 1)),
+        (0.0, true, false, false, (1, 1)),
+        (0.0, false, true, false, (1, 1)),
+        (10.0, false, true, false, (1, 1)),
         // Bounces that cross hidden lights, through the window too.
-        (0.0, false, false, true),
-        (0.5, false, false, true),
-        (0.0, true, false, true),
-        (10.0, false, true, true),
+        (0.0, false, false, true, (1, 1)),
+        (0.5, false, false, true, (1, 1)),
+        (0.0, true, false, true, (1, 1)),
+        (10.0, false, true, true, (1, 1)),
+        // Several light samples per vertex: one `L` event per sample.
+        (0.0, false, false, false, (4, 2)),
+        (10.0, false, true, true, (4, 4)),
+        (0.0, true, false, true, (2, 3)),
     ] {
         let o = Opts {
             clamp,
             guiding,
             window,
             hidden,
+            light_samples,
             ..Opts::default()
         };
         let all = lpe("C.*[LO]");
@@ -283,7 +292,8 @@ fn the_full_path_expression_is_the_beauty_bitwise() {
         let channel = film.var_channels(&beauty, &all);
         assert!(
             bits(&channel) == bits(&beauty_planes(&film, &beauty)),
-            "clamp {clamp}, guiding {guiding}, window {window}, hidden {hidden}"
+            "clamp {clamp}, guiding {guiding}, window {window}, hidden {hidden}, \
+             light samples {light_samples:?}"
         );
         // Asking for expressions changes nothing in the beauty.
         let plain = scene(&o).render_with_tiles();
@@ -319,17 +329,20 @@ fn assert_sums(parts: &[Vec<Vec<f32>>], whole: &[Vec<f32>], what: &str) {
 
 #[test]
 fn a_partition_sums_to_the_beauty() {
-    for (clamp, window, hidden) in [
-        (0.0, false, false),
-        (1.0, false, false),
-        (0.0, true, false),
-        (0.0, false, true),
-        (1.0, true, true),
+    for (clamp, window, hidden, light_samples) in [
+        (0.0, false, false, (1, 1)),
+        (1.0, false, false, (1, 1)),
+        (0.0, true, false, (1, 1)),
+        (0.0, false, true, (1, 1)),
+        (1.0, true, true, (1, 1)),
+        (0.0, false, false, (4, 2)),
+        (1.0, true, true, (3, 3)),
     ] {
         let o = Opts {
             clamp,
             window,
             hidden,
+            light_samples,
             ..Opts::default()
         };
         let vars: Vec<AovVar> = PARTITION.iter().map(|e| lpe(e)).collect();
@@ -338,7 +351,7 @@ fn a_partition_sums_to_the_beauty() {
         assert_sums(
             &parts,
             &beauty_planes(&film, &beauty),
-            &format!("clamp {clamp}, window {window}, hidden {hidden}"),
+            &format!("clamp {clamp}, window {window}, hidden {hidden}, {light_samples:?}"),
         );
         // Every part of this scene carries light somewhere.
         for (v, p) in vars.iter().zip(&parts) {

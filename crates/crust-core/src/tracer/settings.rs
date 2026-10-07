@@ -158,6 +158,12 @@ pub struct RenderSettings {
     // `DEFAULT_INDIRECT_CLAMP` unless overridden; `None` is off (an authored
     // 0). Validated at construction: `Some` is always finite and positive.
     pub(super) indirect_clamp: Option<f32>,
+    // How many light samples NEE takes at the camera vertex and at every
+    // later surface or volume vertex (see `with_light_samples`;
+    // `crust:lightSamples` / `--light-samples` and
+    // `crust:lightSamplesIndirect` / `--light-samples-indirect`). At least 1.
+    pub(super) light_samples: u32,
+    pub(super) light_samples_indirect: u32,
 }
 /// The settings a stage that authors none renders with: 640×360 at 128 spp,
 /// paths up to 32 vertices, adaptive sampling stopping no earlier than 32
@@ -182,6 +188,8 @@ impl Default for RenderSettings {
             pixel_filter: PixelFilter::default(),
             light_selection: LightSelection::default(),
             indirect_clamp: Some(DEFAULT_INDIRECT_CLAMP),
+            light_samples: 1,
+            light_samples_indirect: 1,
         }
     }
 }
@@ -310,6 +318,33 @@ impl RenderSettings {
 
     pub fn adaptive_neighbour_tolerance(&self) -> f32 {
         self.adaptive_neighbour_tolerance
+    }
+
+    /// How many light samples next-event estimation takes per vertex:
+    /// `camera` at the first vertex of each path, `indirect` at every later
+    /// surface or volume vertex. Each is clamped to at least 1, and 1 and 1
+    /// (the default) is the one-sample renderer, bit for bit.
+    ///
+    /// The samples at one vertex stratify the light pick, so a count of N
+    /// spreads over the lights close to N times each one's selection
+    /// probability, and the bounce side weighs a light it hits against N
+    /// times the light density NEE used there (multi-sample MIS). Direct-light
+    /// variance falls about as 1/N; the cost is N shadow rays per vertex, so
+    /// `indirect` multiplies along the whole path while `camera` is paid once.
+    pub fn with_light_samples(mut self, camera: u32, indirect: u32) -> Self {
+        self.light_samples = camera.max(1);
+        self.light_samples_indirect = indirect.max(1);
+        self
+    }
+
+    /// Light samples per camera vertex (at least 1).
+    pub fn light_samples(&self) -> u32 {
+        self.light_samples
+    }
+
+    /// Light samples per later surface or volume vertex (at least 1).
+    pub fn light_samples_indirect(&self) -> u32 {
+        self.light_samples_indirect
     }
 
     pub fn min_samples_per_pixel(&self) -> u32 {

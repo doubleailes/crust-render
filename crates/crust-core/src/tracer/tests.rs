@@ -384,3 +384,87 @@ fn a_re_hit_is_the_same_primitive_from_the_same_side_within_the_window() {
         );
     }
 }
+
+/// The first light sample at a vertex draws exactly what the renderer drew
+/// before sample counts existed: the vertex's own `K_NEE` draw, with the
+/// pick coordinate untouched. Every later sample draws from a sub-domain of
+/// its own.
+#[test]
+fn one_light_sample_draws_as_before() {
+    use super::path::{K_NEE_TEST, nee_sampler, stratified_pick};
+    use crate::PathSampler;
+    for (x, y, index) in [(0, 0, 0), (3, 7, 5), (640, 359, 1023)] {
+        let v = PathSampler::new(x, y, 0, index).new_domain(1).new_domain(2);
+        let before = v.new_domain(K_NEE_TEST).draw_sample_f32::<4>();
+        let now = nee_sampler(v, 0)
+            .new_domain(K_NEE_TEST)
+            .draw_sample_f32::<4>();
+        assert_eq!(before.map(f32::to_bits), now.map(f32::to_bits));
+        assert_eq!(
+            stratified_pick(before[0], 1, 0).to_bits(),
+            before[0].to_bits()
+        );
+        // With four samples, each one's draw is its own and its pick lands
+        // in its own quarter.
+        let mut draws = Vec::new();
+        for i in 0..4 {
+            let d = nee_sampler(v, i)
+                .new_domain(K_NEE_TEST)
+                .draw_sample_f32::<4>();
+            let pick = stratified_pick(d[0], 4, i);
+            assert!(
+                pick >= i as f32 / 4.0 && pick < (i + 1) as f32 / 4.0,
+                "sample {i} picks at {pick}"
+            );
+            draws.push(d.map(f32::to_bits));
+        }
+        draws.sort();
+        draws.dedup();
+        assert_eq!(draws.len(), 4, "the four samples share a draw");
+    }
+}
+
+/// Stratified picks (design D1): with four samples over lights selected
+/// with probabilities 0.5, 0.25 and 0.25, every vertex samples the first
+/// light twice and each other light once — not a binomial count.
+#[test]
+fn stratified_picks_sample_each_light_count_times_its_probability() {
+    use super::path::stratified_pick;
+    use crate::{AreaLight, Emissive, LightList, LightSelection, RectShape};
+    use glam::Vec3A;
+    use std::sync::Arc;
+    let mut lights = LightList::new();
+    // Power selection: a uniform half plus a half by flux, so fluxes of
+    // 4 : 1 : 1 give 1/6 + 1/3, 1/6 + 1/12, 1/6 + 1/12.
+    for (id, radiance) in [(0u32, 4.0f32), (1, 1.0), (2, 1.0)] {
+        let rect = RectShape::new(
+            Vec3A::new(-0.5, 0.0, -0.5),
+            Vec3A::new(1.0, 0.0, 0.0),
+            Vec3A::new(0.0, 0.0, 1.0),
+            -Vec3A::Y,
+        );
+        lights.add(AreaLight::new(
+            rect,
+            Arc::new(Emissive::light(Vec3A::splat(radiance), None)),
+            id,
+        ));
+    }
+    lights.select_by(LightSelection::Power);
+    for (i, want) in [0.5f32, 0.25, 0.25].into_iter().enumerate() {
+        assert!(
+            (lights.pmf(i) - want).abs() < 1e-6,
+            "light {i}: pmf {} vs {want}",
+            lights.pmf(i)
+        );
+    }
+    let mut rng = openqmc::pcg::Rng::new(5);
+    for _ in 0..1000 {
+        let mut counts = [0usize; 3];
+        for i in 0..4 {
+            let u = rng.next_f32();
+            let (index, _) = lights.pick_index(stratified_pick(u, 4, i)).unwrap();
+            counts[index] += 1;
+        }
+        assert_eq!(counts, [2, 1, 1]);
+    }
+}

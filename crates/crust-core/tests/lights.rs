@@ -1259,7 +1259,9 @@ fn power_selection_picks_by_power_defensively() {
     assert_eq!(l.pick(0.0).unwrap().0.geom_id(), Some(10));
     // The strategy's density is the product, on both MIS sides.
     let two = PdfSolidAngle::new(2.0).unwrap();
-    assert_eq!(l.density(two, l.pmf(2)).get(), 2.0 * l.pmf(2));
+    assert_eq!(l.density(two, l.pmf(2), 1).get(), 2.0 * l.pmf(2));
+    // With several light samples at the vertex, the count scales it.
+    assert_eq!(l.density(two, l.pmf(2), 4).get(), 2.0 * l.pmf(2) * 4.0);
 }
 
 /// Under uniform selection the density is the division it always was, so
@@ -1273,7 +1275,7 @@ fn uniform_density_is_the_historical_division() {
     }
     let x = 0.7f32;
     assert_eq!(
-        l.density(PdfSolidAngle::new(x).unwrap(), l.pmf(0)).get(),
+        l.density(PdfSolidAngle::new(x).unwrap(), l.pmf(0), 1).get(),
         x / 3.0
     );
 }

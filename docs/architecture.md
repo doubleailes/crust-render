@@ -140,6 +140,11 @@ other. The pairs:
   (`bounce_emission_weight`, `escaped_emission`), and both go through
   `SamplingStrategy` and `LightList::density` / the `*_at` lookups. Surface
   NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`, guided mixture pdf ↔ NEE.
+  `LightList::density` takes the vertex's light sample count (`crust:lightSamples`
+  / `crust:lightSamplesIndirect`): NEE both weights with and divides by
+  `count · density` (the division is the average over the samples — do not
+  divide by the count again), and the bounce side weights with the count
+  `PrevVertex` carries from the vertex it left.
 - **Hidden light sources.** A source the camera does not see is invisible to
   shadow rays (`light_ray_mask`) *and* crossed by bounce rays, which collect its
   emission and continue (`World::is_transparent_emitter`, `pass_cutouts`,

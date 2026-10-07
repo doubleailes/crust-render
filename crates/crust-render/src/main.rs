@@ -154,6 +154,17 @@ struct RenderArgs {
     /// scene's `crust:lightSelection` when set.
     #[arg(long, value_parser = choices(LightSelection::CHOICES))]
     light_selection: Option<LightSelection>,
+    /// Light samples (shadow rays) per camera vertex: N stratified picks
+    /// over the lights, MIS-combined with the bounce. Lowers direct-light
+    /// noise about as 1/N at N times the shadow rays there. Overrides the
+    /// scene's `crust:lightSamples` (default 1).
+    #[arg(long, value_name = "N", value_parser = parse_count)]
+    light_samples: Option<u32>,
+    /// Light samples per later surface or volume vertex, paid at every
+    /// bounce of the path. Overrides the scene's
+    /// `crust:lightSamplesIndirect` (default 1).
+    #[arg(long, value_name = "M", value_parser = parse_count)]
+    light_samples_indirect: Option<u32>,
     /// Pixel reconstruction filter. Overrides the scene's
     /// `crust:pixelFilter` when set.
     #[arg(long, value_parser = choices(PixelFilter::CHOICES))]
@@ -256,6 +267,19 @@ fn parse_clamp(s: &str) -> std::result::Result<f32, String> {
         Err(format!(
             "{s} is not a finite, non-negative limit (0 turns the clamp off)"
         ))
+    }
+}
+
+/// `--light-samples` / `--light-samples-indirect`'s parser: a count of at
+/// least one. Zero would mean no light sampling at all, which is
+/// `--strategy bsdf`'s job; the engine clamps it up silently, so it is
+/// refused here as a usage error instead.
+fn parse_count(s: &str) -> std::result::Result<u32, String> {
+    let n: u32 = s.parse().map_err(|e| format!("{e}"))?;
+    if n >= 1 {
+        Ok(n)
+    } else {
+        Err(format!("{s} is not a count of at least 1"))
     }
 }
 
@@ -483,6 +507,19 @@ fn apply_overrides(cli: &RenderArgs, settings: RenderSettings) -> RenderSettings
     if let Some(limit) = cli.indirect_clamp {
         debug!("--indirect-clamp {limit} overrides the scene's crust:indirectClamp");
         settings = settings.with_indirect_clamp(limit);
+    }
+    if cli.light_samples.is_some() || cli.light_samples_indirect.is_some() {
+        let camera = cli.light_samples.unwrap_or(settings.light_samples());
+        let indirect = cli
+            .light_samples_indirect
+            .unwrap_or(settings.light_samples_indirect());
+        if let Some(n) = cli.light_samples {
+            debug!("--light-samples {n} overrides the scene's crust:lightSamples");
+        }
+        if let Some(m) = cli.light_samples_indirect {
+            debug!("--light-samples-indirect {m} overrides the scene's crust:lightSamplesIndirect");
+        }
+        settings = settings.with_light_samples(camera, indirect);
     }
     settings
 }
@@ -927,6 +964,35 @@ mod tests {
         assert_eq!(base.with_indirect_clamp(0.0).indirect_clamp(), None);
         assert_eq!(base.with_indirect_clamp(-3.0).indirect_clamp(), None);
         assert_eq!(base.with_indirect_clamp(f32::NAN).indirect_clamp(), None);
+    }
+
+    /// The light sample counts parse as counts of at least one, override
+    /// the scene one at a time, and leave the scene's value alone when
+    /// absent; a zero is a usage error, not a silent clamp.
+    #[test]
+    fn cli_light_samples_are_counts_of_at_least_one() {
+        let cli = render(["--light-samples", "4", "--light-samples-indirect", "2"]).unwrap();
+        assert_eq!(cli.light_samples, Some(4));
+        assert_eq!(cli.light_samples_indirect, Some(2));
+        assert!(render(["--light-samples", "0"]).is_err());
+        assert!(render(["--light-samples-indirect", "0"]).is_err());
+        assert!(render(["--light-samples", "-1"]).is_err());
+        let bare = render([]).unwrap();
+        assert!(bare.light_samples.is_none() && bare.light_samples_indirect.is_none());
+
+        let (_, base) = crust_core::get_settings();
+        assert_eq!(
+            (base.light_samples(), base.light_samples_indirect()),
+            (1, 1)
+        );
+        let scene = base.with_light_samples(3, 5);
+        let s = apply_overrides(&render(["--light-samples", "4"]).unwrap(), scene);
+        assert_eq!((s.light_samples(), s.light_samples_indirect()), (4, 5));
+        let s = apply_overrides(&render(["--light-samples-indirect", "2"]).unwrap(), scene);
+        assert_eq!((s.light_samples(), s.light_samples_indirect()), (3, 2));
+        let s = apply_overrides(&bare, scene);
+        assert_eq!((s.light_samples(), s.light_samples_indirect()), (3, 5));
+        assert_eq!(base.with_light_samples(0, 0).light_samples(), 1);
     }
 
     #[test]

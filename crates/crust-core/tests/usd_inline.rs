@@ -121,6 +121,8 @@ def Scope "Render"
         token crust:samplingStrategy = "balance"
         token crust:pixelFilter = "gaussian"
         float crust:pixelFilterRadius = 2.5
+        int crust:lightSamples = 4
+        int crust:lightSamplesIndirect = 2
     }
 }
 "#;
@@ -448,6 +450,32 @@ fn render_settings_are_read_from_the_stage() {
     );
     assert_eq!(scene.settings.pixel_filter().name(), "gaussian");
     assert_eq!(scene.settings.pixel_filter().radius(), 2.5);
+    assert_eq!(scene.settings.light_samples(), 4);
+    assert_eq!(scene.settings.light_samples_indirect(), 2);
+}
+
+/// Light samples per vertex default to one, and a count below one is
+/// refused (warned about and left at one) rather than read as "no NEE".
+#[test]
+fn light_sample_counts_default_to_one_and_refuse_zero() {
+    let scene = load_with_settings("light_samples_default", "", "");
+    assert_eq!(scene.settings.light_samples(), 1);
+    assert_eq!(scene.settings.light_samples_indirect(), 1);
+    let scene = load_with_settings(
+        "light_samples_zero",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int crust:lightSamples = 0
+        int crust:lightSamplesIndirect = -3
+    }
+}"#,
+    );
+    assert_eq!(scene.settings.light_samples(), 1);
+    assert_eq!(scene.settings.light_samples_indirect(), 1);
 }
 
 #[test]
