@@ -3,8 +3,9 @@
 //!
 //! Channel names follow OpenEXR's `<layer>.<component>` convention and the
 //! ASWF Color Interop rule that only colour gets `R/G/B`: colour vars are
-//! `<layer>.R/.G/.B[/.A]`, vectors `<layer>.X/.Y/.Z`, UVs `<layer>.U/.V`, and
-//! a scalar is one channel named after its layer. The product's first beauty
+//! `<layer>.R/.G/.B[/.A]`, vectors `<layer>.X/.Y/.Z`, UVs `<layer>.U/.V`,
+//! motion vectors `<layer>.u/.v` (lowercase, Nuke's `forward.u/.v`), and a
+//! scalar is one channel named after its layer. The product's first beauty
 //! var is written bare (`R/G/B[/A]`) so every viewer shows it as the image.
 //!
 //! Scanline, not the `exr` crate's default tiling: tinyexr crashes on crust's
@@ -38,6 +39,7 @@ pub fn channel_names(var: &AovVar, bare: bool) -> Vec<String> {
         ChannelKind::Color => &["R", "G", "B"],
         ChannelKind::Vector => &["X", "Y", "Z"],
         ChannelKind::Uv => &["U", "V"],
+        ChannelKind::Motion => &["u", "v"],
         ChannelKind::Scalar => {
             return vec![if layer.is_empty() {
                 var.name.clone()
@@ -278,6 +280,24 @@ mod tests {
                 "diffuse.G",
                 "diffuse.B"
             ]
+        );
+    }
+
+    /// Motion vectors take Nuke's lowercase `u` / `v`, so a var named
+    /// `forward` lands on Nuke's built-in `forward` layer; the UV source
+    /// keeps its `U` / `V`.
+    #[test]
+    fn motion_vectors_write_lowercase_u_v() {
+        let p = product(vec![
+            var("forward", AovSource::MotionVector),
+            var("st", AovSource::St),
+        ]);
+        assert_eq!(names(&p), ["forward.u", "forward.v", "st.U", "st.V"]);
+        let mut prefixed = var("mv", AovSource::MotionVector);
+        prefixed.channel_prefix = Some("backward".into());
+        assert_eq!(
+            names(&product(vec![prefixed])),
+            ["backward.u", "backward.v"]
         );
     }
 

@@ -46,6 +46,9 @@ crust-jit = { path = "../crust-jit", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
+# `std` for `tracing::subscriber::with_default`, which the import tests use
+# to check which warnings a stage's render settings produce.
+tracing = { workspace = true, features = ["std"] }
 
 [[bench]]
 name = "integrator"

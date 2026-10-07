@@ -183,7 +183,9 @@ AOVs. Crust should combine:
 - Multiple cameras or resolutions in one render.
 - `dataWindowNDC` crop and overscan, `pixelAspectRatio`,
   `aspectRatioConformPolicy`.
-- `disableMotionBlur` / `disableDepthOfField`.
+- `disableMotionBlur` / `disableDepthOfField`. (`disableMotionBlur` and its
+  synonym `instantaneousShutter` were honoured later, by
+  `add-motion-vector-aov`; see "Motion vector AOV" below.)
 - `includedPurposes` / `materialBindingPurposes`.
 
 These are UsdRender settings worth a separate change ("camera and settings
@@ -244,8 +246,8 @@ time-invariant fixture, so the two cannot drift silently.
   use a string.
 - Accept `driver:parameters:aov:name` authored as `string` or `token`.
 - Treat `instantaneousShutter` as a synonym of `disableMotionBlur` (outside
-  this change's scope, but recorded so it is not re-derived). Pixar's own
-  `spec.cpp` mis-reads it.
+  this change's scope, but recorded so it is not re-derived; done by
+  `add-motion-vector-aov`). Pixar's own `spec.cpp` mis-reads it.
 - Accept Houdini's `materialBindingPurposes = ["full","allPurpose"]`, which
   lies outside `allowedTokens`.
 
@@ -335,6 +337,7 @@ are aliases, matched case-sensitively, as Arnold and RenderMan do.
 | `sampleCount` | `__sampleCount` | float | sum (unfiltered) | Samples taken by the pixel. Shows adaptive sampling. |
 | `variance` | `crust:variance` | float | per pixel | Variance of the pixel's luminance mean, the quantity adaptive sampling stops on. |
 | `albedo` | `diffuse_albedo`*, `DiffuseAlbedoSD` | color3f | filtered | Phase 2. Albedo at the first non-delta hit (D12). |
+| `motionvector` | — | float2 / half2 | closest | `add-motion-vector-aov`. The first hit's forward 2D screen-space displacement over the shutter, in pixels, `u` right and `v` up (Arnold's raw `motionvector`, Nuke's `forward.u/.v`). Channels `u`, `v` lowercase. Clear `0`. See "Motion vector AOV" below. |
 | `primId` | `id`, `ID`, `Object Index` | int | closest | Phase 3. Stable per-prim integer: hash of the prim path (D14). Clear `-1` (written as u32 `0xFFFFFFFF`). |
 | `instanceId` | `id2` | int | closest | Phase 3. Instance index within its instancer, else `-1`. |
 | `elementId` | `faceindex` | int | closest | Phase 3. *Authored* face index (pre-triangulation), else `-1`. |
@@ -843,8 +846,9 @@ sample.
 ## Follow-ups
 
 - Camera and settings conformance: `dataWindowNDC`, `pixelAspectRatio`,
-  `aspectRatioConformPolicy`, `disableMotionBlur`/`instantaneousShutter`,
-  `disableDepthOfField`, `includedPurposes`, `materialBindingPurposes`.
+  `aspectRatioConformPolicy`, `disableDepthOfField`, `includedPurposes`,
+  `materialBindingPurposes`. (`disableMotionBlur` / `instantaneousShutter`
+  are done: "Motion vector AOV" below.)
 - One render per (camera, resolution) group.
 - `deepRaster` products. Crust's FIS film would need per-sample depth lists.
 - Volume alpha and `C<V.>` volume AOVs with a `ZBack`.
@@ -1030,6 +1034,111 @@ the points to keep here:
 - **A raw and a plain slot of one expression share its DFA bit**; nothing
   is routed twice. The filter is computed only when a raw or
   `diffuse_albedo` AOV asks for it.
+
+## Motion vector AOV (`add-motion-vector-aov`)
+
+`motionvector`: the pass VectorBlur2 blurs a sharp beauty along, and the
+`disableMotionBlur` that makes the beauty sharp. The change's `design.md`
+has the full reasoning (D1–D7); the points to keep here:
+
+- **Definition.** The first hit's *forward* 2D displacement from shutter
+  open to shutter close, in pixels of the rendered image, `u` right and `v`
+  up (Nuke's conventions, Arnold's raw `motionvector`), measured through the
+  pinhole at the lens centre (depth of field ignored on purpose: the vector
+  describes the in-focus image). Per-shutter units: the authored
+  `crust:motion:translate` *is* the displacement over the shutter;
+  `shutter:open/close` are still not read. Closest by default, clear `0`,
+  two floating-point components only (`float2`, `half2`, `texCoord2f`;
+  `int2`/`uint2` refused through the UINT-is-`sampleCount`-only rule,
+  `vector2f` because `vector` is 3-component in USD). Channels are
+  lowercase `u`/`v` (`ChannelKind::Motion`), so a var named `forward` lands
+  on Nuke's built-in `forward` layer; the UV source keeps `U`/`V`.
+- **No aliases.** `velocity`, `Vector`, `motionFore` … each encode their
+  vector differently (Cycles packs four components; V-Ray and RenderMan
+  have their own conventions). The D5 trap again: an alias would be a
+  plausible but wrong channel. Each can be added later as its own row.
+- **The motion is derived in `WorldBuilder`, not stated by the importer**
+  (`rt_world.rs`, `MotionRecord::of` → `World::motion`). Every
+  `Geometry::Instance` attached or set with `InstanceHitId::Own` and an end
+  transform whose linear part equals the start's records `end.translation −
+  start.translation`, in a sparse table sorted by `geom_id` (16 bytes per
+  *moving* geometry; a field on every `SideTables` would charge every static
+  id). The record is read off the very transform the kernel interpolates, so
+  the vector and the blur cannot disagree, and the importer's cases fall out
+  for free: a non-invertible mesh drops its motion (baked, no end transform,
+  no record), a prototype has `transform_end: None`. An end transform with a
+  different linear part, a forwarded label, or an instance over a scene that
+  itself moves is `Unresolved`: vector 0, counted, one summarised `WARN` at
+  commit. Nothing produces those today; the guard is for the next producer.
+  Rejected: storing both endpoint transforms and evaluating `(E − L)·M(t)⁻¹·P`
+  for rotation too — 96 bytes per moving geometry and an inverse per sample
+  for motion nothing produces.
+- **Plumbing.** `FirstHit::Surface` carries `motion`, filled at vertex 0 and
+  in `first_wall` (whose `ThinWalls::first` now keeps the wall's `geom_id`),
+  looked up only when the layout has a `motionvector` slot
+  (`AovLayout::motion` → `PathScratch::motion` → `motion_on`, a constant
+  `false` in the beauty-only instantiation). `SampleExtras` carries the
+  sample's shutter `time`. `CameraFrame` gained the image plane
+  (`lower_left − origin`, `horizontal`, `vertical`) and the resolution, and
+  `proj`, the pinhole inverse of `Camera::get_ray` at the lens centre
+  (pinned to 1e-5 over two cameras, 25 directions and 5 depths each).
+- **The value: rebase, clip, project** (`aov::motion_vector`). `P0 = p −
+  time·v` (exact: the kernel moves every point by `v` at constant speed), `P1
+  = P0 + v`, the segment clipped to camera depth `≥ 1e-3·max(z0, z1)`, both
+  ends projected, the difference scaled by `(width, height)`. The rebase
+  makes the value independent of the sample's shutter time, hence of
+  whether the beauty is blurred; the clip handles a path through the camera
+  (no near plane; a projection at or behind depth 0 blows up or flips
+  sign) and depends only on the path, never on `time`, so it keeps that
+  independence. `max(z0, z1) > 0` always holds because the visible hit lies
+  on the segment in front of the camera, so at most one end is clipped and
+  the result is finite, pointing the way the visible part moves. Rejected:
+  the clear value for such points (a fast object moving towards the camera
+  would lose its blur where it is most visible) and a fixed epsilon (wrong
+  at either end of scene scale).
+- **Perspective, not interpolation.** Equal world displacements cover more
+  pixels up close, so the vector varies across an object even though `v` is
+  constant: the end-to-end test's receding floor shortens towards the
+  horizon, and two renders of a sphere (blur on, blur off) agree on the
+  card at constant depth to rounding but on the sphere only to a fraction of
+  a pixel, because their closest samples hit at different depths. A straight
+  3D path still projects to a straight 2D segment — the one VectorBlur blurs
+  along; only the speed along it is non-uniform.
+- **`disableMotionBlur` / `instantaneousShutter`** (`RenderSettings::
+  motion_blur`, resolved in `import_render_products` like the camera and
+  resolution: the first product's value, else the settings prim's, each flag
+  on its own; either `true` is off) gate only the shutter draw
+  (`Renderer::shutter`, `world.has_motion() && settings.motion_blur`, decided
+  once per pass into `PassConfig` so the beauty-only hot path reads one flag
+  as before: callgrind on cornellbox at 2 spp counts the same instructions
+  in `advance_pixel::<false, false>` with and without this change), never
+  the records. Off, no `K_TIME` domain is derived, every ray has `time = 0`
+  and the beauty is sharp at the authored positions, bit-identical between
+  the two spellings. The two left `warn_unhonoured`. No CLI flag, no
+  environment switch: a scene setting, not an optimisation to A/B.
+- **Verified in numbers, not by eye.** `crates/crust-render/tests/
+  motion_vector.rs` renders `samples/motionvector.usda` through the CLI and
+  checks the written `forward.u/.v` against an independent pinhole projection
+  of the product's own `P` channel: the right-moving sphere's centre pixel
+  within 0.01 px with `v ≈ 0`, the rising sphere's `v > 0` (up is up in the
+  file, not in a buffer), the floor's near vectors longer than its far ones,
+  the sky `(0, 0)`, every pixel on the row through the sphere either the
+  background's `(0, 0)` or its own hit's prediction (closest never blends),
+  and the blurred render's vectors equal to its own hits' predictions (the
+  rebase, end to end). The zero-AOV render is unchanged: `AOV = false`
+  instantiation pinned by callgrind on cornellbox, tiles ↔ scanlines and
+  the beauty with and without the var bit-identical
+  (`crates/crust-core/tests/motion_vector.rs`).
+- **Known gaps.** No 3D velocity, no backward or centred vector, no
+  per-frame units, no camera, rotation or deformation motion, no Arnold
+  normalised encoding; an instancer prototype authoring
+  `crust:motion:translate` neither blurs nor gets a vector (consistent with
+  the beauty; `usd-scene-import` known gaps). Open: whether 3-component
+  `dataType`s (`color3f`, `vector3f`) should be accepted with a zero third
+  channel for Arnold-authored RenderVars that ask for RGB — a later
+  relaxation of the type check if real files need it. The VectorBlur2
+  settings the user doc gives await a check in Nuke by a person (the
+  change's task 6.4).
 - `diffuse_albedo` stopped being an alias of `albedo`.
 
 ## Known gaps

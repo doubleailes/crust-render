@@ -410,6 +410,9 @@ pub(crate) struct PathScratch {
     /// The light path expressions and albedo the render asks for, set on
     /// the scratch of an AOV pass only.
     pub(super) route_ctx: Option<std::sync::Arc<RouteCtx>>,
+    /// Whether a var asks for the motion vector, so the first hit's motion
+    /// is looked up at all. Set on the scratch of an AOV pass only.
+    pub(super) motion: bool,
     /// The path's routing record and per-sample results ([`Route`]).
     pub(super) route: Route,
     /// Per-lobe shares — NEE's toward the light, the bounce's toward the
@@ -441,8 +444,9 @@ struct ThinWalls {
     /// without its straight transmission, which the passes carry instead.
     reduced: bool,
     /// The first thin wall passed, as the camera's first hit when this is
-    /// the camera's segment: its `t` and the hit there.
-    first: Option<(f32, HitRecord)>,
+    /// the camera's segment: its `t`, the hit there and its `geom_id` (for
+    /// the wall's motion, read in the AOV instantiation only).
+    first: Option<(f32, HitRecord, u32)>,
     /// The hidden light sources the segment crossed, in order. Written by
     /// every [`pass_cutouts`], in a world with any.
     crossed: Vec<Crossing>,
@@ -508,6 +512,7 @@ impl PathScratch {
             sss_exit: PendingExit::default(),
             first: FirstHit::Escaped,
             route_ctx: None,
+            motion: false,
             route: Route::default(),
             nee_split: LobeSplit::default(),
             bounce_split: LobeSplit::default(),
@@ -1607,7 +1612,7 @@ fn pass_walls<'w>(
             }
             thin.passes.push((h.rec.t, p / q));
             if thin.first.is_none() {
-                thin.first = Some((h.rec.t, h.rec));
+                thin.first = Some((h.rec.t, h.rec, h.geom_id));
             }
         } else {
             if opacity >= 1.0 {
@@ -1639,13 +1644,25 @@ fn pass_walls<'w>(
 /// the wall. A thin wall is glass, not a hole, so the data AOVs keep seeing
 /// it where it was a vertex before it became a pass-through — only a
 /// cutout is not a hit. The normal is the geometric one, facing the ray:
-/// the wall was never shaded.
-fn first_wall(thin: &ThinWalls, walls: bool, t: f32) -> Option<FirstHit> {
-    let (t_wall, rec) = thin.first.filter(|_| walls)?;
-    (t_wall < t).then_some(FirstHit::Surface {
+/// the wall was never shaded. Its motion is looked up only when a var asks
+/// for the motion vector (`motion_on`).
+fn first_wall(
+    thin: &ThinWalls,
+    walls: bool,
+    t: f32,
+    world: &World,
+    motion_on: bool,
+) -> Option<FirstHit> {
+    let (t_wall, rec, geom_id) = thin.first.filter(|_| walls)?;
+    (t_wall < t).then(|| FirstHit::Surface {
         p: rec.p,
         n: rec.normal,
         uv: rec.uv,
+        motion: if motion_on {
+            world.motion(geom_id)
+        } else {
+            Vec3A::ZERO
+        },
     })
 }
 
@@ -2385,6 +2402,10 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
     // cornellbox, which never walks, 1% of its instructions.
     let mut sss_pending = false;
     let sss_exit = &mut scratch.sss_exit;
+    // Whether the first hit's motion is looked up: only when a var asks for
+    // the motion vector, so other AOV renders do not pay for it. Constant
+    // `false` in the beauty-only instantiation.
+    let motion_on = AOV && scratch.motion;
     let first = &mut scratch.first;
     if AOV {
         *first = FirstHit::Escaped;
@@ -2629,7 +2650,8 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 if AOV && records.is_empty() {
-                    *first = first_wall(thin, walls, t).unwrap_or(FirstHit::Volume { p });
+                    *first = first_wall(thin, walls, t, world, motion_on)
+                        .unwrap_or(FirstHit::Volume { p });
                 }
                 let wi = ray.direction().normalize();
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
@@ -2740,7 +2762,8 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
             if AOV && records.is_empty() {
-                *first = first_wall(thin, walls, t_med).unwrap_or(FirstHit::Volume { p: pos });
+                *first = first_wall(thin, walls, t_med, world, motion_on)
+                    .unwrap_or(FirstHit::Volume { p: pos });
             }
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
             let dir = sample_henyey_greenstein(
@@ -2850,7 +2873,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
             stats.ended_escaped += 1;
             if AOV
                 && records.is_empty()
-                && let Some(wall) = first_wall(thin, walls, f32::INFINITY)
+                && let Some(wall) = first_wall(thin, walls, f32::INFINITY, world, motion_on)
             {
                 *first = wall;
             }
@@ -2957,11 +2980,17 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
             route.diffuse_filter = sp.diffuse_filter();
         }
         if AOV && records.is_empty() {
-            *first = first_wall(thin, walls, rec.t).unwrap_or(FirstHit::Surface {
-                p: rec.p,
-                n: sp.normal(),
-                uv: rec.uv,
-            });
+            *first =
+                first_wall(thin, walls, rec.t, world, motion_on).unwrap_or(FirstHit::Surface {
+                    p: rec.p,
+                    n: sp.normal(),
+                    uv: rec.uv,
+                    motion: if motion_on {
+                        world.motion(hit.geom_id)
+                    } else {
+                        Vec3A::ZERO
+                    },
+                });
         }
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;

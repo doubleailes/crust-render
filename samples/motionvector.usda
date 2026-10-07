@@ -1,0 +1,143 @@
+#usda 1.0
+(
+    doc = """Motion vectors for compositing: a sharp beauty plus Nuke's `forward`
+layer. The render settings author disableMotionBlur, so every camera ray is
+traced at shutter open and the moving prims render sharp at their authored
+positions, while the `forward` RenderVar (sourceName "motionvector") writes
+where each first hit moves on screen over the shutter, in pixels, +u right
+and +v up — what VectorBlur2 blurs the beauty along.
+
+Four moving prims: a sphere moving along the camera's right axis (+u only),
+one moving up (+v only), a card facing the camera moving diagonally (the same
+vector on every pixel of it: constant depth), and the floor, receding from
+the camera, moving sideways (longer vectors near the camera than far away:
+perspective). The dome is the background, where the vector is (0, 0).
+
+    cargo run --release -- render -i samples/motionvector.usda
+
+writes renders/motionvector.exr with R, G, B, A, P.X/Y/Z, forward.u and
+forward.v (+ a .png of the beauty). `-o x.exr` replaces that path. Set
+disableMotionBlur = 0 to see the blur the vectors describe; the vectors do
+not change."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Moves 1.2 to the right over the shutter: forward.u > 0, forward.v = 0
+    # at its centre (it sits at the camera's height).
+    def Sphere "Right"
+    {
+        double radius = 0.6
+        float3 crust:motion:translate = (1.2, 0, 0)
+        double3 xformOp:translate = (-1.5, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Rises 1.0 over the shutter: forward.v > 0.
+    def Sphere "Up"
+    {
+        double radius = 0.6
+        float3 crust:motion:translate = (0, 1, 0)
+        double3 xformOp:translate = (1.5, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # A square facing the camera, 10 units away, moving diagonally. Every
+    # point of it is at the same depth, so every pixel of it holds the same
+    # vector — with motion blur on or off.
+    def Mesh "Card"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+        float3 crust:motion:translate = (0.5, 0.3, 0)
+        double3 xformOp:translate = (0, 2.1, -2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # The floor recedes from z = 3 (near) to z = -9 (far) and slides 0.8 to
+    # the right: its vectors shorten towards the horizon.
+    def Mesh "Floor"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, 0, -9), (6, 0, -9), (6, 0, 3), (-6, 0, 3)]
+        float3 crust:motion:translate = (0.8, 0, 0)
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.4, 0.5, 0.7)
+    }
+
+    def RectLight "KeyLight"
+    {
+        float inputs:width = 3
+        float inputs:height = 2
+        color3f inputs:color = (6, 6, 6)
+        double3 xformOp:translate = (0, 5, 4)
+        float xformOp:rotateX = -60
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (128, 72)
+        uniform bool disableMotionBlur = 1
+        rel products = [</Render/Products/comp>]
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 4
+        int crust:minSamplesPerPixel = 16
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "comp"
+        {
+            token productName = "renders/motionvector.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/C>,
+                </Render/Products/Vars/P>,
+                </Render/Products/Vars/forward>,
+            ]
+        }
+
+        def Scope "Vars"
+        {
+            def RenderVar "C"
+            {
+                uniform token dataType = "color4f"
+                uniform string sourceName = "color"
+            }
+
+            def RenderVar "P"
+            {
+                uniform token dataType = "point3f"
+                uniform string sourceName = "P"
+            }
+
+            # Nuke's built-in `forward` layer: forward.u, forward.v.
+            def RenderVar "forward"
+            {
+                uniform token dataType = "float2"
+                uniform string sourceName = "motionvector"
+            }
+        }
+    }
+}

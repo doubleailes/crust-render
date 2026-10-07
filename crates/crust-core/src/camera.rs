@@ -80,15 +80,21 @@ impl Camera {
         self.origin
     }
 
-    /// The camera's frame at shutter open, for the camera-space AOVs:
+    /// The camera's frame at shutter open, for the camera-space AOVs —
     /// right, up, and backward (the view direction is `−w`, as in a USD
-    /// camera). `get_ray` builds `v = w × u`, so `w = u × v`.
-    pub(crate) fn frame(&self) -> crate::aov::CameraFrame {
+    /// camera); `get_ray` builds `v = w × u`, so `w = u × v` — and its image
+    /// plane and resolution, for the screen-space ones.
+    pub(crate) fn frame(&self, width: usize, height: usize) -> crate::aov::CameraFrame {
         crate::aov::CameraFrame {
             origin: self.origin,
             u: self.u,
             v: self.v,
             w: self.u.cross(self.v),
+            lower_left: self.lower_left_corner - self.origin,
+            horizontal: self.horizontal,
+            vertical: self.vertical,
+            width: width as f32,
+            height: height as f32,
         }
     }
 

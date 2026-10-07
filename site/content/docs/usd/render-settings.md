@@ -65,7 +65,34 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 | `int2 resolution` | `(640, 360)` | image width and height in pixels. The first render product's own `resolution` overrides it. |
 | `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
+| `bool disableMotionBlur` | `false` | render moving geometry sharp, at its shutter-open position. The first render product's own value overrides it. See [below](#disablemotionblur). |
+| `bool instantaneousShutter` | `false` | the same switch under its older `UsdRender` name. Either one set to `true` turns the blur off. |
 | `token renderingColorSpace` | `lin_rec709` | the working colour space. See [below](#renderingcolorspace). |
+
+### disableMotionBlur
+
+`uniform bool disableMotionBlur = 1`
+
+Turns off motion blur for the whole render. Every camera ray is traced at shutter open, so
+geometry that authors
+[`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) renders sharp
+at its authored position, in the beauty and in every AOV. The motion itself stays in the
+scene: the [`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, so
+the blur can be added in compositing from a sharp beauty.
+
+`instantaneousShutter` is the attribute's older name in `UsdRender`, and means the same.
+Either one set to `true` turns the blur off; both are resolved like the render's camera and
+resolution, from the first `RenderProduct` when it authors them, else from this prim. A
+product that authors only one of the two inherits the other from this prim.
+
+```usda
+def RenderSettings "settings"
+{
+    uniform bool disableMotionBlur = 1
+}
+```
+
+`samples/motionvector.usda` renders moving geometry this way.
 
 ### renderingColorSpace
 

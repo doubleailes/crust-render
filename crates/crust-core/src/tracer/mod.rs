@@ -51,6 +51,11 @@ struct PassConfig {
     seed: u32,
     tiled: bool,
     adaptive: bool,
+    /// Whether camera rays draw a shutter time: something moves and motion
+    /// blur is on (`RenderSettings::motion_blur`). Decided once per pass,
+    /// not per pixel, so the beauty-only hot path reads one flag as it
+    /// always did.
+    shutter: bool,
 }
 
 /// Image-quality statistics of one render pass.
@@ -260,6 +265,16 @@ impl Renderer {
         (buf, film, pass.rays)
     }
 
+    /// Whether camera rays sample the shutter: `ray.time` is read by exactly
+    /// one thing — a moving instance interpolating its transform — so on a
+    /// scene where nothing moves every value of it gives the same image, and
+    /// `disableMotionBlur` asks for the same shutter-open image on a scene
+    /// that does move (the motion stays in the scene for the `motionvector`
+    /// AOV).
+    fn shutter(&self) -> bool {
+        self.world.has_motion() && self.settings.motion_blur
+    }
+
     /// Config of a final (image-quality) pass: full budget, adaptive
     /// sampling.
     fn final_pass_config(&self, tiled: bool) -> PassConfig {
@@ -268,6 +283,7 @@ impl Renderer {
             seed: self.settings.frame as u32,
             tiled,
             adaptive: true,
+            shutter: self.shutter(),
         }
     }
 
@@ -341,6 +357,7 @@ impl Renderer {
                 seed,
                 tiled,
                 adaptive: false,
+                shutter: self.shutter(),
             };
             let start = std::time::Instant::now();
             let (buffer, film, samples, stats) =
@@ -506,7 +523,7 @@ impl Renderer {
         let profiling = profile::enabled();
         // The same for the film: the AOV instantiation runs only when a
         // product asks for something beyond the beauty.
-        let cam = self.camera.frame();
+        let cam = self.camera.frame(w, h);
         let aov = layout.is_some();
 
         let threshold = self.settings.variance_threshold as f64;
@@ -592,9 +609,11 @@ impl Renderer {
             }
         };
         let route_ctx = layout.and_then(|l| l.route.clone());
+        let motion_aov = layout.is_some_and(|l| l.motion);
         let scratch = || {
             let mut s = PathScratch::new(self.settings.max_depth as usize);
             s.route_ctx = route_ctx.clone();
+            s.motion = motion_aov;
             s
         };
 
@@ -877,18 +896,18 @@ impl Renderer {
         // decorrelated (the frame seed alone is constant within one render).
         let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
 
-        // Is the shutter coordinate worth sampling at all? `ray.time` is read
-        // by exactly one thing — a moving instance interpolating its
-        // transform — so on a scene where nothing moves, every value of it
-        // produces the same image and drawing one is pure waste. It is not
-        // cheap waste: `draw_sample_f32::<N>` computes a whole 4-dimensional
-        // Owen-scrambled Sobol block whatever `N` is, which measured 4.2% of
-        // the render on cornellbox, one block per camera ray for one float.
+        // Is the shutter coordinate worth sampling at all (`Renderer::shutter`)?
+        // On a scene where nothing moves, or with motion blur off, every
+        // value of it produces the same image and drawing one is pure waste.
+        // It is not cheap waste: `draw_sample_f32::<N>` computes a whole
+        // 4-dimensional Owen-scrambled Sobol block whatever `N` is, which
+        // measured 4.2% of the render on cornellbox, one block per camera ray
+        // for one float.
         //
         // Skipping the draw cannot perturb the other dimensions: `new_domain`
         // is a pure function of the parent state and takes `&self`, so a
         // domain that is never derived leaves `root` untouched.
-        let motion = self.world.has_motion();
+        let motion = cfg.shutter;
 
         // One pixel's world-space width, for the primary ray's cone. Hoisted
         // out of the sample loop: it depends only on the camera and the
@@ -962,6 +981,7 @@ impl Renderer {
                     lpe: &scratch.route.out,
                     albedo: scratch.route.albedo,
                     diffuse_filter: scratch.route.diffuse_filter,
+                    time,
                 };
                 planes.add(&scratch.first, &extras, fx, fy, wx * wy);
             }

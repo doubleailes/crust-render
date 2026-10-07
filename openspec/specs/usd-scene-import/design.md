@@ -469,6 +469,11 @@ Schema mapping:
   (float3, world-space) to streak through that translation over the shutter (transform
   motion blur; primary rays draw a `K_TIME` shutter sample and every secondary/shadow ray
   inherits the path's time). Sample scenes: `samples/motionblur.usda`, `samples/curves.usda`.
+  `disableMotionBlur = true` or `instantaneousShutter = true` on the render settings
+  (`RenderSettings::motion_blur`, below) turns the shutter draw off: every camera ray is
+  traced at time 0, exactly as on a static scene, and the motion stays in the kernel's end
+  transforms for the `motionvector` AOV (the `aovs` design record, "Motion vector AOV").
+  Sample: `samples/motionvector.usda`.
 
 ## Displacement
 
@@ -641,6 +646,18 @@ same point.
   is the quickest way to discover the real one. A dangling `RenderSettings.camera`
   target warns and falls back to the first camera, since the stage, not the operator,
   made that mistake.
+- **`disableMotionBlur` / `instantaneousShutter`** (`RenderSettingsBase`, the second the
+  deprecated name of the first) are resolved in `import_render_products` like the render's
+  camera and resolution — the first product's authored value, else the settings prim's,
+  each flag on its own — and either one `true` sets `RenderSettings::motion_blur = false`.
+  The tracer's shutter gate is then `world.has_motion() && settings.motion_blur`: no
+  `K_TIME` domain is derived (so the other sample dimensions are a static scene's), every
+  ray has `time = 0`, `transforms_at` returns the start transforms, and the beauty is sharp
+  at the authored positions while the motion records stay for the `motionvector` AOV. The
+  two left `warn_unhonoured` when they became honoured; it still warns about
+  `disableDepthOfField`, `pixelAspectRatio` and `dataWindowNDC`. Houdini authors both at
+  their `false` fallback, so Solaris exports are unaffected. There is deliberately no CLI
+  flag or environment switch: this is a scene setting, not an optimisation to A/B.
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:adaptiveNeighbourTolerance` float (index units,
