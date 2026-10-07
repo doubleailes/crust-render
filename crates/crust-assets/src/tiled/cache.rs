@@ -22,7 +22,13 @@
 //!    `thread_local!` idiom the MaterialX evaluator already uses for its value
 //!    stack;
 //! 2. a sharded map, one `Mutex` per shard;
-//! 3. a miss — pop a decoder from the file's pool, read, insert.
+//! 3. a miss — take a reader from the pool, read, insert.
+//!
+//! **Open files are bounded too.** A miss needs an open reader, and readers are
+//! pooled rather than reopened per miss. The pool is one for the whole cache,
+//! capped by `CRUST_TEX_MAX_OPEN_FILES` and ordered by last use, so a render
+//! that touches thousands of files holds at most the cap plus one reader per
+//! thread — see [`ReaderPool`].
 //!
 //! **Nothing here may panic.** `Texture2D::eval`'s contract says so and
 //! `panic = "abort"` makes a violation fatal to the process rather than to a
@@ -32,8 +38,9 @@
 use super::{TileReader, TiledFile};
 use crate::texture_cache::{Ways, mib_to_bytes};
 use half::f16;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Shards the tile map is split across.
@@ -330,6 +337,10 @@ pub struct CacheStats {
     pub bytes_read: AtomicU64,
     pub peak_bytes: AtomicU64,
     pub errors: AtomicU64,
+    /// Readers opened, and the most that existed at once — open file
+    /// descriptors, which is what the cap bounds.
+    pub opens: AtomicU64,
+    pub peak_open: AtomicU64,
 }
 
 /// A plain snapshot of [`CacheStats`], for reporting.
@@ -345,6 +356,14 @@ pub struct CacheCounters {
     pub peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
+    /// Readers opened over the render, and of those the ones beyond each
+    /// file's first: the cost of the open-file cap.
+    pub opens: u64,
+    pub reopens: u64,
+    /// The most readers — open files — that existed at once.
+    pub peak_open: u64,
+    /// `CRUST_TEX_MAX_OPEN_FILES`; `0` is unbounded.
+    pub max_open_files: u64,
     /// Files registered with the cache.
     pub files: u64,
     /// Tiles decoded from disk, first reads and re-reads alike (Guerilla's
@@ -357,13 +376,15 @@ pub struct CacheCounters {
     pub total_bytes: u64,
 }
 
-/// One file's geometry plus the decoders that read it.
+/// One file's geometry and what the cache has learned about it.
 struct FileSlot {
     file: TiledFile,
-    /// Idle cursors. Every `tiff` read takes `&mut self`, so a decoder cannot
-    /// be shared; a miss takes one, uses it, and puts it back. The pool grows
-    /// to the number of threads that ever miss concurrently and no further.
-    readers: Mutex<Vec<TileReader>>,
+    /// Whether a reader on this file was ever opened, so `reopens` can be
+    /// told from first opens at report time.
+    opened: AtomicBool,
+    /// Whether this file's first failed read was already reported at WARN.
+    /// The rest go to DEBUG: one line per broken file, never per tile.
+    warned: AtomicBool,
     /// Tiles this file has ever paged in, so a second page-in of the same tile
     /// can be recognised as thrashing rather than as a first read.
     seen: Mutex<std::collections::HashSet<(u8, u32)>>,
@@ -379,6 +400,108 @@ fn full_chain_bytes(file: &TiledFile) -> u64 {
         .sum()
 }
 
+/// Idle readers across every file, and how many readers exist.
+///
+/// Every `tiff` read takes `&mut self`, so a reader cannot be shared: a miss
+/// takes one, reads one tile and gives it back. Each reader is an open file.
+///
+/// **One pool, not one per file.** Per-file pools grew to (files touched) x
+/// (threads that missed on a file together) and were freed only when the
+/// cache dropped, which took ALab's 6 832 `.tx` past the 1 024-descriptor soft
+/// limit and failed the frame's EXR write after 22 minutes. A global count
+/// alone would not fix it: when the cap is reached the cache has to find an
+/// idle reader on a *cold* file to close, which needs one order over all files.
+/// Without it, dead files keep their descriptors and every live file pays a
+/// reopen per miss.
+///
+/// **The cap never blocks.** It bounds *idle* readers. A miss with nothing to
+/// reuse closes the least recently returned idle reader of another file when
+/// at the cap, and opens either way, so `open` can pass the cap by the threads
+/// inside a miss at once. A reader returned while over the cap is closed
+/// instead of pooled. The bound is the cap plus the thread count, and no
+/// render thread ever waits for a reader — the rule the clock sweep follows
+/// too.
+///
+/// The mutex is held for map operations only, twice per **miss**, never per
+/// hit: never across an open, a read or a close. Readers leaving the pool are
+/// moved out under it and dropped after it is released.
+#[derive(Default)]
+struct ReaderPool {
+    idle: HashMap<u32, Vec<TileReader>>,
+    /// When each file in `idle` last had a reader returned, and the same
+    /// inverted so the oldest is the first key.
+    stamps: HashMap<u32, u64>,
+    lru: BTreeMap<u64, u32>,
+    clock: u64,
+    /// Readers that exist, idle or checked out.
+    open: usize,
+}
+
+impl ReaderPool {
+    /// One of `file`'s idle readers.
+    fn take(&mut self, file: u32) -> Option<TileReader> {
+        let readers = self.idle.get_mut(&file)?;
+        let reader = readers.pop();
+        if readers.is_empty() {
+            self.idle.remove(&file);
+            if let Some(stamp) = self.stamps.remove(&file) {
+                self.lru.remove(&stamp);
+            }
+        }
+        reader
+    }
+
+    /// An idle reader of the least recently used file, to be closed. Called
+    /// only after `take` found none for the file missing, so the oldest is
+    /// always another file's.
+    fn evict_oldest(&mut self) -> Option<TileReader> {
+        let (_, &file) = self.lru.first_key_value()?;
+        let reader = self.take(file)?;
+        self.open = self.open.saturating_sub(1);
+        Some(reader)
+    }
+
+    /// Pools `reader`, or hands it back to be closed when over `cap`.
+    fn give_back(&mut self, file: u32, reader: TileReader, cap: usize) -> Option<TileReader> {
+        if cap != 0 && self.open > cap {
+            self.open = self.open.saturating_sub(1);
+            return Some(reader);
+        }
+        self.idle.entry(file).or_default().push(reader);
+        self.clock += 1;
+        if let Some(old) = self.stamps.insert(file, self.clock) {
+            self.lru.remove(&old);
+        }
+        self.lru.insert(self.clock, file);
+        None
+    }
+
+    /// Every idle reader, to be closed.
+    fn drain(&mut self) -> Vec<TileReader> {
+        let all: Vec<TileReader> = self.idle.drain().flat_map(|(_, r)| r).collect();
+        self.stamps.clear();
+        self.lru.clear();
+        self.open = self.open.saturating_sub(all.len());
+        all
+    }
+}
+
+/// Whether an open failed for want of a file descriptor (`EMFILE`, `ENFILE`;
+/// the same numbers on Linux and macOS). Only then is closing idle readers
+/// worth trying: a missing or corrupt file would otherwise empty the pool on
+/// every one of its misses.
+fn out_of_descriptors(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(e.raw_os_error(), Some(23 | 24))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = e;
+        false
+    }
+}
+
 /// The cache. One per render, shared by every streaming texture in it.
 pub struct TileCache {
     /// Process-unique identity, part of every microcache key. A [`TileId`]'s
@@ -389,6 +512,13 @@ pub struct TileCache {
     id: u32,
     shards: Vec<Mutex<HashMap<TileId, Entry>>>,
     files: Mutex<Vec<Arc<FileSlot>>>,
+    readers: Mutex<ReaderPool>,
+    /// `CRUST_TEX_MAX_OPEN_FILES`: idle readers kept; `0` keeps every one.
+    max_open: usize,
+    /// The OS error the next open fails with, `0` for none: how a test makes
+    /// the process run out of descriptors.
+    #[cfg(test)]
+    inject_open_error: std::sync::atomic::AtomicI32,
     resident: AtomicU64,
     budget: u64,
     /// Held by whichever thread is currently making room. `try_lock`ed, never
@@ -399,12 +529,18 @@ pub struct TileCache {
 }
 
 impl TileCache {
-    pub fn new(budget_bytes: u64) -> TileCache {
+    /// A cache of `budget_bytes` that keeps at most `max_open_files` idle
+    /// readers open (`0`: no cap).
+    pub fn new(budget_bytes: u64, max_open_files: usize) -> TileCache {
         static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         TileCache {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
             files: Mutex::new(Vec::new()),
+            readers: Mutex::new(ReaderPool::default()),
+            max_open: max_open_files,
+            #[cfg(test)]
+            inject_open_error: std::sync::atomic::AtomicI32::new(0),
             resident: AtomicU64::new(0),
             budget: budget_bytes.max(mib_to_bytes(1)),
             sweeping: Mutex::new(0),
@@ -428,7 +564,8 @@ impl TileCache {
         let id = files.len() as u32;
         files.push(Arc::new(FileSlot {
             file,
-            readers: Mutex::new(Vec::new()),
+            opened: AtomicBool::new(false),
+            warned: AtomicBool::new(false),
             seen: Mutex::new(std::collections::HashSet::new()),
         }));
         Some(id)
@@ -445,12 +582,17 @@ impl TileCache {
                     .sum::<u64>()
             })
             .unwrap_or(0);
-        let (files, total_bytes) = lock(&self.files)
+        let (files, total_bytes, files_opened) = lock(&self.files)
             .map(|files| {
                 let total = files.iter().map(|f| full_chain_bytes(&f.file)).sum();
-                (files.len() as u64, total)
+                let opened = files
+                    .iter()
+                    .filter(|f| f.opened.load(Ordering::Relaxed))
+                    .count();
+                (files.len() as u64, total, opened as u64)
             })
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0));
+        let opens = s.opens.load(Ordering::Relaxed);
         CacheCounters {
             files,
             loaded_tiles: s.decoded.load(Ordering::Relaxed),
@@ -475,6 +617,120 @@ impl TileCache {
             peak_bytes: s.peak_bytes.load(Ordering::Relaxed),
             errors: s.errors.load(Ordering::Relaxed),
             budget_bytes: self.budget,
+            opens,
+            reopens: opens.saturating_sub(files_opened),
+            peak_open: s.peak_open.load(Ordering::Relaxed),
+            max_open_files: self.max_open as u64,
+        }
+    }
+
+    /// Closes every idle reader. A later miss reopens, so this is safe at any
+    /// time; the host calls it when the render is done, so writing the outputs
+    /// never competes with texture files for descriptors, whatever the cap.
+    pub fn release_readers(&self) {
+        drop(self.drain_idle());
+    }
+
+    /// Takes every idle reader out of the pool; the caller drops them after
+    /// the lock is released.
+    fn drain_idle(&self) -> Vec<TileReader> {
+        lock(&self.readers)
+            .map(|mut p| p.drain())
+            .unwrap_or_default()
+    }
+
+    /// Readers that exist right now, pooled or checked out — one open file
+    /// descriptor each.
+    #[cfg(test)]
+    pub(crate) fn open_readers(&self) -> usize {
+        lock(&self.readers).map(|p| p.open).unwrap_or(0)
+    }
+
+    /// Readers in the pool, waiting for a miss.
+    #[cfg(test)]
+    pub(crate) fn idle_readers(&self) -> usize {
+        lock(&self.readers)
+            .map(|p| p.idle.values().map(Vec::len).sum())
+            .unwrap_or(0)
+    }
+
+    /// A reader for `file`: an idle one when there is one, else a fresh open.
+    ///
+    /// At the cap, the least recently used other file's idle reader is closed
+    /// first. If the open runs out of descriptors, every idle reader is closed
+    /// and the open tried once more before the miss counts as failed.
+    fn checkout(&self, file: u32, slot: &FileSlot) -> Option<TileReader> {
+        let victim = {
+            let mut pool = lock(&self.readers)?;
+            if let Some(reader) = pool.take(file) {
+                return Some(reader);
+            }
+            let victim = if self.max_open != 0 && pool.open >= self.max_open {
+                pool.evict_oldest()
+            } else {
+                None
+            };
+            pool.open += 1;
+            self.stats
+                .peak_open
+                .fetch_max(pool.open as u64, Ordering::Relaxed);
+            victim
+        };
+        drop(victim);
+        let opened = match self.open_reader(slot) {
+            Err(e) if out_of_descriptors(&e) => {
+                drop(self.drain_idle());
+                self.open_reader(slot)
+            }
+            other => other,
+        };
+        match opened {
+            Ok(reader) => {
+                self.stats.opens.fetch_add(1, Ordering::Relaxed);
+                slot.opened.store(true, Ordering::Relaxed);
+                Some(reader)
+            }
+            Err(e) => {
+                if let Some(mut pool) = lock(&self.readers) {
+                    pool.open = pool.open.saturating_sub(1);
+                }
+                self.read_failed(slot, &e);
+                None
+            }
+        }
+    }
+
+    /// Returns a reader taken by [`TileCache::checkout`], closing it instead
+    /// when the pool is over the cap.
+    fn check_in(&self, file: u32, reader: TileReader) {
+        let excess = match lock(&self.readers) {
+            Some(mut pool) => pool.give_back(file, reader, self.max_open),
+            None => Some(reader),
+        };
+        drop(excess);
+    }
+
+    fn open_reader(&self, slot: &FileSlot) -> io::Result<TileReader> {
+        #[cfg(test)]
+        {
+            let code = self.inject_open_error.swap(0, Ordering::Relaxed);
+            if code != 0 {
+                return Err(io::Error::from_raw_os_error(code));
+            }
+        }
+        slot.file.reader()
+    }
+
+    /// Counts a failed open or read; names the file at WARN the first time.
+    fn read_failed(&self, slot: &FileSlot, e: &io::Error) {
+        self.stats.errors.fetch_add(1, Ordering::Relaxed);
+        if slot.warned.swap(true, Ordering::Relaxed) {
+            tracing::debug!("{}: {e}", slot.file.path().display());
+        } else {
+            tracing::warn!(
+                "{}: {e} — its unreadable tiles use the texture's fallback colour",
+                slot.file.path().display()
+            );
         }
     }
 
@@ -528,32 +784,15 @@ impl TileCache {
             seen.insert((id.level, id.tile));
         }
 
-        let mut dec = match lock(&slot.readers).and_then(|mut p| p.pop()) {
-            Some(d) => d,
-            None => match slot.file.reader() {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::debug!("{}: {e}", slot.file.path().display());
-                    self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-            },
-        };
-
+        let mut dec = self.checkout(id.file, &slot)?;
         let read = slot
             .file
             .read_tile(&mut dec, id.level as usize, id.tile)
-            .map_err(|e| {
-                tracing::debug!("{}: {e}", slot.file.path().display());
-                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-            })
+            .map_err(|e| self.read_failed(&slot, &e))
             .ok();
-
         // The cursor goes back whatever happened — a decode error leaves it
-        // usable, and dropping it would quietly shrink the pool under load.
-        if let Some(mut pool) = lock(&slot.readers) {
-            pool.push(dec);
-        }
+        // usable, and closing it here would cost the next miss a reopen.
+        self.check_in(id.file, dec);
 
         let data = read?;
         let (width, height) = slot
@@ -803,7 +1042,7 @@ mod tests {
         clear_microcache();
         let path = fixture("direct", 300, 200);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(64 * 1024 * 1024);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
 
         let mut dec = tf.reader().expect("reader");
@@ -861,7 +1100,7 @@ mod tests {
 
         let tf = TiledFile::open(&path).expect("open");
         let budget = 1024 * 1024;
-        let cache = TileCache::new(budget);
+        let cache = TileCache::new(budget, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
         let mut dec = tf.reader().expect("reader");
 
@@ -914,7 +1153,7 @@ mod tests {
         // The floor `TileCache::new` clamps to, so the working set below is
         // ~7 MiB against it — several sweeps' worth.
         let budget = 1024 * 1024;
-        let cache = TileCache::new(budget);
+        let cache = TileCache::new(budget, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
 
         let l0 = tf.level(0);
@@ -956,7 +1195,10 @@ mod tests {
         clear_microcache();
         let path = fixture("threads", 512, 512);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = Arc::new(TileCache::new(512 * 1024));
+        let cache = Arc::new(TileCache::new(
+            512 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
         let id = cache.intern(tf.clone()).expect("intern");
 
         // The expected contents, computed once, single-threaded.
@@ -1014,7 +1256,7 @@ mod tests {
         clear_microcache();
         let path = fixture("micro", 256, 256);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(64 * 1024 * 1024);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf).expect("intern");
 
         let a = TileId {
@@ -1054,7 +1296,7 @@ mod tests {
     fn interleaved_textures_do_not_evict_each_other() {
         clear_microcache();
         let path = fixture("micro_interleave", 256, 256);
-        let cache = TileCache::new(64 * 1024 * 1024);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
         // Five textures, as an ALab material has.
         let files: Vec<u32> = (0..5)
             .map(|_| {
@@ -1111,6 +1353,267 @@ mod tests {
         assert_eq!(c.load(), threads as u64 * 1000);
     }
 
+    /// Writes `n` small `.tx` files in one directory, for tests that care how
+    /// many files a render touches rather than what is in them.
+    fn many_fixtures(name: &str, n: usize) -> Vec<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("crust_tilecache_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        (0..n)
+            .map(|k| {
+                let (w, h) = (192, 128);
+                let path = dir.join(format!("t{k}.tx"));
+                let src: Vec<u8> = (0..w * h)
+                    .flat_map(|i| [(i % 251) as u8, k as u8, ((i / w) % 251) as u8])
+                    .collect();
+                write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+                path
+            })
+            .collect()
+    }
+
+    /// Every level-0 tile of every file, from `threads` threads at once, each
+    /// starting at a different file so their misses overlap.
+    fn read_everything(cache: &TileCache, files: &[u32], tiles: u32, threads: u32) {
+        std::thread::scope(|s| {
+            for k in 0..threads {
+                s.spawn(move || {
+                    clear_microcache();
+                    for round in 0..4u32 {
+                        for f in 0..files.len() as u32 {
+                            let file = files[((f + k + round) as usize) % files.len()];
+                            for tile in 0..tiles {
+                                let id = TileId {
+                                    file,
+                                    level: 0,
+                                    tile,
+                                };
+                                assert!(cache.get(id).is_some(), "file {file} tile {tile}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// The regression the descriptor cap fixes: with no cap, pooled readers
+    /// are never closed, so the cache ends a render holding at least one open
+    /// file per file it ever read — ALab's 6 832 `.tx` past a 1 024 soft limit.
+    #[test]
+    fn without_a_cap_every_file_read_keeps_a_reader_open() {
+        clear_microcache();
+        let paths = many_fixtures("uncapped", 24);
+        let cache = TileCache::new(1024 * 1024, 0);
+        let files: Vec<u32> = paths
+            .iter()
+            .map(|p| {
+                cache
+                    .intern(TiledFile::open(p).expect("open"))
+                    .expect("intern")
+            })
+            .collect();
+        read_everything(&cache, &files, 6, 8);
+        assert!(
+            cache.open_readers() >= files.len(),
+            "{} open readers for {} files",
+            cache.open_readers(),
+            files.len()
+        );
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+    }
+
+    /// Interns every path in `paths`, in order.
+    fn intern_all(cache: &TileCache, paths: &[PathBuf]) -> Vec<u32> {
+        paths
+            .iter()
+            .map(|p| {
+                cache
+                    .intern(TiledFile::open(p).expect("open"))
+                    .expect("intern")
+            })
+            .collect()
+    }
+
+    /// The cap bounds open files by itself plus one reader per thread in a
+    /// miss, and leaves at most itself open once the misses are over.
+    #[test]
+    fn a_cap_bounds_open_readers_by_itself_plus_the_threads() {
+        clear_microcache();
+        let paths = many_fixtures("capped", 24);
+        let (cap, threads) = (4, 8);
+        let cache = TileCache::new(1024 * 1024, cap);
+        let files = intern_all(&cache, &paths);
+        read_everything(&cache, &files, 6, threads as u32);
+        let c = cache.counters();
+        assert!(
+            c.peak_open as usize <= cap + threads,
+            "peak {} open against a cap of {cap} on {threads} threads",
+            c.peak_open
+        );
+        assert!(cache.idle_readers() <= cap, "{} idle", cache.idle_readers());
+        assert_eq!(
+            cache.open_readers(),
+            cache.idle_readers(),
+            "a reader leaked"
+        );
+        assert!(c.reopens > 0, "24 files under a cap of 4 must reopen");
+        assert_eq!(c.max_open_files, cap as u64);
+        assert_eq!(c.errors, 0);
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+    }
+
+    /// Readers are interchangeable cursors: which one decoded a tile, and how
+    /// often files were closed and reopened, cannot change its bytes.
+    #[test]
+    fn the_cap_does_not_change_a_single_byte() {
+        clear_microcache();
+        let paths = many_fixtures("cap_identity", 16);
+        let capped = TileCache::new(1024 * 1024, 1);
+        let unbounded = TileCache::new(1024 * 1024, 0);
+        let files = intern_all(&capped, &paths);
+        assert_eq!(intern_all(&unbounded, &paths), files);
+        let tiles = 6;
+        read_everything(&capped, &files, tiles, 8);
+        read_everything(&unbounded, &files, tiles, 8);
+        assert!(capped.counters().reopens > 0, "the cap never engaged");
+        for &file in &files {
+            for level in 0..TiledFile::open(&paths[file as usize])
+                .expect("open")
+                .level_count()
+            {
+                for tile in 0..tiles {
+                    let id = TileId {
+                        file,
+                        level: level as u8,
+                        tile,
+                    };
+                    let a = capped.get(id).map(|t| t.data.clone());
+                    let b = unbounded.get(id).map(|t| t.data.clone());
+                    assert_eq!(a, b, "file {file} level {level} tile {tile}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+    }
+
+    /// Out of descriptors, the cache gives its idle ones back and tries again,
+    /// so the tile is read rather than lost. Any other failure is a property
+    /// of the file, and must not empty the pool.
+    #[test]
+    fn running_out_of_descriptors_drains_the_pool_and_retries() {
+        clear_microcache();
+        let paths = many_fixtures("emfile", 4);
+        let cache = TileCache::new(1024 * 1024, 256);
+        let files = intern_all(&cache, &paths);
+        let tile0 = |file| TileId {
+            file,
+            level: 0,
+            tile: 0,
+        };
+        for &f in &files[..3] {
+            assert!(cache.get(tile0(f)).is_some());
+        }
+        assert_eq!(cache.idle_readers(), 3);
+
+        // Not a descriptor problem: no drain, and the miss fails.
+        cache.inject_open_error.store(2, Ordering::Relaxed); // ENOENT
+        assert!(cache.get(tile0(files[3])).is_none());
+        assert_eq!(cache.idle_readers(), 3, "a missing file emptied the pool");
+        assert_eq!(cache.counters().errors, 1);
+
+        #[cfg(unix)]
+        {
+            cache.inject_open_error.store(24, Ordering::Relaxed); // EMFILE
+            let tile1 = TileId {
+                tile: 1,
+                ..tile0(files[3])
+            };
+            assert!(
+                cache.get(tile1).is_some(),
+                "the retry did not read the tile"
+            );
+            assert_eq!(cache.idle_readers(), 1, "only the retried reader is left");
+            assert_eq!(cache.open_readers(), 1);
+            assert_eq!(cache.counters().errors, 1, "a retried open is not an error");
+        }
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+    }
+
+    /// After a release nothing is open, and the cache still works.
+    #[test]
+    fn releasing_readers_closes_every_file_and_reopens_on_demand() {
+        clear_microcache();
+        let paths = many_fixtures("release", 3);
+        let cache = TileCache::new(1024 * 1024, 256);
+        let files = intern_all(&cache, &paths);
+        read_everything(&cache, &files, 6, 4);
+        assert!(cache.open_readers() > 0);
+        cache.release_readers();
+        assert_eq!(cache.open_readers(), 0);
+        assert_eq!(cache.idle_readers(), 0);
+        // Level 1 was never read, so this is a miss and needs a fresh open.
+        let id = TileId {
+            file: files[0],
+            level: 1,
+            tile: 0,
+        };
+        assert!(cache.get(id).is_some());
+        assert_eq!(cache.open_readers(), 1);
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+    }
+
+    /// Counts WARN events on the thread it is the default for.
+    struct CountWarnings(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tracing::Subscriber for CountWarnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A file that becomes unreadable is named once at WARN, however many of
+    /// its tiles then fail; the failures are all counted.
+    #[test]
+    fn an_unreadable_file_is_warned_about_once() {
+        clear_microcache();
+        let paths = many_fixtures("warn_once", 1);
+        let cache = TileCache::new(1024 * 1024, 256);
+        let file = intern_all(&cache, &paths)[0];
+        let id = |tile| TileId {
+            file,
+            level: 0,
+            tile,
+        };
+        assert!(cache.get(id(0)).is_some());
+        cache.release_readers();
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+
+        let warnings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountWarnings(warnings.clone()), || {
+            for tile in 1..6 {
+                assert!(
+                    cache.get(id(tile)).is_none(),
+                    "tile {tile} of a deleted file"
+                );
+            }
+        });
+        assert_eq!(warnings.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.counters().errors, 5);
+    }
+
     /// Nothing about a broken file may panic — `Texture2D::eval` forbids it and
     /// `panic = "abort"` makes it fatal to the process.
     #[test]
@@ -1118,7 +1621,7 @@ mod tests {
         clear_microcache();
         let path = fixture("broken", 128, 128);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(1024 * 1024);
+        let cache = TileCache::new(1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf).expect("intern");
 
         // A tile index past the end of the level.

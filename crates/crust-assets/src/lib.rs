@@ -293,6 +293,7 @@ impl FileAssets {
     pub fn with_config(config: crust_core::Config) -> FileAssets {
         let streaming = config.tex_stream;
         let budget = tiled::TileCache::budget_of(&config);
+        let max_open_files = config.tex_max_open_files;
         // DEBUG, not INFO: this is the default now, and a default render's
         // INFO lines are the four that do not scale with anything.
         if streaming {
@@ -341,7 +342,7 @@ impl FileAssets {
         );
         FileAssets {
             config,
-            cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
+            cache: std::sync::Arc::new(tiled::TileCache::new(budget, max_open_files)),
             streaming,
             auto_tx: false,
             tx_converted: std::sync::atomic::AtomicUsize::new(0),
@@ -637,7 +638,20 @@ impl FileAssets {
             peak_bytes: c.peak_bytes,
             errors: c.errors,
             budget_bytes: c.budget_bytes,
+            opens: c.opens,
+            reopens: c.reopens,
+            peak_open: c.peak_open,
+            max_open_files: c.max_open_files,
         }
+    }
+
+    /// Closes every `.tx` file the tile cache holds open between misses.
+    ///
+    /// For the host to call once the render is done and before it writes its
+    /// outputs, so the write never competes with texture files for
+    /// descriptors. Textures still work afterwards: a miss reopens.
+    pub fn release_texture_files(&self) {
+        self.cache.release_readers();
     }
 
     /// Where a streamable backing for `path` might be, best candidate first.

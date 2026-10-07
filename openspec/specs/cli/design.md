@@ -278,6 +278,9 @@ and the Moana island. So:
   report. `--stats` is where the *totals* belong.
 - **`WARN`** keeps its own meaning and was not touched: something authored was refused,
   approximated or skipped, and the image differs from what the stage asked for.
+  When the cause can repeat per lookup, the WARN is bounded by what failed, not by how
+  often: an unreadable streamed `.tx` is named once per file, and the render ends with
+  one WARN counting the tile reads that used a fallback.
 
 The practical consequence when adding a log: if you can write a stage that makes your new
 line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel or per
@@ -359,7 +362,8 @@ From the `crust-core` crate description:
   / shadow rays, shadow rays per shading point, average and adaptive samples per
   pixel, how paths ended — the four endings sum to the primary rays), textures
   (Guerilla's total / loaded / still-in-cache memory and loaded / unloaded
-  tiles, plus preloaded UV textures), Ptex, then phases by execution tree and by
+  tiles, the peak open `.tx` files against `CRUST_TEX_MAX_OPEN_FILES` and the reopens
+  it cost, plus preloaded UV textures), Ptex, then phases by execution tree and by
   time. Collection is one `Instant` per *phase* plus integer counters, never a
   timer per ray, so it costs nothing in the integrator and is always on; only
   printing is gated (`--stats`). Two primitive views are reported because for an

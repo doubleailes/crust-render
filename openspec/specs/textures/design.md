@@ -366,6 +366,58 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     the cache tests were working around exactly that. Each cache now carries a
     process-unique `id` in the key. Measured free: `texel::<false>` is 446,589,173
     instructions before and after.
+  - **Open files are bounded: one reader pool, capped, never blocking.** A miss needs a
+    reader (a `tiff` decoder or a `BufReader<File>`, one open descriptor each), and a
+    reader cannot be shared because every read takes `&mut`. Readers used to be pooled
+    per file and never closed until the cache dropped, after the outputs were written,
+    so descriptors grew as (files touched) x (threads that missed on a file together):
+    24 files on 8 threads ended a unit test holding 187. ALab binds 6 832 `.tx`; frame
+    1004 rendered for 22 minutes against the 1 024 soft limit and then failed its EXR
+    write with `Too many open files`, after an unknown number of tile reads had already
+    failed into their fallback colour at DEBUG. Now `TileCache` holds **one**
+    `ReaderPool` for all files — the idle readers keyed by file, a last-use stamp per
+    file with a `BTreeMap` to find the oldest, and a count of every reader that exists.
+    `CRUST_TEX_MAX_OPEN_FILES` (default 256, `0` = the old unbounded pools) caps the
+    *idle* readers. A miss pops this file's idle reader; failing that, at the cap it
+    closes the least recently returned idle reader of another file, then opens. If
+    nothing is idle the open happens anyway, and a reader returned while over the cap
+    is closed rather than pooled — so **the peak is the cap plus the thread count**,
+    and no render thread waits, which is the clock sweep's rule too. A condvar would
+    give a strict bound and break that rule.
+    - *Why not keep per-file pools and add a global count.* The count is easy; choosing
+      what to close is not. At the cap the cache must find an idle reader on a *cold*
+      file, which needs one order over every file. Without it the cheap policy (over
+      the cap, don't pool the returning reader) lets dead files keep their descriptors
+      forever while every live file pays a reopen per miss.
+    - The pool's mutex is taken twice per **miss** — never per hit or texel — and held
+      only for map operations: never across an open, a read or a close; readers leaving
+      the pool are moved out and dropped after the lock is released.
+    - An open failing with `EMFILE`/`ENFILE` (`cfg(unix)`) closes every idle reader and
+      retries once. Other errors are not retried: a missing file would otherwise empty
+      the pool on each of its misses.
+    - A failed open or read is still a fallback colour, never a panic, but no longer
+      silent: the file is named once at WARN (`FileSlot::warned`) and `main.rs` logs
+      one WARN with the total at the end of the render.
+    - `FileAssets::release_texture_files` closes every idle reader once the render is
+      done, before any output is written, at any cap including `0`.
+    - Scheduling only: readers are interchangeable cursors, so the cap cannot change a
+      tile (pinned by `the_cap_does_not_change_a_single_byte`, cap 1 against 0).
+      `--stats` prints the peak open count against the cap, and the reopens — opens
+      beyond each file's first, which re-parse the header — that the cap cost.
+    - *Measured on ALab frame 1004* (2026-10-07, 72 threads, `ulimit -n 1024`, 5 722
+      streamed files, 55 325 misses). Default cap: peak 259 descriptors in
+      `/proc/<pid>/fd` (256 readers + stdio), 31 657 reopens, 0 tile read errors, EXR
+      written. `CRUST_TEX_MAX_OPEN_FILES=0`: peak 1 015 descriptors. The `EMFILE` retry
+      drained the pool repeatedly and lost no tile (26 339 reopens, 0 errors), and the
+      image is bit-identical to the default cap's. At 32 spp under `--profile`,
+      TextureLoad is 1.4% of thread time at 160.7 µs a miss at the default cap, against
+      1.5% and 163.8 µs at `0`. `bench_ab.sh` (3 interleaved reps) puts the default cap
+      at +1.4% min / +0.8% mean against `0`, below the noise floor. ALab's `.tx` are
+      EXR, and an EXR reopen is one `File::open`; a TIFF reopen also re-parses IFD0, so
+      a TIFF-heavy scene is where to re-measure before lowering the default. With
+      reopens at no measurable cost, 256 stays. The peak `--stats` reports can exceed
+      the real descriptor count by the opens that are failing at that moment (1 027 at
+      `0` above), because an open is counted when it is reserved, before it is tried.
 
 ## Ptex
 
@@ -659,6 +711,19 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   channel) and ignores alpha, refuses ripmaps, multi-layer and deep files, and requires
   square tiles; the TIFF writer still emits 8-bit RGB only, so an HDR conversion is an
   EXR conversion.
+
+- **Streamed Ptex holds one file descriptor per `.ptx` for the whole render.**
+  `ptex::SharedReader` keeps its `File` open, so the count scales with the streamed files
+  (not files x threads, unlike the `.tx` pools before `CRUST_TEX_MAX_OPEN_FILES`), and
+  that cap does **not** cover it. Today it is bounded only by accident: admission lets
+  at most `budget / MIN_PTEX_SHARE` readers stream, so on the Moana island
+  (`CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_STREAM_MIN_MB=0`,
+  `ulimit -n 1024`, 2026-10-07) 952 of 3 618 files streamed and the process peaked at
+  956 descriptors, 68 under the limit. With every file admitted
+  (`CRUST_PTEX_CACHE_MB=8192`) it reached 1 024 during import: about 1 284 `.ptx` failed
+  with `Too many open files` (WARN, constant base colour), then the USD stage itself
+  failed to open and the render aborted. The fix belongs upstream in `ptex-rs`, beside
+  its cache (close idle files, reopen on a miss), not in a second cache here.
 
 ## Known gaps: HDR texture range
 

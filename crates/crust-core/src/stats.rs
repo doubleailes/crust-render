@@ -545,6 +545,14 @@ pub struct TextureCacheStats {
     pub peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
+    /// `.tx` readers opened, and those beyond each file's first: what the
+    /// open-file cap (`CRUST_TEX_MAX_OPEN_FILES`) cost in reopens.
+    pub opens: u64,
+    pub reopens: u64,
+    /// The most `.tx` files open at once, against `max_open_files` (`0`:
+    /// unbounded). The bound is the cap plus the thread count.
+    pub peak_open: u64,
+    pub max_open_files: u64,
     /// Streamed files registered with the cache.
     pub files: u64,
     /// Tiles decoded from disk ("loaded tiles"); `evictions` is the
@@ -1203,6 +1211,29 @@ impl RenderStats {
                 human_bytes(t.peak_bytes),
                 human_bytes(t.budget_bytes)
             )?;
+            writeln!(
+                f,
+                "  {:<28} {} / {}",
+                "peak open files / cap",
+                count(t.peak_open),
+                match t.max_open_files {
+                    0 => "unbounded".to_string(),
+                    n => count(n),
+                }
+            )?;
+            // A reopen re-parses the file's header, so many of them say the
+            // cap is below the files the render keeps coming back to.
+            writeln!(
+                f,
+                "  {:<28} {}{}",
+                "file reopens",
+                count(t.reopens),
+                if t.max_open_files > 0 && t.reopens > t.opens / 2 {
+                    "   (raise CRUST_TEX_MAX_OPEN_FILES)"
+                } else {
+                    ""
+                }
+            )?;
             writeln!(f, "  {:<28} {}", "loaded tiles", count(t.loaded_tiles))?;
             writeln!(f, "  {:<28} {}", "unloaded tiles", count(t.evictions))?;
             writeln!(f, "  {:<28} {}", "lookups", count(t.lookups()))?;
@@ -1819,6 +1850,40 @@ mod tests {
         // no `--profile`, so no render profile.
         assert!(!out.contains("adaptive:"));
         assert!(!out.contains("Render profile"));
+    }
+
+    #[test]
+    fn report_prints_open_texture_files_against_the_cap() {
+        let streamed = |max_open_files| RenderStats {
+            textures: TextureCacheStats {
+                misses: 10,
+                files: 3,
+                opens: 5,
+                reopens: 2,
+                peak_open: 4,
+                max_open_files,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = streamed(256).report();
+        for needle in [
+            "peak open files / cap        4 / 256",
+            "file reopens                 2\n",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in\n{out}");
+        }
+        let out = streamed(0).report();
+        assert!(out.contains("peak open files / cap        4 / unbounded"));
+        let out = RenderStats {
+            textures: TextureCacheStats {
+                reopens: 4,
+                ..streamed(1).textures
+            },
+            ..Default::default()
+        }
+        .report();
+        assert!(out.contains("(raise CRUST_TEX_MAX_OPEN_FILES)"), "{out}");
     }
 
     #[test]

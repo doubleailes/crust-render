@@ -699,3 +699,18 @@ CRUST_TRI_PACKETS=indexed CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file \
     target/release/crust render -i $ISLAND --camera /island/cam/shotCam \
     --subdiv-level 1 -s 16 --stats
 ```
+
+## File descriptors under streamed Ptex (2026-10-07)
+
+Measured for `bound-texture-open-files`, under `ulimit -n 1024`, sampling
+`/proc/<pid>/fd` once a second. Preloaded Ptex (the default) closes every file after
+reading it: peak 4 descriptors. A streamed `.ptx` keeps one open for the render:
+
+| switches (all with `CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_STREAM_MIN_MB=0`) | streamed | peak fds | outcome |
+|---|---|---|---|
+| default `CRUST_PTEX_CACHE_MB` (1024) | 952 of 3 618 | 956 | renders; 2 680 preload for want of budget |
+| `CRUST_PTEX_CACHE_MB=8192` | all admitted | 1 024 | ~1 284 `.ptx` fail with `os error 24`, then the stage fails to open: **render aborts** |
+
+So streaming every island texture needs about 3 620 descriptors, which a 1024 soft limit
+cannot hold. The `.tx` cap (`CRUST_TEX_MAX_OPEN_FILES`) does not cover Ptex; see
+`openspec/specs/textures/design.md` § Known gaps: texture residency.

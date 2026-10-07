@@ -20,3 +20,8 @@ tiff.workspace = true
 flate2.workspace = true
 half.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# `std` for `tracing::subscriber::with_default`, which the WARN-once test
+# counts events through.
+tracing = { workspace = true, features = ["std"] }
