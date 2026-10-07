@@ -3,28 +3,24 @@
 ### Requirement: Light selection
 
 NEE SHALL sample one light per vertex, chosen by `crust:lightSelection` /
-`--light-selection`: `learned` (default; a visibility-aware table trained by a
-deterministic pre-pass and blended between neighbouring cells, over the power
-table), `power` (infinite lights keep a uniform share, the finite lights split
-the rest half evenly and half by flux), or `uniform` (bit-identical to the
-historical renderer).
+`--light-selection`: `power` (default; infinite lights keep a uniform share, the
+finite lights split the rest half evenly and half by flux), `uniform`
+(bit-identical to the historical renderer), or `learned` (a visibility-aware
+table trained by a deterministic pre-pass and blended between neighbouring
+cells, over the power table). The default stays `power`: the equal-time gate
+the design set for flipping it failed on 16 of 28 scenes.
 
 #### Scenario: Uniform selection
 
 - **WHEN** a render runs with `--light-selection uniform`
 - **THEN** each of N lights is picked with probability 1/N
 
-#### Scenario: Learned is the default
+#### Scenario: Power is the default and unchanged
 
 - **WHEN** a stage authors no `crust:lightSelection` and the command line gives
   no `--light-selection`
-- **THEN** lights are selected by the learned table
-
-#### Scenario: Power reproduces the previous default
-
-- **WHEN** a render runs with `--light-selection power`
-- **THEN** the image is bit-identical to the renderer before this change at the
-  same settings
+- **THEN** lights are selected by power, and the image is bit-identical to the
+  renderer before this change at the same settings
 
 ## ADDED Requirements
 

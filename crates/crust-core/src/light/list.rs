@@ -127,7 +127,7 @@ pub struct LightList {
     pub(super) backdrops: Vec<LightKind>,
     /// The learned per-region selection, under [`LightSelection::Learned`].
     /// Consulted by every `*_at` method; `pmf` / `cdf` are what it falls back
-    /// to outside trained cells.
+    /// to where no trained cell is near.
     pub(super) cache: Option<std::sync::Arc<crate::light_cache::LightCache>>,
     /// Light and shadow linking, when any light authors a link.
     pub(super) links: Option<Box<LightLinks>>,
@@ -415,19 +415,21 @@ impl LightList {
     }
 
     /// [`LightList::pick`] for a vertex at `p`, as an index into
-    /// [`LightList::lights`]: under a learned selection, from the distribution
-    /// of the cell holding `p`; otherwise exactly `pick_index`.
+    /// [`LightList::lights`]: under a learned selection, from the trilinear
+    /// blend of the trained cells around `p` (`LightCache::blend_at`);
+    /// otherwise exactly `pick_index`.
     ///
     /// Forced inline: it sits on every NEE pick, and LLVM's own threshold
     /// outlined it once `trace_path` grew by a few instructions elsewhere,
     /// which cost cornellbox 0.6% of its instructions (callgrind, 2 spp).
     #[inline(always)]
     pub fn pick_index_at(&self, p: Vec3A, u: f32) -> Option<(usize, f32)> {
-        match self.cache.as_ref().and_then(|c| c.lookup(p)) {
-            Some((pmf, cdf)) => {
-                let index = cdf.partition_point(|&c| c <= u).min(self.lights.len() - 1);
-                Some((index, pmf[index]))
-            }
+        match self
+            .cache
+            .as_ref()
+            .and_then(|c| c.blend_at(p).map(|b| (c, b)))
+        {
+            Some((cache, blend)) => Some(cache.pick(&blend, u)),
             None => self.pick_index(u),
         }
     }
@@ -436,8 +438,12 @@ impl LightList {
     /// what the bounce side weights emission found from a vertex at `p` with.
     #[inline]
     pub fn pmf_at(&self, p: Vec3A, index: usize) -> f32 {
-        match self.cache.as_ref().and_then(|c| c.lookup(p)) {
-            Some((pmf, _)) => pmf[index],
+        match self
+            .cache
+            .as_ref()
+            .and_then(|c| c.blend_at(p).map(|b| (c, b)))
+        {
+            Some((cache, blend)) => cache.pmf_at(&blend, index),
             None => self.pmf(index),
         }
     }
@@ -456,17 +462,19 @@ impl LightList {
     /// [`Light::escaped`] is `None` by contract, so skipping it changes
     /// nothing but the number of virtual calls.
     pub fn infinite_at(&self, p: Vec3A) -> impl Iterator<Item = (&LightKind, f32)> {
-        let table = if self.infinite.is_empty() {
+        let blend = if self.infinite.is_empty() {
             None
         } else {
-            self.cache.as_ref().and_then(|c| c.lookup(p)).map(|t| t.0)
+            self.cache
+                .as_ref()
+                .and_then(|c| c.blend_at(p).map(|b| (c, b)))
         };
         self.infinite.iter().map(move |&index| {
             let index = index as usize;
             (
                 &self.lights[index],
-                match table {
-                    Some(pmf) => pmf[index],
+                match &blend {
+                    Some((cache, b)) => cache.pmf_at(b, index),
                     None => self.pmf(index),
                 },
             )
