@@ -200,9 +200,21 @@ up or flips sign.
   `motionvector` with `closest_filter` for the same reason. The overrides
   in the `aovs` design record's D7 still apply. Clear value 0, or an
   authored `clearValue`.
-- **Two components only.** Any `*2*` `dataType` or `aov:format` (`float2`,
-  `half2`, `vector2f` …) is accepted. Anything else is refused with a `WARN`,
-  per the `aovs` design record's D4.
+- **Two floating-point components only.** The spellings `parse_data_type`
+  already accepts with two components and float or half precision:
+  - `float2`, `half2`, `double2`;
+  - `texCoord2f`, `texCoord2h`, `texCoord2d`.
+
+  Everything else is refused with a `WARN`, per the `aovs` design record's
+  D4:
+  - **`int2` / `uint2`**, by the existing `type_fits` rule that UINT is for
+    `sampleCount` only. Motion is signed, and UINT output would wrap
+    leftward and downward vectors.
+  - **`vector2f`**, which is not a USD value type: `vector` is 3-component
+    only. The parser stays as it is.
+  - **No `dataType` authored**, which falls back to `color3f`. Houdini and
+    Arnold exports always author one, and the user doc's RenderVar example
+    does too.
 - **Channel kind.** A new `ChannelKind::Motion` writes `u`, `v`, lowercase,
   matching Nuke's built-in `forward.u` / `forward.v`. A RenderVar named
   `forward` therefore lands on that layer, and any other name gives a

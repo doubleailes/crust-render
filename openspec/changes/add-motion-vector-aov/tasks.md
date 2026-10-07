@@ -56,9 +56,13 @@
       clear value 0. Verify with `aov.rs` unit tests for name resolution,
       component count, default mode, and `velocity` still refused as
       unknown.
-- [ ] 3.2 Accept only 2-component `dataType` / `aov:format` for it, and
-      refuse anything else with one `WARN` per var. Verify with a test that
-      `dataType = "float"` is refused and produces no channel.
+- [ ] 3.2 Accept only 2-component float or half `dataType` / `aov:format`
+      for it, through the existing `parse_data_type` / `type_fits` (no new
+      spellings), and refuse anything else with one `WARN` per var. Verify
+      with RenderVar tests:
+      - `float2`, `half2` and `texCoord2f` each write the two channels;
+      - `float`, `color3f`, `int2`, `uint2` and `vector2f` are each refused
+        with no channel.
 - [ ] 3.3 Add `ChannelKind::Motion` writing lowercase `u`, `v` in
       `crust-render/src/products.rs`. Verify with a `channel_names` test: a
       var named `forward` gives `forward.u`, `forward.v`, and the UV source

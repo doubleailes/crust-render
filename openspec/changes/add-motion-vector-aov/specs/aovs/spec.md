@@ -118,8 +118,8 @@ displacement from shutter open to shutter close, in pixels of the rendered
 image. `u` SHALL be positive to the right and `v` positive upwards, as Nuke
 expects. A hit on geometry authoring `crust:motion:translate` SHALL report
 where that translation moves the hit's shutter-open point on screen. Units
-SHALL be per shutter interval. The source SHALL have two components and a
-clear value of 0.
+SHALL be per shutter interval. The source SHALL have two floating-point
+components (float or half) and a clear value of 0.
 
 #### Scenario: Object moving right
 
@@ -152,6 +152,12 @@ clear value of 0.
 
 - **WHEN** a `motionvector` var authors `dataType = "float"`
 - **THEN** a warning names the var, and the product has no channel for it
+
+#### Scenario: Integer types are refused
+
+- **WHEN** a `motionvector` var authors `dataType = "int2"` or `"uint2"`
+- **THEN** a warning names the var, and the product has no channel for it,
+  since unsigned samples cannot hold leftward or downward motion
 
 ### Requirement: Motion vectors do not depend on the beauty's blur
 
