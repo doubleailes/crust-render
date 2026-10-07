@@ -841,7 +841,12 @@ impl TileCache {
         // shard, so holding this one across the call deadlocks the thread
         // against itself the first time a texture exceeds the budget — which
         // is to say, on every render the cache is actually for.
-        let inserted = match lock(self.shard(&id)) {
+        //
+        // The bytes are counted *under* the guard, though: a sweep needs this
+        // shard's lock to evict the entry, so counting after the drop lets
+        // another thread evict it and subtract its bytes first, wrapping
+        // `resident` below zero.
+        let resident = match lock(self.shard(&id)) {
             Some(mut m) => m
                 .insert(
                     id,
@@ -850,12 +855,12 @@ impl TileCache {
                         used: true,
                     },
                 )
-                .is_none(),
-            None => false,
+                .is_none()
+                .then(|| self.resident.fetch_add(bytes, Ordering::Relaxed) + bytes),
+            None => None,
         };
         self.stats.decoded.fetch_add(1, Ordering::Relaxed);
-        if inserted {
-            let now = self.resident.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        if let Some(now) = resident {
             self.stats.peak_bytes.fetch_max(now, Ordering::Relaxed);
             if now > self.budget {
                 self.make_room();
