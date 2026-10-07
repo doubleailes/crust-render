@@ -60,7 +60,8 @@ cargo test -p crust-mtlx --test osl_oracle          # MaterialX nodes vs Materia
 scripts/osl_oracle.py                               # regenerate those values (needs materialx + exact-math OSL)
 
 # CI (toolchain pinned by rust-toolchain.toml, Cargo.lock committed,
-# RUSTFLAGS=-D warnings), four parallel jobs:
+# RUSTFLAGS=-D warnings), four parallel jobs; skipped when a change touches only
+# documentation (openspec/, docs/, site/, *.md — the list is in rust.yml):
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
