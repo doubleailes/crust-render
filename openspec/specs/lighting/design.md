@@ -111,8 +111,18 @@
     visibility-aware. Before the first pass, a deterministic pre-pass (one camera
     path per 4×4 pixels, two BSDF bounces) estimates **every** light's NEE
     contribution at each vertex with the integrand itself (radiance × BSDF ×
-    shadow ray), and sums the estimates into a grid. Each trained cell picks
-    `0.7 · E/ΣE + 0.3 / n_live`, and everywhere else the power table answers.
+    shadow ray), and sums the estimates into a grid. Each trained cell's table
+    is `0.7 · E/ΣE + 0.3 / n_live`, with a floor of `0.15 / n_seen` under every
+    light seen in the cell or one of its 26 neighbours (`SEEN_FLOOR`; a light
+    seen once nearby used to sit at the same `0.3 / n` as one never seen, and
+    where it was visible but under-sampled that was a firefly). A point reads
+    the **trilinear blend** of the trained cells among the eight around it —
+    the blended CDF, so NEE's pick and the bounce side's weight are intervals of
+    one function, bit for bit — and no probability jumps at a cell edge; only
+    where no trained cell is near does the power table answer. Untrained corners
+    take no part in the blend: mixing the power table in at every surface
+    (receivers lie on surfaces) is what put ALab's hidden lights back. `f` and
+    the blend's effect are measured in `docs/light_sampling.md` §3.12.
     It exists because of ALab: power gave 49% of the picks to two exterior
     lights visible from **no** receiver, and 3.2% of light samples delivered
     light (`examples/light_occlusion` measures that per light). Learned cuts

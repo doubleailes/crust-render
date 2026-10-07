@@ -770,6 +770,109 @@ The checked-in samples' per-sample gains shrink by their own time costs, which
 this section has not measured scene by scene. That, and the noise-pattern change
 to every render, is why `learned` is opt-in rather than the default.
 
+**Blended tables and a visibility floor** (2026-10-07; the OpenSpec change
+`learned-light-selection-by-default`). Two changes to the tables, aimed at the
+fireflies that kept `learned` opt-in:
+
+- **Trilinear blending.** A point reads the blend of the trained cells among the
+  eight whose centres surround it, weights renormalised over the trained ones
+  (mixing the power table in for untrained corners would put ALab's hidden
+  lights back: receivers lie on surfaces, so half of a floor point's corners are
+  empty cells). The blended CDF is evaluated — the weighted sum of the corners'
+  CDFs — so NEE picks by binary search over it, a light's probability is its
+  interval of it, and both MIS sides read the same `f32`. No probability jumps
+  at a cell edge any more; only CDFs are stored.
+- **A floor for lights seen nearby.** A light that delivered light to any
+  receiver in a cell or its 26 neighbours gets at least `f / n_seen` (`n_seen`
+  the lights so seen), against the defensive `0.3 / n` a light never seen nearby
+  keeps. The floors' excess comes out of the lights above their floor, so an
+  unseen light keeps exactly `0.3 / n`.
+- **`f` = 0.15**, chosen by relMSE at 16 spp (`--indirect-clamp 0`, four seeds
+  for the two static scenes, one for ALab) against a 1024 spp `power` reference:
+
+  | scene | power | f = 0.15 | f = 0.3 | f = 0.5 |
+  |---|---|---|---|---|
+  | `domelight`, full / trimmed | 0.346 / 0.0227 | 0.338 / 0.0183 | 0.338 / 0.0183 | 0.351 / 0.0184 |
+  | Playground, full / trimmed | 1.5e4 / 0.187 | 1.1e4 / 0.1217 | 1.1e4 / 0.1222 | 1.1e4 / 0.1266 |
+  | ALab, full / trimmed | 2.07 / 0.873 | 49 / 0.335 | 1078 / 0.393 | 174 / 0.455 |
+  | ALab, occluded shadow rays | 82.2% | 60.9% | 63.0% | 66.0% |
+
+  0.15 is best or tied on every line. (With two lights `0.15 / n_seen` never
+  rises above `0.3 / n`, so `domelight` reads the blend alone: 1.24× on the
+  trimmed measure, from the blend.) The untrimmed Playground and ALab numbers
+  are single pixels — the Playground's varies 10 000× between seeds under
+  `power` alone, and the ALab reference itself holds a firefly of radiance
+  2684 — and decide nothing. A higher floor for lights at infinity (the
+  uniform `1 / n` power gives them) was tried against ALab's fireflies and
+  reverted: it changed nothing there and forced `domelight` to 50/50.
+
+  ALab's direct-only render (`crust:maxDepth = 1`) occludes 47.5% of its shadow
+  rays with the blended, floored tables (`f` = 0.15; 49.9% at 0.3) against
+  44.1% with today's per-cell tables and 68.3% under `power`: the blend and the
+  floor send a few more rays to lights a neighbour saw, 3.4 points, 8% relative. (The 94.2% / 33.4%
+  above predate hidden lights becoming transparent to shadow rays.)
+
+**The gate, and why `learned` stays opt-in.** Every scene with two or more
+lights — 26 checked-in samples, the OpenPBR Shader Playground and ALab — at
+16 spp, `--indirect-clamp 0`, against the 1024 spp `power` reference (adaptive
+sampling off). Time is `bench_ab.sh`'s min of 6 interleaved `Render` seconds
+per side; relMSE the mean over four seeds (`-f 0..3`; one seed for the two
+animated scenes and for ALab, whose frame is its animation); the equal-time
+relMSE is `learned`'s times its time ratio, since error falls as one over
+samples. The gate (design D3) passes a scene when that is within 5% of
+`power`'s on both the full and the trimmed measure.
+
+  | scene | seeds | t power / learned (s) | time × | relMSE power (full / trimmed) | learned (full / trimmed) | equal-time learned × (full / trimmed) | occluded power → learned | gate |
+  |---|---|---|---|---|---|---|---|---|
+  | usdlux | 4 | 0.12 / 0.15 | 1.26 | 0.1019 / 0.08431 | 0.05204 / 0.04061 | **0.64 / 0.61** | 8% → 6% | pass |
+  | materialx_showcase | 4 | 2.12 / 2.41 | 1.13 | 0.006145 / 0.005318 | 0.005739 / 0.004848 | **1.06 / 1.03** | 9% → 10% | FAIL |
+  | veach_mis | 4 | 0.28 / 0.33 | 1.18 | 0.01625 / 0.006813 | 0.009165 / 0.003502 | **0.66 / 0.60** | 5% → 4% | pass |
+  | openpbr_showcase | 4 | 0.10 / 0.12 | 1.22 | 0.006057 / 0.002665 | 0.006179 / 0.002766 | **1.24 / 1.26** | 6% → 8% | FAIL |
+  | materialx_teapot | 4 | 0.42 / 0.48 | 1.14 | 0.004419 / 0.003757 | 0.003647 / 0.002998 | **0.94 / 0.91** | 10% → 6% | pass |
+  | materialx_lion | 4 | 0.59 / 0.65 | 1.11 | 0.007442 / 0.006518 | 0.005914 / 0.005038 | **0.88 / 0.86** | 13% → 9% | pass |
+  | light_visibility | 4 | 0.01 / 0.01 | 1.00 | 0.00249 / 0.0009936 | 0.002315 / 0.0008193 | **0.93 / 0.82** | 0% → 0% | pass |
+  | light_linking | 4 | 0.02 / 0.02 | 1.21 | 0.001442 / 0.001366 | 0.0008358 / 0.0007733 | **0.70 / 0.69** | 7% → 7% | pass |
+  | hair | 4 | 0.09 / 0.09 | 0.98 | 0.1317 / 0.08165 | 0.1219 / 0.07363 | **0.90 / 0.88** | 45% → 44% | pass |
+  | aovs_lpe | 4 | 0.12 / 0.13 | 1.08 | 0.1651 / 0.03386 | 0.1624 / 0.03282 | **1.07 / 1.05** | 42% → 34% | FAIL |
+  | usdpreview_textured | 4 | 0.10 / 0.12 | 1.23 | 0.001272 / 0.001004 | 0.001069 / 0.0008247 | **1.04 / 1.01** | 0% → 0% | pass |
+  | subdivision_adaptive | 4 | 0.04 / 0.05 | 1.17 | 0.002164 / 0.001872 | 0.002166 / 0.00187 | **1.17 / 1.17** | 8% → 18% | FAIL |
+  | subdivision | 4 | 0.04 / 0.05 | 1.15 | 0.00242 / 0.001538 | 0.002714 / 0.001801 | **1.29 / 1.35** | 11% → 12% | FAIL |
+  | pxr_displace | 4 | 0.01 / 0.02 | 1.14 | 0.0008033 / 0.0003119 | 0.0008063 / 0.0003909 | **1.15 / 1.43** | 17% → 13% | FAIL |
+  | motionblur | 1 | 0.02 / 0.02 | 1.05 | 0.001406 / 0.001325 | 0.001877 / 0.001789 | **1.41 / 1.42** | 24% → 25% | FAIL |
+  | nested_instancing | 4 | 0.08 / 0.09 | 1.16 | 0.002709 / 0.002484 | 0.002795 / 0.002572 | **1.20 / 1.20** | 6% → 6% | FAIL |
+  | materialx_subsurface | 4 | 0.23 / 0.26 | 1.13 | 0.06992 / 0.04857 | 0.06027 / 0.04019 | **0.98 / 0.94** | 31% → 20% | pass |
+  | materialx_cutout | 4 | 0.12 / 0.16 | 1.28 | 0.2371 / 0.04365 | 0.1865 / 0.0369 | **1.00 / 1.08** | 6% → 6% | FAIL |
+  | materialx_basic | 4 | 0.10 / 0.13 | 1.24 | 0.002588 / 0.002348 | 0.002079 / 0.001892 | **0.99 / 1.00** | 0% → 0% | pass |
+  | instancing | 4 | 0.07 / 0.09 | 1.17 | 0.006143 / 0.005257 | 0.006321 / 0.005433 | **1.21 / 1.21** | 11% → 11% | FAIL |
+  | domelight | 4 | 0.07 / 0.09 | 1.20 | 0.3464 / 0.02269 | 0.3383 / 0.01826 | **1.17 / 0.97** | 12% → 13% | FAIL |
+  | dome_backdrop | 4 | 0.03 / 0.03 | 1.00 | 0.003543 / 0.003264 | 0.003543 / 0.003264 | **1.00 / 1.00** | 33% → 33% | identical |
+  | displacement | 4 | 0.03 / 0.03 | 1.28 | 0.0006798 / 0.0005722 | 0.0008076 / 0.0006868 | **1.52 / 1.54** | 24% → 20% | FAIL |
+  | curves | 4 | 0.01 / 0.02 | 1.13 | 0.0004123 / 0.0003859 | 0.0005657 / 0.0005357 | **1.55 / 1.57** | 4% → 5% | FAIL |
+  | aovs | 4 | 0.03 / 0.03 | 1.16 | 0.0004446 / 0.0004147 | 0.0006042 / 0.0005719 | **1.58 / 1.60** | 15% → 13% | FAIL |
+  | animation | 1 | 0.01 / 0.01 | 1.08 | 9.113e-05 / 8.514e-05 | 0.0001857 / 0.0001775 | **2.19 / 2.25** | 0% → 0% | FAIL |
+  | playground | 4 | 1.08 / 1.19 | 1.10 | 1.53e+04 / 0.1868 | 1.081e+04 / 0.1217 | **0.78 / 0.72** | 72% → 56% | pass |
+  | alab | 1 | 3.74 / 4.59 | 1.23 | 2.065 / 0.8732 | 49 / 0.3351 | **29.14 / 0.47** | 82% → 61% | FAIL |
+
+  Twelve pass, sixteen fail, and the failures are not fireflies: on the small
+  two-light scenes (`curves`, `aovs`, `animation`, `displacement`, `subdivision`)
+  `learned` is 1.3–2× worse **per sample** on both measures, exactly as today's
+  per-cell tables are (checked against `main`: `animation` 2.5× under them, 2.0×
+  under the blend), and then pays 10–28% more time. Those scenes have two
+  visible lights whose flux ranks them as the power table does; a 16-receiver
+  cell's estimate of each light's mean contribution is noisier than that
+  ranking, and the tables lose to it. The gains are where visibility varies:
+  `usdlux` 0.61×, `veach_mis` 0.60×, `light_linking` 0.69×, the Playground
+  0.72×, ALab 0.47× (trimmed), `materialx_lion` 0.86×. The untrimmed ALab and
+  Playground columns are single pixels — the ALab reference itself holds a
+  firefly of radiance 2684, the Playground's full relMSE varies 10 000× between
+  seeds under `power` — and read nothing. So **`power` stays the default**; the
+  blend and the floor ship, and `learned` is the opt-in it was, now without
+  the cell-edge jumps. What would flip the default is the per-cell estimate
+  losing to the flux ranking: a table that blends the power ranking in where
+  the training signal is weak (few receivers, or lights whose contributions
+  agree), which is the opposite mix from the one the ALab finding forbids for
+  hidden lights, and a follow-up.
+
 ---
 
 ## 4. The anatomy of the direct-lighting estimator

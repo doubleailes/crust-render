@@ -14,7 +14,10 @@
 //! and shadow-ray query NEE uses. The estimates are summed into a uniform grid
 //! over the receivers' bounds. Each trained cell gets its own pick
 //! distribution, proportional to its lights' contributions and mixed
-//! defensively with a uniform share over every light that can emit.
+//! defensively with a uniform share over every light that can emit, with a
+//! floor under every light seen in the cell or one of its 26 neighbours. A
+//! point reads the **trilinear blend** of the trained cells among the eight
+//! whose centres surround it, so no probability jumps at a cell edge.
 //!
 //! The target is each light's **mean** contribution in the cell. The
 //! variance-optimal one-sample pick is proportional to the square root of the
@@ -26,12 +29,13 @@
 //!
 //! - **Unbiased.** The defensive share gives every light that emits a pick
 //!   probability of at least `DEFENSIVE / n` in every cell, so no light that
-//!   could contribute is ever unsampleable. An untrained cell uses the global
-//!   power distribution.
-//! - **One strategy on both MIS sides.** NEE picks with the cell of the vertex
-//!   it samples from; the bounce side (`bounce_emission_weight`,
+//!   could contribute is ever unsampleable. A point with no trained cell
+//!   around it uses the global power distribution.
+//! - **One strategy on both MIS sides.** NEE picks with the blend at the
+//!   vertex it samples from; the bounce side (`bounce_emission_weight`,
 //!   `escaped_emission`) asks for the pmf at the *previous* vertex's position,
-//!   which is that same vertex. Both read the same stored `f32`.
+//!   which is that same vertex. Both evaluate the same blended CDF, in the
+//!   same order, so they read the same `f32`.
 //! - **Deterministic, and scheduling-free.** The pre-pass depends on the scene
 //!   and the settings alone, reduces in receiver order, and is frozen before
 //!   any pass starts. So tiled and scanline renders stay bit-identical.
@@ -73,6 +77,15 @@ const LIGHT_SAMPLES: usize = 2;
 /// lost. On ALab power is the problem: it gives the two hidden lights half the
 /// picks.
 pub const DEFENSIVE: f32 = 0.3;
+/// The floor under a light that delivered light to any receiver in a cell or
+/// one of its 26 neighbours: `SEEN_FLOOR / n_seen`, `n_seen` being the lights
+/// so seen there. A light seen once nearby used to sit at the uniform floor
+/// `DEFENSIVE / n`, the same as one never seen; where it was in fact visible
+/// but under-sampled, its contribution over that small pmf was a firefly.
+/// Lights seen nowhere nearby keep `DEFENSIVE / n`, so hidden lights stay out
+/// of the picks (mixing the power table back in put ALab's exterior lights
+/// back). The value is chosen by measurement: `docs/light_sampling.md` §3.12.
+pub const SEEN_FLOOR: f32 = 0.15;
 /// Receivers a cell needs before its own distribution is trusted.
 const MIN_RECEIVERS: u32 = 2;
 /// Target receivers per occupied cell; sets the grid resolution.
@@ -98,32 +111,137 @@ pub struct LightCache {
     /// for an untrained cell.
     slot: Vec<u32>,
     lights: usize,
-    /// `slots x lights` pick probabilities, and their inclusive running sums.
-    pmf: Vec<f32>,
+    /// `slots x lights` inclusive running sums of each cell's pick
+    /// probabilities. Only the CDFs are stored: a probability is an interval
+    /// of the blended CDF (see [`LightCache::pmf_at`]).
     cdf: Vec<f32>,
+    /// The last light that can be picked at all: where a `u` past the end of
+    /// a blended CDF that rounds below one lands.
+    last_live: usize,
     /// For the debug line and the tests.
     pub receivers: usize,
     pub trained_cells: usize,
 }
 
+/// The trained cells around a point and their trilinear weights: what every
+/// probability at that point is read from.
+///
+/// Of the eight cells whose centres surround the point, only the trained ones
+/// take part, their weights renormalised to one; an untrained corner has
+/// weight zero. Blending the power table in for untrained corners was the
+/// alternative, and the wrong one: receivers lie on surfaces, so half of a
+/// floor point's corners are empty cells, and mixing the power table back in
+/// is what put ALab's hidden exterior lights back into the picks. A point
+/// with no trained corner has no blend, and reads the power table as before.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Blend {
+    slots: [u32; 8],
+    weights: [f32; 8],
+}
+
 impl LightCache {
-    /// The trained table for the cell holding `p`, as `(pmf, cdf)`.
+    /// The blend at `p`, or `None` where no trained cell is near: outside
+    /// the grid, or with every surrounding cell untrained.
     #[inline]
-    pub(crate) fn lookup(&self, p: Vec3A) -> Option<(&[f32], &[f32])> {
+    pub(crate) fn blend_at(&self, p: Vec3A) -> Option<Blend> {
         let c = (p - self.origin) * self.inv_cell;
+        // Also false for a NaN, which has no cell.
         if !(c.x >= 0.0 && c.y >= 0.0 && c.z >= 0.0) {
             return None;
         }
-        let (x, y, z) = (c.x as usize, c.y as usize, c.z as usize);
-        if x >= self.dims[0] || y >= self.dims[1] || z >= self.dims[2] {
+        if c.x >= self.dims[0] as f32 || c.y >= self.dims[1] as f32 || c.z >= self.dims[2] as f32 {
             return None;
         }
-        let s = self.slot[(z * self.dims[1] + y) * self.dims[0] + x];
-        if s == u32::MAX {
+        // Cell-centre coordinates: the point lies between the centres of
+        // cells `base` and `base + 1` along each axis, `t` of the way.
+        let g = c - Vec3A::splat(0.5);
+        let base = g.floor();
+        let t = g - base;
+        let base = [base.x as i64, base.y as i64, base.z as i64];
+        let mut slots = [0u32; 8];
+        let mut weights = [0.0f32; 8];
+        let mut total = 0.0f32;
+        for (corner, (slot, weight)) in slots.iter_mut().zip(&mut weights).enumerate() {
+            let d = [corner & 1, (corner >> 1) & 1, corner >> 2];
+            let mut inside = true;
+            let mut index = 0usize;
+            for axis in (0..3).rev() {
+                let i = base[axis] + d[axis] as i64;
+                if i < 0 || i >= self.dims[axis] as i64 {
+                    inside = false;
+                    break;
+                }
+                index = index * self.dims[axis] + i as usize;
+            }
+            if !inside {
+                continue;
+            }
+            let s = self.slot[index];
+            if s == u32::MAX {
+                continue;
+            }
+            let w = (if d[0] == 1 { t.x } else { 1.0 - t.x })
+                * (if d[1] == 1 { t.y } else { 1.0 - t.y })
+                * (if d[2] == 1 { t.z } else { 1.0 - t.z });
+            *slot = s;
+            *weight = w;
+            total += w;
+        }
+        if total <= 0.0 || total.is_nan() {
             return None;
         }
-        let r = s as usize * self.lights..(s as usize + 1) * self.lights;
-        Some((&self.pmf[r.clone()], &self.cdf[r]))
+        for w in &mut weights {
+            *w /= total;
+        }
+        Some(Blend { slots, weights })
+    }
+
+    /// The blended CDF at light `j`: the weighted sum of the corners' CDFs,
+    /// which is the CDF of the weighted sum of their pmfs. Monotone in `j`,
+    /// since every corner's is and rounding keeps order.
+    #[inline]
+    fn cdf_at(&self, b: &Blend, j: usize) -> f32 {
+        let n = self.lights;
+        let mut sum = 0.0f32;
+        for (&slot, &w) in b.slots.iter().zip(&b.weights) {
+            sum += w * self.cdf[slot as usize * n + j];
+        }
+        sum
+    }
+
+    /// The probability [`LightCache::pick`] lands on light `j` from blend
+    /// `b`: its interval of the blended CDF. Computed from the same CDF
+    /// values, in the same order, as the pick that lands in it — so the
+    /// pmf NEE divides by and the bounce side weights with is the one the
+    /// pick actually has, to the bit. Zero for a light no corner can pick.
+    #[inline]
+    pub(crate) fn pmf_at(&self, b: &Blend, j: usize) -> f32 {
+        let hi = self.cdf_at(b, j);
+        if j == 0 {
+            hi
+        } else {
+            hi - self.cdf_at(b, j - 1)
+        }
+    }
+
+    /// Picks a light from `[0, 1)` sample `u` by inverting the blended CDF:
+    /// the first light whose CDF exceeds `u`, with its probability. A `u` at
+    /// or past the blend's last value (which rounds within an ulp of one)
+    /// lands on the last light that can be picked.
+    #[inline]
+    pub(crate) fn pick(&self, b: &Blend, u: f32) -> (usize, f32) {
+        let n = self.lights;
+        let (mut lo, mut hi) = (0usize, n);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.cdf_at(b, mid) <= u {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let j = if lo < n { lo } else { self.last_live };
+        (j, self.pmf_at(b, j))
     }
 }
 
@@ -363,9 +481,46 @@ pub(crate) fn train(
     // pick. Only these share the defensive part.
     let live: Vec<bool> = (0..n).map(|k| lights.pmf(k) > 0.0).collect();
     let n_live = live.iter().filter(|&&l| l).count().max(1);
+    let last_live = live.iter().rposition(|&l| l)?;
+
+    // The lights seen in a cell or any of its 26 neighbours, trained or not:
+    // a receiver that saw a light counts wherever its cell borders.
+    let seen_near = |c: usize| -> Vec<bool> {
+        let (x, y, z) = (
+            c % dims[0],
+            (c / dims[0]) % dims[1],
+            c / (dims[0] * dims[1]),
+        );
+        let mut seen = vec![false; n];
+        for dz in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    let (nx, ny, nz) = (x as i64 + dx, y as i64 + dy, z as i64 + dz);
+                    if nx < 0
+                        || ny < 0
+                        || nz < 0
+                        || nx >= dims[0] as i64
+                        || ny >= dims[1] as i64
+                        || nz >= dims[2] as i64
+                    {
+                        continue;
+                    }
+                    let nc = (nz as usize * dims[1] + ny as usize) * dims[0] + nx as usize;
+                    if let Some((_, sum)) = sums.get(&nc) {
+                        for (k, &e) in sum.iter().enumerate() {
+                            if e > 0.0 && live[k] {
+                                seen[k] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        seen
+    };
 
     let mut slot = vec![u32::MAX; dims[0] * dims[1] * dims[2]];
-    let (mut pmf, mut cdf) = (Vec::new(), Vec::new());
+    let mut cdf = Vec::new();
     let mut trained = 0usize;
     for c in order {
         let (count, sum) = &sums[&c];
@@ -377,9 +532,8 @@ pub(crate) fn train(
         }
         slot[c] = trained as u32;
         trained += 1;
-        let (cell_cdf, cell_pmf) = cell_table(sum, total, &live, n_live);
-        cdf.extend(cell_cdf);
-        pmf.extend(cell_pmf);
+        let seen = seen_near(c);
+        cdf.extend(cell_table(sum, total, &live, n_live, &seen));
     }
     if trained == 0 {
         return None;
@@ -390,64 +544,110 @@ pub(crate) fn train(
         dims,
         slot,
         lights: n,
-        pmf,
         cdf,
+        last_live,
         receivers: receivers.len(),
         trained_cells: trained,
     })
 }
 
-/// One trained cell's `(cdf, pmf)`: `(1 - DEFENSIVE) * E/ΣE` plus the
-/// defensive share spread over the live lights.
+/// One trained cell's CDF: over each live light, `(1 - DEFENSIVE) * E/ΣE`
+/// plus the defensive share `DEFENSIVE / n_live`, raised to the visibility
+/// floor `SEEN_FLOOR / n_seen` for the lights `seen` in the cell's
+/// neighbourhood (`n_seen` of them). What the floors add is taken back from
+/// the lights above their floor, in proportion to their excess, so the table
+/// still sums to one and a light seen nowhere nearby keeps exactly
+/// `DEFENSIVE / n_live`. Where no floor binds, the table is the plain
+/// defensive mixture.
 ///
-/// The CDF is finalised first, in f32, and each pmf is then the width of its
-/// own interval, `cdf[k] - cdf[k-1]`. So the probability NEE divides by, and
-/// the bounce side weights with, is the one the pick actually lands with.
-/// Rounding `p` and the running sum separately could let the two differ, and
-/// the forced final 1.0 could make them differ by more.
-fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize) -> (Vec<f32>, Vec<f32>) {
+/// A higher floor for lights at infinity — the uniform `1 / n_live` the power
+/// table gives them — was tried against ALab's fireflies and reverted: it
+/// left ALab's untrimmed relMSE where it was (the firefly is not the sun's),
+/// cost 4% on its trimmed one, and on `domelight`, whose two lights are both
+/// at infinity, it forced a 50/50 table and erased the 1.24× the blend had
+/// won there.
+///
+/// The CDF is accumulated in f64 and rounded once per entry; a probability is
+/// then an interval of the blended CDF ([`LightCache::pmf_at`]), so the pick
+/// and the weights cannot disagree by construction. The last pickable light
+/// ends the CDF at exactly one, as in `LightList::select_by`, so no `u`
+/// below one falls past it in an unblended cell.
+fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize, seen: &[bool]) -> Vec<f32> {
+    let n_seen = seen.iter().zip(live).filter(|(s, l)| **s && **l).count();
+    let defensive = DEFENSIVE as f64 / n_live as f64;
+    let seen_floor = if n_seen > 0 {
+        (SEEN_FLOOR as f64 / n_seen as f64).max(defensive)
+    } else {
+        defensive
+    };
+    let floors: Vec<f64> = (0..sum.len())
+        .map(|k| {
+            if !live[k] {
+                return 0.0;
+            }
+            if seen[k] { seen_floor } else { defensive }
+        })
+        .collect();
+    // The floors leave room for the learned part: at most
+    // `SEEN_FLOOR + DEFENSIVE`, below one.
+    let floor_total: f64 = floors.iter().sum();
+    let above_total: f64 = (0..sum.len())
+        .filter(|&k| live[k])
+        .map(|k| {
+            let learned = (1.0 - DEFENSIVE as f64) * sum[k] / total;
+            (defensive + learned - floors[k]).max(0.0)
+        })
+        .sum();
+    // The learned mass left once every floor is paid, spread over the lights
+    // above their floor in proportion to their excess.
+    let scale = if above_total > 0.0 {
+        (1.0 - floor_total) / above_total
+    } else {
+        0.0
+    };
     let mut running = 0.0f64;
     let mut cdf = Vec::with_capacity(sum.len());
     let mut last_live = None;
     for (k, &e) in sum.iter().enumerate() {
         let p = if live[k] {
             last_live = Some(k);
-            (1.0 - DEFENSIVE as f64) * e / total + DEFENSIVE as f64 / n_live as f64
+            let learned = (1.0 - DEFENSIVE as f64) * e / total;
+            floors[k] + scale * (defensive + learned - floors[k]).max(0.0)
         } else {
             0.0
         };
         running += p;
         cdf.push(running as f32);
     }
-    // As in `LightList::select_by`: the last pickable light ends the CDF at
-    // exactly one, so no `u` below one falls past it.
     if let Some(last) = last_live {
         for c in &mut cdf[last..] {
             *c = 1.0;
         }
     }
-    let mut prev = 0.0f32;
-    let pmf = cdf
-        .iter()
-        .map(|&c| {
-            let p = c - prev;
-            prev = c;
-            p
-        })
-        .collect();
-    (cdf, pmf)
+    cdf
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every pmf is exactly its own CDF interval, including the last live
-    /// light's, whose boundary is forced to 1.0, and a dead light's, which is
-    /// empty. Checked where rounding bites: many lights, tiny and uneven
+    fn pmf_of(cdf: &[f32]) -> Vec<f32> {
+        let mut prev = 0.0f32;
+        cdf.iter()
+            .map(|&c| {
+                let p = c - prev;
+                prev = c;
+                p
+            })
+            .collect()
+    }
+
+    /// Every live light keeps the defensive floor through the rounding, a
+    /// dead light's interval is empty, and the table ends at exactly one.
+    /// Checked where rounding bites: many lights, tiny and uneven
     /// contributions.
     #[test]
-    fn each_pmf_is_exactly_its_cdf_interval() {
+    fn each_live_light_keeps_its_floor_and_the_table_ends_at_one() {
         let n = MAX_LIGHTS;
         let sum: Vec<f64> = (0..n)
             .map(|k| {
@@ -462,14 +662,11 @@ mod tests {
         // A few dead lights, the last one among them.
         let live: Vec<bool> = (0..n).map(|k| k % 101 != 3 && k != n - 1).collect();
         let n_live = live.iter().filter(|&&l| l).count();
-        let (cdf, pmf) = cell_table(&sum, total, &live, n_live);
-
-        let mut prev = 0.0f32;
+        let seen: Vec<bool> = sum.iter().map(|&e| e > 0.0).collect();
+        let cdf = cell_table(&sum, total, &live, n_live, &seen);
+        let pmf = pmf_of(&cdf);
         for k in 0..n {
-            assert_eq!(pmf[k], cdf[k] - prev, "light {k}");
-            prev = cdf[k];
             if live[k] {
-                // The defensive floor survives the rounding.
                 assert!(
                     pmf[k] >= 0.99 * DEFENSIVE / n_live as f32,
                     "light {k}: {}",
@@ -482,5 +679,118 @@ mod tests {
         assert_eq!(*cdf.last().unwrap(), 1.0);
         let total_p: f64 = pmf.iter().map(|&p| p as f64).sum();
         assert!((total_p - 1.0).abs() < 1e-6, "{total_p}");
+    }
+
+    /// The visibility floor (design D2): a light seen nowhere nearby keeps
+    /// exactly `DEFENSIVE / n_live`; a light seen once nearby, with nothing
+    /// from it in this cell, gets `SEEN_FLOOR / n_seen` instead; the rest is
+    /// taken from the lights above their floor; and where no floor binds the
+    /// table is the plain defensive mixture.
+    #[test]
+    fn a_light_seen_nearby_gets_the_floor_and_an_unseen_one_the_defensive_share() {
+        let live = vec![true; 4];
+        // Light 0 lights this cell; light 1 was seen by a neighbour only;
+        // lights 2 and 3 were never seen nearby.
+        let sum = vec![10.0, 0.0, 0.0, 0.0];
+        let seen = vec![true, true, false, false];
+        let pmf = pmf_of(&cell_table(&sum, 10.0, &live, 4, &seen));
+        let defensive = DEFENSIVE / 4.0;
+        assert!((pmf[2] - defensive).abs() < 1e-6, "unseen: {}", pmf[2]);
+        assert!((pmf[3] - defensive).abs() < 1e-6, "unseen: {}", pmf[3]);
+        let floor = SEEN_FLOOR / 2.0;
+        assert!((pmf[1] - floor).abs() < 1e-6, "seen nearby: {}", pmf[1]);
+        assert!(pmf[1] > defensive);
+        let total: f32 = pmf.iter().sum();
+        assert!((total - 1.0).abs() < 1e-6);
+        assert!((pmf[0] - (1.0 - floor - 2.0 * defensive)).abs() < 1e-6);
+
+        // Both lights well above the floor: the mixture as it always was.
+        let sum = vec![6.0, 4.0];
+        let pmf = pmf_of(&cell_table(&sum, 10.0, &[true, true], 2, &[true, true]));
+        assert!((pmf[0] - (0.7 * 0.6 + 0.15)).abs() < 1e-6, "{}", pmf[0]);
+        assert!((pmf[1] - (0.7 * 0.4 + 0.15)).abs() < 1e-6, "{}", pmf[1]);
+    }
+
+    /// A cache of two trained cells side by side along x, and an untrained
+    /// row above them.
+    fn two_cells(a: &[f64], b: &[f64]) -> LightCache {
+        let live = [true, true, true];
+        let seen = [true, true, true];
+        let mut cdf = cell_table(a, a.iter().sum(), &live, 3, &seen);
+        cdf.extend(cell_table(b, b.iter().sum(), &live, 3, &seen));
+        LightCache {
+            origin: Vec3A::ZERO,
+            inv_cell: 1.0,
+            dims: [2, 2, 1],
+            // Row y = 0 trained (slots 0 and 1), row y = 1 untrained.
+            slot: vec![0, 1, u32::MAX, u32::MAX],
+            lights: 3,
+            cdf,
+            last_live: 2,
+            receivers: 0,
+            trained_cells: 2,
+        }
+    }
+
+    /// Design D1: along a line crossing the boundary between two trained
+    /// cells, every light's probability changes continuously and the blend
+    /// sums to one; the pick's probability is the one `pmf_at` reports; and
+    /// an untrained neighbour takes no part, so the trained row's tables are
+    /// read above it as well.
+    #[test]
+    fn the_blend_is_continuous_across_a_cell_edge_and_sums_to_one() {
+        let cache = two_cells(&[8.0, 1.0, 1.0], &[1.0, 1.0, 8.0]);
+        let at = |x: f32, y: f32| {
+            let b = cache.blend_at(Vec3A::new(x, y, 0.5)).expect("inside");
+            [0, 1, 2].map(|j| cache.pmf_at(&b, j))
+        };
+        let mut prev = at(0.5, 0.5);
+        let steps = 400;
+        for i in 1..=steps {
+            let x = 0.5 + i as f32 / steps as f32;
+            let now = at(x, 0.5);
+            let total: f32 = now.iter().sum();
+            assert!((total - 1.0).abs() < 1e-5, "x {x}: sums to {total}");
+            for j in 0..3 {
+                assert!(
+                    (now[j] - prev[j]).abs() < 0.01,
+                    "x {x}, light {j}: {} -> {}",
+                    prev[j],
+                    now[j]
+                );
+            }
+            prev = now;
+        }
+        // At the centres the blend is each cell's own table; between them
+        // light 0 falls and light 2 rises.
+        let (left, right, mid) = (at(0.5, 0.5), at(1.5, 0.5), at(1.0, 0.5));
+        assert!(left[0] > 0.6 && right[2] > 0.6);
+        assert!((mid[0] - (left[0] + right[0]) / 2.0).abs() < 1e-6);
+        // The untrained row above reads the trained row below it.
+        assert_eq!(at(0.5, 1.4), at(0.5, 0.5));
+        // Outside the grid: nothing.
+        assert!(cache.blend_at(Vec3A::new(-0.1, 0.5, 0.5)).is_none());
+        assert!(cache.blend_at(Vec3A::new(0.5, 0.5, 1.5)).is_none());
+
+        // The pick lands in the interval `pmf_at` reports, at every u.
+        let b = cache.blend_at(Vec3A::new(1.2, 0.5, 0.5)).unwrap();
+        let mut counts = [0usize; 3];
+        let n = 100_000;
+        for i in 0..n {
+            let u = (i as f32 + 0.5) / n as f32;
+            let (j, p) = cache.pick(&b, u);
+            assert_eq!(p, cache.pmf_at(&b, j));
+            counts[j] += 1;
+        }
+        for (j, &count) in counts.iter().enumerate() {
+            let frequency = count as f32 / n as f32;
+            assert!(
+                (frequency - cache.pmf_at(&b, j)).abs() < 2e-5,
+                "light {j}: picked {frequency}, pmf {}",
+                cache.pmf_at(&b, j)
+            );
+        }
+        // A `u` at the top of the range lands on the last pickable light.
+        assert_eq!(cache.pick(&b, 1.0 - f32::EPSILON / 2.0).0, 2);
     }
 }

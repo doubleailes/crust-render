@@ -254,10 +254,11 @@ How light sampling picks which light to sample at each vertex. Overrides
 |-------|---------|
 | `power` | by emitted power, defensively: half the shadow rays are shared evenly among the finite lights, and lights at infinity keep their uniform share. **Default.** |
 | `uniform` | every light is equally likely, whatever it emits |
-| `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
+| `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it; the regions' tables are blended, so no probability jumps at a region edge |
 
 `learned` helps scenes with many lights where the brightest ones are often hidden, for
-example a room lit through its windows.
+example a room lit through its windows, and on scenes lit by a few lights that are all
+visible it can be slower and noisier than `power`, which is why `power` stays the default.
 
 ### filter
 

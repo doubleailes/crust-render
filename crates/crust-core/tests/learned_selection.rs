@@ -238,3 +238,48 @@ fn one_light_learns_nothing() {
     let r = Renderer::new(camera, world.commit(), lights, settings);
     assert_eq!(r.lights.selection(), LightSelection::Power);
 }
+
+/// Spec: "Strategies agree under learned selection". The blended, floored
+/// tables are one strategy on both MIS sides: on `samples/usdlux.usda`
+/// (seven lights of every UsdLux kind), power MIS, light sampling alone and
+/// BSDF sampling alone agree under `learned`, and with the `power` render.
+#[test]
+fn strategies_agree_under_learned_selection_on_usdlux() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/usdlux.usda");
+    let mean = |selection: LightSelection, strategy: SamplingStrategy, spp: u32| {
+        let scene = crust_core::Scene::from_usd(std::path::Path::new(path)).expect("usdlux loads");
+        let (w, h) = (64usize, 36usize);
+        let settings = scene
+            .settings
+            .with_resolution(w, h)
+            .with_samples_per_pixel(spp)
+            .with_adaptive_sampling(spp, 0.0)
+            .with_indirect_clamp(0.0)
+            .with_sampling_strategy(strategy)
+            .with_light_selection(selection);
+        let r = Renderer::new(scene.camera, scene.world, scene.lights, settings);
+        assert_eq!(r.lights.selection(), selection);
+        let b = r.render();
+        let mut sum = 0.0f64;
+        for y in 0..h {
+            for x in 0..w {
+                let p = b.get_pixel(x, y);
+                sum += (p.x + p.y + p.z) as f64 / 3.0;
+            }
+        }
+        sum / (w * h) as f64
+    };
+    let reference = mean(LightSelection::Power, SamplingStrategy::PowerMis, 1024);
+    assert!(reference > 0.0);
+    for (strategy, spp, tol) in [
+        (SamplingStrategy::PowerMis, 512, 0.03),
+        (SamplingStrategy::LightOnly, 512, 0.03),
+        (SamplingStrategy::BsdfOnly, 2048, 0.08),
+    ] {
+        let m = mean(LightSelection::Learned, strategy, spp);
+        assert!(
+            (m - reference).abs() < tol * reference,
+            "{strategy:?} under learned: {m} vs {reference}"
+        );
+    }
+}

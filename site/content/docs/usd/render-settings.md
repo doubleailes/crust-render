@@ -173,9 +173,11 @@ How light sampling picks which light to sample.
 |-------|---------|
 | `power` | by emitted power, defensively: half the shadow rays are shared evenly among the finite lights, and lights at infinity keep their uniform share |
 | `uniform` | every light is equally likely |
-| `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
+| `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it; the regions' tables are blended, so no probability jumps at a region edge |
 
-An unknown name logs a warning and uses `power`.
+An unknown name logs a warning and uses `power`. `learned` pays off where lights are
+often hidden (interiors lit through windows); on scenes lit by a few lights that are all
+visible it can be slower and noisier than `power`.
 
 ## Pixel filter
 
