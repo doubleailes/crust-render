@@ -402,22 +402,28 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
       done, before any output is written, at any cap including `0`.
     - Scheduling only: readers are interchangeable cursors, so the cap cannot change a
       tile (pinned by `the_cap_does_not_change_a_single_byte`, cap 1 against 0).
-      `--stats` prints the peak open count against the cap, and the reopens — opens
-      beyond each file's first, which re-parse the header — that the cap cost.
+      `--stats` prints the peak open count against the cap, and the reopens that the
+      cap cost: opens on a file that had a reader closed (a TIFF reopen re-parses the
+      header). A second reader opened while a file's first is in use is not one. The
+      peak is counted from successful opens and actual closes, so an open that fails
+      never raises it. `--stats` gives no advice on the cap: many reopens only say the
+      scene touches more files than it, and the ALab numbers below show that costing
+      nothing.
     - *Measured on ALab frame 1004* (2026-10-07, 72 threads, `ulimit -n 1024`, 5 722
       streamed files, 55 325 misses). Default cap: peak 259 descriptors in
-      `/proc/<pid>/fd` (256 readers + stdio), 31 657 reopens, 0 tile read errors, EXR
+      `/proc/<pid>/fd` (256 readers + stdio), 0 tile read errors, EXR
       written. `CRUST_TEX_MAX_OPEN_FILES=0`: peak 1 015 descriptors. The `EMFILE` retry
-      drained the pool repeatedly and lost no tile (26 339 reopens, 0 errors), and the
+      drained the pool repeatedly and lost no tile (0 errors), and the
       image is bit-identical to the default cap's. At 32 spp under `--profile`,
       TextureLoad is 1.4% of thread time at 160.7 µs a miss at the default cap, against
       1.5% and 163.8 µs at `0`. `bench_ab.sh` (3 interleaved reps) puts the default cap
       at +1.4% min / +0.8% mean against `0`, below the noise floor. ALab's `.tx` are
       EXR, and an EXR reopen is one `File::open`; a TIFF reopen also re-parses IFD0, so
       a TIFF-heavy scene is where to re-measure before lowering the default. With
-      reopens at no measurable cost, 256 stays. The peak `--stats` reports can exceed
-      the real descriptor count by the opens that are failing at that moment (1 027 at
-      `0` above), because an open is counted when it is reserved, before it is tried.
+      reopens at no measurable cost, 256 stays. (These runs predate the current
+      reopen and peak counting: they reported 31 657 and 26 339 "reopens", which
+      included concurrent extra readers, and a cap-0 peak of 1 027 that counted
+      failing opens. The descriptor peaks above come from `/proc`, not `--stats`.)
 
 ## Ptex
 

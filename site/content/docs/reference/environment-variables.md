@@ -245,9 +245,11 @@ plus one file per render thread is open at once. Every `.tx` file is closed when
 render ends, before the images are written.
 
 The cap never changes the image, only how often files are reopened. `--stats` reports the
-peak number of open files and the reopens. Many reopens mean the cap is below the
-number of files the render keeps coming back to: raise it, keeping it plus the thread
-count under the process's open-file limit (`ulimit -n`, often 1024).
+peak number of open files and the reopens: reads that had to open a file the cap had
+closed. Many reopens mean the scene touches more files than the cap, which usually costs
+little. Raise the cap only if `--profile` shows `TextureLoad` taking a large share of the
+render, and keep it plus the thread count under the process's open-file limit
+(`ulimit -n`, often 1024).
 
 `0` never closes a file during the render, which was the behaviour before the cap. A
 scene that streams thousands of `.tx` files can then run out of file descriptors.

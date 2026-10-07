@@ -545,8 +545,9 @@ pub struct TextureCacheStats {
     pub peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
-    /// `.tx` readers opened, and those beyond each file's first: what the
-    /// open-file cap (`CRUST_TEX_MAX_OPEN_FILES`) cost in reopens.
+    /// `.tx` readers opened, and of those the ones on a file whose reader
+    /// had been closed: what the open-file cap (`CRUST_TEX_MAX_OPEN_FILES`)
+    /// cost in reopens.
     pub opens: u64,
     pub reopens: u64,
     /// The most `.tx` files open at once, against `max_open_files` (`0`:
@@ -1221,19 +1222,11 @@ impl RenderStats {
                     n => count(n),
                 }
             )?;
-            // A reopen re-parses the file's header, so many of them say the
-            // cap is below the files the render keeps coming back to.
-            writeln!(
-                f,
-                "  {:<28} {}{}",
-                "file reopens",
-                count(t.reopens),
-                if t.max_open_files > 0 && t.reopens > t.opens / 2 {
-                    "   (raise CRUST_TEX_MAX_OPEN_FILES)"
-                } else {
-                    ""
-                }
-            )?;
+            // No advice here, deliberately. Many reopens only say the scene
+            // touches more files than the cap; on ALab that cost nothing
+            // measurable, and a higher cap leaves less room under the
+            // descriptor limit. Whether they cost time is TextureLoad's to say.
+            writeln!(f, "  {:<28} {}", "file reopens", count(t.reopens))?;
             writeln!(f, "  {:<28} {}", "loaded tiles", count(t.loaded_tiles))?;
             writeln!(f, "  {:<28} {}", "unloaded tiles", count(t.evictions))?;
             writeln!(f, "  {:<28} {}", "lookups", count(t.lookups()))?;
@@ -1875,15 +1868,8 @@ mod tests {
         }
         let out = streamed(0).report();
         assert!(out.contains("peak open files / cap        4 / unbounded"));
-        let out = RenderStats {
-            textures: TextureCacheStats {
-                reopens: 4,
-                ..streamed(1).textures
-            },
-            ..Default::default()
-        }
-        .report();
-        assert!(out.contains("(raise CRUST_TEX_MAX_OPEN_FILES)"), "{out}");
+        // Reopens are reported, not judged: no advice to raise the cap.
+        assert!(!out.contains("raise CRUST_TEX_MAX_OPEN_FILES"), "{out}");
     }
 
     #[test]

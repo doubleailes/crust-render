@@ -38,7 +38,7 @@
 use super::{TileReader, TiledFile};
 use crate::texture_cache::{Ways, mib_to_bytes};
 use half::f16;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -337,9 +337,13 @@ pub struct CacheStats {
     pub bytes_read: AtomicU64,
     pub peak_bytes: AtomicU64,
     pub errors: AtomicU64,
-    /// Readers opened, and the most that existed at once — open file
-    /// descriptors, which is what the cap bounds.
+    /// Readers opened, and of those the ones on a file that had a reader
+    /// closed before — the reopens the cap costs. A second reader opened
+    /// while the first is still in use is an open, not a reopen.
     pub opens: AtomicU64,
+    pub reopens: AtomicU64,
+    /// The most readers open at once, counted from successful opens and
+    /// actual closes: open file descriptors, which is what the cap bounds.
     pub peak_open: AtomicU64,
 }
 
@@ -356,8 +360,8 @@ pub struct CacheCounters {
     pub peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
-    /// Readers opened over the render, and of those the ones beyond each
-    /// file's first: the cost of the open-file cap.
+    /// Readers opened over the render, and of those the ones on a file whose
+    /// reader had been closed: the cost of the open-file cap.
     pub opens: u64,
     pub reopens: u64,
     /// The most readers — open files — that existed at once.
@@ -379,9 +383,6 @@ pub struct CacheCounters {
 /// One file's geometry and what the cache has learned about it.
 struct FileSlot {
     file: TiledFile,
-    /// Whether a reader on this file was ever opened, so `reopens` can be
-    /// told from first opens at report time.
-    opened: AtomicBool,
     /// Whether this file's first failed read was already reported at WARN.
     /// The rest go to DEBUG: one line per broken file, never per tile.
     warned: AtomicBool,
@@ -433,8 +434,11 @@ struct ReaderPool {
     stamps: HashMap<u32, u64>,
     lru: BTreeMap<u64, u32>,
     clock: u64,
-    /// Readers that exist, idle or checked out.
+    /// Readers that exist or are being opened, idle or checked out: what the
+    /// cap is checked against.
     open: usize,
+    /// Files that have had a reader closed, so an open on one is a reopen.
+    closed: HashSet<u32>,
 }
 
 impl ReaderPool {
@@ -458,6 +462,7 @@ impl ReaderPool {
         let (_, &file) = self.lru.first_key_value()?;
         let reader = self.take(file)?;
         self.open = self.open.saturating_sub(1);
+        self.closed.insert(file);
         Some(reader)
     }
 
@@ -465,6 +470,7 @@ impl ReaderPool {
     fn give_back(&mut self, file: u32, reader: TileReader, cap: usize) -> Option<TileReader> {
         if cap != 0 && self.open > cap {
             self.open = self.open.saturating_sub(1);
+            self.closed.insert(file);
             return Some(reader);
         }
         self.idle.entry(file).or_default().push(reader);
@@ -478,6 +484,7 @@ impl ReaderPool {
 
     /// Every idle reader, to be closed.
     fn drain(&mut self) -> Vec<TileReader> {
+        self.closed.extend(self.idle.keys().copied());
         let all: Vec<TileReader> = self.idle.drain().flat_map(|(_, r)| r).collect();
         self.stamps.clear();
         self.lru.clear();
@@ -513,6 +520,10 @@ pub struct TileCache {
     shards: Vec<Mutex<HashMap<TileId, Entry>>>,
     files: Mutex<Vec<Arc<FileSlot>>>,
     readers: Mutex<ReaderPool>,
+    /// Readers actually open: up on a successful open, down after a close.
+    /// The pool's `open` also counts opens still being tried, so the peak is
+    /// taken from this one.
+    live: AtomicU64,
     /// `CRUST_TEX_MAX_OPEN_FILES`: idle readers kept; `0` keeps every one.
     max_open: usize,
     /// The OS error the next open fails with, `0` for none: how a test makes
@@ -538,6 +549,7 @@ impl TileCache {
             shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
             files: Mutex::new(Vec::new()),
             readers: Mutex::new(ReaderPool::default()),
+            live: AtomicU64::new(0),
             max_open: max_open_files,
             #[cfg(test)]
             inject_open_error: std::sync::atomic::AtomicI32::new(0),
@@ -564,7 +576,6 @@ impl TileCache {
         let id = files.len() as u32;
         files.push(Arc::new(FileSlot {
             file,
-            opened: AtomicBool::new(false),
             warned: AtomicBool::new(false),
             seen: Mutex::new(std::collections::HashSet::new()),
         }));
@@ -582,17 +593,12 @@ impl TileCache {
                     .sum::<u64>()
             })
             .unwrap_or(0);
-        let (files, total_bytes, files_opened) = lock(&self.files)
+        let (files, total_bytes) = lock(&self.files)
             .map(|files| {
                 let total = files.iter().map(|f| full_chain_bytes(&f.file)).sum();
-                let opened = files
-                    .iter()
-                    .filter(|f| f.opened.load(Ordering::Relaxed))
-                    .count();
-                (files.len() as u64, total, opened as u64)
+                (files.len() as u64, total)
             })
-            .unwrap_or((0, 0, 0));
-        let opens = s.opens.load(Ordering::Relaxed);
+            .unwrap_or((0, 0));
         CacheCounters {
             files,
             loaded_tiles: s.decoded.load(Ordering::Relaxed),
@@ -617,8 +623,8 @@ impl TileCache {
             peak_bytes: s.peak_bytes.load(Ordering::Relaxed),
             errors: s.errors.load(Ordering::Relaxed),
             budget_bytes: self.budget,
-            opens,
-            reopens: opens.saturating_sub(files_opened),
+            opens: s.opens.load(Ordering::Relaxed),
+            reopens: s.reopens.load(Ordering::Relaxed),
             peak_open: s.peak_open.load(Ordering::Relaxed),
             max_open_files: self.max_open as u64,
         }
@@ -628,7 +634,16 @@ impl TileCache {
     /// time; the host calls it when the render is done, so writing the outputs
     /// never competes with texture files for descriptors, whatever the cap.
     pub fn release_readers(&self) {
-        drop(self.drain_idle());
+        self.close(self.drain_idle());
+    }
+
+    /// Closes `readers`, outside the pool's lock, and only then counts them
+    /// closed: the live count may briefly over-report, never under-report.
+    fn close(&self, readers: impl IntoIterator<Item = TileReader>) {
+        let n = readers.into_iter().count() as u64;
+        if n > 0 {
+            self.live.fetch_sub(n, Ordering::Relaxed);
+        }
     }
 
     /// Takes every idle reader out of the pool; the caller drops them after
@@ -660,7 +675,7 @@ impl TileCache {
     /// first. If the open runs out of descriptors, every idle reader is closed
     /// and the open tried once more before the miss counts as failed.
     fn checkout(&self, file: u32, slot: &FileSlot) -> Option<TileReader> {
-        let victim = {
+        let (victim, reopen) = {
             let mut pool = lock(&self.readers)?;
             if let Some(reader) = pool.take(file) {
                 return Some(reader);
@@ -671,15 +686,12 @@ impl TileCache {
                 None
             };
             pool.open += 1;
-            self.stats
-                .peak_open
-                .fetch_max(pool.open as u64, Ordering::Relaxed);
-            victim
+            (victim, pool.closed.contains(&file))
         };
-        drop(victim);
+        self.close(victim);
         let opened = match self.open_reader(slot) {
             Err(e) if out_of_descriptors(&e) => {
-                drop(self.drain_idle());
+                self.close(self.drain_idle());
                 self.open_reader(slot)
             }
             other => other,
@@ -687,7 +699,11 @@ impl TileCache {
         match opened {
             Ok(reader) => {
                 self.stats.opens.fetch_add(1, Ordering::Relaxed);
-                slot.opened.store(true, Ordering::Relaxed);
+                if reopen {
+                    self.stats.reopens.fetch_add(1, Ordering::Relaxed);
+                }
+                let live = self.live.fetch_add(1, Ordering::Relaxed) + 1;
+                self.stats.peak_open.fetch_max(live, Ordering::Relaxed);
                 Some(reader)
             }
             Err(e) => {
@@ -707,7 +723,7 @@ impl TileCache {
             Some(mut pool) => pool.give_back(file, reader, self.max_open),
             None => Some(reader),
         };
-        drop(excess);
+        self.close(excess);
     }
 
     fn open_reader(&self, slot: &FileSlot) -> io::Result<TileReader> {
@@ -1460,6 +1476,58 @@ mod tests {
         assert!(c.reopens > 0, "24 files under a cap of 4 must reopen");
         assert_eq!(c.max_open_files, cap as u64);
         assert_eq!(c.errors, 0);
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+    }
+
+    /// A reopen is an open on a file that had a reader closed. Threads opening
+    /// a second reader on a file whose first is in use closed nothing, so
+    /// under a cap the scene never reaches, nothing counts as a reopen.
+    #[test]
+    fn concurrent_first_reads_are_not_reopens() {
+        clear_microcache();
+        let paths = many_fixtures("no_reopen", 1);
+        let cache = TileCache::new(1024 * 1024, 256);
+        let files = intern_all(&cache, &paths);
+        read_everything(&cache, &files, 6, 8);
+        let c = cache.counters();
+        assert!(c.opens >= 1);
+        assert_eq!(c.reopens, 0, "{} opens, nothing closed", c.opens);
+        // Closing and reading again is a reopen.
+        cache.release_readers();
+        let id = TileId {
+            file: files[0],
+            level: 1,
+            tile: 0,
+        };
+        assert!(cache.get(id).is_some());
+        assert_eq!(cache.counters().reopens, 1);
+        let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+    }
+
+    /// The reported peak counts files that were open, not opens that were
+    /// tried and failed.
+    #[test]
+    fn failed_opens_do_not_raise_the_peak() {
+        clear_microcache();
+        let paths = many_fixtures("peak_failed", 3);
+        let cache = TileCache::new(1024 * 1024, 256);
+        let files = intern_all(&cache, &paths);
+        let tile0 = |file| TileId {
+            file,
+            level: 0,
+            tile: 0,
+        };
+        for &f in &files[..2] {
+            assert!(cache.get(tile0(f)).is_some());
+        }
+        assert_eq!(cache.counters().peak_open, 2);
+        cache.inject_open_error.store(2, Ordering::Relaxed); // ENOENT
+        assert!(cache.get(tile0(files[2])).is_none());
+        assert_eq!(cache.counters().peak_open, 2, "a failed open was counted");
+        // Closing and opening again does not grow the peak either.
+        cache.release_readers();
+        assert!(cache.get(tile0(files[2])).is_some());
+        assert_eq!(cache.counters().peak_open, 2);
         let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
     }
 
