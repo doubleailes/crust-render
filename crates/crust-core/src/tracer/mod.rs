@@ -22,7 +22,8 @@ use path::{K_CAMERA, K_TIME, PathContext, ray_cones_enabled, trace_path};
 
 pub use path::{ray_color, ray_color_with_light_samples};
 pub use settings::{
-    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, RenderSettings, SamplingStrategy,
+    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, DEFAULT_LIGHT_SAMPLES,
+    MAX_LIGHT_SAMPLES, RenderSettings, SamplingStrategy,
 };
 
 pub(crate) use path::PathScratch;

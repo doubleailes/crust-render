@@ -9,8 +9,9 @@
 ## 2. Estimator (`crates/crust-core/src/tracer/path.rs`)
 
 - [x] 2.1 Loop the surface NEE block over N (camera vertex) or M (later
-      vertices) samples with stratified pick and point dimensions (design D1),
-      averaging the contributions. Verify: at N = 1, a unit test shows the
+      vertices) samples with a stratified pick only (design D1; the
+      point-on-light coordinates come unstratified from each sample's own
+      sub-domain), averaging the contributions. Verify: at N = 1, a unit test shows the
       draws equal today's.
 - [x] 2.2 Carry the count in `PrevVertex`. Use `count · density` in
       `bounce_emission_weight`, `escaped_emission`, the phase arm and guiding's

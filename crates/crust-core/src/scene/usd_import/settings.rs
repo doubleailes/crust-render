@@ -268,16 +268,23 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
 }
 
 /// A per-vertex light sample count off the `RenderSettings` prim: the
-/// authored value when it is at least 1, else the default of 1 with a
-/// warning. Unauthored is 1.
+/// authored value when it is at least 1, clamped to `MAX_LIGHT_SAMPLES` with
+/// a warning above it (a count multiplies every vertex's shadow rays, so a
+/// typo there is a render that never ends), else the default with a warning.
+/// Unauthored is the default.
 fn light_sample_count(prim: &Prim, name: &str) -> u32 {
+    use crate::tracer::{DEFAULT_LIGHT_SAMPLES, MAX_LIGHT_SAMPLES};
     match custom_i32(prim, name) {
+        Some(n) if n >= 1 && n as u32 > MAX_LIGHT_SAMPLES => {
+            warn!("{name} = {n} is above {MAX_LIGHT_SAMPLES} — taking {MAX_LIGHT_SAMPLES}");
+            MAX_LIGHT_SAMPLES
+        }
         Some(n) if n >= 1 => n as u32,
         Some(n) => {
-            warn!("{name} = {n} is below 1 — taking one light sample");
-            1
+            warn!("{name} = {n} is below 1 — taking {DEFAULT_LIGHT_SAMPLES}");
+            DEFAULT_LIGHT_SAMPLES
         }
-        None => 1,
+        None => DEFAULT_LIGHT_SAMPLES,
     }
 }
 

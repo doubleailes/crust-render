@@ -266,7 +266,7 @@ example a room lit through its windows.
 `--light-samples <N>`
 
 How many light samples (shadow rays) light sampling takes at the first vertex of each
-camera path. It must be at least 1. Overrides
+camera path. It must be from 1 to 1024. Overrides
 [`crust:lightSamples`](@/docs/usd/render-settings.md#crust-lightsamples) (default 1).
 
 The N samples spread over the lights in proportion to their selection probabilities
@@ -281,7 +281,7 @@ bit-identical to a render before the counts existed.
 `--light-samples-indirect <M>`
 
 The same count at every later vertex of a path — surface and volume alike. It must be
-at least 1. Overrides
+from 1 to 1024. Overrides
 [`crust:lightSamplesIndirect`](@/docs/usd/render-settings.md#crust-lightsamplesindirect)
 (default 1). Paid at every bounce, so it multiplies the shadow rays along the whole
 path for a smaller share of the image's noise than the camera vertex's count.

@@ -270,16 +270,20 @@ fn parse_clamp(s: &str) -> std::result::Result<f32, String> {
     }
 }
 
-/// `--light-samples` / `--light-samples-indirect`'s parser: a count of at
-/// least one. Zero would mean no light sampling at all, which is
-/// `--strategy bsdf`'s job; the engine clamps it up silently, so it is
-/// refused here as a usage error instead.
+/// `--light-samples` / `--light-samples-indirect`'s parser: a count from 1
+/// to `MAX_LIGHT_SAMPLES`. Zero would mean no light sampling at all, which
+/// is `--strategy bsdf`'s job, and a count multiplies every vertex's shadow
+/// rays, so a mistyped huge one is a render that never ends; the engine
+/// clamps both silently, so they are refused here as usage errors instead.
 fn parse_count(s: &str) -> std::result::Result<u32, String> {
     let n: u32 = s.parse().map_err(|e| format!("{e}"))?;
-    if n >= 1 {
+    if (1..=crust_core::MAX_LIGHT_SAMPLES).contains(&n) {
         Ok(n)
     } else {
-        Err(format!("{s} is not a count of at least 1"))
+        Err(format!(
+            "{s} is not a count from 1 to {}",
+            crust_core::MAX_LIGHT_SAMPLES
+        ))
     }
 }
 
@@ -977,6 +981,9 @@ mod tests {
         assert!(render(["--light-samples", "0"]).is_err());
         assert!(render(["--light-samples-indirect", "0"]).is_err());
         assert!(render(["--light-samples", "-1"]).is_err());
+        assert!(render(["--light-samples", "1024"]).is_ok());
+        assert!(render(["--light-samples", "1025"]).is_err());
+        assert!(render(["--light-samples-indirect", "1000000000"]).is_err());
         let bare = render([]).unwrap();
         assert!(bare.light_samples.is_none() && bare.light_samples_indirect.is_none());
 
@@ -993,6 +1000,11 @@ mod tests {
         let s = apply_overrides(&bare, scene);
         assert_eq!((s.light_samples(), s.light_samples_indirect()), (3, 5));
         assert_eq!(base.with_light_samples(0, 0).light_samples(), 1);
+        assert_eq!(
+            base.with_light_samples(u32::MAX, 5000)
+                .light_samples_indirect(),
+            crust_core::MAX_LIGHT_SAMPLES
+        );
     }
 
     #[test]

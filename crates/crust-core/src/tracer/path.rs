@@ -72,14 +72,23 @@ pub(super) fn nee_sampler(vertex: PathSampler, index: u32) -> PathSampler {
 /// is `u` itself. Only the pick is stratified: a point-on-light coordinate
 /// tied to the same slice would make which part of a light is sampled
 /// depend on which light was picked, which is a bias, not a stratification.
+///
+/// The last slice's `(count − 1 + u) / count` rounds to exactly 1.0 for a
+/// `u` within an ulp of 1, and a pick coordinate of 1.0 lands past every CDF
+/// entry — on the last light, which may be one of zero probability that the
+/// CDF never gives a slice (a zero-power light), and whose `1e-6` density
+/// floor would then divide a real contribution. The pick stays below 1.
 #[inline(always)]
 pub(super) fn stratified_pick(u: f32, count: u32, index: u32) -> f32 {
     if count == 1 {
         u
     } else {
-        (index as f32 + u) / count as f32
+        ((index as f32 + u) / count as f32).min(BELOW_ONE)
     }
 }
+
+/// The largest `f32` below 1: `1 − 2⁻²⁴`.
+const BELOW_ONE: f32 = 1.0 - f32::EPSILON / 2.0;
 
 /// The white Lambertian every random walk exits through.
 static SSS_EXIT: ExitLambertian = ExitLambertian;

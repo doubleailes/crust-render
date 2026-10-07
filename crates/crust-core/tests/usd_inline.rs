@@ -476,6 +476,25 @@ def Scope "Render"
     );
     assert_eq!(scene.settings.light_samples(), 1);
     assert_eq!(scene.settings.light_samples_indirect(), 1);
+    // A count above the maximum is clamped to it, not taken as written.
+    let scene = load_with_settings(
+        "light_samples_huge",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int crust:lightSamples = 1000000000
+        int crust:lightSamplesIndirect = 1024
+    }
+}"#,
+    );
+    assert_eq!(
+        scene.settings.light_samples(),
+        crust_core::MAX_LIGHT_SAMPLES
+    );
+    assert_eq!(scene.settings.light_samples_indirect(), 1024);
 }
 
 #[test]

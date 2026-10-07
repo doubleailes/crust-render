@@ -14,6 +14,19 @@ use crate::pdf::PdfSolidAngle;
 /// unbiased estimator.
 pub const DEFAULT_INDIRECT_CLAMP: f32 = 10.0;
 
+/// The light samples per vertex a render takes unless the stage
+/// (`crust:lightSamples` / `crust:lightSamplesIndirect`) or the host
+/// (`--light-samples` / `--light-samples-indirect`) says otherwise — see
+/// [`RenderSettings::with_light_samples`]. One: the measured defaults
+/// (`openspec/specs/lighting/design.md`, "Several light samples per vertex").
+pub const DEFAULT_LIGHT_SAMPLES: u32 = 1;
+
+/// The most light samples a vertex may take. A count multiplies the shadow
+/// rays at every vertex it applies to, so a mistyped `1000000000` would be a
+/// render that never finishes; anything above this is clamped (the importer
+/// warns, the CLI refuses it).
+pub const MAX_LIGHT_SAMPLES: u32 = 1024;
+
 /// The adaptive neighbour tolerance a render gets unless the stage
 /// (`crust:adaptiveNeighbourTolerance`) says otherwise — see
 /// [`RenderSettings::with_adaptive_neighbour_tolerance`]. One index unit:
@@ -188,8 +201,8 @@ impl Default for RenderSettings {
             pixel_filter: PixelFilter::default(),
             light_selection: LightSelection::default(),
             indirect_clamp: Some(DEFAULT_INDIRECT_CLAMP),
-            light_samples: 1,
-            light_samples_indirect: 1,
+            light_samples: DEFAULT_LIGHT_SAMPLES,
+            light_samples_indirect: DEFAULT_LIGHT_SAMPLES,
         }
     }
 }
@@ -322,8 +335,9 @@ impl RenderSettings {
 
     /// How many light samples next-event estimation takes per vertex:
     /// `camera` at the first vertex of each path, `indirect` at every later
-    /// surface or volume vertex. Each is clamped to at least 1, and 1 and 1
-    /// (the default) is the one-sample renderer, bit for bit.
+    /// surface or volume vertex. Each is clamped to 1 ..= [`MAX_LIGHT_SAMPLES`],
+    /// and 1 and 1 (the default, [`DEFAULT_LIGHT_SAMPLES`]) is the one-sample
+    /// renderer, bit for bit.
     ///
     /// The samples at one vertex stratify the light pick, so a count of N
     /// spreads over the lights close to N times each one's selection
@@ -332,8 +346,8 @@ impl RenderSettings {
     /// variance falls about as 1/N; the cost is N shadow rays per vertex, so
     /// `indirect` multiplies along the whole path while `camera` is paid once.
     pub fn with_light_samples(mut self, camera: u32, indirect: u32) -> Self {
-        self.light_samples = camera.max(1);
-        self.light_samples_indirect = indirect.max(1);
+        self.light_samples = camera.clamp(1, MAX_LIGHT_SAMPLES);
+        self.light_samples_indirect = indirect.clamp(1, MAX_LIGHT_SAMPLES);
         self
     }
 
