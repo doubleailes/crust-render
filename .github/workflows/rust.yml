@@ -1,11 +1,37 @@
 name: Rust
 
+# A change that touches only documentation (the OpenSpec records, docs/, the
+# site/ user documentation, images, Markdown anywhere) cannot change what
+# these jobs build or test, so it does not start them: no crate reads any of
+# those paths (tests load samples/ and their own data/ fixtures only). A push
+# or pull request that touches anything else alongside runs everything as
+# usual. site/ has its own workflow, docs.yml. Keep the push and
+# pull_request lists identical.
+
 on:
   push:
     branches:
       - main
       - master
+    paths-ignore:
+      - "openspec/**"
+      - "docs/**"
+      - "site/**"
+      - "images/**"
+      - "logo/**"
+      - ".claude/**"
+      - "**/*.md"
+      - ".github/workflows/docs.yml"
   pull_request:
+    paths-ignore:
+      - "openspec/**"
+      - "docs/**"
+      - "site/**"
+      - "images/**"
+      - "logo/**"
+      - ".claude/**"
+      - "**/*.md"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
   release:
     types: [created]
