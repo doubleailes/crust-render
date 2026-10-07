@@ -700,6 +700,17 @@ fn render(cli: &RenderArgs) -> ExitCode {
     if cli.profile {
         stats.profile = crust_core::profile::take();
     }
+    // Lost texels are said whether or not `--stats` is on: each failing file
+    // was already named once, and this is the total they cost.
+    if stats.textures.errors > 0 {
+        warn!(
+            "{} texture tile read(s) failed; those lookups used their texture's fallback colour",
+            stats.textures.errors
+        );
+    }
+    // Before any output is written, so a render that streamed thousands of
+    // `.tx` files never fails its write for want of a descriptor.
+    assets.release_texture_files();
     info!("Render finished in {duration:?}");
     let output_start = Instant::now();
     if let Some(film) = &film {

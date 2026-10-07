@@ -80,6 +80,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_TEX_MIP`](#crust-tex-mip) | on | UV textures |
 | [`CRUST_TEX_STREAM`](#crust-tex-stream) | on | UV textures |
 | [`CRUST_TEX_CACHE_MB`](#crust-tex-cache-mb) | 1024 | UV textures |
+| [`CRUST_TEX_MAX_OPEN_FILES`](#crust-tex-max-open-files) | 256 | UV textures |
 | [`CRUST_PTEX`](#crust-ptex) | on | Ptex |
 | [`CRUST_PTEX_MAX_LOG2`](#crust-ptex-max-log2) | 5 preloaded / uncapped streamed | Ptex |
 | [`CRUST_PTEX_MIP`](#crust-ptex-mip) | on | Ptex |
@@ -232,6 +233,24 @@ Integer ≥ 1, default **1024**.
 
 The memory budget, in MiB, of the tile cache for streamed `.tx` textures. `0` is refused
 (the default is used).
+
+### CRUST_TEX_MAX_OPEN_FILES
+
+Integer ≥ 0, default **256**.
+
+How many streamed `.tx` files the tile cache keeps open between reads, across all files.
+When a read needs a file that isn't open and the cap is reached, the least recently used
+open file is closed first. A render thread never waits for the cap, so at most the cap
+plus one file per render thread is open at once. Every `.tx` file is closed when the
+render ends, before the images are written.
+
+The cap never changes the image, only how often files are reopened. `--stats` reports the
+peak number of open files and the reopens. Many reopens mean the cap is below the
+number of files the render keeps coming back to: raise it, keeping it plus the thread
+count under the process's open-file limit (`ulimit -n`, often 1024).
+
+`0` never closes a file during the render, which was the behaviour before the cap. A
+scene that streams thousands of `.tx` files can then run out of file descriptors.
 
 ## Ptex
 

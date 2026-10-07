@@ -404,6 +404,14 @@ nothing: tiles are the default.
 
 When the render finishes, print render statistics and a per-phase profile: the time and
 memory of parsing, building, rendering and writing the output, plus scene statistics.
+For streamed textures it reports the tile cache's memory and hit rates, and how many `.tx`
+files were open at the peak against
+[`CRUST_TEX_MAX_OPEN_FILES`](@/docs/reference/environment-variables.md#crust-tex-max-open-files),
+with the reopens that cap cost.
+
+Whether or not `--stats` is on, a texture tile that can't be read is reported: its file is
+named once in a warning, and the render ends with one warning counting the failed reads.
+Those lookups use the texture's fallback colour.
 
 The report always prints, whatever `-l` is set to. It also goes to `--log-file` if one is
 open.
