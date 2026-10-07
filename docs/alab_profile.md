@@ -486,3 +486,129 @@ eu-stack -p "$(pgrep -x crust)" > stacks.txt
 ```
 
 Each run peaks at about 29 GiB, so run them one at a time.
+
+## openusd main and PR #142 (2026-10-07)
+
+What [mxpv/openusd#142](https://github.com/mxpv/openusd/pull/142) ("stage open/traversal
+perf") changes for this import, measured before it lands. Nothing here is on `main`:
+crust still builds against crates.io `openusd` 0.7.0. The two openusd revisions are:
+- **A**, the PR's merge base `f764a92061c0c0f63435817edd2544b40270b695`;
+- **B**, its head `04b168619ee509da94125d6b60a6d7140ff755a4`.
+
+Both are patched in through `[patch.crates-io]` for `openusd` and `openusd-schemas`. A and B
+are built from the same crust tree, with Cargo.lock files that differ only in that rev.
+
+### The port to openusd main
+
+openusd main changed the schema API, so the import was ported first, identically on both
+sides:
+- the schema accessors are now traits (`MeshSchema`, `CameraSchema`, …), and the `use`
+  lines changed with them;
+- `Collection` became `CollectionAPI`, `Light` became `LightAPI`, and the render
+  `Settings` / `Product` / `Var` names moved;
+- the `UsdPreviewSurface` shader-id tokens moved, so they are kept as 0.7's literal strings;
+- `local_to_parent_transform` became `local_transformation`.
+
+Two of the changes matter for behaviour:
+- **Every stage is opened with `.schema_registry(openusd_schemas::schema_registry())`.**
+  Typed views go through `prim.is_a()` against the stage's registry, and without one
+  nothing is a `Mesh`.
+- **That registry makes `attr.get` return schema fallbacks for unauthored attributes**,
+  where 0.7 returned `None`. The camera then read `verticalAperture = 15.2908` and
+  `focusDistance = 0` instead of falling back to crust's own defaults. That changed
+  `samples/animation.usda`.
+
+  The port gates each read on `attr.has_authored_value()` (`attrs::authored_at`). With
+  the gate, all 37 samples are bit-identical at 16 spp with `--indirect-clamp 0` across
+  0.7, A and B. This shot at `-s 4` is identical too: 0 differing pixels.
+
+**The gate is expensive here.** `has_authored_value` builds a full `resolve_info`: a pcp
+resolve walk, plus a schema-fallback lookup when nothing is authored. On this shot it
+costs about 37 s of traversal and **15 GiB** of resident memory, on A and on B alike.
+So every number below is given twice:
+- **without the gate**, which is openusd's own cost and the one to quote upstream;
+- **with it**, which is what the port as written costs.
+
+A real port should narrow the gate to the few attributes whose fallback differs from
+crust's (the camera's), not apply it to every read.
+
+### Timing
+
+All runs are `scripts/bench_ab.sh` interleaved, `-f 1004 --camera $CAM -s 1 --stats`, on
+72 threads. Times are min / mean.
+
+Without the gate (openusd's own cost):
+
+| | 0.7.0 | A (main) | B (#142) | A → B |
+|---|---|---|---|---|
+| Parse USD stage | 144.0 / 149.6 s | 148.7 / 148.8 s | 127.8 / 127.8 s | −15.9% / −19.1% |
+| Traverse prims | 140.6 / 146.0 s | 145.4 / 145.5 s | 124.5 / 124.6 s | **−16.2% / −19.2%** |
+| Load assets | 2.04 / 2.11 s | 1.82 / 1.87 s | 1.77 / 1.79 s | noise |
+| Commit acceleration structure | 1.31 / 1.35 s | 1.33 / 1.34 s | 1.31 / 1.34 s | noise |
+| RSS after traversal | 28.06 GiB | 28.05 GiB | 18.46 GiB | −34.2% |
+| **peak RSS** | 28.49 GiB | 28.48 GiB | **18.88 GiB** | **−33.6%** |
+
+Each column pair was its own interleaved run, n = 2: 0.7 against A, then A against B.
+The A column shows the first run.
+
+With the gate (the port as written; A against B n = 3, 0.7 against A n = 2):
+
+| | 0.7.0 | A | B | A → B |
+|---|---|---|---|---|
+| Traverse prims | 144.5 / 146.1 s | 183.9 / 199.9 s | 162.7 / 165.7 s | −11.5% / −17.1% |
+| peak RSS | 28.49 GiB | 43.61 GiB | 34.07 GiB | −21.9% |
+
+- **openusd main costs nothing over 0.7 on this shot**: about +3% traverse on min,
+  −0.4% on mean, and flat memory. The +35% / +53% that the gated port shows is the gate.
+- **#142 is a fifth of the import and a third of the memory.** The 9.6 GiB it saves
+  is the composed stage, which a single-stage import keeps for the whole render
+  (`skip_stage_teardown`). It is a third of the frame's peak.
+- **Load and Commit do not move.** They are crust's own code.
+
+### Where the openusd time goes
+
+These were timed with temporary `DEBUG` lines in the scratch build, gated binaries, one
+run each:
+
+| | A | B |
+|---|---|---|
+| first `/__Prototype_N` query (`is_active` on the prototype root, which runs `discover_prototypes`) | 91.3 s | **61.5 s** |
+| `prim.prototype()` on the first instance | 349 µs | 245 µs |
+| stage drop, with `skip_stage_teardown` disabled locally | 32.7 s | **13.2 s** |
+
+- **Prototype discovery is half the traversal on either side.** It fell by a third,
+  because #142 makes composition itself cheaper (shared path text, root layers read
+  once, status queries merged). The commits do not touch `discover_prototypes`: it
+  still walks and composes the whole populated stage in one call.
+- **The stage drop fell by 60%** but is still 13 s, which `skip_stage_teardown`
+  continues to hide. Those drop runs carry the gate's 15 GiB, so the no-gate drop is
+  smaller on both sides.
+- **The instance-proxy traversal was not timed separately on ALab.** On the single
+  element, callgrind puts openusd's code outside discovery and the index caches at
+  about −1% (`docs/moana_profile.md`, same date). So the rest of this shot's gain is
+  also composition.
+
+### Reproducing
+
+The port and the temporary timing lines are kept outside the repository as one diff
+(`port+measure.diff`, 517 lines). Apply it to this commit to rebuild the binaries.
+
+```bash
+# the port, plus a [patch.crates-io] of openusd + openusd-schemas pinned to <rev>
+git apply port+measure.diff
+sed -i -E 's/rev = "[0-9a-f]{40}"/rev = "<rev A or B>"/' Cargo.toml
+cargo build --release -p crust-render --target-dir target/ousd-<a|b>
+cp target/ousd-<a|b>/release/crust /somewhere/crust-<A|B>   # outside target/
+# images: identical or not
+CRUST_BIN=/somewhere/crust-A CRUST_EXTRA="--indirect-clamp 0" scripts/check_images.sh record golden-A
+CRUST_BIN=/somewhere/crust-B CRUST_EXTRA="--indirect-clamp 0" scripts/check_images.sh check  golden-A
+# timing, every phase kept per run
+CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
+scripts/bench_ab.sh -a crust-A -b crust-B -n 3 -p "Traverse prims" -k runs/alab-AB \
+    -x "-f 1004 --camera $CAM -s 1" samples/ALab/entry.usda
+# the prototype query and the stage drop (DEBUG lines from the diff)
+CRUST_MEASURE_TEARDOWN=1 crust-A render -i samples/ALab/entry.usda -f 1004 --camera $CAM \
+    -s 1 --stats -l debug 2>&1 | grep MEASURE
+```
+
+The gated A peaks at about 44 GiB, so run one at a time.

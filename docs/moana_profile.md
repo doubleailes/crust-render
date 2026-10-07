@@ -714,3 +714,114 @@ reading it: peak 4 descriptors. A streamed `.ptx` keeps one open for the render:
 So streaming every island texture needs about 3 620 descriptors, which a 1024 soft limit
 cannot hold. The `.tx` cap (`CRUST_TEX_MAX_OPEN_FILES`) does not cover Ptex; see
 `openspec/specs/textures/design.md` § Known gaps: texture residency.
+
+## openusd main and PR #142 (2026-10-07)
+
+The same measurement as `docs/alab_profile.md` § "openusd main and PR #142", which
+covers the revisions, the port to openusd main and its `has_authored_value` gate:
+- 0.7.0;
+- A = `f764a92061c0c0f63435817edd2544b40270b695`, the merge base;
+- B = `04b168619ee509da94125d6b60a6d7140ff755a4`, the PR head.
+
+All runs are `scripts/bench_ab.sh` interleaved, `--camera /island/cam/shotCam -s 1
+--stats`, with `CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file`, on 72 threads.
+Times are min / mean.
+
+At `-s 4` the island renders identically under 0.7, A and B.
+
+### The streamed island (22 masked stages)
+
+| without the gate | 0.7 → A (n = 2) | A → B (n = 2) | B |
+|---|---|---|---|
+| Parse USD stage | +3.5% / +3.1% | −10.3% / −10.7% | 197.7 / 197.8 s |
+| Traverse prims | +4.7% / +3.8% | **−13.3% / −13.7%** | 153.1 / 153.2 s (A: 176.6 / 177.5) |
+| Load assets | flat | −1.4% / −1.0% | 26.9 / 27.4 s |
+| Commit acceleration structure | flat | +4.8% / +5.7% | 16.6 / 16.9 s |
+| RSS after traversal / peak | flat | flat | 20.8 / 23.6 GiB |
+
+With the gate the deltas are nearly the same:
+- 0.7 → A: +8.3% / +9.4% traverse;
+- A → B: −12.5% / −13.6% traverse (185.8 → 162.6 s);
+- peak RSS: 23.7 → 23.9 GiB.
+
+The gate costs the island about 5% and no memory.
+
+- **#142 takes 13% off the island's import, but no memory.** Each chunk's stage is
+  dropped before the next opens, so the peak is crust's geometry plus the largest
+  chunk. Composition never dominates it.
+- **Commit's +5% is crust's BVH build**, which does not call openusd. It is the noise
+  floor at n = 2.
+- **The unmasked whole island was not measured.** Its single-stage import was recorded
+  at a 117 GiB peak, 75.7 GiB of it openusd. This machine has 93 GiB.
+
+### Per masked element
+
+The masked stages are timed with temporary `DEBUG` lines, gated binaries, one run each.
+The table lists chunks over half a second; the total covers all 22.
+
+| chunk | open A | open B | first prototype query A | B | stage drop A | B |
+|---|---|---|---|---|---|---|
+| isCoral | 8 ms | 7 ms | 19.6 s | 16.3 s | 8.9 s | 3.4 s |
+| isDunesB | 30 ms | 20 ms | 15.1 s | 13.8 s | 5.9 s | 3.5 s |
+| isBayCedarA1 | 1 ms | 1 ms | 4.2 s | 4.0 s | 2.0 s | 1.5 s |
+| isPalmRig | 4 ms | 4 ms | 2.8 s | 2.5 s | 0.9 s | 0.5 s |
+| isMountainB | 40 ms | 10 ms | 1.6 s | 0.9 s | 0.2 s | 0.1 s |
+| isDunesA | 10 ms | 5 ms | 1.4 s | 1.0 s | 0.4 s | 0.3 s |
+| **all 22** | 0.35 s | 0.22 s | **48.0 s** | **41.4 s** | **19.0 s** | **9.7 s** |
+
+- **Opening a masked stage is free.** Composition is lazy, so the cost lands on the first
+  query of the prototype namespace (`discover_prototypes`). #142 takes 14% off it.
+- **The stage drops are on the import's critical path here.** Streaming releases each
+  chunk before the next opens, and #142 halves them: 9.3 s of the 23 s it saves.
+
+### The single element, isDunesA
+
+A wrapper layer holds only `/island/isDunesA`, referencing `elements/isDunesA/element.usda`
+as `island.usda` does, plus `island.usda`'s camera. It has two subtrees, so the element
+imports as one stage. The bench used n = 6.
+
+| | 0.7 → A, no gate | A → B, no gate | A → B, gated |
+|---|---|---|---|
+| Parse USD stage | +0.8% / +1.8% | −5.2% / −8.5% | −8.8% / −7.0% |
+| Traverse prims | −0.9% / +2.2% | **−8.9% / −10.7%** | −9.7% / −9.0% |
+| Load assets | flat | −2.8% / −1.9% | −3.6% / −0.3% |
+| RSS after traversal | flat | 0.68 → 0.55 GiB | 0.68 → 0.55 GiB |
+| peak RSS | flat | **0.81 → 0.68 GiB (−16%)** | 0.81 → 0.68 GiB |
+
+Callgrind on it, `RAYON_NUM_THREADS=1`, gated:
+
+| instructions | A | B | |
+|---|---|---|---|
+| whole program | 45.57 G | 45.05 G | −1.1% |
+| openusd, inclusive at the crust → openusd call edges | 12.02 G | 11.51 G | −4.3% |
+| `ensure_prototypes_discovered` | 5.68 G | 4.97 G | **−12.6%** |
+| `has_authored_value` (the port's gate) | 2.75 G | 2.98 G | +8.6% |
+| the rest of openusd | 3.60 G | 3.56 G | −1% |
+
+- **The instruction gain is all prototype discovery.** The prim-index cache lookups
+  under it fall 8–14% (`ensure_index`, `is_populated`, `has_spec_at`). Instance-proxy
+  traversal and attribute reads outside it do not move.
+- **Wall time falls more than instructions do** (9% against 1.1% of the program and
+  4.3% of openusd). On this one element, #142's gain is mostly memory traffic:
+  - resident memory falls 19%;
+  - path text is shared;
+  - root layers are read once.
+
+  Callgrind counts instructions and does not see cache behaviour.
+
+### Reproducing
+
+```bash
+ISLAND=~/Workspace/samples/island/usd/island.usda
+export CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file
+# crust-A / crust-B built as in docs/alab_profile.md § "openusd main and PR #142"
+scripts/bench_ab.sh -a crust-A -b crust-B -n 2 -p "Traverse prims" -k runs/island-AB \
+    -x "--camera /island/cam/shotCam -s 1" $ISLAND
+# per masked element: open, first prototype query, stage drop
+crust-A render -i $ISLAND --camera /island/cam/shotCam -s 1 --stats -l debug 2>&1 \
+    | grep -E "MEASURE|Composed .* masked"
+# the single element: a wrapper with def Xform "island" { def Xform "isDunesA" (prepend
+#   references = @<abs>/elements/isDunesA/element.usda@</isDunesA>) {} } plus island.usda's cam block
+RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
+    crust-A render -i island_isDunesA.usda --camera /island/cam/shotCam -s 1
+```

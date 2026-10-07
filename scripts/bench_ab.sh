@@ -21,11 +21,13 @@
 #     cp target/release/crust /tmp/bin_after
 #     scripts/bench_ab.sh -a /tmp/bin_before -b /tmp/bin_after cornellbox veach_mis
 #
-# Usage: scripts/bench_ab.sh -a <binA> -b <binB> [-n reps] [-p phase] [-x args] [scene ...]
+# Usage: scripts/bench_ab.sh -a <binA> -b <binB> [-n reps] [-p phase] [-k dir] [-x args] [scene ...]
 #
 #   -p phase  which `--stats` phase to time, by its report name (default
 #             "Render"; e.g. "Parse USD stage" or "Traverse prims" to measure
 #             an import). Durations above a minute (`03:29.3`) are converted.
+#   -k dir    keep every run's full `--stats` report as dir/<scene>-<a|b>-<rep>.txt,
+#             so one sweep yields every phase and its RSS columns, not just -p.
 #   -x args   extra renderer arguments for every run, e.g. a scene that needs a
 #             frame and a camera:
 #             -x "-f 1004 --camera /root/camera01/.../renderCam -s 1"
@@ -37,13 +39,15 @@ BIN_B=""
 REPS=6
 PHASE="Render"
 EXTRA=""
+KEEP=""
 
-while getopts "a:b:n:p:x:h" opt; do
+while getopts "a:b:n:p:k:x:h" opt; do
     case "$opt" in
         a) BIN_A="$OPTARG" ;;
         b) BIN_B="$OPTARG" ;;
         n) REPS="$OPTARG" ;;
         p) PHASE="$OPTARG" ;;
+        k) KEEP="$OPTARG"; mkdir -p "$KEEP" ;;
         x) EXTRA="$OPTARG" ;;
         h) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
         *) exit 2 ;;
@@ -100,7 +104,7 @@ for scene in "${SCENES[@]}"; do
 
     a_times=()
     b_times=()
-    for _ in $(seq "$REPS"); do
+    for rep in $(seq "$REPS"); do
         # A then B, back to back, so a load spike hits both.
         for side in a b; do
             bin="$BIN_A"; cmd="$CMD_A"
@@ -109,8 +113,10 @@ for scene in "${SCENES[@]}"; do
             # render failure in a 50-run sweep would otherwise abort the whole
             # comparison. Drop the sample and carry on instead.
             # shellcheck disable=SC2086  # EXTRA and cmd are deliberately word-split
-            t="$("$bin" $cmd -i "$path" -o "$WORK/o.exr" --stats -l error $EXTRA 2>/dev/null \
-                | phase_seconds || true)"
+            report="$WORK/report.txt"
+            [ -n "$KEEP" ] && report="$KEEP/$(basename "$scene" .usda)-$side-$rep.txt"
+            "$bin" $cmd -i "$path" -o "$WORK/o.exr" --stats -l error $EXTRA >"$report" 2>/dev/null || true
+            t="$(phase_seconds <"$report" || true)"
             [ -n "$t" ] || continue
             if [ "$side" = a ]; then a_times+=("$t"); else b_times+=("$t"); fi
         done
