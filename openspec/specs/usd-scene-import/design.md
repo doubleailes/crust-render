@@ -436,7 +436,15 @@ Schema mapping:
     identical boxes over the dune field, 99% of all instance descents and a 6 ms ray
     (`docs/moana_profile.md`). Flattening instead would multiply the outer instance count
     by the inner one — the blow-up instancing exists to prevent. The kernel
-    nests to arbitrary depth. A nested *native* instance is skipped (upstream bug, below).
+    nests to arbitrary depth. A nested *native* instance is a single placement, so it
+    takes no extra level: `collect_proto_parts` splices its prototype's parts (built once
+    through `prototype_parts`, cached by `(epoch, path)` like any prototype) into the
+    outer prototype's list as clones placed by `this_local · inner.local`, sharing their
+    kernel scenes and slots, and does not walk the instance's proxy subtree. Each part
+    keeps its own mask, as at a top-level instance; pruning runs first, so an invisible
+    nested instance contributes nothing; depth goes through the same
+    `MAX_INSTANCE_NESTING` guard. The inner prototype is always the shared version
+    (gap below).
     Sample scene: `samples/nested_instancing.usda`. `MAX_INSTANCE_NESTING` (8) is a
     backstop against a malformed stage describing an instancing cycle.
   - `class` prims are abstract and never drawn on their own — only reached through the
@@ -600,8 +608,11 @@ same point.
   is single-threaded — parallelising it means threading the time explicitly. **No
   frame means the attribute *default*, not frame 0**: a stage that authors only
   `timeSamples` reads its schema fallback, which is exactly the pre-`--frame` behaviour
-  (pinned pixel-identical on the samples). openusd's own xformable composition (the
-  `compose_xform_ops` fallback) has no default arm and keeps its historical 0.0. A frame
+  (pinned pixel-identical on the samples). The one exception is transforms: openusd
+  0.7's `local_to_parent_transform`, which composes every prim's `xformOp` stack, has no
+  default arm, so without a frame it evaluates at 0.0 (`xform_time()`). That differs from
+  the default only for an op that authors both a default and time samples; it goes away
+  with the openusd bump, where `None` means default time. A frame
   also sets the sampler's frame seed (its integer part, over `crust:frame`), so a
   sequence gets independent noise per frame, and a frame outside an authored
   `startTimeCode..endTimeCode` warns (USD holds the end samples; it is usually a typo).
@@ -798,10 +809,8 @@ resolution, which moves cage vertices only and warns once.
   compose, normals map back through every level, masks gate per level — pinned by
   `instances_nest`, `nested_instances_compose_transforms_and_normals` and
   `nested_instances_respect_masks_at_each_level` in `crust-rt`), and the importer expands
-  a `PointInstancer` inside a prototype into real nested sub-scenes. What is *not*
-  supported is a natively-instanced (`instanceable`) prim inside another instance's
-  prototype: `openusd` 0.5 cannot read its contents at all (see the upstream bug below),
-  so the importer skips it with a warning. Volumes inside prototypes are skipped — they
+  a `PointInstancer` inside a prototype into real nested sub-scenes, and splices a
+  native instance inside a prototype into its parts. Volumes inside prototypes are skipped — they
   live outside the surface BVH by design and cannot ride an instance transform.
   `PointInstancer`
   `velocities` / `accelerations` / `angularVelocities` are ignored, so vectorized instances
@@ -811,6 +820,10 @@ resolution, which moves cage vertices only and warns once.
   other attribute, so an animated instancer does move between frames. Top-level `UsdGeomSphere` prims
   still bake their centre into world space and so ignore scale; spheres *inside* a
   prototype go through the instanced path and scale correctly.
+- **A nested native instance's prototype is never adaptive.** `count_placements` does not
+  descend into instances, so it has no count with which to call an inner placement
+  unshared; the inner prototype always takes the uniform level, the answer any placement
+  counted more than once already gets.
 
 ## Known gaps: adaptive subdivision
 
@@ -834,20 +847,27 @@ resolution, which moves cage vertices only and warns once.
 
 ## Known gaps: openusd bugs and workarounds
 
-- **`openusd` xformOp bug, worked around locally; fixed upstream in 0.6.0.** `openusd`
-  0.5.0 composed multi-op `xformOpOrder` stacks in the wrong order (the authored
-  translate came back multiplied by the scale), which used to make
-  `samples/cornellbox.usda` render as floating objects against sky. `usd_import/xform.rs`
-  therefore composes the individual `xformOp:*` attributes itself
-  (`compose_xform_ops`: translate/scale/rotateX·Y·Z/rotate-Euler-triples/orient/
-  transform, `!invert!` prefixes, namespaced suffixes), falling back to openusd's
-  composition — with a warning — only for op kinds it cannot decode. Regression test:
-  `cornellbox_transforms_compose_correctly`.
-  **On 0.6.0 the case that motivated it is fixed**: a translate+scale stack composes to the
-  authored translation with the scale on the diagonal (`examples/xform_probe`). That is one
-  case, not the whole surface — rotations, Euler triples, `orient`, `!invert!` prefixes and
-  namespaced suffixes are unverified — so the local composer stays authoritative and the
-  fallback stays in place. Retiring either means checking those kinds first.
+- **Transforms are openusd's; two divergences from C++ USD remain until the bump.**
+  `openusd` 0.5.0 composed multi-op `xformOpOrder` stacks in the wrong order, so the
+  importer used to compose `xformOp`s itself (in `f32`, falling back to openusd for six
+  prim types and to identity for every other). That composer is gone: on 18 stacks
+  covering every op kind it decoded (translate, scale, every single-axis and three-axis
+  rotation, `orient`, `transform`, `!invert!`, pivot suffixes, a leading
+  `!resetXformStack!`, a time-sampled translate), openusd 0.7.0 matched C++ USD 26.8 on
+  every matrix entry. `xform.rs` now hands every prim to openusd's `Xformable` through one
+  type-independent view (`AnyXformable`), composing in `f64` and casting once, so
+  `translateX`-style ops and a leading reset work on every prim type. An op kind outside
+  the `UsdGeomXformOp` vocabulary still warns (openusd 0.7 reads it as identity silently;
+  that list decides the message only). Regression tests:
+  `cornellbox_transforms_compose_correctly`, the `xform.rs` unit tests and
+  `single_axis_ops_place_non_xform_prims` / `a_leading_reset_drops_the_parent_on_a_light` /
+  `a_pivot_stack_places_geometry_as_cpp_usd_does`. Remaining, both fixed on openusd main
+  and retired by the bump (`openspec/changes/retire-openusd-workarounds`, phase 2):
+  - **A `!resetXformStack!` after the first entry** makes 0.7 refuse the stack: the prim's
+    local transform is identity, with a warning, and its parent's is still inherited.
+    C++ keeps only the ops after the last reset.
+  - **Ops on a prim that is not `Xformable`** (an untyped prim, a `Scope`) still apply to
+    it and its descendants; C++ ignores them.
 
 - **Fixed in openusd 0.6.0, keep in mind when reading old branches.** Two composition
   bugs used to make the Moana island import as almost nothing, and both failed silently —
@@ -859,24 +879,6 @@ resolution, which moves cage vertices only and warns once.
   Written up with minimal reproductions under `docs/issues/`, kept because the symptoms
   are worth recognising, and because pinning to 0.5 brings both back. `examples/proto_probe`
   and `examples/rel_probe` are the diagnostics.
-
-- **Nested native instances are still skipped, but no longer have to be.** An
-  `instanceable` prim *inside another instance's prototype* could not be read on
-  `openusd` 0.5.0: resolving its prototype, or reading the type name of anything beneath
-  it, tripped a `debug_assert!` in `pcp/instancing.rs::materialize_prototype` (debug builds
-  aborted, release had it compiled out). So `collect_proto_parts` tests `is_instance()`
-  **before** any schema lookup — a schema `get()` reads the type name, which is what
-  aborted — and skips such prims with a warning. Regression test:
-  `nested_native_instance_degrades_gracefully`.
-  **On 0.6.0 that abort is gone**: a debug build resolves the nested prototype to a valid
-  prim with its geometry (checked with `examples/proto_probe` on a four-line stage). The
-  skip arm is therefore now conservative rather than necessary, and deleting it would
-  recover this geometry — splice the inner prototype's parts in with composed transforms,
-  since a native instance is a single placement and needs no extra level of kernel
-  indirection. Not done yet, and it costs the Moana island nothing (that arm never fires
-  there), so it is a correctness improvement for other stages rather than a fix for this
-  one. The regression test would need rewriting to assert the geometry arrives instead of
-  that it is skipped.
 
 ## Known gaps: ALab
 

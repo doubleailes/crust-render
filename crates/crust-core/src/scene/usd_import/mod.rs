@@ -189,7 +189,7 @@ fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
         if prune_reason(&prim, WalkScope::Stage).is_some() {
             continue;
         }
-        let world = compose_with_parent(stage, &prim, parent_world);
+        let world = compose_with_parent(&prim, parent_world);
         if prim.is_instance().unwrap_or(false)
             && let Ok(Some(proto)) = prim.prototype()
         {
@@ -271,7 +271,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             continue;
         }
 
-        let this_world = compose_with_parent(stage, &prim, parent_world);
+        let this_world = compose_with_parent(&prim, parent_world);
 
         // An invisible subtree draws nothing and lights nothing, but is still
         // walked for cameras: a camera's own visibility only hides its gizmo

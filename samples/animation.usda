@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = "Time-sampled animation, for --frame: a sphere crossing the frame left to right over frames 1-10, a card whose points drop towards the floor, and a key light that brightens. Render a frame with `-i samples/animation.usda --frame 5`; without --frame every attribute reads its default value, which parks the sphere above the frame."
+    doc = "Time-sampled animation, for --frame: a sphere crossing the frame left to right over frames 1-10, a card whose points drop towards the floor, and a key light that brightens. Render a frame with `-i samples/animation.usda --frame 5`; without --frame every attribute reads its default value, except transforms, which read time 0 and so hold frame 1 (an openusd 0.7 limit)."
     defaultPrim = "World"
     upAxis = "Y"
     startTimeCode = 1

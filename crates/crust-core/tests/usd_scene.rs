@@ -997,75 +997,231 @@ fn nested_scatter_reserves_no_slots_for_hidden_prototypes() {
     );
 }
 
-/// An `instanceable` prim *inside* another instance's prototype cannot be
-/// read at all with openusd 0.5.0, so the importer must skip it rather
-/// than abort.
-///
-/// The upstream bug: resolving such a prim's prototype — or reading the
-/// type name of any prim beneath it — reaches
-/// `pcp/instancing.rs::materialize_prototype`, whose `debug_assert!`
-/// ("materialized prototype root's instanceable must be inert") fires.
-/// Debug builds abort; release builds have the assertion compiled out.
-/// The prim itself is safe to inspect (`is_instance`, `children`,
-/// `type_name` all succeed) — only its *contents* are unreachable, which
-/// is why there is no proxy-traversal fallback either.
-///
-/// It is a property of the composed stage, not of crust: it reproduces
-/// with `class` and `def` prototypes alike, and single-level native
-/// instancing and nested `PointInstancer`s are both unaffected.
-///
-/// This test pins graceful degradation — the outer instance still renders,
-/// the unreadable inner one is dropped with a warning. When upstream fixes
-/// it, this test will start seeing the inner geometry and should be
-/// replaced with one asserting the nested content *is* imported.
-#[test]
-fn nested_native_instance_degrades_gracefully() {
-    let dir = std::env::temp_dir().join("crust_nested_native_probe");
+/// Writes `body` as a `.usda` under the temp dir and loads it.
+fn load_inline(name: &str, body: &str) -> Scene {
+    let dir = std::env::temp_dir().join("crust_usd_scene_inline");
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("nested_native.usda");
-    std::fs::write(
-        &path,
-        r#"#usda 1.0
-(defaultPrim = "W")
-def Xform "W" {
-    class Xform "_Inner" { def Sphere "s" { double radius = 0.5 } }
-    class Xform "_Outer" {
-        def Sphere "outer" { double radius = 0.4 }
-        def Xform "i" (instanceable = true; references = </W/_Inner>) {
-            double3 xformOp:translate = (3, 0, 0)
-            uniform token[] xformOpOrder = ["xformOp:translate"]
-        }
+    let path = dir.join(format!("{name}.usda"));
+    std::fs::write(&path, format!("#usda 1.0\n{body}")).expect("write stage");
+    let scene = Scene::from_usd(&path).expect("inline stage must load");
+    let _ = std::fs::remove_file(&path);
+    scene
+}
+
+/// The centre of a scene's bounds, which for a stage of one small prim is
+/// where that prim was placed.
+fn bounds_centre(scene: &Scene) -> Vec3A {
+    let b = scene.world.bounds().expect("a bounded world");
+    (b.minimum + b.maximum) * 0.5
+}
+
+fn assert_near(got: Vec3A, want: Vec3A, what: &str) {
+    assert!(
+        (got - want).abs().max_element() < 1e-3,
+        "{what}: expected {want}, got {got}"
+    );
+}
+
+/// A single-axis op composes on prim types other than `Xform`: it used to
+/// read as identity off the six types the local composer could fall back
+/// for, leaving the prim at its parent's origin.
+#[test]
+fn single_axis_ops_place_non_xform_prims() {
+    let curves = load_inline(
+        "translatex_curves",
+        r#"def Xform "W" {
+    double3 xformOp:translate = (0, 0, 5)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    def BasisCurves "C" {
+        uniform token type = "linear"
+        int[] curveVertexCounts = [2]
+        point3f[] points = [(0, -1, 0), (0, 1, 0)]
+        float[] widths = [0.1] (interpolation = "constant")
+        double xformOp:translateX = 2
+        uniform token[] xformOpOrder = ["xformOp:translateX"]
     }
-    def Xform "A" (instanceable = true; references = </W/_Outer>) {}
 }
 "#,
+    );
+    assert_near(
+        bounds_centre(&curves),
+        Vec3A::new(2.0, 0.0, 5.0),
+        "BasisCurves",
+    );
+
+    let light = load_inline(
+        "translatex_disk",
+        r#"def Xform "W" {
+    double3 xformOp:translate = (0, 0, 5)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    def DiskLight "D" {
+        float inputs:radius = 0.5
+        double xformOp:translateX = 2
+        uniform token[] xformOpOrder = ["xformOp:translateX"]
+    }
+}
+"#,
+    );
+    assert_eq!(light.world.primitive_breakdown().disks, 1);
+    assert_near(
+        bounds_centre(&light),
+        Vec3A::new(2.0, 0.0, 5.0),
+        "DiskLight",
+    );
+}
+
+/// A leading `!resetXformStack!` drops the inherited transform on a light,
+/// not only on the six types the old dispatch listed.
+#[test]
+fn a_leading_reset_drops_the_parent_on_a_light() {
+    let scene = load_inline(
+        "reset_disk",
+        r#"def Xform "W" {
+    double3 xformOp:translate = (10, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    def DiskLight "D" {
+        float inputs:radius = 0.5
+        double3 xformOp:translate = (0, 3, 0)
+        uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"]
+    }
+}
+"#,
+    );
+    assert_near(
+        bounds_centre(&scene),
+        Vec3A::new(0.0, 3.0, 0.0),
+        "reset DiskLight",
+    );
+}
+
+/// The pivot pair with `!invert!`, placing a triangle whose corners are the
+/// unit axes: the corners land where C++ USD's matrix for the same stack
+/// (row-vector `0 2 0 0 / -2 0 0 0 / 0 0 2 0 / 5 2 0 1`) puts them.
+#[test]
+fn a_pivot_stack_places_geometry_as_cpp_usd_does() {
+    let scene = load_inline(
+        "pivot_stack",
+        r#"def Mesh "M" {
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+    point3f[] points = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    double3 xformOp:translate = (2, 3, 0)
+    double3 xformOp:translate:pivot = (1, 1, 0)
+    float3 xformOp:rotateXYZ = (0, 0, 90)
+    float3 xformOp:scale = (2, 2, 2)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:translate:pivot", "xformOp:rotateXYZ", "xformOp:scale", "!invert!xformOp:translate:pivot"]
+}
+"#,
+    );
+    // (1,0,0) → (5,4,0), (0,1,0) → (3,2,0), (0,0,1) → (5,2,2).
+    let b = scene.world.bounds().expect("a bounded world");
+    assert_near(b.minimum, Vec3A::new(3.0, 2.0, 0.0), "minimum");
+    assert_near(b.maximum, Vec3A::new(5.0, 4.0, 2.0), "maximum");
+}
+
+/// A stage whose prototype `_Outer` holds a sphere at its origin and the
+/// native instances `nested` of `_Inner` (a sphere at its origin), placed by
+/// `placements` under one `Set` — one top-level subtree, so one stage of the
+/// streaming import, within which a prototype is shared.
+fn nested_native_stage(name: &str, nested: &str, placements: &str) -> Scene {
+    load_inline(
+        name,
+        &format!(
+            r#"(defaultPrim = "W")
+def Xform "W" {{
+    class Xform "_Inner" {{ def Sphere "s" {{ double radius = 0.5 }} }}
+    class Xform "_Outer" {{
+        def Sphere "outer" {{ double radius = 0.4 }}
+{nested}
+    }}
+    def Xform "Set" {{
+{placements}
+    }}
+}}
+"#
+        ),
     )
-    .expect("write probe stage");
+}
 
-    // The load must complete. Before the guard this aborted the process.
-    let scene = Scene::from_usd(&path).expect("stage with a nested native instance must load");
+/// One nested instance of `_Inner`, translated by `(x, 0, 0)`.
+fn nested_at(name: &str, x: f32, extra: &str) -> String {
+    format!(
+        r#"        def Xform "{name}" (instanceable = true; references = </W/_Inner>) {{
+            double3 xformOp:translate = ({x}, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            {extra}
+        }}"#
+    )
+}
 
-    // The outer prototype's own geometry survives; only the unreadable
-    // nested instance is missing.
-    assert_eq!(
-        scene.world.count(),
-        1,
-        "expected the outer sphere only (the nested instance is unreadable upstream), got {}",
-        scene.world.count()
-    );
+/// One placement of `_Outer`, translated by `(0, y, 0)`.
+fn outer_at(name: &str, y: f32) -> String {
+    format!(
+        r#"    def Xform "{name}" (instanceable = true; references = </W/_Outer>) {{
+        double3 xformOp:translate = (0, {y}, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}"#
+    )
+}
 
-    let hit = |x: f32| {
-        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, 0.0, 10.0), -crust_core::Vec3A::Z);
-        scene.world.intersect(&ray, 0.001, 40.0).is_some()
-    };
-    assert!(hit(0.0), "the outer prototype's own sphere should render");
+fn hits(scene: &Scene, x: f32, y: f32) -> bool {
+    let ray = Ray::new(Vec3A::new(x, y, 10.0), -Vec3A::Z);
+    scene.world.intersect(&ray, 0.001, 40.0).is_some()
+}
+
+/// A native instance inside another instance's prototype is imported: its
+/// prototype's parts are spliced into the outer prototype's under the
+/// composed transforms, built once and shared by every outer placement.
+///
+/// openusd 0.5 aborted on this stage (a `debug_assert!` in
+/// `pcp/instancing.rs`), so the importer used to skip the nested instance;
+/// run this in a debug build too, which is where it aborted.
+#[test]
+fn nested_native_instance_is_imported() {
+    // Instance inside a prototype: both spheres render.
+    let one = nested_native_stage("nested_one", &nested_at("i", 3.0, ""), &outer_at("A", 0.0));
+    assert_eq!(one.world.count(), 2, "the outer and the nested sphere");
+    assert!(hits(&one, 0.0, 0.0), "the outer prototype's own sphere");
     assert!(
-        !hit(3.0),
-        "the nested instance is expected to be missing — if this now hits, \
-         openusd has been fixed and the skip in collect_proto_parts can go"
+        hits(&one, 3.0, 0.0),
+        "the nested instance's sphere, 3 along X"
+    );
+    assert!(!hits(&one, -3.0, 0.0));
+
+    // Two outer placements, each carrying two nested instances: every
+    // placement carries every sphere, and the inner prototype is built once.
+    let nested = [nested_at("i", 3.0, ""), nested_at("j", -3.0, "")].join("\n");
+    let placements = [outer_at("A", 0.0), outer_at("B", 10.0)].join("\n");
+    let two = nested_native_stage("nested_two", &nested, &placements);
+    for y in [0.0, 10.0] {
+        for x in [0.0, 3.0, -3.0] {
+            assert!(hits(&two, x, y), "a sphere at ({x}, {y})");
+        }
+    }
+    assert_eq!(
+        two.world.unique_primitive_breakdown().spheres,
+        2,
+        "the outer sphere and one shared inner sphere are resident, not one per placement"
     );
 
-    let _ = std::fs::remove_file(&path);
+    // An invisible nested instance contributes nothing, in any placement.
+    let hidden = nested_native_stage(
+        "nested_hidden",
+        &nested_at("i", 3.0, r#"token visibility = "invisible""#),
+        &placements,
+    );
+    assert_eq!(
+        hidden.world.count(),
+        2,
+        "the outer sphere, once per placement"
+    );
+    for y in [0.0, 10.0] {
+        assert!(hits(&hidden, 0.0, y));
+        assert!(
+            !hits(&hidden, 3.0, y),
+            "the hidden nested sphere at y = {y}"
+        );
+    }
 }
 
 /// A host that decodes nothing real, so the importer's asset plumbing can
@@ -2181,15 +2337,17 @@ fn animated_stage_is_evaluated_at_the_requested_frame() {
     let after = load(Some(25.0));
     assert!(sphere_at(&after, 2.0).is_some());
 
-    // No frame: every attribute reads its default, which is the historical
-    // behaviour — the sphere sits at its off-screen default translate.
+    // No frame: every attribute reads its default — except an `xformOp`,
+    // which openusd 0.7 composes at time 0.0 (its transform API has no
+    // default-time arm), so the sphere holds its first sample rather than
+    // its off-screen default translate. The openusd bump in
+    // `retire-openusd-workarounds` (phase 2) restores the default here.
     let default = load(None);
-    for x in [-2.0, 0.0, 2.0] {
-        assert!(
-            sphere_at(&default, x).is_none(),
-            "default time: no sphere at x = {x}"
-        );
-    }
+    assert!(
+        sphere_at(&default, -2.0).is_some(),
+        "no frame: the sphere's translate is read at time 0, holding frame 1"
+    );
+    assert!(sphere_at(&default, 2.0).is_none());
 }
 
 /// The frame drives the sampler's frame seed too, so an image sequence gets

@@ -154,5 +154,5 @@ fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
     ancestors.reverse();
     ancestors
         .iter()
-        .fold(GMat4::IDENTITY, |acc, p| compose_with_parent(stage, p, acc))
+        .fold(GMat4::IDENTITY, |acc, p| compose_with_parent(p, acc))
 }

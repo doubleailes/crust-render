@@ -2,7 +2,7 @@
 
 ## 1. Baseline
 
-- [ ] 1.1 Build `main`'s release binary (`bin_before`), then run
+- [x] 1.1 Build `main`'s release binary (`bin_before`), then run
       `scripts/check_images.sh record <dir>` with it, using `--indirect-clamp 0`.
       Done when every checked-in sample has a 16 spp golden EXR in `<dir>`.
 - [ ] 1.2 With `bin_before`, render each sample, ALab (`-f 1004`) and the island at
@@ -10,21 +10,23 @@
       `could not decode the xformOp stack` warnings per scene. Done when the counts are
       written in the change's working notes. They attribute every image diff in groups
       2 and 3 to a source.
+      *Samples done (`notes.md`): no skip warning anywhere. ALab and the island are not
+      available in the session container: still to count.*
 
 ## 2. Transforms composed by openusd (phase 1, D1–D4)
 
-- [ ] 2.1 In `usd_import/xform.rs`, add the crate-private `Prim` newtype implementing
+- [x] 2.1 In `usd_import/xform.rs`, add the crate-private `Prim` newtype implementing
       `SchemaBase` (`AbstractTyped`), `Imageable` and `Xformable`. Route
       `compose_with_parent` through its `local_to_parent_transform(xform_time())` and
       `resets_xform_stack()`. Delete `compose_xform_ops`, `xform_op_matrix`,
       `local_matrix_via_openusd`, `local_matrix_at` and the six-type
       `resets_xform_stack_at`. Done when `cargo build -p crust-core` and
       `cornellbox_transforms_compose_correctly` pass.
-- [ ] 2.2 Add the D3 op-kind check (one `WARN` per prim naming the unknown op) and the
+- [x] 2.2 Add the D3 op-kind check (one `WARN` per prim naming the unknown op) and the
       D4 error arm (one `WARN`, identity local). Done when unit tests in `xform.rs`
       cover an unknown kind and a mid-stack reset, asserting the matrix and that the
       call returns.
-- [ ] 2.3 Add integration tests in `crates/crust-core/tests/usd_scene.rs` for the delta
+- [x] 2.3 Add integration tests in `crates/crust-core/tests/usd_scene.rs` for the delta
       spec's "Transform stacks" scenarios. Done when these pass:
       - `xformOp:translateX` on a `BasisCurves` and on a `DiskLight` is placed off its
         parent's origin;
@@ -36,12 +38,17 @@
       record `exr_diff` relmse at 16 / 64 / 256 spp. Done when every difference falls
       as 1/√N, or is traced to a stack that composed wrongly before (from 1.2's
       counts).
+      *Open (`notes.md`): trimmed relmse ≤ 2e-12 and flat, but untrimmed relmse plateaus on
+      `materialx_cutout`. That reads as D2's deterministic ulp placement change, not
+      noise, so the criterion as written is not met. It needs a decision.*
 - [ ] 2.5 A/B the import: `scripts/bench_ab.sh -n 2 -p "Parse USD stage"` with
       `bin_before` against the new binary, on `samples/cornellbox.usda` and ALab
       (`-x "-f 1004 --camera … -s 1"`). Done when min and mean are recorded and neither
       regresses beyond noise. If it does, read `xformOpOrder` once in the adapter
       (design, Risks) and re-run.
-- [ ] 2.6 Update the docs:
+      *Cornell and PointInstancedMedCity done (`notes.md`): no regression, −0.1% import
+      instructions. ALab still to measure.*
+- [x] 2.6 Update the docs:
       - `openspec/specs/usd-scene-import/design.md` § "Known gaps: openusd bugs and
         workarounds": replace the xformOp entry with the verification (openusd 0.7.0 vs
         C++ USD 26.8, 18 stacks) and the two remaining gaps (mid-stack reset, ops on
@@ -53,7 +60,7 @@
 
 ## 3. Nested native instances (phase 1, D5)
 
-- [ ] 3.1 In `usd_import/instancing.rs`:
+- [x] 3.1 In `usd_import/instancing.rs`:
       - delete `prototype_prunes`' nested-instance arm and its warning;
       - in `collect_proto_parts`, resolve a non-root instance's prototype, take its
         parts from `prototype_parts(…, depth + 1)` and splice clones with
@@ -61,16 +68,16 @@
       - pass `ProtoPlace::Shared` for the inner prototype.
 
       Done when `cargo build -p crust-core` passes.
-- [ ] 3.2 Replace `nested_native_instance_degrades_gracefully` with
+- [x] 3.2 Replace `nested_native_instance_degrades_gracefully` with
       `nested_native_instance_is_imported`. It covers the delta spec's "Native instance
       nesting" scenarios: both spheres hit at x = 0 and x = 3, two outer placements
       give four hits with one shared inner scene, and an invisible inner instance
       contributes none. Also run the test in a debug build, the build that used to
       abort. Done when `cargo test -p crust-core --test usd_scene nested_native` passes
       in debug and release.
-- [ ] 3.3 Re-run `scripts/check_images.sh check <dir>`. Done when the only new
+- [x] 3.3 Re-run `scripts/check_images.sh check <dir>`. Done when the only new
       differences beyond group 2's are scenes that emitted the skip warning in 1.2.
-- [ ] 3.4 Update the docs:
+- [x] 3.4 Update the docs:
       - the `usd-scene-import` design record: delete the "Nested native instances are
         still skipped" gap; add the splice to "Rendering the Moana island" / the
         instancing text; add the adaptive-mode limit (inner prototypes always share)
@@ -82,11 +89,11 @@
 
 ## 4. Phase 1 integration
 
-- [ ] 4.1 Run CI locally: `cargo fmt --all -- --check`,
+- [x] 4.1 Run CI locally: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast` and
       `scripts/test_simd_matrix.sh -p crust-rt`. Done when all four are green.
-- [ ] 4.2 Validate the change with `openspec validate retire-openusd-workarounds
+- [x] 4.2 Validate the change with `openspec validate retire-openusd-workarounds
       --strict`. Done when it passes.
 
 ## 5. openusd bump (phase 2, D6). Blocked until an openusd release after 0.7.0 contains `fe8e9e8`
