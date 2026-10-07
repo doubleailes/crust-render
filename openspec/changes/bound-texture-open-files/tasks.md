@@ -89,11 +89,25 @@
       Verify: the default-cap run writes its EXR with 0 tile read errors. Adjust the
       default if reopens cost more than the noise floor, and record the numbers in
       `openspec/specs/textures/design.md`.
-- [ ] 5.4 Add the Ptex descriptor gap (one per streamed `.ptx`, bounded by files and
-      not by threads, owned upstream by `ptex-rs`) to
-      `openspec/specs/textures/design.md` § Known gaps: texture residency. Verify: the
-      gap names the switch it does *not* cover.
-- [ ] 5.5 Run the CI set: `cargo fmt --all -- --check`,
+- [ ] 5.4 Render the Moana island (`usd/island.usda`, `--camera /island/cam/shotCam`,
+      the command in `docs/moana_profile.md`) with `--stats` and `ulimit -n 1024`,
+      `bin_before` against the new binary. The island binds only Ptex, so no `.tx`
+      streams and the cap must never engage. Sample the peak descriptor count from
+      `/proc/<pid>/fd` once a second, in two runs:
+      - **Control:** the default Ptex residency. Verify: images are bit-identical at
+        `-s 16`, the textures block reports 0 opens, and `bench_ab.sh` shows no timing
+        change beyond the noise floor (min and mean).
+      - **The Ptex gap:** `CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file
+        CRUST_PTEX_STREAM_MIN_MB=0`, which streams all 3,618 files. Verify: the peak
+        descriptor count is recorded, and whether the render and its output write
+        survive the 1024 limit. This is the figure 5.5 cites.
+- [ ] 5.5 Add the Ptex descriptor gap to `openspec/specs/textures/design.md` § Known
+      gaps: texture residency: one descriptor per streamed `.ptx`, bounded by files and
+      not by threads, owned upstream by `ptex-rs`. Include the island figure from 5.4.
+      If the 5.4 run failed on descriptors, also record it in `docs/moana_profile.md`,
+      and note it on `stream-ptex-by-default`, which makes streaming the default. Verify:
+      the gap names the switch it does *not* cover and carries the measured peak.
+- [ ] 5.6 Run the CI set: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast` and `cargo deny --locked check`.
       Verify: all are green.

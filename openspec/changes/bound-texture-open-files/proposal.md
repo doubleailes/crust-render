@@ -76,7 +76,11 @@ under `--stats`.
   `libc` / `rustix`, which is a project decision. It is left out (see design.md).
 - **Not covered:** Ptex streaming (`ptex-rs` `SharedReader`) holds one descriptor per
   streamed `.ptx` for the render. That is bounded by the file count rather than by
-  files × threads, and it stays a documented gap.
+  files × threads, and it stays a documented gap. The Moana island measures it: its
+  3,618 `.ptx`, all streamed, would need about 3,600 descriptors.
 - **Performance:** none at the default on scenes under the cap; every checked-in
-  sample is. On ALab, reopens are measured with `bench_ab.sh` and callgrind, and the
-  default is tuned from those numbers.
+  sample is. Two production scenes are benchmarked:
+  - **ALab** (6,832 `.tx`) is the case the cap exists for. Its reopens are measured
+    with `bench_ab.sh` and callgrind, and the default is tuned from those numbers.
+  - **The Moana island** (Ptex only) is the control: the cap never engages there, so
+    its image and timing must not move.
