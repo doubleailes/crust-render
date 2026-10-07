@@ -98,7 +98,7 @@ and a 256 default, `cap + threads` already has the headroom. Rejected.
   USD stage on the default soft limit (≈ 640 at 128 threads). It is above OIIO's
   `max_open_files` default of 100 because crust has no per-file handle sharing:
   one hot file can hold several readers.
-- The ALab measurement (task 4.3) may move the number. The spec names the switch,
+- The ALab measurement (task 5.3) may move the number. The spec names the switch,
   not the value, apart from stating the default.
 
 ### 4. Retry once on descriptor exhaustion, only on `EMFILE` / `ENFILE`
@@ -158,6 +158,12 @@ the `cap = 0` A/B leg, so the "off" side can no longer fail the write for this r
 - [Bit-identity] → readers are interchangeable cursors, and tile bytes do not depend
   on which reader decoded them. A test renders a multi-`.tx` scene at `cap=1` vs `0`
   and compares bitwise, and a cache-level test hammers `cap=1` from many threads.
+- [A regression on scenes the cap never touches] → the Moana island binds only Ptex,
+  so it is the control (task 5.4): bit-identical at `-s 16`, 0 opens in `--stats`, and
+  no `bench_ab.sh` change.
+- [The Ptex gap is worse than recorded] → the same Moana run streams all 3,618 `.ptx`
+  under `ulimit -n 1024` and samples peak descriptors. If it fails, the gap is recorded
+  with that number and flagged to `stream-ptex-by-default`, rather than fixed here.
 - [WARN noise on a genuinely broken asset library] → it is bounded by failing files
   and points at real lost texels, which is the intent.
 
