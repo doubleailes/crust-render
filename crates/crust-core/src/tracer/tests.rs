@@ -424,6 +424,29 @@ fn one_light_sample_draws_as_before() {
     }
 }
 
+/// The last slice's pick stays below 1 for a draw within an ulp of 1, at
+/// every count: a coordinate of 1.0 would land on the last light whatever
+/// its probability. One sample passes the draw through untouched.
+#[test]
+fn a_stratified_pick_never_reaches_one() {
+    use super::path::stratified_pick;
+    let below_one = 1.0 - f32::EPSILON / 2.0;
+    assert!(below_one < 1.0 && (below_one + f32::EPSILON / 2.0) == 1.0);
+    for count in [2u32, 3, 4, 7, 1024] {
+        for u in [below_one, 0.9999999, 0.999999, 0.5] {
+            let pick = stratified_pick(u, count, count - 1);
+            assert!(pick < 1.0, "count {count}, u {u}: pick {pick}");
+            assert!(pick >= (count - 1) as f32 / count as f32);
+        }
+    }
+    assert_eq!(
+        stratified_pick(below_one, 1, 0).to_bits(),
+        below_one.to_bits()
+    );
+    // Without the clamp the last slice does round up to 1.
+    assert_eq!((1.0 + below_one) / 2.0, 1.0);
+}
+
 /// Stratified picks (design D1): with four samples over lights selected
 /// with probabilities 0.5, 0.25 and 0.25, every vertex samples the first
 /// light twice and each other light once — not a binomial count.

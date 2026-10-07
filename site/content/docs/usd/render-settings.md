@@ -187,8 +187,9 @@ How many light samples (shadow rays) light sampling takes at the first vertex of
 camera path. The samples spread over the lights in proportion to their selection
 probabilities and are combined with BSDF sampling by multi-sample multiple importance
 sampling, so the image is the same in expectation at every count; direct-light noise
-falls about as 1/N. A value below 1 is refused with a warning, and 1 is used. At 1 the
-image is bit-identical to a render before this setting existed.
+falls about as 1/N. A value below 1 is refused with a warning, and 1 is used; a value
+above 1024 is clamped to 1024 with a warning. At 1 the image is bit-identical to a
+render before this setting existed.
 
 ### crust:lightSamplesIndirect
 
@@ -196,7 +197,8 @@ image is bit-identical to a render before this setting existed.
 
 The same count at every later vertex of a path, surface and volume alike. It is paid at
 every bounce, so it costs more per unit of noise removed than `crust:lightSamples`. A
-value below 1 is refused with a warning, and 1 is used.
+value below 1 is refused with a warning, and 1 is used; a value above 1024 is clamped to
+1024 with a warning.
 
 ## Pixel filter
 

@@ -26,7 +26,9 @@ refused on both sides rather than given a finite stand-in.
 
 NEE SHALL take `crust:lightSamples` / `--light-samples` light samples at the
 camera vertex and `crust:lightSamplesIndirect` / `--light-samples-indirect` at
-every later surface and volume vertex (each default 1, at least 1). The light
+every later surface and volume vertex (each default 1, from 1 to 1024; a stage
+value outside that range is clamped with a warning, a command-line one refused).
+The light
 of each sample SHALL be chosen by `crust:lightSelection` / `--light-selection`:
 `power` (default; infinite lights keep a uniform share, the finite lights split
 the rest half evenly and half by flux), `uniform` (bit-identical to the

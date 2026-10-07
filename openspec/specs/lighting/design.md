@@ -182,8 +182,10 @@
 `crust:lightSamples` / `--light-samples` (N, the first vertex of each path, whatever
 kind of vertex it is) and `crust:lightSamplesIndirect` / `--light-samples-indirect`
 (M, every later surface or volume vertex, a subsurface walk's exit included), both
-default 1 and at least 1 (`RenderSettings::with_light_samples`; a stage value below 1
-is refused with a `WARN`, the CLI refuses 0 as a usage error). The motivation is in
+default 1 and from 1 to 1024 (`RenderSettings::with_light_samples`, which clamps;
+`DEFAULT_LIGHT_SAMPLES`, `MAX_LIGHT_SAMPLES`; a stage value outside the range is
+clamped with a `WARN`, the CLI refuses it as a usage error — a count multiplies every
+vertex's shadow rays, so a mistyped huge one would be a render that never ends). The motivation is in
 `docs/light_sampling.md` §7.4: direct lighting at the camera vertex is the largest and
 most visible term at 16 spp, a shadow ray costs about 0.27 µs against about 1.5 µs per
 shading point, and N light samples there cost N − 1 shadow rays and no extra camera
@@ -213,7 +215,10 @@ paths, for direct-light variance falling about as 1/N.
   so a light with selection probability `p` is picked `count · p` times, give or take
   one (pinned by `stratified_picks_sample_each_light_count_times_its_probability`:
   pmfs 0.5/0.25/0.25 and N = 4 give 2/1/1 at every vertex), where independent picks
-  would give a binomial count that leaves a bright light unsampled far too often.
+  would give a binomial count that leaves a bright light unsampled far too often. The
+  last slice is clamped below 1: `(count − 1 + u) / count` rounds to exactly 1.0 for a
+  `u` within an ulp of 1, and a pick of 1.0 lands past the whole CDF on the last light
+  even when that light has probability zero and a `1e-6` density floor.
   **Only the pick is stratified.** The proposal's first draft stratified the
   point-on-light coordinates by the same slice; with those pmfs the third light is only
   ever picked by slice 3 and its point would only ever come from the top quarter of its
