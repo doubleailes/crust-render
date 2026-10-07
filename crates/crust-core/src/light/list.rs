@@ -415,8 +415,9 @@ impl LightList {
     }
 
     /// [`LightList::pick`] for a vertex at `p`, as an index into
-    /// [`LightList::lights`]: under a learned selection, from the distribution
-    /// of the cell holding `p`; otherwise exactly `pick_index`.
+    /// [`LightList::lights`]: under a learned selection, from the trilinear
+    /// blend of the trained cells around `p` (`LightCache::blend_at`);
+    /// otherwise exactly `pick_index`.
     ///
     /// Forced inline: it sits on every NEE pick, and LLVM's own threshold
     /// outlined it once `trace_path` grew by a few instructions elsewhere,

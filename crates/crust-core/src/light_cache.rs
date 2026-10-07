@@ -198,9 +198,17 @@ impl LightCache {
 
     /// The blended CDF at light `j`: the weighted sum of the corners' CDFs,
     /// which is the CDF of the weighted sum of their pmfs. Monotone in `j`,
-    /// since every corner's is and rounding keeps order.
+    /// since every corner's is and rounding keeps order. Exactly one from
+    /// the last pickable light on: every corner's CDF is one there, so the
+    /// weighted sum is one up to the rounding of the weights, and pinning it
+    /// makes the last light's interval end where the pick's does
+    /// ([`LightCache::pick`] sends every `u` below one somewhere, and
+    /// [`LightCache::pmf_at`] must report the interval it lands in).
     #[inline]
     fn cdf_at(&self, b: &Blend, j: usize) -> f32 {
+        if j >= self.last_live {
+            return 1.0;
+        }
         let n = self.lights;
         let mut sum = 0.0f32;
         for (&slot, &w) in b.slots.iter().zip(&b.weights) {
@@ -225,9 +233,10 @@ impl LightCache {
     }
 
     /// Picks a light from `[0, 1)` sample `u` by inverting the blended CDF:
-    /// the first light whose CDF exceeds `u`, with its probability. A `u` at
-    /// or past the blend's last value (which rounds within an ulp of one)
-    /// lands on the last light that can be picked.
+    /// the first light whose CDF exceeds `u`, with its probability. The CDF
+    /// is exactly one from the last pickable light on, so every `u` below
+    /// one lands on a light at or before it; the fallback only guards a `u`
+    /// of one or more.
     #[inline]
     pub(crate) fn pick(&self, b: &Blend, u: f32) -> (usize, f32) {
         let n = self.lights;
@@ -688,21 +697,24 @@ mod tests {
     /// table is the plain defensive mixture.
     #[test]
     fn a_light_seen_nearby_gets_the_floor_and_an_unseen_one_the_defensive_share() {
-        let live = vec![true; 4];
+        // Six live lights, two of them seen nearby: the floor `0.15 / 2` is
+        // above the defensive `0.3 / 6`, so the test can tell them apart.
         // Light 0 lights this cell; light 1 was seen by a neighbour only;
-        // lights 2 and 3 were never seen nearby.
-        let sum = vec![10.0, 0.0, 0.0, 0.0];
-        let seen = vec![true, true, false, false];
-        let pmf = pmf_of(&cell_table(&sum, 10.0, &live, 4, &seen));
-        let defensive = DEFENSIVE / 4.0;
-        assert!((pmf[2] - defensive).abs() < 1e-6, "unseen: {}", pmf[2]);
-        assert!((pmf[3] - defensive).abs() < 1e-6, "unseen: {}", pmf[3]);
+        // lights 2 to 5 were never seen nearby.
+        let live = vec![true; 6];
+        let sum = vec![10.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let seen = vec![true, true, false, false, false, false];
+        let pmf = pmf_of(&cell_table(&sum, 10.0, &live, 6, &seen));
+        let defensive = DEFENSIVE / 6.0;
         let floor = SEEN_FLOOR / 2.0;
+        assert!(floor > defensive + 0.02);
+        for (k, &p) in pmf.iter().enumerate().skip(2) {
+            assert!((p - defensive).abs() < 1e-6, "unseen {k}: {p}");
+        }
         assert!((pmf[1] - floor).abs() < 1e-6, "seen nearby: {}", pmf[1]);
-        assert!(pmf[1] > defensive);
         let total: f32 = pmf.iter().sum();
         assert!((total - 1.0).abs() < 1e-6);
-        assert!((pmf[0] - (1.0 - floor - 2.0 * defensive)).abs() < 1e-6);
+        assert!((pmf[0] - (1.0 - floor - 4.0 * defensive)).abs() < 1e-6);
 
         // Both lights well above the floor: the mixture as it always was.
         let sum = vec![6.0, 4.0];
@@ -790,7 +802,22 @@ mod tests {
                 cache.pmf_at(&b, j)
             );
         }
-        // A `u` at the top of the range lands on the last pickable light.
-        assert_eq!(cache.pick(&b, 1.0 - f32::EPSILON / 2.0).0, 2);
+        // A `u` at the top of the range lands on the last pickable light,
+        // and the last light's interval ends at exactly one — so what the
+        // pick reports for it is one minus the CDF before it, whatever the
+        // weights' rounding leaves the blended sum at.
+        let top = 1.0 - f32::EPSILON / 2.0;
+        assert_eq!(cache.pick(&b, top).0, 2);
+        assert_eq!(cache.cdf_at(&b, 2), 1.0);
+        assert_eq!(cache.pick(&b, top).1, 1.0 - cache.cdf_at(&b, 1));
+        // Any point of the grid, including ones whose weights do not sum to
+        // one in f32: the last CDF is pinned.
+        for i in 0..50 {
+            let p = Vec3A::new(0.5 + i as f32 / 49.0, 0.2 + i as f32 / 70.0, 0.5);
+            let b = cache.blend_at(p).unwrap();
+            assert_eq!(cache.cdf_at(&b, 2), 1.0, "{p}");
+            let w: f32 = b.weights.iter().sum();
+            assert!((w - 1.0).abs() < 1e-6);
+        }
     }
 }

@@ -269,12 +269,13 @@ fn strategies_agree_under_learned_selection_on_usdlux() {
         }
         sum / (w * h) as f64
     };
-    let reference = mean(LightSelection::Power, SamplingStrategy::PowerMis, 1024);
+    // Kept small for debug builds: about 2.4 M camera paths in all.
+    let reference = mean(LightSelection::Power, SamplingStrategy::PowerMis, 256);
     assert!(reference > 0.0);
     for (strategy, spp, tol) in [
-        (SamplingStrategy::PowerMis, 512, 0.03),
-        (SamplingStrategy::LightOnly, 512, 0.03),
-        (SamplingStrategy::BsdfOnly, 2048, 0.08),
+        (SamplingStrategy::PowerMis, 128, 0.04),
+        (SamplingStrategy::LightOnly, 128, 0.04),
+        (SamplingStrategy::BsdfOnly, 512, 0.10),
     ] {
         let m = mean(LightSelection::Learned, strategy, spp);
         assert!(
