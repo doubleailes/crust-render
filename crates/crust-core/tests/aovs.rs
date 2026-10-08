@@ -25,6 +25,7 @@ fn var(name: &str, source: AovSource) -> AovVar {
         clear: source.default_clear(),
         expression: None,
         raw: false,
+        variance: false,
     }
 }
 

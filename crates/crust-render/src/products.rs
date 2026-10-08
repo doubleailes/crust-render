@@ -50,7 +50,7 @@ pub fn channel_names(var: &AovVar, bare: bool) -> Vec<String> {
         None if bare => String::new(),
         None => var.name.clone(),
     };
-    let components: &[&str] = match var.source.channel_kind() {
+    let components: &[&str] = match var.channel_kind() {
         ChannelKind::Color if var.with_alpha() => &["R", "G", "B", "A"],
         ChannelKind::Color => &["R", "G", "B"],
         ChannelKind::Vector => &["X", "Y", "Z"],
@@ -246,6 +246,7 @@ mod tests {
             clear: source.default_clear(),
             expression: None,
             raw: false,
+            variance: false,
         }
     }
 

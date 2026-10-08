@@ -582,6 +582,14 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     let mut expression = None;
     let mut raw = false;
     let raw_authored = custom_bool(&prim, "crust:aov:raw") == Some(true);
+    let variance = custom_bool(&prim, "crust:aov:variance") == Some(true);
+    if variance && source_type != "lpe" {
+        warn!(
+            "{path}: crust:aov:variance applies to light path expressions (sourceType \
+             \"lpe\"), not sourceType {source_type:?}; no channel written"
+        );
+        return None;
+    }
     let source = match source_type.as_str() {
         "raw" => {
             let lookup = if source_name.is_empty() {
@@ -667,14 +675,23 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         }
     };
 
+    // An expression's variance is one scalar: unauthored, it is a float.
     let type_name = custom_token(&prim, "driver:parameters:aov:format")
         .or_else(|| custom_token(&prim, "dataType"))
-        .unwrap_or_else(|| "color3f".to_owned());
+        .unwrap_or_else(|| if variance { "float" } else { "color3f" }.to_owned());
     let Some((components, precision)) = parse_data_type(&type_name) else {
         warn!("{path}: data type {type_name:?} is not a numeric type; no channel written");
         return None;
     };
-    if !type_fits(source, components, precision) {
+    if variance && (components != 1 || precision == Precision::Uint) {
+        warn!(
+            "{path}: the variance of {:?} is one float channel and cannot be written as \
+             {type_name:?}; no channel written",
+            expression.as_deref().unwrap_or_default()
+        );
+        return None;
+    }
+    if !variance && !type_fits(source, components, precision) {
         warn!(
             "{path}: {} cannot be written as {type_name:?}; no channel written",
             source.name()
@@ -683,7 +700,16 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     }
 
     let default = source.default_accumulation();
-    let accumulation = match authored_accumulation(&prim) {
+    let authored = authored_accumulation(&prim);
+    if variance && authored == Some(Accumulation::Closest) {
+        // One sample's value per pixel has no sample variance.
+        warn!(
+            "{path}: crust:aov:variance needs every sample, so it cannot be accumulated \
+             as Closest; no channel written"
+        );
+        return None;
+    }
+    let accumulation = match authored {
         Some(mode) if !source.accepts_accumulation() && mode != default => {
             warn!(
                 "{path}: {} is a per-pixel quantity and cannot be accumulated as {mode:?}; \
@@ -709,6 +735,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         clear,
         expression,
         raw,
+        variance,
     })
 }
 

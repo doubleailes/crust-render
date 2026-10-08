@@ -95,6 +95,10 @@ is bitwise equal to the `variance` AOV. A test pins this.
 - Renders with AOVs but no variance var run the existing arms, so every
   existing channel stays bitwise identical.
 
+*As built:* no `n` plane. Every sample lands in every slot, so the count
+is the pixel's own `taken`, which `store` already receives. The moments
+live only in the unit's planes; the film keeps one resolved f32 per pixel.
+
 ### D5. The correlation caveat is part of the contract, not a footnote
 
 For a partition `C<RD>[LO]`, `C<RD>.+[LO]`, … the component estimators of
