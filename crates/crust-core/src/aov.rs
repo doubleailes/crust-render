@@ -372,9 +372,17 @@ impl AovVar {
             Some(e) if self.source == AovSource::Lpe => lpes.iter().position(|x| x == e)? as u16,
             _ => NO_LPE,
         };
+        // A variance is a statistic over every sample: its slot is filtered
+        // whatever the var carries. The importer refuses `Closest` on one;
+        // an engine-built var asking for it still gets the variance.
+        let accumulation = if self.is_lpe_variance() {
+            Accumulation::Filtered
+        } else {
+            self.accumulation
+        };
         self.source.needs_slot().then(|| SlotKey {
             source: self.source,
-            accumulation: self.accumulation,
+            accumulation,
             clear_bits: self.clear.to_bits(),
             lpe,
             raw: self.raw,
@@ -748,8 +756,11 @@ struct SlotPlanes {
     hit_weight: Vec<f32>,
     hits: Vec<u32>,
     /// A unit's variance slot only: the luminance moments its samples
-    /// accumulate. The film's planes hold the resolved variance in
-    /// `values` instead, so a frame costs no more than a scalar AOV.
+    /// accumulate, in place of `values` (which such a unit leaves empty).
+    /// The film's planes hold the resolved variance in `values` instead, so
+    /// the finished frame costs no more than a scalar AOV — but every unit
+    /// of a pass is built before it renders and kept until the film is
+    /// assembled, so while a pass runs the moments cover its whole region.
     var: Option<VarPlanes>,
 }
 
@@ -832,14 +843,21 @@ impl UnitAov {
                 .slots
                 .iter()
                 .map(|s| {
-                    let mut planes = SlotPlanes::new(s, pixels);
                     if s.variance {
-                        planes.var = Some(VarPlanes {
-                            sum: vec![0.0; pixels],
-                            sq: vec![0.0; pixels],
-                        });
+                        SlotPlanes {
+                            values: Vec::new(),
+                            key: Vec::new(),
+                            in_box: Vec::new(),
+                            hit_weight: Vec::new(),
+                            hits: Vec::new(),
+                            var: Some(VarPlanes {
+                                sum: vec![0.0; pixels],
+                                sq: vec![0.0; pixels],
+                            }),
+                        }
+                    } else {
+                        SlotPlanes::new(s, pixels)
                     }
-                    planes
                 })
                 .collect(),
             luma: layout.luma,
@@ -1571,6 +1589,51 @@ mod tests {
         let (u, v) = motion_vector(&cam, p0 + 0.9 * v3, v3, 0.9);
         assert!(u.is_finite() && v.is_finite(), "({u}, {v})");
         assert!(u < 0.0 && v.abs() < 1e-3, "({u}, {v})");
+    }
+
+    /// An expression's variance is a statistic over every sample, so its
+    /// slot is filtered whatever accumulation the var carries: an
+    /// engine-built var asking for `Closest` (the importer refuses it) still
+    /// gets the variance, never the nearest sample's red channel.
+    #[test]
+    fn a_variance_var_is_filtered_whatever_its_accumulation() {
+        let mut v = var(AovSource::Lpe, Accumulation::Closest);
+        v.expression = Some("C.*[LO]".into());
+        v.components = 1;
+        v.variance = true;
+        let request = AovRequest {
+            products: vec![AovProduct {
+                prim_path: "/p".into(),
+                name: "a.exr".into(),
+                vars: vec![v.clone()],
+                attributes: Vec::new(),
+            }],
+        };
+        let layout = AovLayout::new(&request);
+        let mut unit = UnitAov::new(&layout, frame(), 1);
+        let hit = FirstHit::Surface {
+            p: Vec3A::new(0.0, 0.0, -1.0),
+            n: Vec3A::Z,
+            uv: None,
+            motion: Vec3A::ZERO,
+        };
+        let samples = [Vec3A::new(1.0, 0.0, 0.0), Vec3A::new(3.0, 0.0, 0.0)];
+        for lpe in &samples {
+            let extras = SampleExtras {
+                lpe: std::slice::from_ref(lpe),
+                ..NONE
+            };
+            unit.add(&hit, &extras, 0.5, 0.5, 1.0);
+        }
+        let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
+        film.store(&unit, 0, 0, 0, 2.0, 2, 0.0);
+        let (x0, x1) = (
+            layout.luma.of(samples[0]) as f64,
+            layout.luma.of(samples[1]) as f64,
+        );
+        let want = crate::tracer::var_of_mean(x0 + x1, x0 * x0 + x1 * x1, 2) as f32;
+        assert!(want > 0.0);
+        assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![want]]);
     }
 
     /// Only a surface has a motion vector; a volume scatter and an escape

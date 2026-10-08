@@ -1011,7 +1011,8 @@ fn samples_an_expression_rejects_count_as_zeros() {
     let (b, f) = render(&o, &[indirect.clone(), value.clone()]);
     let var = &f.var_channels(&b, &indirect)[0];
     let val = &f.var_channels(&b, &value);
-    let lum = |q: usize| 0.2126 * val[0][q] + 0.7152 * val[1][q] + 0.0722 * val[2][q];
+    // The renderer's own Rec.709 luminance (this scene's working space).
+    let lum = |q: usize| utils::luminance(Vec3A::new(val[0][q], val[1][q], val[2][q]));
     let n = o.spp as f64;
     let mut checked = 0;
     for (q, &v) in var.iter().enumerate() {
