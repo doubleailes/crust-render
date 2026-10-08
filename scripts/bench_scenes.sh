@@ -9,7 +9,7 @@
 #
 # Two things this script deliberately does NOT do:
 #
-#   - It does not compare images. Use `exr_diff` for that, and always render
+#   - It does not compare images. Use `crust diff` for that, and always render
 #     the comparison at `-s 16`: `min_samples_per_pixel` defaults to 32 and
 #     the adaptive early-stop needs `taken >= min_spp`, so at 16 spp adaptive
 #     sampling can never fire and the sample count is fixed. Above it, a

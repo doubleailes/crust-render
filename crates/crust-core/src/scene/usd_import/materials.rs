@@ -132,7 +132,7 @@ const RENDER_BINDING_PURPOSE: &str = "full";
 /// - **Purpose.** ALab authors `material:binding:full` and
 ///   `material:binding:preview` and almost never the all-purpose relationship,
 ///   so asking for `""` alone found nothing on 7 256 prims.
-fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
+pub(super) fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
     let mut path = Some(prim.path().clone());
     while let Some(p) = path {
         if p.is_abs_root() {
@@ -593,6 +593,20 @@ fn resolve_material_uncached(
             default_material()
         }
     }
+}
+
+/// The `info:id` of the surface shader the import decodes the material at
+/// `mat_path` from, in the import's order: a `PxrDisneyBsdf` child first
+/// (see [`resolve_material_uncached`]), else the shader the surface terminal
+/// resolves to. `None` when there is none — a MaterialX reference composes
+/// no shader prim. What `crust ls material --json` reports as `surface`.
+pub(super) fn surface_shader_id(stage: &Stage, mat_path: &sdf::Path) -> Option<String> {
+    if has_shader_id(stage, mat_path, "PxrDisneyBsdf") {
+        return Some("PxrDisneyBsdf".to_owned());
+    }
+    let mat = UsdMaterial::get(stage, mat_path.clone()).ok().flatten()?;
+    terminal_shader(mat.compute_surface_source(SURFACE_RENDER_CONTEXTS))
+        .and_then(|s| shader_info_id(&s))
 }
 
 /// The first `Shader`-typed source driving a resolved terminal.

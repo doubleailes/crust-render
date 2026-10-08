@@ -26,6 +26,7 @@
 
 mod environment;
 mod error;
+mod exr_planes;
 mod ies;
 mod image_file;
 mod mip_filter;
@@ -37,6 +38,7 @@ mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb, read_rgb_image};
 pub use error::AssetError;
+pub use exr_planes::read_exr_planes;
 pub use ies::{load_ies, parse_ies};
 pub use ptex_stream::{
     DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,

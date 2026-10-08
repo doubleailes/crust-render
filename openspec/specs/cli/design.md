@@ -30,6 +30,8 @@ cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; pl
 # subcommand name or `ls`'s KIND would swallow it. `ls <camera|light|material>` lists through
 # `Scene::list_usd(path, ListKind)`, the import's own walk and pruning per kind
 # (`usd_import/listing.rs`) — keep the two walks agreeing when either changes.
+# `ls --json` adds each prim's values (`Scene::list_usd_records`, read through the
+# import's own readers), `diff A B` compares two EXRs (`crust_core::compare`).
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
 # --log-file [DIR] (tee the log to crust-<UTC stamp>.log), --scanline
@@ -54,6 +56,7 @@ cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; pl
 #   A/B: CRUST_ADAPTIVE_PER_FACE=0, CRUST_ADAPTIVE_FRUSTUM=0),
 # --stats (per-phase profile + scene statistics),
 # --profile (implies --stats; adds a Guerilla-style per-section render profile),
+# --stats-json PATH|- (the same statistics as crust-stats/1 JSON; `-` moves the log to stderr),
 # --auto-tx (convert UV textures to a .tx beside the original on first use)
 
 # Keep a full record of a render. The file gets the same events as the terminal
@@ -68,8 +71,19 @@ cargo run --release -- render -i samples/animation.usda -f 5 -o frame.0005.exr
 
 # Crop a frame: only the pixels of the rectangle are traced, each bit-identical to
 # the full render's at -s 16 (the rendering design record's "Render regions" says
-# when it is not). Check placement with exr_diff against a full render, or in Nuke.
+# when it is not). Check placement with crust diff against a full render, or in Nuke.
 cargo run --release -- render -i samples/cornellbox.usda -s 16 --region 100,50,164,114 -o crop.exr
+
+# The same figures for a script: crust-stats/1, one JSON object on stdout (the log,
+# the progress bar and any text report go to stderr). Add --stats for both forms.
+cargo run --release -- render -i scene.usda --stats-json - > stats.json
+
+# What a stage holds, with the values a render reads for each prim (crust-ls/1):
+# lens and the camera a render goes through, light inputs as authored, each
+# material's surface shader and whether anything renders bound to it. -f
+# evaluates the values at a time code; the paths never depend on it.
+cargo run --release -- ls camera -i scene.usda --json -
+cargo run --release -- ls light -i scene.usda -f 1004 --json -
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
 cargo run --release -- render -i samples/curves.usda --stats
@@ -122,7 +136,12 @@ cargo run --release -p crust-rt --example ray_throughput -- --large [MTRIS]
 # nightly"; stable rejects the feature with E0554 by design):
 cargo +nightly test -p crust-rt --features bvh8
 RUSTFLAGS='-C target-cpu=x86-64-v3' cargo +nightly run --release -p crust-rt --example ray_throughput --features bvh8
-cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
+# Did the image change? Exit 0 identical, 1 differs, 2 unreadable. Reads both EXRs'
+# crust:* sampling stamps and notes on stderr (or in --json's `comparability`) when
+# the pixels cannot be compared: adaptive sampling on, different clamps, frames,
+# cameras, filters. The notes never change the exit status.
+cargo run --release -- diff a.exr b.exr                                  # did the image change? exit 0 / 1 / 2
+cargo run --release -- diff ref.exr test.exr --json - | jq .beauty.relmse_trimmed
 cargo run --release -p crust-mtlx --example mtlx_bench -- lion_ldX.mtlx   # ns per MaterialX program run
 cargo run --release -p crust-jit --example jit_bench -- lion_ldX.mtlx      # ...interpreter vs JIT
 
@@ -179,7 +198,7 @@ cargo run --release -p crust-render --example mtlx_shade -- \
 # ...and the same thing end to end, where the difference is 15.0 exactly.
 CRUST_TEX_STREAM=0 cargo run --release -- render -i samples/materialx_emissive.usda -o ldr.exr -s 32
 cargo run --release -- render -i samples/materialx_emissive.usda -o hdr.exr -s 32
-cargo run --release -p crust-render --example exr_diff -- ldr.exr hdr.exr
+cargo run --release -- diff ldr.exr hdr.exr
 
 # Is a Ptex file actually being addressed correctly? Neither check renders
 # anything -- a wrong Ptex lookup still produces a plausible-looking surface,
@@ -243,7 +262,7 @@ CRUST_PTEX_MAX_LOG2=5 cargo run --release -- render -i samples/ptex_quads.usda -
 CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
     CRUST_PTEX_STREAM_MIPSPACE=file \
     cargo run --release -- render -i samples/ptex_quads.usda -o b.exr -s 16
-cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # 0 pixels
+cargo run --release -- diff a.exr b.exr   # 0 pixels
 # The configuration that streams under the *default* policy: no pyramid, so no
 # chain to reduce in the wrong space. Exact and uncapped, at the cost of the
 # pyramid's anti-aliasing.
@@ -280,8 +299,13 @@ cargo test --workspace --no-fail-fast
 ## Logging
 
 Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (default `info`).
-A render logs to stdout, as it always has; `crust ls` logs to stderr, because its stdout
-is its result and is read by scripts.
+A render logs to stdout, as it always has; `crust ls`, `crust diff` and `crust diagnostic`
+log to stderr, because their stdout is their result and is read by scripts. One flag moves
+a render's log: `--stats-json -`. `main` picks the stream (`logging::Terminal`) before
+the subscriber is built, from the parsed command, so the decision is made once and the
+whole run — the log, the `--stats` text report, the progress bar (always stderr) — lands
+on stderr, leaving stdout one JSON object. `--stats-json PATH` changes nothing about the
+streams.
 
 **The level is decided by whether the line scales with the scene, not by how interesting
 it is.** A default render prints four `INFO` lines — what is being rendered, how long it
@@ -362,6 +386,50 @@ branch), while `CRUST_RAY_CONES=0` zeroes every footprint with the pyramids stil
 resident. Either side alone is bit-identical to the pre-filtering renderer, and the two
 produce the same image as each other — which is what makes them an honest A/B of the two
 halves: the pyramid, and the footprint that selects from it.
+
+## Machine-readable reports
+
+`--stats-json`, `ls --json` and `diff --json` share the `cli` spec's rule ("Machine-readable
+reports share one shape"), implemented once in `crust_core::report`:
+
+- **`Report<T>`** is the envelope: `format` and `crust_version`, then the body
+  `#[serde(flatten)]`ed. serde writes a struct's fields in declaration order, so the
+  envelope leads without `preserve_order`. `crust-diagnostic/1` predates it and spells the
+  two fields out itself; same keys, same place.
+- **`finite_or_null`** maps NaN and infinities to `null` (serde_json refuses them) and
+  writes an `f32` at `f32` precision — through the `f64` widening, a focal length of 12.7
+  printed as `12.700016975402832`. **`seconds`** writes a `Duration` as `f64` seconds for
+  a `*_s` key.
+- **The report types are the contract.** `RenderStats` serializes through a view that
+  *destructures* it, so a field added to it is a compile error until it has a key, and
+  `stats_json_key_set_is_pinned` lists all 150-odd keys: a new one fails the test until
+  its name is reviewed. The kernel's `MemoryFootprint` is crust-rt's (serde-free), so it is
+  destructured into `*_bytes` keys the same way. The ratios the text report derives
+  (`total_rays`, `mean_path_length`, `rr_kill_rate`, `hit_rate`, `micro_rate`,
+  `rays_per_s`) are computed in the view, once, zero guards included.
+- **One snapshot of the peak RSS.** `RenderStats::peak_memory_bytes` is taken by the host
+  after the outputs are written, and both `Display` and the JSON read the field: the text
+  report used to call `peak_memory_bytes()` while formatting, which a second form would
+  have read at another moment.
+
+`ls --json` reads values through the import's own readers (`camera_lens`,
+`light_inputs`, `bound_material`, `surface_shader_id`, made `pub(super)`), never a copy,
+and the camera choice through the import's (`settings::wanted_camera`, `pick_camera`), so
+`is_render_camera` is the camera the import resolves — checked against `Scene::camera_path`
+in `usd_listing.rs`. The import's fallback is the first camera *its* walk meets, which pops
+children last-first; the listing prints in authored order, so it walks the cameras a second
+time in the import's order to find that one. Text `ls` stays the old walk, byte-identical,
+and pays for none of this. `material`'s `bound` resolves every geometry prim's binding (a
+second walk); measured `ls material --json` against text `ls` at 1.03× on
+`PointInstancedMedCity.usd`, 0.93× on the Cornell box and 1.12× on `materialx_showcase`
+(min of 5). ALab, where the binding walk would matter, was not available to measure.
+
+`diff` splits as a render does: crust-assets decodes (`read_exr_planes`, the old example's
+`load` with errors for panics), crust-core compares (`compare`, no I/O, so the diagnostic
+can call it on buffers), the CLI prints and maps the exit status. Its text report is the
+`exr_diff` example's, line for line — checked on eight fixture pairs (identical,
+4 vs 16 spp both ways, a crop against the frame, AOV-only products, a beauty product
+against a single beauty) before the example was deleted.
 
 ## Stats and render profile (`stats.rs`, `profile.rs`)
 

@@ -502,12 +502,7 @@ impl RenderProfile {
         let root_ns = self.tree.children_ns(0).max(1) as f64;
         let pct = |d: Duration| 100.0 * d.as_nanos() as f64 / root_ns;
 
-        let mut sections: Vec<(Section, SectionTotals)> = Section::ALL
-            .iter()
-            .map(|&s| (s, self.section(s)))
-            .filter(|(_, t)| t.calls > 0)
-            .collect();
-        sections.sort_by_key(|(_, t)| std::cmp::Reverse(t.local));
+        let sections = self.sections_by_local();
 
         // -- Profile ---------------------------------------------------
         writeln!(f, "{rule}")?;
@@ -640,11 +635,93 @@ impl RenderProfile {
         )
     }
 
+    /// Every profiled section with its totals, heaviest local time first —
+    /// the rows of the flat report.
+    fn sections_by_local(&self) -> Vec<(Section, SectionTotals)> {
+        let mut sections: Vec<(Section, SectionTotals)> = Section::ALL
+            .iter()
+            .map(|&s| (s, self.section(s)))
+            .filter(|(_, t)| t.calls > 0)
+            .collect();
+        sections.sort_by_key(|(_, t)| std::cmp::Reverse(t.local));
+        sections
+    }
+
     fn sorted_children(&self, id: u32) -> impl Iterator<Item = u32> {
         let mut kids = self.tree.nodes[id as usize].children.clone();
         kids.retain(|&c| self.tree.nodes[c as usize].calls > 0);
         kids.sort_by_key(|&c| std::cmp::Reverse(self.tree.nodes[c as usize].ns));
         kids.into_iter()
+    }
+}
+
+/// The profile in `crust-stats/1`, under `profile`: the flat section table
+/// and the execution tree, in the text report's row order, times in seconds
+/// of thread time.
+impl serde::Serialize for RenderProfile {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct SectionJson {
+            name: &'static str,
+            category: &'static str,
+            local_s: f64,
+            total_s: f64,
+            calls: u64,
+        }
+        #[derive(serde::Serialize)]
+        struct NodeJson {
+            section: &'static str,
+            depth: usize,
+            local_s: f64,
+            total_s: f64,
+            calls: u64,
+        }
+        #[derive(serde::Serialize)]
+        struct ProfileJson {
+            threads: usize,
+            thread_time_s: f64,
+            scope_count: u64,
+            scope_cost_s: f64,
+            sections: Vec<SectionJson>,
+            tree: Vec<NodeJson>,
+        }
+        let sections = self
+            .sections_by_local()
+            .into_iter()
+            .map(|(sec, t)| SectionJson {
+                name: sec.name(),
+                category: sec.category().name(),
+                local_s: t.local.as_secs_f64(),
+                total_s: t.total.as_secs_f64(),
+                calls: t.calls,
+            })
+            .collect();
+        let mut tree = Vec::new();
+        let mut stack: Vec<(u32, usize)> = self.sorted_children(0).map(|c| (c, 1)).collect();
+        stack.reverse();
+        while let Some((id, depth)) = stack.pop() {
+            let n = &self.tree.nodes[id as usize];
+            tree.push(NodeJson {
+                section: n.section.expect("only the root has no section").name(),
+                depth,
+                local_s: Duration::from_nanos(self.tree.local_ns(id)).as_secs_f64(),
+                total_s: Duration::from_nanos(n.ns).as_secs_f64(),
+                calls: n.calls,
+            });
+            let mut kids: Vec<(u32, usize)> =
+                self.sorted_children(id).map(|c| (c, depth + 1)).collect();
+            kids.reverse();
+            stack.extend(kids);
+        }
+        ProfileJson {
+            threads: self.threads,
+            thread_time_s: self.thread_time().as_secs_f64(),
+            scope_count: self.scope_count(),
+            scope_cost_s: self.scope_cost.as_secs_f64(),
+            sections,
+            tree,
+        }
+        .serialize(s)
     }
 }
 

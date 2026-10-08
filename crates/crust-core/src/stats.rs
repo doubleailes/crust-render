@@ -20,6 +20,8 @@
 //! cheap, so it lives in [`crate::profile`] behind `--profile`, and is only
 //! printed here (after the phases, since it zooms into one of them).
 
+use crate::report::{finite_or_null, seconds};
+use serde::{Serialize, Serializer};
 use std::fmt;
 use std::time::Duration;
 
@@ -32,12 +34,15 @@ use std::time::Duration;
 /// any point up to then. A large gap between them says the phase
 /// allocated far more than it kept — transient build churn, which costs
 /// page faults and time even though the final structures are small.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Phase {
     pub name: String,
     pub depth: u8,
+    #[serde(rename = "time_s", serialize_with = "seconds")]
     pub duration: Duration,
+    #[serde(rename = "rss_end_bytes")]
     pub rss_end: Option<u64>,
+    #[serde(rename = "peak_end_bytes")]
     pub peak_end: Option<u64>,
 }
 
@@ -75,7 +80,7 @@ impl MemorySample {
 }
 
 /// Primitives split by kind. Mirrors [`crate::rt::PrimitiveBreakdown`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PrimitiveCounts {
     pub triangles: usize,
     pub spheres: usize,
@@ -128,7 +133,7 @@ impl From<crate::rt::PrimitiveBreakdown> for PrimitiveCounts {
 /// `unique` descends into instances and counts each distinct prototype
 /// once, so it is what actually occupies memory. The gap between them is
 /// the benefit instancing is buying.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct SceneCounters {
     /// Attached geometries (`geom_id`s), i.e. entries in the material table.
     pub geometries: usize,
@@ -140,6 +145,7 @@ pub struct SceneCounters {
     /// `crust-rt` — materials, the USD stage, import caches — is *not*
     /// counted, so this being well under peak RSS is expected and the gap
     /// is itself informative.
+    #[serde(rename = "kernel_memory", serialize_with = "footprint_json")]
     pub footprint: crate::rt::MemoryFootprint,
 }
 
@@ -154,7 +160,7 @@ pub struct SceneCounters {
 /// Accumulated per work unit (a tile or a scanline) and summed when the
 /// pass collects its results, so no two threads ever touch the same
 /// counter and there is nothing to contend on.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct RayStats {
     /// Primary rays cast from the camera.
     pub camera_rays: u64,
@@ -334,11 +340,13 @@ impl RayStats {
 }
 
 /// Image-level parameters worth reporting next to the costs they drove.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ImageCounters {
     pub width: usize,
     pub height: usize,
-    /// The render region, when it is smaller than the frame (image space).
+    /// The render region, when it is smaller than the frame (image space),
+    /// as `[x0, y0, x1, y1]`, `x1` and `y1` excluded.
+    #[serde(serialize_with = "region_json")]
     pub region: Option<crate::PixelRect>,
     pub samples_per_pixel: u32,
     pub max_depth: u32,
@@ -395,6 +403,11 @@ pub struct RenderStats {
     pub light_kinds: Vec<(&'static str, usize)>,
     /// The per-section render profile, when `--profile` asked for one.
     pub profile: Option<crate::profile::RenderProfile>,
+    /// The process's peak resident size, snapshotted once by the host just
+    /// before it reports, so the text report's `peak memory (RSS)` line and
+    /// the JSON's `peak_memory_bytes` are the same figure. `None` until
+    /// taken, and without procfs.
+    pub peak_memory_bytes: Option<u64>,
     /// Adaptive subdivision's choices; empty (and not reported) in uniform
     /// subdivision.
     pub subdivision: SubdivisionCounters,
@@ -404,7 +417,7 @@ pub struct RenderStats {
 }
 
 /// What the displacement pass did over a load.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct DisplacementCounters {
     /// Distinct meshes displaced — once per distinct mesh, however many prims
     /// share it.
@@ -413,8 +426,10 @@ pub struct DisplacementCounters {
     pub vertices: u64,
     /// Time spent displacing (charts, offsets, normals), within "Traverse
     /// prims".
+    #[serde(rename = "time_s", serialize_with = "seconds")]
     pub time: Duration,
     /// The largest `|offset|` applied, in local units.
+    #[serde(serialize_with = "finite_or_null")]
     pub max_offset: f32,
     /// Displaced meshes left at their authored cage resolution — the
     /// displacement then moves only cage vertices.
@@ -425,10 +440,11 @@ pub struct DisplacementCounters {
 }
 
 /// What adaptive subdivision chose over a load.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct SubdivisionCounters {
     /// The target edge length in pixels and the level ceiling; `None` in
     /// uniform subdivision, which reports nothing here.
+    #[serde(serialize_with = "adaptive_json")]
     pub adaptive: Option<(f32, u32)>,
     /// Subdivision meshes read, by the level each was refined to (index =
     /// level): a direct prim once per placement, a prototype's mesh once per
@@ -460,7 +476,7 @@ pub struct SubdivisionCounters {
 /// A mixed report is possible and is not a bug: streaming falls back to
 /// preloading for a file it cannot open, so `streamed < textures` means some
 /// file declined, which is exactly when you want to be told.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PtexCacheStats {
     /// Textures opened, by either backend.
     pub textures: u32,
@@ -484,6 +500,7 @@ pub struct PtexCacheStats {
     /// policy — `CRUST_PTEX_STREAM_MIPSPACE=file` accepts the file's chain
     /// instead. Counted apart because it is the line that explains a render
     /// where `CRUST_PTEX_STREAM=1` was set and nothing streamed.
+    #[serde(rename = "mip_space_refused")]
     pub mip_space: u32,
     pub faces: u64,
     /// Resident bytes held by the **preloaded** textures. Fixed for the
@@ -538,7 +555,7 @@ impl PtexCacheStats {
 /// And `redundant` — tiles paged in more than once over one render — is the
 /// only number that distinguishes "the cache is full" from "the cache is too
 /// small for the working set", which is the question an operator actually has.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TextureCacheStats {
     pub micro_hits: u64,
     pub hits: u64,
@@ -658,6 +675,227 @@ impl RenderStats {
     pub fn report(&self) -> String {
         self.to_string()
     }
+
+    /// The `crust-stats/1` report (`--stats-json`): the same value the text
+    /// report is formatted from, so the two cannot disagree.
+    pub fn to_json(&self) -> String {
+        crate::report::Report::new(STATS_FORMAT, self).to_json()
+    }
+}
+
+/// The `format` of the `--stats-json` report.
+pub const STATS_FORMAT: &str = "crust-stats/1";
+
+/// `RenderStats` as JSON: its own fields, plus the figures the text report
+/// derives from them (`total_rays`, `mean_path_length`, `hit_rate`, ...),
+/// computed here once so a reader need not repeat their zero guards.
+///
+/// The struct is destructured, not read field by field: a field added to
+/// `RenderStats` and not given a key here is a compile error, and the
+/// key-set test then asks for its name to be reviewed.
+impl Serialize for RenderStats {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let RenderStats {
+            phases,
+            scene,
+            image,
+            rays,
+            textures,
+            ptex,
+            materials,
+            light_kinds,
+            profile,
+            subdivision,
+            displacement,
+            peak_memory_bytes,
+        } = self;
+        let render_s = self
+            .render_phase()
+            .map(|p| p.duration.as_secs_f64())
+            .filter(|&t| t > 0.0);
+        let view = StatsJson {
+            total_time_s: self.total(),
+            peak_memory_bytes: *peak_memory_bytes,
+            phases,
+            image,
+            scene,
+            materials: Kinds(materials),
+            light_kinds: Kinds(light_kinds),
+            subdivision,
+            displacement,
+            rays: RaysJson {
+                counters: rays,
+                total_rays: rays.total_rays(),
+                bounce_rays: rays.bounce_rays(),
+                surface_vertices: rays
+                    .vertices
+                    .saturating_sub(rays.volume_scatters + rays.medium_scatters),
+                mean_path_length: rays.mean_path_length(),
+                rr_kill_rate: rays.rr_kill_rate(),
+                shadow_rays_per_vertex: rays.shadow_rays_per_vertex(),
+                rays_per_s: render_s.map(|t| rays.total_rays() as f64 / t),
+            },
+            textures: TexturesJson {
+                counters: textures,
+                lookups: textures.lookups(),
+                hit_rate: textures.hit_rate(),
+            },
+            ptex: PtexJson {
+                counters: ptex,
+                lookups: ptex.lookups(),
+                micro_rate: ptex.micro_rate(),
+            },
+            profile: profile.as_ref(),
+        };
+        view.serialize(s)
+    }
+}
+
+/// The top-level object of `crust-stats/1`, in key order.
+#[derive(Serialize)]
+struct StatsJson<'a> {
+    #[serde(serialize_with = "seconds")]
+    total_time_s: Duration,
+    peak_memory_bytes: Option<u64>,
+    phases: &'a [Phase],
+    image: &'a ImageCounters,
+    scene: &'a SceneCounters,
+    materials: Kinds<'a>,
+    light_kinds: Kinds<'a>,
+    subdivision: &'a SubdivisionCounters,
+    displacement: &'a DisplacementCounters,
+    rays: RaysJson<'a>,
+    textures: TexturesJson<'a>,
+    ptex: PtexJson<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<&'a crate::profile::RenderProfile>,
+}
+
+#[derive(Serialize)]
+struct RaysJson<'a> {
+    #[serde(flatten)]
+    counters: &'a RayStats,
+    total_rays: u64,
+    bounce_rays: u64,
+    surface_vertices: u64,
+    #[serde(serialize_with = "finite_or_null")]
+    mean_path_length: f64,
+    #[serde(serialize_with = "finite_or_null")]
+    rr_kill_rate: f64,
+    #[serde(serialize_with = "finite_or_null")]
+    shadow_rays_per_vertex: f64,
+    /// Ray queries per second of the Render phase; `null` without one.
+    rays_per_s: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct TexturesJson<'a> {
+    #[serde(flatten)]
+    counters: &'a TextureCacheStats,
+    lookups: u64,
+    #[serde(serialize_with = "finite_or_null")]
+    hit_rate: f64,
+}
+
+#[derive(Serialize)]
+struct PtexJson<'a> {
+    #[serde(flatten)]
+    counters: &'a PtexCacheStats,
+    lookups: u64,
+    #[serde(serialize_with = "finite_or_null")]
+    micro_rate: f64,
+}
+
+/// A by-kind breakdown as `[{"kind": ..., "count": ...}]`, heaviest first.
+struct Kinds<'a>(&'a [(&'static str, usize)]);
+
+impl Serialize for Kinds<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Kind {
+            kind: &'static str,
+            count: usize,
+        }
+        s.collect_seq(self.0.iter().map(|&(kind, count)| Kind { kind, count }))
+    }
+}
+
+/// `PixelRect` as `[x0, y0, x1, y1]`.
+fn region_json<S: Serializer>(r: &Option<crate::PixelRect>, s: S) -> Result<S::Ok, S::Error> {
+    r.map(|r| [r.x0, r.y0, r.x1, r.y1]).serialize(s)
+}
+
+/// Adaptive subdivision's `(edge length, level cap)` as named values.
+fn adaptive_json<S: Serializer>(a: &Option<(f32, u32)>, s: S) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Adaptive {
+        #[serde(serialize_with = "finite_or_null")]
+        edge_length_px: f32,
+        max_level: u32,
+    }
+    a.map(|(edge_length_px, max_level)| Adaptive {
+        edge_length_px,
+        max_level,
+    })
+    .serialize(s)
+}
+
+/// The kernel's [`MemoryFootprint`](crate::rt::MemoryFootprint), every
+/// table in bytes. crust-rt stays free of serde, so the keys are named here;
+/// destructured, so a table added there is a compile error here.
+fn footprint_json<S: Serializer>(fp: &crate::rt::MemoryFootprint, s: S) -> Result<S::Ok, S::Error> {
+    let &crate::rt::MemoryFootprint {
+        prim_nodes,
+        instances,
+        cubic_spans,
+        bvh_nodes,
+        leaves,
+        packets,
+        packets_indexed,
+        indices,
+        triangle_records,
+        vertices,
+        vertex_normals,
+        geometry_tables,
+        lanes,
+        lanes_filled,
+    } = fp;
+    #[derive(Serialize)]
+    struct Footprint {
+        total_bytes: usize,
+        vertices_bytes: usize,
+        vertex_normals_bytes: usize,
+        triangle_records_bytes: usize,
+        packets_bytes: usize,
+        packets_indexed_bytes: usize,
+        prim_nodes_bytes: usize,
+        instances_bytes: usize,
+        cubic_spans_bytes: usize,
+        bvh_nodes_bytes: usize,
+        indices_bytes: usize,
+        leaves_bytes: usize,
+        geometry_tables_bytes: usize,
+        lanes: usize,
+        lanes_filled: usize,
+    }
+    Footprint {
+        total_bytes: fp.total(),
+        vertices_bytes: vertices,
+        vertex_normals_bytes: vertex_normals,
+        triangle_records_bytes: triangle_records,
+        packets_bytes: packets,
+        packets_indexed_bytes: packets_indexed,
+        prim_nodes_bytes: prim_nodes,
+        instances_bytes: instances,
+        cubic_spans_bytes: cubic_spans,
+        bvh_nodes_bytes: bvh_nodes,
+        indices_bytes: indices,
+        leaves_bytes: leaves,
+        geometry_tables_bytes: geometry_tables,
+        lanes,
+        lanes_filled,
+    }
+    .serialize(s)
 }
 
 /// One snapshot of `/proc/self/status`. Fields that must agree with each
@@ -1003,7 +1241,7 @@ impl RenderStats {
                 )?;
             }
         }
-        if let Some(peak) = peak_memory_bytes() {
+        if let Some(peak) = self.peak_memory_bytes {
             writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
         }
         Ok(())
@@ -1969,5 +2207,262 @@ mod tests {
             parse_proc_status_bytes("VmRSS:\t  bogus kB\n", "VmRSS:"),
             None
         );
+    }
+
+    /// Every key path of a JSON value, arrays as `[]`, sorted and deduplicated.
+    fn key_paths(v: &serde_json::Value) -> Vec<String> {
+        fn walk(v: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, v) in m {
+                        let path = if at.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{at}.{k}")
+                        };
+                        out.push(path.clone());
+                        walk(v, &path, out);
+                    }
+                }
+                serde_json::Value::Array(a) => {
+                    for v in a {
+                        walk(v, &format!("{at}[]"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(v, "", &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// A report with every optional part present but the profile (a
+    /// `--profile` render's; pinned by the CLI test).
+    fn fixture() -> RenderStats {
+        let mut s = RenderStats::new();
+        s.record_at(
+            "Render",
+            0,
+            Duration::from_millis(1500),
+            MemorySample {
+                rss: Some(1 << 20),
+                peak: None,
+            },
+        );
+        s.image.region = Some(crate::PixelRect::new(0, 0, 4, 2));
+        s.materials = vec![("OpenPBR", 2)];
+        s.light_kinds = vec![("rect", 1)];
+        s.subdivision.adaptive = Some((2.0, 3));
+        s.peak_memory_bytes = Some(42 << 20);
+        s
+    }
+
+    /// The `crust-stats/1` contract: the full key set. A field added to
+    /// `RenderStats` or any of its parts changes this list, and the test
+    /// fails until the new key's name has been reviewed (snake_case, its
+    /// unit in the name) and added here.
+    #[test]
+    fn stats_json_key_set_is_pinned() {
+        let v: serde_json::Value = serde_json::from_str(&fixture().to_json()).unwrap();
+        let got = key_paths(&v);
+        let want: &[&str] = &[
+            "crust_version",
+            "displacement",
+            "displacement.at_cage",
+            "displacement.frustum_skipped",
+            "displacement.max_offset",
+            "displacement.meshes",
+            "displacement.time_s",
+            "displacement.vertices",
+            "format",
+            "image",
+            "image.height",
+            "image.max_depth",
+            "image.region",
+            "image.samples_per_pixel",
+            "image.width",
+            "light_kinds",
+            "light_kinds[].count",
+            "light_kinds[].kind",
+            "materials",
+            "materials[].count",
+            "materials[].kind",
+            "peak_memory_bytes",
+            "phases",
+            "phases[].depth",
+            "phases[].name",
+            "phases[].peak_end_bytes",
+            "phases[].rss_end_bytes",
+            "phases[].time_s",
+            "ptex",
+            "ptex.below_threshold",
+            "ptex.budget_bytes",
+            "ptex.budget_full",
+            "ptex.cache_hits",
+            "ptex.cache_misses",
+            "ptex.evictions",
+            "ptex.faces",
+            "ptex.lookups",
+            "ptex.micro_hits",
+            "ptex.micro_rate",
+            "ptex.micro_reserve_bytes",
+            "ptex.micro_retained_bytes",
+            "ptex.mip_space_refused",
+            "ptex.open_failed",
+            "ptex.preloaded_bytes",
+            "ptex.reader_lookups",
+            "ptex.resident_bytes",
+            "ptex.streamed",
+            "ptex.textures",
+            "rays",
+            "rays.adaptive_pixels",
+            "rays.adaptive_samples",
+            "rays.bounce_rays",
+            "rays.camera_rays",
+            "rays.closest_hit",
+            "rays.cutout_passes",
+            "rays.cutout_rays",
+            "rays.early_stopped",
+            "rays.ended_absorbed",
+            "rays.ended_depth",
+            "rays.ended_escaped",
+            "rays.light_samples",
+            "rays.mean_path_length",
+            "rays.medium_scatters",
+            "rays.neighbour_held",
+            "rays.rays_per_s",
+            "rays.rr_kill_rate",
+            "rays.rr_killed",
+            "rays.rr_tested",
+            "rays.shadow_occluded",
+            "rays.shadow_rays",
+            "rays.shadow_rays_per_vertex",
+            "rays.spp_max",
+            "rays.spp_min",
+            "rays.sss_exits",
+            "rays.sss_rays",
+            "rays.sss_steps",
+            "rays.sss_walks",
+            "rays.surface_vertices",
+            "rays.total_rays",
+            "rays.vertices",
+            "rays.volume_scatters",
+            "scene",
+            "scene.geometries",
+            "scene.kernel_memory",
+            "scene.kernel_memory.bvh_nodes_bytes",
+            "scene.kernel_memory.cubic_spans_bytes",
+            "scene.kernel_memory.geometry_tables_bytes",
+            "scene.kernel_memory.indices_bytes",
+            "scene.kernel_memory.instances_bytes",
+            "scene.kernel_memory.lanes",
+            "scene.kernel_memory.lanes_filled",
+            "scene.kernel_memory.leaves_bytes",
+            "scene.kernel_memory.packets_bytes",
+            "scene.kernel_memory.packets_indexed_bytes",
+            "scene.kernel_memory.prim_nodes_bytes",
+            "scene.kernel_memory.total_bytes",
+            "scene.kernel_memory.triangle_records_bytes",
+            "scene.kernel_memory.vertex_normals_bytes",
+            "scene.kernel_memory.vertices_bytes",
+            "scene.lights",
+            "scene.top_level",
+            "scene.top_level.cubic_curve_spans",
+            "scene.top_level.curve_segments",
+            "scene.top_level.cylinders",
+            "scene.top_level.disks",
+            "scene.top_level.instances",
+            "scene.top_level.spheres",
+            "scene.top_level.triangles",
+            "scene.unique",
+            "scene.unique.cubic_curve_spans",
+            "scene.unique.curve_segments",
+            "scene.unique.cylinders",
+            "scene.unique.disks",
+            "scene.unique.instances",
+            "scene.unique.spheres",
+            "scene.unique.triangles",
+            "scene.volumes",
+            "subdivision",
+            "subdivision.adaptive",
+            "subdivision.adaptive.edge_length_px",
+            "subdivision.adaptive.max_level",
+            "subdivision.levels",
+            "subdivision.per_face_fallbacks",
+            "subdivision.per_face_meshes",
+            "subdivision.rate_bins",
+            "subdivision.shared_level",
+            "subdivision.shared_meshes",
+            "textures",
+            "textures.budget_bytes",
+            "textures.bytes_read",
+            "textures.errors",
+            "textures.evictions",
+            "textures.files",
+            "textures.hit_rate",
+            "textures.hits",
+            "textures.loaded_tiles",
+            "textures.lookups",
+            "textures.max_open_files",
+            "textures.micro_hits",
+            "textures.misses",
+            "textures.opens",
+            "textures.peak_bytes",
+            "textures.peak_open",
+            "textures.preloaded",
+            "textures.preloaded_bytes",
+            "textures.raced",
+            "textures.redundant",
+            "textures.reopens",
+            "textures.resident_bytes",
+            "textures.total_bytes",
+            "total_time_s",
+        ];
+        if got != want {
+            panic!("crust-stats/1 keys changed:\n{got:#?}");
+        }
+    }
+
+    #[test]
+    fn stats_json_opens_with_the_envelope_and_keeps_units() {
+        let json = fixture().to_json();
+        assert!(
+            json.starts_with("{\n  \"format\": \"crust-stats/1\",\n  \"crust_version\": "),
+            "{json}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["phases"][0]["time_s"], 1.5);
+        assert_eq!(v["phases"][0]["rss_end_bytes"], 1 << 20);
+        assert!(
+            v["phases"][0]["peak_end_bytes"].is_null(),
+            "no procfs: null"
+        );
+        assert_eq!(v["image"]["region"], serde_json::json!([0, 0, 4, 2]));
+        assert!(v.get("profile").is_none(), "no --profile, no key");
+        // No ray was traced: the zero-guarded ratios are 0, never NaN.
+        assert_eq!(v["rays"]["mean_path_length"], 0.0);
+        assert!(v["rays"]["rays_per_s"].is_number());
+    }
+
+    /// The text report and the JSON read one snapshot of the peak RSS — the
+    /// field — and print nothing for it when it was never taken.
+    #[test]
+    fn peak_memory_is_one_snapshot_in_both_forms() {
+        let s = fixture();
+        let v: serde_json::Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(v["peak_memory_bytes"], 42u64 << 20);
+        let report = s.report();
+        let line = report.lines().find(|l| l.contains("peak memory (RSS)"));
+        assert!(line.is_some_and(|l| l.ends_with(" 42.00 MiB")), "{report}");
+        let none = RenderStats {
+            peak_memory_bytes: None,
+            ..fixture()
+        };
+        let v: serde_json::Value = serde_json::from_str(&none.to_json()).unwrap();
+        assert!(v["peak_memory_bytes"].is_null());
+        assert!(!none.report().contains("peak memory"));
     }
 }

@@ -90,14 +90,14 @@ use lights::{
     emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light, emit_rect_light,
     emit_sphere_light,
 };
-pub(crate) use listing::list_prims;
+pub(crate) use listing::{list_prims, list_records};
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use products::import_render_products;
 use settings::{
-    CameraChoice, check_time_range, dome_light_camera_visibility, import_render_settings,
-    render_settings_camera, render_settings_color_space, render_settings_subdiv_edge_length,
-    render_settings_subdiv_level,
+    CameraChoice, CameraPick, check_time_range, dome_light_camera_visibility,
+    import_render_settings, pick_camera, render_settings_color_space,
+    render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
 use time::EvalTimeScope;
@@ -226,7 +226,8 @@ struct ImportCtx<'a> {
     world: WorldBuilder,
     lights: LightList,
     volumes: Vec<VolumeRegion>,
-    camera: Option<Camera>,
+    /// The camera built to render through, and its prim.
+    camera: Option<(Camera, sdf::Path)>,
     /// The camera to render through, when one was named; see
     /// [`CameraChoice`]. `None` takes the first camera met.
     wanted_camera: Option<CameraChoice>,
@@ -435,7 +436,7 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
         match build_camera(stage, prim, &ctx.settings) {
             Some(c) if is_named || named.is_none() => {
                 debug!("Imported USD camera at {}", prim.path());
-                ctx.camera = Some(c);
+                ctx.camera = Some((c, prim.path().clone()));
             }
             Some(c) => ctx.first_camera = Some((c, prim.path().clone())),
             None => warn!("Failed to build camera from {}", prim.path()),
@@ -696,32 +697,45 @@ fn traverse_stage(
 /// stage's `RenderSettings.camera` names one that is not there — the first
 /// camera met, else the procedural fallback's. A camera the host asked for by
 /// path and the stage does not have is an error naming the alternatives.
-fn resolve_camera(ctx: &mut ImportCtx) -> Result<Camera, crate::Error> {
-    let camera = match (
+/// Returned with the prim it was built from, `None` for the procedural one.
+fn resolve_camera(ctx: &mut ImportCtx) -> Result<(Camera, Option<String>), crate::Error> {
+    // `camera` is the wanted one when it was met, else (nothing named) the
+    // first; `first_camera` is the first, kept only while a named one was
+    // still being looked for.
+    let (built, wanted, first) = (
         ctx.camera.take(),
         ctx.wanted_camera.take(),
         ctx.first_camera.take(),
-    ) {
-        (Some(c), _, _) => c,
-        (None, Some(CameraChoice::Requested(p)), _) => {
+    );
+    let wanted_met = wanted.is_some() && built.is_some();
+    let any_met = built.is_some() || first.is_some();
+    let with_path = |(c, path): (Camera, sdf::Path)| (c, Some(path.to_string()));
+    Ok(match pick_camera(wanted.as_ref(), wanted_met, any_met) {
+        CameraPick::Missing(p) => {
             return Err(crate::Error::CameraNotFound {
                 path: p.to_string(),
                 available: ctx.cameras_seen.iter().map(ToString::to_string).collect(),
             });
         }
-        (None, Some(CameraChoice::Settings(p)), Some((c, first))) => {
-            warn!(
-                "RenderSettings.camera targets {p}, which is not a camera on this stage — \
-                 rendering through {first} instead"
-            );
-            c
-        }
-        (None, _, _) => {
+        CameraPick::Wanted => with_path(built.expect("the wanted camera was met")),
+        CameraPick::First => match (built, first) {
+            (Some(c), _) => with_path(c),
+            (None, Some((c, first))) => {
+                if let Some(p) = wanted.as_ref().map(CameraChoice::path) {
+                    warn!(
+                        "RenderSettings.camera targets {p}, which is not a camera on this \
+                         stage — rendering through {first} instead"
+                    );
+                }
+                with_path((c, first))
+            }
+            (None, None) => unreachable!("a camera was met"),
+        },
+        CameraPick::Procedural => {
             warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
-            crate::world::get_settings().0
+            (crate::world::get_settings().0, None)
         }
-    };
-    Ok(camera)
+    })
 }
 
 /// The subdivision and displacement counters the traversal accumulated, into
@@ -835,14 +849,7 @@ pub(crate) fn load_scene(
     // Which camera to render through: the host's explicit choice, else the
     // stage's own `RenderSettings.camera`. Decided here, on the index stage,
     // because the traversal needs it before it meets any camera.
-    let wanted_camera = match requested_camera {
-        Some(p) => Some(CameraChoice::Requested(p)),
-        None => products
-            .camera
-            .clone()
-            .or_else(|| render_settings_camera(&index))
-            .map(CameraChoice::Settings),
-    };
+    let wanted_camera = settings::wanted_camera(requested_camera, products.camera.clone(), &index);
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
     }
@@ -935,7 +942,7 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
-    let camera = resolve_camera(&mut ctx)?;
+    let (camera, camera_path) = resolve_camera(&mut ctx)?;
 
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen
@@ -992,6 +999,8 @@ pub(crate) fn load_scene(
     scene.stats = stats;
     scene.aovs = products.request;
     scene.working_space = working;
+    scene.camera_path = camera_path;
+    scene.time = time;
     Ok(scene)
 }
 

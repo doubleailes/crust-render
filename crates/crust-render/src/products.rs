@@ -12,6 +12,7 @@
 //! tiled files (`docs/material_fidelity.md`). The no-products render does not
 //! come through here at all — it keeps `write_rgb_file`, byte for byte.
 
+use crust_core::stamp::{STAMP_PREFIX, SamplingStamp, StampValue};
 use crust_core::{AovFilm, AovProduct, AovVar, Buffer, ChannelKind, Precision};
 use exr::meta::attribute::{AttributeValue, IntegerBounds};
 use exr::prelude::{
@@ -36,6 +37,28 @@ pub fn exr_windows(beauty: &Buffer) -> (Vec2<i32>, IntegerBounds) {
         Vec2(region.x0 as i32, region.y0 as i32),
         IntegerBounds::new((0, 0), (frame_w, frame_h)),
     )
+}
+
+/// Writes `stamp` into a layer's header, each attribute typed as the stamp
+/// types it (`int`, `v2i`, `float`, `double`, `string`) and replacing any
+/// attribute of the same name already there. The one function both writers
+/// call, the single beauty EXR and each RenderProduct.
+pub fn stamp(attributes: &mut LayerAttributes, stamp: &SamplingStamp) {
+    for (name, value) in stamp.attributes() {
+        let value = match value {
+            StampValue::Int(v) => AttributeValue::I32(v),
+            StampValue::Int2(a, b) => AttributeValue::IntVec2(Vec2(a, b)),
+            StampValue::Float(v) => AttributeValue::F32(v),
+            StampValue::Double(v) => AttributeValue::F64(v),
+            StampValue::Text(v) => match Text::new_or_none(&v) {
+                Some(t) => AttributeValue::Text(t),
+                // A camera path outside EXR's text (non-ASCII): left out
+                // rather than written wrong.
+                None => continue,
+            },
+        };
+        attributes.other.insert(Text::from(name), value);
+    }
 }
 
 /// The Color Interop ID for a working space without one in the config.
@@ -144,6 +167,7 @@ pub fn write_product(
     beauty: &Buffer,
     film: &AovFilm,
     color: &super::OutputColor,
+    sampling: &SamplingStamp,
 ) -> io::Result<Vec<String>> {
     let interop = crust_core::color::interop_id(color.working);
     let interop = interop.as_deref().unwrap_or(UNKNOWN_INTEROP_ID);
@@ -192,6 +216,12 @@ pub fn write_product(
                  channels are {interop}",
                 product.prim_path
             ),
+            // How the pixels were sampled: crust's own record, below.
+            k if k.starts_with(STAMP_PREFIX) => warn!(
+                "{}: driver:parameters {k} = {value:?} is not copied: crust stamps its \
+                 own {STAMP_PREFIX}* attributes",
+                product.prim_path
+            ),
             k if exr::meta::header::standard_names::ALL.contains(&k.as_bytes()) => {
                 warn!(
                     "{}: driver:parameters {k:?} names a standard EXR attribute crust sets \
@@ -207,6 +237,7 @@ pub fn write_product(
             attributes.other.insert(k, AttributeValue::Text(v));
         }
     }
+    stamp(&mut attributes, sampling);
 
     let layer = Layer::new(
         (width, height),
@@ -261,6 +292,17 @@ mod tests {
                 ("comments".into(), "a note".into()),
             ],
         }
+    }
+
+    /// A 16 spp render's stamp.
+    fn sampling() -> SamplingStamp {
+        let (_, settings) = crust_core::get_settings();
+        SamplingStamp::new(
+            &settings.with_samples_per_pixel(16),
+            &crust_core::RayStats::default(),
+            None,
+            None,
+        )
     }
 
     fn names(p: &AovProduct) -> Vec<String> {
@@ -348,7 +390,8 @@ mod tests {
         // directories do not exist yet.
         let p = product(vec![var("beauty", AovSource::Color)]);
         let rec709 = crate::tests::rec709();
-        let written = write_product(&path, &p, &beauty, &film, &rec709).expect("written");
+        let written =
+            write_product(&path, &p, &beauty, &film, &rec709, &sampling()).expect("written");
         assert_eq!(written, ["B", "G", "R"]);
         let image = read()
             .no_deep_data()
@@ -417,7 +460,15 @@ mod tests {
         let film = crust_core::AovFilm::empty(region.width(), region.height());
         let path = std::env::temp_dir().join("crust_render_cropped_product.exr");
         let p = product(vec![var("beauty", AovSource::Color)]);
-        write_product(&path, &p, &beauty, &film, &crate::tests::rec709()).expect("written");
+        write_product(
+            &path,
+            &p,
+            &beauty,
+            &film,
+            &crate::tests::rec709(),
+            &sampling(),
+        )
+        .expect("written");
         let image = read()
             .no_deep_data()
             .largest_resolution_level()
@@ -436,6 +487,71 @@ mod tests {
         assert_eq!(data_window.max(), Vec2(163, 113));
         let r = &layer.channel_data.list[2];
         assert_eq!(r.sample_data.value_by_flat_index(0).to_f32(), 1.0);
+    }
+
+    /// A product may not author crust's own stamp: the written value is the
+    /// render's, and the authored one is warned about, naming the product.
+    #[test]
+    fn an_authored_stamp_attribute_is_replaced_and_warned_about() {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Log(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for Log {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Log::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let log = log.clone();
+                move || log.clone()
+            })
+            .with_ansi(false)
+            .finish();
+        let (w, h) = (2, 2);
+        let beauty = Buffer::new(w, h);
+        let film = crust_core::AovFilm::empty(w, h);
+        let path = std::env::temp_dir().join("crust_render_authored_stamp.exr");
+        let mut p = product(vec![var("beauty", AovSource::Color)]);
+        p.attributes.push(("crust:spp".into(), "1024".into()));
+        tracing::subscriber::with_default(subscriber, || {
+            write_product(
+                &path,
+                &p,
+                &beauty,
+                &film,
+                &crate::tests::rec709(),
+                &sampling(),
+            )
+            .expect("written")
+        });
+        let image = read()
+            .no_deep_data()
+            .largest_resolution_level()
+            .all_channels()
+            .first_valid_layer()
+            .all_attributes()
+            .from_file(&path)
+            .expect("reads back");
+        let other = &image.layer_data.attributes.other;
+        assert_eq!(
+            other.get(&Text::from("crust:spp")),
+            Some(&AttributeValue::I32(16))
+        );
+        assert_eq!(
+            other.get(&Text::from("crust:sppTaken")),
+            Some(&AttributeValue::IntVec2(Vec2(16, 16)))
+        );
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("WARN") && log.contains("/Render/p") && log.contains("crust:spp"),
+            "{log}"
+        );
     }
 
     #[test]
