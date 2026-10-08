@@ -135,7 +135,7 @@
       total is within noise of the baseline (the zero-fuzz path is unchanged).
 - [x] 6.3 Render 1.3's scenes with the new binary and put the before/after pair in
       the change's PR description.
-- [ ] 6.4 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace
+- [x] 6.4 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace
       --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast` and
       `cargo deny --locked check`. Run the pinned nightly leg as well. Verify that
       all exit 0.
