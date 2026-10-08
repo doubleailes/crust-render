@@ -500,18 +500,77 @@ paths, for direct-light variance falling about as 1/N.
   `active_intervals`), so an excluded volume does not attenuate. Inner prototype
   geometry keeps its own mask: every shadow ray carries `MASK_SHADOW`, so it matches
   inside any instance its class bit let it into.
-  A shadow-linked light is **NEE-only at continuous vertices**
-  (`LightList::nee_only`): NEE weight 1, bounce-side emission 0. A bounce ray is
-  stopped by occluders the light's shadow rays ignore, so the two strategies
-  disagree on its visibility and cannot be MIS-combined. After a delta bounce the
-  light is found at full weight through the real occluders, so a mirror shows the
-  physical shadow; so does a `bsdf`-only render. *Measured* (2026-09-29,
-  `samples/light_linking.usda` with Key's shadow link pointed at an occluder that
-  changes nothing, 16 spp against a 1024 spp reference, `--indirect-clamp 0`, 4
-  seeds): no cost on the diffuse sample (relMSE +0.004–0.02%), but on the same
-  scene in rough metal (roughness 0.15) relMSE rises **2.1× (median), 3.1×
-  (mean)**, heavy-tailed. A Cycles-style extra ray that finds the light behind
-  excluded blockers and MISes it is the follow-up.
+  A shadow-linked light's bounce side is its **link twin** (`tracer/path.rs`,
+  `link_twin`; change `mis-for-shadow-linked-lights`). The ordinary bounce ray is
+  stopped by occluders the light's shadow rays ignore, so the two strategies would
+  disagree on its visibility, and for a while the light was NEE's alone at continuous
+  vertices. That removed the half of MIS that keeps glossy reflections quiet: on ALab
+  the distant sun, NEE-only, was 66% of the frame's firefly variance. Now:
+  - **The twin.** At a continuous surface, volume-region or enclosure vertex, after the
+    bounce direction ω and its pdf (the guide mixture when guided) are drawn and the path
+    survives roulette, each *twinned* light (`LightList::twinned_lights`: restricted, not
+    NEE-only) is asked where ω meets it (`LightKind::found_along`: `LightShape::hits` for
+    an area light, every hit, nearest first, skipping points that emit nothing toward
+    the vertex; `escaped` for a distant light). For each point a fresh shadow ray runs
+    `shadow_transmittance` with the light's own mask, so it sees exactly NEE's
+    visibility, crossings and volumes included. The emission × transmittance is weighted
+    as `bounce_emission_weight_at` would weigh a hit there (same `density`, same `pmf_at`,
+    `unopposed` where NEE never samples the point), added to the vertex's `crossed`
+    (scaled by the continuation factor in the gather, like a bounce hit) and routed as a
+    crossed light (`Route::cross`: the lobe's event, then `L`). Its draws come from
+    `K_LINK_TWIN`, one sub-domain per light, so nothing else moves. A weight of 0 (under
+    `--strategy light`) casts no ray.
+  - **One owner.** The ordinary bounce collects nothing from a twinned light at a
+    continuous vertex, under every strategy (`LightList::bounce_skips`, read by
+    `bounce_emission_weight_at`, hence hidden-light crossings, and by `escaped_emission`
+    / `escaped_split`), and NEE weighs it with the ordinary `light_weight`. So
+    `--strategy bsdf` honours shadow links too, and light, bsdf and MIS estimate one
+    image.
+  - **Why a fresh ray, not the bounce ray continued past excluded occluders.** The
+    bounce crosses cutouts and thin walls stochastically (`P/q`) and NEE by
+    transmittance: one cutout the light ignores would weigh `1 − α` on one side and 1 on
+    the other. Getting that right needs a second crossing walk with the light's mask,
+    which is a shadow ray anyway.
+  - **Why an analytic support test, not a kernel query.** Finding only light L through
+    the kernel would need a mask bit per light; those bits are spent on shadow classes.
+    The pair test `analytic_light_hits_match_the_kernel` fires 4 000 rays per shape
+    (sphere, rect, affine sphere/disk/cylinder) at the kernel's own geometry for the
+    light: hit or miss agree, distances within 1e-4·t.
+  - **Domes stay NEE-only** (`LightLinks::nee_only`, now a restricted dome only): a
+    dome's support is every direction, so a twin is a shadow ray on every bounce (+84%
+    shadow rays on ALab), and ALab's restricted dome carries no measurable noise. Revisit
+    if a restricted dome shows up in a noise attribution; the cheap version is a twin
+    only when the bounce escapes or stops on geometry the dome ignores.
+  - **Delta vertices are unchanged**: after a mirror or glass bounce the light is found
+    at full weight through the real occluders, so a mirror shows the physical shadow.
+  - **Cost.** `trace_path` is monomorphised on `TWINS` (as on `MEDIA`): a scene without
+    a twinned light runs an integrator without the call sites. Guarded at run time it
+    cost cornellbox +0.22% instructions — the extra call site changed the inlined
+    integrator's register allocation, and keeping the `ShadingPoint` alive for its curve
+    flag was another 9 instructions a vertex (the twin now takes the flag from the bounce
+    ray, which carries it per lobe). Monomorphised, cornellbox's integrator runs 69 k
+    *fewer* instructions and the run +0.014% (the wider per-pixel dispatch); binary
+    +300 KB, build time unchanged.
+  - **Measured** on the linked glossy test scene (`glossy_linked_scene` in
+    `tests/light_linking.rs`: rough metal 0.15, a sphere light behind a ball its link
+    excludes, 16², 64 spp, depth 1, clamp off, 4 seeds). Before (the twin off): light
+    0.808, bsdf **0.0037**, power 0.808 mean luminance, and power's two-seed variance
+    equal to light's (20.80). After: light 0.808 ± 0.007, bsdf 0.792 ± 0.012, power
+    0.793 ± 0.005, and power's variance **5.61 (−73%)**. ALab: see "Measured on ALab"
+    below. `samples/light_linking.usda` (diffuse receivers) moves by relMSE 2.5e-9 at
+    16 spp against a seed-to-seed 3.0e-3, every unlinked sample bit-identical.
+  *Measured on ALab* (frame 1004, 256 spp, `--light-samples 4 --light-selection
+  learned`, two seeds; method and full table in `docs/alab_profile.md`, "Shadow-linked
+  lights and their noise"): `lgt_sun_distant`'s direct-glossy variance falls
+  **3 551 → 100 (−97.2%)**, its worst pixel's noise 39 → 3.6, and the frame's variance
+  −34%. The rect sun moves −7%, as predicted (its noise is a glint's coverage), and the
+  NEE-only dome not at all. Means agree: the NEE-only estimate of the sun's glossy term
+  is heavy-tailed and read 6–11% low at 256 spp, and climbs to within 0.5σ of the
+  twin's at 1024.
+  Render time +2.3% (`bench_ab.sh`, n = 3), against a +5% budget.
+  **`CRUST_LINK_TWIN` stays** (the change's open question): its `0` is the NEE-only
+  estimator exactly, the A/B the measurements above need, at the cost of one read at
+  import.
   *Throughput* on unlinked scenes (callgrind, `usdlux`, `-s 2`, single thread,
   against the renderer before camera visibility and linking): **+1.3%
   instructions**; `bench_ab.sh` +1.1% on `usdlux`, +0.7% on `cornellbox`. That is
@@ -648,9 +707,11 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   these gaps: membership is judged on the prim that brought the geometry in, so a
   collection target inside a native instance's prototype, or one `PointInstancer`
   instance, cannot be told apart from its siblings (warned per collection);
-  `membershipExpression` is refused with a `WARN` and read as the default; and a
-  shadow-linked light is NEE-only at continuous vertices (noisier on glossy
-  receivers) and physically shadowed through delta ones and under `bsdf`-only. Of RenderMan's per-light `visibility:*` primvars
+  `membershipExpression` is refused with a `WARN` and read as the default; a
+  shadow-linked *dome* is NEE-only at continuous vertices (noisier on glossy
+  receivers; its `bsdf`-only render sees it through the physical occluders); and every
+  shadow-linked light is physically shadowed through delta vertices (a mirror shows the
+  occluder's shadow). Of RenderMan's per-light `visibility:*` primvars
   only `camera` is read. A textured
   `RectLight` is sampled by solid angle rather than by its map's luminance (a card
   with a small bright region is noisier than it need be), its lookup is nearest-texel

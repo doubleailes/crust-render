@@ -6,6 +6,7 @@ use std::f32::consts::PI;
 use glam::{Affine3A, Mat3A, Vec3A};
 
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
+use crate::ray::TRACE_T_MIN;
 
 use super::rect::{RectShape, SphericalRect};
 
@@ -55,6 +56,69 @@ pub trait LightShape: Send + Sync {
     fn solid_angle_sampler(&self, _from: Vec3A) -> Option<SolidAngleSampler<'_>> {
         None
     }
+
+    /// Where the ray from `origin` along `dir` meets the surface, beyond
+    /// [`TRACE_T_MIN`]: the same surface the kernel intersects for the
+    /// light's geometry (both sides of a flat light, a cylinder's wall but
+    /// not its caps), so a bounce-side estimate of a shadow-linked light
+    /// finds the light where a bounce ray would. Distances are in units of
+    /// `dir`.
+    #[must_use]
+    fn hits(&self, origin: Vec3A, dir: Vec3A) -> ShapeHits;
+}
+
+/// Where a ray meets a light's surface ([`LightShape::hits`]): at most two
+/// distances along it, nearest first.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShapeHits {
+    t: [f32; 2],
+    len: u8,
+}
+
+impl ShapeHits {
+    /// Adds `t` when it is ahead of the ray's near bound. Pushed in
+    /// increasing order.
+    pub(super) fn push(&mut self, t: f32) {
+        // From below, so a NaN root is rejected too.
+        if t > TRACE_T_MIN && t < f32::INFINITY && (self.len as usize) < self.t.len() {
+            self.t[self.len as usize] = t;
+            self.len += 1;
+        }
+    }
+
+    /// The distances, nearest first.
+    pub fn iter(&self) -> impl Iterator<Item = f32> + '_ {
+        self.t[..self.len as usize].iter().copied()
+    }
+
+    /// The nearest distance, if the ray meets the surface at all.
+    pub fn first(&self) -> Option<f32> {
+        self.iter().next()
+    }
+}
+
+/// The roots of `|oc + t·d|² = r²`, nearest first: the kernel's sphere and
+/// cylinder arithmetic (`crust_rt`'s `SpherePrim::hit`), the closest-approach
+/// discriminant and the stable root pair, so a light's analytic hit and the
+/// kernel's agree to the kernel's own rounding.
+fn quadratic_roots(oc: Vec3A, d: Vec3A, r: f32) -> Option<(f32, f32)> {
+    let a = d.length_squared();
+    if a == 0.0 {
+        return None;
+    }
+    let half_b = oc.dot(d);
+    let c = oc.length_squared() - r * r;
+    let l = oc - d * (half_b / a);
+    let discriminant = a * (r * r - l.length_squared());
+    if discriminant < 0.0 {
+        return None;
+    }
+    let q = -half_b - half_b.signum() * discriminant.sqrt();
+    if q == 0.0 {
+        return None;
+    }
+    let (t0, t1) = (c / q, q / a);
+    Some(if t0 < t1 { (t0, t1) } else { (t1, t0) })
 }
 
 /// The two halves of a shape's solid-angle strategy, as calls: a sample and
@@ -282,6 +346,15 @@ impl LightShape for SphereShape {
             cone,
         }))
     }
+
+    fn hits(&self, origin: Vec3A, dir: Vec3A) -> ShapeHits {
+        let mut hits = ShapeHits::default();
+        if let Some((near, far)) = quadratic_roots(origin - self.center, dir, self.radius) {
+            hits.push(near);
+            hits.push(far);
+        }
+        hits
+    }
 }
 
 /// A point on a sphere, uniform over the cone it subtends from `from`
@@ -360,6 +433,40 @@ impl UnitShape {
             UnitShape::Disk => -Vec3A::Z,
             UnitShape::Cylinder => Vec3A::new(0.0, p.y, p.z).normalize_or(Vec3A::Y),
         }
+    }
+
+    /// Where the local ray `o + t·d` meets the unit surface: the sphere, the
+    /// disk (either side), or the tube's wall within `|x| ≤ ½`.
+    pub(super) fn hits(self, o: Vec3A, d: Vec3A) -> ShapeHits {
+        let mut hits = ShapeHits::default();
+        match self {
+            UnitShape::Sphere => {
+                if let Some((near, far)) = quadratic_roots(o, d, 1.0) {
+                    hits.push(near);
+                    hits.push(far);
+                }
+            }
+            UnitShape::Disk => {
+                if d.z != 0.0 {
+                    let t = -o.z / d.z;
+                    let p = o + t * d;
+                    if p.x * p.x + p.y * p.y <= 1.0 {
+                        hits.push(t);
+                    }
+                }
+            }
+            UnitShape::Cylinder => {
+                let across = Vec3A::new(0.0, 1.0, 1.0);
+                if let Some((near, far)) = quadratic_roots(o * across, d * across, 1.0) {
+                    for t in [near, far] {
+                        if (o.x + t * d.x).abs() <= 0.5 {
+                            hits.push(t);
+                        }
+                    }
+                }
+            }
+        }
+        hits
     }
 }
 
@@ -508,6 +615,15 @@ impl LightShape for AffineShape {
             from_local,
             cone,
         }))
+    }
+
+    /// In local space, where the surface is the unit one: an affine map
+    /// sends the line `o + t·d` to `o' + t·d'`, so `t` is the same in both.
+    fn hits(&self, origin: Vec3A, dir: Vec3A) -> ShapeHits {
+        self.unit.hits(
+            self.world_to_light.transform_point3a(origin),
+            self.world_to_light.matrix3 * dir,
+        )
     }
 }
 

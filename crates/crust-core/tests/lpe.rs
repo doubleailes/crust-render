@@ -2,13 +2,15 @@
 //! to the beauty — `C.*[LO]` is the beauty bit for bit, a partition of
 //! expressions sums to it (with the firefly clamp too), the per-lobe split is
 //! unbiased, light groups select their lights, and NEE-only and BSDF-only
-//! renders agree per expression.
+//! renders agree per expression — a shadow-linked light's bounce-side twin
+//! included.
 
 use crust_core::rt::Geometry;
 use crust_core::{
     Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, AreaLight, Buffer, Camera,
-    DistantLight, DomeLight, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR, PixelFilter,
-    Precision, RenderSettings, Renderer, SamplingStrategy, SphereShape, Vec3A, WorldBuilder,
+    DistantLight, DomeLight, Emissive, LightLinks, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR,
+    PixelFilter, Precision, RayMask, RenderSettings, Renderer, SamplingStrategy, SphereShape,
+    Vec3A, WorldBuilder,
 };
 use std::sync::Arc;
 
@@ -87,6 +89,11 @@ struct Opts {
     window: bool,
     /// Light samples at the (camera, later) vertices.
     light_samples: (u32, u32),
+    /// A ball between the ball and the key, invisible to the camera, which
+    /// stops bounce rays and every light's shadow rays but the key's: the
+    /// key's `collection:shadowLink` excludes it, so the key is estimated on
+    /// the bounce side by its link twin.
+    linked: bool,
 }
 
 impl Default for Opts {
@@ -114,6 +121,7 @@ impl Default for Opts {
             filter: PixelFilter::default(),
             window: false,
             light_samples: (1, 1),
+            linked: false,
         }
     }
 }
@@ -210,6 +218,19 @@ fn scene(o: &Opts) -> Renderer {
             lights.set_lpe_tag(index, Some(tag));
         }
     }
+    // The shadow class the importer would give the linked blocker: one bit
+    // above the three ray categories, and no `MASK_SHADOW`.
+    const BLOCKER_CLASS: u32 = 1 << 3;
+    if o.linked {
+        world.attach_masked(
+            Geometry::Sphere {
+                center: Vec3A::new(-1.5, 2.4, 3.5),
+                radius: 0.3,
+            },
+            Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+            RayMask(MASK_INDIRECT.0 | BLOCKER_CLASS),
+        );
+    }
     if o.dome {
         lights.add(DomeLight::new(
             Vec3A::new(0.3, 0.35, 0.5),
@@ -236,6 +257,23 @@ fn scene(o: &Opts) -> Renderer {
         .with_guiding(o.guiding, 1, 0.5)
         .with_pixel_filter(o.filter)
         .with_light_samples(o.light_samples.0, o.light_samples.1);
+    if o.linked {
+        // As the importer encodes it: every light blocked by every class,
+        // the key by every class but the blocker's.
+        let n = lights.count();
+        let key = (0..n)
+            .find(|&i| lights.lpe_tag(i) == Some("key"))
+            .expect("a key light");
+        let mut links = LightLinks {
+            illuminates: vec![None; n],
+            shadow_masks: vec![RayMask(MASK_SHADOW.0 | !0b111); n],
+            restricted: vec![false; n],
+            nee_only: vec![false; n],
+        };
+        links.shadow_masks[key] = RayMask(MASK_SHADOW.0 | (!0b111 & !BLOCKER_CLASS));
+        links.restricted[key] = true;
+        lights.set_links(links);
+    }
     Renderer::new(camera, world.commit(), lights, settings)
 }
 
@@ -263,7 +301,7 @@ fn mean(plane: &[f32]) -> f64 {
 
 #[test]
 fn the_full_path_expression_is_the_beauty_bitwise() {
-    for (clamp, guiding, window, hidden, light_samples) in [
+    for case in [
         (0.0, false, false, false, (1, 1)),
         (10.0, false, false, false, (1, 1)),
         (0.5, false, false, false, (1, 1)),
@@ -279,13 +317,18 @@ fn the_full_path_expression_is_the_beauty_bitwise() {
         (0.0, false, false, false, (4, 2)),
         (10.0, false, true, true, (4, 4)),
         (0.0, true, false, true, (2, 3)),
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|case| [(case, false), (case, true)])
+    {
+        let ((clamp, guiding, window, hidden, light_samples), linked) = case;
         let o = Opts {
             clamp,
             guiding,
             window,
             hidden,
             light_samples,
+            linked,
             ..Opts::default()
         };
         let all = lpe("C.*[LO]");
@@ -295,7 +338,7 @@ fn the_full_path_expression_is_the_beauty_bitwise() {
         assert!(
             bits(&channel) == bits(&beauty_planes(&film, &beauty)),
             "clamp {clamp}, guiding {guiding}, window {window}, hidden {hidden}, \
-             light samples {light_samples:?}"
+             light samples {light_samples:?}, linked {linked}"
         );
         // Asking for expressions changes nothing in the beauty.
         let plain = scene(&o).render_with_tiles();
@@ -331,7 +374,7 @@ fn assert_sums(parts: &[Vec<Vec<f32>>], whole: &[Vec<f32>], what: &str) {
 
 #[test]
 fn a_partition_sums_to_the_beauty() {
-    for (clamp, window, hidden, light_samples) in [
+    for case in [
         (0.0, false, false, (1, 1)),
         (1.0, false, false, (1, 1)),
         (0.0, true, false, (1, 1)),
@@ -339,12 +382,17 @@ fn a_partition_sums_to_the_beauty() {
         (1.0, true, true, (1, 1)),
         (0.0, false, false, (4, 2)),
         (1.0, true, true, (3, 3)),
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|case| [(case, false), (case, true)])
+    {
+        let ((clamp, window, hidden, light_samples), linked) = case;
         let o = Opts {
             clamp,
             window,
             hidden,
             light_samples,
+            linked,
             ..Opts::default()
         };
         let vars: Vec<AovVar> = PARTITION.iter().map(|e| lpe(e)).collect();
@@ -353,7 +401,10 @@ fn a_partition_sums_to_the_beauty() {
         assert_sums(
             &parts,
             &beauty_planes(&film, &beauty),
-            &format!("clamp {clamp}, window {window}, hidden {hidden}, {light_samples:?}"),
+            &format!(
+                "clamp {clamp}, window {window}, hidden {hidden}, {light_samples:?}, \
+                 linked {linked}"
+            ),
         );
         // Every part of this scene carries light somewhere.
         for (v, p) in vars.iter().zip(&parts) {
@@ -525,43 +576,53 @@ fn the_lobe_split_converges_to_each_lobe_alone() {
 /// rough: a near-mirror lobe (the default ball's coat at roughness 0, GGX
 /// α = 1e-4) is one NEE practically never lands in, and light-only renders
 /// it black at any sample count a test can afford — unbiased, but not
-/// comparable.
+/// comparable. With the key shadow-linked past a ball that stops bounce rays,
+/// BSDF sampling sees the key through its link twin, as NEE does.
 #[test]
 fn nee_only_and_bsdf_only_agree_per_expression() {
-    let rough = OpenPBR {
-        specular_roughness: 0.3,
-        coat_weight: 0.5,
-        coat_roughness: 0.4,
-        ..OpenPBR::diffuse(Vec3A::new(0.7, 0.4, 0.2))
-    };
-    let vars: Vec<AovVar> = ["C<RD>L", "C<RG'coat'>L", "C<RD>.+L", "C.*<L.'key'>"]
-        .iter()
-        .map(|e| lpe(e))
-        .collect();
-    let at = |strategy| {
-        let (b, f) = render(
-            &Opts {
-                spp: 2048,
-                strategy,
-                glow: false,
-                glass: false,
-                ball: rough.clone(),
-                ..Opts::default()
-            },
-            &vars,
-        );
-        vars.iter()
-            .map(|v| mean(&f.var_channels(&b, v)[1]))
-            .collect::<Vec<f64>>()
-    };
-    let light = at(SamplingStrategy::LightOnly);
-    let bsdf = at(SamplingStrategy::BsdfOnly);
-    for ((v, l), b) in vars.iter().zip(&light).zip(&bsdf) {
-        assert!(
-            (l - b).abs() <= 0.1 * l.abs().max(b.abs()),
-            "{}: light only {l}, BSDF only {b}",
-            v.name
-        );
+    for linked in [false, true] {
+        let rough = OpenPBR {
+            specular_roughness: 0.3,
+            coat_weight: 0.5,
+            coat_roughness: 0.4,
+            ..OpenPBR::diffuse(Vec3A::new(0.7, 0.4, 0.2))
+        };
+        // Light-only finds the indirect diffuse term rarely, and the linked
+        // scene's extra ball makes it rarer: there it converges slowly (light
+        // vs BSDF −14% at 2048 spp, −8% at 8192, −3.5% at 32768; −9% and −6%
+        // unlinked), so the linked case checks the expressions its key reaches.
+        let exprs: &[&str] = if linked {
+            &["C<RD>L", "C<RG'coat'>L", "C.*<L.'key'>"]
+        } else {
+            &["C<RD>L", "C<RG'coat'>L", "C<RD>.+L", "C.*<L.'key'>"]
+        };
+        let vars: Vec<AovVar> = exprs.iter().map(|e| lpe(e)).collect();
+        let at = |strategy| {
+            let (b, f) = render(
+                &Opts {
+                    spp: 2048,
+                    strategy,
+                    glow: false,
+                    glass: false,
+                    ball: rough.clone(),
+                    linked,
+                    ..Opts::default()
+                },
+                &vars,
+            );
+            vars.iter()
+                .map(|v| mean(&f.var_channels(&b, v)[1]))
+                .collect::<Vec<f64>>()
+        };
+        let light = at(SamplingStrategy::LightOnly);
+        let bsdf = at(SamplingStrategy::BsdfOnly);
+        for ((v, l), b) in vars.iter().zip(&light).zip(&bsdf) {
+            assert!(
+                (l - b).abs() <= 0.1 * l.abs().max(b.abs()),
+                "{} (linked {linked}): light only {l}, BSDF only {b}",
+                v.name
+            );
+        }
     }
 }
 

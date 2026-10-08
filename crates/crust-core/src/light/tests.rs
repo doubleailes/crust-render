@@ -454,3 +454,143 @@ fn remove_is_as_if_never_added() {
     };
     assert_eq!(seen(&removed), seen(&never));
 }
+
+/// The pair behind the bounce-side estimate of a shadow-linked light
+/// (`LightShape::hits`): fired from many origins, a light's analytic hits and
+/// the kernel's hits on the light's own geometry — built as the importer
+/// builds it — agree on hit or miss, and on the distance to the kernel's
+/// rounding. Both the nearest hit and the one past it.
+#[test]
+fn analytic_light_hits_match_the_kernel() {
+    use crate::ray::{Ray, TRACE_T_MIN};
+    use crate::rt_world::WorldBuilder;
+    use crust_rt::Geometry;
+
+    let unit_geometry = |unit: UnitShape| match unit {
+        UnitShape::Sphere => Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
+        UnitShape::Disk => Geometry::Disk {
+            center: Vec3A::ZERO,
+            normal: -Vec3A::Z,
+            radius: 1.0,
+        },
+        UnitShape::Cylinder => Geometry::Cylinder {
+            p0: Vec3A::new(-0.5, 0.0, 0.0),
+            p1: Vec3A::new(0.5, 0.0, 0.0),
+            radius: 1.0,
+        },
+    };
+    // A non-uniform, rotated placement: the instanced unit primitive.
+    let squash = Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(1.5, 0.6, 0.9),
+        glam::Quat::from_euler(glam::EulerRot::XYZ, 0.4, -0.7, 0.2),
+        glam::Vec3::new(0.3, -0.2, 0.5),
+    );
+    let rect = RectShape::new(
+        Vec3A::new(-0.7, -0.4, 0.2),
+        Vec3A::new(1.2, 0.3, 0.0),
+        Vec3A::new(-0.15, 0.6, 0.5),
+        Vec3A::new(1.2, 0.3, 0.0).cross(Vec3A::new(-0.15, 0.6, 0.5)),
+    );
+    let (c00, c10, c11, c01) = (
+        rect.origin,
+        rect.origin + rect.edge_u,
+        rect.origin + rect.edge_u + rect.edge_v,
+        rect.origin + rect.edge_v,
+    );
+    let mut cases: Vec<(&str, AreaShape, Geometry)> = vec![
+        (
+            "sphere",
+            SphereShape {
+                center: Vec3A::new(0.2, 0.1, -0.3),
+                radius: 0.8,
+            }
+            .into(),
+            Geometry::Sphere {
+                center: Vec3A::new(0.2, 0.1, -0.3),
+                radius: 0.8,
+            },
+        ),
+        (
+            "rect",
+            rect.clone().into(),
+            Geometry::TriangleMesh {
+                vertices: vec![
+                    c00.to_array(),
+                    c10.to_array(),
+                    c11.to_array(),
+                    c01.to_array(),
+                ],
+                indices: vec![[0, 1, 2], [0, 2, 3]],
+                normals: None,
+            },
+        ),
+    ];
+    for unit in [UnitShape::Sphere, UnitShape::Disk, UnitShape::Cylinder] {
+        let mut b = crust_rt::SceneBuilder::new();
+        b.attach(unit_geometry(unit));
+        cases.push((
+            match unit {
+                UnitShape::Sphere => "affine sphere",
+                UnitShape::Disk => "affine disk",
+                UnitShape::Cylinder => "affine cylinder",
+            },
+            AffineShape::new(unit, squash).unwrap().into(),
+            Geometry::Instance {
+                scene: Arc::new(b.commit_with(crate::commit_options())),
+                transform: squash,
+                transform_end: None,
+            },
+        ));
+    }
+
+    let material = Arc::new(Emissive::light(Vec3A::ONE, None));
+    let mut rng = openqmc::pcg::Rng::new(17);
+    let mut rand = |lo: f32, hi: f32| lo + (hi - lo) * rng.next_f32();
+    for (name, shape, geometry) in cases {
+        let mut world = WorldBuilder::new();
+        world.attach(geometry, material.clone());
+        let world = world.commit();
+        let (mut hits, mut disagree) = (0, 0);
+        for _ in 0..4000 {
+            let origin = Vec3A::new(rand(-4.0, 4.0), rand(-4.0, 4.0), rand(-4.0, 4.0));
+            // Aimed near a point of the shape, so most rays meet it and
+            // some pass its edges; unit length, as the integrator asks.
+            let on = shape.sample_point(rand(0.0, 1.0), rand(0.0, 1.0));
+            let target = on + Vec3A::new(rand(-0.3, 0.3), rand(-0.3, 0.3), rand(-0.3, 0.3));
+            let dir = (target - origin).normalize();
+            let analytic = shape.hits(origin, dir);
+            let ray = Ray::new(origin, dir);
+            let kernel = world.intersect(&ray, TRACE_T_MIN, f32::INFINITY);
+            let mut kernel_ts = Vec::new();
+            if let Some(h) = &kernel {
+                kernel_ts.push(h.rec.t);
+                let past = h.rec.t + h.rec.t.max(1.0) * 1e-3;
+                if let Some(h2) = world.intersect(&ray, past, f32::INFINITY) {
+                    kernel_ts.push(h2.rec.t);
+                }
+            }
+            let analytic_ts: Vec<f32> = analytic.iter().collect();
+            if analytic_ts.len() != kernel_ts.len() {
+                // Only a ray grazing an edge or a silhouette may land on
+                // either side of it.
+                disagree += 1;
+                continue;
+            }
+            for (a, k) in analytic_ts.iter().zip(&kernel_ts) {
+                hits += 1;
+                assert!(
+                    (a - k).abs() <= 1e-4 * k.max(1.0),
+                    "{name}: analytic t {a} vs kernel t {k} from {origin} along {dir}"
+                );
+            }
+        }
+        assert!(hits > 1000, "{name}: only {hits} hits");
+        assert!(
+            disagree <= 4,
+            "{name}: {disagree} rays disagree on hit or miss"
+        );
+    }
+}

@@ -176,6 +176,11 @@ pub struct Config {
     /// `CRUST_RAY_CONES`: texture footprints from ray cones (`false`: every
     /// footprint zero, the finest mip always).
     pub ray_cones: bool,
+    /// `CRUST_LINK_TWIN`: estimate a shadow-linked light on the bounce side
+    /// too, through a shadow ray along the bounce direction, and MIS-combine
+    /// it with NEE (`false`: every shadow-linked light is NEE's alone at a
+    /// continuous vertex, the renderer before the twin).
+    pub link_twin: bool,
     /// `CRUST_TEX`: load UV textures (`false`: decline every one, so surfaces
     /// render on their constants).
     pub tex: bool,
@@ -247,6 +252,7 @@ impl Default for Config {
             mtlx_opt: true,
             shader_jit: true,
             ray_cones: true,
+            link_twin: true,
             tex: true,
             tex_max: NonZeroUsize::new(DEFAULT_TEX_MAX).unwrap(),
             tex_mip: true,
@@ -293,6 +299,7 @@ impl Config {
             mtlx_opt: flag("CRUST_MTLX_OPT", d.mtlx_opt),
             shader_jit: flag("CRUST_SHADER_JIT", d.shader_jit),
             ray_cones: flag("CRUST_RAY_CONES", d.ray_cones),
+            link_twin: flag("CRUST_LINK_TWIN", d.link_twin),
             tex: flag("CRUST_TEX", d.tex),
             tex_max: env_parse(&lookup, "CRUST_TEX_MAX", d.tex_max, "a positive integer"),
             tex_mip: flag("CRUST_TEX_MIP", d.tex_mip),

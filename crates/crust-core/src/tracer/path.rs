@@ -2,7 +2,8 @@
 //! gathered backward into a radiance estimate (and guiding training samples).
 //!
 //! Every NEE weight here has a bounce-side twin (`bounce_emission_weight`,
-//! `escaped_emission`); change both or neither.
+//! `escaped_emission`, and for a shadow-linked light `link_twin`); change both
+//! or neither.
 
 use glam::Vec3A;
 use utils::exp3;
@@ -48,6 +49,7 @@ const K_THIN: i32 = 10; // off vertex, per crossing: thin wall's T estimate (0) 
 const K_NEE_THIN: i32 = 11; // off vertex, per crossing: a shadow ray's thin-wall T estimates
 const K_CROSS: i32 = 12; // off vertex: volume transmittance to hidden lights crossed past the depth
 const K_NEE_SAMPLES: i32 = 13; // off vertex: light sample i of several hangs off .new_domain(i)
+const K_LINK_TWIN: i32 = 14; // off vertex, per light index: a link twin's shadow ray (`link_twin`)
 
 /// The sampler light sample `index` at a vertex draws its pick, its point
 /// on the light and its shadow ray from: the vertex itself for the first
@@ -209,24 +211,23 @@ pub fn ray_color_with_light_samples(
         light_samples: light_samples.0.max(1),
         light_samples_indirect: light_samples.1.max(1),
     };
-    if world.has_medium_boundaries() {
-        trace_path::<false, false, true>(
-            r,
-            &cx,
-            sampler,
-            &mut no_training,
-            &mut scratch,
-            &mut stats,
-        )
-    } else {
-        trace_path::<false, false, false>(
-            r,
-            &cx,
-            sampler,
-            &mut no_training,
-            &mut scratch,
-            &mut stats,
-        )
+    let (training, s) = (&mut no_training, &mut scratch);
+    match (
+        world.has_medium_boundaries(),
+        !lights.twinned_lights().is_empty(),
+    ) {
+        (true, true) => {
+            trace_path::<false, false, true, true>(r, &cx, sampler, training, s, &mut stats)
+        }
+        (true, false) => {
+            trace_path::<false, false, true, false>(r, &cx, sampler, training, s, &mut stats)
+        }
+        (false, true) => {
+            trace_path::<false, false, false, true>(r, &cx, sampler, training, s, &mut stats)
+        }
+        (false, false) => {
+            trace_path::<false, false, false, false>(r, &cx, sampler, training, s, &mut stats)
+        }
     }
 }
 
@@ -645,10 +646,12 @@ fn bounce_emission_weight_at(
     let Some(bounce_pdf) = competing else {
         return strategy.unopposed_weight();
     };
-    // A shadow-linked light is NEE's alone at a continuous vertex: this ray
-    // is stopped by occluders its shadow rays ignore, so the two strategies
-    // disagree on its visibility and cannot be MIS-combined.
-    if lights.nee_only(index) && strategy.samples_lights() {
+    // A shadow-linked light is never this ray's at a continuous vertex: the
+    // ray is stopped by occluders its shadow rays ignore, so the two
+    // strategies would disagree on its visibility. Its bounce side is the
+    // vertex's `link_twin`, which sees it as NEE does — or, for a NEE-only
+    // light (a restricted dome), there is none.
+    if lights.bounce_skips(index, strategy.samples_lights()) {
         return 0.0;
     }
     let light = lights.light(index);
@@ -732,8 +735,9 @@ pub(super) fn escaped_emission(
         if !lights.illuminates(index, class) {
             continue;
         }
-        // NEE's alone at a continuous vertex (see `bounce_emission_weight`).
-        if competing.is_some() && lights.nee_only(index) && strategy.samples_lights() {
+        // The link twin's, or NEE's alone, at a continuous vertex (see
+        // `bounce_emission_weight`).
+        if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
             continue;
         }
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
@@ -799,7 +803,7 @@ fn escaped_split(
         if !lights.illuminates(index, class) {
             continue;
         }
-        if competing.is_some() && lights.nee_only(index) && strategy.samples_lights() {
+        if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
             continue;
         }
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
@@ -1879,6 +1883,114 @@ fn collect_crossings(
     }
 }
 
+/// The bounce-side estimate of the shadow-linked lights at a continuous
+/// vertex (lighting design record, "Shadow linking"): the *link twin*.
+///
+/// The ordinary bounce ray is stopped by occluders a restricted light's
+/// shadow rays ignore, so it collects nothing from such a light
+/// ([`bounce_emission_weight`], [`escaped_emission`] skip it). Instead, for
+/// each [`LightList::twinned_lights`] entry, this asks where the bounce
+/// direction `dir` meets the light ([`crate::LightKind::found_along`]) and
+/// traces a fresh shadow ray there, with the light's own shadow mask, through
+/// [`shadow_transmittance`] — NEE's visibility, crossings and volumes
+/// included. Each point found is weighted against NEE exactly as a bounce hit
+/// on it would be ([`bounce_emission_weight_at`]): with `bounce_pdf`, the
+/// vertex's sampling density (the guide mixture when guided), against the
+/// light density NEE divides by at `nee_count` samples. So the two sides
+/// estimate one integrand, emission × the light's visibility × BSDF, and MIS
+/// combines them as for an unlinked light.
+///
+/// Returns the weighted sum and the unweighted one (guiding trains on raw
+/// emission), both to be scaled by the vertex's continuation factor like the
+/// emission its bounce reaches: the caller adds them to the vertex's
+/// `crossed`. With light path expressions each share is routed as a crossed
+/// light, an `L` right after the bounce's lobe event.
+///
+/// `escapes` is whether the bounce's segment can escape to a light at
+/// infinity: false when it is the depth-capped lookup, which collects only
+/// what it hits.
+///
+/// Each light's shadow ray draws from its own sub-domain of `vertex` under
+/// [`K_LINK_TWIN`], so a scene without restricted lights draws nothing new.
+/// Cold and out of line: an unlinked scene never calls it.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn link_twin<const PROFILE: bool, const MEDIA: bool>(
+    from: Vec3A,
+    dir: Vec3A,
+    bounce_pdf: PdfSolidAngle,
+    class: u16,
+    nee_count: u32,
+    inside: Option<&Enclosure>,
+    curve_exits_ignored: bool,
+    escapes: bool,
+    time: f32,
+    world: &World,
+    volumes: &Volumes,
+    lights: &LightList,
+    strategy: SamplingStrategy,
+    vertex: PathSampler,
+    routing: Option<&RouteCtx>,
+    route: &mut Route,
+    stats: &mut RayStats,
+) -> (Vec3A, Vec3A) {
+    let (mut weighted, mut raw) = (Vec3A::ZERO, Vec3A::ZERO);
+    for &index in lights.twinned_lights() {
+        let index = index as usize;
+        if !lights.illuminates(index, class) {
+            continue;
+        }
+        let light = lights.light(index);
+        // The bounce that ends at the depth cap collects what it hits but
+        // never a light at infinity (`trace_path`'s depth-exhausted lookup):
+        // neither does its twin.
+        if !escapes && light.at_infinity() {
+            continue;
+        }
+        let pmf = lights.pmf_at(from, index);
+        let domain = vertex.new_domain(K_LINK_TWIN).new_domain(index as i32);
+        light.found_along(from, dir, |found| {
+            // `bounce_emission_weight_at`'s weight, for this point.
+            let weight = match found.pdf {
+                Some(pdf) if pmf > 0.0 => {
+                    let light_pdf = lights.density(pdf, pmf, nee_count).max(1e-6);
+                    strategy.bounce_weight(bounce_pdf, light_pdf)
+                }
+                _ => strategy.unopposed_weight(),
+            };
+            // Under `--strategy light` NEE owns every point it samples: no
+            // ray for a share that is zero.
+            if weight == 0.0 {
+                return;
+            }
+            let shadow_ray = Ray::new(from, dir)
+                .with_time(time)
+                .with_mask(lights.shadow_mask(index))
+                .with_curve_exits_ignored(curve_exits_ignored);
+            let tr = shadow_transmittance::<PROFILE, MEDIA>(
+                world,
+                volumes,
+                &shadow_ray,
+                found.distance,
+                inside,
+                domain,
+                stats,
+            );
+            if tr == Vec3A::ZERO {
+                return;
+            }
+            let e = found.radiance * tr;
+            weighted += e * weight;
+            raw += e;
+            if let Some(ctx) = routing {
+                route.cross(ctx.light(index), e * weight, Arrival::default());
+            }
+        });
+    }
+    (weighted, raw)
+}
+
 /// Direct lighting at a volume-region scatter point. The exact mirror of
 /// the surface NEE block: same light-selection strategy, with the
 /// phase function (value == pdf for the HG mixture) in place of
@@ -1959,8 +2071,9 @@ fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
         // averages the `count` samples (Veach's multi-sample estimator sums
         // `w · f / (n_i · p_i)`), so no further `1/count` is applied.
         let light_pdf = lights.density(s.pdf, pmf, count).max(1e-6);
-        // The phase function is its own pdf, in solid angle. A shadow-linked
-        // light has no competing bounce strategy (see `bounce_emission_weight`).
+        // The phase function is its own pdf, in solid angle. A NEE-only light
+        // (a restricted dome) has no competing bounce strategy; any other
+        // shadow-linked light competes with its `link_twin`.
         let weight = if lights.nee_only(index) {
             1.0
         } else {
@@ -2116,8 +2229,9 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
                 }
                 _ => brdf_pdf,
             });
-            // A shadow-linked light is NEE's alone here: the bounce side
-            // collects none of it at a continuous vertex.
+            // A NEE-only light (a restricted dome) is NEE's alone here: the
+            // bounce side collects none of it at a continuous vertex. Any
+            // other shadow-linked light competes with its `link_twin`.
             let weight = if lights.nee_only(light_index) {
                 1.0
             } else {
@@ -2358,7 +2472,12 @@ pub(crate) fn past_medium_boundaries<'w>(
 /// with `AOV = false` every `if AOV` block compiles away, leaving the
 /// function the beauty-only render has always run.
 #[inline(always)]
-pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool>(
+pub(super) fn trace_path<
+    const PROFILE: bool,
+    const AOV: bool,
+    const MEDIA: bool,
+    const TWINS: bool,
+>(
     r: &Ray,
     cx: &PathContext<'_>,
     sampler: PathSampler,
@@ -2436,6 +2555,11 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
     // which none of them exists: guarded at run time instead, cornellbox ran
     // 0.7% more instructions.
     debug_assert_eq!(MEDIA, world.has_medium_boundaries());
+    // `TWINS` likewise: a scene with a shadow-linked light that is not
+    // NEE-only runs a `link_twin` at continuous vertices; any other scene runs
+    // an instantiation without the call sites. Guarded at run time instead,
+    // cornellbox ran 0.22% more instructions (callgrind, 2 spp).
+    debug_assert_eq!(TWINS, !lights.twinned_lights().is_empty());
     let boundaries = MEDIA;
     let mut enclosure: Option<Enclosure> = None;
     let mut carry: Option<(Vec3A, Vec3A)> = None;
@@ -2722,9 +2846,33 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
                     records.push(vrec);
                     break;
                 }
+                let phase_pdf = PdfSolidAngle::from_measure(phase_pdf);
+                if TWINS {
+                    let (w, raw) = link_twin::<PROFILE, MEDIA>(
+                        p,
+                        dir,
+                        phase_pdf,
+                        class,
+                        nee_count,
+                        enclosure.as_ref(),
+                        false,
+                        remaining > 1,
+                        ray.time(),
+                        world,
+                        volumes,
+                        lights,
+                        strategy,
+                        v,
+                        routing,
+                        route,
+                        stats,
+                    );
+                    vrec.crossed += w;
+                    vrec.crossed_raw += raw;
+                }
                 prev = Some(PrevVertex::Phase {
                     pos: p,
-                    pdf: PdfSolidAngle::from_measure(phase_pdf),
+                    pdf: phase_pdf,
                     class,
                     nee_count,
                 });
@@ -2849,6 +2997,32 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
                 records.push(vrec);
                 break;
             }
+            let phase_pdf = PdfSolidAngle::from_measure(hg_phase(wi.dot(dir), medium.g).max(1e-6));
+            if let Some(e) = &enclosed
+                && TWINS
+            {
+                let (w, raw) = link_twin::<PROFILE, MEDIA>(
+                    pos,
+                    dir,
+                    phase_pdf,
+                    e.class,
+                    nee_count,
+                    Some(e),
+                    false,
+                    remaining > 1,
+                    ray.time(),
+                    world,
+                    volumes,
+                    lights,
+                    strategy,
+                    v,
+                    routing,
+                    route,
+                    stats,
+                );
+                vrec.crossed += w;
+                vrec.crossed_raw += raw;
+            }
             stats.vertices += 1;
             records.push(vrec);
             let cone = ray.cone().scattered(
@@ -2862,7 +3036,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
             remaining -= 1;
             prev = enclosed.map(|e| PrevVertex::Phase {
                 pos,
-                pdf: PdfSolidAngle::from_measure(hg_phase(wi.dot(dir), medium.g).max(1e-6)),
+                pdf: phase_pdf,
                 class: e.class,
                 nee_count,
             });
@@ -3232,10 +3406,36 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool
                     }
                     continue;
                 }
+                // A BSDF (or guide-mixture) pdf, in solid angle.
+                let bounce_pdf = PdfSolidAngle::from_measure(sample.pdf);
+                if TWINS && !sample.delta {
+                    let (w, raw) = link_twin::<PROFILE, MEDIA>(
+                        rec.p,
+                        dir,
+                        bounce_pdf,
+                        class_here,
+                        nee_count,
+                        enclosure.as_ref(),
+                        // The bounce ray's own: whether the lobe it left
+                        // by passes out of curve tubes.
+                        sample.ray.rt().ignore_curve_exits,
+                        remaining > 1,
+                        ray.time(),
+                        world,
+                        volumes,
+                        lights,
+                        strategy,
+                        v,
+                        routing,
+                        route,
+                        stats,
+                    );
+                    vrec.crossed += w;
+                    vrec.crossed_raw += raw;
+                }
                 prev = Some(PrevVertex::Surface(PrevBounce {
                     pos: rec.p,
-                    // A BSDF (or guide-mixture) pdf, in solid angle.
-                    pdf: PdfSolidAngle::from_measure(sample.pdf),
+                    pdf: bounce_pdf,
                     delta: sample.delta,
                     class: class_here,
                     nee_count,

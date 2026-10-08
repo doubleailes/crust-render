@@ -80,9 +80,16 @@ pub struct LightLinks {
     /// Per light, the mask its shadow rays carry: which occluder classes
     /// block it (see `shadow_link` encoding in the importer).
     pub shadow_masks: Vec<RayMask>,
-    /// Per light, whether its shadow set is restricted: such a light is
-    /// sampled by NEE alone at non-delta vertices, because a bounce ray is
-    /// stopped by the occluders its shadow rays ignore.
+    /// Per light, whether its shadow set is restricted: its shadow mask
+    /// leaves some occluder class out. A bounce ray is stopped by occluders
+    /// such a light's shadow rays ignore, so at a continuous vertex the
+    /// bounce side estimates it through its *link twin* instead — a shadow
+    /// ray along the bounce direction (`tracer/path.rs`) — or not at all.
+    pub restricted: Vec<bool>,
+    /// Per light, whether it is sampled by NEE alone at continuous vertices:
+    /// a restricted dome, whose twin would cost a shadow ray on every bounce
+    /// (lighting design record, "Shadow linking"), or every restricted light
+    /// under `CRUST_LINK_TWIN=0`. Implies `restricted`.
     pub nee_only: Vec<bool>,
 }
 
@@ -131,6 +138,10 @@ pub struct LightList {
     pub(super) cache: Option<std::sync::Arc<crate::light_cache::LightCache>>,
     /// Light and shadow linking, when any light authors a link.
     pub(super) links: Option<Box<LightLinks>>,
+    /// The restricted lights that are not NEE-only, in list order: the ones
+    /// a continuous vertex estimates through a link twin
+    /// ([`LightList::twinned_lights`]). Empty without shadow links.
+    pub(super) twinned: Vec<u32>,
     /// Per light, its light-path-expression tag (`crust:light:lpeTag`): the
     /// label its `L` events carry, so `<L.'key'>` selects it. Kept in step
     /// with `lights` by `add_masked` and `remove`.
@@ -160,6 +171,7 @@ impl LightList {
             backdrops: Vec::new(),
             cache: None,
             links: None,
+            twinned: Vec::new(),
             lpe_tags: Vec::new(),
             luma: utils::Luma::REC709,
         }
@@ -515,9 +527,18 @@ impl LightList {
         assert!(
             links.illuminates.len() == n
                 && links.shadow_masks.len() == n
+                && links.restricted.len() == n
                 && links.nee_only.len() == n,
             "light links are indexed like the lights"
         );
+        debug_assert!(
+            (0..n).all(|i| !links.nee_only[i] || links.restricted[i]),
+            "NEE-only implies restricted"
+        );
+        self.twinned = (0..n)
+            .filter(|&i| links.restricted[i] && !links.nee_only[i])
+            .map(|i| i as u32)
+            .collect();
         self.links = Some(Box::new(links));
     }
 
@@ -551,10 +572,48 @@ impl LightList {
     }
 
     /// Whether light `index` is sampled by NEE alone at non-delta vertices
-    /// (its shadow set is restricted). False in a scene without shadow links.
+    /// (a restricted dome; see [`LightLinks::nee_only`]). False in a scene
+    /// without shadow links.
     #[inline]
     pub fn nee_only(&self, index: usize) -> bool {
         self.links.as_ref().is_some_and(|l| l.nee_only[index])
+    }
+
+    /// Whether light `index`'s shadow set is restricted
+    /// ([`LightLinks::restricted`]). False in a scene without shadow links.
+    #[inline]
+    pub fn restricted(&self, index: usize) -> bool {
+        self.links.as_ref().is_some_and(|l| l.restricted[index])
+    }
+
+    /// Whether light `index` is estimated on the bounce side by its link
+    /// twin at a continuous vertex — restricted, and not NEE-only — so that
+    /// the ordinary bounce must collect nothing from it there.
+    #[inline]
+    pub fn twinned(&self, index: usize) -> bool {
+        self.links
+            .as_ref()
+            .is_some_and(|l| l.restricted[index] && !l.nee_only[index])
+    }
+
+    /// Whether the ordinary bounce collects nothing from light `index` at a
+    /// continuous vertex: a twinned light under every strategy (its link
+    /// twin owns that side), and a NEE-only one whenever the strategy samples
+    /// lights (`samples_lights`), since then NEE owns it whole. One look at
+    /// the link tables, for the integrator's bounce-side weights.
+    #[inline]
+    pub fn bounce_skips(&self, index: usize, samples_lights: bool) -> bool {
+        match &self.links {
+            None => false,
+            Some(l) => l.restricted[index] && (!l.nee_only[index] || samples_lights),
+        }
+    }
+
+    /// The lights [`LightList::twinned`] holds for, in list order: what a
+    /// continuous vertex runs a link twin for. Empty without shadow links.
+    #[inline]
+    pub fn twinned_lights(&self) -> &[u32] {
+        &self.twinned
     }
 
     /// Hides every light at infinity from the camera, backdrops included —

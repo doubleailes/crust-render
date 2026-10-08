@@ -151,8 +151,9 @@ are what matter):
 - **Light and shadow links are read now.** The import splits the scene into 3
   occluder classes. `lgt_env_dome` ignores 1 class, `lgt_sun_distant` ignores
   2, and `lgt_sun_area_01` and `_02` ignore 1 each. A light that ignores an
-  occluder class is sampled by NEE alone at non-delta vertices (the history
-  section "Shadow links" has the rig's exclusions).
+  occluder class is MIS-combined through its link twin, the dome excepted (see
+  "Shadow-linked lights and their noise" below; the history section "Shadow
+  links" has the rig's exclusions).
 - **The four `lgt_screenLights` rect lights are dropped.** Their
   `collection:lightLink` has `includeRoot = 0`, and its `includes` name
   `/root/electronics_ham_equipment03/GEO/…/screen0N_M_geo`. That path matches
@@ -176,6 +177,78 @@ are what matter):
   cap: 919 paths. The mean path length is 3.41 vertices.
 - **Adaptive sampling barely engages.** 1.2% of pixels stopped early (0.6%
   more were held back by a neighbour), and the average is 127.1 of 128 spp.
+
+## Shadow-linked lights and their noise (2026-10-08)
+
+Change `mis-for-shadow-linked-lights`. All four exterior lights are shadow-linked:
+the sun lights ignore the louvered windows, and the distant sun and the dome also
+ignore the sky-dome sphere. Before the change each was sampled by NEE alone at
+continuous vertices, so MIS did nothing for them. Now the distant sun and the two
+rect suns get a link twin; the dome stays NEE-only.
+
+### Method
+
+Each measurement is two renders that differ only in sampler seed:
+
+- `groups.usda` sublayers `entry.usda`, sets `crust:light:lpeTag` on the four
+  exterior lights (`sun_distant`, `sun_area_01`, `sun_area_02`, `env_dome`), and
+  defines `/Render/settings` with `crust:varianceThreshold = 0` (adaptive sampling
+  off) and one product of `C<RG><L.'tag'>` / `C<RD><L.'tag'>` vars per light, plus
+  `C<RG>[LO]` and `C<RD>[LO]`. The settings prim must be `/Render/settings`, the
+  only path the importer reads; a differently named one is ignored without a word
+  beyond a DEBUG line, and the render falls back to the stage's first camera.
+- `groups_seed2.usda` is `subLayers = [@./groups.usda@ (offset = 1)]`. Rendered at
+  `-f 1005`, it evaluates the scene at 1004 with seed 1005.
+- Per pixel, the noise variance of the two-seed mean is `(a − b)² / 4` of the
+  luminance, summed over the frame. "Top 0.1%" is the share of that sum held by the
+  beauty's 0.1% noisiest pixels; "worst" is the noisiest pixel's standard deviation.
+
+```bash
+CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
+crust render -i groups.usda       -f 1004 --camera $CAM -s 256 --light-samples 4 --light-selection learned
+crust render -i groups_seed2.usda -f 1005 --camera $CAM -s 256 --light-samples 4 --light-selection learned
+```
+
+The overlays and the comparison tool are scratch files and not committed.
+
+### Before and after
+
+256 spp, `--light-samples 4 --light-selection learned`, default clamp (10). The
+"before" binary is `e228475`.
+
+| layer | before: variance (top 0.1%, worst) | after | change |
+|---|---|---|---|
+| beauty | 5 589 (96.8%, 39.2) | 3 692 (95.2%, 25.4) | −34% |
+| `C<RG>[LO]` direct glossy | 5 445 (99.2%, 39.2) | 3 137 (98.2%, 25.4) | −42% |
+| `C<RD>[LO]` direct diffuse | 102.6 | 71.7 | −30% |
+| `lgt_sun_distant` glossy | **3 551 (99.5%, 39.2)** | **100.4 (74.2%, 3.6)** | **−97.2%** |
+| `lgt_sun_distant` diffuse | 96.4 | 64.8 | −33% |
+| `lgt_sun_area_01` glossy | 3 079 | 2 853 | −7% |
+| `lgt_env_dome` glossy / diffuse | 0.1 / 0.5 | 0.1 / 0.5 | none (NEE-only) |
+
+- **The distant sun is fixed.** Its direct glossy variance falls 97.2%, which is
+  the drop predicted by deactivating the excluded blockers (3 545 → 103). A second
+  seed pair agrees: 2 063 → 102.5.
+- **The rect sun barely moves**, as the design predicted from the same blocker
+  experiment (−9% there). The design located 89% of its variance in about 20
+  pixels of a real highlight at the right frame edge (x 638–639, y 116–126):
+  sub-pixel coverage noise of a glint, not light-sampling noise (not re-measured
+  here).
+- **The frame's noise is now mostly the rect sun's**: 2 853 of the 3 692.
+- **The means agree.** Direct diffuse is unchanged to 4 digits (0.14740 against
+  0.14737). The distant sun's direct glossy read 0.00508 and 0.00537 before (two
+  seed pairs) against 0.00573 and 0.00575 after. That is the heavy tail of the
+  NEE-only estimator, not a bias: rendered at 1024 spp, the before estimate climbs
+  to 0.00564, within 0.5σ, while its variance falls only 1.5× where 4× would be
+  Gaussian. The beauty reads 3% brighter after (0.2100 → 0.2165): the firefly clamp
+  at 10 is biased, and it clamps the lower-variance estimate less.
+
+### Cost
+
+`scripts/bench_ab.sh -n 3 -p Render` against `e228475`, same flags, frame 1004:
+60.1 s → 61.5 s, **+2.3%** (min and mean alike), inside the change's +5% budget.
+The twin casts a shadow ray only when the bounce direction actually reaches a
+twinned light: the 20° sun cone or one of the two rect suns.
 
 ## What is left, in order of what it would buy
 

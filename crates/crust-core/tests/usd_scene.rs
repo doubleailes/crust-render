@@ -1304,7 +1304,8 @@ fn loads_domelight_usda() {
 
 /// `samples/light_linking.usda`: Rim and Fill author light links, Key a
 /// shadow link, so two lights carry illuminated-class sets and one is
-/// sampled by NEE alone.
+/// restricted — a sphere light, so MIS-combined through its link twin rather
+/// than sampled by NEE alone.
 #[test]
 fn loads_light_linking_usda() {
     let scene =
@@ -1312,7 +1313,9 @@ fn loads_light_linking_usda() {
     assert_eq!(scene.lights.count(), 3);
     let links = scene.lights.links().expect("the sample authors links");
     assert_eq!(links.illuminates.iter().filter(|s| s.is_some()).count(), 2);
-    assert_eq!(links.nee_only.iter().filter(|&&n| n).count(), 1);
+    assert_eq!(links.restricted.iter().filter(|&&n| n).count(), 1);
+    assert_eq!(links.nee_only.iter().filter(|&&n| n).count(), 0);
+    assert_eq!(scene.lights.twinned_lights().len(), 1);
     // The hero, the floor and the rest are three receiver classes.
     let class = |z: f32, y: f32| {
         let ray = Ray::new(Vec3A::new(0.0, y, z), -Vec3A::Z).with_mask(crust_core::MASK_CAMERA);

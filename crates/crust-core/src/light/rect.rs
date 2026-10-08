@@ -3,7 +3,7 @@
 
 use glam::{DVec2, DVec3, Vec3, Vec3A};
 
-use super::shape::{LightShape, SolidAngleSampler};
+use super::shape::{LightShape, ShapeHits, SolidAngleSampler};
 use crate::pdf::PdfSolidAngle;
 
 /// Rectangular light surface (UsdLux `RectLight`): the parallelogram
@@ -282,5 +282,24 @@ impl LightShape for RectShape {
     fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
         self.spherical_rect(from)
             .map(|rect| SolidAngleSampler::rect(self, rect))
+    }
+
+    /// The parallelogram from either side, as its two triangles are hit.
+    fn hits(&self, origin: Vec3A, dir: Vec3A) -> ShapeHits {
+        let mut hits = ShapeHits::default();
+        let n = self.edge_u.cross(self.edge_v);
+        let (denom, n2) = (n.dot(dir), n.length_squared());
+        if denom == 0.0 || n2 == 0.0 {
+            return hits;
+        }
+        let t = n.dot(self.origin - origin) / denom;
+        // `rel = a·edge_u + b·edge_v`, solved by the two cross products.
+        let rel = origin + t * dir - self.origin;
+        let a = rel.cross(self.edge_v).dot(n) / n2;
+        let b = self.edge_u.cross(rel).dot(n) / n2;
+        if (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) {
+            hits.push(t);
+        }
+        hits
     }
 }

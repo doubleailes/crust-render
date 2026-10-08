@@ -9,8 +9,10 @@ use crate::material::Emissive;
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
 use super::rect::RectShape;
-use super::shape::{AffineShape, LightShape, SolidAngleSampler, SolidAngleSampling, SphereShape};
-use super::{Light, LightSample};
+use super::shape::{
+    AffineShape, LightShape, ShapeHits, SolidAngleSampler, SolidAngleSampling, SphereShape,
+};
+use super::{FoundAlong, Light, LightSample};
 
 /// The emitting surface of an [`AreaLight`]: one of the crate's
 /// [`LightShape`]s, dispatched by `match` rather than through a
@@ -89,6 +91,11 @@ impl LightShape for AreaShape {
     fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
         dispatch!(self, s => s.solid_angle_sampler(from))
     }
+
+    #[inline]
+    fn hits(&self, origin: Vec3A, dir: Vec3A) -> ShapeHits {
+        dispatch!(self, s => s.hits(origin, dir))
+    }
 }
 
 /// A geometric area light: an [`AreaShape`] paired with the [`Emissive`]
@@ -162,6 +169,28 @@ impl AreaLight {
         self.shape
             .inv_pdf_area(light_point)
             .to_solid_angle(direction.length_squared(), cosine)
+    }
+
+    /// What a ray from `from` along the unit `dir` finds of this light: each
+    /// point where it meets the surface, nearest first, with the radiance
+    /// emitted back toward `from` there and NEE's density for that point —
+    /// the answers [`Light::sample_li`] gives for the same point
+    /// ([`Emissive::radiance_toward`], [`Light::pdf_at_point`]). Points that
+    /// emit nothing toward `from` (a one-sided light's back) are skipped.
+    pub(super) fn found_along(&self, from: Vec3A, dir: Vec3A, mut f: impl FnMut(FoundAlong)) {
+        for t in self.shape.hits(from, dir).iter() {
+            let point = from + t * dir;
+            let front = self.shape.normal_at(point).dot(-dir) > 0.0;
+            let radiance = self.material.radiance_toward(point, -dir, front);
+            if radiance == Vec3A::ZERO {
+                continue;
+            }
+            f(FoundAlong {
+                distance: t,
+                radiance,
+                pdf: self.pdf_at_point(from, point),
+            });
+        }
     }
 }
 

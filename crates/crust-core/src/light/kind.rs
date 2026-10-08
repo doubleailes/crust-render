@@ -2,7 +2,7 @@
 
 use glam::Vec3A;
 
-use super::{AreaLight, DistantLight, DomeLight, Light, LightSample};
+use super::{AreaLight, DistantLight, DomeLight, FoundAlong, Light, LightSample};
 use crate::pdf::PdfSolidAngle;
 
 /// One light of the scene: every [`Light`] the renderer has, as an enum
@@ -37,6 +37,41 @@ impl From<DistantLight> for LightKind {
 impl From<DomeLight> for LightKind {
     fn from(l: DomeLight) -> Self {
         LightKind::Dome(l)
+    }
+}
+
+impl LightKind {
+    /// What a ray from `from` along the unit `dir` finds of this light,
+    /// visibility aside: for an area light each point where it meets the
+    /// light's surface, nearest first; for a distant light the cone, at
+    /// infinity, when `dir` is inside it. The radiance and density are the
+    /// ones NEE uses for the same connection ([`Light::sample_li`],
+    /// [`Light::pdf_at_point`], [`Light::escaped`]). A dome answers nothing:
+    /// every direction reaches it, and its bounce side is the escaping ray.
+    ///
+    /// The bounce-side estimate of a shadow-linked light (the "link twin" in
+    /// `tracer/path.rs`) asks this, then tests visibility the way NEE does.
+    #[inline]
+    pub fn found_along(&self, from: Vec3A, dir: Vec3A, mut f: impl FnMut(FoundAlong)) {
+        match self {
+            LightKind::Area(l) => l.found_along(from, dir, f),
+            LightKind::Distant(l) => {
+                if let Some((radiance, pdf)) = l.escaped(from, dir) {
+                    f(FoundAlong {
+                        distance: f32::INFINITY,
+                        radiance,
+                        pdf,
+                    });
+                }
+            }
+            LightKind::Dome(_) => {}
+        }
+    }
+
+    /// Whether this is a dome light.
+    #[inline]
+    pub fn is_dome(&self) -> bool {
+        matches!(self, LightKind::Dome(_))
     }
 }
 
