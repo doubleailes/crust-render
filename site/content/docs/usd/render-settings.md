@@ -121,7 +121,8 @@ one camera.
 
 - A window reaching outside `[0, 1]` (overscan) is clipped to the frame, with a warning.
   Rendering outside the frame is not supported.
-- A window that selects no pixel is refused with a warning, and the full frame renders.
+- A window that selects no pixel, one lying wholly outside the frame included, is refused
+  with a warning, and the full frame renders.
 
 ```usda
 def RenderSettings "settings"

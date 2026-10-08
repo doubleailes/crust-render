@@ -232,8 +232,10 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             }
             Some(_) => {}
         }
+        // Compared as they render: an unauthored window is the full frame,
+        // like an authored `(0, 0, 1, 1)`.
         if let Some(first) = &render_base
-            && first.data_window != resolved.data_window
+            && window_or_full(first.data_window) != window_or_full(resolved.data_window)
         {
             // One region per render, like one shutter: the file is still
             // written, over the first product's region.
@@ -312,8 +314,16 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     out
 }
 
+/// `UsdRender`'s fallback `dataWindowNDC`: the whole frame.
+const FULL_WINDOW: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// The window a render uses: the authored one, else the full frame.
+fn window_or_full(window: Option<[f32; 4]>) -> [f32; 4] {
+    window.unwrap_or(FULL_WINDOW)
+}
+
 fn describe_window(window: Option<[f32; 4]>) -> String {
-    let [x0, y0, x1, y1] = window.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    let [x0, y0, x1, y1] = window_or_full(window);
     format!("({x0}, {y0}, {x1}, {y1})")
 }
 
@@ -324,22 +334,17 @@ fn describe_window(window: Option<[f32; 4]>) -> String {
 /// full frame.
 ///
 /// A window reaching outside [0, 1] (overscan) is clipped to the frame, with
-/// one warning; one that selects no pixel, or is not finite, is refused with
-/// one warning and the full frame renders.
+/// one warning; one that selects no pixel — a window wholly outside the frame
+/// included — or is not finite, is refused with one warning and the full
+/// frame renders. No window gets two.
 pub(super) fn region_from_ndc(window: [f32; 4], width: usize, height: usize) -> Option<PixelRect> {
     let text = describe_window(Some(window));
-    if window == [0.0, 0.0, 1.0, 1.0] {
+    if window == FULL_WINDOW {
         return None;
     }
     if !window.iter().all(|c| c.is_finite()) {
         warn!("dataWindowNDC = {text} is not finite; rendering the full frame");
         return None;
-    }
-    if window.iter().any(|c| !(0.0..=1.0).contains(c)) {
-        warn!(
-            "dataWindowNDC = {text} reaches outside the frame; overscan is not supported, \
-             so it is clipped to it"
-        );
     }
     let [xmin, ymin, xmax, ymax] = window.map(f64::from);
     let (w, h) = (width as f64, height as f64);
@@ -359,6 +364,14 @@ pub(super) fn region_from_ndc(window: [f32; 4], width: usize, height: usize) -> 
             "dataWindowNDC = {text} selects no pixel of the {width}x{height} frame; rendering the full frame"
         );
         return None;
+    }
+    // Only once the clipped window is known to select something: a window
+    // wholly outside the frame is the empty case above, not a clipped one.
+    if window.iter().any(|c| !(0.0..=1.0).contains(c)) {
+        warn!(
+            "dataWindowNDC = {text} reaches outside the frame; overscan is not supported, \
+             so it is clipped to it"
+        );
     }
     Some(region)
 }
