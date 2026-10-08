@@ -127,13 +127,13 @@
 
 ## 6. Integration
 
-- [ ] 6.1 Run `scripts/check_images.sh check <dir>` against 1.1's goldens. Verify
+- [x] 6.1 Run `scripts/check_images.sh check <dir>` against 1.1's goldens. Verify
       that every scene without fuzz or a `zeltner` sheen is bit-identical, and that
       only `openpbr_showcase`, `materialx_lion` and the `materialx_surfaces` scenes
       differ.
-- [ ] 6.2 Re-run 1.2's callgrind on the new binary. Verify that the `cornellbox`
+- [x] 6.2 Re-run 1.2's callgrind on the new binary. Verify that the `cornellbox`
       total is within noise of the baseline (the zero-fuzz path is unchanged).
-- [ ] 6.3 Render 1.3's scenes with the new binary and put the before/after pair in
+- [x] 6.3 Render 1.3's scenes with the new binary and put the before/after pair in
       the change's PR description.
 - [ ] 6.4 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace
       --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast` and

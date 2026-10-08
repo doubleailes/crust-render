@@ -3165,7 +3165,7 @@ pub(super) fn trace_path<
         }
         if diffuse_filter_on && records.is_empty() {
             // The first hit's diffuse colour: the raw light AOVs' divisor.
-            route.diffuse_filter = sp.diffuse_filter();
+            route.diffuse_filter = sp.diffuse_filter(cos_o);
         }
         if AOV && records.is_empty() {
             *first =
@@ -3345,7 +3345,7 @@ pub(super) fn trace_path<
                 Some(s) if s.delta && walk_event.is_none() => {
                     route.albedo_through(s.value / s.pdf);
                 }
-                _ => route.albedo_at(sp.albedo()),
+                _ => route.albedo_at(sp.albedo(cos_o)),
             }
         }
         if let Some(sample) = bounce {
