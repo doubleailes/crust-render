@@ -32,6 +32,14 @@ pub struct Scene {
     /// space (an EXR's chromaticities and `colorInteropID`) or encodes for a
     /// display (the preview PNG) reads it here.
     pub working_space: crate::color::Space,
+    /// The camera prim the render goes through, after any fallback (a
+    /// `RenderSettings.camera` that is not on the stage falls back to the
+    /// first camera met); `None` for the procedural camera.
+    pub camera_path: Option<String>,
+    /// The time code the stage was evaluated at, as given — a subframe
+    /// included, unlike the sampler seed [`RenderSettings::frame`] holds,
+    /// which is its integer part. `None` when attributes read their defaults.
+    pub time: Option<f64>,
 }
 
 impl Scene {
@@ -45,6 +53,8 @@ impl Scene {
             stats: RenderStats::new(),
             aovs: crate::AovRequest::default(),
             working_space: crate::color::Space::LIN_REC709,
+            camera_path: None,
+            time: None,
         }
     }
 
@@ -146,6 +156,114 @@ impl Scene {
     pub fn list_usd(path: &std::path::Path, kind: ListKind) -> Result<Vec<String>, crate::Error> {
         usd_import::list_prims(path, kind)
     }
+
+    /// The prims [`Scene::list_usd`] lists, in the same order, each with the
+    /// values a render reads for it (`crust ls --json`), evaluated at time
+    /// code `frame` (`None`: attribute defaults, as a render without one
+    /// reads them). Read through the import's own readers, an unauthored
+    /// value at the fallback the render uses. Costlier than the paths alone:
+    /// a material's `bound` resolves the binding of every geometry prim.
+    ///
+    /// A non-finite `frame` is refused with [`crate::Error::InvalidFrame`].
+    pub fn list_usd_records(
+        path: &std::path::Path,
+        kind: ListKind,
+        frame: Option<f64>,
+    ) -> Result<Vec<ListRecord>, crate::Error> {
+        usd_import::list_records(path, kind, frame)
+    }
+}
+
+/// The `crust-ls/1` report's `format`.
+pub const LS_FORMAT: &str = "crust-ls/1";
+
+/// The `crust-ls/1` report: what was listed, at which time code, and the
+/// records in the text listing's order.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Listing {
+    /// `camera`, `light` or `material`.
+    pub kind: &'static str,
+    /// The time code the values were evaluated at; `null` for defaults.
+    pub frame: Option<f64>,
+    pub prims: Vec<ListRecord>,
+}
+
+impl Listing {
+    pub fn to_json(&self) -> String {
+        crate::report::Report::new(LS_FORMAT, self).to_json()
+    }
+}
+
+/// One listed prim and the values a render reads for it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(untagged)]
+pub enum ListRecord {
+    Camera(CameraRecord),
+    Light(LightRecord),
+    Material(MaterialRecord),
+}
+
+impl ListRecord {
+    /// The prim's absolute path.
+    pub fn path(&self) -> &str {
+        match self {
+            ListRecord::Camera(r) => &r.path,
+            ListRecord::Light(r) => &r.path,
+            ListRecord::Material(r) => &r.path,
+        }
+    }
+}
+
+/// A `UsdGeomCamera`: its lens as the render reads it, and whether a render
+/// goes through it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct CameraRecord {
+    pub path: String,
+    #[serde(serialize_with = "crate::report::finite_or_null")]
+    pub focal_length_mm: f32,
+    /// Horizontal, vertical; the vertical defaults to the horizontal over
+    /// the image's aspect ratio, as the render reads it.
+    pub aperture_mm: [f32; 2],
+    /// `0` is a pinhole.
+    #[serde(serialize_with = "crate::report::finite_or_null")]
+    pub f_stop: f32,
+    #[serde(serialize_with = "crate::report::finite_or_null")]
+    pub focus_distance: f32,
+    /// The camera `crust render` without `--camera` goes through: the first
+    /// RenderProduct's, else `RenderSettings.camera`, else (that missing, or
+    /// nothing named) the first one the import meets. At most one is.
+    pub is_render_camera: bool,
+    /// Under an invisible ancestor (it still renders).
+    pub hidden: bool,
+}
+
+/// A UsdLux light's `LightAPI` inputs as authored, no transform applied.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LightRecord {
+    pub path: String,
+    /// `sphere`, `rect`, `disk`, `cylinder`, `distant` or `dome`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(serialize_with = "crate::report::finite_or_null")]
+    pub intensity: f32,
+    #[serde(serialize_with = "crate::report::finite_or_null")]
+    pub exposure: f32,
+    pub color: [f32; 3],
+    pub normalize: bool,
+}
+
+/// A `UsdShadeMaterial`: the surface shader the render decodes, and whether
+/// anything it renders is bound to it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MaterialRecord {
+    pub path: String,
+    /// The surface shader's `info:id`; `None` when the material has none
+    /// the import can name (a MaterialX reference composes no shader prim).
+    pub surface: Option<String>,
+    /// Whether the import's binding resolution — inheritance, collections,
+    /// binding strength, the `full` purpose falling back to all-purpose —
+    /// resolves at least one geometry prim it renders to this material.
+    pub bound: bool,
 }
 
 /// What [`Scene::list_usd`] lists.
@@ -168,6 +286,17 @@ pub enum ListKind {
     /// inactive ancestor or inside an instance's prototype, whether or not
     /// anything binds them.
     Material,
+}
+
+impl ListKind {
+    /// The kind's name, as `crust ls` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ListKind::Camera => "camera",
+            ListKind::Light => "light",
+            ListKind::Material => "material",
+        }
+    }
 }
 
 /// Choices a host makes about how a USD stage is imported.

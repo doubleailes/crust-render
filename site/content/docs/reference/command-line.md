@@ -2,7 +2,7 @@
 title = "Command line"
 description = "Every crust command and flag."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-08T08:00:00+00:00
+updated = 2026-10-09T08:00:00+00:00
 draft = false
 weight = 10
 sort_by = "weight"
@@ -19,13 +19,15 @@ top = false
 ```bash
 crust render [OPTIONS]              # render a scene
 crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materials
+crust diff <A> <B>                  # did the image change, and by how much?
 crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or cleaner
 ```
 
 | command | what it does |
 |---------|--------------|
 | `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` belongs to it. |
-| [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line. |
+| [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line, or as JSON with the values a render reads for each. |
+| [`diff`](#diff) | compares two EXRs: whether they are identical, by how much they differ, and whether they can be compared at all. |
 | [`diagnostic`](#diagnostic) | measures which settings make the stage's render faster or cleaner, within a time budget, and reports the evidence. Takes the scene flags of `render`. |
 
 `-l, --level` applies to every command, and can go before or after it. `--log-file` belongs to
@@ -74,6 +76,7 @@ The flags of `crust render`:
 | [`--scanline`](#scanline) | flag | off (tiles) | — |
 | [`--stats`](#stats) | flag | off | — |
 | [`--profile`](#profile) | flag | off | — |
+| [`--stats-json`](#stats-json) | path or `-` | off | — |
 | [`-l`, `--level`](#level) | name | `info` | — |
 | [`--log-file`](#log-file) | directory | off | — |
 | `-h`, `--help` | | | |
@@ -501,6 +504,32 @@ Profiling slows the render (the report prints its own estimate of the cost, typi
 15–20%). It is separate from `--stats` so that the `--stats` render time stays comparable
 between runs.
 
+### stats-json
+
+`--stats-json <PATH|->`
+
+Write the statistics as JSON, format `crust-stats/1` (see [JSON reports](#json-reports)),
+to `PATH` once the images are written, or to stdout with `-`. It holds what `--stats`
+prints: the phases (`name`, `depth`, `time_s`, `rss_end_bytes`, `peak_end_bytes`), the
+image, scene, ray, texture, Ptex, subdivision and displacement counters, the materials
+and lights by kind, and `peak_memory_bytes`, the same figure the text report prints as
+`peak memory (RSS)`. The ratios the text report derives are included too: `total_rays`,
+`mean_path_length`, `rr_kill_rate`, `rays_per_s`, the texture `hit_rate`.
+
+It collects the statistics without printing the table: pass `--stats` as well for both.
+With [`--profile`](#profile), the report gains a `profile` object (the sections and the
+execution tree, in seconds of thread time).
+
+With `-`, stdout holds only the JSON, and the log, the progress bar and any text report go
+to stderr:
+
+```bash
+crust render -i scene.usda -s 64 --stats-json - > stats.json
+jq '.rays.rays_per_s' stats.json
+```
+
+If the file can't be written, the command fails after the images are written.
+
 ### level
 
 `-l, --level <LEVEL>` — default `info`
@@ -539,7 +568,7 @@ If the file can't be created, the run stops before loading the scene.
 
 ## ls
 
-`crust ls <KIND> -i <SCENE>`
+`crust ls <KIND> -i <SCENE> [--json <PATH|->] [-f <FRAME>]`
 
 Prints the stage's prims of one kind, one absolute prim path per line, in namespace
 order. `KIND` is one of:
@@ -585,6 +614,130 @@ done
 
 A stage with nothing of that kind prints nothing and logs a warning. A stage that can't
 be opened is an error.
+
+### ls --json
+
+`--json <PATH|->` writes the listed prims as JSON, format `crust-ls/1` (see
+[JSON reports](#json-reports)): `kind`, `frame`, and `prims`, the records in the text
+listing's order. With `-` the JSON replaces the paths on stdout; with a path, the paths
+are printed as without it.
+
+Each record has the prim's `path` and the values a render reads for it, read by the
+render's own code, so an unauthored value is the one the render falls back to:
+
+| kind | values |
+|------|--------|
+| `camera` | `focal_length_mm`, `aperture_mm` (horizontal, vertical: the vertical one defaults to the horizontal over the image's aspect), `f_stop` (`0` is a pinhole), `focus_distance`, `is_render_camera`, `hidden` |
+| `light` | `type` (`sphere`, `rect`, `disk`, `cylinder`, `distant`, `dome`), `intensity`, `exposure`, `color`, `normalize`, as authored on the light: no transform, colour space or colour temperature applied |
+| `material` | `surface`, the `info:id` of the surface shader the render decodes (`null` when there is none), and `bound` |
+
+`is_render_camera` marks the camera `crust render` without `--camera` goes through: the
+first RenderProduct's camera, else `RenderSettings.camera`, else (that camera missing, or
+none named) the first one the render meets. At most one camera is marked, and none on a
+stage without cameras, where the render uses the procedural camera.
+
+`bound` is true when the render's own binding resolution — inherited bindings, collection
+bindings, binding strength, the `full` purpose falling back to the all-purpose binding —
+resolves at least one mesh, sphere or curve it renders to that material. A material
+targeted only by a binding that never takes effect is not bound. Working it out resolves
+every geometry prim's binding, so it costs a walk of the stage.
+
+```bash
+$ crust ls camera -i samples/cornellbox.usda --json - | jq -c '.prims[] | [.path, .is_render_camera]'
+["/scene/camera1",true]
+```
+
+### ls -f
+
+`-f, --frame <FRAME>` evaluates the values `--json` reports at that time code, parsed as
+[`render -f`](#frame) parses it. Without it, values read their default
+(non-time-sampled) value, as a render without `-f` does. Which prims are listed does not
+depend on it.
+
+## diff
+
+`crust diff <A> <B> [--json <PATH|->]`
+
+Compares two EXR files, `A` the reference. Every channel of every layer is compared, by
+its full name (`layer.channel`, or the bare name in an unnamed layer); two channels are
+equal only when every sample is bitwise equal, so a NaN that moved counts and two equal
+infinities do not. A channel in only one file differs in every pixel.
+
+The text report on stdout gives the resolution and the pixels where any channel differs,
+then a line per differing channel. Here, the Cornell box at 16 samples per pixel against
+the same at 4 (the eight listed pixels shortened to one):
+
+```text
+$ crust diff cornell16.exr cornell4.exr
+640x360  differing pixels: 228227/230400 (99.0569%)
+  channel B: 128881 pixels differ, max abs diff 4.4404057e-1
+  channel G: 221895 pixels differ, max abs diff 3.6249244e-1
+  channel R: 221014 pixels differ, max abs diff 3.0812702e-1
+  differs at (0, 0): [0.6399156, 0.78394943, 1.0] vs [0.64000183, 0.7840011, 1.0]
+max abs diff: 4.4404057e-1   max rel diff: 1e0
+mean abs diff: 2.4019428117913372e-2
+rmse: 4.149975813667258e-2
+relmse: 4.757807812359412e-2
+relmse (trimmed 0.1%): 4.602686768547243e-2
+comparability: warn
+  crust:spp differs: 16 vs 4
+```
+
+(The last two lines are on stderr.)
+
+When both files have `R`, `G` and `B`, it lists the first eight differing pixels and the
+beauty's error metrics against `A`: the largest absolute and relative difference, the mean
+absolute difference, the RMSE, the relative MSE `(A − B)² / (A² + 0.01)` — the noise
+metric to use against a high-spp reference — and the same with the worst 0.1% of pixels
+discarded, so a few fireflies do not decide it.
+
+It exits with:
+
+| status | when |
+|--------|------|
+| `0` | the files have the same resolution and every channel is identical |
+| `1` | they differ, a resolution mismatch included |
+| `2` | a file can't be read, or the arguments are invalid |
+
+`--json <PATH|->` also writes the report as JSON, format `crust-diff/1` (see
+[JSON reports](#json-reports)): `identical`, `a` and `b` (path, size and stamp),
+`differing_pixels`, `total_pixels`, `channels` (every channel, with its `status` and
+count), `beauty` (the metrics, when both files have one) and `comparability`. With `-` the
+JSON replaces the text report on stdout.
+
+### Comparability
+
+Every EXR `crust render` writes records how it was sampled
+([the sampling stamp](@/docs/usd/aovs.md#how-the-pixels-were-sampled)). `diff` reads both
+stamps and says whether the pixels can be compared at all:
+
+| status | when |
+|--------|------|
+| `ok` | the stamps agree on everything that changes what a pixel holds |
+| `warn` | they show a condition that makes pixel differences unreliable, each named in a note |
+| `unknown` | a file has no stamp: another renderer wrote it, or an older crust |
+
+A note is written for adaptive sampling on either side (a budget above
+`crust:minSpp`, or pixels that took different counts: a one-ulp change then changes a
+pixel's sample budget and cascades, so compare at `-s 16`), for an
+`--indirect-clamp` that differs (the clamp is biased, so the metrics include its
+bias), and for each other stamped value that differs: the frame, the camera, the sample
+count, the depth, the light samples, the threshold, the pixel filter and its radius, the
+strategy, the light selection, and `colorInteropID`. Two builds of crust are never a
+reason to warn: comparing them is what `diff` is for.
+
+In text mode the notes go to stderr, so stdout reads the same either way. Comparability
+**never changes the exit status**, which answers only whether the pixels changed. And
+`ok` only means the stamps match: it is not proof that a difference is noise. To show
+that, render both sides at several sample counts and check that the difference falls as
+1/√N rather than levelling off.
+
+```bash
+crust render -i scene.usda -s 16 --indirect-clamp 0 -o before.exr
+# ... change something, rebuild ...
+crust render -i scene.usda -s 16 --indirect-clamp 0 -o after.exr
+crust diff before.exr after.exr && echo identical
+```
 
 ## diagnostic
 
@@ -633,13 +786,33 @@ $ crust diagnostic -i samples/veach_mis.usda --budget 30s > report.md
 $ crust diagnostic -i samples/veach_mis.usda --light-selection learned --baseline crust-diagnostic.json
 ```
 
+## JSON reports
+
+`--stats-json`, `ls --json` and `diff --json` (and the [`diagnostic`](#diagnostic)'s
+report) share one shape, so a script reads them the same way:
+
+- each is one JSON object, opening with `format` — the report and its version, such as
+  `crust-stats/1` — and `crust_version`;
+- keys are `snake_case`, and a quantity with a unit names it: `time_s`, `peak_bytes`,
+  `focal_length_mm`;
+- a value that is not finite, or not available on the platform (memory without
+  `/proc`), is `null`;
+- a change that removes or renames a key, or changes what it means, bumps the version.
+
+A flag that writes one takes a path, or `-` for stdout. With `-`, stdout holds only the
+JSON, and the log, the progress bar and any text report go to stderr. With a path, every
+other output stays where it is without the flag.
+
 ## Exit status
 
 `crust render` exits with `0` when the images are written, and `crust ls` when the list
 is printed. It exits with a non-zero status
 when the arguments are invalid (a missing command included), the scene or the requested
 camera can't be loaded, the log
-file can't be created, or an image can't be written.
+file can't be created, or an image or a JSON report can't be written.
+
+`crust diff` exits with `0` when the files are identical, `1` when they differ and `2` on
+an error (see [diff](#diff)).
 
 `crust diagnostic` exits with:
 
@@ -674,6 +847,12 @@ crust render -i asset.usda --auto-tx --stats
 
 # re-render one object of a frame, placed in the frame for compositing
 crust render -i shot.usdc -f 1048 --region 812,240,1100,520 -o fix.1048.exr
+
+# did a change move any pixel? (0 identical, 1 differs)
+crust diff before.exr after.exr
+
+# render statistics for a script
+crust render -i scene.usda --stats-json - > stats.json
 
 # what would make this shot faster or cleaner, in five minutes
 crust diagnostic -i shot.usdc -f 1048 --camera /shot/cam/renderCam --budget 5m > report.md

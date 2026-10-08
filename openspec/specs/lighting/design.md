@@ -261,7 +261,7 @@ paths, for direct-light variance falling about as 1/N.
   sampler, for the static scenes; one for ALab, whose frame is its animation — with
   the six configurations interleaved within each seed so load lands on all alike;
   time is the minimum `Render` phase over the seeds, relMSE the mean of
-  `exr_diff`'s 0.1%-trimmed value against the reference, and efficiency
+  `crust diff`'s 0.1%-trimmed value against the reference, and efficiency
   `1 / (time · relMSE)` relative to (1, 1). The untrimmed relMSE is unusable here: with
   the clamp off it is firefly-dominated and varies 10 000× between seeds on the
   Playground. `Kitchen_set` has no light and measures nothing. ALab is one seed, so
@@ -699,7 +699,7 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   is bit-identical, since the shadow ray draws from its own `K_NEE_SHADOW`
   domain, §3.11 there.)
   Measure changes with
-  `exr_diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
+  `crust diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
 
 ## Known gaps: lighting
 

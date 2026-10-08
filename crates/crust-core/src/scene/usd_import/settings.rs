@@ -38,6 +38,56 @@ impl CameraChoice {
     }
 }
 
+/// The camera a render is told to use: the host's `requested` path (the
+/// CLI's `--camera`), else the first RenderProduct's camera (`product_camera`,
+/// which is the settings' own when the product names none), else the stage's
+/// `RenderSettings.camera`. Read off the payload-free `index`, before any
+/// traversal meets a camera. The one precedence the import and `crust ls`
+/// both follow.
+pub(super) fn wanted_camera(
+    requested: Option<sdf::Path>,
+    product_camera: Option<sdf::Path>,
+    index: &Stage,
+) -> Option<CameraChoice> {
+    match requested {
+        Some(p) => Some(CameraChoice::Requested(p)),
+        None => product_camera
+            .or_else(|| render_settings_camera(index))
+            .map(CameraChoice::Settings),
+    }
+}
+
+/// Which camera a render goes through, once the walk is done.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CameraPick<'a> {
+    /// The camera it was told to use.
+    Wanted,
+    /// The first camera the import's walk met: nothing was named, or the
+    /// stage's `RenderSettings.camera` names a prim that is not a camera.
+    First,
+    /// The procedural fallback camera: the stage has none.
+    Procedural,
+    /// The host asked for a camera the stage does not have: an error.
+    Missing(&'a sdf::Path),
+}
+
+/// The fallback rule of [`CameraChoice`]: `wanted_met` says whether the
+/// wanted camera was met, `any_met` whether any camera was. Shared by the
+/// import (`resolve_camera`) and the listing (`is_render_camera`), so the
+/// camera `ls` marks is the one a render uses.
+pub(super) fn pick_camera(
+    wanted: Option<&CameraChoice>,
+    wanted_met: bool,
+    any_met: bool,
+) -> CameraPick<'_> {
+    match wanted {
+        Some(_) if wanted_met => CameraPick::Wanted,
+        Some(CameraChoice::Requested(p)) => CameraPick::Missing(p),
+        _ if any_met => CameraPick::First,
+        _ => CameraPick::Procedural,
+    }
+}
+
 impl std::fmt::Display for CameraChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

@@ -286,7 +286,7 @@ really runs locally — as the article notes.)
 - The pre-existing `shared_edge_is_watertight` / `shared_vertex_is_covered`
   and `matches_linear_scan` / `hit_any_matches_hit` tests still pass.
 - **Whole-image diff**: every sample scene was rendered before and after and
-  compared with `cargo run --release -p crust-render --example exr_diff`.
+  compared with `crust diff`.
   Seven of eight are **pixel-identical**. `cornellbox` differs in **1 pixel
   of 230 400** by 4.6e-4, at the seam where the inner box's bottom face is
   exactly coplanar with the floor — a genuine `t` tie between two
@@ -296,7 +296,7 @@ really runs locally — as the article notes.)
 
 Note that `cmp`-ing two EXR files is *not* a valid image comparison here:
 tile write order is nondeterministic, so the same binary run twice produces
-different bytes for identical pixels. Use `exr_diff`.
+different bytes for identical pixels. Use `crust diff`.
 
 ## Tooling added
 
@@ -307,9 +307,10 @@ different bytes for identical pixels. Use `exr_diff`.
   Criterion's *means* drift 10%+ on a shared machine; noise only ever adds
   time, so the minimum is the better statistic for comparing two versions of
   a kernel.
-- `crates/crust-render/examples/exr_diff.rs` — numeric diff of two rendered
-  EXRs (differing pixel count, max absolute/relative, mean absolute, and the
-  first few coordinates). The regression check for any kernel change.
+- `crust diff` (an example binary when this work was done, a subcommand
+  since) — numeric diff of two rendered EXRs (differing pixel count, max
+  absolute/relative, mean absolute, and the first few coordinates), exiting
+  1 when they differ. The regression check for any kernel change.
 - `scripts/test_simd_matrix.sh` — the test suite across four SIMD codegen
   configurations (see above).
 
@@ -354,7 +355,7 @@ holds: `std::simd` is safe code.
 
 **Correctness.** Images are **bit-identical** to BVH4: cornellbox,
 veach_mis and `gen_stress_scene.py`'s scene at 16 spp, 0 differing pixels
-(`exr_diff`). The per-lane arithmetic is the 4-wide test's operation for
+(`crust diff`). The per-lane arithmetic is the 4-wide test's operation for
 operation, and `safe_inv3` keeps it NaN-free, so `simd_min`/`simd_max`
 agree with `minps`/`maxps`; closest-hit selection does not depend on
 visit order except for exact ties, and none occurred. All `crust-rt`

@@ -18,6 +18,7 @@ use crust_core::PixelRect;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
 use crust_core::Scene;
+use crust_core::stamp::SamplingStamp;
 use crust_core::{AovRequest, RenderSettings};
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
@@ -55,6 +56,18 @@ enum Command {
         /// Input scene path — .usda / .usdc / .usdz.
         #[arg(short, long)]
         input: std::path::PathBuf,
+        /// Write each prim with the values a render reads for it as JSON
+        /// (format `crust-ls/1`) to PATH, or to stdout with `-` instead of
+        /// the paths: a camera's lens and whether a render goes through it,
+        /// a light's type, intensity, exposure, color and normalize, a
+        /// material's surface shader and whether anything is bound to it.
+        #[arg(long, value_name = "PATH|-")]
+        json: Option<std::path::PathBuf>,
+        /// USD time code to evaluate the values at, as `render -f` takes it.
+        /// Without it, values read their default (non-time-sampled) value.
+        /// Which prims are listed does not depend on it.
+        #[arg(short, long, allow_negative_numbers = true, value_parser = parse_frame)]
+        frame: Option<f64>,
     },
     /// Measure how to make a stage's render faster or cleaner, within a
     /// time budget: a baseline, then every unbiased setting tried on
@@ -67,6 +80,23 @@ enum Command {
     /// ran out first (the report is still written), 1 on error, 2 on a
     /// usage error.
     Diagnostic(Box<DiagnosticArgs>),
+    /// Compare two EXRs: did the image change, and by how much?
+    ///
+    /// Every channel of every layer is compared bitwise; on the beauty
+    /// (`R`, `G`, `B`) it adds the error metrics against A, the reference.
+    /// From both files' `crust:*` sampling stamps it says whether the pixels
+    /// can be compared at all (on stderr, or in the JSON). Exits 0 when the
+    /// files are identical, 1 when they differ, 2 on an error.
+    Diff {
+        /// The reference image.
+        a: std::path::PathBuf,
+        /// The image compared with it.
+        b: std::path::PathBuf,
+        /// Also write the report as JSON (format `crust-diff/1`) to PATH;
+        /// with `-`, the JSON goes to stdout instead of the text report.
+        #[arg(long, value_name = "PATH|-")]
+        json: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -251,6 +281,12 @@ struct RenderArgs {
     /// Render phase must stay comparable between runs.
     #[arg(long, default_value_t = false)]
     profile: bool,
+    /// Write the statistics as JSON (format `crust-stats/1`) to PATH, or to
+    /// stdout with `-`, which moves the log to stderr. Collects what
+    /// `--stats` reports without printing its table; pass `--stats` too for
+    /// both. With `--profile`, the report gains a `profile` object.
+    #[arg(long, value_name = "PATH|-")]
+    stats_json: Option<std::path::PathBuf>,
     /// The OpenColorIO config every colour is managed with: a `.ocio` file,
     /// an `.ocioz` archive or an `ocio://` builtin URI. Defaults to `$OCIO`
     /// when that is set, else to the builtin ACES CG config
@@ -535,6 +571,7 @@ fn write_beauty(
     buffer: &Buffer,
     output: &str,
     color: &OutputColor,
+    sampling: &SamplingStamp,
 ) -> std::result::Result<(), ExitCode> {
     let (img_width, img_height) = buffer.size();
     debug!(
@@ -557,6 +594,7 @@ fn write_beauty(
             );
         }
     }
+    products::stamp(&mut image.layer_data.attributes, sampling);
     match image.write().to_file(output) {
         Ok(_) => info!("Image written to: {:?}", output),
         Err(e) => {
@@ -717,15 +755,42 @@ fn select_products(aovs: &mut AovRequest, output: Option<&str>) {
     }
 }
 
+/// A JSON report's destination: `-` is stdout.
+fn is_stdout(path: &Path) -> bool {
+    path == Path::new("-")
+}
+
+/// Write a JSON report to `path`, or print it on stdout for `-`.
+fn write_json(path: &Path, json: &str) -> std::io::Result<()> {
+    if is_stdout(path) {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        out.write_all(json.as_bytes())?;
+        out.flush()
+    } else {
+        std::fs::write(path, json)
+    }
+}
+
 /// Every failure returns through here rather than `std::process::exit`, so
 /// the stack unwinds normally and every destructor runs on the way out.
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // A listing's stdout is its result, so its log goes to stderr; a
-    // render's log stays where it always was.
+    // render's log stays where it always was, unless its stdout carries a
+    // JSON report (`--stats-json -`).
     let (log_to, log_file) = match &cli.command {
-        Command::Render(args) => (logging::Terminal::Stdout, args.log_file.as_deref()),
-        Command::Ls { .. } | Command::Diagnostic(_) => (logging::Terminal::Stderr, None),
+        Command::Render(args) => (
+            if args.stats_json.as_deref().is_some_and(is_stdout) {
+                logging::Terminal::Stderr
+            } else {
+                logging::Terminal::Stdout
+            },
+            args.log_file.as_deref(),
+        ),
+        Command::Ls { .. } | Command::Diagnostic(_) | Command::Diff { .. } => {
+            (logging::Terminal::Stderr, None)
+        }
     };
     if let Err(e) = logging::init(cli.level, log_file, log_to) {
         eprintln!("error: {e}");
@@ -733,8 +798,68 @@ fn main() -> ExitCode {
     }
     match &cli.command {
         Command::Render(args) => render(args),
-        Command::Ls { kind, input } => ls(*kind, input),
+        Command::Ls {
+            kind,
+            input,
+            json,
+            frame,
+        } => ls(*kind, input, json.as_deref(), *frame),
         Command::Diagnostic(args) => diagnostic(args),
+        Command::Diff { a, b, json } => diff(a, b, json.as_deref()),
+    }
+}
+
+/// `crust diff`'s exit status for an error: unreadable input or an output
+/// that cannot be written (a usage error exits 2 through clap as well).
+const DIFF_ERROR: u8 = 2;
+
+/// `crust diff`: read both files through crust-assets, compare them in
+/// crust-core, print or write the report. 0 identical, 1 differs, 2 error.
+fn diff(a: &Path, b: &Path, json: Option<&Path>) -> ExitCode {
+    let read = |path: &Path| {
+        crust_assets::read_exr_planes(path).map_err(|e| {
+            error!("{e}");
+            ExitCode::from(DIFF_ERROR)
+        })
+    };
+    let (a, b) = match (read(a), read(b)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(code), _) | (_, Err(code)) => return code,
+    };
+    let report = crust_core::compare::compare(&a, &b);
+    match json {
+        Some(path) if is_stdout(path) => {
+            if let Err(e) = write_json(path, &report.to_json()) {
+                error!("--json -: {e}");
+                return ExitCode::from(DIFF_ERROR);
+            }
+        }
+        _ => {
+            print!("{}", report.to_text());
+            // On stderr, so stdout reads as the report always did.
+            let c = &report.comparability;
+            if c.status != crust_core::compare::ComparabilityStatus::Ok {
+                let status = match c.status {
+                    crust_core::compare::ComparabilityStatus::Warn => "warn",
+                    _ => "unknown",
+                };
+                eprintln!("comparability: {status}");
+                for note in &c.notes {
+                    eprintln!("  {note}");
+                }
+            }
+            if let Some(path) = json
+                && let Err(e) = write_json(path, &report.to_json())
+            {
+                error!("--json {}: {e}", path.display());
+                return ExitCode::from(DIFF_ERROR);
+            }
+        }
+    }
+    if report.identical {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
@@ -817,16 +942,50 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
     }
 }
 
-/// `crust ls`: print the stage's `kind` prims, one path per line.
-fn ls(kind: LsKind, input: &Path) -> ExitCode {
-    match Scene::list_usd(input, kind.into()) {
-        Ok(prims) => {
-            if prims.is_empty() {
-                let name = kind.to_possible_value().expect("no skipped variant");
-                warn!("{} has no {}", input.display(), name.get_name());
+/// `crust ls`: print the stage's `kind` prims, one path per line; with
+/// `--json`, write them with their values as `crust-ls/1` (on stdout for
+/// `-`, instead of the paths).
+fn ls(kind: LsKind, input: &Path, json: Option<&Path>, frame: Option<f64>) -> ExitCode {
+    let empty = |n: usize| {
+        if n == 0 {
+            let name = kind.to_possible_value().expect("no skipped variant");
+            warn!("{} has no {}", input.display(), name.get_name());
+        }
+    };
+    let Some(json) = json else {
+        if frame.is_some() {
+            debug!("-f only changes the values --json reports; the paths are the same");
+        }
+        return match Scene::list_usd(input, kind.into()) {
+            Ok(prims) => {
+                empty(prims.len());
+                for prim in prims {
+                    println!("{prim}");
+                }
+                ExitCode::SUCCESS
             }
-            for prim in prims {
-                println!("{prim}");
+            Err(e) => {
+                error!("Failed to read USD scene: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    };
+    match Scene::list_usd_records(input, kind.into(), frame) {
+        Ok(records) => {
+            empty(records.len());
+            if !is_stdout(json) {
+                for r in &records {
+                    println!("{}", r.path());
+                }
+            }
+            let listing = crust_core::Listing {
+                kind: crust_core::ListKind::from(kind).name(),
+                frame,
+                prims: records,
+            };
+            if let Err(e) = write_json(json, &listing.to_json()) {
+                error!("--json {}: {e}", json.display());
+                return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
         }
@@ -888,6 +1047,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
     let world = scene.world;
     let lights = scene.lights;
     let volumes = scene.volumes;
+    let (camera_path, time) = (scene.camera_path, scene.time);
     // Import phases and scene counts come from the loader; render and
     // output are timed here.
     let mut stats = scene.stats;
@@ -1010,13 +1170,15 @@ fn render(cli: &RenderArgs) -> ExitCode {
     // `.tx` files never fails its write for want of a descriptor.
     assets.release_texture_files();
     info!("Render finished in {duration:?}");
+    // How the pixels were sampled, recorded in every EXR written.
+    let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time);
     let output_start = Instant::now();
     if let Some(film) = &film {
         // One EXR per product, then the PNG from the first one's beauty.
         let mut written = Vec::new();
         for product in &aovs.products {
             let path = Path::new(&product.name);
-            match products::write_product(path, product, &buffer, film, &output_color) {
+            match products::write_product(path, product, &buffer, film, &output_color, &sampling) {
                 Ok(channels) => {
                     debug!("{}: {}", path.display(), channels.join(" "));
                     written.push(format!("{} ({} channels)", path.display(), channels.len()));
@@ -1045,6 +1207,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
         &buffer,
         output.as_deref().unwrap_or("output.exr"),
         &output_color,
+        &sampling,
     ) {
         return code;
     }
@@ -1061,6 +1224,9 @@ fn render(cli: &RenderArgs) -> ExitCode {
         info!(target: STATS_TARGET, "{out}");
     }
 
+    // One snapshot, after every output is written, for both forms of the
+    // report.
+    stats.peak_memory_bytes = crust_core::peak_memory_bytes();
     if cli.stats || cli.profile {
         // Through `tracing` rather than `println!`, so the report reaches
         // every sink the run configured — `--log-file` above all, which is
@@ -1073,6 +1239,18 @@ fn render(cli: &RenderArgs) -> ExitCode {
         // event prefix would indent the first rule and only that one, so the
         // table's top edge would not line up with the rest of it.
         info!(target: STATS_TARGET, "\n{stats}");
+    }
+    if let Some(path) = &cli.stats_json {
+        if let Err(e) = write_json(path, &stats.to_json()) {
+            error!(
+                "--stats-json {}: {e} (the images are written)",
+                path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+        if !is_stdout(path) {
+            debug!("Statistics written to {}", path.display());
+        }
     }
     ExitCode::SUCCESS
 }
@@ -1506,7 +1684,7 @@ mod tests {
             let c = Cli::try_parse_from(["crust", "ls", name, "-i", "scene.usda", "-l", "warn"])
                 .expect("valid");
             assert!(matches!(c.level, LoggerLevel::Warn));
-            let Command::Ls { kind, input } = c.command else {
+            let Command::Ls { kind, input, .. } = c.command else {
                 panic!("ls")
             };
             assert_eq!(crust_core::ListKind::from(kind), want, "{name}");
@@ -1521,6 +1699,17 @@ mod tests {
             "and a kind"
         );
         assert!(Cli::try_parse_from(["crust", "ls", "meshes", "-i", "s.usda"]).is_err());
+        let c =
+            Cli::try_parse_from(["crust", "diff", "a.exr", "b.exr", "--json", "-"]).expect("diff");
+        let Command::Diff { a, b, json } = c.command else {
+            panic!("diff")
+        };
+        assert_eq!((a.to_str(), b.to_str()), (Some("a.exr"), Some("b.exr")));
+        assert_eq!(json.as_deref(), Some(Path::new("-")));
+        let err = Cli::try_parse_from(["crust", "diff", "a.exr"])
+            .err()
+            .expect("two files");
+        assert_eq!(err.exit_code(), 2, "a usage error exits 2");
     }
 
     /// `crust diagnostic <args>`, parsed down to its own arguments.
