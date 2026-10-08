@@ -72,7 +72,7 @@
 - [x] 3.4 Reserve the `crust:` prefix in `write_product`: authored values are
       not copied, and a warning is logged, as for `colorInteropID`. Verify
       with a test where a product authors `driver:parameters:crust:spp`.
-- [ ] 3.5 Rewrite tests that pin whole EXR headers to compare with `crust:*`
+- [x] 3.5 Rewrite tests that pin whole EXR headers to compare with `crust:*`
       attributes removed, and keep pixel and window comparisons bitwise.
       Verify that `cargo test --workspace` passes.
 - [x] 3.6 Document the stamp in `site/content/docs/usd/aovs.md` (or the
@@ -196,7 +196,7 @@
 
 ## 7. Integration
 
-- [ ] 7.1 Run the CI set locally:
+- [x] 7.1 Run the CI set locally:
       - `cargo fmt --all -- --check`;
       - `cargo clippy --workspace --all-targets -- -D warnings`;
       - `cargo test --workspace --no-fail-fast`;
