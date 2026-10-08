@@ -594,3 +594,24 @@ fn analytic_light_hits_match_the_kernel() {
         );
     }
 }
+
+/// A restricted dome is NEE-only even when the links handed to
+/// `LightList::set_links` say otherwise: a dome has no link twin
+/// (`LightKind::found_along` finds nothing), so twinning it would drop its
+/// bounce side's share of the light.
+#[test]
+fn a_restricted_dome_is_nee_only_whoever_builds_the_links() {
+    use crate::ray::MASK_SHADOW;
+    let mut lights = LightList::new();
+    lights.add(DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY));
+    lights.add(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0));
+    lights.set_links(LightLinks {
+        illuminates: vec![None; 2],
+        shadow_masks: vec![MASK_SHADOW; 2],
+        restricted: vec![true; 2],
+        nee_only: vec![false; 2],
+    });
+    assert!(lights.nee_only(0), "the restricted dome is NEE-only");
+    assert!(!lights.nee_only(1), "the restricted sun keeps its twin");
+    assert_eq!(lights.twinned_lights(), &[1]);
+}

@@ -553,7 +553,8 @@ paths, for direct-light variance falling about as 1/N.
     +300 KB, build time unchanged.
   - **Measured** on the linked glossy test scene (`glossy_linked_scene` in
     `tests/light_linking.rs`: rough metal 0.15, a sphere light behind a ball its link
-    excludes, 16², 64 spp, depth 1, clamp off, 4 seeds). Before (the twin off): light
+    excludes, 16², 64 spp, depth 2 — so the first bounce may escape to a light at
+    infinity rather than end on the depth cap's lookup — clamp off, 4 seeds). Before (the twin off): light
     0.808, bsdf **0.0037**, power 0.808 mean luminance, and power's two-seed variance
     equal to light's (20.80). After: light 0.808 ± 0.007, bsdf 0.792 ± 0.012, power
     0.793 ± 0.005, and power's variance **5.61 (−73%)**. ALab: see "Measured on ALab"
