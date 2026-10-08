@@ -106,21 +106,21 @@
 
 ## 5. MaterialX `zeltner` sheen
 
-- [ ] 5.1 Carry `SheenMode` into the `Sheen` leaf in `crust-mtlx` and remove the
+- [x] 5.1 Carry `SheenMode` into the `Sheen` leaf in `crust-mtlx` and remove the
       "evaluated as conty_kulla" report. Invert the `a_zeltner_sheen_is_reported`
       test into "is silent", and verify `cargo test -p crust-mtlx`.
-- [ ] 5.2 Branch `prepare_sheen`, `eval_lobe` and `sample_lobe` on the mode (D6):
+- [x] 5.2 Branch `prepare_sheen`, `eval_lobe` and `sample_lobe` on the mode (D6):
       `zeltner` uses `ZeltnerSheen` with throughput `1 − weight·R`, and `conty_kulla`
       stays bit-identical. Verify with the spec's "Both Zeltner sheens agree"
       scenario and with closure pdf/sample consistency tests for a `zeltner` leaf.
-- [ ] 5.3 Update `crates/crust-core/tests/mtlx_surfaces.rs`: the zeltner-reported
+- [x] 5.3 Update `crates/crust-core/tests/mtlx_surfaces.rs`: the zeltner-reported
       assertion becomes silent, and the white-furnace bound and the Teapot
       four-layer stack are re-pinned. Verify that `cargo test -p crust-core --test
       mtlx_surfaces` passes.
-- [ ] 5.4 Update `openspec/specs/materials/design.md`:
+- [x] 5.4 Update `openspec/specs/materials/design.md`:
       - remove "Approximated leaves" (Zeltner) from Known gaps;
-      - add the departure from MaterialX's analytic Zeltner fits (up to ≈0.01 in R,
-        ≈0.1 in a⁻¹), with the measured table.
+      - add the departure from MaterialX's analytic Zeltner fits, measured: up to
+        0.013 in R for roughness ≥ 0.3, 0.076 below it toward grazing, 0.30 in a⁻¹.
 
       Verify that the record's "sheen fit overestimates by up to 0.035" paragraph
       now names `conty_kulla` only.

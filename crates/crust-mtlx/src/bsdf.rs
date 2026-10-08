@@ -802,13 +802,13 @@ fn bsdf_tree(
             let weight = c.input_or(node, scalar, Val::ONE);
             Some(out.push(Closure::Multiply { input, weight }))
         }
-        _ => leaf(c, node, out).map(|l| out.push(Closure::Leaf(l))),
+        _ => leaf(c, node).map(|l| out.push(Closure::Leaf(l))),
     }
 }
 
 /// Builds a leaf, or `None` for a BSDF node there is no leaf for (reported)
 /// or one that can never contribute (a literal `weight = 0`).
-fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
+fn leaf(c: &mut Compiler<'_>, node: &Node) -> Option<Leaf> {
     const KNOWN: [&str; 10] = [
         "oren_nayar_diffuse_bsdf",
         "diffuse_bsdf",
@@ -885,10 +885,6 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
                 Some("zeltner") => SheenMode::Zeltner,
                 _ => SheenMode::ContyKulla,
             };
-            if mode == SheenMode::Zeltner {
-                out.reported
-                    .insert("sheen_bsdf mode zeltner (evaluated as conty_kulla)".into());
-            }
             Bsdf::Sheen {
                 color: c.input_or(node, "color", Val::ONE),
                 roughness: c.input_or(node, "roughness", Val::float(0.3)),
@@ -1478,15 +1474,24 @@ mod tests {
         assert_eq!(slots[tf.thickness as usize].x(), 400.0);
     }
 
+    /// A `zeltner` sheen is evaluated as one, not approximated: it keeps its
+    /// mode and nothing is reported.
     #[test]
-    fn a_zeltner_sheen_is_reported() {
+    fn a_zeltner_sheen_is_silent() {
         let doc = r#"<materialx>
           <sheen_bsdf name="s" type="BSDF">
             <input name="mode" type="string" value="zeltner" />
           </sheen_bsdf>
         </materialx>"#;
         let (_, cl) = build(doc, "s");
-        assert!(cl.reported.iter().any(|r| r.contains("zeltner")));
+        assert!(cl.reported.is_empty(), "{:?}", cl.reported);
+        assert!(
+            cl.nodes.iter().any(|n| matches!(
+                n,
+                Closure::Leaf(l) if matches!(l.bsdf, Bsdf::Sheen { mode: SheenMode::Zeltner, .. })
+            )),
+            "the leaf keeps its mode"
+        );
     }
 
     #[test]

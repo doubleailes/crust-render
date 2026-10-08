@@ -56,7 +56,8 @@ This change is the first step toward making native OpenPBR track Adobe as a whol
   - Its layer throughput is `1 − weight · R(ω_o)`.
   - It is no longer reported as approximated.
   - `conty_kulla` mode is unchanged.
-  - This departs from MaterialX's own analytic fits by up to about 0.01 in R. That
+  - This departs from MaterialX's own analytic fits by up to 0.013 in R for
+    roughness ≥ 0.3, and up to 0.076 for very smooth sheens toward grazing. That
     departure is recorded as a known gap.
 - **Licensing.** The table's 3072 values originate in Disney's `ltc-sheen` (Apache-2.0)
   and are identical, bit for bit, in Adobe's and BSDL's copies. They get a

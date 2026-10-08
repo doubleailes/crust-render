@@ -386,15 +386,6 @@ impl B<'_, '_> {
         if self.is(weight, 0.0) {
             return None;
         }
-        if let Bsdf::Sheen {
-            mode: SheenMode::Zeltner,
-            ..
-        } = &bsdf
-        {
-            self.out
-                .reported
-                .insert("sheen_bsdf mode zeltner (evaluated as conty_kulla)".into());
-        }
         Some(self.push(Closure::Leaf(Leaf {
             bsdf,
             weight,
