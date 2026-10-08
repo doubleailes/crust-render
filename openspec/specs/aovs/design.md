@@ -1069,7 +1069,14 @@ has the full reasoning (D1–D7); the points to keep here:
   no record), a prototype has `transform_end: None`. An end transform with a
   different linear part, a forwarded label, or an instance over a scene that
   itself moves is `Unresolved`: vector 0, counted, one summarised `WARN` at
-  commit. Nothing produces those today; the guard is for the next producer.
+  commit. So is any id a forwarding instance reports its inner hits under
+  (`InstanceHitId::As(k)`: `k`; `Offset(base)`: `base ..= base +
+  inner.max_hit_id()`): a hit carrying it may lie in the forwarding
+  placement rather than on the geometry that owns the id, so the owner's
+  record goes too, whichever was attached first. The unresolved ids are a
+  set, the slots' current state, so a reserved slot given a geometry twice
+  is one id and a replaced one is none. Nothing produces any of those today;
+  the guards are for the next producer.
   Rejected: storing both endpoint transforms and evaluating `(E − L)·M(t)⁻¹·P`
   for rotation too — 96 bytes per moving geometry and an inverse per sample
   for motion nothing produces.
@@ -1107,7 +1114,9 @@ has the full reasoning (D1–D7); the points to keep here:
 - **`disableMotionBlur` / `instantaneousShutter`** (`RenderSettings::
   motion_blur`, resolved in `import_render_products` like the camera and
   resolution: the first product's value, else the settings prim's, each flag
-  on its own; either `true` is off) gate only the shutter draw
+  on its own; either `true` is off — but unlike the camera and resolution a
+  later product that differs is written with the first's blur and warned
+  about, not refused) gate only the shutter draw
   (`Renderer::shutter`, `world.has_motion() && settings.motion_blur`, decided
   once per pass into `PassConfig` so the beauty-only hot path reads one flag
   as before: callgrind on cornellbox at 2 spp counts the same instructions

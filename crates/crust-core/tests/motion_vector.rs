@@ -563,3 +563,101 @@ fn a_motion_vector_var_alone_needs_the_film() {
     };
     assert!(request.needs_film());
 }
+
+/// A forwarding instance reports its inner hits under another geometry's
+/// id (`InstanceHitId::As` / `Offset`), so a hit carrying that id may lie
+/// in the forwarding placement rather than on the geometry that owns it. No
+/// translation is the answer for such an id: the owner's record goes,
+/// whichever is attached first, and the id is counted unresolved.
+#[test]
+fn an_id_a_forwarding_instance_shares_gets_no_motion_record() {
+    let moving = || {
+        instance(
+            ball(),
+            Affine3A::IDENTITY,
+            Some(Affine3A::from_translation(Vec3::X)),
+        )
+    };
+    let placed = |x: f32| {
+        instance(
+            ball(),
+            Affine3A::from_translation(Vec3::new(x, 0.0, 0.0)),
+            None,
+        )
+    };
+
+    // The moving geometry first, then an instance forwarding to its id.
+    let mut b = WorldBuilder::new();
+    let owner = b.attach(moving(), grey());
+    let group = b.attach_labelled(placed(5.0), grey(), MASK_ALL, InstanceHitId::As(owner));
+    assert_eq!(b.unresolved_motion(), 1);
+    let world = b.commit();
+    assert_eq!(world.motion(owner), Vec3A::ZERO);
+    assert_eq!(world.motion(group), Vec3A::ZERO);
+    // A hit through the forwarding placement carries the owner's id...
+    let hit = world
+        .intersect(&Ray::new(Vec3A::new(5.0, 0.0, 5.0), -Vec3A::Z), 1e-3, 100.0)
+        .expect("the placed ball");
+    assert_eq!(hit.geom_id, owner);
+    // ...and reads zero, not the owner's translation.
+    assert_eq!(world.motion(hit.geom_id), Vec3A::ZERO);
+
+    // The forwarding instance first: the range is remembered, and a moving
+    // geometry attached inside it later gets no record either.
+    let mut b = WorldBuilder::new();
+    let _group = b.attach_labelled(placed(5.0), grey(), MASK_ALL, InstanceHitId::As(1));
+    let owner = b.attach(moving(), grey());
+    assert_eq!(owner, 1);
+    assert_eq!(b.unresolved_motion(), 1);
+    assert_eq!(b.commit().motion(owner), Vec3A::ZERO);
+
+    // `Offset(base)` covers `base ..= base + inner.max_hit_id()`: a ball
+    // scene reports id 0, so an offset of 3 forwards id 3 and nothing else.
+    let mut b = WorldBuilder::new();
+    let _group = b.attach_labelled(placed(5.0), grey(), MASK_ALL, InstanceHitId::Offset(3));
+    let outside = b.attach(moving(), grey()); // id 1
+    let _static = b.attach(quad(), grey()); // id 2
+    let inside = b.attach(moving(), grey()); // id 3
+    assert_eq!((outside, inside), (1, 3));
+    let world = b.commit();
+    assert_eq!(world.motion(outside), Vec3A::X);
+    assert_eq!(world.motion(inside), Vec3A::ZERO);
+}
+
+/// The unresolved set is the slots' current state: a reserved slot given a
+/// rotating instance and then a static or translating geometry is not
+/// unresolved any more, and the commit stays silent.
+#[test]
+fn replacing_an_unresolved_geometry_clears_its_warning() {
+    let mut b = WorldBuilder::new();
+    let a = b.reserve_slot(grey(), MASK_ALL);
+    let c = b.reserve_slot(grey(), MASK_ALL);
+    let rotating = || {
+        instance(
+            ball(),
+            Affine3A::IDENTITY,
+            Some(Affine3A::from_rotation_y(0.5)),
+        )
+    };
+    b.set_geometry(a, rotating());
+    b.set_geometry(c, rotating());
+    assert_eq!(b.unresolved_motion(), 2);
+    // Given again unresolved: still one id, not two assignments.
+    b.set_geometry(a, rotating());
+    assert_eq!(b.unresolved_motion(), 2);
+    b.set_geometry(a, quad());
+    b.set_geometry(
+        c,
+        instance(
+            ball(),
+            Affine3A::IDENTITY,
+            Some(Affine3A::from_translation(Vec3::Z)),
+        ),
+    );
+    assert_eq!(b.unresolved_motion(), 0);
+    let warnings = Arc::new(AtomicUsize::new(0));
+    let world = tracing::subscriber::with_default(CountWarnings(warnings.clone()), || b.commit());
+    assert_eq!(warnings.load(Ordering::Relaxed), 0);
+    assert_eq!(world.motion(a), Vec3A::ZERO);
+    assert_eq!(world.motion(c), Vec3A::Z);
+}

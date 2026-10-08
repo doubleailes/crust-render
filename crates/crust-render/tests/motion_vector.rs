@@ -140,8 +140,10 @@ fn close(got: (f32, f32), want: (f64, f64), tol: f64) -> bool {
     (got.0 as f64 - want.0).abs() < tol && (got.1 as f64 - want.1).abs() < tol
 }
 
-fn rendered_sample() -> Exr {
-    let out = work_dir("sharp").join("mv.exr");
+/// Renders the sample as authored into a directory of its own: tests run
+/// in parallel, and `work_dir` clears the directory it is given.
+fn rendered_sample(test: &str) -> Exr {
+    let out = work_dir(&format!("{test}_sharp")).join("mv.exr");
     render(&sample(), &out);
     Exr::load(&out)
 }
@@ -155,7 +157,7 @@ const CARD_V: [f64; 3] = [0.5, 0.3, 0.0];
 
 #[test]
 fn the_written_vectors_match_an_independent_projection() {
-    let exr = rendered_sample();
+    let exr = rendered_sample("projection");
     assert!(
         exr.channels.contains_key("forward.u") && exr.channels.contains_key("forward.v"),
         "{:?}",
@@ -234,8 +236,8 @@ fn the_written_vectors_match_an_independent_projection() {
 /// interior pixel holds one vector, blur or not.
 #[test]
 fn motion_blur_does_not_change_the_vectors() {
-    let sharp = rendered_sample();
-    let dir = work_dir("blurred");
+    let sharp = rendered_sample("blur");
+    let dir = work_dir("blur_blurred");
     let stage = dir.join("motionvector_blurred.usda");
     let text = std::fs::read_to_string(sample()).expect("read sample");
     assert!(text.contains("uniform bool disableMotionBlur = 1"));

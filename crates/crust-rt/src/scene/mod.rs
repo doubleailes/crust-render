@@ -778,6 +778,15 @@ impl Scene {
         self.n_geoms
     }
 
+    /// The largest `geom_id` a hit in this scene can report: the last
+    /// geometry's, or further when an instance relabels its inner hits
+    /// ([`InstanceHitId::As`] / [`InstanceHitId::Offset`]). An instance of
+    /// this scene attached with `Offset(base)` reports ids up to
+    /// `base + max_hit_id`.
+    pub fn max_hit_id(&self) -> u32 {
+        self.max_hit_id
+    }
+
     /// Does anything in this scene move over the shutter interval — i.e. can
     /// `ray.time` change what a query returns?
     ///

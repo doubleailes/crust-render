@@ -650,6 +650,8 @@ same point.
   deprecated name of the first) are resolved in `import_render_products` like the render's
   camera and resolution — the first product's authored value, else the settings prim's,
   each flag on its own — and either one `true` sets `RenderSettings::motion_blur = false`.
+  A later product whose effective setting differs is not refused like one with another
+  camera or resolution: its file is written with the first product's blur, and warned about.
   The tracer's shutter gate is then `world.has_motion() && settings.motion_blur`: no
   `K_TIME` domain is derived (so the other sample dimensions are a static scene's), every
   ray has `time = 0`, `transforms_at` returns the start transforms, and the beauty is sharp

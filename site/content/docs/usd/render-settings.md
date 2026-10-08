@@ -83,7 +83,9 @@ the blur can be added in compositing from a sharp beauty.
 `instantaneousShutter` is the attribute's older name in `UsdRender`, and means the same.
 Either one set to `true` turns the blur off; both are resolved like the render's camera and
 resolution, from the first `RenderProduct` when it authors them, else from this prim. A
-product that authors only one of the two inherits the other from this prim.
+product that authors only one of the two inherits the other from this prim. A later
+product that asks for the other setting is still written, with the first product's, and a
+warning says so: one render has one shutter, as it has one camera.
 
 ```usda
 def RenderSettings "settings"

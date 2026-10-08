@@ -591,9 +591,17 @@ pub struct WorldBuilder {
     /// move, and a field on every `SideTables` would cost each static
     /// `geom_id` 16 bytes for a value read at most once per camera sample.
     motion: Vec<(u32, Vec3A)>,
-    /// Geometries whose motion the table cannot express
-    /// ([`MotionRecord::Unresolved`]), warned about once at commit.
-    unresolved_motion: usize,
+    /// The `geom_id`s whose motion the table cannot express
+    /// ([`MotionRecord::Unresolved`]), sorted; warned about once at commit.
+    /// A set, not a count: a slot given a geometry twice is one id.
+    unresolved: Vec<u32>,
+    /// The `geom_id` ranges that forwarding instances
+    /// (`InstanceHitId::As` / `Offset`) report their inner hits under. A hit
+    /// carrying such an id may lie in the forwarding placement rather than
+    /// on the geometry that owns the id, so no translation can be the
+    /// answer for it: an id inside a range gets no record, whichever
+    /// geometry it belongs to.
+    forwarded: Vec<(u32, u32)>,
 }
 
 impl WorldBuilder {
@@ -632,19 +640,61 @@ impl WorldBuilder {
     ) -> u32 {
         let vertices = Self::vertex_source(&geometry, label);
         let motion = MotionRecord::of(&geometry, label);
+        // The ids this instance's hits will carry, when they are not its
+        // own: a translation recorded under one of them would be read by
+        // hits that lie in this placement instead.
+        let forwards = match (label, &geometry) {
+            (InstanceHitId::As(id), _) => Some((id, id)),
+            (InstanceHitId::Offset(base), Geometry::Instance { scene, .. }) => {
+                Some((base, base.saturating_add(scene.max_hit_id())))
+            }
+            _ => None,
+        };
         let id = self.rt.attach_labelled(geometry, mask, label);
         self.materials.push(material);
         self.faces.push(SideTables {
             vertices,
             ..SideTables::default()
         });
+        if let Some(range) = forwards {
+            self.forward_ids(range);
+        }
         self.record_motion(id, motion);
         debug_assert_eq!(id as usize + 1, self.materials.len());
         id
     }
 
-    /// Replaces `id`'s entry in the motion table with `motion`.
+    /// Marks `range` (inclusive) as ids forwarding instances report: a
+    /// translation already recorded inside it becomes unresolved, and none
+    /// is recorded there later.
+    fn forward_ids(&mut self, range: (u32, u32)) {
+        self.forwarded.push(range);
+        let (lo, hi) = range;
+        let shared: Vec<u32> = self
+            .motion
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| (lo..=hi).contains(id))
+            .collect();
+        for id in shared {
+            self.record_motion(id, MotionRecord::Unresolved);
+        }
+    }
+
+    /// Replaces `id`'s entry in the motion table with `motion`: the current
+    /// state of the slot, so a geometry given again drops what it replaced.
     fn record_motion(&mut self, id: u32, motion: MotionRecord) {
+        let motion = match motion {
+            MotionRecord::Translation(_)
+                if self
+                    .forwarded
+                    .iter()
+                    .any(|(lo, hi)| (*lo..=*hi).contains(&id)) =>
+            {
+                MotionRecord::Unresolved
+            }
+            m => m,
+        };
         let at = self.motion.binary_search_by_key(&id, |(i, _)| *i);
         match (motion, at) {
             (MotionRecord::Translation(v), Ok(i)) => self.motion[i].1 = v,
@@ -654,16 +704,21 @@ impl WorldBuilder {
             }
             (MotionRecord::None | MotionRecord::Unresolved, Err(_)) => {}
         }
-        if motion == MotionRecord::Unresolved {
-            self.unresolved_motion += 1;
+        match (motion, self.unresolved.binary_search(&id)) {
+            (MotionRecord::Unresolved, Err(i)) => self.unresolved.insert(i, id),
+            (MotionRecord::None | MotionRecord::Translation(_), Ok(i)) => {
+                self.unresolved.remove(i);
+            }
+            _ => {}
         }
     }
 
     /// Geometries attached so far whose motion the `motionvector` AOV cannot
-    /// report (an end transform that rotates or scales, or nested motion):
-    /// they blur, and their vector is zero.
+    /// report (an end transform that rotates or scales, nested motion, or an
+    /// id a forwarding instance shares): they blur, and their vector is
+    /// zero. The current state of the slots, not a count of assignments.
     pub fn unresolved_motion(&self) -> usize {
-        self.unresolved_motion
+        self.unresolved.len()
     }
 
     /// Where a hit's vertices can be read from — see [`VertexSource`] for
@@ -792,23 +847,16 @@ impl WorldBuilder {
         let boundaries = self.materials.iter().any(|m| m.is_medium_boundary());
         // Something authored is approximated, so WARN; once, with the count,
         // because it grows with the scene.
-        if self.unresolved_motion > 0 {
+        let unresolved = self.unresolved.len();
+        if unresolved > 0 {
+            let one = unresolved == 1;
             warn!(
-                "{} geometr{} move{} other than by a translation (a rotating or scaling end \
-                 transform, or nested motion); motion blurred, but the motionvector AOV \
-                 reports zero for {}",
-                self.unresolved_motion,
-                if self.unresolved_motion == 1 {
-                    "y"
-                } else {
-                    "ies"
-                },
-                if self.unresolved_motion == 1 { "s" } else { "" },
-                if self.unresolved_motion == 1 {
-                    "it"
-                } else {
-                    "them"
-                },
+                "{unresolved} geometr{} move{} other than by a translation (a rotating or \
+                 scaling end transform, nested motion, or an id shared with a forwarding \
+                 instance); motion blurred, but the motionvector AOV reports zero for {}",
+                if one { "y" } else { "ies" },
+                if one { "s" } else { "" },
+                if one { "it" } else { "them" },
             );
         }
         World {
