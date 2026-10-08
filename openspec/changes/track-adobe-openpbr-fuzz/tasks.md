@@ -2,40 +2,40 @@
 
 ## 1. Baseline
 
-- [ ] 1.1 Build the parent commit's release binary (`bin_before`). Record
+- [x] 1.1 Build the parent commit's release binary (`bin_before`). Record
       `scripts/check_images.sh record <dir>` with it, using `--indirect-clamp 0`,
       and verify the record exits 0 with one EXR per scene.
-- [ ] 1.2 Record the zero-fuzz instruction count: `RAYON_NUM_THREADS=1` callgrind
+- [x] 1.2 Record the zero-fuzz instruction count: `RAYON_NUM_THREADS=1` callgrind
       on `samples/cornellbox.usda -s 2` with `bin_before`. Keep the total and the
       `openpbr::lobes` inclusive counts for 6.2.
-- [ ] 1.3 Render `samples/openpbr_showcase.usda` and `samples/materialx_lion.usda`
+- [x] 1.3 Render `samples/openpbr_showcase.usda` and `samples/materialx_lion.usda`
       at `-s 64` with `bin_before`, as the "before" images for the change record.
 
 ## 2. Adobe oracle (no image change)
 
-- [ ] 2.1 Write `scripts/adobe_oracle/probe.cpp`. It reads cases (parameters,
+- [x] 2.1 Write `scripts/adobe_oracle/probe.cpp`. It reads cases (parameters,
       ω_o, ω_i) on stdin and prints Adobe's eval (diffuse and specular parts), pdf,
       directional albedo (sampler mean over a fixed quasi-random set) and emission.
       Verify it builds against `adobe/openpbr-bsdf@c91aad1` plus GLM with
       `g++ -std=c++17`, and reproduces the README example's output.
-- [ ] 2.2 Write `scripts/adobe_oracle.py`. It fetches the pinned Adobe commit and GLM
+- [x] 2.2 Write `scripts/adobe_oracle.py`. It fetches the pinned Adobe commit and GLM
       into a temporary directory, compiles the probe, draws cases from a fixed seed
       (random parameters and directions, plus hand-picked corners: each layer alone,
       grazing views, roughness 0 and 1), and writes
       `crates/crust-core/tests/data/adobe_oracle.txt` with a header naming the
       commit. Verify that two runs produce byte-identical fixtures.
-- [ ] 2.3 Write `crates/crust-core/tests/adobe_oracle.rs`. It replays each case
+- [x] 2.3 Write `crates/crust-core/tests/adobe_oracle.rs`. It replays each case
       through native `OpenPBR` (the mapped parameter set, eval, pdf, emission, and
       directional albedo by crust's own sampler over the same point set), with a
       completeness test like `osl_oracle.rs::the_fixture_is_complete`. Verify that
       `cargo test -p crust-core --test adobe_oracle` runs offline.
-- [ ] 2.4 Implement deviation rules, each a named predicate on the case's inputs
-      with a measured bound. Write one per gap in
-      `docs/openpbr_reference_alignment.md`, the current fuzz included, and make a
-      stale rule (its condition met, no difference beyond tolerance) fail the
-      test. Verify that the suite passes on the current shader and that deleting
+- [x] 2.4 Implement deviation rules, each a named predicate on the case's inputs
+      with a measured bound, composed by summing bounds. Write one per gap in
+      `docs/openpbr_reference_alignment.md`, the current fuzz included, plus the
+      interactions the fixture exposes, and make a stale rule (every case passes
+      without it) fail the test. Verify that the suite passes on the current shader and that deleting
       any single rule makes it fail.
-- [ ] 2.5 Document it:
+- [x] 2.5 Document it:
       - the generator's requirements and usage in its docstring;
       - a command-cookbook entry in `openspec/specs/cli/design.md`;
       - the two command lines beside the OSL oracle's in `CLAUDE.md`;

@@ -165,6 +165,15 @@ cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 
 cargo test -p crust-mtlx --test osl_oracle -- --nocapture   # prints the guard counts
 OSL_ROOT=/path/to/osl scripts/osl_oracle.py                 # rewrites tests/data/osl_oracle.txt
 
+# How far is the native OpenPBR from Adobe's reference, gap by gap? The replay
+# needs nothing installed; regenerating the reference values needs a C++17
+# compiler and network access (it fetches adobe/openpbr-bsdf and GLM at pinned
+# commits). Each known gap is a named deviation with a bound; the report prints
+# the numbers the bounds are set from. See docs/openpbr_reference_alignment.md.
+cargo test -p crust-core --test adobe_oracle                                     # the check
+cargo test -p crust-core --test adobe_oracle -- --ignored --nocapture            # the report
+scripts/adobe_oracle.py                                       # rewrites crust-core/tests/data/adobe_oracle.txt
+
 # What OpenPBR parameters does a MaterialX graph actually reduce to? A wrong
 # albedo decode is a plausible pastel and a wrong mask is a plausible blend, so
 # a MaterialX surface cannot be checked by eye -- this prints the numbers at a
