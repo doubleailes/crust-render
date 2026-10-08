@@ -82,11 +82,14 @@ pub fn trial_cost_s(
 /// What the later tiers will render, for the reservation.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Later {
-    /// Tier 2's seconds, whatever the trial spp: the adaptive renders.
+    /// Tier 2's seconds, whatever the trial spp: the adaptive renders and
+    /// their setup.
     pub tier2_s: f64,
     /// Tier 3's pixel-renders per trial sample: the half-depth pairs, the
     /// light-only reach renders and any baseline tier 1 will not render.
     pub tier3_pixels: f64,
+    /// Tier 3's setup, whatever the trial spp: each of those renders' own.
+    pub tier3_setup_s: f64,
 }
 
 /// The trial sample count and the reserves of the later tiers (D10).
@@ -116,7 +119,7 @@ pub fn plan(
 ) -> Plan {
     let tier1 =
         |spp: u32| trials as f64 * trial_cost_s(s_per_pixel_spp, crop_pixels, spp, repeats, 0.0);
-    let tier3 = |spp: u32| s_per_pixel_spp * later.tier3_pixels * spp as f64;
+    let tier3 = |spp: u32| s_per_pixel_spp * later.tier3_pixels * spp as f64 + later.tier3_setup_s;
     let mut spp = MIN_TRIAL_SPP;
     while spp < MAX_TRIAL_SPP {
         let next = spp * 2;
@@ -133,6 +136,20 @@ pub fn plan(
         tier2_reserve_s,
         tier3_reserve_s,
     }
+}
+
+/// The estimated cost of `renders` renders of `pixels` pixels at `spp`:
+/// the sampling, and each render's own setup (the `learned` pre-pass and
+/// guiding's training, which `shoot` pays per render). What every tier-2
+/// and tier-3 measurement is admitted on, and reserved for.
+pub fn render_cost_s(
+    s_per_pixel_spp: f64,
+    pixels: usize,
+    spp: u32,
+    renders: f64,
+    setup_per_render_s: f64,
+) -> f64 {
+    renders * (s_per_pixel_spp * pixels as f64 * spp as f64 + setup_per_render_s)
 }
 
 /// The samples per pixel guiding's training passes render before the final
@@ -229,6 +246,7 @@ mod tests {
         let later = Later {
             tier2_s: 5.0,
             tier3_pixels: (px + 6 * 128 * 128) as f64,
+            tier3_setup_s: 0.0,
         };
         // 8 trials at 16 spp: 37.7 s, tier 3 at 16 spp: 2.4 s, tier 2: 5 s.
         let p = plan(1e-6, px, 3, 8, later, 50.0);
@@ -245,6 +263,34 @@ mod tests {
         assert!((p.tier2_reserve_s - (6.0 - tier1)).abs() < 1e-9);
         assert_eq!(p.tier3_reserve_s, 0.0);
         assert_eq!(plan(1e-6, px, 3, 8, later, 0.0).tier2_reserve_s, 0.0);
+    }
+
+    /// A later render pays its setup: the reserve and the admission count
+    /// it, or tier 1 spends time a `learned` pre-pass needs.
+    #[test]
+    fn later_tiers_reserve_their_setup() {
+        let px = 3 * 128 * 128;
+        let later = Later {
+            tier2_s: 0.0,
+            tier3_pixels: px as f64,
+            tier3_setup_s: 1.5,
+        };
+        let p = plan(1e-6, px, 3, 8, later, 50.0);
+        assert_eq!(p.spp, 16);
+        assert!((p.tier3_reserve_s - (1e-6 * px as f64 * 16.0 + 1.5)).abs() < 1e-12);
+        // Setup alone can push the trials down a power of two: at 16 spp
+        // tier 1 and tier 3's sampling take 38.5 s of 39.5, and the setup's
+        // 1.5 s no longer fits beside them.
+        let no_setup = Later {
+            tier3_setup_s: 0.0,
+            ..later
+        };
+        assert_eq!(plan(1e-6, px, 3, 8, no_setup, 39.5).spp, 16);
+        assert_eq!(plan(1e-6, px, 3, 8, later, 39.5).spp, 8);
+        // Two renders of 128² at 4 spp, each with a 0.5 s pre-pass.
+        let cost = render_cost_s(1e-6, 128 * 128, 4, 2.0, 0.5);
+        assert!((cost - 2.0 * (0.065536 + 0.5)).abs() < 1e-12);
+        assert_eq!(render_cost_s(1e-6, 128 * 128, 4, 0.0, 0.5), 0.0);
     }
 
     #[test]

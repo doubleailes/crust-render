@@ -99,10 +99,17 @@ one estimator guiding's own ΔEff uses. Per pair,
 
 **Repeats are interleaved** (`B T B T …`, `--repeats`, default 3), so load lands
 on both sides, and **each pair has its own seed**: pair *i* renders both sides
-with `with_frame(frame + i · 0x9E37_79B9)` (wrapping; the constant guiding steps
-its passes by), pair 0 the scene's own, so it renders exactly the first
-version's images and two runs render the same ones (`each_pair_has_its_own_fixed_seed`;
-`run.seeds`). Both sides of a pair share the seed — the common random numbers
+with `with_frame(frame + i · 0x85EB_CA6B)` (wrapping), pair 0 the scene's own,
+so it renders exactly the first version's images and two runs render the same
+ones (`each_pair_has_its_own_fixed_seed`; `run.seeds`). The step is *not*
+guiding's pass step (`GUIDING_PASS_SEED_STEP`, 0x9E37_79B9), which the first
+implementation used: a guided render adds `(k + 1) · step` to the pair's seed
+for training pass `k`, so pass `k` of pair *i* drew the samples of pair
+*i + k + 1*'s final passes — guided pairs, and every pair of a scene authoring
+guiding, were correlated with later pairs (found in review). With MurmurHash3's
+constant no pair or pass seed meets another over 64 pairs and 32 training
+iterations, modulo 2³² as the tracer seeds (`no_pair_or_pass_shares_a_seed`;
+the old step gave 2016 collisions). Both sides of a pair share the seed — the common random numbers
 the picture check needs — and the pairs are independent draws, so "every pair
 agrees" is evidence about the error, not only the time. The seed changes only
 sample patterns: the stage's time samples are resolved at import.
@@ -274,7 +281,14 @@ The budget covers everything after import. Once the crops are chosen, tiers 2
 and 3 **reserve** their estimated cost (`schedule::plan`) and tier 1 may spend
 the rest; tier ends are cumulative, so unspent time rolls forward. Tier 2's is
 the adaptive render of every crop at `spp_a`; tier 3's the half-depth pairs (2R
-renders of crop 0) and one light-only render per crop, at the trial spp. Trial
+renders of crop 0) and one light-only render per crop, at the trial spp. Each
+render's setup counts too, in the reserves and in every tier-2 and tier-3
+admission (`schedule::render_cost_s`): the `learned` pre-pass, which covers
+the full frame whatever the crop, and guiding's training, scaled to the crop.
+The first version priced those renders by their samples alone, so a `learned`
+stage could start a measurement past the budget. Tier 2 is admitted at the
+best settings' setup as tier 1 measured it, and reserved at the authored
+settings' (the best are not known yet). Trial
 spp is the largest power of two in 2..=256 at which every tier-1 trial (combined
 included), tier 3's renders and tier 2's cost fit together. The reserves are
 those estimates with no margin: the estimates already err long, because the
@@ -348,7 +362,9 @@ direct light (`highlights_are_not_fireflies`).
 ## Calibration (harden-diagnostic-verdicts)
 
 On a 72-thread machine, otherwise idle; every threshold of the design held, and
-one finding's scope moved.
+one finding's scope moved. These runs used the first pair-seed step (guiding's,
+since replaced — see "Efficiency and its reference"); pair 0, which the reach
+and the half-depth trial use, is unchanged.
 
 - **Cornell box** (`--budget 2m`): trials at 128 spp; no trial `biased` (every
   |z| ≤ 1); noise floors 1.002; reach 99.96–100% (|z| ≤ 0.5); none of the picture
@@ -511,11 +527,11 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
   samples its own variance estimate misses: `veach_mis`'s crop_c read a reach of
   0.754 at z −3.4 at 64 spp, just inside the |z| > 4 guard. Below 1 then means
   "light sampling rarely finds this energy at this spp", not "never".
-- **Guided pairs' seeds overlap their passes'.** Pair *i* starts at
-  `frame + i · φ`, and guiding steps its passes by the same φ, so pair 1's first
-  training pass reuses pair 0's second pass's seed (at the same 2 spp, with a
-  different field). The pairs are still distinct draws, but not fully
-  independent ones.
+- **A reserve can still come up short.** It assumes the authored settings'
+  render rate and setup, and that tier 1 renders every crop; slower best
+  settings in tier 2, or a tier 1 that rendered nothing, need more. The
+  measurement is then not started and is listed under `not_tried` (`budget`),
+  and a tier 1 that rendered nothing left its whole share to roll forward.
 - **No per-object or per-light attribution** of the missing energy: which path
   or light carries it waits for `add-identity-aovs-openexrid`, and for light
   groups on large rigs.

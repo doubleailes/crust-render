@@ -28,7 +28,7 @@
 - budget 120 s, used 61.23 s (import 0.5 s, not counted), 16 threads, 3 repeats
 - probe conditions: indirect clamp off, adaptive sampling off, fixed spp true, 640×360
 - P1: 4 s
-- seeds [0, 2654435769, 5308871538]; held back from tier 1: 4 s for tier 2, 1.5 s for tier 3
+- seeds [0, 2246822507, 4493645014]; held back from tier 1: 4 s for tier 2, 1.5 s for tier 3
 - exit status 0
 
 ## Static findings
