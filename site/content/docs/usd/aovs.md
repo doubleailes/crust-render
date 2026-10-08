@@ -518,8 +518,10 @@ Read each one as that light's own noise, for example relative to its own mean
 {% end %}
 
 **Cost.** Nothing unless asked for. Each variance var adds a luminance, a square and
-two additions per sample, and two 8-byte accumulators per pixel of the tile or row
-being rendered; the finished frame holds one float per pixel, like any scalar AOV.
+two additions per sample. While a render runs it holds two 8-byte accumulators for
+every pixel of the frame (or of the [region](@/docs/reference/command-line.md#region)):
+16 bytes per pixel, about 130 MB at 4K. The finished image holds one float per pixel,
+like any scalar AOV.
 
 
 ## Motion vectors

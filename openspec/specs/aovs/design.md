@@ -1053,13 +1053,19 @@ per-pixel variance of the expression's luminance mean. The change's
 - **Zeros count.** Every sample lands in every slot, so `n` is the pixel's
   own `taken`; no count plane is kept (the proposal's `n` plane would
   always equal it).
-- **Moments live only in the unit.** `SlotKey::variance` gives the unit's
-  `SlotPlanes` a `VarPlanes { sum, sq }` (f64); `store` resolves them, and
-  the film's plane is one f32 per pixel like any scalar. A frame costs 4
-  bytes per pixel per variance var, a tile 16 more while it renders.
+- **Moments live only in the units.** `SlotKey::variance` gives a unit's
+  `SlotPlanes` a `VarPlanes { sum, sq }` (f64) in place of its `values`;
+  `store` resolves them, and the film's plane is one f32 per pixel like any
+  scalar. But `render_pass` builds every unit of a pass before it renders
+  and keeps them until the film is assembled, so while a pass runs the
+  moments cover its whole region: 16 bytes per pixel per variance var (about
+  130 MB at 4K), plus the film's 4. Streaming units into the film as they
+  finish would bound it to the units in flight.
 - **Sharing.** The variance and value slots of one expression share its DFA
   bit (distinct `SlotKey`s, one `lpes` entry), as raw and plain do. A
-  variance slot is never `hits_only` whatever its clear value.
+  variance slot is never `hits_only` whatever its clear value, and always
+  `Filtered` whatever its var's accumulation: the importer refuses
+  `Closest`, but an engine-built `AovVar` is not imported.
 - **Refusals at import** (`products.rs`): not `sourceType = "lpe"`
   (`rawLight` included), `closest` accumulation, or a type that is not one
   float/half/double; an unauthored type is `float`.

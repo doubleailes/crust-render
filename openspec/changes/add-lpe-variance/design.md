@@ -115,7 +115,9 @@ total.
 - **[f64 planes are memory]** 20 bytes per pixel per variance slot: about
   166 MB per slot at 4K. That is acceptable for an opt-in diagnostic
   channel. The diagnostic requests them on crops or low-resolution full
-  frames only.
+  frames only. *As built:* 16 bytes per pixel of the render's region while
+  a pass runs (every unit is alive until the film is assembled), about
+  130 MB at 4K, and the film's one f32 after.
 - **[Mitchell's negative weights]** `luma(w·v)` can be negative, so the
   estimator behaves as the beauty's does, an approximation. This is
   documented, not fixed: matching the beauty is the requirement.
