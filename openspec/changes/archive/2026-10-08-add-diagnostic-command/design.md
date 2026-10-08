@@ -127,9 +127,13 @@ report says `budget_exceeded_in: P1` (exit 3).
 
 - A trial is R pairs (default 3, `--repeats`), interleaved on one crop:
   `B T B T B T`. Load lands on both sides, as in `bench_ab.sh`.
-- Sampling is deterministic (openqmc), so a configuration's image, and its
-  MRSE, are identical across repeats. Only time varies. Task 3.2 verifies
-  that assumption; if it fails, MRSE is averaged across repeats.
+- Sampling is deterministic (openqmc), so an unguided configuration's
+  image, and its MRSE, are identical across repeats; only time varies.
+  Task 3.2 found the assumption false for guiding: a guided render decides
+  whether its final pass is guided from a ΔEff measured in wall-clock time,
+  so two guided renders of the same settings can differ. Each pair's MRSE
+  is therefore measured on that pair's own images (for an unguided
+  configuration, the same number every time).
 - Per pair: `ΔEff_i = (t_B · MRSE_B) / (t_T · MRSE_T)`.
 - Verdict, with ε = 0.05:
   - `better`: every `ΔEff_i > 1 + ε`;
@@ -180,8 +184,10 @@ P1 requests an engine-built `AovRequest` of value and variance vars
 | `volume` | `C<V.>.*[LO]` | |
 | `unlit_emitters` | `C.*O` | emission reached only by BSDF sampling |
 
-This is the same partition the `aovs` spec already tests to sum to the
-beauty. Each row reports the component's own relative error
+The first seven rows are the partition the `aovs` spec already tests to
+sum to the beauty (with glossy and singular reflection merged);
+`unlit_emitters` overlaps them, since every `[LO]` row also ends on `O`
+(found by task 3.4). Each row reports the component's own relative error
 (`var / max(mean², ε)`, averaged over the crop) and its relative error
 against the beauty's mean. Rows are never reported as shares of the total
 (`add-lpe-variance` D5).
