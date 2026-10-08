@@ -38,13 +38,13 @@ use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::ScatterSample;
 use crate::material::brdf::{
-    ggx_d_aniso, ggx_g2_smith_aniso, pdf_vndf_ggx_aniso_local, pdf_vndf_h_aniso_local,
-    sample_vndf_ggx_aniso_local, tangent_frame,
+    ZeltnerSheen, ggx_d_aniso, ggx_g2_smith_aniso, pdf_vndf_ggx_aniso_local,
+    pdf_vndf_h_aniso_local, sample_vndf_ggx_aniso_local, tangent_frame,
 };
 use crate::medium::Medium;
 use crate::ray::Ray;
 use crate::subsurface::SubsurfaceEntry;
-use crust_mtlx::{Bsdf, Closure, Closures, DiffuseModel, NodeId, ScatterMode, Val};
+use crust_mtlx::{Bsdf, Closure, Closures, DiffuseModel, NodeId, ScatterMode, SheenMode, Val};
 use mx::{Fresnel, FresnelModel};
 
 /// How many leaves a resolved closure holds inline.
@@ -127,9 +127,14 @@ pub enum Lobe {
         /// A thin-walled surface transmits straight through (a delta lobe).
         thin_walled: bool,
     },
+    /// `sheen_bsdf`. In `conty_kulla` mode MaterialX's Imageworks sheen,
+    /// sampled cosine-weighted; in `zeltner` mode the LTC sheen, prepared at
+    /// this vertex's view ([`ZeltnerSheen`]), the one the native `OpenPBR`'s
+    /// fuzz is.
     Sheen {
         color: Vec3A,
         roughness: f32,
+        zeltner: Option<ZeltnerSheen>,
     },
     Translucent {
         color: Vec3A,
@@ -257,9 +262,19 @@ impl Prepared {
                     c(tint)
                 )
             }
-            Lobe::Sheen { color, roughness } => {
-                format!("sheen color {} roughness {roughness:.3}", c(color))
-            }
+            Lobe::Sheen {
+                color,
+                roughness,
+                zeltner,
+            } => format!(
+                "sheen ({}) color {} roughness {roughness:.3}",
+                if zeltner.is_some() {
+                    "zeltner"
+                } else {
+                    "conty_kulla"
+                },
+                c(color)
+            ),
             Lobe::Translucent { color } => format!("translucent color {}", c(color)),
             Lobe::Hair(h) => format!("hair albedo {}", c(h.albedo())),
             Lobe::Subsurface {
@@ -1162,8 +1177,10 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
         Bsdf::Hair { .. } => prepare_hair(&cx, &leaf.bsdf),
         Bsdf::Translucent { color } => prepare_translucent(&cx, color),
         Bsdf::Sheen {
-            color, roughness, ..
-        } => prepare_sheen(&cx, color, roughness),
+            color,
+            roughness,
+            mode,
+        } => prepare_sheen(&cx, color, roughness, *mode),
         Bsdf::Dielectric {
             tint,
             ior,
@@ -1351,14 +1368,25 @@ fn prepare_translucent(cx: &LeafInputs<'_>, color: &u32) -> Built {
 
 /// [`prepare`] for a `Sheen` leaf.
 #[inline(always)]
-fn prepare_sheen(cx: &LeafInputs<'_>, color: &u32, roughness: &u32) -> Built {
+///
+/// Its directional albedo `E` (the layer throughput `1 − E · weight`, and the
+/// pick weight) is the mode's own: MaterialX's Imageworks fit, or the
+/// Zeltner table's `R`, which is the leaf's exact albedo.
+fn prepare_sheen(cx: &LeafInputs<'_>, color: &u32, roughness: &u32, mode: SheenMode) -> Built {
     let color = cx.rgb(*color);
     let r = cx.s(*roughness).x().clamp(0.0, 1.0);
-    let e = mx::imageworks_sheen_dir_albedo(cx.nv, r);
+    let (e, zeltner) = match mode {
+        SheenMode::ContyKulla => (mx::imageworks_sheen_dir_albedo(cx.nv, r), None),
+        SheenMode::Zeltner => {
+            let lobe = ZeltnerSheen::new(r, cx.nv);
+            (lobe.albedo(), Some(lobe))
+        }
+    };
     (
         Lobe::Sheen {
             color,
             roughness: r,
+            zeltner,
         },
         (cx.w.luma.of(color) * e).max(0.02),
         Some(Vec3A::splat(e)),
@@ -1593,7 +1621,23 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
         // direction: no value and no continuous density.
         Lobe::Subsurface { .. } => (Vec3A::ZERO, 0.0),
         Lobe::Hair(ref h) => h.eval(l),
-        Lobe::Sheen { color, roughness } => {
+        Lobe::Sheen {
+            color,
+            zeltner: Some(lobe),
+            ..
+        } => {
+            if l.z <= 0.0 {
+                return (Vec3A::ZERO, 0.0);
+            }
+            // The LTC carries the cosine; the value here goes without it.
+            let d = lobe.density(v, l);
+            (color * (lobe.albedo() * d / l.z), d)
+        }
+        Lobe::Sheen {
+            color,
+            roughness,
+            zeltner: None,
+        } => {
             if l.z <= 0.0 {
                 return (Vec3A::ZERO, 0.0);
             }
@@ -1695,8 +1739,15 @@ fn refraction(v: Vec3A, l: Vec3A, eta: f32, ax: f32, ay: f32) -> (f32, f32, f32)
 /// Samples a direction from one lobe.
 fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample> {
     match *lobe {
-        Lobe::Diffuse { .. } | Lobe::Sheen { .. } => Some(LobeSample::Continuous {
+        Lobe::Diffuse { .. } | Lobe::Sheen { zeltner: None, .. } => Some(LobeSample::Continuous {
             dir: cosine_hemisphere(uv),
+            spread: crate::RayCone::MAX_SPREAD,
+        }),
+        Lobe::Sheen {
+            zeltner: Some(lobe),
+            ..
+        } => lobe.sample(v, uv).map(|dir| LobeSample::Continuous {
+            dir,
             spread: crate::RayCone::MAX_SPREAD,
         }),
         Lobe::Translucent { .. } => {

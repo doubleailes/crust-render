@@ -137,8 +137,10 @@ Following Adobe's and Disney's formulation:
   deviation rule rather than a silent clamp.
 
 *Alternative:* MaterialX's analytic fits, which need no table. They differ from the
-"Volume" fit by up to about 0.01 in R and 0.1 in a⁻¹, and Adobe is the reference
-this change tracks. The user chose one flavour, so it is the table.
+"Volume" fit by up to 0.013 in R for roughness ≥ 0.3 and 0.076 below it toward
+grazing, and by up to 0.30 in a⁻¹ (measured over a 101 × 100 grid; an early
+spot check had said "about 0.01"), and Adobe is the reference this change
+tracks. The user chose one flavour, so it is the table.
 
 ### D4. Native layering takes R(ω_o) once per shading point
 

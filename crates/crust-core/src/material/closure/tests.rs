@@ -1176,3 +1176,101 @@ fn a_thick_glass_has_no_straight_transmission() {
         Vec3A::ZERO
     );
 }
+
+/// A `sheen_bsdf` in `zeltner` mode alone under a surface, at roughness `r`.
+fn zeltner_sheen(r: f32) -> String {
+    doc(&format!(
+        r#"<sheen_bsdf name="t" type="BSDF">
+             <input name="roughness" type="float" value="{r}" />
+             <input name="mode" type="string" value="zeltner" />
+           </sheen_bsdf>
+           <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="t" /></surface>"#
+    ))
+}
+
+/// The materials spec's "Both Zeltner sheens agree": a MaterialX `zeltner`
+/// sheen and the native `OpenPBR`'s fuzz are one implementation, so a white
+/// one of each at the same roughness shades alike toward every direction.
+/// (The two build different tangent frames; the LTC sheen is isotropic
+/// about the normal, so that cannot show.)
+#[test]
+fn both_zeltner_sheens_agree() {
+    let dirs = [
+        Vec3A::new(0.3, 0.2, 0.93),
+        Vec3A::new(-0.8, 0.1, 0.59),
+        Vec3A::new(0.1, -0.95, 0.3),
+        Vec3A::new(0.97, 0.0, 0.24),
+    ];
+    for r in [0.0f32, 0.3, 1.0] {
+        let native = crate::OpenPBR {
+            base_weight: 0.0,
+            specular_weight: 0.0,
+            fuzz_weight: 1.0,
+            fuzz_roughness: r,
+            ..crate::OpenPBR::default()
+        };
+        for cos in [0.1f32, 0.5, 1.0] {
+            let theta = cos.acos();
+            let leaf = resolved(&zeltner_sheen(r), "s", theta, true);
+            let (ray, rec) = (arriving(theta), hit(true));
+            for wi in dirs {
+                let wi = wi.normalize();
+                let (a, _) = leaf.eval(&ray, &rec, wi).expect("the leaf evaluates");
+                let (b, _) =
+                    crate::Material::eval(&native, &ray, &rec, wi).expect("OpenPBR evaluates");
+                assert!(
+                    (a - b).abs().max_element() <= 1e-5 * b.max_element().max(1e-3),
+                    "r {r} cos {cos} toward {wi}: MaterialX {a} vs OpenPBR {b}"
+                );
+            }
+        }
+    }
+}
+
+/// A `zeltner` leaf samples with the density it reports: every sample's pdf
+/// is `eval`'s toward it, and the density integrates to the share of
+/// samples that land (an LTC sheared below the plane loses the rest).
+#[test]
+fn a_zeltner_leaf_samples_with_the_density_it_reports() {
+    for r in [0.1f32, 0.5, 1.0] {
+        for cos in [0.15f32, 0.6, 1.0] {
+            let theta = cos.acos();
+            let c = resolved(&zeltner_sheen(r), "s", theta, true);
+            let (ray, rec) = (arriving(theta), hit(true));
+            const NT: usize = 256;
+            const NP: usize = 128;
+            let mut mass = 0.0f64;
+            for i in 0..NT {
+                let t = (i as f32 + 0.5) / NT as f32;
+                let z = t * t;
+                let s = (1.0 - z * z).max(0.0).sqrt();
+                for j in 0..NP {
+                    let phi = 2.0 * PI * (j as f32 + 0.5) / NP as f32;
+                    let wi = Vec3A::new(s * phi.cos(), s * phi.sin(), z);
+                    let p = c.eval(&ray, &rec, wi).map_or(0.0, |(_, p)| p);
+                    mass += p as f64 * 2.0 * t as f64;
+                }
+            }
+            let mass = mass / NT as f64 * (2.0 * std::f64::consts::PI / NP as f64);
+            let mut sampler = S(0);
+            let n = 4096;
+            let mut landed = 0;
+            for _ in 0..n {
+                if let Some(x) = c.scatter(&ray, &rec, sampler.next()) {
+                    landed += 1;
+                    let (_, p) = c.eval(&ray, &rec, x.ray.direction()).expect("evaluates");
+                    assert!(
+                        (p - x.pdf).abs() <= 1e-3 * x.pdf.max(1.0),
+                        "r {r} cos {cos}: sampled pdf {} vs eval {p}",
+                        x.pdf
+                    );
+                }
+            }
+            let landed = landed as f64 / n as f64;
+            assert!(
+                (mass - landed).abs() < 0.02,
+                "r {r} cos {cos}: density mass {mass}, samples landed {landed}"
+            );
+        }
+    }
+}

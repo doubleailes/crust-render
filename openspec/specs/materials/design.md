@@ -351,7 +351,9 @@
     F82 generalized-Schlick Fresnel, each optionally through the Airy thin film
     a `layer` of `thin_film_bsdf` puts on the base's specular leaves; EON (an
     `oren_nayar_diffuse_bsdf` with `energy_compensation`), plain Oren–Nayar and
-    Burley diffuse; Imageworks sheen. A specular leaf's `roughness` is GGX
+    Burley diffuse; sheen: Imageworks in `conty_kulla` mode, and in `zeltner` mode the
+    native fuzz's LTC (`brdf::ZeltnerSheen`, Disney's table), sampled exactly and
+    prepared at the vertex's view. A specular leaf's `roughness` is GGX
     **alpha**, taken as authored — the DPEL teapot's `desquare_roughness_*`
     nodes exist to produce it — and only the BSDL table below is indexed by
     perceptual roughness `√α`. Dielectric scatter modes: `R`; `RT`, which picks
@@ -588,15 +590,16 @@
     and bit-identical to the table Typhoon ships
     (`ty:dielectricLayerThroughputMode = "bsdl"`, its default); a film on the
     dielectric uses MaterialX's Fresnel-weighted fit instead, as Typhoon does.
-    Generalized Schlick and sheen use MaterialX's analytic fits
-    (`mx_ggx_dir_albedo`, `mx_imageworks_sheen_dir_albedo`). The tables describe
+    Generalized Schlick and a `conty_kulla` sheen use MaterialX's analytic fits
+    (`mx_ggx_dir_albedo`, `mx_imageworks_sheen_dir_albedo`); a `zeltner` sheen layers
+    with its own table's `R`, which is the leaf's exact albedo. The tables describe
     BSDL's and MaterialX's lobes, not crust's, so the gap is measured and pinned
     (`closure/tests.rs`, 4096 samples per point): the BSDL table is within
     ±0.004 of crust's integrated dielectric leaf everywhere except near-smooth
     grazing, worst +0.020 (IOR 2, r 0.05, cos 0.1), where its linear
     interpolation in cosine undershoots a steep curve; the Schlick fit is within
-    0.011; the sheen fit overestimates by up to 0.035 at low roughness and
-    grazing — a sheen layer there loses energy, never creates it. The white
+    0.011; the `conty_kulla` sheen fit overestimates by up to 0.035 at low
+    roughness and grazing — a sheen layer there loses energy, never creates it. The white
     furnace over every fixture material (`tests/mtlx_surfaces.rs`) bounds the
     sum: nothing returns more than its environment.
   - **Surface shaders are their nodegraphs, node for node.** `open_pbr_surface`
@@ -687,8 +690,9 @@
     importer prints **one `WARN` per material**, beside the unsupported-node
     warning: glTF `occlusion`, the inputs MaterialX's own graphs ignore (glTF `dispersion` and
     `thickness`, `standard_surface`'s `transmission_depth` / `scatter` /
-    `dispersion`, OpenPBR's `transmission_dispersion_scale`) and a live Zeltner
-    sheen (evaluated as Imageworks). Default-valued inputs stay silent: the suite authors
+    `dispersion`, OpenPBR's `transmission_dispersion_scale`). A `zeltner` sheen was
+    once reported too, while it was evaluated as Imageworks; it is now evaluated as
+    itself. Default-valued inputs stay silent: the suite authors
     `alpha_mode` and `geometry_opacity` at their defaults in dozens of
     documents.
   - **The EDF half is a second list, not a leaf.** MaterialX's `<surface>` has an
@@ -934,8 +938,16 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   reports as unsupported. Nodegraph-scoped names are flattened: every node is
   addressed by its prim path.
 
-- **Approximated leaves.** A Zeltner sheen (`mode = zeltner`, OpenPBR's fuzz)
-  is evaluated as Imageworks / Charlie, and reported per material when live.
+- **A `zeltner` sheen is Adobe's, not MaterialX's.** MaterialX's own GLSL
+  evaluates `mode = zeltner` with analytic fits to the LTC coefficients and the
+  albedo (`mx_zeltner_sheen_ltc_aInv` / `_bInv`, `mx_zeltner_sheen_dir_albedo`,
+  roughness clamped to [0.01, 1]); crust uses the table those fits approximate,
+  Disney's "Volume" fit, which Adobe and BSDL ship, so that a MaterialX
+  `open_pbr_surface` and a native `OpenPBR` share one fuzz. Measured over a
+  101 × 100 grid of roughness and view cosine, the two differ by at most 0.013 in
+  `R` for roughness ≥ 0.3, and by up to 0.076 below it toward grazing (roughness
+  0.06, cos θ_o 0.01: 0.262 against the fit's 0.186); `a⁻¹` by up to 0.30. The
+  OSL oracle does not cover BSDF nodes, so nothing pins MaterialX's side.
 - **The random walk reflects less than its colour, as Typhoon's does.**
   Chiang's inversion is fitted for a *diffuse* entry; entered by refraction, a
   walk heads deeper and more of it is absorbed. Through the integrator a colour

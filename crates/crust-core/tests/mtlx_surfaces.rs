@@ -1091,19 +1091,17 @@ fn default_valued_inputs_are_silent() {
     assert!(l.reported.is_empty(), "{:?}", l.reported);
 }
 
+/// The materials spec's "A live fuzz layer reports its sheen approximation":
+/// it no longer does, because the fuzz's `zeltner` sheen is evaluated as one.
 #[test]
-fn a_live_fuzz_layer_reports_its_sheen_approximation() {
+fn a_live_fuzz_layer_is_evaluated_not_reported() {
     let l = load(
         "fuzz",
         r#"<open_pbr_surface name="s" type="surfaceshader">
              <input name="fuzz_weight" type="float" value="0.5" />
            </open_pbr_surface>"#,
     );
-    assert!(
-        l.reported.iter().any(|r| r.contains("zeltner")),
-        "{:?}",
-        l.reported
-    );
+    assert!(l.reported.is_empty(), "{:?}", l.reported);
     let quiet = load(
         "nofuzz",
         r#"<open_pbr_surface name="s" type="surfaceshader" />"#,
