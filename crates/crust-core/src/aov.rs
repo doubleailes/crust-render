@@ -1046,21 +1046,21 @@ impl AovFilm {
         }
     }
 
-    /// Blends the films of independent passes with the beauty's own
-    /// inverse-variance weights (`weights[k] / total`, applied in pass order
-    /// exactly as the beauty blend applies them), so a filtered AOV of a
-    /// guided render is the same linear combination of passes as the
+    /// Blends the films of independent passes with the beauty's own weights
+    /// (`shares[k]`, each pass's share of the sample budget, applied in pass
+    /// order exactly as the beauty blend applies them), so a filtered AOV of
+    /// a guided render is the same linear combination of passes as the
     /// beauty. Closest slots take the closest sample across passes, the
     /// sample count sums, and the variance of the blended mean is
-    /// `Σ (wₖ/total)² · varₖ` — for the `variance` source and an
-    /// expression's variance alike, in the same arithmetic.
+    /// `Σ sₖ² · varₖ` — for the `variance` source and an expression's
+    /// variance alike, in the same arithmetic.
     ///
-    /// A pass with no weight (its variance could not be estimated, as at
-    /// 1 spp) adds nothing to the variance, and nothing non-finite to a
-    /// filtered plane: `0 · inf` is NaN, where the beauty, finite, gets 0.
-    /// A [`SlotKey::hits_only`] slot takes the weighted mean of the passes
-    /// whose pixel hit something, and keeps its clear value where none did.
-    pub(crate) fn blend(films: Vec<AovFilm>, weights: &[f64], total: f64) -> AovFilm {
+    /// A pass with no share (no budget) adds nothing to the variance, and
+    /// nothing non-finite to a filtered plane: `0 · inf` is NaN, where the
+    /// beauty, finite, gets 0. A [`SlotKey::hits_only`] slot takes the
+    /// weighted mean of the passes whose pixel hit something, and keeps its
+    /// clear value where none did.
+    pub(crate) fn blend(films: Vec<AovFilm>, shares: &[f64]) -> AovFilm {
         let first = films.first().expect("at least one pass");
         let mut out = AovFilm {
             rect: first.rect,
@@ -1086,8 +1086,7 @@ impl AovFilm {
                 }
             })
             .collect();
-        for (film, w) in films.iter().zip(weights) {
-            let share = *w / total;
+        for (film, &share) in films.iter().zip(shares) {
             for ((dst, src), hit_share) in out.slots.iter_mut().zip(&film.slots).zip(&mut hit_share)
             {
                 match dst.key.accumulation {
@@ -1405,10 +1404,9 @@ mod tests {
         // The weighted mean of the hits alone; the miss-only pixel clears.
         assert_eq!(depth, &vec![2.5, f32::INFINITY]);
 
-        // Blended with a zero-weight pass (a 1 spp pass whose variance
-        // could not be estimated), nothing goes NaN either.
+        // Blended with a zero-share pass, nothing goes NaN either.
         let other = film.clone();
-        let blended = AovFilm::blend(vec![film, other], &[0.0, 1.0], 1.0);
+        let blended = AovFilm::blend(vec![film, other], &[0.0, 1.0]);
         assert_eq!(
             &blended.var_channels(&Buffer::new(2, 1), &v)[0],
             &vec![2.5, f32::INFINITY]
@@ -1433,7 +1431,7 @@ mod tests {
         one_spp.store(&unit, 0, 0, 0, 1.0, 1, f64::INFINITY);
         let mut trained = AovFilm::new(&layout, PixelRect::full(1, 1));
         trained.store(&unit, 0, 0, 0, 4.0, 4, 0.5);
-        let blended = AovFilm::blend(vec![one_spp, trained], &[0.0, 2.0], 2.0);
+        let blended = AovFilm::blend(vec![one_spp, trained], &[0.0, 1.0]);
         assert_eq!(
             blended.var_channels(&Buffer::new(1, 1), &v),
             vec![vec![0.5]]

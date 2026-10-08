@@ -1166,8 +1166,7 @@ pass, and looked up identically on the bounce side.
 
 **For crust.** Spatiotemporal *reuse* is a real-time amortisation, and in a
 progressive offline renderer it is a liability. It introduces cross-pixel
-correlation, which the adaptive stop and the inverse-variance pass blending both
-assume away.
+correlation, which the adaptive stop assumes away.
 
 **Per-vertex RIS without reuse**, on the other hand, is plain importance
 sampling with a better pdf:

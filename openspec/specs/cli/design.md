@@ -132,6 +132,19 @@ cargo run --release -p crust-jit --example jit_bench -- lion_ldX.mtlx      # ...
 cargo run --release -p crust-render --example light_occlusion -- \
     samples/ALab/entry.usda --frame 1004 --camera /path/to/cam
 
+# Is guiding biased on a crop, or only noisier? Renders the crop guided and
+# unguided, clamp and adaptive sampling off, SEEDS seeds each, and reports each
+# side's mean luminance ± the standard error across seeds (so fireflies count
+# and no per-pixel variance is trusted), the median, z unpaired and paired by
+# seed, and on how many seeds guided is darker; each guided render's ΔEff and
+# pass weight shares go to stderr. Seed i renders frame FRAME + i·STEP (default
+# 0x9E3779B9, guiding's own pass step: a guided render's training passes then
+# share seeds with later seeds' renders; pass e.g. 1000003 for an independent
+# set). ALab's import takes ~160 s, each render ~5 s at 64 spp on 72 threads.
+# #244 was found and closed with it (rendering's design record, "Path guiding").
+cargo run --release -p crust-render --example guided_bias_probe -- \
+    renders/alab/alab_aovs.usda 1004 176 88 448 360 64 40 [STEP]
+
 # Placing a camera in a downloaded production asset, and settling whether a
 # texture is display-encoded or linear (see "Ptex" under USD import).
 cargo run --release -p crust-render --example scene_bounds -- scene.usda

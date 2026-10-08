@@ -232,7 +232,8 @@ other. The pairs:
   test. A filtered AOV uses exactly the beauty's per-sample weight `wx·wy` and
   its `weight_sum` (with the same `/ taken` fallback in `AovFilm::store`), and
   a guided render's AOVs blend with the beauty's own pass weights
-  (`blend_weights`); change either side alone and an AOV stops matching the
+  (`pass_weights`, computed once in `render_guided`); change either side alone
+  and an AOV stops matching the
   image it was rendered with. AOV planes are per pixel, in the pixel's own
   sample order, so tiles ↔ scanlines stays bit-identical for every channel.
 - **Light path expressions route the beauty, not a copy of it.** The AOV

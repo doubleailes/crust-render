@@ -399,9 +399,14 @@ and the half-depth trial use, is unchanged.
   standard error across seeds — gave 0.4611 ± 0.0046 unguided against
   0.4294 ± 0.0055 guided: **6.9% darker, z −4.4**, the guided seeds below the
   unguided mean 33 times in 40. That is the design's premise working: a
-  `biased` verdict on an unbiased factor is a renderer problem (`rendering`'s
-  Known gaps; [#244](https://github.com/doubleailes/crust-render/issues/244)). It
-  is not fixed here.
+  `biased` verdict on an unbiased factor is a renderer problem
+  ([#244](https://github.com/doubleailes/crust-render/issues/244)): guided passes
+  were blended by weights estimated from their own samples. Fixed by
+  `unbiased-guided-pass-blend` (`rendering`'s design record, "Path guiding"). The
+  same `--budget 10m` run, three crops at 32 spp, then read guiding `worse`
+  (ΔEff 0.14; shifts +1.3%, +0.4%, −2.8%, |z| ≤ 3.1) where the parent commit read
+  `biased` (−3.7%, −4.1%, −3.5%; crop_c at z −4.06). At `--budget 2m` it still
+  reads `biased`, on the wrong side (Known gaps, "At a few samples").
 
 Two lessons. On a firefly-dominated crop at a few samples, the trimmed shift
 says *that* a trial moved energy, not by how much or which way: the same
@@ -514,10 +519,16 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
 - **The picture check trims 1%.** A bias only a few pixels show (a caustic one
   setting drops) can pass it; the light-sampling reach and `firefly_energy`,
   which count every pixel, report that energy instead.
-- **A biased trial's shift is a sign, not a measure, at a few samples.** On a
+- **At a few samples the picture check misjudges a trial that adds samples.** On a
   firefly-dominated crop the trimmed means depend on which pixels each pair
-  trims (ALab, 4 spp: guiding read +8–13% where its bias is −7%). The verdict
-  held; the number did not. More budget makes it a measure.
+  trims, and a trial whose image holds more samples per pixel than the baseline's
+  loses less to the trim. A guided trial does: at 4 spp it is 80% its 16 training
+  spp. On ALab at `--budget 2m` guiding read `biased` at +8–13% while it was 7%
+  *darker*, and still reads `biased`, at +12–17% (z 9–15), now that it is
+  unbiased (`rendering`'s design record, "Path guiding"; at `--budget 10m` it
+  reads `worse`, |z| ≤ 3.1). Neither the number nor, there, the verdict holds;
+  more budget makes both trustworthy. Comparing a guided trial with a baseline
+  at its total spp would remove the mismatch.
 - **Tier 2's adaptive test can take much of a short budget.** On ALab at
   `--budget 2m` it reserved 32.8 s (three crops at 128 spp) to report 0.6–4%
   saved, and tier 1 stayed at 4 spp.

@@ -69,8 +69,8 @@ consumed as ordinary dependencies:
      The tiled path still gathers its tiles serially: its copy is one pixel store
      each, far below what timing can see.
    The two are **bit-identical**, guided renders included: the per-pixel work is the
-   same, and the tiled path hands a pass's guiding training samples and its variance
-   sum (both order-dependent in floating point) on in scanline order. Keep it that way —
+   same, and the tiled path hands a pass's guiding training samples (order-dependent
+   in floating point) on in scanline order. Keep it that way —
    a render mode must be scheduling only.
    Pixel reconstruction (`filter.rs`, `crust:pixelFilter` / `--filter`) is **filter
    importance sampling**, not splatting: each pixel warps its jitter through the
@@ -355,12 +355,50 @@ consumed as ordinary dependencies:
 4. **Path guiding** (opt-in via `crust:pathGuiding`, `guiding/` module): a pure-Rust
    Practical Path Guiding SD-tree (`GuidingField`). `render_guided()` runs training
    passes at 2, 2, 4, 8, … spp (geometric, floored at 2 so every pass can estimate
-   its own variance), splats `(position, direction, luminance·cos²)` samples
+   the variance the efficiency estimate below needs), splats
+   `(position, direction, luminance·cos²)` samples
    into the field between passes, then renders the final pass with one-sample MIS
    between the frozen field and the BSDF (mixture pdf; secondary bounces only —
    primary vertices sit far below the field's spatial resolution). All passes
-   (training + final) are blended into the output weighted by inverse variance, so
-   the training budget is not discarded. Delta/transmissive
+   (training + final) are blended into the output, each weighted by its share of the
+   total *configured* sample budget (`pass_weights`: 2, 2, 4, 8 and a 64-spp final
+   pass weigh 2.5, 2.5, 5, 10 and 80%), so the training budget is not discarded. The
+   beauty, the AOV films (`AovFilm::blend`), the blend's variance (`Σ sₖ² varₖ`) and
+   the efficiency reference below take the same shares. They are fixed before any
+   pass renders on purpose. They used to be inverse *estimated* variances, each from
+   its pass's own samples — biased wherever rare bright paths carry the image: a
+   low-spp pass that misses them is dark *and* looks low-variance, so it takes the
+   weight, and one that caught them is down-weighted with their energy. ALab's guided
+   renders came out 7% darker ([#244](https://github.com/doubleailes/crust-render/issues/244));
+   logged shares like `[2, 69, 6, 8, 14]` gave a 2-spp training pass 69% of the image.
+   The final pass weighs its configured spp, never the samples an adaptive pass took,
+   which depend on the pixel's values too. Measured on ALab with
+   `guided_bias_probe` (`cli` cookbook): crop `[176, 88, 448, 360]` of frame 1004,
+   64 spp, clamp and adaptive sampling off, mean crop luminance ± the standard error
+   across 40 seeds, paired by seed:
+
+   | | mean | median | vs unguided | z (unpaired / paired) | darker, same seed |
+   |---|---|---|---|---|---|
+   | unguided | 0.4611 ± 0.0046 | 0.462 | | | |
+   | guided, inverse variance | 0.4311 ± 0.0056 | 0.429 | −6.5% | −4.1 / −4.7 | 36/40 |
+   | guided, budget weights | 0.4461 ± 0.0049 | 0.442 | −3.3% | −2.2 / −2.7 | 30/40 |
+
+   (The issue's run of the same seeds read 0.4294 guided: whether a final pass is
+   guided depends on a wall-clock `ΔEff`.) The −3.3% is those 40 seeds, not a bias.
+   Instrumented to log every pass's own mean
+   (80 seeds, the first 40 the same), each guided pass against an unguided render
+   with its seed and spp read: pass 0 (field untrained) bit-identical on every seed;
+   passes 1–3 −3.3 ± 3.3%, −0.6 ± 2.1%, −0.3 ± 1.8%; the guided final pass
+   −0.9 ± 0.9% (z −2.6 on seeds 0–39, +1.5 on seeds 40–79); the blend −0.5 ± 0.8%
+   (z −0.6). So the guide mixture ↔ NEE pair shows no bias at this resolution either.
+   An independent 40 seeds at 256 spp (seed step 1000003, so no training pass shares a
+   seed with another render) read 0.4560 ± 0.0034 guided against 0.4547 ± 0.0016
+   unguided: +0.3%, z +0.3 unpaired and +0.4 paired, darker on 23 of 40 seeds, where
+   a −3.3% bias would have read z ≈ −4.8. `samples/caustic_guided.usda` (a rough glass
+   ball under a small sphere light) is the same failure in miniature: at 64², 256 spp
+   and 32 seeds its shadow came out at 0.51 of the unguided mean with the old blend and
+   at 0.97 with budget weights (`guided_caustic_is_not_darkened`).
+   Delta/transmissive
    materials (`Material::eval` → `None`) and untrained regions fall back to pure BSDF
    sampling. The NEE weight competes against the same mixture pdf — keep the two sides
    consistent or emission gets double-counted. The quadtree descent draws a fresh pair
@@ -373,7 +411,8 @@ consumed as ordinary dependencies:
    "Path Guiding in Disney's Zootopia 2"): efficiency `E = 1/(wall-clock cost × MRSE)`,
    comparing the first pass (field untrained → effectively unguided) against the last
    training pass (field most trained). MRSE normalizes each pass's per-pixel variance
-   by one *shared* reference image (the blend of all training passes) — never by the
+   by one *shared* reference image (the budget-weighted blend of all training passes,
+   for the same reason as the image blend) — never by the
    pass's own noisy mean, which would correlate numerator and denominator and break
    the 1/spp scaling the comparison relies on. If `ΔEff < 1`, the final pass renders
    unguided (training passes still blend in; every pass is unbiased either way).
@@ -642,19 +681,29 @@ randomness use `openqmc::pcg::Rng`.
   transmittance, boosted `2R/(1+R)` reflection, view-dependent tint) — which the
   integrator takes over as a pass-through (above), so the guide never sees it. The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
-- **Guided renders of ALab are darker than unguided ones.** `crust diagnostic`'s
-  picture check flagged it (`diagnostics` design record, "Calibration"), and a direct
-  test confirmed it: a 272×272 crop of frame 1004 at 64 spp, clamp and adaptive
-  sampling off, 40 seeds each, read 0.4294 ± 0.0055 guided against 0.4611 ± 0.0046
-  unguided — 6.9% darker, z −4.4 on the standard error across seeds. Not yet
-  diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)). Two
-  suspects: the pass blend, whose weights are each pass's *estimated* mean variance,
-  so a pass that caught a firefly is down-weighted along with the firefly's energy (a
-  known bias of weights estimated from the data they weigh, largest where fireflies
-  carry the image, as on ALab) — 8 of 9 guided renders darkened with an *unguided*
-  final pass, and one gave a 2-spp training pass 69% of the weight; and the guide
-  mixture ↔ NEE pair. The Cornell box and `veach_mis` show no such shift (|z| < 2 at
-  64–128 spp).
+- **`ΔEff` cannot see rare bright paths, so guiding can make a render noisier.** It
+  compares the 2-spp first pass's variance with the last training pass's, and passes
+  that small rarely hold the paths that carry a firefly-dominated image. On ALab's
+  crop (above) it reads 1.02–1.20 on all 40 seeds and keeps every final pass guided,
+  yet the guided final pass is the noisier one: across 80 seeds its crop mean's
+  standard deviation is 0.036 against 0.025 for an unguided 64-spp render, about
+  twice the variance; with the training passes blended in, 0.031 (1.5× the variance,
+  while spending 80 spp and the training's overhead against 64). A wrong "on" costs
+  noise, never bias. Under the inverse-variance reference the same seeds read
+  0.02–4.20 and kept 15 of 40 final passes guided, but only because that reference
+  was biased. At 256 spp (independent seeds, `ΔEff` 1.04–1.25, every final pass
+  guided) the guided crop's standard error across seeds is 2.1× the unguided one's,
+  4.4× the variance. `caustic_guided.usda` moves the same way: `ΔEff` 0.01–0.87 (every
+  final pass unguided) before, 3.36–3.84 (every one guided) after, at its authored
+  256² and 64 spp over 4 seeds; at the test's 64² and 256 spp the guided shadow's
+  mean over blocks of 8 seeds spreads 0.150–0.205 against 0.188–0.204 unguided.
+- **On `cornellbox_guided.usda` guiding does not pay off.** At its 512², 8 training
+  passes and a 64-spp final pass spend 320 spp. Clamp and adaptive sampling off, 4
+  seeds against an unguided 16384-spp reference: relMSE 0.0356 guided (`ΔEff`
+  1.35–1.43, final pass guided), 0.155 unguided at 64 spp and 0.0310 unguided at
+  320 spp, and the guided render took 41.8 s against 6.5 s for the 320-spp one (min
+  of 6 interleaved runs, spreads under 1%). The "about 20% less error at equal
+  spp" the README and the site used to claim counted only the final pass's samples.
 
 ## Known gaps: volume regions
 

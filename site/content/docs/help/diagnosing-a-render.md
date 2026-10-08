@@ -309,10 +309,11 @@ report: every one of them is meant to change only noise and time.
 - **The picture check trims.** A bias only a few pixels show — a caustic one setting
   drops — can pass it; the light-sampling reach and `firefly_energy`, which count every
   pixel, report that energy instead.
-- **At a few samples, a biased trial's shift is a sign, not a measure.** Where
-  fireflies carry the image, the shift depends on which pixels each pair leaves out:
-  on ALab at 4 spp guiding read +8–13% brighter, where it is in fact about 7% darker
-  (at 32 spp the check read −4% to −13%). Trust the verdict; read the number at a
-  larger `--budget`.
+- **At a few samples, the picture check can misjudge guiding.** Where fireflies carry
+  the image, the shift depends on which pixels each pair leaves out, and a guided
+  trial, which also holds its training passes' samples, loses fewer of them than the
+  baseline. On ALab at 4 spp guiding reads 12–17% brighter, and `biased`, though it
+  is unbiased; at 32 spp it reads within 3% of the baseline. Read a guiding verdict at
+  a larger `--budget`.
 - **Thread time, not wall time.** A crop's baseline time is the time its tiles took on
   their workers, summed: a share of the work.

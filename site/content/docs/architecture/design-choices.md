@@ -163,9 +163,11 @@ sides rather than given a stand-in.
 is the only biased default. Set it to 0 for reference renders.
 
 **Options on top.** Adaptive sampling stops converged pixels early. Path guiding
-(*Practical Path Guiding*, Müller et al. 2017, reimplemented in Rust) is opt-in. On the
-bundled `cornellbox_guided.usda`, where all light arrives indirectly, guiding cuts the
-error by about 20% at the same sample count. Light selection can learn which lights reach
+(*Practical Path Guiding*, Müller et al. 2017, reimplemented in Rust) is opt-in. It
+doesn't pay off yet: on the bundled `cornellbox_guided.usda`, where all light arrives
+indirectly, an unguided render with the same total samples has about 13% less error, in
+a sixth of the time (see [Limitations](@/docs/architecture/limitations.md#path-guiding)).
+Light selection can learn which lights reach
 each region of the scene (`learned`).
 
 ## The engine decodes no files

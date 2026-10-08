@@ -351,9 +351,8 @@ impl CropImage {
 }
 
 /// The reference of a crop: the inverse-variance blend of every unbiased
-/// image of it (each weighted by one over its mean variance, as
-/// `render_guided` blends passes), and that blend's own variance,
-/// `Σ (wₖ/W)² varₖ` per pixel. An image whose variance cannot be weighed
+/// image of it (each weighted by one over its mean variance), and that
+/// blend's own variance, `Σ (wₖ/W)² varₖ` per pixel. An image whose variance cannot be weighed
 /// (non-finite or zero) weighs nothing; with none weighable, the first
 /// image is the reference.
 pub fn reference(images: &[&CropImage]) -> CropImage {

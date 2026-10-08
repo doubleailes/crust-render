@@ -127,10 +127,17 @@ render.
   same stage can differ when that estimate sits near 1.
 - **Surfaces only.** Volumes and phase functions aren't guided.
 - **Luminance only.** The guide is trained on luminance, not per colour channel.
-- **Darker where fireflies carry the image.** On ALab, a guided render of a crop came
-  out 6.9% darker than an unguided one over 40 seeds — a bias, not noise, and not yet
-  diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)).
-  `crust diagnostic` reports guiding as `biased` there, and never suggests it. Scenes without strong fireflies (the Cornell box, `veach_mis`) show no shift.
+- **Not yet worth its cost.** On `cornellbox_guided.usda`, which hides its only light so
+  that all light arrives indirectly, an unguided render with the same total samples has
+  about 13% less error, in a sixth of the time.
+- **Noisier where fireflies carry the image.** Guiding decides whether its last pass
+  is guided from its short training passes, which rarely see the rare, bright paths
+  fireflies come from. On ALab it keeps guiding on, and a guided render of a crop is
+  noisier than an unguided one with fewer samples. It is not darker: guided and
+  unguided agree within noise. Compare the two with `crust diagnostic` before turning
+  guiding on for such a scene, with a `--budget` of several minutes: at a few samples
+  its picture check misjudges guiding (see
+  [Diagnosing a render](@/docs/help/diagnosing-a-render.md#limitations)).
 
 ## Diagnostic
 

@@ -41,7 +41,8 @@ All four points below come from reading the code.
   - A serial gather writes units into a `Buffer` (`Vec<Vec3A>`) in scanline
     order. That is why tiles and scanlines are bit-identical.
   - Per-pixel luminance variance (`var_map`) is computed and then discarded.
-  - Guided renders blend whole passes by inverse variance (`blend_passes`).
+  - Guided renders blend whole passes by inverse variance (`blend_passes`;
+    by sample budget since #244, `rendering`'s design record).
 - **Integrator** (`tracer/path.rs`):
   - `trace_path` returns a bare `Vec3A`.
   - The forward walk records one `VertexRec` per vertex: `atten`,
@@ -498,8 +499,8 @@ depth and ID matte. So:
   - Driving the stop test with AOV variance (RenderMan can) is out of scope.
   - The `variance` AOV *is* the beauty's stopping statistic, so the user can
     see why a pixel stopped.
-- **Guided renders** (`render_guided`, several passes blended by inverse
-  variance):
+- **Guided renders** (`render_guided`, several passes blended by their share
+  of the sample budget, `pass_weights`):
   - Filtered AOVs blend with **the same per-pass weights as the beauty**.
     Blending is linear, so an LPE partition still sums to the blended beauty.
   - Closest AOVs take the closest across passes.

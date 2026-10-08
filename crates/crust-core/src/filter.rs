@@ -4,9 +4,8 @@
 //! filter's own distribution and weights the radiance by `f(x)/p(x)`. The
 //! expectation is the same filtered measurement, but every sample belongs to
 //! exactly one pixel — which is what keeps the renderer's strictly per-pixel
-//! machinery (adaptive early-stop, per-pixel QMC domains, inverse-variance
-//! pass blending) intact. A weight-buffer splatting film would break all
-//! three.
+//! machinery (adaptive early-stop, per-pixel QMC domains) intact. A
+//! weight-buffer splatting film would break both.
 //!
 //! For the non-negative filters the sampled density *is* the filter, so the
 //! weight is 1 (up to the tabulation quadrature); Mitchell's negative lobes
