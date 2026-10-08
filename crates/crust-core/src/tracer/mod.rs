@@ -62,6 +62,63 @@ struct PassConfig {
     /// `trace_path` instantiation (`TWINS`) the pass runs. Read once here
     /// rather than per pixel.
     twins: bool,
+    /// Time each work unit ([`Instruments::tile_times`]).
+    timed: bool,
+    /// The clamp whose effect this pass measures without applying it
+    /// ([`Instruments::clamp`]).
+    measure_clamp: Option<f32>,
+}
+
+/// What a diagnostic render measures beside its image
+/// ([`crate::diagnostic`]). The default measures nothing, and is what every
+/// public render entry point passes: each instrument costs a branch per work
+/// unit or per camera sample only while it is on.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Instruments {
+    /// Wall-clock seconds per work unit (16×16 tile or row), summed over a
+    /// guided render's passes.
+    pub(crate) tile_times: bool,
+    /// While the render's own clamp is off: what this indirect clamp would
+    /// remove, per pixel, measured on the final pass without applying it.
+    pub(crate) clamp: Option<f32>,
+    /// Return the per-pixel variance of the image — for a guided render,
+    /// of its blend of passes, which needs every pass's variance kept.
+    pub(crate) variance: bool,
+    /// The render is one of many (the diagnostic's trials): what a render
+    /// says once at `INFO` goes to `DEBUG`, so the log stays bounded.
+    pub(crate) quiet: bool,
+}
+
+/// What [`Instruments::clamp`] measured on the pass it watched.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ClampMeasure {
+    /// Σ over pixels of the luminance the clamp would remove from the pixel
+    /// estimate (the beauty's own estimator over each sample's removal).
+    pub(crate) removed_luminance: f64,
+    /// Pixels at least one of whose samples the clamp would change.
+    pub(crate) pixels_touched: u64,
+    pub(crate) pixels: u64,
+}
+
+/// A render with its measurements — what [`Renderer::render_measured`]
+/// returns. Every per-pixel plane covers the render's region in raster
+/// space (rows bottom-up), indexed through [`PixelRect::index`].
+pub(crate) struct Measured {
+    pub(crate) buffer: Buffer,
+    pub(crate) film: Option<AovFilm>,
+    pub(crate) rays: RayStats,
+    /// Variance of each pixel's luminance mean; empty unless
+    /// [`Instruments::variance`] asked for it.
+    pub(crate) var_map: Vec<f64>,
+    /// Each work unit's rectangle (raster space) and seconds; empty unless
+    /// [`Instruments::tile_times`] asked for them.
+    pub(crate) tiles: Vec<(PixelRect, f64)>,
+    pub(crate) clamp: ClampMeasure,
+    /// Wall-clock seconds of guiding's training passes: setup, not the
+    /// image's sampling (though they blend into it).
+    pub(crate) setup_s: f64,
+    /// Wall-clock seconds of the final (or only) pass.
+    pub(crate) render_s: f64,
 }
 
 /// Image-quality statistics of one render pass.
@@ -113,6 +170,9 @@ struct PassStats {
     var_map: Vec<f64>,
     /// Integrator work this pass did.
     rays: RayStats,
+    /// Each unit's rectangle and seconds, when the pass was timed.
+    tiles: Vec<(PixelRect, f64)>,
+    clamp: ClampMeasure,
 }
 
 pub struct Renderer {
@@ -129,22 +189,39 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(
-        camera: Camera,
-        world: World,
-        mut lights: LightList,
-        settings: RenderSettings,
-    ) -> Self {
-        // Built here rather than by the importer so that every way of
-        // assembling a scene — USD, the procedural fallback, a test — gets
-        // the selection its settings ask for.
-        lights.select_by(settings.light_selection());
+    /// A renderer over the scene, configured for `settings` — exactly
+    /// [`Renderer::reconfigure`] on a fresh one, so the two cannot drift.
+    pub fn new(camera: Camera, world: World, lights: LightList, settings: RenderSettings) -> Self {
+        let mut renderer = Renderer {
+            camera,
+            world,
+            lights,
+            settings,
+            volumes: Volumes::default(),
+        };
+        renderer.reconfigure(settings);
+        renderer
+    }
+
+    /// Switches to `settings`, keeping the camera, the world, the volumes
+    /// and every asset cache: rebuilds what depends on the settings — the
+    /// light selection, the `learned` pre-pass included — and nothing else.
+    /// Every other setting is read per pass. Returns the time the light
+    /// selection took to build (the `learned` pre-pass; next to nothing
+    /// otherwise), which is setup rather than sampling.
+    ///
+    /// The selection is built here rather than by the importer so that
+    /// every way of assembling a scene — USD, the procedural fallback, a
+    /// test — gets the selection its settings ask for.
+    pub fn reconfigure(&mut self, settings: RenderSettings) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        self.settings = settings;
+        self.lights.select_by(settings.light_selection());
         if settings.light_selection() == LightSelection::Learned {
-            let started = std::time::Instant::now();
             match crate::light_cache::train(
-                &world,
-                &camera,
-                &lights,
+                &self.world,
+                &self.camera,
+                &self.lights,
                 settings.width,
                 settings.height,
                 settings.frame,
@@ -156,25 +233,19 @@ impl Renderer {
                         cache.trained_cells,
                         started.elapsed()
                     );
-                    lights.set_cache(cache);
+                    self.lights.set_cache(cache);
                 }
                 None => debug!("learned light selection: nothing to learn, picking by power"),
             }
         }
         debug!(
             "Renderer over {} geometries, {} light(s) picked by {:?}, {} rayon thread(s)",
-            world.count(),
-            lights.count(),
-            lights.selection(),
+            self.world.count(),
+            self.lights.count(),
+            self.lights.selection(),
             rayon::current_num_threads()
         );
-        Renderer {
-            camera,
-            world,
-            lights,
-            settings,
-            volumes: Volumes::default(),
-        }
+        started.elapsed()
     }
 
     pub fn with_volumes(mut self, regions: Vec<crate::volume::VolumeRegion>) -> Self {
@@ -189,18 +260,21 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Buffer {
-        self.render_impl(false, None, None).0
+        self.render_impl(false, None, None, Instruments::default())
+            .buffer
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
-        self.render_impl(true, None, None).0
+        self.render_impl(true, None, None, Instruments::default())
+            .buffer
     }
 
     /// Renders with a progress callback — see [`ProgressCallback`]. With
     /// guiding enabled, only the final pass reports (training passes are
     /// silent, as before).
     pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
-        self.render_impl(tiled, Some(progress), None).0
+        self.render_impl(tiled, Some(progress), None, Instruments::default())
+            .buffer
     }
 
     /// As [`Renderer::render_with_progress`], also returning what the
@@ -211,8 +285,8 @@ impl Renderer {
     /// With guiding enabled the counters cover **every** pass, training
     /// included, since all of them spend time.
     pub fn render_with_stats(&self, tiled: bool, progress: ProgressCallback) -> (Buffer, RayStats) {
-        let (buffer, _, rays) = self.render_impl(tiled, Some(progress), None);
-        (buffer, rays)
+        let m = self.render_impl(tiled, Some(progress), None, Instruments::default());
+        (m.buffer, m.rays)
     }
 
     /// As [`Renderer::render_with_stats`], also filling the AOVs `request`
@@ -227,10 +301,38 @@ impl Renderer {
         progress: ProgressCallback,
         request: &AovRequest,
     ) -> (Buffer, AovFilm, RayStats) {
+        let layout = self.layout_for(request);
+        let m = self.render_impl(
+            tiled,
+            Some(progress),
+            layout.as_ref(),
+            Instruments::default(),
+        );
+        let film = match m.film {
+            Some(film) => film,
+            None => AovFilm::new(&AovLayout::default(), self.settings.raster_region()),
+        };
+        (m.buffer, film, m.rays)
+    }
+
+    /// A tiled render of `request`'s AOVs (none when `None`), with the
+    /// measurements `instruments` asks for — the diagnostic's one way to
+    /// render. Silent: no progress is reported.
+    pub(crate) fn render_measured(
+        &self,
+        request: Option<&AovRequest>,
+        instruments: Instruments,
+    ) -> Measured {
+        let layout = request.and_then(|r| self.layout_for(r));
+        self.render_impl(true, None, layout.as_ref(), instruments)
+    }
+
+    /// The film layout `request` needs, or `None` when it needs no film (no
+    /// products, or only a 3-channel beauty): such a render takes the
+    /// beauty-only path.
+    fn layout_for(&self, request: &AovRequest) -> Option<AovLayout> {
         if !request.needs_film() {
-            let (buffer, _, rays) = self.render_impl(tiled, Some(progress), None);
-            let rect = self.settings.raster_region();
-            return (buffer, AovFilm::new(&AovLayout::default(), rect), rays);
+            return None;
         }
         let mut layout = AovLayout::new(request);
         layout.luma = self.lights.luma();
@@ -250,12 +352,7 @@ impl Renderer {
             );
             layout.route = Some(std::sync::Arc::new(ctx));
         }
-        let (buffer, film, rays) = self.render_impl(tiled, Some(progress), Some(&layout));
-        (
-            buffer,
-            film.expect("a pass with a layout returns a film"),
-            rays,
-        )
+        Some(layout)
     }
 
     fn render_impl(
@@ -263,13 +360,39 @@ impl Renderer {
         tiled: bool,
         progress: Option<ProgressCallback>,
         layout: Option<&AovLayout>,
-    ) -> (Buffer, Option<AovFilm>, RayStats) {
+        instruments: Instruments,
+    ) -> Measured {
         if self.settings.guiding {
-            return self.render_guided(tiled, progress, layout);
+            return self.render_guided(tiled, progress, layout, instruments);
         }
-        let (buf, film, _, pass) =
-            self.render_pass(self.final_pass_config(tiled), None, progress, layout);
-        (buf, film, pass.rays)
+        self.render_unguided(tiled, progress, layout, instruments)
+    }
+
+    /// One final pass, as everything but a guided render is.
+    fn render_unguided(
+        &self,
+        tiled: bool,
+        progress: Option<ProgressCallback>,
+        layout: Option<&AovLayout>,
+        instruments: Instruments,
+    ) -> Measured {
+        let start = std::time::Instant::now();
+        let cfg = self.final_pass_config(tiled, instruments);
+        let (buffer, film, _, pass) = self.render_pass(cfg, None, progress, layout);
+        Measured {
+            buffer,
+            film,
+            rays: pass.rays,
+            var_map: if instruments.variance {
+                pass.var_map
+            } else {
+                Vec::new()
+            },
+            tiles: pass.tiles,
+            clamp: pass.clamp,
+            setup_s: 0.0,
+            render_s: start.elapsed().as_secs_f64(),
+        }
     }
 
     /// Whether camera rays sample the shutter: `ray.time` is read by exactly
@@ -284,7 +407,7 @@ impl Renderer {
 
     /// Config of a final (image-quality) pass: full budget, adaptive
     /// sampling.
-    fn final_pass_config(&self, tiled: bool) -> PassConfig {
+    fn final_pass_config(&self, tiled: bool, instruments: Instruments) -> PassConfig {
         PassConfig {
             spp: self.settings.samples_per_pixel,
             seed: self.settings.frame as u32,
@@ -292,6 +415,12 @@ impl Renderer {
             adaptive: true,
             shutter: self.shutter(),
             twins: !self.lights.twinned_lights().is_empty(),
+            timed: instruments.tile_times,
+            // Only while the render's own clamp is off: with it on there is
+            // nothing left for the measurement to remove.
+            measure_clamp: instruments
+                .clamp
+                .filter(|_| self.settings.indirect_clamp.is_none()),
         }
     }
 
@@ -320,7 +449,8 @@ impl Renderer {
         tiled: bool,
         progress: Option<ProgressCallback>,
         layout: Option<&AovLayout>,
-    ) -> (Buffer, Option<AovFilm>, RayStats) {
+        instruments: Instruments,
+    ) -> Measured {
         // Every pass costs time, training included, so the counters cover
         // all of them rather than the final pass alone.
         let mut rays = RayStats::default();
@@ -328,9 +458,21 @@ impl Renderer {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                let (buf, film, _, pass) =
-                    self.render_pass(self.final_pass_config(tiled), None, progress, layout);
-                return (buf, film, pass.rays);
+                return self.render_unguided(tiled, progress, layout, instruments);
+            }
+        };
+        // Training time (setup), each pass's variance map when the caller
+        // wants the blend's, and unit times summed over every pass.
+        let mut setup_s = 0.0f64;
+        let mut var_maps: Vec<Vec<f64>> = Vec::new();
+        let mut tiles: Vec<(PixelRect, f64)> = Vec::new();
+        let mut add_tiles = |pass: &[(PixelRect, f64)]| {
+            if tiles.is_empty() {
+                tiles = pass.to_vec();
+            } else {
+                for (sum, (_, s)) in tiles.iter_mut().zip(pass) {
+                    sum.1 += s;
+                }
             }
         };
         let cfg = GuidingConfig {
@@ -367,13 +509,21 @@ impl Renderer {
                 adaptive: false,
                 shutter: self.shutter(),
                 twins: !self.lights.twinned_lights().is_empty(),
+                timed: instruments.tile_times,
+                // The clamp is measured on the final pass alone.
+                measure_clamp: None,
             };
             let start = std::time::Instant::now();
             let (buffer, film, samples, stats) =
                 self.render_pass(train_cfg, Some(&gctx), None, layout);
             films.extend(film);
             rays.merge(&stats.rays);
+            add_tiles(&stats.tiles);
             let secs = start.elapsed().as_secs_f64();
+            setup_s += secs;
+            if instruments.variance {
+                var_maps.push(stats.var_map.clone());
+            }
             debug!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
                 k + 1,
@@ -410,12 +560,19 @@ impl Renderer {
                 let mrse_pg = mean_relative_error(var_pg, &ref_lum);
                 if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0 {
                     let delta_eff = (cost_pt * mrse_pt) / (cost_pg * mrse_pg);
-                    info!(
+                    // INFO once per render; DEBUG when the render is one of
+                    // a diagnostic's many.
+                    macro_rules! say {
+                        ($($t:tt)*) => {
+                            if instruments.quiet { debug!($($t)*) } else { info!($($t)*) }
+                        };
+                    }
+                    say!(
                         "path guiding: estimated efficiency improvement ΔEff = {:.2} (>1 means guiding pays off)",
                         delta_eff
                     );
                     if delta_eff < 1.0 {
-                        info!(
+                        say!(
                             "path guiding: ΔEff < 1 — guiding costs more than the variance it removes here; rendering the final pass unguided"
                         );
                     }
@@ -440,21 +597,57 @@ impl Renderer {
             training: false,
         };
         let final_gctx = if guide_final { Some(&gctx) } else { None };
-        let (final_buffer, final_film, _, final_stats) =
-            self.render_pass(self.final_pass_config(tiled), final_gctx, progress, layout);
+        let start = std::time::Instant::now();
+        let (final_buffer, final_film, _, final_stats) = self.render_pass(
+            self.final_pass_config(tiled, instruments),
+            final_gctx,
+            progress,
+            layout,
+        );
+        let render_s = start.elapsed().as_secs_f64();
         rays.merge(&final_stats.rays);
+        add_tiles(&final_stats.tiles);
         passes.push((final_buffer, final_stats.variance));
         films.extend(final_film);
 
+        let (weights, total) = blend_weights(&passes);
+        // The blend's own variance: Σₖ (wₖ/W)² · varₖ per pixel, for passes
+        // that are independent. With nothing weightable the blend is the
+        // final pass, and so is its variance.
+        let var_map = if !instruments.variance {
+            Vec::new()
+        } else if total <= 0.0 {
+            final_stats.var_map
+        } else {
+            var_maps.push(final_stats.var_map);
+            let mut out = vec![0.0f64; var_maps[0].len()];
+            for (map, w) in var_maps.iter().zip(&weights) {
+                let share = (w / total) * (w / total);
+                if share > 0.0 {
+                    for (o, v) in out.iter_mut().zip(map) {
+                        *o += share * v;
+                    }
+                }
+            }
+            out
+        };
         let film = (!films.is_empty()).then(|| {
-            let (weights, total) = blend_weights(&passes);
             if total <= 0.0 {
                 films.pop().expect("checked non-empty")
             } else {
                 AovFilm::blend(films, &weights, total)
             }
         });
-        (self.blend_passes(passes), film, rays)
+        Measured {
+            buffer: self.blend_passes(passes),
+            film,
+            rays,
+            var_map,
+            tiles,
+            clamp: final_stats.clamp,
+            setup_s,
+            render_s,
+        }
     }
 
     /// Inverse-variance blend of independent unbiased passes. Passes whose
@@ -530,8 +723,13 @@ impl Renderer {
         let filter = FilterSampler::new(self.settings.pixel_filter);
         // Read once per pass and dispatched to one of two monomorphisations
         // of the integrator (see `profile::scope_if`), so an unprofiled
-        // render carries no trace of the profiler.
-        let profiling = profile::enabled();
+        // render carries no trace of the profiler. The clamp counter lives
+        // in the same instrumented instantiation — a branch per camera
+        // sample there cost the ordinary render 0.3% of its instructions
+        // (callgrind, cornellbox at 2 spp) — so a pass that measures it
+        // takes that instantiation too; its sections record nothing unless
+        // profiling is on.
+        let profiling = profile::enabled() || cfg.measure_clamp.is_some();
         // The same for the film: the AOV instantiation runs only when a
         // product asks for something beyond the beauty.
         let cam = self.camera.frame(w, h);
@@ -605,7 +803,7 @@ impl Renderer {
         };
         let mut units: Vec<Unit> = tiles
             .into_iter()
-            .map(|tile| Unit::new(tile, layout, cam))
+            .map(|tile| Unit::new(tile, layout, cam, cfg.measure_clamp.is_some()))
             .collect();
         let total = units.len() as u64 + rounds as u64;
         // Incremented and reported under one lock, so the callback sees
@@ -634,6 +832,8 @@ impl Renderer {
         units
             .par_iter_mut()
             .for_each_init(scratch, |scratch, unit| {
+                // Per unit, and only when the pass is timed.
+                let started = cfg.timed.then(std::time::Instant::now);
                 // Stamped once per `AOV` and chosen per unit, not per pixel:
                 // a per-pixel branch on the film cost the beauty-only render
                 // 0.02% of its instructions (callgrind, cornellbox at 2 spp).
@@ -652,6 +852,9 @@ impl Renderer {
                     sweep!(true)
                 } else {
                     sweep!(false)
+                }
+                if let Some(t) = started {
+                    unit.work.secs += t.elapsed().as_secs_f64();
                 }
                 // Once per unit, and a no-op unless `--profile` is on.
                 profile::flush();
@@ -678,6 +881,7 @@ impl Renderer {
             units
                 .par_iter_mut()
                 .for_each_init(scratch, |scratch, unit| {
+                    let started = cfg.timed.then(std::time::Instant::now);
                     // Per unit, as in the first sweep.
                     macro_rules! round {
                         ($aov:literal) => {
@@ -708,6 +912,9 @@ impl Renderer {
                         round!(true)
                     } else {
                         round!(false)
+                    }
+                    if let Some(t) = started {
+                        unit.work.secs += t.elapsed().as_secs_f64();
                     }
                     profile::flush();
                 });
@@ -759,8 +966,33 @@ impl Renderer {
             .take_while(|u| u.tile.y == rect.y0)
             .count()
             .max(1);
+        let mut clamp = ClampMeasure::default();
+        let mut tile_times = Vec::new();
         for unit in &units {
             rays.merge(&unit.work.rays);
+            if cfg.timed {
+                let t = &unit.tile;
+                tile_times.push((
+                    PixelRect::new(t.x, t.y, t.x + t.width, t.y + t.height),
+                    unit.work.secs,
+                ));
+            }
+            // Each pixel's removals through the beauty's own estimator. A
+            // sum over pixels, so the order does not matter beyond f64
+            // rounding; done apart from the gather below so that a render
+            // that measures nothing never looks.
+            for (st, &removed) in unit.pixels.iter().zip(&unit.work.clamp) {
+                let removed = if st.weight_sum > 0.0 {
+                    removed / st.weight_sum
+                } else {
+                    removed / st.taken as f32
+                };
+                clamp.pixels += 1;
+                if removed != 0.0 {
+                    clamp.pixels_touched += 1;
+                    clamp.removed_luminance += removed as f64;
+                }
+            }
         }
         for ty in (0..units.len() / tiles_x).rev() {
             let row = ty * tiles_x..(ty + 1) * tiles_x;
@@ -838,6 +1070,8 @@ impl Renderer {
                 variance: variance_sum / pixel_count,
                 var_map,
                 rays,
+                tiles: tile_times,
+                clamp,
             },
         )
     }
@@ -871,7 +1105,7 @@ impl Renderer {
         macro_rules! go {
             ($profile:literal, $media:literal, $twins:literal) => {
                 self.advance_pixel::<$profile, AOV, $media, $twins>(
-                    i, j, cfg, filter, gctx, work, scratch, st, target,
+                    i, j, p, cfg, filter, gctx, work, scratch, st, target,
                 )
             };
         }
@@ -900,6 +1134,7 @@ impl Renderer {
         &self,
         i: usize,
         j: usize,
+        p: usize,
         cfg: &PassConfig,
         filter: &FilterSampler,
         gctx: Option<&GuidingContext>,
@@ -942,11 +1177,17 @@ impl Renderer {
             volumes: &self.volumes,
             depth: self.settings.max_depth as i32,
             strategy: self.settings.sampling_strategy,
-            indirect_clamp: self.settings.indirect_clamp,
             guiding: gctx,
             light_samples: self.settings.light_samples,
             light_samples_indirect: self.settings.light_samples_indirect,
+            // A measured clamp rides in the clamp's own slot, flagged as
+            // measured: the integrator reads the flag only where it would
+            // clamp (see `PathContext::measure_clamp`).
+            indirect_clamp: cfg.measure_clamp.or(self.settings.indirect_clamp),
+            measure_clamp: PROFILE && cfg.measure_clamp.is_some(),
         };
+        let measuring = PROFILE && cfg.measure_clamp.is_some();
+        let mut removed = 0.0f32;
         for sample in state.taken..target {
             let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);
             let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
@@ -1004,11 +1245,20 @@ impl Renderer {
                 };
                 planes.add(&scratch.first, &extras, fx, fy, wx * wy);
             }
+            if measuring {
+                // What `trace_path` found the clamp would remove from this
+                // sample, weighted as the sample is.
+                let r = std::mem::take(&mut scratch.clamp_removed);
+                removed += self.lights.luma().of(r) * (wx * wy);
+            }
             state.sum += color;
             state.weight_sum += wx * wy;
             let lum = self.lights.luma().of(color) as f64;
             state.lum_sum += lum;
             state.lum_sq += lum * lum;
+        }
+        if measuring && let Some(c) = unit.clamp.get_mut(p) {
+            *c += removed;
         }
         state.taken = target;
         state.samples_end = unit.samples.len() as u32;
@@ -1188,6 +1438,11 @@ struct UnitWork {
     /// The unit's AOV planes, beside (not inside) its `PixelState`s, so a
     /// render without AOVs keeps the pixel state it always had.
     aov: Option<UnitAov>,
+    /// Wall-clock seconds the unit took, when the pass is timed.
+    secs: f64,
+    /// Per pixel, Σ over samples of filter weight × the luminance the
+    /// measured clamp would remove; empty unless the pass measures one.
+    clamp: Vec<f32>,
 }
 
 /// One work unit of a pass — a tile or a row — and its pixels' state.
@@ -1199,13 +1454,14 @@ struct Unit {
 }
 
 impl Unit {
-    fn new(tile: Tile, layout: Option<&AovLayout>, cam: CameraFrame) -> Self {
+    fn new(tile: Tile, layout: Option<&AovLayout>, cam: CameraFrame, clamp: bool) -> Self {
         let pixels = tile.width * tile.height;
         Unit {
             pixels: vec![PixelState::new(); pixels],
             tile,
             work: UnitWork {
                 aov: layout.map(|l| UnitAov::new(l, cam, pixels)),
+                clamp: if clamp { vec![0.0; pixels] } else { Vec::new() },
                 ..UnitWork::default()
             },
         }
@@ -1291,7 +1547,7 @@ fn blend_luminance(passes: &[(Buffer, f64)], rect: PixelRect, luma: utils::Luma)
 /// must be *shared* by every pass being compared — normalizing a low-spp
 /// pass by its own noisy mean correlates numerator and denominator and
 /// breaks the 1/spp scaling the efficiency ratio relies on.
-fn mean_relative_error(var_map: &[f64], ref_lum: &[f64]) -> f64 {
+pub(crate) fn mean_relative_error(var_map: &[f64], ref_lum: &[f64]) -> f64 {
     let n = var_map.len().max(1) as f64;
     var_map
         .iter()

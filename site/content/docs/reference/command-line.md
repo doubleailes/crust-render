@@ -2,7 +2,7 @@
 title = "Command line"
 description = "Every crust command and flag."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-08T08:00:00+00:00
 draft = false
 weight = 10
 sort_by = "weight"
@@ -19,12 +19,14 @@ top = false
 ```bash
 crust render [OPTIONS]              # render a scene
 crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materials
+crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or cleaner
 ```
 
 | command | what it does |
 |---------|--------------|
 | `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` belongs to it. |
 | [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line. |
+| [`diagnostic`](#diagnostic) | measures which settings make the stage's render faster or cleaner, within a time budget, and reports the evidence. Takes the scene flags of `render`. |
 
 `-l, --level` applies to every command, and can go before or after it. `--log-file` belongs to
 `render`: its directory is optional, so anywhere else it could take the next word as one.
@@ -584,6 +586,53 @@ done
 A stage with nothing of that kind prints nothing and logs a warning. A stage that can't
 be opened is an error.
 
+## diagnostic
+
+`crust diagnostic -i <SCENE> [--budget 120s] [--json PATH] [--baseline PREV.json] [OPTIONS]`
+
+Imports the stage once and measures how to make its render faster or cleaner: a
+full-frame baseline, then every unbiased setting tried on up to three crops of the frame
+and judged by efficiency (time × error). It writes **no image** and changes no file
+beside the stage. Its outputs are:
+
+- the Markdown report on stdout, and nothing else there;
+- the JSON report, format `crust-diagnostic/1`, at `--json` (default
+  `crust-diagnostic.json` in the working directory);
+- the log on stderr.
+
+Reading the report, its verdicts and the loop it is made for are in
+[Diagnosing a render](@/docs/help/diagnosing-a-render.md).
+
+It accepts the flags that shape the scene and its settings, with the same names, values
+and defaults as `render`, so a suggestion made as a flag can be passed straight back:
+
+[`-i`](#input) (required), [`-f`](#frame), [`--camera`](#camera), [`--region`](#region),
+[`--strategy`](#strategy), [`--light-selection`](#light-selection),
+[`--light-samples`](#light-samples), [`--light-samples-indirect`](#light-samples-indirect),
+[`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
+[`--filter-radius`](#filter-radius), [`--subdiv-level`](#subdiv-level),
+[`--subdiv-edge-length`](#subdiv-edge-length) and [`--auto-tx`](#auto-tx).
+
+With `--region`, that region is the only crop the trials render. `--auto-tx` is the one
+flag that writes beside the stage: the `.tx` files it creates, as a render would.
+
+The rest of `render`'s flags (`-s`, `-o`, the colour and statistics flags, `--scanline`,
+`--log-file`) are refused: the diagnostic picks its own sample counts and writes no image.
+Its own flags:
+
+| flag | value | default | what it does |
+|------|-------|---------|--------------|
+| `--budget` | duration | `120s` | Time to spend after the import: `90s`, `5m`, `1m30s`, `1h`, `250ms`, or plain seconds. The import is reported, not counted. The baseline always runs; the trials then fit what is left, and one that would overrun is listed under `not_tried`. |
+| `--json` | path | `crust-diagnostic.json` | Where to write the JSON report. |
+| `--baseline` | path | — | A previous report of the same scene, frame, camera, resolution and region. Adds a `deltas` section (what changed in time, error, settings, findings and suggestions); a report of anything else is marked *not comparable*. |
+| `--repeats` | count | 3 | Interleaved baseline/trial pairs per crop. More resolves smaller differences on a busy machine, at the cost of fewer trials. |
+| `--target-mrse` | number | threshold² | The mean relative squared error the sample-budget estimate aims for. Defaults to the square of the scene's adaptive variance threshold (0.05 → 0.0025). |
+
+```bash
+$ crust diagnostic -i samples/cornellbox.usda --budget 30s > report.md
+$ crust diagnostic -i samples/cornellbox.usda --strategy bsdf --baseline crust-diagnostic.json
+```
+
 ## Exit status
 
 `crust render` exits with `0` when the images are written, and `crust ls` when the list
@@ -591,6 +640,15 @@ is printed. It exits with a non-zero status
 when the arguments are invalid (a missing command included), the scene or the requested
 camera can't be loaded, the log
 file can't be created, or an image can't be written.
+
+`crust diagnostic` exits with:
+
+| status | when |
+|--------|------|
+| `0` | the unbiased trials (tier 1) completed, whether or not the later tiers fit |
+| `3` | the budget ran out before they did, the baseline included; both reports are still written |
+| `1` | an error: the stage, the `--baseline` file or the region can't be read, or the JSON can't be written. No report is written. |
+| `2` | a usage error: an unknown or render-only flag, a malformed value, no `-i` |
 
 ## Examples
 
@@ -616,4 +674,7 @@ crust render -i asset.usda --auto-tx --stats
 
 # re-render one object of a frame, placed in the frame for compositing
 crust render -i shot.usdc -f 1048 --region 812,240,1100,520 -o fix.1048.exr
+
+# what would make this shot faster or cleaner, in five minutes
+crust diagnostic -i shot.usdc -f 1048 --camera /shot/cam/renderCam --budget 5m > report.md
 ```

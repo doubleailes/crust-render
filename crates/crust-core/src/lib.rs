@@ -17,6 +17,7 @@ mod buffer;
 mod camera;
 pub mod color;
 pub mod config;
+pub mod diagnostic;
 mod environment;
 mod error;
 mod filter;
@@ -103,7 +104,7 @@ pub use stats::traversal_report;
 pub use stats::{
     DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,
     RayStats, RenderStats, SceneCounters, SubdivisionCounters, TextureCacheStats,
-    current_memory_bytes, peak_memory_bytes,
+    current_memory_bytes, machine_memory_bytes, peak_memory_bytes,
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};
 pub use tracer::{

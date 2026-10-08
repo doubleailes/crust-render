@@ -56,6 +56,42 @@ enum Command {
         #[arg(short, long)]
         input: std::path::PathBuf,
     },
+    /// Measure how to make a stage's render faster or cleaner, within a
+    /// time budget: a baseline, then every unbiased setting tried on
+    /// representative crops and judged by efficiency.
+    ///
+    /// Writes no image and changes no file beside the stage (but for the
+    /// `.tx` files `--auto-tx` creates, as a render would). The Markdown
+    /// report goes to stdout, the JSON report to `--json`, the log to
+    /// stderr. Exits 0 when the unbiased trials completed, 3 when the budget
+    /// ran out first (the report is still written), 1 on error, 2 on a
+    /// usage error.
+    Diagnostic(Box<DiagnosticArgs>),
+}
+
+#[derive(Args)]
+struct DiagnosticArgs {
+    #[command(flatten)]
+    scene: SceneArgs,
+    /// Time to spend after the import: `90s`, `5m`, `1m30s`, `1h`, or plain
+    /// seconds. The baseline always runs; the trials then fit what is left.
+    #[arg(long, value_name = "DURATION", default_value = "120s", value_parser = parse_duration)]
+    budget: Duration,
+    /// Where to write the JSON report (format `crust-diagnostic/1`).
+    #[arg(long, value_name = "PATH", default_value = "crust-diagnostic.json")]
+    json: std::path::PathBuf,
+    /// A previous report of the same scene, frame, camera, resolution and
+    /// region: adds a `deltas` section saying what changed since.
+    #[arg(long, value_name = "PREV.json")]
+    baseline: Option<std::path::PathBuf>,
+    /// Interleaved baseline/trial pairs per crop. More resolves smaller
+    /// differences on a noisy machine, at the cost of fewer trials.
+    #[arg(long, value_name = "R", default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..))]
+    repeats: u32,
+    /// The mean relative squared error the sample budget aims for. Defaults
+    /// to the square of the scene's adaptive variance threshold.
+    #[arg(long, value_name = "MRSE", value_parser = parse_target)]
+    target_mrse: Option<f64>,
 }
 
 /// `crust ls`'s kinds, each the engine's [`crust_core::ListKind`].
@@ -83,19 +119,15 @@ impl From<LsKind> for crust_core::ListKind {
     }
 }
 
+/// The flags that shape the scene and its settings, shared by `render` and
+/// `diagnostic` with the same names, values and defaults — so a diagnostic
+/// suggestion given as a flag means the same in a render.
 #[derive(Args)]
-struct RenderArgs {
+struct SceneArgs {
     /// Input scene path — .usda / .usdc / .usdz.
-    /// When absent, falls back to a hard-coded procedural scene.
+    /// When absent, `render` falls back to a hard-coded procedural scene.
     #[arg(short, long)]
     input: Option<String>,
-    /// Output image path. Without RenderProducts on the stage, the linear EXR
-    /// is written here (default `output.exr`) and a tone-mapped sRGB PNG next
-    /// to it (same path with a .png extension). When the stage authors
-    /// RenderProducts, this replaces the first product's `productName`, as
-    /// husk's `-o` does; the other products keep theirs.
-    #[arg(short, long)]
-    output: Option<String>,
     /// Render only a rectangle of the frame: `X0,Y0,X1,Y1` in pixels, from
     /// the image's top-left corner, `X1` and `Y1` excluded. Each pixel
     /// renders exactly as in the full frame; the EXR keeps the full
@@ -105,30 +137,6 @@ struct RenderArgs {
     /// left is an error.
     #[arg(long, value_name = "X0,Y0,X1,Y1", value_parser = parse_region)]
     region: Option<PixelRect>,
-    /// Also write the log to a file named for the time the run started
-    /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
-    /// current directory; given a directory, it writes there and creates it
-    /// if needed. The file receives the same events as the terminal, so
-    /// `-l debug --log-file` is how a full record of a render is kept.
-    // A render flag, not a global one: its directory is optional, so before
-    // a subcommand or a positional (`crust --log-file render`, `crust ls
-    // --log-file camera`) it would take that word as the directory.
-    // `render` has no positional for it to swallow.
-    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
-    log_file: Option<std::path::PathBuf>,
-    /// Render by scanlines — a row is the work unit, rows in parallel, each
-    /// written into the image in place — instead of the default 16x16 tiles.
-    /// The image is bit-identical; kept as the A/B and for a progress bar in
-    /// rows.
-    #[arg(long, default_value_t = false)]
-    scanline: bool,
-    /// Tiles ("bucket" order) are the default now; accepted so existing
-    /// command lines keep working, and ignored.
-    #[arg(short, long, default_value_t = false, hide = true)]
-    bucket: bool,
-    /// Samples per pixel. Overrides the scene / default value when set.
-    #[arg(short, long)]
-    samples: Option<u32>,
     /// USD time code (frame) to render. Every animated attribute resolves
     /// its time samples here; unanimated ones read their default. Fractional
     /// values render a subframe. Also sets the sampler's frame seed,
@@ -189,6 +197,49 @@ struct RenderArgs {
     /// Overrides the scene's `crust:indirectClamp`.
     #[arg(long, value_parser = parse_clamp)]
     indirect_clamp: Option<f32>,
+    /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
+    /// (same path, extension `.tx`) on first use, when the `.tx` is missing or
+    /// older than its source. A `.tx` beside a texture is always streamed when
+    /// present; this only creates the missing ones.
+    #[arg(long, default_value_t = false)]
+    auto_tx: bool,
+}
+
+#[derive(Args)]
+struct RenderArgs {
+    #[command(flatten)]
+    scene: SceneArgs,
+    /// Output image path. Without RenderProducts on the stage, the linear EXR
+    /// is written here (default `output.exr`) and a tone-mapped sRGB PNG next
+    /// to it (same path with a .png extension). When the stage authors
+    /// RenderProducts, this replaces the first product's `productName`, as
+    /// husk's `-o` does; the other products keep theirs.
+    #[arg(short, long)]
+    output: Option<String>,
+    /// Also write the log to a file named for the time the run started
+    /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
+    /// current directory; given a directory, it writes there and creates it
+    /// if needed. The file receives the same events as the terminal, so
+    /// `-l debug --log-file` is how a full record of a render is kept.
+    // A render flag, not a global one: its directory is optional, so before
+    // a subcommand or a positional (`crust --log-file render`, `crust ls
+    // --log-file camera`) it would take that word as the directory.
+    // `render` has no positional for it to swallow.
+    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
+    log_file: Option<std::path::PathBuf>,
+    /// Render by scanlines — a row is the work unit, rows in parallel, each
+    /// written into the image in place — instead of the default 16x16 tiles.
+    /// The image is bit-identical; kept as the A/B and for a progress bar in
+    /// rows.
+    #[arg(long, default_value_t = false)]
+    scanline: bool,
+    /// Tiles ("bucket" order) are the default now; accepted so existing
+    /// command lines keep working, and ignored.
+    #[arg(short, long, default_value_t = false, hide = true)]
+    bucket: bool,
+    /// Samples per pixel. Overrides the scene / default value when set.
+    #[arg(short, long)]
+    samples: Option<u32>,
     /// Print render statistics and a per-phase profile (parse, build,
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
@@ -200,12 +251,6 @@ struct RenderArgs {
     /// Render phase must stay comparable between runs.
     #[arg(long, default_value_t = false)]
     profile: bool,
-    /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
-    /// (same path, extension `.tx`) on first use, when the `.tx` is missing or
-    /// older than its source. A `.tx` beside a texture is always streamed when
-    /// present; this only creates the missing ones.
-    #[arg(long, default_value_t = false)]
-    auto_tx: bool,
     /// The OpenColorIO config every colour is managed with: a `.ocio` file,
     /// an `.ocioz` archive or an `ocio://` builtin URI. Defaults to `$OCIO`
     /// when that is set, else to the builtin ACES CG config
@@ -229,6 +274,63 @@ struct RenderArgs {
     /// transform instead. The EXR is never affected.
     #[arg(long, value_name = "VIEW", default_value = crust_core::color::PREVIEW_VIEW)]
     view: String,
+}
+
+/// A render's scene flags read as its own (`cli.strategy`), as they were
+/// before they moved into [`SceneArgs`]: the render code and its tests keep
+/// their spelling, and `&RenderArgs` passes wherever `&SceneArgs` is taken.
+impl std::ops::Deref for RenderArgs {
+    type Target = SceneArgs;
+    fn deref(&self) -> &SceneArgs {
+        &self.scene
+    }
+}
+
+/// `--budget`'s parser: one or more `<number><unit>` terms (`h`, `m`, `s`,
+/// `ms`), as in `90s`, `5m` or `1m30s`, or a bare number of seconds. The
+/// total must be positive.
+fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
+    let bad = || format!("{s:?} is not a duration like 90s, 5m or 1m30s");
+    let t = s.trim();
+    if let Ok(secs) = t.parse::<f64>() {
+        return (secs.is_finite() && secs > 0.0)
+            .then(|| Duration::from_secs_f64(secs))
+            .ok_or_else(bad);
+    }
+    let mut total = 0.0f64;
+    let mut rest = t;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .ok_or_else(bad)?;
+        let value: f64 = rest[..digits].parse().map_err(|_| bad())?;
+        rest = &rest[digits..];
+        let unit_len = rest
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let scale = match &rest[..unit_len] {
+            "h" => 3600.0,
+            "m" => 60.0,
+            "s" => 1.0,
+            "ms" => 1e-3,
+            _ => return Err(bad()),
+        };
+        total += value * scale;
+        rest = &rest[unit_len..];
+    }
+    (total.is_finite() && total > 0.0)
+        .then(|| Duration::from_secs_f64(total))
+        .ok_or_else(bad)
+}
+
+/// `--target-mrse`'s parser: a finite, positive error.
+fn parse_target(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("{s} is not a positive, finite error"))
+    }
 }
 
 /// `--frame`'s parser: an `f64` that is also finite. `f64::from_str` accepts
@@ -473,7 +575,11 @@ fn write_beauty(
 /// The scene to render: the USD stage `-i` names, imported under the CLI's
 /// options, or the procedural fallback without one. A failure is already
 /// logged; the error is the exit code.
-fn load_scene(cli: &RenderArgs, assets: &FileAssets) -> std::result::Result<Scene, ExitCode> {
+fn load_scene(
+    cli: &SceneArgs,
+    working_space: Option<&String>,
+    assets: &FileAssets,
+) -> std::result::Result<Scene, ExitCode> {
     let scene = if let Some(t) = &cli.input {
         let input_path = std::path::Path::new(&t);
         debug!("Loading USD scene from {}", input_path.display());
@@ -485,7 +591,7 @@ fn load_scene(cli: &RenderArgs, assets: &FileAssets) -> std::result::Result<Scen
             // The process renders once and exits, so freeing the composed
             // stage is pure delay before the render (45 s on ALab).
             skip_stage_teardown: true,
-            working_space: cli.working_space.clone(),
+            working_space: working_space.cloned(),
         };
         match Scene::from_usd_with_options(input_path, assets, &options) {
             Ok(scene) => scene,
@@ -504,7 +610,7 @@ fn load_scene(cli: &RenderArgs, assets: &FileAssets) -> std::result::Result<Scen
         if let Some(camera) = &cli.camera {
             warn!("--camera {camera} has no effect without -i/--input");
         }
-        if let Some(space) = &cli.working_space {
+        if let Some(space) = working_space {
             warn!(
                 "--working-space {space} has no effect without -i/--input: the procedural \
                  scene renders in lin_rec709"
@@ -517,15 +623,22 @@ fn load_scene(cli: &RenderArgs, assets: &FileAssets) -> std::result::Result<Scen
     Ok(scene)
 }
 
-/// The scene's render settings with the CLI's overrides applied.
+/// The scene's render settings with a render's overrides applied: `-s`,
+/// then the scene flags ([`apply_scene_overrides`]).
 fn apply_overrides(cli: &RenderArgs, settings: RenderSettings) -> RenderSettings {
-    let mut settings = match cli.samples {
+    let settings = match cli.samples {
         Some(spp) => {
             debug!("--samples {spp} overrides the scene's crust:samplesPerPixel");
             settings.with_samples_per_pixel(spp)
         }
         None => settings,
     };
+    apply_scene_overrides(cli, settings)
+}
+
+/// The scene's render settings with the shared scene flags applied — what
+/// `render` and `diagnostic` both run with.
+fn apply_scene_overrides(cli: &SceneArgs, mut settings: RenderSettings) -> RenderSettings {
     if let Some(strategy) = cli.strategy {
         debug!("--strategy {strategy} overrides the scene's crust:samplingStrategy");
         settings = settings.with_sampling_strategy(strategy);
@@ -608,7 +721,7 @@ fn main() -> ExitCode {
     // render's log stays where it always was.
     let (log_to, log_file) = match &cli.command {
         Command::Render(args) => (logging::Terminal::Stdout, args.log_file.as_deref()),
-        Command::Ls { .. } => (logging::Terminal::Stderr, None),
+        Command::Ls { .. } | Command::Diagnostic(_) => (logging::Terminal::Stderr, None),
     };
     if let Err(e) = logging::init(cli.level, log_file, log_to) {
         eprintln!("error: {e}");
@@ -617,6 +730,86 @@ fn main() -> ExitCode {
     match &cli.command {
         Command::Render(args) => render(args),
         Command::Ls { kind, input } => ls(*kind, input),
+        Command::Diagnostic(args) => diagnostic(args),
+    }
+}
+
+/// `crust diagnostic`: import the stage once, diagnose it, print the
+/// Markdown report and write the JSON one. The exit status is the report's.
+fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
+    let Some(input) = &args.scene.input else {
+        use clap::CommandFactory;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "crust diagnostic needs a stage: -i <INPUT>",
+            )
+            .exit();
+    };
+    // Read before the import, so a wrong path fails in a second.
+    let previous = match &args.baseline {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(e) => {
+                error!("--baseline {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+    if let Some(ocio) = &crust_core::config().ocio
+        && let Err(e) = crust_core::color::use_config(ocio)
+    {
+        error!("$OCIO: {e}");
+        return ExitCode::FAILURE;
+    }
+    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let import_start = Instant::now();
+    let mut scene = match load_scene(&args.scene, None, &assets) {
+        Ok(scene) => scene,
+        Err(code) => return code,
+    };
+    let import = import_start.elapsed();
+    let settings = apply_scene_overrides(&args.scene, scene.settings);
+    let (w, h) = settings.get_dimensions();
+    if let Some(region) = args.scene.region
+        && region.clip_to(w, h).is_none()
+    {
+        error!("--region: {region} has no pixel inside the {w}x{h} frame");
+        return ExitCode::FAILURE;
+    }
+    scene.settings = settings;
+    info!(
+        "Diagnosing {input} ({w}x{h}), imported in {import:.2?}, budget {:?}",
+        args.budget
+    );
+    let cache_stats = || (assets.texture_cache_stats(), assets.ptex_stats());
+    let options = crust_core::diagnostic::Options {
+        frame: args.scene.frame,
+        camera: args.scene.camera.clone(),
+        region: args.scene.region,
+        budget: args.budget,
+        repeats: args.repeats,
+        target_mrse: args.target_mrse,
+        previous,
+        import,
+        auto_tx: args.scene.auto_tx,
+        subdivision_level: args.scene.subdiv_level,
+        subdivision_edge_length: args.scene.subdiv_edge_length,
+        cache_stats: Some(&cache_stats),
+        ..crust_core::diagnostic::Options::new(input.clone())
+    };
+    let report = crust_core::diagnostic::run(scene, &options);
+    assets.release_texture_files();
+    print!("{}", report.to_markdown());
+    if let Err(e) = std::fs::write(&args.json, report.to_json()) {
+        error!("--json {}: {e}", args.json.display());
+        return ExitCode::FAILURE;
+    }
+    info!("Report written to {}", args.json.display());
+    match report.run.exit {
+        0 => ExitCode::SUCCESS,
+        code => ExitCode::from(code as u8),
     }
 }
 
@@ -662,7 +855,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
     }
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
-    let scene = match load_scene(cli, &assets) {
+    let scene = match load_scene(cli, cli.working_space.as_ref(), &assets) {
         Ok(scene) => scene,
         Err(code) => return code,
     };
@@ -889,7 +1082,7 @@ mod tests {
         let cli = Cli::try_parse_from(["crust", "render"].into_iter().chain(args))?;
         match cli.command {
             Command::Render(args) => Ok(*args),
-            Command::Ls { .. } => unreachable!("parsed as render"),
+            _ => unreachable!("parsed as render"),
         }
     }
 
@@ -1324,6 +1517,112 @@ mod tests {
             "and a kind"
         );
         assert!(Cli::try_parse_from(["crust", "ls", "meshes", "-i", "s.usda"]).is_err());
+    }
+
+    /// `crust diagnostic <args>`, parsed down to its own arguments.
+    fn diagnose<const N: usize>(
+        args: [&str; N],
+    ) -> std::result::Result<DiagnosticArgs, clap::Error> {
+        let cli = Cli::try_parse_from(["crust", "diagnostic"].into_iter().chain(args))?;
+        match cli.command {
+            Command::Diagnostic(args) => Ok(*args),
+            _ => unreachable!("parsed as diagnostic"),
+        }
+    }
+
+    #[test]
+    fn diagnostic_defaults_and_budgets() {
+        let d = diagnose(["-i", "s.usda"]).unwrap();
+        assert_eq!(d.budget, Duration::from_secs(120));
+        assert_eq!(d.json, std::path::Path::new("crust-diagnostic.json"));
+        assert_eq!(d.repeats, 3);
+        assert!(d.baseline.is_none() && d.target_mrse.is_none());
+        for (text, secs) in [
+            ("90s", 90.0),
+            ("5m", 300.0),
+            ("1m30s", 90.0),
+            ("1h", 3600.0),
+            ("1.5s", 1.5),
+            ("250ms", 0.25),
+            ("45", 45.0),
+        ] {
+            assert_eq!(
+                parse_duration(text),
+                Ok(Duration::from_secs_f64(secs)),
+                "{text}"
+            );
+        }
+        for bad in ["", "0s", "-5s", "5x", "s", "m5", "nan", "inf"] {
+            assert!(parse_duration(bad).is_err(), "{bad:?}");
+        }
+        assert!(diagnose(["--repeats", "0"]).is_err());
+        assert!(diagnose(["--target-mrse", "0"]).is_err());
+        assert_eq!(
+            diagnose(["--target-mrse", "0.001"]).unwrap().target_mrse,
+            Some(0.001)
+        );
+    }
+
+    /// The `cli` spec's scenario: a shared flag means the same in both
+    /// subcommands, and the render-only ones are refused by `diagnostic`.
+    #[test]
+    fn diagnostic_shares_the_scene_flags_with_render() {
+        let args = [
+            "-i",
+            "scene.usda",
+            "-f",
+            "12",
+            "--camera",
+            "/cam",
+            "--region",
+            "0,0,256,256",
+            "--strategy",
+            "balance",
+            "--light-selection",
+            "learned",
+            "--light-samples",
+            "2",
+            "--light-samples-indirect",
+            "3",
+            "--indirect-clamp",
+            "0",
+            "--filter",
+            "box",
+            "--filter-radius",
+            "0.75",
+            "--subdiv-level",
+            "2",
+            "--subdiv-edge-length",
+            "4",
+            "--auto-tx",
+        ];
+        let d = diagnose(args).expect("every shared flag");
+        let r = render(args).expect("the same flags render");
+        let (_, base) = crust_core::get_settings();
+        let ds = apply_scene_overrides(&d.scene, base);
+        let rs = apply_overrides(&r, base);
+        assert_eq!(format!("{ds:?}"), format!("{rs:?}"));
+        assert_eq!(ds.light_selection(), LightSelection::Learned);
+        assert_eq!(d.scene.region, r.region);
+        assert_eq!(
+            (d.scene.frame, d.scene.camera.as_deref()),
+            (Some(12.0), Some("/cam"))
+        );
+        for render_only in [
+            &["-s", "64"][..],
+            &["-o", "x.exr"],
+            &["--log-file"],
+            &["--scanline"],
+            &["--ocio-config", "x.ocio"],
+            &["--working-space", "acescg"],
+            &["--display", "sRGB - Display"],
+            &["--profile"],
+        ] {
+            let mut a = vec!["-i", "s.usda"];
+            a.extend_from_slice(render_only);
+            let cli = Cli::try_parse_from(["crust", "diagnostic"].into_iter().chain(a));
+            assert!(cli.is_err(), "{render_only:?} accepted");
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 title = "Overview"
 description = "The crates that make up Crust Render, and how a render flows through them."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-08T08:00:00+00:00
 draft = false
 weight = 10
 sort_by = "weight"
@@ -45,9 +45,9 @@ in the repository.
 | `crust-rt` | geometry, the BVH build, ray intersection, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | reading `.mtlx` documents, compiling node graphs into programs, the BSDF closure tree | any Crust type |
 | `crust-jit` | compiling MaterialX programs to machine code (optional, the `jit` feature) | everything but `crust-mtlx` |
-| `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, path guiding, statistics | decoding images, textures or IES files |
+| `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, path guiding, statistics, the diagnostic and its report | decoding images, textures or IES files |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the texture tile caches, `.tx` conversion | the integrator |
-| `crust-render` | the command line, logging, the progress bar, writing the EXR and PNG | decoding anything |
+| `crust-render` | the command line, logging, the progress bar, writing the EXR and PNG, printing and saving the diagnostic's report | decoding anything |
 | `utils` | stateless math: sampling warps, MIS heuristics, luminance | everything |
 
 Three libraries come from outside the workspace, all pure Rust:

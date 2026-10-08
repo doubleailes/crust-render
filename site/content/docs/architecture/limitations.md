@@ -2,7 +2,7 @@
 title = "Limitations"
 description = "What Crust Render does not do, or does only partly."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-02T08:00:00+00:00
+updated = 2026-10-08T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
@@ -122,5 +122,16 @@ render.
 
 ## Path guiding
 
+- **Not repeatable bit for bit.** A guided render decides whether its last pass is
+  guided from an efficiency measured in wall-clock time, so two guided renders of the
+  same stage can differ when that estimate sits near 1.
 - **Surfaces only.** Volumes and phase functions aren't guided.
 - **Luminance only.** The guide is trained on luminance, not per colour channel.
+
+## Diagnostic
+
+- **Crops stand in for the frame.** `crust diagnostic` compares settings on up to three
+  crops; its full-frame numbers are estimates. See
+  [Diagnosing a render](@/docs/help/diagnosing-a-render.md#limitations) for the rest.
+- **Guiding is suggested as an attribute.** `crust render` has no guiding flag, so a
+  guiding suggestion is authored on the stage (`crust:pathGuiding`).

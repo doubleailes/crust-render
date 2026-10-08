@@ -659,3 +659,180 @@ fn the_region_is_clipped_to_the_frame_and_reset_by_the_resolution() {
         "a new resolution resets the region"
     );
 }
+
+/// A sample stage at a small resolution, for the renderer tests below.
+fn sample_scene(name: &str) -> crate::Scene {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples")
+        .join(name);
+    crate::Scene::from_usd(&path).unwrap_or_else(|e| panic!("load {name}: {e}"))
+}
+
+fn bits(buffer: &crate::Buffer) -> Vec<u32> {
+    let (w, h) = buffer.size();
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let (r, g, b) = buffer.get_rgb(x, y);
+            [r.to_bits(), g.to_bits(), b.to_bits()]
+        })
+        .collect()
+}
+
+/// `new(s)` and `new(s0).reconfigure(s)` render the same image, bit for
+/// bit, for every setting the diagnostic varies — `new` is `reconfigure` on
+/// a fresh renderer, and `reconfigure` leaves nothing of `s0` behind.
+#[test]
+fn reconfigure_renders_what_new_renders() {
+    use crate::{LightSelection, Renderer};
+    for name in ["cornellbox.usda", "veach_mis.usda"] {
+        let base = sample_scene(name)
+            .settings
+            .with_resolution(48, 32)
+            .with_samples_per_pixel(16);
+        // Everything the diagnostic varies, set away from every case below.
+        let s0 = base
+            .with_sampling_strategy(SamplingStrategy::BsdfOnly)
+            .with_light_selection(LightSelection::Learned)
+            .with_light_samples(3, 3)
+            .with_guiding(true, 2, 0.5)
+            .with_max_depth(2);
+        let cases = [
+            base.with_sampling_strategy(SamplingStrategy::BalanceMis),
+            base.with_light_selection(LightSelection::Uniform),
+            base.with_light_selection(LightSelection::Power),
+            base.with_light_selection(LightSelection::Learned),
+            base.with_light_samples(2, 1),
+            base.with_light_samples(1, 2),
+            // One training iteration: with more, whether the final pass is
+            // guided follows a ΔEff measured in wall-clock time, so two
+            // guided renders of the same settings may differ.
+            base.with_guiding(true, 1, 0.5),
+            base.with_max_depth(3),
+        ];
+        for (k, s) in cases.into_iter().enumerate() {
+            let scene = sample_scene(name);
+            let fresh =
+                Renderer::new(scene.camera, scene.world, scene.lights, s).render_with_tiles();
+            let scene = sample_scene(name);
+            let mut r = Renderer::new(scene.camera, scene.world, scene.lights, s0);
+            r.reconfigure(s);
+            assert_eq!(r.lights.selection(), {
+                let scene = sample_scene(name);
+                Renderer::new(scene.camera, scene.world, scene.lights, s)
+                    .lights
+                    .selection()
+            });
+            assert!(
+                bits(&fresh) == bits(&r.render_with_tiles()),
+                "{name}: case {k} differs after reconfigure"
+            );
+        }
+    }
+}
+
+/// The clamp counter observes only: the image is the unclamped one, bit
+/// for bit, and what it measures is exactly the luminance the clamp takes
+/// from the image when it is on.
+#[test]
+fn the_clamp_counter_measures_what_the_clamp_removes() {
+    use super::Instruments;
+    use crate::Renderer;
+    let limit = 0.25;
+    let settings = sample_scene("cornellbox.usda")
+        .settings
+        .with_resolution(48, 32)
+        .with_samples_per_pixel(16);
+    let render = |clamp: f32, instruments: Instruments| {
+        let scene = sample_scene("cornellbox.usda");
+        let s = settings.with_indirect_clamp(clamp);
+        Renderer::new(scene.camera, scene.world, scene.lights, s).render_measured(None, instruments)
+    };
+    let off = render(0.0, Instruments::default());
+    let measured = render(
+        0.0,
+        Instruments {
+            clamp: Some(limit),
+            ..Instruments::default()
+        },
+    );
+    let clamped = render(limit, Instruments::default());
+    assert!(
+        bits(&off.buffer) == bits(&measured.buffer),
+        "the counter changed the image"
+    );
+    // Off by default.
+    assert_eq!(off.clamp.pixels, 0);
+    let m = measured.clamp;
+    assert_eq!(m.pixels, 48 * 32);
+    assert!(m.pixels_touched > 0 && m.removed_luminance > 0.0, "{m:?}");
+    // With the clamp on, there is nothing for the counter to measure.
+    let on = {
+        let scene = sample_scene("cornellbox.usda");
+        Renderer::new(
+            scene.camera,
+            scene.world,
+            scene.lights,
+            settings.with_indirect_clamp(limit),
+        )
+        .render_measured(
+            None,
+            Instruments {
+                clamp: Some(limit),
+                ..Instruments::default()
+            },
+        )
+    };
+    assert_eq!(on.clamp.pixels, 0);
+    let luma = sample_scene("cornellbox.usda").lights.luma();
+    let total = |b: &crate::Buffer| -> f64 {
+        let (w, h) = b.size();
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let (r, g, b) = b.get_rgb(x, y);
+                luma.of(crate::Vec3A::new(r, g, b)) as f64
+            })
+            .sum()
+    };
+    let diff = total(&off.buffer) - total(&clamped.buffer);
+    let rel = (diff - m.removed_luminance).abs() / diff;
+    assert!(
+        rel < 1e-4,
+        "image lost {diff}, the counter measured {}",
+        m.removed_luminance
+    );
+}
+
+/// The unit timer is off by default, and on gives every tile of the frame
+/// a time.
+#[test]
+fn the_tile_timer_times_every_unit_when_asked() {
+    use super::Instruments;
+    use crate::Renderer;
+    let scene = sample_scene("cornellbox.usda");
+    let s = scene
+        .settings
+        .with_resolution(40, 20)
+        .with_samples_per_pixel(2);
+    let r = Renderer::new(scene.camera, scene.world, scene.lights, s);
+    assert!(
+        r.render_measured(None, Instruments::default())
+            .tiles
+            .is_empty()
+    );
+    let m = r.render_measured(
+        None,
+        Instruments {
+            tile_times: true,
+            variance: true,
+            ..Instruments::default()
+        },
+    );
+    // 40×20 in 16×16 tiles: 3 × 2.
+    assert_eq!(m.tiles.len(), 6);
+    assert_eq!(m.tiles.iter().map(|(t, _)| t.area()).sum::<usize>(), 800);
+    assert!(m.tiles.iter().all(|&(_, s)| s >= 0.0));
+    assert_eq!(m.var_map.len(), 800);
+    assert!(m.render_s > 0.0 && m.setup_s == 0.0);
+}

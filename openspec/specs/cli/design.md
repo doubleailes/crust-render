@@ -251,6 +251,19 @@ CRUST_PTEX_STREAM=1 CRUST_PTEX_MIP=0 cargo run --release -- render -i scene.usda
 CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 CRUST_PTEX_STREAM_MIPSPACE=file \
     cargo run --release -- render -i scene.usda --stats
 
+# --- Diagnose a scene: which *settings* make it faster or cleaner ----------
+# (openspec/specs/diagnostics/design.md). Markdown on stdout, the
+# crust-diagnostic/1 JSON at --json, log on stderr; exit 0 = tier 1 done,
+# 3 = budget ran out first (reports still written). Takes render's scene flags.
+cargo run --release -- diagnostic -i samples/cornellbox.usda --budget 30s > report.md
+cargo run --release -- diagnostic -i scene.usda --region 0,0,512,512   # one crop, that region
+# The loop: apply a suggestion as a flag, compare with the previous report.
+cargo run --release -- diagnostic -i scene.usda --light-selection learned \
+    --baseline crust-diagnostic.json --json r2.json > r2.md
+cargo run --release -- diagnostic -i scene.usda --repeats 5 --budget 10m  # busy machine
+cargo run --release -- diagnostic -i scene.usda -l debug 2> diag.log      # per-trial lines
+# For a *code* change, bench_ab.sh below stays the tool: this one varies settings.
+
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
