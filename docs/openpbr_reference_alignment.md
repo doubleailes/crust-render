@@ -175,7 +175,17 @@ like the coat passage.
 
 ## Remaining gaps vs. the Adobe reference
 
-Known, deliberate, and recorded here so nobody rediscovers them:
+Known, deliberate, and recorded here so nobody rediscovers them. Each gap is
+also a named deviation in the Adobe oracle (`crust-core/tests/adobe_oracle.rs`),
+which replays reference values from Adobe's `openpbr-bsdf` at a pinned commit
+(`scripts/adobe_oracle.py` regenerates them). A deviation is the condition on
+the inputs under which crust may differ, and a bound on how far: the worst of a
+case's albedo error (absolute), emission error (relative to `max(1, |e|)`) and
+per-direction value error (relative to `max(0.05, |f·cos|)`). A case outside
+every deviation must match within 2e-3; a case under several is excused up to
+the sum of their bounds; and a deviation every case passes without fails the
+test, so closing a gap means deleting its rule. The bounds below are the ones
+measured on 2026-10-08:
 
 - **Microfacet multiple-scattering energy compensation** — Adobe adds
   LUT-driven MMS lobes (dielectric + metal) and scales diffuse by a
@@ -187,6 +197,10 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   grazing, so a coloured surface desaturates toward its silhouette. A
   hand-rolled `1 − F(μ_v)` substitute is not a fix — it breaks reciprocity
   unless symmetrised as `√((1 − E(μ_v))(1 − E(μ_l)))`.
+  Oracle: `metal-no-mms` (0.457), `dielectric-specular` (0.0156, which also
+  covers Schlick against Adobe's Fresnel), `specular-diffuse-coupling` (3.22),
+  and `diffuse-flat-coupling` (0.0408: the flat `1 − F_avg` dims the diffuse
+  even at `specular_weight = 0`, where Adobe has no interface to take energy).
 - **Random-walk subsurface entry** — non-transmissive SSS materials never
   refract into their interior; they use the tinted-diffuse (EON)
   approximation. Needs an interface refraction event for the SSS fraction
@@ -196,6 +210,7 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   subsurface lobe whose selection returns a `ScatterSample::subsurface`
   entry, and its `from_subsurface` van de Hulst medium replaced by the walk's
   Chiang remap, since the two invert the albedo differently.
+  Oracle: `subsurface-as-diffuse` (4.85).
 - **`specular_weight` semantics** — `specular_weight` weighs the **dielectric
   base's** specular interface and nothing else: it scales the finished
   dielectric lobe, and the metal lobe takes its coverage from `base_metalness`
@@ -211,12 +226,17 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   the IOR remap is still not done.
   Related: the coat-aware base-IOR ratio (TIR fix) and coat-induced
   specular roughening are skipped.
+  Oracle: `transmission` (11.8) for the remap and the transmission lobe;
+  `coat-over-base` (6.2) for the coat's effect on the base; `coat` (0.0334)
+  for the coat lobe itself.
 - **Fuzz** — Charlie sheen D × Imageworks visibility with a scalar
   `(1 − fuzz_weight)` layer approximation, vs. Adobe's Zeltner LTC sheen
   with fuzz↔coat roughness cross-coupling.
+  Oracle: `fuzz-charlie` (9.25).
 - **Interior hits** — emission is not suppressed when a closed surface is
   hit from inside, and the coat is not reduced to transmission-tint-only
   there.
+  Oracle: `interior` (3.06).
 - **`geometry_opacity`** — not a BSDF input on either side: Adobe documents
   opacity as the host renderer's job (stochastic cutout), and crust's host
   does it (`Material::opacity`): below 1 the surface is met with that
@@ -225,8 +245,12 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   (`geometry_normal/tangent/coat_normal/coat_tangent`); frames are
   auto-generated (Duff et al.), so anisotropy has no authored orientation
   (Adobe additionally offers a (cos, sin) anisotropy-rotation extension).
+  Oracle: `anisotropy` (0.23). The frames agree at the oracle's normal, so
+  that bound is the anisotropic lobe itself, not its orientation.
 - **Thin film + thin wall** — thin film applies to reflection only, not to
   thin-walled transmission (Adobe documents the same limitation).
+  Oracle: `thin-film` (0.791), for the interference itself. The thin-walled
+  window model matches Adobe in every case the fixture holds, so it has no rule.
 
 Every item above is test-pinned where implemented; the shader's regression
 suite lives in `openpbr/` (`cargo test -p crust-core`).

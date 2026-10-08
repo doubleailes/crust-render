@@ -159,25 +159,30 @@ from inside SHALL have no fuzz.
 ### Requirement: Native OpenPBR is checked against Adobe's reference
 
 `OpenPBR` SHALL be compared with Adobe's `openpbr-bsdf` reference at a pinned
-commit, through a committed fixture of reference values: BSDF value, pdf,
+commit, through a committed fixture of reference values: BSDF value,
 directional albedo and emission, over sampled parameters and directions. It
-SHALL match within a stated tolerance, except where a named deviation rule
-excuses the difference. Each rule SHALL name its input condition and
+SHALL match within a stated tolerance, except where named deviation rules
+excuse the difference. Each rule SHALL name its input condition and
 measured bound.
 
 #### Scenario: The fuzz matches the reference
 
-- **WHEN** the oracle replays a fixture case whose only active layers are a fuzz
-  over a diffuse base
-- **THEN** crust's value, pdf and albedo match the reference within tolerance,
-  with no deviation rule applied
+- **WHEN** the oracle replays a fixture case whose only active layer is a fuzz
+  over a black base
+- **THEN** crust's values, albedo and emission match the reference within
+  tolerance, with no deviation rule applied
 
 #### Scenario: A known gap is excused only under its condition
 
 - **WHEN** a fixture case differs from crust because of a recorded gap (for
   example, a rough metal, which lacks multiple-scattering compensation)
-- **THEN** the difference is excused only by the rule naming that condition, and
-  only up to its recorded bound
+- **THEN** the difference is excused only by the rules whose conditions hold
+  for that case, and only up to the sum of their recorded bounds
+
+#### Scenario: A closed gap leaves no excuse behind
+
+- **WHEN** every fixture case passes with one deviation rule removed
+- **THEN** the oracle fails, naming that rule as stale
 
 #### Scenario: CI needs no reference toolchain
 

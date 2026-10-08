@@ -65,15 +65,22 @@ See proposal.md for the motivation. Here is the state this design starts from.
 - CI never runs the generator.
 
 Each fixture case holds:
-- the resolved parameter set (every Adobe input crust maps, at a value drawn from a
-  fixed-seed generator, plus hand-picked corner cases);
-- ω_o and ω_i in the local frame;
-- the reference eval, split into Adobe's `diffuse` and `specular` parts and summed
-  on comparison;
-- the pdf;
-- the directional albedo at ω_o: Adobe's sampler averaged over a fixed quasi-random
-  set, so it is deterministic;
+- the parameter set (every Adobe input crust maps, at a value drawn from a
+  fixed-seed generator, plus hand-picked corner cases: one per known gap with
+  nothing else present, so each rule has a case it alone explains);
+- ω_o and eight ω_i in the local frame (outward normal +Z; a ω_o below the plane
+  is a back-face hit);
+- the reference eval (Adobe's `diffuse` and `specular` parts summed), the BSDF
+  times the cosine;
+- the directional albedo at ω_o: `(π/N) Σ f(ω_o, ω_i)` over a fixed 32 × 32
+  cosine-weighted midpoint grid that the replay rebuilds, so both sides compute
+  one quantity rather than two estimates;
 - the emission toward ω_o.
+
+The pdf is **not** compared. It is each renderer's own sampling density (crust's
+comes from its lobe-selection heuristic and its floors), so no two correct
+implementations need agree on it. crust's pdf has to agree with crust's values,
+which the consistency tests in `openpbr/tests.rs` check (D4).
 
 *Alternative:* calling Adobe's GLSL through a Rust shader crate, or binding the C++
 with `cc` in a `build.rs`. Both would bring a C++ toolchain into
@@ -82,17 +89,28 @@ keeps CI pure Rust, exactly as the OSL oracle does.
 
 ### D2. A deviation is a predicate on the inputs, with a bound
 
-A rule names the condition under which it applies, for example "`specular_roughness
-> 0.3` with `base_metalness > 0`: MMS compensation missing". It also names the
-largest relative difference it excuses, measured when the fixture is generated.
+A rule names the condition under which it applies, for example "`base_metalness
+> 0`: no multiple-scattering compensation on the metal lobe", and the largest
+error it excuses.
 
-- A case outside every rule's condition must match within the global tolerance.
-  The starting tolerance is 1e-4 relative on eval and pdf, and 2e-3 absolute on
-  albedo, which is Monte Carlo on Adobe's side.
-- A rule whose condition no longer produces a difference is reported as stale and
-  fails the test. Without that, a closed gap would leave its excuse behind.
-- The initial rules are each gap in `docs/openpbr_reference_alignment.md` except
-  "Fuzz", measured on the first fixture.
+- A case's error is the worst of three measures that stay meaningful where values
+  are near zero and where they peak: the albedo's absolute error, the emission's
+  error relative to `max(1, |e|)`, and each value's error relative to
+  `max(0.05, |f·cos|)`.
+- A case outside every rule's condition must be within the global tolerance,
+  2e-3.
+- A case under several rules is excused up to the **sum** of their bounds. Random
+  cases stack gaps, and their errors do not separate.
+- A rule's bound is the worst error among the cases it alone applies to. For a gap
+  no case can isolate (thin film needs a specular lobe), it is what its cases need
+  beyond the other rules' bounds. Both are measured by an `#[ignore]`d report test
+  and get a 2% margin.
+- A rule is **stale** when every case passes without it, and a stale rule fails
+  the test. Without that, a closed gap would leave its excuse behind. This is also
+  "deleting any single rule makes the oracle fail", checked on every run.
+- The initial rules are each gap in `docs/openpbr_reference_alignment.md`,
+  "Fuzz" included (until 4.7), plus the interactions the fixture exposed: the
+  specular-diffuse coupling and the coat's effect on the base.
 
 *Alternative:* a per-case "expected crust value" snapshot. It is simpler, but it
 records a difference without saying why, and the oracle's whole point is to make
