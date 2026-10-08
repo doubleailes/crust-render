@@ -202,11 +202,13 @@
       - `cargo test --workspace --no-fail-fast`;
       - `cargo deny --locked check`;
       - the pinned nightly clippy.
-- [ ] 7.2 Confirm there is no render-path cost: callgrind on
+- [x] 7.2 Confirm there is no render-path cost: callgrind on
       `samples/cornellbox.usda -s 2` with `RAYON_NUM_THREADS=1`, parent vs
       this change, must agree within noise (the stamp and JSON run after
       tracing).
-- [ ] 7.3 Agent loop smoke test: render the Cornell box twice at `-s 16
+      Result: render pass 3,723,110,597 (parent) vs 3,723,110,585
+      instructions; program total +478k (+0.011%), all after tracing.
+- [x] 7.3 Agent loop smoke test: render the Cornell box twice at `-s 16
       --indirect-clamp 0` with `--stats-json`, then run `crust diff --json -`
       on the pair. Verify exit 0 and `comparability.status = "ok"`; then
       re-render one side at `-s 64` and verify `warn`.
