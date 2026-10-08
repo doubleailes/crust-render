@@ -930,7 +930,8 @@ resolution, which moves cage vertices only and warns once.
   (see "Where import time goes"), 28.7 GiB peak, and 23.4 s to render at the importer
   defaults (640x360, 128 spp), so the import is 88% of the frame.
   **`docs/alab_profile.md` is the `--profile` of that render**: texture lookups are
-  43% of render thread time and tracing 40%, and 72 threads render ~5.4x faster than 8.
+  43% of render thread time and tracing 40%. 72 threads render 5.16x faster than 8
+  at equal spp (2026-10-08), against at most ~5.6x that this 72-vCPU VM allows.
   Its first profile (2026-09-27) found the lookups at 89% and 3:20 to render, from
   contention rather than work: a shared counter bumped on every lookup, and a 2-slot
   microcache that missed 25% once a material interleaved ~5 textures, so 72 threads

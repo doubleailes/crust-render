@@ -14,9 +14,11 @@ Measured 2026-10-05 at `4143c58` (0.5.0). The main findings:
   time.** That is 1.57 µs per `eval`, against 21.55 µs before the cache fix.
   Ray tracing is next at 40%, so the frame is now close to the even split a
   healthy render shows.
-- **The render scales with threads.** 72 threads render 5.4× faster than 8,
-  against 1.25× in the first profile. Some contention remains: a texture call
-  is 1.8× slower at 72 threads than at 8.
+- **The render scales with threads, close to what the machine allows.** 72
+  threads render 5.16× faster than 8 (measured 2026-10-08 at equal spp),
+  against 1.25× in the first profile. This VM allows at most about 5.6× from 8
+  to 72 threads (see "Thread scaling"), so most of the gap to 9× is the
+  machine. Texture lookups still carry about 1.19× of contention of their own.
 
 ## Setup
 
@@ -30,6 +32,8 @@ cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -
   of 72 cores with no SMT, 16 MiB L3, 93 GiB RAM). A physical E5-2699 v4 has 22
   cores, so these vCPUs span several physical sockets. That makes cache-line
   traffic between threads expensive, and it is what this profile is sensitive to.
+  It also caps scaling: 72 single-threaded renders run at once deliver only 41×
+  the throughput of one (see "Thread scaling").
 - **Settings:** the stage authors no `crust:` render settings, so the importer
   defaults apply: 640×360, 128 spp, depth 32, adaptive (min 32), power MIS, power
   light selection, triangle filter, indirect clamp 10, bucket order.
@@ -127,24 +131,106 @@ resident. Streaming holds the frame under 0.6 GiB.
 
 ## Thread scaling
 
-The same frame, varying only the thread count (profiled runs; per-call times
-are what matter):
+Measured 2026-10-08 at `3c8b861`: the same frame and camera, one render at a
+time on an idle machine, varying only `RAYON_NUM_THREADS`. The frame now does
+about 18% more ray queries than at 0.5.0 (165.8 M against 140.9 M at 128 spp),
+so its render times are longer than the ones above. What matters here is the
+ratio.
 
-| threads | spp | Render | Texture µs/call | Trace µs/call | EvalBsdfs µs/call (incl. textures) |
-|---|---|---|---|---|---|
-| 72 | 32 | 6.43 s | 1.60 | 5.95 | 8.67 |
-| 8 | 8 | 8.74 s | 0.895 | 4.15 | 4.87 |
-| *first profile, 72* | *32* | *48.0 s* | *23.38* | *7.90* | *113.7* |
-| *first profile, 8* | *8* | *15.1 s* | *2.26* | *4.46* | *11.4* |
+| run | 8 threads | 72 threads | 8 → 72 |
+|---|---|---|---|
+| 32 spp, `--stats` | 38.27 s | 7.42 s (repeat: 7.44 s) | **5.16×** |
+| 32 spp, `--profile` | 41.38 s | 8.02 s | 5.16× |
+| default 128 spp, adaptive | 2:31.7 | 29.27 s | **5.18×** |
 
-- **72 threads buy 5.4× over 8**, against 1.25× before. Normalised to the same
-  32 spp, 8 threads would take about 35 s, and 72 take 6.4 s. The ideal is 9×.
-- **The gap is still texture contention.** At 9× the threads, a texture call is
-  1.8× slower (it was 10× slower). Trace slows 1.4×, consistent with shared
-  cache and memory traffic.
-- **At 8 threads the frame is ray-bound**: Trace 37.6% against Texture 35.9%.
-  So the texture path is no longer expensive in itself. What it still costs is
-  contention between threads.
+- **72 threads buy 5.16× over 8.** The two 72-thread runs agree within 0.3%.
+  At 128 spp, adaptive sampling stops only 1.1% of pixels, so each of its
+  rounds is nearly a full sweep and the ratio matches 32 spp's.
+- **The 5.4× this section used to report was an extrapolation.** It came from
+  two profiled runs at 8 and 32 spp, with the 8-thread time scaled ×4. At equal
+  spp, the ratio is 5.16×.
+
+### What the machine allows
+
+The thread ratio, 9×, is out of reach on this VM whatever the renderer does.
+The control is N copies of a single-threaded cornellbox render, started
+together (`RAYON_NUM_THREADS=1 crust render -i samples/cornellbox.usda -s 16`).
+They share nothing in software, so whatever each copy loses, the machine
+takes:
+
+| copies | seconds per copy (mean) | efficiency | throughput |
+|---|---|---|---|
+| 1 | 4.96 | 1.00 | 1× |
+| 8 | 5.43 | 0.91 | 7.3× |
+| 16 | 6.04 | 0.82 | 13.1× |
+| 24 | 6.23 | 0.80 | 19.1× |
+| 36 | 6.27 | 0.79 | 28.4× |
+| 48 | 6.70 | 0.74 | 35.5× |
+| 60 | 7.64 | 0.65 | 38.9× |
+| 72 | 8.70 | 0.57 | **41.0×** |
+
+- **At 72 threads the machine gives 41×, and 8 → 72 gives at most 5.6×.**
+  - Up to 36 copies, the loss fits the turbo clock falling from 3.6 to 2.8 GHz
+    as more cores wake (a ratio of 0.78). Cornellbox fits in L2, so it is not
+    memory.
+  - Past 36, the vCPUs behave like hyperthread siblings or shared cores, and
+    the copies spread out: the slowest of the 72 took 9.71 s.
+  - The VM reports one socket and one NUMA node, so these causes are inferred
+    from the curve, not observed.
+- **A thread doing the same work is 1.6× slower at 72-way occupancy than at
+  8-way.** That, not 1.0×, is the bar a per-call slowdown has to be judged
+  against.
+- **Crust itself reaches 35.2× on cornellbox at 72 threads** (128 spp), 86% of
+  the 41×.
+- **ALab cannot be calibrated this way.** A copy peaks at 29 GiB, so 72 of them
+  do not fit.
+
+### Per call, against the machine
+
+The profiled pair, at 32 spp:
+
+| section | 8 threads | 72 threads | slowdown | against the machine's 1.6× |
+|---|---|---|---|---|
+| GeneratePrimary | 168 ns | 263 ns | 1.57× | at it |
+| Bounce | 293 ns | 480 ns | 1.64× | at it |
+| SurfaceLighting (local) | 1.46 µs | 2.16 µs | 1.48× | below |
+| Trace | 4.05 µs | 5.88 µs | 1.45× | below |
+| Occlusion | 2.07 µs | 2.91 µs | 1.41× | below |
+| **Texture** | **895 ns** | **1.71 µs** | **1.91×** | **1.19× above** |
+| TextureLoad | 76.5 µs | 176.5 µs | 2.31× | above, but 1.5% of thread time |
+
+- **Texture is the one section with contention of its own, about 1.19×.** The
+  1.8× this section used to attribute to contention was mostly the machine.
+  - The microcache still hits 84.4%, so 15.6% of 972 M lookups reach a shard,
+    about one per `eval`.
+  - A shard hit writes to cache lines that every thread reading that tile
+    shares: it locks the shard `Mutex` and increments the tile's `Arc` count,
+    and the microcache drops another `Arc` when it evicts an entry later.
+  - The excess, about 0.28 µs per `eval`, is consistent with one or two
+    cross-socket line transfers.
+- **Traversal has no contention problem.** Trace and Occlusion slow down less
+  than the machine factor: memory-bound work loses less to the clock and gains
+  more from a hyperthread sibling. So ALab's own limit is probably somewhat
+  above cornellbox's 5.6×.
+- **Thread time grows 1.67×** (5:28.2 → 9:08.9), against the machine's 1.60×.
+- **At 8 threads the frame is still nearly even**: Texture 39.1%, Trace 33.8%.
+
+### Where the 72-thread render goes
+
+72 threads × 8.02 s is 577 s of thread capacity:
+
+| | thread time | share |
+|---|---|---|
+| work at the machine's 72-way speed | 510.3 s | 88.4% |
+| texture time beyond the 1.6× factor | 38.6 s | 6.7% |
+| idle | 28.5 s | 4.9% |
+
+- **The idle time is the end of the pass.** Threads are busy 95.1% of the wall
+  at 72 threads, against 99.1% at 8. At 640×360 the pass is 920 tiles of 16×16,
+  about 13 per thread, and the last expensive ones finish alone.
+- **Without both losses, the render would take about 7.2 s**, 5.8× over 8
+  threads. That is about 11% of the 72-thread render's time. If texture should
+  scale like Trace (1.45×) rather than like compute, the figure is 14%.
 
 ## Other findings
 
@@ -255,11 +341,14 @@ twinned light: the 20° sun cone or one of the two rect suns.
 1. **The import.** At 2:53 of a 3:20 frame, composition is now where a
    single frame's time goes. The render could halve again and the frame would
    be 6% faster.
-2. **Texture contention.** 15% of lookups still reach the shard mutexes, and a
-   lookup is 1.8× slower at 72 threads than at 8. Closing that gap would bring
-   the render near the ideal 9× over 8 threads. Consecutive shading points on
-   one thread are often different materials, which no per-thread cache
-   absorbs.
+2. **Texture contention and the end of the pass.** 15.6% of lookups still
+   reach a shard, and a texture call is 1.91× slower at 72 threads than at 8,
+   against the machine's 1.6×. That excess is 6.7% of the 72-thread render's
+   thread capacity, and threads idling at the end of the pass are another
+   4.9%. Removing both would take 72 threads from 5.16× to about 5.8× over 8,
+   not to 9×, which this VM cannot reach ("Thread scaling"). Consecutive
+   shading points on one thread are often different materials, which no
+   per-thread cache absorbs.
 3. **Traversal.** Trace is now a third of render thread time, at 5.9 µs per
    closest-hit query on this VM.
 4. **Light selection.** 82% of shadow rays are still occluded under power
@@ -550,8 +639,16 @@ not a render.
 
 ```bash
 CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
-cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --profile
-RAYON_NUM_THREADS=8 cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 8 --profile
+# the pair, at equal spp (--stats for the ratio, --profile for per-call times):
+RAYON_NUM_THREADS=72 cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --stats
+RAYON_NUM_THREADS=8  cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --stats
+# what the machine allows: N single-threaded copies at once (N = 1, 8, ..., 72);
+# a lone copy's Render time over each copy's here is the machine's efficiency at N
+N=72; mkdir -p /tmp/cal$N
+for k in $(seq 1 $N); do
+  RAYON_NUM_THREADS=1 target/release/crust render -i samples/cornellbox.usda \
+    -o /tmp/cal$N/$k.exr -s 16 --stats > /tmp/cal$N/$k.log 2>&1 &
+done; wait; grep -h '^  Render ' /tmp/cal$N/*.log
 # light and shadow links, and why a light left the list:
 cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 1 -l debug 2>&1 | grep light_links
 # stack snapshots during the render phase of the first:
