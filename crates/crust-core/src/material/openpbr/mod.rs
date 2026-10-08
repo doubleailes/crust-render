@@ -879,8 +879,25 @@ impl Material for OpenPBR {
     /// directional Fresnel transmission, and the multi-bounce darkening, all
     /// fading with `coat_weight`; then through the fuzz, the share it lets
     /// pass, `1 − fuzz_weight · R(ω_o)`.
+    ///
+    /// Every hit asks, so the common surface — no coat, no fuzz — answers
+    /// here, inlined, and the layers are out of line: while they were one
+    /// function LLVM stopped inlining it, which cost cornellbox 0.4% of its
+    /// instructions.
+    #[inline]
     fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {
         let uncoated = self.emission_color * self.emission_luminance;
+        if self.coat_weight <= 0.0 && self.fuzz_weight <= 0.0 {
+            return uncoated;
+        }
+        self.emitted_through_layers(uncoated, cos_theta_o)
+    }
+}
+
+impl OpenPBR {
+    /// [`Material::emitted_directional`] through a coat or a fuzz.
+    #[inline(never)]
+    fn emitted_through_layers(&self, uncoated: Vec3A, cos_theta_o: f32) -> Vec3A {
         let coated = if self.coat_weight <= 0.0 {
             uncoated
         } else {
@@ -892,7 +909,10 @@ impl Material for OpenPBR {
             );
             uncoated * coat_passage(self, cos_theta_o) * dark
         };
-        coated * lobes::base_atten(self, cos_theta_o)
+        match FuzzLayer::at(self, cos_theta_o) {
+            Some(f) => coated * f.base_atten(),
+            None => coated,
+        }
     }
 }
 

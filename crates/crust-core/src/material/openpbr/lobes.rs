@@ -95,15 +95,44 @@ impl LobePmf {
     /// The fuzz is weighed by what it reflects toward the view, `w · R(ω_o)`,
     /// at its brightest channel, and everything beneath it by the share it
     /// lets through, as Adobe's `openpbr_sheen_probability` weighs them; so
-    /// the pmf depends on the view cosine `cos_v`. Without a fuzz that share
-    /// is exactly 1.0 and the pmf is the one it was.
+    /// the pmf depends on the view cosine `cos_v`. Without a fuzz the pmf is
+    /// the one it was, computed as it was: the `FUZZ = false` instance below
+    /// has no attenuation to multiply by (a runtime `× 1.0` is exact but not
+    /// free, and cost cornellbox 0.8% of its instructions).
     pub(super) fn selecting<const STRAIGHT: bool>(m: &OpenPBR, cos_v: f32) -> Self {
+        if m.fuzz_weight > 0.0 {
+            Self::selecting_under_fuzz::<STRAIGHT>(m, cos_v)
+        } else {
+            Self::weighing::<STRAIGHT, false>(m, 1e-6, 1.0)
+        }
+    }
+
+    /// [`LobePmf::selecting`] for a material with a fuzz, out of line so the
+    /// table lookup does not weigh on the common path.
+    #[inline(never)]
+    fn selecting_under_fuzz<const STRAIGHT: bool>(m: &OpenPBR, cos_v: f32) -> Self {
+        let f = FuzzLayer::at(m, cos_v).expect("a fuzz");
+        Self::weighing::<STRAIGHT, true>(
+            m,
+            (f.reflected() * m.fuzz_color.max_element()).max(1e-6),
+            f.base_atten(),
+        )
+    }
+
+    /// [`LobePmf::selecting`] with the fuzz's selection weight `w_fuzz` and
+    /// the share `base_atten` it passes to everything beneath, which only the
+    /// `FUZZ` instance applies.
+    #[inline(always)]
+    fn weighing<const STRAIGHT: bool, const FUZZ: bool>(
+        m: &OpenPBR,
+        w_fuzz: f32,
+        base_atten: f32,
+    ) -> Self {
+        let beneath = |w: f32| if FUZZ { w * base_atten } else { w };
         let f0_diel = f0_from_ior(m.specular_ior);
         let f0_coat = f0_from_ior(m.coat_ior);
         let base_luma = m.luma.of(m.base_color).max(0.02);
         let spec_luma = m.luma.of(m.specular_color).max(0.02);
-        let fuzz = FuzzLayer::at(m, cos_v);
-        let base_atten = fuzz.as_ref().map_or(1.0, FuzzLayer::base_atten);
 
         // Metal reflectivity is base_color · base_weight, covered by
         // base_metalness. No `specular_weight` here, matching `eval_specular`:
@@ -113,18 +142,19 @@ impl LobePmf {
         // returned its full energy — fireflies on every metal.
         let w_metal = m.base_metalness * m.luma.of(m.base_color * m.base_weight).max(0.02);
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
-        let w_specular = (w_metal + w_diel_spec).max(1e-4) * base_atten;
+        let w_specular = beneath((w_metal + w_diel_spec).max(1e-4));
 
         // Transmission displaces the diffuse base (OpenPBR: the base is a
         // mix of the opaque-diffuse and translucent-base substrates), so
         // fully transmissive surfaces stop scattering diffusely.
-        let w_diffuse = ((1.0 - m.base_metalness)
-            * (1.0 - m.transmission_weight)
-            * m.base_weight
-            * base_luma
-            * (1.0 - f0_diel))
-            .max(1e-4)
-            * base_atten;
+        let w_diffuse = beneath(
+            ((1.0 - m.base_metalness)
+                * (1.0 - m.transmission_weight)
+                * m.base_weight
+                * base_luma
+                * (1.0 - f0_diel))
+                .max(1e-4),
+        );
 
         // The coat reflection is untinted — coat_color only attenuates the
         // substrate — so its lobe weight ignores the color.
@@ -143,17 +173,14 @@ impl LobePmf {
         // and guard `total` instead; that changes the image, so it needs a
         // converged A/B against `eval_matches_scatter_importance` rather than
         // being folded into a bit-identical change.
-        let w_coat = (m.coat_weight * f0_coat).max(1e-6) * base_atten;
-        let w_fuzz = fuzz
-            .map_or(0.0, |f| f.reflected() * m.fuzz_color.max_element())
-            .max(1e-6);
+        let w_coat = beneath((m.coat_weight * f0_coat).max(1e-6));
 
         // Transmission: dominant when weight is high. When enabled it
         // steals energy from the dielectric-specular / diffuse pathway.
         let trans_luma = m.luma.of(m.transmission_color).max(0.02);
         let w_transmission = if m.transmission_weight > 0.0 && (STRAIGHT || !m.geometry_thin_walled)
         {
-            ((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4) * base_atten
+            beneath(((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4))
         } else {
             0.0
         };
@@ -496,6 +523,13 @@ impl FuzzLayer {
     }
 }
 
+/// The fuzz lobe's density toward `l_local`, out of line for
+/// [`pdf_all`]'s common, fuzz-free path.
+#[inline(never)]
+fn fuzz_density(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A) -> f32 {
+    ZeltnerSheen::new(m.fuzz_roughness, v_local.z).density(v_local, l_local)
+}
+
 /// [`FuzzLayer::base_atten`] for `m` viewed at `cos_v`: exactly 1.0 without a
 /// fuzz.
 #[inline]
@@ -772,8 +806,11 @@ pub(super) fn pdf_all(
     // still floored above zero (see `LobePmf::selecting`), and the sampler
     // then draws it cosine-weighted, as it always has: any density will do
     // for a lobe with no energy, and that one leaves the image unchanged.
-    let pdf_fuzz =
-        FuzzLayer::at(m, v_local.z).map_or(pdf_cosine, |f| f.lobe.density(v_local, l_local));
+    let pdf_fuzz = if m.fuzz_weight > 0.0 {
+        fuzz_density(m, v_local, l_local)
+    } else {
+        pdf_cosine
+    };
     let pdf_specular = pdf_vndf_ggx_aniso_local(v_local, h_local, ax, ay);
     // The coat density is *not* skippable the way `eval_coat` is: even at
     // `coat_weight == 0`, `LobePmf::selecting` floors the coat's selection
