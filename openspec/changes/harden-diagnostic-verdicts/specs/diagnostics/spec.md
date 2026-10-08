@@ -55,9 +55,10 @@ fragile, as static findings, each with numeric evidence:
   least 5% of the baseline's luminance. Evidence: the limit, the share of
   luminance removed, and the share of pixels touched.
 - `firefly_energy` (kind `noise`): the brightest 0.1% of the baseline's pixels
-  hold at least 20% of its luminance, not counting emission seen directly by the
-  camera. Evidence: that share, the baseline's spp, and the noise-breakdown row
-  holding the most of those pixels' luminance.
+  hold at least 20% of its luminance, not counting light seen directly by the
+  camera or in a single glossy or mirror reflection (the `emission` and
+  `direct_glossy` rows). Evidence: that share, the baseline's spp, and the
+  noise-breakdown row holding the most of those pixels' luminance.
 - `light_sampling_misses` (kind `noise`): tier 3's light-sampling reach is below
   0.9 on some crop, with a z beyond 4. Evidence: the lowest reach, its z, and
   its crop.

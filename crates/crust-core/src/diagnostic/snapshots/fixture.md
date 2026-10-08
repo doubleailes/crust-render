@@ -4,6 +4,7 @@
 
 - **Top time sink:** Trace (41%)
 - **Top noise source:** indirect_diffuse
+- **Picture:** none
 - **Best change:** `--light-samples 2` (ΔEff 1.25)
 - **Converged:** no
 
@@ -27,6 +28,7 @@
 - budget 120 s, used 61.23 s (import 0.5 s, not counted), 16 threads, 3 repeats
 - probe conditions: indirect clamp off, adaptive sampling off, fixed spp true, 640×360
 - P1: 4 s
+- seeds [0, 2654435769, 5308871538]; held back from tier 1: 4 s for tier 2, 1.5 s for tier 3
 - exit status 0
 
 ## Static findings
@@ -60,19 +62,22 @@ Light groups by: none.
 
 ## Trials
 
-| trial | overall ΔEff | verdict | per crop (median [min, max]: verdict) |
+ΔEff is on render time and trimmed MRSE; the luminance shift is the picture check against the paired baseline; the floor is the baseline's own spread across seeds.
+
+| trial | overall ΔEff | verdict | per crop (median [min, max]: verdict; shift, floor) |
 |---|---|---|---|
-| light_samples=2 | 1.25 | better | crop_a @16 spp: 1.25 [1.2, 1.3]: better |
+| light_samples=2 | 1.25 | better | crop_a @16 spp: 1.25 [1.2, 1.3]: better; shift +0.1% (z 0.3), floor 1.04 |
 
 ## Sample budget (estimates)
 
 - target MRSE 0.0025 (from variance_threshold), with light_samples=2 settings
-- estimated spp to reach it: 48; projected full-frame render time 9.6 s (sampling only)
+- estimated spp to reach it: 48; projected full-frame render time 9.6 s (sampling only), and 0 s of setup
 
 ## Picture-changing settings (measured, not ranked)
 
 - indirect clamp 10: removes 0.4% of the image's luminance (mean 0.001 per pixel), touching 2% of the pixels
 - max depth 32: 0% of paths ended there
+- light-sampling reach: crop_a 99.8% (z -0.4). Below 100%, part of the energy arrives only on paths BSDF sampling finds
 - subdivision: meshes per level []; the scene holds 0 unique triangles in 0.0 MiB of kernel geometry; its build time is not recorded
 
 ## Not tried
@@ -81,7 +86,7 @@ Light groups by: none.
 
 ## Suggestions
 
-- **light_samples=2**: flag `--light-samples`, attribute `crust:lightSamples`, value `2`, expected ΔEff 1.25 (evidence: light_samples=2)
+- **light_samples=2**: flag `--light-samples`, attribute `crust:lightSamples`, value `2`, expected ΔEff 1.25, 1.25 at the target (evidence: light_samples=2)
 
 ## Converged
 

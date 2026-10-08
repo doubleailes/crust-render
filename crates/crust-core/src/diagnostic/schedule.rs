@@ -1,10 +1,10 @@
 //! The time budget (design D10). Pure bookkeeping over seconds: the caller
 //! reports what each step took and asks before starting one, so tests can
 //! drive it with a fake clock.
-
-/// Of what remains once the baseline has run: tier 1 (unbiased swaps),
-/// tier 2 (sample budget), tier 3 (picture-changing settings).
-pub const TIER_SHARES: [f64; 3] = [0.70, 0.15, 0.15];
+//!
+//! Once the baseline has run, tiers 2 (sample budget) and 3
+//! (picture-changing settings) reserve their estimated render cost, and
+//! tier 1 (unbiased swaps) may spend everything else.
 
 /// The largest trial sample count tried: past it, a crop's error is far
 /// below anything the timing noise can separate.
@@ -46,17 +46,11 @@ impl Schedule {
         self.spent_s >= self.budget_s
     }
 
-    /// Splits what remains between the tiers ([`TIER_SHARES`]); called once
-    /// the baseline has run.
-    pub fn open_tiers(&mut self) {
-        let left = self.remaining_s();
-        let mut end = self.spent_s;
-        for (k, share) in TIER_SHARES.iter().enumerate() {
-            end += share * left;
-            self.tier_end_s[k] = end;
-        }
-        // Whatever rounding leaves, the last tier ends with the budget.
-        self.tier_end_s[2] = self.budget_s.max(self.spent_s);
+    /// Holds `tier2_s` and `tier3_s` back from tier 1 for the later tiers;
+    /// called once the baseline has run. Tier 1 may spend the rest.
+    pub fn open_tiers(&mut self, tier2_s: f64, tier3_s: f64) {
+        let end = self.budget_s.max(self.spent_s);
+        self.tier_end_s = [end - tier2_s - tier3_s, end - tier3_s, end];
     }
 
     /// Seconds tier `tier` (1-based) may still spend: up to its end, which
@@ -85,27 +79,60 @@ pub fn trial_cost_s(
     s_per_pixel_spp * crop_pixels as f64 * spp as f64 * 2.0 * repeats as f64 + setup_s
 }
 
+/// What the later tiers will render, for the reservation.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Later {
+    /// Tier 2's seconds, whatever the trial spp: the adaptive renders.
+    pub tier2_s: f64,
+    /// Tier 3's pixel-renders per trial sample: the half-depth pairs, the
+    /// light-only reach renders and any baseline tier 1 will not render.
+    pub tier3_pixels: f64,
+}
+
+/// The trial sample count and the reserves of the later tiers (D10).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Plan {
+    pub spp: u32,
+    pub tier2_reserve_s: f64,
+    pub tier3_reserve_s: f64,
+}
+
 /// The trials' sample count: the largest power of two, from
-/// [`MIN_TRIAL_SPP`] to [`MAX_TRIAL_SPP`], at which all `trials` fit in
-/// `share_s` ([`trial_cost_s`] each, without setup). When even the minimum
-/// does not fit, the minimum — and the budget then decides which trials run.
-pub fn trial_spp(
+/// [`MIN_TRIAL_SPP`] to [`MAX_TRIAL_SPP`], at which all `trials`
+/// ([`trial_cost_s`] each, without setup), tier 3's renders at that spp and
+/// tier 2's fixed cost fit in `left_s` together. The reserves are those
+/// estimates, with no margin.
+///
+/// When even the minimum does not fit, the tiers keep their priority: tier
+/// 1 keeps what its trials need at the minimum, tier 2 reserves what it can
+/// of the rest, then tier 3 — and the budget then decides what runs.
+pub fn plan(
     s_per_pixel_spp: f64,
     crop_pixels: usize,
     repeats: u32,
     trials: usize,
-    share_s: f64,
-) -> u32 {
+    later: Later,
+    left_s: f64,
+) -> Plan {
+    let tier1 =
+        |spp: u32| trials as f64 * trial_cost_s(s_per_pixel_spp, crop_pixels, spp, repeats, 0.0);
+    let tier3 = |spp: u32| s_per_pixel_spp * later.tier3_pixels * spp as f64;
     let mut spp = MIN_TRIAL_SPP;
     while spp < MAX_TRIAL_SPP {
         let next = spp * 2;
-        let cost = trials as f64 * trial_cost_s(s_per_pixel_spp, crop_pixels, next, repeats, 0.0);
-        if cost > share_s {
+        if tier1(next) + tier3(next) + later.tier2_s > left_s {
             break;
         }
         spp = next;
     }
-    spp
+    let after_tier1 = (left_s - tier1(spp)).max(0.0);
+    let tier2_reserve_s = later.tier2_s.min(after_tier1);
+    let tier3_reserve_s = tier3(spp).min(after_tier1 - tier2_reserve_s);
+    Plan {
+        spp,
+        tier2_reserve_s,
+        tier3_reserve_s,
+    }
 }
 
 /// The samples per pixel guiding's training passes render before the final
@@ -130,20 +157,22 @@ pub fn baseline_spp(budget_s: f64, calibration_s: f64) -> u32 {
 mod tests {
     use super::*;
 
+    /// The spec's scenario "Later tiers need little": 100 s remain after
+    /// the baseline, tiers 2 and 3 are estimated at 3 s together.
     #[test]
-    fn tiers_split_what_the_baseline_leaves() {
-        let mut s = Schedule::new(100.0);
+    fn later_tiers_reserve_what_they_need() {
+        let mut s = Schedule::new(120.0);
         s.set_spent(20.0);
-        s.open_tiers();
-        assert!((s.tier_left_s(1) - 56.0).abs() < 1e-9);
-        assert!((s.tier_left_s(2) - 68.0).abs() < 1e-9);
-        assert!((s.tier_left_s(3) - 80.0).abs() < 1e-9);
+        s.open_tiers(2.0, 1.0);
+        assert!((s.tier_left_s(1) - 97.0).abs() < 1e-9);
+        assert!((s.tier_left_s(2) - 99.0).abs() < 1e-9);
+        assert!((s.tier_left_s(3) - 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn unspent_time_rolls_forward() {
         let mut s = Schedule::new(100.0);
-        s.open_tiers();
+        s.open_tiers(15.0, 15.0);
         // Tier 1 (70 s) finishes after 30 s: tier 2 has its own 15 and the
         // 40 tier 1 left.
         s.set_spent(30.0);
@@ -156,9 +185,9 @@ mod tests {
     fn a_step_that_would_overrun_never_starts() {
         let mut s = Schedule::new(10.0);
         s.set_spent(8.0);
-        s.open_tiers();
-        assert!(!s.fits(1, 1.5));
-        assert!(s.fits(1, 1.0));
+        s.open_tiers(0.0, 0.0);
+        assert!(!s.fits(1, 2.5));
+        assert!(s.fits(1, 2.0));
         assert!(!s.fits(1, f64::NAN));
         s.set_spent(13.0);
         assert!(s.exhausted());
@@ -171,7 +200,7 @@ mod tests {
         // The spec's scenario: a 10 s budget, a baseline of 8 s plus 3 s.
         let mut s = Schedule::new(10.0);
         s.set_spent(11.0);
-        s.open_tiers();
+        s.open_tiers(1.0, 1.0);
         for tier in 1..=3 {
             assert_eq!(s.tier_left_s(tier), 0.0);
             assert!(!s.fits(tier, 0.1));
@@ -185,10 +214,37 @@ mod tests {
         let px = 3 * 128 * 128;
         let one = trial_cost_s(1e-6, px, 1, 3, 0.0);
         assert!((one - 0.294912).abs() < 1e-9);
+        let none = Later::default();
         // 8 trials in 40 s: 8 · 0.295 · s ≤ 40 → s ≤ 16.9.
-        assert_eq!(trial_spp(1e-6, px, 3, 8, 40.0), 16);
-        assert_eq!(trial_spp(1e-6, px, 3, 8, 0.0), MIN_TRIAL_SPP);
-        assert_eq!(trial_spp(1e-12, px, 3, 8, 1e9), MAX_TRIAL_SPP);
+        assert_eq!(plan(1e-6, px, 3, 8, none, 40.0).spp, 16);
+        assert_eq!(plan(1e-6, px, 3, 8, none, 0.0).spp, MIN_TRIAL_SPP);
+        assert_eq!(plan(1e-12, px, 3, 8, none, 1e9).spp, MAX_TRIAL_SPP);
+    }
+
+    #[test]
+    fn the_plan_fits_the_later_tiers_beside_tier_one() {
+        let px = 3 * 128 * 128;
+        // Tier 3 renders every crop once more per sample (the reach) and
+        // crop 0 six times (the half-depth pairs); tier 2 needs 5 s.
+        let later = Later {
+            tier2_s: 5.0,
+            tier3_pixels: (px + 6 * 128 * 128) as f64,
+        };
+        // 8 trials at 16 spp: 37.7 s, tier 3 at 16 spp: 2.4 s, tier 2: 5 s.
+        let p = plan(1e-6, px, 3, 8, later, 50.0);
+        assert_eq!(p.spp, 16);
+        assert_eq!(p.tier2_reserve_s, 5.0);
+        assert!((p.tier3_reserve_s - 1e-6 * later.tier3_pixels * 16.0).abs() < 1e-12);
+        // 40 s no longer fits 16 spp beside them.
+        assert_eq!(plan(1e-6, px, 3, 8, later, 40.0).spp, 8);
+        // Tier 1 keeps its priority: at the minimum it takes its 4.7 s
+        // first, tier 2 gets what is left, tier 3 nothing.
+        let p = plan(1e-6, px, 3, 8, later, 6.0);
+        assert_eq!(p.spp, MIN_TRIAL_SPP);
+        let tier1 = 8.0 * trial_cost_s(1e-6, px, MIN_TRIAL_SPP, 3, 0.0);
+        assert!((p.tier2_reserve_s - (6.0 - tier1)).abs() < 1e-9);
+        assert_eq!(p.tier3_reserve_s, 0.0);
+        assert_eq!(plan(1e-6, px, 3, 8, later, 0.0).tier2_reserve_s, 0.0);
     }
 
     #[test]

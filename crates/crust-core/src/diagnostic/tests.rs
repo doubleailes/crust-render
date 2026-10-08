@@ -48,6 +48,9 @@ pub(super) fn fixture() -> Report {
             }],
             budget_exceeded_in: None,
             exit: 0,
+            seeds: vec![0, 2_654_435_769, 5_308_871_538],
+            tier2_reserve_s: n(4.0),
+            tier3_reserve_s: n(1.5),
         },
         static_findings: vec![Finding {
             id: "textures_without_tx".into(),
@@ -116,13 +119,22 @@ pub(super) fn fixture() -> Report {
                 max: n(1.3),
                 mrse_baseline: n(0.02),
                 mrse_trial: n(0.012),
-                time_baseline_s: n(0.1),
-                time_trial_s: n(0.13),
+                render_baseline_s: n(0.1),
+                render_trial_s: n(0.13),
                 setup_trial_s: n(0.0),
                 verdict: Verdict::Better,
+                mean_luminance_baseline: n(0.21),
+                mean_luminance_trial: n(0.2102),
+                luminance_shift: n(0.001),
+                luminance_shift_z: n(0.3),
+                mrse_baseline_untrimmed: n(0.025),
+                mrse_trial_untrimmed: n(0.016),
+                delta_eff_untrimmed: vec![n(1.15), n(1.25), n(1.2)],
+                noise_floor: Some(n(1.04)),
             }],
             overall_delta_eff: Some(n(1.25)),
             verdict: Verdict::Better,
+            delta_eff_at_target: Some(n(1.25)),
         }],
         sample_budget: Some(SampleBudget {
             target_mrse: n(0.0025),
@@ -132,6 +144,7 @@ pub(super) fn fixture() -> Report {
             spp_to_target: Some(n(48.0)),
             projected_render_s: Some(n(9.6)),
             adaptive: Vec::new(),
+            projected_setup_s: Some(n(0.0)),
         }),
         picture_changing: PictureChanging {
             clamp: Some(ClampResult {
@@ -146,6 +159,11 @@ pub(super) fn fixture() -> Report {
                 half_depth: None,
             },
             subdivision: SubdivisionResult::default(),
+            light_sampling_reach: Some(vec![Reach {
+                crop: "crop_a".into(),
+                reach: n(0.998),
+                z: n(-0.4),
+            }]),
         },
         not_tried: vec![NotTried {
             id: "combined".into(),
@@ -160,6 +178,7 @@ pub(super) fn fixture() -> Report {
             value: "2".into(),
             expected_delta_eff: n(1.25),
             evidence: vec!["light_samples=2".into()],
+            expected_delta_eff_at_target: n(1.25),
         }],
         converged: false,
         suggested_command: "crust render -i samples/cornellbox.usda --light-samples 2".into(),
@@ -512,8 +531,18 @@ fn converged_needs_no_better_trial_and_no_actionable_finding() {
     // Better at 1.25 overall: not converged.
     assert!(!super::converged(&r.trials, &[]));
     let mut t = r.trials.clone();
+    // Better, but vetoed at the target.
+    t[0].delta_eff_at_target = Some(Num(0.9));
+    assert!(super::converged(&t, &[]));
+    t[0].delta_eff_at_target = None;
+    assert!(super::converged(&t, &[]));
+    t[0].delta_eff_at_target = Some(Num(1.25));
     t[0].overall_delta_eff = Some(Num(1.08));
     // Better, but under the suggestion bar.
+    assert!(super::converged(&t, &[]));
+    // Biased whatever its ΔEff: not a reason to keep going.
+    t[0].verdict = Verdict::Biased;
+    t[0].overall_delta_eff = Some(Num(14.0));
     assert!(super::converged(&t, &[]));
     t[0].verdict = Verdict::Inconclusive;
     t[0].overall_delta_eff = Some(Num(3.0));
@@ -547,6 +576,7 @@ fn the_suggested_command_applies_every_suggestion() {
         value: "true".into(),
         expected_delta_eff: Num(1.3),
         evidence: vec!["combined".into()],
+        expected_delta_eff_at_target: Num(1.3),
     };
     let cmd = super::command(&o, &s, &[guiding], None);
     assert_eq!(
@@ -583,6 +613,20 @@ fn tier_one_never_tries_a_single_strategy() {
     // A stage authoring a single strategy gets both heuristics tried.
     assert_eq!(values(LightOnly), ["power", "balance"]);
     assert_eq!(values(BsdfOnly), ["power", "balance"]);
+    // No factor, from any authored strategy, ever tries one.
+    for base in [PowerMis, BalanceMis, LightOnly, BsdfOnly] {
+        let s = crate::RenderSettings::default().with_sampling_strategy(base);
+        for factor in super::noise::FACTORS {
+            for c in super::changes(factor, s, 20).unwrap_or_default() {
+                let tried = (c.apply)(s, &c.value).sampling_strategy();
+                assert!(
+                    tried == base || matches!(tried, PowerMis | BalanceMis),
+                    "{factor}={} from {base}",
+                    c.value
+                );
+            }
+        }
+    }
 }
 
 /// The Ptex rate is the reader cache's own: a tiled lookup can make
@@ -602,4 +646,258 @@ fn the_ptex_hit_rate_never_passes_one() {
     let (lookups, hits) = super::ptex_cache_delta(&before, &after);
     assert_eq!((lookups, hits), (150, 140));
     assert!(hits <= lookups);
+}
+
+// -- Hardened verdicts ----------------------------------------------------------------
+
+/// Pair 0 renders with the scene's own seed, bit for bit the image a
+/// render without a seed override makes; every other pair with its own,
+/// the same in every run.
+#[test]
+fn each_pair_has_its_own_fixed_seed() {
+    assert_eq!(super::seed(1004, 0), 1004);
+    assert_eq!(super::seed(1004, 1), 1004 + 0x9E37_79B9);
+    assert_eq!(super::seed(1004, 2), super::seed(1004, 2));
+    let scene = sample("cornellbox.usda");
+    let settings = super::probe(scene.settings.with_resolution(48, 32), 4);
+    let mut r = Renderer::new(scene.camera, scene.world, scene.lights, settings);
+    let mut image = |s: crate::RenderSettings| bits(&super::shoot(&mut r, s).1.buffer);
+    let today = image(settings);
+    let frame = settings.frame();
+    assert!(image(settings.with_frame(super::seed(frame, 0))) == today);
+    let one = image(settings.with_frame(super::seed(frame, 1)));
+    assert!(one != today, "pairs 0 and 1 render the same image");
+    assert!(image(settings.with_frame(super::seed(frame, 1))) == one);
+    assert!(image(settings.with_frame(super::seed(frame, 2))) != one);
+}
+
+/// A 20×20 crop rendered at luminance `lum`, every pixel's variance `var`.
+fn shot(lum: f64, var: f64, render_s: f64) -> super::Shot {
+    super::Shot {
+        image: super::CropImage {
+            lum: vec![lum; 400],
+            var: vec![var; 400],
+        },
+        selection_s: 0.0,
+        training_s: 0.0,
+        render_s,
+    }
+}
+
+/// A trial of three pairs on one crop: the baseline at 0.5, the trial at
+/// `lum` with variance `var`, both rendering in 0.1 s.
+fn running(id: &str, lum: f64, var: f64) -> super::Running {
+    let (factor, value) = id.split_once('=').unwrap_or((id, ""));
+    let pairs = (0..3)
+        .map(|_| (shot(0.5, 1e-4, 0.1), shot(lum, var, 0.1)))
+        .collect();
+    super::Running {
+        changes: Vec::new(),
+        id: id.into(),
+        factor: factor.into(),
+        value: value.into(),
+        per_crop: vec![super::CropRun::new(pairs)],
+    }
+}
+
+fn judge_all(runs: &[super::Running]) -> (Vec<super::CropImage>, Vec<Trial>) {
+    let crops = vec![Crop {
+        id: "crop_a".into(),
+        rect: [0, 0, 20, 20],
+        reason: "highest_relative_variance".into(),
+        relative_variance: Num(0.1),
+        baseline_thread_s: Num(0.1),
+        reference_mrse: None,
+    }];
+    let refs = super::references(runs, 1);
+    let floors = super::noise_floors(runs, &refs);
+    let j = super::Judging {
+        crops: &crops,
+        areas: &[400],
+        refs: &refs,
+        floors: &floors,
+        spp: 4,
+        frame_pixels: 1600.0,
+        setup_b: 0.0,
+        render_b: 10.0,
+    };
+    let judged = runs.iter().map(|r| super::judge(r, &j)).collect();
+    (refs, judged)
+}
+
+/// The spec's scenario "A setting that darkens the image": a trial at 39%
+/// of the baseline's luminance, with a far lower error, is `biased` — out
+/// of the reference, the winners and the suggestions, and reported with
+/// its efficiency and its shift.
+#[test]
+fn a_biased_trial_is_reported_never_used() {
+    let runs = [
+        running("strategy=light", 0.195, 1e-6),
+        running("light_samples=2", 0.5, 0.5e-4),
+    ];
+    let (refs, trials) = judge_all(&runs);
+    // The reference blends the baseline and the unbiased trial only: the
+    // darkened image, the least noisy, would otherwise carry it.
+    assert!(refs[0].lum.iter().all(|&l| (l - 0.5).abs() < 1e-12));
+    let light = &trials[0];
+    assert_eq!(light.verdict, Verdict::Biased);
+    assert!(light.overall_delta_eff.expect("measured").0 > 10.0);
+    let c = &light.per_crop[0];
+    assert_eq!(c.verdict, Verdict::Biased);
+    assert!((c.luminance_shift.0 + 0.61).abs() < 1e-9, "{c:?}");
+    assert!(c.luminance_shift_z.0 < -4.0);
+    assert!((c.mean_luminance_baseline.0 - 0.5).abs() < 1e-12);
+    assert!((c.mean_luminance_trial.0 - 0.195).abs() < 1e-12);
+    // Identical baselines across seeds: a floor of exactly 1.
+    assert_eq!(c.noise_floor, Some(Num(1.0)));
+    let samples = &trials[1];
+    assert_eq!(samples.verdict, Verdict::Better);
+    assert_eq!(samples.per_crop[0].luminance_shift.0, 0.0);
+    // No setup on either side: at the target as overall.
+    assert_eq!(samples.delta_eff_at_target, samples.overall_delta_eff);
+    assert_eq!(
+        super::winners(&trials)
+            .iter()
+            .map(|(i, _)| trials[*i].id.as_str())
+            .collect::<Vec<_>>(),
+        ["light_samples=2"]
+    );
+    assert_eq!(
+        super::best(&trials).map(|t| t.id.as_str()),
+        Some("light_samples=2")
+    );
+    // Its report carries the shift beside the efficiency.
+    let mut r = fixture();
+    r.trials = trials;
+    let md = r.to_markdown();
+    assert!(
+        md.contains("`strategy=light` changes the picture: luminance −61% on crop_a"),
+        "{md}"
+    );
+}
+
+/// The combined trial is guarded like the others: biased, it is reported
+/// and never suggested, however efficient.
+#[test]
+fn a_biased_combination_is_not_suggested() {
+    let runs = [
+        running("light_samples=2", 0.5, 0.5e-4),
+        running("combined", 0.3, 1e-7),
+    ];
+    let (_, trials) = judge_all(&runs);
+    assert_eq!(trials[1].verdict, Verdict::Biased);
+    assert_eq!(
+        super::best(&trials).map(|t| t.id.as_str()),
+        Some("light_samples=2")
+    );
+}
+
+/// `converged` waits for every trial the probe could not decide.
+#[test]
+fn insufficient_samples_is_not_converged() {
+    let mut t = fixture().trials;
+    t[0].verdict = Verdict::Inconclusive;
+    assert!(super::converged(&t, &[]));
+    t[0].verdict = Verdict::InsufficientSamples;
+    assert!(!super::converged(&t, &[]));
+    // The verdict block says what to do about it.
+    let mut r = fixture();
+    r.trials = t;
+    r.suggestions.clear();
+    r.converged = false;
+    let md = r.to_markdown();
+    assert!(
+        md.contains(
+            "- **Converged:** no — 1 trial(s) need more samples to decide: raise `--budget`"
+        ),
+        "{md}"
+    );
+}
+
+/// The spec's scenario "The picture comes first": the clamp's bias and
+/// the firefly numbers lead the verdict, before the best change.
+#[test]
+fn the_picture_comes_first() {
+    let mut r = fixture();
+    let facts = super::checks::Facts {
+        clamp: Some((10.0, 0.66, 0.076)),
+        top_pixels: Some(super::noise::TopPixels {
+            share: 0.41,
+            row: Some(("indirect_diffuse".into(), 0.62)),
+        }),
+        spp: 16,
+        reach: vec![("crop_a".into(), 0.39, -30.0)],
+        ..super::checks::Facts::default()
+    };
+    r.static_findings = super::checks::run(&facts);
+    let md = r.to_markdown();
+    let line = |label: &str| {
+        md.lines()
+            .position(|l| l.starts_with(&format!("- **{label}:**")))
+            .unwrap_or_else(|| panic!("no {label} line"))
+    };
+    assert!(line("Picture") < line("Best change"));
+    let picture = md.lines().nth(line("Picture")).unwrap();
+    assert!(
+        picture.contains("`clamp_bias`") && picture.contains("66%"),
+        "{picture}"
+    );
+    let noise = md.lines().nth(line("Top noise source")).unwrap();
+    assert_eq!(
+        noise,
+        "- **Top noise source:** indirect_diffuse — 41% of the energy in 0.1% of the pixels; \
+         light sampling reaches 39%"
+    );
+    // Five lines: nothing else joined the block.
+    let block: Vec<&str> = md
+        .split("## Verdict")
+        .nth(1)
+        .unwrap()
+        .split("## Scene")
+        .next()
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with("- "))
+        .collect();
+    assert_eq!(block.len(), 5, "{block:?}");
+}
+
+/// `--baseline` reads a report written before the verdicts were hardened:
+/// the renamed time keys through their aliases, every new key defaulted.
+#[test]
+fn a_report_from_before_the_hardening_still_compares() {
+    let old = include_str!("snapshots/before_hardening.json");
+    assert!(old.contains("\"time_baseline_s\""));
+    let back: Report = serde_json::from_str(old).expect("an older report parses");
+    let c = &back.trials[0].per_crop[0];
+    assert_eq!((c.render_baseline_s.0, c.render_trial_s.0), (0.1, 0.13));
+    assert_eq!(c.noise_floor, None);
+    assert!(back.run.seeds.is_empty());
+    assert!(back.picture_changing.light_sampling_reach.is_none());
+    let mut now = previous();
+    now.suggestions.clear();
+    let d = super::compare::deltas(old, &now);
+    assert!(d.comparable, "{:?}", d.note);
+    assert_eq!(d.suggestions_gone, ["light_samples=2"]);
+}
+
+/// Light seen directly or in a reflection is never what the brightest
+/// pixels' energy is attributed to: `veach_mis`'s lights in its glossy
+/// plates are highlights, not fireflies.
+#[test]
+fn highlights_are_not_fireflies() {
+    let m = baseline("veach_mis.usda", false);
+    let groups = super::noise::Groups {
+        by: "none",
+        tags: Vec::new(),
+    };
+    let rows = super::noise::rows(&groups);
+    let luma = sample("veach_mis.usda").lights.luma();
+    let top = super::noise::top_pixels(&rows, m.film.as_ref().expect("a film"), &m.buffer, luma)
+        .expect("lit");
+    assert!(top.share > 0.0 && top.share < 1.0, "{top:?}");
+    if let Some((row, _)) = &top.row {
+        assert!(!super::noise::SEEN_ROWS.contains(&row.as_str()), "{top:?}");
+    }
+    assert!(top.share < super::checks::FIREFLY_SHARE, "{top:?}");
 }

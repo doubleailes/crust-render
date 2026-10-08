@@ -10,11 +10,16 @@
 //!   effect, path and cache statistics. The static checks read it.
 //! - **Crops**: up to three windows chosen from the baseline's maps.
 //! - **Tier 1**: every unbiased setting swapped one at a time, then the
-//!   winners combined, each measured as interleaved baseline/trial pairs
-//!   on every crop and judged by efficiency `1/(time · MRSE)`.
+//!   winners combined, each measured as interleaved baseline/trial pairs,
+//!   one seed per pair, on every crop: checked for a change of the picture
+//!   first, then judged by efficiency `1/(render time · MRSE)`.
 //! - **Tier 2**: the sample count a target error needs, and adaptive
 //!   sampling measured.
-//! - **Tier 3**: the settings that change the picture, measured only.
+//! - **Tier 3**: the settings that change the picture, and how much of the
+//!   energy light sampling alone reaches — measured only.
+//!
+//! The findings are assembled last, from the baseline and tier 3, and
+//! reported first.
 //!
 //! The engine writes nothing: [`run`] returns a [`Report`], which the host
 //! prints ([`Report::to_markdown`]) and saves ([`Report::to_json`]).
@@ -41,7 +46,7 @@ use crate::{
     TextureCacheStats, profile,
 };
 use report::*;
-use trials::CropImage;
+use trials::{CropImage, Shift};
 
 pub use report::{FORMAT, Report};
 
@@ -98,6 +103,16 @@ impl Options<'_> {
 
 /// Above this many lights, the light groups are not one per light.
 const MAX_GROUP_LIGHTS: usize = 8;
+
+/// What decorrelates one pair's seed from the next: the constant guiding
+/// already steps its passes' seeds by.
+const SEED_STEP: u32 = 0x9E37_79B9;
+
+/// The sampler seed of pair `i` (D7): the scene's own for pair 0, then a
+/// fixed step per pair, so two runs render the same images.
+fn seed(frame: isize, i: u32) -> isize {
+    frame.wrapping_add((i as isize).wrapping_mul(SEED_STEP as isize))
+}
 
 /// `settings` as every efficiency comparison renders them (D3): the clamp
 /// off, adaptive sampling off, `spp` samples in every pixel.
@@ -255,14 +270,29 @@ fn changes(factor: &str, base: RenderSettings, lights: usize) -> Result<Vec<Chan
 /// One measured render of a crop: its image, and its time split.
 struct Shot {
     image: CropImage,
-    setup_s: f64,
+    /// The `learned` pre-pass: over the full frame whatever the crop.
+    selection_s: f64,
+    /// Guiding's training passes: over the crop.
+    training_s: f64,
     render_s: f64,
 }
 
 impl Shot {
-    fn time_s(&self) -> f64 {
-        self.setup_s + self.render_s
+    fn setup_s(&self) -> f64 {
+        self.selection_s + self.training_s
     }
+}
+
+/// A render's setup, `(selection, training)`: the `learned` pre-pass and
+/// guiding's training passes. Every other selection is built in next to
+/// no time, and counts as none — so a trial without setup has none.
+fn setup_parts(settings: RenderSettings, selection: Duration, m: &Measured) -> (f64, f64) {
+    let selection_s = if settings.light_selection() == LightSelection::Learned {
+        selection.as_secs_f64()
+    } else {
+        0.0
+    };
+    (selection_s, m.setup_s)
 }
 
 /// Each pixel's luminance in a measured render, indexed as its variance
@@ -291,12 +321,14 @@ fn shoot(renderer: &mut Renderer, settings: RenderSettings) -> (Shot, Measured) 
     );
     let rect = settings.region().flip_y(settings.get_dimensions().1);
     let lum = luminance(&m, rect, renderer.lights.luma());
+    let (selection_s, training_s) = setup_parts(settings, selection, &m);
     let shot = Shot {
         image: CropImage {
             lum,
             var: std::mem::take(&mut m.var_map),
         },
-        setup_s: selection.as_secs_f64() + m.setup_s,
+        selection_s,
+        training_s,
         render_s: m.render_s,
     };
     (shot, m)
@@ -304,8 +336,26 @@ fn shoot(renderer: &mut Renderer, settings: RenderSettings) -> (Shot, Measured) 
 
 /// A tier-1 trial's measurements on one crop.
 struct CropRun {
-    /// `(baseline, trial)` per pair, interleaved B T B T ….
+    /// `(baseline, trial)` per pair, interleaved B T B T …; pair `i`
+    /// rendered with seed `i`.
     pairs: Vec<(Shot, Shot)>,
+    /// Each pair's picture check (D2).
+    shifts: Vec<Shift>,
+}
+
+impl CropRun {
+    fn new(pairs: Vec<(Shot, Shot)>) -> Self {
+        let shifts = pairs
+            .iter()
+            .map(|(b, t)| trials::luminance_shift(&b.image, &t.image))
+            .collect();
+        CropRun { pairs, shifts }
+    }
+
+    /// Whether the trial changed the picture on this crop.
+    fn biased(&self) -> bool {
+        trials::biased(&self.shifts)
+    }
 }
 
 /// A tier-1 trial while it is being measured.
@@ -327,33 +377,107 @@ impl Running {
     }
 }
 
-/// Judges `run` on every crop against the crops' references.
-fn judge(run: &Running, crops: &[Crop], refs: &[CropImage], spp: u32) -> Trial {
+/// The median of `values`.
+fn median(values: impl Iterator<Item = f64>) -> f64 {
+    trials::summary(&values.collect::<Vec<_>>()).0
+}
+
+/// A run's setup at full-frame scale (D9): the `learned` pre-pass as
+/// measured, since it trains over the full frame whatever the crop, plus
+/// guiding's training scaled from the crop to the frame, median over the
+/// crops. A combined trial's is thereby the sum of its factors'.
+fn full_frame_setup(run: &Running, areas: &[usize], frame_pixels: f64) -> f64 {
+    let selection = median(
+        run.per_crop
+            .iter()
+            .flat_map(|c| c.pairs.iter().map(|(_, t)| t.selection_s)),
+    );
+    let training = median(run.per_crop.iter().zip(areas).map(|(c, &a)| {
+        median(c.pairs.iter().map(|(_, t)| t.training_s)) * frame_pixels / a.max(1) as f64
+    }));
+    [selection, training]
+        .into_iter()
+        .filter(|x| x.is_finite())
+        .sum()
+}
+
+/// What every trial is judged against.
+struct Judging<'a> {
+    crops: &'a [Crop],
+    /// Each crop's pixels.
+    areas: &'a [usize],
+    refs: &'a [CropImage],
+    /// Each crop's noise floor (D7).
+    floors: &'a [Option<f64>],
+    spp: u32,
+    frame_pixels: f64,
+    /// The baseline's full-frame setup, and its projected render time to
+    /// reach the target (D9).
+    setup_b: f64,
+    render_b: f64,
+}
+
+/// Judges `run` on every crop against the crops' references: the picture
+/// check first, then efficiency on render time.
+fn judge(run: &Running, j: &Judging) -> Trial {
     let mut per_crop = Vec::new();
-    for ((crop, cr), reference) in crops.iter().zip(&run.per_crop).zip(refs) {
-        let mrse = |s: &Shot| trials::mrse(&s.image.var, &reference.lum);
-        let pairs: Vec<f64> = cr
+    for (((crop, cr), reference), floor) in
+        j.crops.iter().zip(&run.per_crop).zip(j.refs).zip(j.floors)
+    {
+        let mrse: Vec<trials::PairMrse> = cr
             .pairs
             .iter()
-            .map(|(b, t)| trials::delta_eff(b.time_s(), mrse(b), t.time_s(), mrse(t)))
+            .map(|(b, t)| trials::mrse_pair(&b.image.var, &t.image.var, &reference.lum))
             .collect();
-        let (median, min, max) = trials::summary(&pairs);
-        let med = |f: &dyn Fn(&(Shot, Shot)) -> f64| {
-            trials::summary(&cr.pairs.iter().map(f).collect::<Vec<_>>()).0
+        let eff = |trimmed: bool| -> Vec<f64> {
+            cr.pairs
+                .iter()
+                .zip(&mrse)
+                .map(|((b, t), m)| {
+                    let (mb, mt) = if trimmed {
+                        (m.baseline, m.trial)
+                    } else {
+                        (m.baseline_untrimmed, m.trial_untrimmed)
+                    };
+                    trials::delta_eff(b.render_s, mb, t.render_s, mt)
+                })
+                .collect()
         };
+        let (pairs, untrimmed) = (eff(true), eff(false));
+        let (med, min, max) = trials::summary(&pairs);
+        let verdict = trials::crop_verdict(trials::CropEvidence {
+            pairs: &pairs,
+            untrimmed_median: trials::summary(&untrimmed).0,
+            noise_floor: *floor,
+            biased: cr.biased(),
+        });
+        let of_pairs =
+            |f: &dyn Fn(&(Shot, Shot)) -> f64| -> Num { median(cr.pairs.iter().map(f)).into() };
+        let of_mrse =
+            |f: &dyn Fn(&trials::PairMrse) -> f64| -> Num { median(mrse.iter().map(f)).into() };
+        let of_shifts =
+            |f: &dyn Fn(&Shift) -> f64| -> Num { median(cr.shifts.iter().map(f)).into() };
         per_crop.push(CropTrial {
             crop: crop.id.clone(),
-            spp,
+            spp: j.spp,
             delta_eff: pairs.iter().map(|&p| Num(p)).collect(),
-            median: median.into(),
+            median: med.into(),
             min: min.into(),
             max: max.into(),
-            mrse_baseline: med(&|(b, _)| mrse(b)).into(),
-            mrse_trial: med(&|(_, t)| mrse(t)).into(),
-            time_baseline_s: med(&|(b, _)| b.time_s()).into(),
-            time_trial_s: med(&|(_, t)| t.time_s()).into(),
-            setup_trial_s: med(&|(_, t)| t.setup_s).into(),
-            verdict: trials::crop_verdict(&pairs),
+            mrse_baseline: of_mrse(&|m| m.baseline),
+            mrse_trial: of_mrse(&|m| m.trial),
+            render_baseline_s: of_pairs(&|(b, _)| b.render_s),
+            render_trial_s: of_pairs(&|(_, t)| t.render_s),
+            setup_trial_s: of_pairs(&|(_, t)| t.setup_s()),
+            verdict,
+            mean_luminance_baseline: of_shifts(&|s| s.mean_baseline),
+            mean_luminance_trial: of_shifts(&|s| s.mean_trial),
+            luminance_shift: of_shifts(&|s| s.shift),
+            luminance_shift_z: of_shifts(&|s| s.z),
+            mrse_baseline_untrimmed: of_mrse(&|m| m.baseline_untrimmed),
+            mrse_trial_untrimmed: of_mrse(&|m| m.trial_untrimmed),
+            delta_eff_untrimmed: untrimmed.iter().map(|&p| Num(p)).collect(),
+            noise_floor: floor.map(Num),
         });
     }
     let (geo, verdict) = trials::overall(
@@ -362,6 +486,8 @@ fn judge(run: &Running, crops: &[Crop], refs: &[CropImage], spp: u32) -> Trial {
             .map(|c| (c.median.0, c.verdict))
             .collect::<Vec<_>>(),
     );
+    let setup_t = full_frame_setup(run, j.areas, j.frame_pixels);
+    let at_target = trials::delta_eff_at_target(geo, j.setup_b, setup_t, j.render_b);
     let (flag, usd_attribute) = run.names();
     Trial {
         id: run.id.clone(),
@@ -373,24 +499,49 @@ fn judge(run: &Running, crops: &[Crop], refs: &[CropImage], spp: u32) -> Trial {
         per_crop,
         overall_delta_eff: geo.is_finite().then_some(Num(geo)),
         verdict,
+        delta_eff_at_target: at_target.is_finite().then_some(Num(at_target)),
     }
 }
 
-/// The references of every crop: the blend of every unbiased image of it
-/// rendered so far — the first baseline and each trial's first image.
+/// The baseline's images of crop `k`, one per seed. An unguided baseline
+/// renders the same image for every trial, so the first run's stand for
+/// all of them.
+fn baseline_images(runs: &[Running], k: usize) -> Vec<&CropImage> {
+    runs.first()
+        .map(|r| r.per_crop[k].pairs.iter().map(|(b, _)| &b.image).collect())
+        .unwrap_or_default()
+}
+
+/// The references of every crop (D3): the blend of the baseline's image of
+/// every seed, and of every image of every trial that is not `biased` on
+/// that crop. Judged after the picture check, so no image that changes the
+/// picture weighs in.
 fn references(runs: &[Running], crops: usize) -> Vec<CropImage> {
     (0..crops)
         .map(|k| {
-            let mut images: Vec<&CropImage> = Vec::new();
-            if let Some((b, _)) = runs.iter().find_map(|r| r.per_crop[k].pairs.first()) {
-                images.push(&b.image);
-            }
+            let mut images = baseline_images(runs, k);
             for r in runs {
-                if let Some((_, t)) = r.per_crop[k].pairs.first() {
-                    images.push(&t.image);
+                let cr = &r.per_crop[k];
+                if !cr.biased() {
+                    images.extend(cr.pairs.iter().map(|(_, t)| &t.image));
                 }
             }
             trials::reference(&images)
+        })
+        .collect()
+}
+
+/// Each crop's noise floor against its reference (D7): `None` with one
+/// seed.
+fn noise_floors(runs: &[Running], refs: &[CropImage]) -> Vec<Option<f64>> {
+    refs.iter()
+        .enumerate()
+        .map(|(k, r)| {
+            let mrse: Vec<f64> = baseline_images(runs, k)
+                .iter()
+                .map(|b| trials::mrse_trimmed(&b.var, &r.lum))
+                .collect();
+            trials::noise_floor(&mrse)
         })
         .collect()
 }
@@ -455,7 +606,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let request = noise::request(&rows);
     let before_p1 = cache();
     let p1_start = Instant::now();
-    let selection = renderer.reconfigure(probe(full, spp_p1));
+    let p1_settings = probe(full, spp_p1);
+    let selection = renderer.reconfigure(p1_settings);
     profile::set_enabled(true);
     let p1 = renderer.render_measured(
         Some(&request),
@@ -479,7 +631,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     if sched.exhausted() {
         exceeded = Some("P1".into());
     }
-    let p1_setup = selection.as_secs_f64() + p1.setup_s;
+    let (p1_selection, p1_training) = setup_parts(p1_settings, selection, &p1);
+    let p1_setup = p1_selection + p1_training;
     info!(
         "diagnostic P1: {w}x{h} at {spp_p1} spp in {:.2}s (calibration {:.2}s at 1 spp)",
         p1_s, calibration_s
@@ -549,7 +702,17 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         .iter()
         .find(|r| r.key == "unlit_emitters")
         .map(|r| r.mean_luminance.0);
-    let facts = checks::Facts {
+    let beauty_total: f64 = p1_lum.iter().sum();
+    let clamp = authored.indirect_clamp().map(|limit| ClampResult {
+        limit: (limit as f64).into(),
+        removed_luminance_share: (p1.clamp.removed_luminance / beauty_total).into(),
+        mean_removed_luminance: (p1.clamp.removed_luminance / pixels).into(),
+        pixels_affected_share: (p1.clamp.pixels_touched as f64 / p1.clamp.pixels.max(1) as f64)
+            .into(),
+    });
+    // The findings are assembled when the run ends: the reach comes from
+    // tier 3.
+    let mut facts = checks::Facts {
         lights: light_count,
         light_selection: authored.light_selection(),
         auto_tx: options.auto_tx,
@@ -565,8 +728,18 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         ),
         peak_mem_bytes: peak_mem,
         machine_mem_bytes: crate::machine_memory_bytes(),
+        strategy: authored.sampling_strategy(),
+        clamp: clamp.as_ref().map(|c| {
+            (
+                c.limit.0,
+                c.removed_luminance_share.0,
+                c.pixels_affected_share.0,
+            )
+        }),
+        top_pixels: noise::top_pixels(&rows, film, &p1.buffer, luma),
+        spp: spp_p1,
+        reach: Vec::new(),
     };
-    let static_findings = checks::run(&facts);
 
     // -- Crops ---------------------------------------------------------------
     let mut maps = crops::CropMaps {
@@ -635,7 +808,6 @@ pub fn run(scene: Scene, options: &Options) -> Report {
 
     // -- Tier 1 --------------------------------------------------------------
     let tier1_start = Instant::now();
-    sched.open_tiers();
     let mut planned: Vec<Change> = Vec::new();
     debug!(
         "diagnostic: tier 1 ordered by {:?} (dominant row {:?}, {light_count} lights)",
@@ -653,16 +825,58 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             }),
         }
     }
-    let crop_pixels: usize = picked.iter().map(|p| p.rect.area()).sum();
+    let areas: Vec<usize> = picked.iter().map(|p| p.rect.area()).collect();
+    let crop_pixels: usize = areas.iter().sum();
     let per_px_spp = p1.render_s / (pixels * spp_p1 as f64);
+    // What tiers 2 and 3 will render, reserved before tier 1 starts (D10).
+    let threshold = authored.variance_threshold() as f64;
+    // A budget the adaptive test can act on: well past its minimum.
+    let spp_a = (4 * authored.min_samples_per_pixel().max(2)).clamp(64, 1024);
+    let max_depth = authored.max_depth();
+    let half_depth_applies = max_depth >= 2 && !picked.is_empty();
+    let reach_applies: Result<(), &str> = if light_count == 0 {
+        Err("the scene has no light-list entry")
+    } else if !matches!(
+        authored.sampling_strategy(),
+        SamplingStrategy::PowerMis | SamplingStrategy::BalanceMis
+    ) {
+        Err("the baseline already samples with one strategy only")
+    } else {
+        Ok(())
+    };
+    let later = schedule::Later {
+        tier2_s: if threshold > 0.0 {
+            per_px_spp * crop_pixels as f64 * spp_a as f64
+        } else {
+            0.0
+        },
+        tier3_pixels: if half_depth_applies {
+            2.0 * repeats as f64 * areas[0] as f64
+        } else {
+            0.0
+        } + if reach_applies.is_ok() {
+            crop_pixels as f64
+        } else {
+            0.0
+        },
+    };
+    sched.set_spent(elapsed());
     // The combined trial counts as one more.
-    let spp_t = schedule::trial_spp(
+    let plan = schedule::plan(
         per_px_spp,
         crop_pixels,
         repeats,
         planned.len() + 1,
-        sched.tier_left_s(1),
+        later,
+        sched.remaining_s(),
     );
+    sched.open_tiers(plan.tier2_reserve_s, plan.tier3_reserve_s);
+    let spp_t = plan.spp;
+    debug!(
+        "diagnostic: trials at {spp_t} spp; {:.2}s reserved for tier 2, {:.2}s for tier 3",
+        plan.tier2_reserve_s, plan.tier3_reserve_s
+    );
+    let seeds: Vec<isize> = (0..repeats).map(|i| seed(authored.frame(), i)).collect();
     let mut setup_by_factor: Vec<(&'static str, f64)> = Vec::new();
     let mut runs: Vec<Running> = Vec::new();
     let mut tier1_complete = exceeded.is_none();
@@ -670,7 +884,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     // the light selection's (crop-independent) and guiding's training
     // (scaling with the pixels).
     let baseline_setup_s =
-        selection.as_secs_f64() * picked.len() as f64 + p1.setup_s * crop_pixels as f64 / pixels;
+        p1_selection * picked.len() as f64 + p1_training * crop_pixels as f64 / pixels;
     let measure = |renderer: &mut Renderer,
                    sched: &mut schedule::Schedule,
                    setup_by_factor: &mut Vec<(&'static str, f64)>,
@@ -727,13 +941,15 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             let base = crop_settings(full, k, spp_t);
             let trial = changes.iter().fold(base, |s, c| (c.apply)(s, &c.value));
             let mut pairs = Vec::new();
-            for _ in 0..repeats {
-                let (b, _) = shoot(renderer, base);
-                let (t, _) = shoot(renderer, trial);
-                setup_seen = setup_seen.max(t.setup_s);
+            // Both sides of a pair share its seed (the picture check's
+            // common random numbers); the pairs are independent draws.
+            for &sd in &seeds {
+                let (b, _) = shoot(renderer, base.with_frame(sd));
+                let (t, _) = shoot(renderer, trial.with_frame(sd));
+                setup_seen = setup_seen.max(t.setup_s());
                 pairs.push((b, t));
             }
-            per_crop.push(CropRun { pairs });
+            per_crop.push(CropRun::new(pairs));
             // Past the budget, the rest of the trial is not run: its
             // measurements so far are dropped, and it is listed as not tried.
             if elapsed() > budget_s && k + 1 < picked.len() {
@@ -749,7 +965,32 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             setup_by_factor.push((c.factor, setup_seen));
         }
         sched.set_spent(elapsed());
-        debug!("diagnostic: {id} measured on {} crop(s)", per_crop.len());
+        // Per crop, the picture check's shift and z, and the untrimmed
+        // ratio beside them: where they part, the trial moved energy
+        // between a crop's brightest pixels and the rest.
+        debug!(
+            "diagnostic: {id} measured on {} crop(s); per crop (shift, z; untrimmed shift, z): \
+             {}",
+            per_crop.len(),
+            per_crop
+                .iter()
+                .map(|c| {
+                    let untrimmed: Vec<Shift> = c
+                        .pairs
+                        .iter()
+                        .map(|(b, t)| trials::luminance_ratio(&b.image, &t.image))
+                        .collect();
+                    format!(
+                        "({:+.4}, {:.1}; {:+.4}, {:.1})",
+                        median(c.shifts.iter().map(|s| s.shift)),
+                        median(c.shifts.iter().map(|s| s.z)),
+                        median(untrimmed.iter().map(|s| s.shift)),
+                        median(untrimmed.iter().map(|s| s.z))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         Some(Running {
             changes,
             id,
@@ -792,29 +1033,43 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             });
         }
     }
+    // The baseline's projected full-frame render time to reach the target
+    // (tier 2's, at the baseline's settings), or at the scene's samples
+    // without one: what a trial's setup is charged against (D9).
+    let (target, target_from) = match options.target_mrse {
+        Some(t) => (Some(t), "--target-mrse"),
+        None if threshold > 0.0 => (Some(threshold * threshold), "variance_threshold"),
+        None => (None, "variance_threshold"),
+    };
+    let render_per_spp = p1.render_s / spp_p1 as f64;
+    let render_b = match target {
+        Some(t) => render_per_spp * spp_p1 as f64 * p1_mrse / t,
+        None => render_per_spp * authored.samples_per_pixel() as f64,
+    };
+    // Every pair's picture check is in its `CropRun`: the references hold
+    // only images that passed it, and the trials are judged against them.
+    let judge_all = |runs: &[Running], crops: &[Crop]| -> (Vec<CropImage>, Vec<Trial>) {
+        let refs = references(runs, areas.len());
+        let floors = noise_floors(runs, &refs);
+        let j = Judging {
+            crops,
+            areas: &areas,
+            refs: &refs,
+            floors: &floors,
+            spp: spp_t,
+            frame_pixels: pixels,
+            setup_b: p1_setup,
+            render_b,
+        };
+        let judged = runs.iter().map(|r| judge(r, &j)).collect();
+        (refs, judged)
+    };
     // The winners: the best `better` value of each factor, judged against
-    // the references of the single trials.
-    let refs = references(&runs, picked.len());
-    let judged: Vec<Trial> = runs
-        .iter()
-        .map(|r| judge(r, &crops_out, &refs, spp_t))
-        .collect();
-    let mut winners: Vec<(usize, f64)> = Vec::new();
-    for (i, t) in judged.iter().enumerate() {
-        if t.verdict != Verdict::Better {
-            continue;
-        }
-        let eff = t.overall_delta_eff.map_or(0.0, |n| n.0);
-        match winners
-            .iter_mut()
-            .find(|(j, _)| judged[*j].factor == t.factor)
-        {
-            Some(w) if w.1 >= eff => {}
-            Some(w) => *w = (i, eff),
-            None => winners.push((i, eff)),
-        }
-    }
-    let combined_id = "combined".to_string();
+    // the references of the single trials. A `biased` trial is never
+    // `better`, so never a winner.
+    let (_, judged) = judge_all(&runs, &crops_out);
+    let winners = winners(&judged);
+    let combined_id = COMBINED.to_string();
     if winners.len() >= 2 {
         let changes: Vec<Change> = winners
             .iter()
@@ -831,10 +1086,21 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             &mut setup_by_factor,
             changes,
             combined_id.clone(),
-            "combined".into(),
-            value,
+            COMBINED.into(),
+            value.clone(),
         ) {
-            Some(r) => runs.push(r),
+            Some(r) => {
+                // Each part passed the picture check: a combination that
+                // fails it means the factors interact, which no unbiased
+                // pair of settings should.
+                if r.per_crop.iter().any(CropRun::biased) {
+                    warn!(
+                        "diagnostic: the combined trial ({value}) changes the picture while \
+                         none of its parts does; it is reported, not suggested"
+                    );
+                }
+                runs.push(r)
+            }
             None => {
                 tier1_complete = false;
                 not_tried.push(NotTried {
@@ -857,16 +1123,12 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         });
     }
     // Final: every trial against the references of all of tier 1.
-    let refs = references(&runs, picked.len());
+    let (refs, trials_out) = judge_all(&runs, &crops_out);
     for (c, r) in crops_out.iter_mut().zip(&refs) {
         if !r.var.is_empty() {
             c.reference_mrse = Some(trials::mrse(&r.var, &r.lum).into());
         }
     }
-    let trials_out: Vec<Trial> = runs
-        .iter()
-        .map(|r| judge(r, &crops_out, &refs, spp_t))
-        .collect();
     // Every trial ran, but past the whole budget: the budget ran out before
     // tier 1 completed.
     sched.set_spent(elapsed());
@@ -892,22 +1154,9 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         tier1_start.elapsed().as_secs_f64()
     );
 
-    // The suggestion: the combined trial if it beats the best single one,
-    // else the best single — when it clears the suggestion bar.
     let eff = |t: &Trial| t.overall_delta_eff.map_or(0.0, |n| n.0);
-    let best_single = trials_out
-        .iter()
-        .filter(|t| t.id != combined_id && t.verdict == Verdict::Better)
-        .max_by(|a, b| eff(a).total_cmp(&eff(b)));
-    let combined = trials_out
-        .iter()
-        .find(|t| t.id == combined_id && t.verdict == Verdict::Better);
-    let best: Option<&Trial> = match (combined, best_single) {
-        (Some(c), Some(s)) if eff(c) > eff(s) => Some(c),
-        (_, Some(s)) => Some(s),
-        (c, None) => c,
-    }
-    .filter(|t| eff(t) >= trials::SUGGEST_ABOVE);
+    let at_target = |t: &Trial| t.delta_eff_at_target.map_or(f64::NAN, |n| n.0);
+    let best = best(&trials_out);
     let best_changes: Vec<Change> = best
         .and_then(|t| runs.iter().find(|r| r.id == t.id))
         .map(|r| r.changes.clone())
@@ -927,6 +1176,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                 }
                 e
             },
+            expected_delta_eff_at_target: Num(best.map_or(f64::NAN, at_target)),
         })
         .collect();
     let best_settings = best_changes
@@ -935,12 +1185,6 @@ pub fn run(scene: Scene, options: &Options) -> Report {
 
     // -- Tier 2: the sample budget --------------------------------------------
     let tier2_start = Instant::now();
-    let threshold = authored.variance_threshold() as f64;
-    let (target, target_from) = match options.target_mrse {
-        Some(t) => (Some(t), "--target-mrse"),
-        None if threshold > 0.0 => (Some(threshold * threshold), "variance_threshold"),
-        None => (None, "variance_threshold"),
-    };
     // MRSE and time of the best settings relative to the baseline, from the
     // trial that measured them (geometric means over the crops).
     let geo = |f: &dyn Fn(&CropTrial) -> f64| -> f64 {
@@ -959,16 +1203,20 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         })
     };
     let mrse_ratio = geo(&|c| c.mrse_trial.0 / c.mrse_baseline.0);
-    let time_ratio = geo(&|c| c.time_trial_s.0 / c.time_baseline_s.0);
+    let time_ratio = geo(&|c| c.render_trial_s.0 / c.render_baseline_s.0);
     let spp_to_target = target
         .map(|t| spp_p1 as f64 * p1_mrse * mrse_ratio / t)
         .filter(|s| s.is_finite());
-    let projected = spp_to_target.map(|s| p1.render_s / spp_p1 as f64 * s * time_ratio);
+    let projected = spp_to_target.map(|s| render_per_spp * s * time_ratio);
+    // The best settings' setup at full-frame scale, from the trial that
+    // measured them; the baseline's own without one.
+    let projected_setup = best
+        .and_then(|t| runs.iter().find(|r| r.id == t.id))
+        .map_or(p1_setup, |r| full_frame_setup(r, &areas, pixels));
     let mut adaptive = Vec::new();
-    if threshold > 0.0 && exceeded.is_none() {
-        // A budget the adaptive test can act on: well past its minimum.
-        let min_spp = authored.min_samples_per_pixel().max(2);
-        let spp_a = (4 * min_spp).clamp(64, 1024);
+    // Every measurement the budget cannot fit is listed, whatever tier 1
+    // left of it (D10).
+    if threshold > 0.0 {
         for (k, p) in picked.iter().enumerate() {
             let fixed = crop_settings(best_settings, k, spp_a);
             let estimate = per_px_spp * p.rect.area() as f64 * spp_a as f64 * time_ratio;
@@ -1027,7 +1275,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                 time_saved_share: (1.0 - shot.render_s / fixed_s).into(),
             });
         }
-    } else if threshold <= 0.0 {
+    } else {
         not_tried.push(NotTried {
             id: "adaptive".into(),
             tier: 2,
@@ -1043,6 +1291,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         spp_to_target: spp_to_target.map(Num),
         projected_render_s: projected.map(Num),
         adaptive,
+        projected_setup_s: Some(Num(projected_setup)),
     });
     phases.push(PhaseRun {
         name: "tier 2".into(),
@@ -1060,17 +1309,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
 
     // -- Tier 3: picture-changing settings -------------------------------------
     let tier3_start = Instant::now();
-    let beauty_total: f64 = p1_lum.iter().sum();
-    let clamp = authored.indirect_clamp().map(|limit| ClampResult {
-        limit: (limit as f64).into(),
-        removed_luminance_share: (p1.clamp.removed_luminance / beauty_total).into(),
-        mean_removed_luminance: (p1.clamp.removed_luminance / pixels).into(),
-        pixels_affected_share: (p1.clamp.pixels_touched as f64 / p1.clamp.pixels.max(1) as f64)
-            .into(),
-    });
-    let max_depth = authored.max_depth();
     let mut half_depth = None;
-    if max_depth >= 2 && !picked.is_empty() && exceeded.is_none() {
+    if half_depth_applies {
         let k = 0;
         let full_s = crop_settings(full, k, spp_t);
         let half_s = full_s.with_max_depth(max_depth / 2);
@@ -1104,6 +1344,68 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             });
         }
     }
+    // The light-sampling reach (D4): one light-only render per crop against
+    // the crop's baseline image of the same seed and samples — pair 0's,
+    // rendered here when tier 1 did not.
+    let mut light_sampling_reach = None;
+    match reach_applies {
+        Err(why) => not_tried.push(NotTried {
+            id: "light_sampling_reach".into(),
+            tier: 3,
+            reason: "not_applicable".into(),
+            detail: Some(why.into()),
+        }),
+        Ok(()) => {
+            let mut measured = Vec::new();
+            for (k, p) in picked.iter().enumerate() {
+                let base = crop_settings(full, k, spp_t);
+                let known = runs.first().map(|r| &r.per_crop[k].pairs[0].0.image);
+                let renders = if known.is_some() { 1.0 } else { 2.0 };
+                let estimate = renders * per_px_spp * p.rect.area() as f64 * spp_t as f64;
+                sched.set_spent(elapsed());
+                if !sched.fits(3, estimate) {
+                    not_tried.push(NotTried {
+                        id: format!("light_sampling_reach@{}", crops_out[k].id),
+                        tier: 3,
+                        reason: "budget".into(),
+                        detail: None,
+                    });
+                    continue;
+                }
+                let rendered: Shot;
+                let b = match known {
+                    Some(b) => b,
+                    None => {
+                        rendered = shoot(&mut renderer, base).0;
+                        &rendered.image
+                    }
+                };
+                let (light, _) = shoot(
+                    &mut renderer,
+                    base.with_sampling_strategy(SamplingStrategy::LightOnly),
+                );
+                let r = trials::luminance_ratio(b, &light.image);
+                // The calibration evidence that the picture check would
+                // catch light-only, trimmed as it trims.
+                let trimmed = trials::luminance_shift(b, &light.image);
+                debug!(
+                    "diagnostic: light-only on {}: reach {:.4} (z {:.1}); trimmed shift {:+.4} \
+                     (z {:.1})",
+                    crops_out[k].id,
+                    1.0 + r.shift,
+                    r.z,
+                    trimmed.shift,
+                    trimmed.z
+                );
+                measured.push(Reach {
+                    crop: crops_out[k].id.clone(),
+                    reach: (1.0 + r.shift).into(),
+                    z: r.z.into(),
+                });
+            }
+            light_sampling_reach = (!measured.is_empty()).then_some(measured);
+        }
+    }
     let picture_changing = PictureChanging {
         clamp,
         max_depth: DepthResult {
@@ -1117,6 +1419,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             mem_bytes: import_stats.scene.footprint.total() as u64,
             build_s: None,
         },
+        light_sampling_reach,
     };
     phases.push(PhaseRun {
         name: "tier 3".into(),
@@ -1126,14 +1429,32 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             .any(|n| n.tier == 3 && n.reason == "budget"),
     });
     info!(
-        "diagnostic tier 3: clamp {}, {:.1}% of paths end at max depth, in {:.2}s",
+        "diagnostic tier 3: clamp {}, {:.1}% of paths end at max depth, light sampling reaches \
+         {}, in {:.2}s",
         picture_changing.clamp.as_ref().map_or_else(
             || "off".into(),
             |c| format!("removes {:.2}%", 100.0 * c.removed_luminance_share.0)
         ),
         100.0 * baseline.ended_by_depth_share.0,
+        picture_changing.light_sampling_reach.as_ref().map_or_else(
+            || "–".into(),
+            |r| r
+                .iter()
+                .map(|c| format!("{:.1}%", 100.0 * c.reach.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         tier3_start.elapsed().as_secs_f64()
     );
+
+    // -- Findings, assembled last, reported first ------------------------------
+    facts.reach = picture_changing
+        .light_sampling_reach
+        .iter()
+        .flatten()
+        .map(|r| (r.crop.clone(), r.reach.0, r.z.0))
+        .collect();
+    let static_findings = checks::run(&facts);
 
     // -- Report ---------------------------------------------------------------
     let converged = converged(&trials_out, &static_findings);
@@ -1166,6 +1487,9 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             phases,
             budget_exceeded_in: exceeded,
             exit,
+            seeds: seeds.iter().map(|&s| s as i64).collect(),
+            tier2_reserve_s: plan.tier2_reserve_s.into(),
+            tier3_reserve_s: plan.tier3_reserve_s.into(),
         },
         static_findings,
         baseline,
@@ -1186,17 +1510,68 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     report
 }
 
-/// Converged (D11): no tier-1 trial, the combined one included, is
-/// `better` by at least [`trials::SUGGEST_ABOVE`], and no `time` or
-/// `noise` finding has an action left to take.
+/// The combined trial's id.
+const COMBINED: &str = "combined";
+
+/// The winners of tier 1 (D3): per factor, the index of its best `better`
+/// value and that value's overall ΔEff. A `biased` trial is never
+/// `better`, so never a winner.
+fn winners(judged: &[Trial]) -> Vec<(usize, f64)> {
+    let mut winners: Vec<(usize, f64)> = Vec::new();
+    for (i, t) in judged.iter().enumerate() {
+        if t.verdict != Verdict::Better {
+            continue;
+        }
+        let eff = t.overall_delta_eff.map_or(0.0, |n| n.0);
+        match winners
+            .iter_mut()
+            .find(|(j, _)| judged[*j].factor == t.factor)
+        {
+            Some(w) if w.1 >= eff => {}
+            Some(w) => *w = (i, eff),
+            None => winners.push((i, eff)),
+        }
+    }
+    winners
+}
+
+/// The suggestion: of the trials that clear the suggestion bar, the
+/// combined one if it beats the best single one, else the best single.
+fn best(trials: &[Trial]) -> Option<&Trial> {
+    let eff = |t: &Trial| t.overall_delta_eff.map_or(0.0, |n| n.0);
+    let best_single = trials
+        .iter()
+        .filter(|t| t.id != COMBINED)
+        .filter(|t| meets_bar(t))
+        .max_by(|a, b| eff(a).total_cmp(&eff(b)));
+    let combined = trials.iter().find(|t| t.id == COMBINED && meets_bar(t));
+    match (combined, best_single) {
+        (Some(c), Some(s)) if eff(c) > eff(s) => Some(c),
+        (_, Some(s)) => Some(s),
+        (c, None) => c,
+    }
+}
+
+/// Whether `t` clears the suggestion bar: `better`, with an overall ΔEff
+/// and a ΔEff at the target of at least [`trials::SUGGEST_ABOVE`].
+fn meets_bar(t: &Trial) -> bool {
+    trials::meets_bar(
+        t.verdict,
+        t.overall_delta_eff.map_or(f64::NAN, |n| n.0),
+        t.delta_eff_at_target.map_or(f64::NAN, |n| n.0),
+    )
+}
+
+/// Converged (D11): no tier-1 trial, the combined one included, clears the
+/// suggestion bar or needs more samples to decide, and no `time` or `noise`
+/// finding has an action left to take.
 fn converged(trials: &[Trial], findings: &[Finding]) -> bool {
-    !trials.iter().any(|t| {
-        t.verdict == Verdict::Better
-            && t.overall_delta_eff
-                .is_some_and(|e| e.0 >= trials::SUGGEST_ABOVE)
-    }) && !findings.iter().any(|f| {
-        matches!(f.kind, FindingKind::Time | FindingKind::Noise) && f.action.is_actionable()
-    })
+    !trials
+        .iter()
+        .any(|t| meets_bar(t) || t.verdict == Verdict::InsufficientSamples)
+        && !findings.iter().any(|f| {
+            matches!(f.kind, FindingKind::Time | FindingKind::Noise) && f.action.is_actionable()
+        })
 }
 
 /// Every setting the diagnosis ran with, by the names that set it.

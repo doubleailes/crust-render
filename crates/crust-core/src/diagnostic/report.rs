@@ -194,6 +194,16 @@ pub struct RunInfo {
     /// The process's exit status: 0 when tier 1 completed, 3 when the
     /// budget ran out first.
     pub exit: i32,
+    /// The sampler seed (`crust:frame`) of each pair: pair 0 renders with
+    /// the scene's own, so every run renders the same images.
+    #[serde(default)]
+    pub seeds: Vec<i64>,
+    /// The seconds held back from tier 1 for tiers 2 and 3: their estimated
+    /// render cost.
+    #[serde(default)]
+    pub tier2_reserve_s: Num,
+    #[serde(default)]
+    pub tier3_reserve_s: Num,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -346,6 +356,11 @@ pub enum Verdict {
     Worse,
     Inconclusive,
     Mixed,
+    /// The trial changes the picture: never a gain, whatever its ΔEff.
+    Biased,
+    /// The probe's own error moves more between seeds than the smallest
+    /// gain worth suggesting: a larger budget may decide it.
+    InsufficientSamples,
 }
 
 impl Verdict {
@@ -355,6 +370,8 @@ impl Verdict {
             Verdict::Worse => "worse",
             Verdict::Inconclusive => "inconclusive",
             Verdict::Mixed => "mixed",
+            Verdict::Biased => "biased",
+            Verdict::InsufficientSamples => "insufficient_samples",
         }
     }
 }
@@ -372,24 +389,59 @@ pub struct Trial {
     /// Geometric mean of the per-crop medians.
     pub overall_delta_eff: Option<Num>,
     pub verdict: Verdict,
+    /// The baseline's projected full-frame time to reach the target over
+    /// the trial's, each side's setup included at full-frame scale: an
+    /// estimate, which can only veto a suggestion.
+    #[serde(default)]
+    pub delta_eff_at_target: Option<Num>,
 }
 
+/// One trial on one crop. Values are medians over the pairs unless they are
+/// lists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CropTrial {
     pub crop: String,
     pub spp: u32,
-    /// One per interleaved pair: `(t_B · MRSE_B) / (t_T · MRSE_T)`.
+    /// One per interleaved pair: `(render_B · MRSE_B) / (render_T ·
+    /// MRSE_T)`, trimmed.
     pub delta_eff: Vec<Num>,
     pub median: Num,
     pub min: Num,
     pub max: Num,
+    /// Trimmed: without the top 0.1% of either side's pixels.
     pub mrse_baseline: Num,
     pub mrse_trial: Num,
-    /// Medians over the pairs; `time = setup + render`.
-    pub time_baseline_s: Num,
-    pub time_trial_s: Num,
+    /// Render time, setup excluded.
+    #[serde(alias = "time_baseline_s")]
+    pub render_baseline_s: Num,
+    #[serde(alias = "time_trial_s")]
+    pub render_trial_s: Num,
+    /// The `learned` pre-pass and guiding's training, per render.
     pub setup_trial_s: Num,
     pub verdict: Verdict,
+    /// Mean luminance of both sides over the pixels the picture check
+    /// keeps (all but the 1% whose two values differ most).
+    #[serde(default)]
+    pub mean_luminance_baseline: Num,
+    #[serde(default)]
+    pub mean_luminance_trial: Num,
+    /// `mean_luminance_trial / mean_luminance_baseline − 1`.
+    #[serde(default)]
+    pub luminance_shift: Num,
+    /// The shift over its standard error.
+    #[serde(default)]
+    pub luminance_shift_z: Num,
+    #[serde(default)]
+    pub mrse_baseline_untrimmed: Num,
+    #[serde(default)]
+    pub mrse_trial_untrimmed: Num,
+    /// One per pair, from the untrimmed MRSEs.
+    #[serde(default)]
+    pub delta_eff_untrimmed: Vec<Num>,
+    /// The largest over the smallest of the baseline's MRSEs across seeds;
+    /// `null` with one repeat.
+    #[serde(default)]
+    pub noise_floor: Option<Num>,
 }
 
 /// Tier 2. Projections are estimates and never produce suggestions.
@@ -406,6 +458,9 @@ pub struct SampleBudget {
     /// Full frame, sampling only (setup excluded).
     pub projected_render_s: Option<Num>,
     pub adaptive: Vec<AdaptiveCrop>,
+    /// The settings' setup at full-frame scale, apart from the render.
+    #[serde(default)]
+    pub projected_setup_s: Option<Num>,
 }
 
 /// One crop rendered with adaptive sampling on at the authored threshold.
@@ -429,6 +484,21 @@ pub struct PictureChanging {
     pub clamp: Option<ClampResult>,
     pub max_depth: DepthResult,
     pub subdivision: SubdivisionResult,
+    /// Per crop; `null` when it does not apply (no light-list entry, or a
+    /// single-strategy baseline) or was not measured.
+    #[serde(default)]
+    pub light_sampling_reach: Option<Vec<Reach>>,
+}
+
+/// The light-sampling reach of one crop: a light-only render's mean
+/// luminance over the baseline's, same seed and samples, every pixel.
+/// Below 1, part of the energy arrives only on paths BSDF sampling finds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reach {
+    pub crop: String,
+    pub reach: Num,
+    /// `(reach − 1)` over its standard error.
+    pub z: Num,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -485,6 +555,8 @@ pub struct Suggestion {
     pub expected_delta_eff: Num,
     /// Trial and finding ids.
     pub evidence: Vec<String>,
+    #[serde(default)]
+    pub expected_delta_eff_at_target: Num,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -208,6 +208,85 @@ pub fn measure(
         .collect()
 }
 
+/// The share of the pixels whose luminance [`top_pixels`] weighs: the
+/// repo's 0.1% trim.
+pub const TOP_PIXELS: f64 = 0.001;
+
+/// The rows [`top_pixels`] leaves out: light seen directly, or in one
+/// glossy or mirror reflection. Each is the brightest thing in its pixel
+/// without being noise — `veach_mis`'s lights in its glossy plates put 35%
+/// of the image in 0.1% of the pixels at 64 spp, every bit of it
+/// `direct_glossy`, a row whose relative error (`var / mean²`) was 0.0098.
+pub const SEEN_ROWS: &[&str] = &["emission", "direct_glossy"];
+
+/// Where the brightest pixels' energy is (design D5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopPixels {
+    /// The share of the image's luminance, not counting light seen
+    /// directly or in a reflection ([`SEEN_ROWS`]), that its brightest
+    /// [`TOP_PIXELS`] hold.
+    pub share: f64,
+    /// The partition row holding the most of those pixels' luminance, and
+    /// its share of it.
+    pub row: Option<(String, f64)>,
+}
+
+/// How much of the beauty's luminance its brightest pixels hold, not
+/// counting light seen directly or in one reflection ([`SEEN_ROWS`]).
+/// `None` when the image holds no such luminance.
+pub fn top_pixels(
+    rows: &[(String, String)],
+    film: &AovFilm,
+    beauty: &Buffer,
+    luma: utils::Luma,
+) -> Option<TopPixels> {
+    let (w, h) = beauty.size();
+    let n = w * h;
+    let lum_of = |key: &str, expr: &str| -> Vec<f64> {
+        let value = film.var_channels(beauty, &var(key, expr, false));
+        (0..n)
+            .map(|q| luma.of(glam::Vec3A::new(value[0][q], value[1][q], value[2][q])) as f64)
+            .collect()
+    };
+    let partition = &rows[..PARTITION.min(rows.len())];
+    let seen: Vec<Vec<f64>> = partition
+        .iter()
+        .filter(|(k, _)| SEEN_ROWS.contains(&k.as_str()))
+        .map(|(k, e)| lum_of(k, e))
+        .collect();
+    let lit: Vec<f64> = (0..n)
+        .map(|q| {
+            let (r, g, b) = beauty.get_rgb(q % w, q / w);
+            let seen_q: f64 = seen.iter().map(|l| l[q]).sum();
+            (luma.of(glam::Vec3A::new(r, g, b)) as f64 - seen_q).max(0.0)
+        })
+        .collect();
+    let total: f64 = lit.iter().sum();
+    if total.is_nan() || total <= 0.0 {
+        return None;
+    }
+    let k = ((n as f64 * TOP_PIXELS).ceil() as usize).clamp(1, n);
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.select_nth_unstable_by(k - 1, |a, b| lit[*b].total_cmp(&lit[*a]));
+    idx.truncate(k);
+    let top: f64 = idx.iter().map(|&q| lit[q]).sum();
+    // The other partition rows partition what is left of the beauty.
+    let row = partition
+        .iter()
+        .filter(|(k, _)| !SEEN_ROWS.contains(&k.as_str()))
+        .map(|(key, expr)| {
+            let l = lum_of(key, expr);
+            (key.clone(), idx.iter().map(|&q| l[q]).sum::<f64>())
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|(_, sum)| *sum > 0.0)
+        .map(|(key, sum)| (key, sum / top));
+    Some(TopPixels {
+        share: top / total,
+        row,
+    })
+}
+
 /// The partition row with the largest error against the beauty, if any row
 /// carries any.
 pub fn dominant(components: &[NoiseRow]) -> Option<String> {

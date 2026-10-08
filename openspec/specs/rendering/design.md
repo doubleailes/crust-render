@@ -642,6 +642,19 @@ randomness use `openqmc::pcg::Rng`.
   transmittance, boosted `2R/(1+R)` reflection, view-dependent tint) — which the
   integrator takes over as a pass-through (above), so the guide never sees it. The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
+- **Guided renders of ALab are darker than unguided ones.** `crust diagnostic`'s
+  picture check flagged it (`diagnostics` design record, "Calibration"), and a direct
+  test confirmed it: a 272×272 crop of frame 1004 at 64 spp, clamp and adaptive
+  sampling off, 40 seeds each, read 0.4294 ± 0.0055 guided against 0.4611 ± 0.0046
+  unguided — 6.9% darker, z −4.4 on the standard error across seeds. Not yet
+  diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)). Two
+  suspects: the pass blend, whose weights are each pass's *estimated* mean variance,
+  so a pass that caught a firefly is down-weighted along with the firefly's energy (a
+  known bias of weights estimated from the data they weigh, largest where fireflies
+  carry the image, as on ALab) — 8 of 9 guided renders darkened with an *unguided*
+  final pass, and one gave a 2-spp training pass 69% of the weight; and the guide
+  mixture ↔ NEE pair. The Cornell box and `veach_mis` show no such shift (|z| < 2 at
+  64–128 spp).
 
 ## Known gaps: volume regions
 
