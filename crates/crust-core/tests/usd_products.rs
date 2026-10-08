@@ -1340,6 +1340,86 @@ fn an_empty_window_renders_the_full_frame_with_one_warning() {
     assert!(warnings[0].contains("selects no pixel"), "{warnings:?}");
 }
 
+/// A window wholly outside the frame is overscan that clips to nothing: it
+/// is the empty case, with that one warning, not also a clipped one.
+#[test]
+fn a_window_wholly_outside_the_frame_warns_once() {
+    let (region, warnings) = window_region("window_off_frame", (640, 360), "(1.2, 0, 1.5, 1)");
+    assert_eq!(region, PixelRect::full(640, 360));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("selects no pixel"), "{warnings:?}");
+}
+
+/// Two products whose windows render the same frame — one authoring the
+/// fallback `(0, 0, 1, 1)`, one authoring nothing — are not warned about.
+#[test]
+fn an_unauthored_and_a_full_window_are_the_same_region() {
+    let (scene, warnings) = load_warnings(
+        "window_full_vs_unauthored",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform int2 resolution = (64, 36)
+        rel products = [</Render/a>, </Render/b>]
+    }
+    def RenderProduct "a"
+    {
+        uniform float4 dataWindowNDC = (0, 0, 1, 1)
+        token productName = "a.exr"
+        rel orderedVars = [</Render/beauty>]
+    }
+    def RenderProduct "b"
+    {
+        token productName = "b.exr"
+        rel orderedVars = [</Render/beauty>]
+    }
+    def RenderVar "beauty"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }
+"#,
+    );
+    assert_eq!(scene.aovs.products.len(), 2);
+    assert!(scene.settings.is_full_frame());
+    assert!(
+        !warnings.iter().any(|w| w.contains("dataWindowNDC")),
+        "{warnings:?}"
+    );
+    // A product that does ask for another window is still warned about.
+    let (_, warnings) = load_warnings(
+        "window_products_differ",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform int2 resolution = (64, 36)
+        rel products = [</Render/a>, </Render/b>]
+    }
+    def RenderProduct "a"
+    {
+        token productName = "a.exr"
+        rel orderedVars = [</Render/beauty>]
+    }
+    def RenderProduct "b"
+    {
+        uniform float4 dataWindowNDC = (0.5, 0, 1, 1)
+        token productName = "b.exr"
+        rel orderedVars = [</Render/beauty>]
+    }
+    def RenderVar "beauty"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }
+"#,
+    );
+    let differ: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("asks for dataWindowNDC"))
+        .collect();
+    assert_eq!(differ.len(), 1, "{warnings:?}");
+}
+
 #[test]
 fn a_window_is_no_longer_listed_as_not_honoured() {
     let (_, warnings) = load_warnings(

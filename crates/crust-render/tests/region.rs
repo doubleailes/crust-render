@@ -1,19 +1,28 @@
-//! `crust render --region`: a crop of `samples/cornellbox.usda` (640×360)
-//! is written as an EXR whose display window is the frame and whose data
-//! window is the region, with the full render's pixels there, and a PNG of
-//! the region alone; a region that is malformed, or outside the frame, is
-//! refused without writing anything.
+//! `crust render --region`: a crop is written as an EXR whose display window
+//! is the frame and whose data window is the region, with the full render's
+//! pixels there, and a PNG of the region alone; a region that is malformed,
+//! or outside the frame, is refused without writing anything.
+//!
+//! The crop is compared at `-s 16`, as every image comparison here is
+//! (CLAUDE.md, "Measuring a change"), on `samples/dome_backdrop.usda`
+//! (240×136): small enough to render twice at 16 spp in a debug build, and
+//! still a frame the 64×64 crop sits inside away from every edge.
 
 use exr::prelude::{IntegerBounds, ReadChannels, ReadLayers, Vec2, read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn sample() -> PathBuf {
+fn sample(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../samples/cornellbox.usda")
+        .join("../../samples")
+        .join(name)
         .canonicalize()
-        .expect("samples/cornellbox.usda")
+        .unwrap_or_else(|e| panic!("samples/{name}: {e}"))
 }
+
+/// `samples/dome_backdrop.usda`'s resolution.
+const W: usize = 240;
+const H: usize = 136;
 
 fn work_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("crust_region_cli").join(name);
@@ -28,7 +37,7 @@ fn crust(args: &[&str], stage: &Path, out: &Path) -> Output {
         .arg(stage)
         .arg("-o")
         .arg(out)
-        .args(["-s", "1", "-l", "error"])
+        .args(["-s", "16", "-l", "error"])
         .args(args)
         .output()
         .expect("run crust")
@@ -65,21 +74,24 @@ fn load(path: &Path) -> (IntegerBounds, IntegerBounds, Vec<f32>) {
 fn a_crop_is_placed_in_the_frame_and_matches_it() {
     let dir = work_dir("crop");
     let (full, crop) = (dir.join("full.exr"), dir.join("crop.exr"));
-    let out = crust(&[], &sample(), &full);
+    let stage = sample("dome_backdrop.usda");
+    let out = crust(&[], &stage, &full);
     assert!(out.status.success(), "{out:?}");
-    let out = crust(&["--region", "100,50,164,114"], &sample(), &crop);
+    let out = crust(&["--region", "100,50,164,114"], &stage, &crop);
     assert!(out.status.success(), "{out:?}");
 
     let (display, data, pixels) = load(&crop);
-    assert_eq!(display, IntegerBounds::new((0, 0), (640, 360)));
+    assert_eq!(display, IntegerBounds::new((0, 0), (W, H)));
     assert_eq!(data.position, Vec2(100, 50));
     assert_eq!(data.max(), Vec2(163, 113));
     let (_, full_data, full_pixels) = load(&full);
-    assert_eq!(full_data, IntegerBounds::new((0, 0), (640, 360)));
+    assert_eq!(full_data, IntegerBounds::new((0, 0), (W, H)));
     let expected: Vec<f32> = (50..114)
         .flat_map(|y| (100..164).map(move |x| (x, y)))
-        .map(|(x, y)| full_pixels[y * 640 + x])
+        .map(|(x, y)| full_pixels[y * W + x])
         .collect();
+    // Not vacuous: the crop sees something.
+    assert!(pixels.iter().any(|&v| v > 0.0));
     assert!(
         pixels
             .iter()
@@ -112,7 +124,12 @@ fn a_malformed_region_is_a_usage_error_before_loading() {
 fn a_region_outside_the_frame_names_the_resolution() {
     let dir = work_dir("outside");
     let out = dir.join("out.exr");
-    let result = crust(&["--region", "700,0,800,100"], &sample(), &out);
+    // Cornell box: 640×360, authored by no RenderSettings (the default).
+    let result = crust(
+        &["--region", "700,0,800,100"],
+        &sample("cornellbox.usda"),
+        &out,
+    );
     assert!(!result.status.success());
     let log = String::from_utf8_lossy(&result.stdout).into_owned()
         + &String::from_utf8_lossy(&result.stderr);
