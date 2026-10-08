@@ -42,16 +42,21 @@ That change is kept separate.
   - With `-`, the JSON goes to stdout and the render's log moves to stderr.
 - **`crust ls` gains metadata and a time code.**
   - `--json PATH|-` (`crust-ls/1`) gives per-prim records:
-    - cameras: focal length, aperture, clipping, projection, whether this is
-      the render camera, hidden;
+    - cameras: focal length, aperture, f-stop, focus distance, whether this
+      is the camera a render would use, hidden;
     - lights: type, intensity, exposure, color, normalize;
     - materials: the authored surface shader, and whether any prim binds it.
   - `-f/--frame` evaluates those values at a time code.
   - The text output stays one path per line, unchanged.
 - **Every EXR `crust render` writes is stamped** with how it was sampled:
-  - `crust:spp`, `crust:minSpp`, `crust:sppTaken` (min/max over the pixels);
-  - `crust:indirectClamp`, `crust:samplingStrategy`, `crust:lightSelection`;
-  - `crust:frame`, `crust:camera`, `crust:version`.
+  - `crust:spp`, `crust:minSpp`, `crust:sppTaken` (min/max over the pixels),
+    `crust:varianceThreshold`;
+  - `crust:indirectClamp`, `crust:maxDepth`, `crust:lightSamples`,
+    `crust:lightSamplesIndirect`, `crust:samplingStrategy`,
+    `crust:lightSelection`, `crust:pixelFilter`, `crust:pixelFilterRadius`;
+  - `crust:frame` (the evaluation time code, subframes included),
+    `crust:camera` (the camera actually rendered through, after any fallback),
+    `crust:version`.
 
   Both writers stamp: the single beauty EXR and each RenderProduct. A product's
   authored attribute with a `crust:` name is overridden, with a warning.
@@ -83,14 +88,20 @@ That change is kept separate.
 - **crust-core**:
   - `serde` and `serde_json` become direct dependencies (both are already in
     `Cargo.lock`);
-  - `RenderStats` and its children gain `Serialize`;
+  - `RenderStats` and its children gain `Serialize`, and `RenderStats` gains
+    the peak-RSS snapshot its text report used to read directly;
+  - `Scene` keeps the camera path and the time code it was imported with;
+  - a `compare` module: identity, metrics and comparability over decoded
+    planes, with no I/O;
   - the listing returns records instead of strings, read through the import's
     own camera, UsdLux and material readers and evaluated at an optional time
     code;
-  - a `SamplingStamp` value built from `RenderSettings` plus `RayStats`.
-- **crust-render**:
-  - a new `diff` subcommand, with EXR reading through the existing `exr`
-    dependency;
+  - a `SamplingStamp` value built from `RenderSettings`, `RayStats`, the
+    camera path and the time code.
+- **crust-assets**: reading an EXR's channels and `crust:*` stamp for `diff`.
+- **crust-render** (still `main.rs`, `products.rs`, `logging.rs` only):
+  - a new `diff` subcommand that reads through crust-assets and compares
+    through crust-core;
   - `--stats-json`, and `ls --json` / `-f`;
   - one stamp function shared by `write_beauty` and `products::write_product`;
   - the log's stream chosen per invocation.

@@ -7,9 +7,10 @@
 When the stage authors no RenderProduct, the tool SHALL write the rendered
 buffer as an RGB EXR image to the `-o/--output` path (default `output.exr`),
 with pixels byte-identical to the output before AOV support and a header that
-differs from it only by the sampling stamp ("EXRs record how they were
-sampled"). When the stage authors products, the tool SHALL write each product
-as described in "One multi-channel EXR per render product".
+differs from it only by the `crust:*` stamp ("EXRs record how they were
+sampled", "EXRs record what they were rendered from"). When the stage
+authors products, the tool SHALL write each product as described in "One
+multi-channel EXR per render product".
 
 #### Scenario: EXR is written
 
@@ -74,16 +75,19 @@ differ from it only by the sampling stamp.
 ### Requirement: EXRs record how they were sampled
 
 Every EXR `crust render` writes, the single beauty and each product alike,
-SHALL carry these header attributes:
+SHALL carry as `crust:*` header attributes every setting that changes how its
+pixels were sampled or what they converge to, named as the CLI flags and USD
+`crust:*` attributes that set them, plus the fewest and most samples any pixel
+took.
 
-- `crust:spp`, `crust:minSpp`, and `crust:sppTaken` (the fewest and most samples
-  any pixel took);
-- `crust:indirectClamp` (`0` when off), `crust:samplingStrategy`,
-  `crust:lightSelection`;
-- `crust:frame`, `crust:camera`, `crust:version`.
+#### Scenario: The attribute set
 
-The names and values SHALL match the CLI flags and USD `crust:*` attributes
-that set them.
+- **WHEN** any render writes an EXR
+- **THEN** it carries `crust:spp`, `crust:minSpp`, `crust:sppTaken`,
+  `crust:varianceThreshold`, `crust:indirectClamp` (`0` when off),
+  `crust:maxDepth`, `crust:lightSamples`, `crust:lightSamplesIndirect`,
+  `crust:samplingStrategy`, `crust:lightSelection`, `crust:pixelFilter` and
+  `crust:pixelFilterRadius`
 
 #### Scenario: A fixed-budget render
 
@@ -92,10 +96,40 @@ that set them.
 - **THEN** its EXR has `crust:spp = 16`, `crust:minSpp = 32`, `crust:sppTaken`
   of 16 and 16, and `crust:indirectClamp = 0`
 
+#### Scenario: The filter used
+
+- **WHEN** the render runs with `--filter gaussian --filter-radius 2`
+- **THEN** its EXR has `crust:pixelFilter = gaussian` and
+  `crust:pixelFilterRadius = 2`
+
 #### Scenario: Every product is stamped
 
 - **WHEN** a stage authors two RenderProducts
 - **THEN** both EXRs carry the same `crust:*` attributes
+
+### Requirement: EXRs record what they were rendered from
+
+Every EXR `crust render` writes SHALL carry `crust:version`, and
+`crust:frame` and `crust:camera` holding the time code the stage was evaluated
+at and the camera actually rendered through, after any fallback. Without a
+time code, `crust:frame` SHALL be absent; for the procedural camera,
+`crust:camera` SHALL be absent.
+
+#### Scenario: A subframe
+
+- **WHEN** the render runs with `-f 10.5`
+- **THEN** `crust:frame` is `10.5`, not the sampler seed `10`
+
+#### Scenario: Camera fallback
+
+- **WHEN** `RenderSettings.camera` names a missing camera and the render
+  falls back to `/cams/first`
+- **THEN** `crust:camera` is `/cams/first`
+
+#### Scenario: No time code, procedural camera
+
+- **WHEN** the procedural fallback scene renders without `-f`
+- **THEN** the EXR has no `crust:frame` and no `crust:camera`
 
 ### Requirement: Crust's stamp wins over authored product attributes
 

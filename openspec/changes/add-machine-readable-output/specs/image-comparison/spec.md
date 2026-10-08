@@ -132,6 +132,18 @@ change the exit status.
 - **WHEN** the stamps' `crust:frame`, `crust:camera` or `crust:spp` differ
 - **THEN** the status is `warn`, with a note naming each field that differs
 
+#### Scenario: Different pixel filters
+
+- **WHEN** `a` was rendered with `--filter gaussian` and `b` with
+  `--filter box`, or the same filter at a different radius
+- **THEN** the status is `warn`, with a note naming `pixelFilter` or
+  `pixelFilterRadius`
+
+#### Scenario: Two builds, same settings
+
+- **WHEN** the stamps differ only in `crust:version`
+- **THEN** the status is `ok`
+
 #### Scenario: An EXR from another renderer
 
 - **WHEN** `a` has no `crust:` attributes
