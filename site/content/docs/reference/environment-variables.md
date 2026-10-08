@@ -75,6 +75,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_MTLX_OPT`](#crust-mtlx-opt) | on | shading |
 | [`CRUST_SHADER_JIT`](#crust-shader-jit) | on | shading |
 | [`CRUST_RAY_CONES`](#crust-ray-cones) | on | textures |
+| [`CRUST_LINK_TWIN`](#crust-link-twin) | on | lighting |
 | [`CRUST_TEX`](#crust-tex) | on | UV textures |
 | [`CRUST_TEX_MAX`](#crust-tex-max) | 1024 | UV textures |
 | [`CRUST_TEX_MIP`](#crust-tex-mip) | on | UV textures |
@@ -187,6 +188,24 @@ Bit-identical, only slower.
 
 The JIT exists only in builds with the `jit` feature, which is the default. A build with
 `--no-default-features` always interprets.
+
+## Lighting
+
+### CRUST_LINK_TWIN
+
+Boolean, default **on**.
+
+A light whose `collection:shadowLink` leaves some occluders out casts its shadow rays past
+them, but an ordinary bounce ray is still stopped by them. On, each surface or volume
+scatter also traces a shadow ray toward such a light along the bounce direction, with the
+light's own shadow set, so both sampling strategies see the light the same way and are
+combined by multiple importance sampling as for any other light. This is what keeps glossy
+reflections of a shadow-linked light quiet.
+
+`0` samples every shadow-linked light by light sampling alone, as crust did before: the
+same average image, noisier on glossy surfaces. A scene without shadow links renders
+identically either way. Shadow-linked dome lights are sampled by light sampling alone
+in both cases (see [Limitations](@/docs/architecture/limitations.md)).
 
 ## Textures
 

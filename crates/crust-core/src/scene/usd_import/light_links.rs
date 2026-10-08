@@ -337,6 +337,7 @@ impl LightLinks {
         let mut links = RuntimeLinks {
             illuminates: vec![None; n],
             shadow_masks: vec![MASK_SHADOW; n],
+            restricted: vec![false; n],
             nee_only: vec![false; n],
         };
         let mut any = false;
@@ -412,6 +413,28 @@ impl LightLinks {
                 volumes,
                 &mut links,
             );
+            // Which bounce side each restricted light gets (lighting design
+            // record, "Shadow linking"): a link twin, or none — a dome's
+            // twin would cost a shadow ray on every bounce.
+            let twin = crate::config().link_twin;
+            for (index, p) in &restricted {
+                if !links.restricted[*index] {
+                    continue;
+                }
+                let dome = lights.light(*index).is_dome();
+                links.nee_only[*index] = dome || !twin;
+                debug!(
+                    "{}: {}",
+                    p.path,
+                    if dome {
+                        "a restricted dome is sampled by NEE alone at non-delta vertices"
+                    } else if !twin {
+                        "sampled by NEE alone at non-delta vertices (CRUST_LINK_TWIN=0)"
+                    } else {
+                        "MIS-combined with a shadow-linked bounce twin at non-delta vertices"
+                    }
+                );
+            }
             any = true;
         }
 
@@ -570,13 +593,12 @@ fn encode_shadows(
         }
         let excluded = order.iter().filter(|&&c| !classes[c].get(bit)).count();
         debug!(
-            "{}: collection:shadowLink ignores {excluded} of {} occluder class(es) — sampled \
-             by NEE alone at non-delta vertices",
+            "{}: collection:shadowLink ignores {excluded} of {} occluder class(es)",
             p.path,
             classes.len()
         );
         links.shadow_masks[*index] = RayMask(mask);
-        links.nee_only[*index] = true;
+        links.restricted[*index] = true;
     }
 }
 

@@ -15,7 +15,8 @@ pub use kind::LightKind;
 pub use list::{EVERY_CLASS, LightLinks, LightList, LightSelection};
 pub use rect::RectShape;
 pub use shape::{
-    AffineShape, LightShape, SolidAngleSampler, SolidAngleSampling, SphereShape, UnitShape,
+    AffineShape, LightShape, ShapeHits, SolidAngleSampler, SolidAngleSampling, SphereShape,
+    UnitShape,
 };
 
 /// One sampled connection from a shading point to a light: where to aim
@@ -41,6 +42,18 @@ pub struct LightSample {
     /// cone rather than being made singular, which keeps one MIS path
     /// through the integrator instead of two.
     pub pdf: PdfSolidAngle,
+}
+
+/// What a ray along a direction finds of a light ([`LightKind::found_along`]):
+/// how far along the ray, the radiance arriving from there, and the
+/// solid-angle density NEE samples that connection with — `None` where NEE
+/// never delivers it, so nothing competes for it.
+#[derive(Clone, Copy, Debug)]
+pub struct FoundAlong {
+    /// Distance along the (unit) direction; `f32::INFINITY` at infinity.
+    pub distance: f32,
+    pub radiance: Vec3A,
+    pub pdf: Option<PdfSolidAngle>,
 }
 
 /// The `Light` trait is what the integrator's light-sampling strategy (NEE)

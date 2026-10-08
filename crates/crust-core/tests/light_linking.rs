@@ -494,26 +494,213 @@ fn an_excluded_occluder_or_volume_casts_no_nee_shadow() {
     }
 }
 
-/// A shadow-linked light is sampled by NEE alone at a continuous vertex, so
-/// power MIS and NEE-only are the same estimator for it.
-#[test]
-fn power_mis_matches_nee_only_for_a_shadow_linked_light() {
-    let mis = centre(&render(shadow_scene(
-        "restricted_power",
-        BALL,
-        EXCLUDE,
-        "power",
-    )));
-    let nee = centre(&render(shadow_scene(
-        "restricted_light",
-        BALL,
-        EXCLUDE,
-        "light",
-    )));
-    assert!(
-        (mis - nee).abs().max_element() <= 1e-4 * nee.max_element(),
-        "{mis} vs {nee}"
+/// A glossy floor (metal, roughness 0.15) seen from `(0, 5, 6)`, reflecting a
+/// sphere light at the mirror position `(0, 5, −6)` through a ball halfway
+/// along the reflected ray. The ball is invisible to the camera but blocks
+/// bounce and shadow rays, so whether the light's `collection:shadowLink`
+/// (`light_links`) excludes it decides whether the highlight is there: a link
+/// that matters. `light` is the light prim, with `LINKS` where its links go.
+fn glossy_linked_scene(
+    name: &str,
+    light: &str,
+    light_links: &str,
+    strategy: &str,
+    spp: u32,
+    seed: isize,
+) -> Scene {
+    let body = format!(
+        r#"    def Camera "Cam"
+    {{
+        float focalLength = 50
+        float horizontalAperture = 20
+        float verticalAperture = 20
+        double3 xformOp:translate = (0, 5, 6)
+        float xformOp:rotateX = -39.8
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }}
+    def Material "Metal"
+    {{
+        token outputs:surface.connect = </World/Metal/S.outputs:surface>
+        def Shader "S"
+        {{
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.8, 0.8, 0.8)
+            float inputs:metallic = 1
+            float inputs:roughness = 0.15
+            token outputs:surface
+        }}
+    }}
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]
+        rel material:binding = </World/Metal>
+    }}
+    {light}
+    def Sphere "Blocker"
+    {{
+        double radius = 1
+        int crust:rayMask = 6
+        double3 xformOp:translate = (0, 2.5, -3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+"#,
+        light = light.replace("LINKS", light_links)
     );
+    // Depth 2, so the first vertex's bounce may escape to a light at
+    // infinity rather than end on the depth cap's lookup, which never does.
+    let mut scene = load(name, &body, &settings_at_depth(strategy, spp, 16, 2));
+    scene.settings = scene.settings.with_frame(seed);
+    scene
+}
+
+const GLOSSY_KEY: &str = r#"def SphereLight "Key"
+    {
+        float inputs:radius = 0.5
+        float inputs:intensity = 50
+        LINKS
+        double3 xformOp:translate = (0, 5, -6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#;
+
+/// A distant sun (5° across) at the same mirror direction, `(0, 5, −6)` seen
+/// from the floor's centre: the light at infinity's link twin.
+const GLOSSY_SUN: &str = r#"def DistantLight "Key"
+    {
+        float inputs:angle = 5
+        float inputs:intensity = 20
+        LINKS
+        float xformOp:rotateX = -140.19
+        uniform token[] xformOpOrder = ["xformOp:rotateX"]
+    }"#;
+
+/// Per-pixel luminance of a render.
+fn luminance(b: &Buffer) -> Vec<f64> {
+    let (w, h) = (16, 16);
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let c = b.get_pixel(x, y);
+            out.push(0.2126 * c.x as f64 + 0.7152 * c.y as f64 + 0.0722 * c.z as f64);
+        }
+    }
+    out
+}
+
+/// The glossy floor's mean luminance under `strategy`, one render per seed.
+fn glossy_means(light: &str, strategy: &str, links: &str, seeds: &[isize]) -> Vec<f64> {
+    let kind = if light == GLOSSY_SUN { "sun" } else { "sphere" };
+    seeds
+        .iter()
+        .map(|&seed| {
+            let img = luminance(&render(glossy_linked_scene(
+                &format!("glossy_{kind}_{strategy}_{}_{seed}", links.is_empty()),
+                light,
+                links,
+                strategy,
+                64,
+                seed,
+            )));
+            img.iter().sum::<f64>() / img.len() as f64
+        })
+        .collect()
+}
+
+/// Mean and standard error of the mean.
+fn mean_and_error(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    (mean, (var / n).sqrt())
+}
+
+/// A shadow-linked light is MIS-combined through its link twin, which sees
+/// it through the light's own shadow set: `light`, `bsdf` and `power`
+/// estimate the same image of a glossy floor whose highlight the link
+/// uncovers — including the highlight itself, which BSDF sampling used to
+/// find behind the excluded ball.
+#[test]
+fn every_strategy_agrees_on_a_shadow_link_that_matters() {
+    for light in [GLOSSY_KEY, GLOSSY_SUN] {
+        let seeds = [1, 2, 3, 4];
+        let blocked = mean_and_error(&glossy_means(light, "light", "", &seeds));
+        let stats: Vec<(&str, (f64, f64))> = ["light", "bsdf", "power"]
+            .into_iter()
+            .map(|s| (s, mean_and_error(&glossy_means(light, s, EXCLUDE, &seeds))))
+            .collect();
+        for (s, (mean, err)) in &stats {
+            eprintln!("{s}: mean {mean:.5} ± {err:.5} (blocked: {:.5})", blocked.0);
+            assert!(
+                *mean > 1.5 * blocked.0,
+                "{s}: the highlight behind the excluded ball is lit ({mean} vs {})",
+                blocked.0
+            );
+        }
+        for (i, (a, (ma, ea))) in stats.iter().enumerate() {
+            for (b, (mb, eb)) in &stats[i + 1..] {
+                let sigma = (ea * ea + eb * eb).sqrt();
+                assert!(
+                    (ma - mb).abs() <= 5.0 * sigma + 1e-4 * ma.abs(),
+                    "{a} {ma} ± {ea} vs {b} {mb} ± {eb}"
+                );
+            }
+        }
+    }
+}
+
+/// The per-pixel noise variance of two renders differing only in seed,
+/// `(a − b)² / 4` per pixel, summed over the image.
+fn two_seed_variance(strategy: &str) -> f64 {
+    let [a, b] = [1, 2].map(|seed| {
+        luminance(&render(glossy_linked_scene(
+            &format!("glossy_var_{strategy}_{seed}"),
+            GLOSSY_KEY,
+            EXCLUDE,
+            strategy,
+            64,
+            seed,
+        )))
+    });
+    a.iter().zip(&b).map(|(x, y)| (x - y).powi(2) / 4.0).sum()
+}
+
+/// With its bounce side back, MIS lowers a shadow-linked light's noise on a
+/// glossy floor below light sampling's, where it used to be identical.
+#[test]
+fn mis_is_whole_again_for_a_shadow_linked_light() {
+    let power = two_seed_variance("power");
+    let light = two_seed_variance("light");
+    eprintln!("variance: power {power:.6e}, light {light:.6e}");
+    assert!(power < 0.5 * light, "power {power} vs light {light}");
+}
+
+/// A restricted dome has no link twin: it is NEE's alone at a continuous
+/// vertex, so power MIS and light sampling are the same estimator for it,
+/// to the bit — as before shadow-linked lights had twins.
+#[test]
+fn a_restricted_dome_stays_nee_only() {
+    let dome = r#"def DomeLight "Key"
+    {
+        float inputs:intensity = 1
+        LINKS
+    }"#;
+    let [power, light] = ["power", "light"].map(|s| {
+        let scene = glossy_linked_scene(&format!("dome_{s}"), dome, EXCLUDE, s, 16, 1);
+        let index = (0..scene.lights.count())
+            .find(|&i| scene.lights.restricted(i))
+            .expect("the dome's link was encoded");
+        assert!(
+            scene.lights.nee_only(index),
+            "a restricted dome is NEE-only"
+        );
+        assert!(scene.lights.twinned_lights().is_empty());
+        luminance(&render(scene))
+    });
+    for (p, l) in power.iter().zip(&light) {
+        assert!((p - l).abs() <= 1e-6 * l.abs().max(1e-3), "{p} vs {l}");
+    }
 }
 
 /// 30 lights, each excluding its own occluder, make 30 occluder classes:
@@ -556,7 +743,7 @@ fn overflow_occluders_block_unrestricted_and_refused_lights() {
         .map(|i| light_above(&scene, 3.0 * i as f32))
         .collect();
     let refused: Vec<usize> = (0..30)
-        .filter(|&i| !scene.lights.nee_only(per_light[i]))
+        .filter(|&i| !scene.lights.restricted(per_light[i]))
         .collect();
     assert_eq!(
         refused.len(),
@@ -741,7 +928,7 @@ fn a_hidden_light_source_is_no_caster_under_shadow_linking() {
     let scene = load("hidden_source_classes", &body, "");
     let restricted = light_above(&scene, 100.0);
     let free = light_above(&scene, 200.0);
-    assert!(scene.lights.nee_only(restricted), "the link was encoded");
+    assert!(scene.lights.restricted(restricted), "the link was encoded");
     let blocked = |x: f32, light: usize| {
         let ray =
             Ray::new(Vec3A::new(x, -5.0, 0.0), Vec3A::Y).with_mask(scene.lights.shadow_mask(light));
