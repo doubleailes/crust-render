@@ -236,7 +236,7 @@ fn nothing_at_infinity_is_black() {
 /// the tolerance above `p` holds it.
 #[test]
 fn a_cross_neighbour_holds_a_pixel_only_past_the_tolerance() {
-    use super::held_by_neighbour;
+    use super::{PixelRect, held_by_neighbour};
     let (w, h) = (3usize, 3usize);
     let (x, y) = (1usize, 1usize);
     let t = 1.0f32;
@@ -245,22 +245,57 @@ fn a_cross_neighbour_holds_a_pixel_only_past_the_tolerance() {
     let active = vec![true; w * h];
     // Left neighbour at exactly `own + t`: not held.
     index[y * w + x - 1] = own + t;
-    assert!(!held_by_neighbour(&index, &active, w, h, x, y, t));
+    assert!(!held_by_neighbour(
+        &index,
+        &active,
+        PixelRect::full(w, h),
+        x,
+        y,
+        t
+    ));
     // ...and a hair above it: held.
     index[y * w + x - 1] = own + t + 1e-3;
-    assert!(held_by_neighbour(&index, &active, w, h, x, y, t));
+    assert!(held_by_neighbour(
+        &index,
+        &active,
+        PixelRect::full(w, h),
+        x,
+        y,
+        t
+    ));
     // A stopped neighbour never holds, whatever its index.
     let mut stopped = active.clone();
     stopped[y * w + x - 1] = false;
     index[y * w + x - 1] = f32::INFINITY;
-    assert!(!held_by_neighbour(&index, &stopped, w, h, x, y, t));
+    assert!(!held_by_neighbour(
+        &index,
+        &stopped,
+        PixelRect::full(w, h),
+        x,
+        y,
+        t
+    ));
     // A negative tolerance ignores every neighbour.
-    assert!(!held_by_neighbour(&index, &active, w, h, x, y, -1.0));
+    assert!(!held_by_neighbour(
+        &index,
+        &active,
+        PixelRect::full(w, h),
+        x,
+        y,
+        -1.0
+    ));
     // A diagonal neighbour at +∞ does not hold.
     index[y * w + x - 1] = own;
     index[(y - 1) * w + x - 1] = f32::INFINITY;
     index[(y + 1) * w + x + 1] = f32::INFINITY;
-    assert!(!held_by_neighbour(&index, &active, w, h, x, y, t));
+    assert!(!held_by_neighbour(
+        &index,
+        &active,
+        PixelRect::full(w, h),
+        x,
+        y,
+        t
+    ));
     // Each of the four cross neighbours holds on its own, +∞ included.
     for q in [
         y * w + x - 1,
@@ -270,7 +305,10 @@ fn a_cross_neighbour_holds_a_pixel_only_past_the_tolerance() {
     ] {
         let mut idx = vec![own; w * h];
         idx[q] = f32::INFINITY;
-        assert!(held_by_neighbour(&idx, &active, w, h, x, y, t), "{q}");
+        assert!(
+            held_by_neighbour(&idx, &active, PixelRect::full(w, h), x, y, t),
+            "{q}"
+        );
     }
 }
 
@@ -278,14 +316,117 @@ fn a_cross_neighbour_holds_a_pixel_only_past_the_tolerance() {
 /// only the neighbours they have.
 #[test]
 fn neighbours_outside_the_image_are_ignored() {
-    use super::held_by_neighbour;
+    use super::{PixelRect, held_by_neighbour};
     let (w, h) = (2usize, 1usize);
     let index = [0.5f32, 0.5];
     let active = [true, true];
-    assert!(!held_by_neighbour(&index, &active, w, h, 0, 0, 1.0));
-    assert!(!held_by_neighbour(&index, &active, w, h, 1, 0, 1.0));
+    assert!(!held_by_neighbour(
+        &index,
+        &active,
+        PixelRect::full(w, h),
+        0,
+        0,
+        1.0
+    ));
+    assert!(!held_by_neighbour(
+        &index,
+        &active,
+        PixelRect::full(w, h),
+        1,
+        0,
+        1.0
+    ));
     let index = [0.5f32, 5.0];
-    assert!(held_by_neighbour(&index, &active, w, h, 0, 0, 1.0));
+    assert!(held_by_neighbour(
+        &index,
+        &active,
+        PixelRect::full(w, h),
+        0,
+        0,
+        1.0
+    ));
+}
+
+/// A neighbour outside the render region is as absent as one outside the
+/// frame (design D5): the planes cover the region only, and a pixel on its
+/// border compares only the neighbours inside it.
+#[test]
+fn neighbours_outside_the_region_are_ignored() {
+    use super::{PixelRect, held_by_neighbour};
+    // A 2×2 region at (10, 20) of a larger frame, planes region-sized.
+    let rect = PixelRect::new(10, 20, 12, 22);
+    let active = [true; 4];
+    let calm = [0.5f32; 4];
+    for (x, y) in [(10, 20), (11, 20), (10, 21), (11, 21)] {
+        assert!(!held_by_neighbour(&calm, &active, rect, x, y, 1.0));
+    }
+    // The pixel right of (10, 20) still holds it.
+    let mut index = calm;
+    index[rect.index(11, 20)] = 5.0;
+    assert!(held_by_neighbour(&index, &active, rect, 10, 20, 1.0));
+    assert!(!held_by_neighbour(&index, &active, rect, 10, 21, 1.0));
+}
+
+/// Over the full frame the generators emit exactly the units they always
+/// did (the pre-region code, kept here as the reference), so a render with
+/// no region schedules, and replays, exactly as before.
+#[test]
+fn a_full_frame_region_yields_the_frame_tiles_and_rows() {
+    use super::{PixelRect, TILE, generate_rows, generate_tiles};
+    fn old_tiles(w: usize, h: usize, t: usize) -> Vec<[usize; 4]> {
+        let mut out = Vec::new();
+        for y in (0..h).step_by(t) {
+            for x in (0..w).step_by(t) {
+                out.push([x, y, (x + t).min(w) - x, (y + t).min(h) - y]);
+            }
+        }
+        out
+    }
+    let as_arrays = |tiles: Vec<super::Tile>| -> Vec<[usize; 4]> {
+        tiles
+            .iter()
+            .map(|t| [t.x, t.y, t.width, t.height])
+            .collect()
+    };
+    for (w, h) in [(640, 360), (1, 1), (17, 33), (16, 16), (100, 7)] {
+        let full = PixelRect::full(w, h);
+        assert_eq!(as_arrays(generate_tiles(full, TILE)), old_tiles(w, h, TILE));
+        let rows: Vec<[usize; 4]> = (0..h).map(|y| [0, y, w, 1]).collect();
+        assert_eq!(as_arrays(generate_rows(full)), rows);
+    }
+}
+
+/// A region's tiles are the frame grid's tiles clipped to it: every edge
+/// on a multiple of the tile size or on the region's border, the region
+/// covered exactly once, in tile rows by increasing `y`.
+#[test]
+fn region_tiles_keep_the_frame_grid() {
+    use super::{PixelRect, TILE, generate_rows, generate_tiles};
+    let rect = PixelRect::new(37, 21, 101, 77);
+    let tiles = generate_tiles(rect, TILE);
+    let mut covered = vec![0u8; rect.area()];
+    for t in &tiles {
+        assert!(t.x == rect.x0 || t.x % TILE == 0, "x {}", t.x);
+        assert!(t.y == rect.y0 || t.y % TILE == 0, "y {}", t.y);
+        let (x1, y1) = (t.x + t.width, t.y + t.height);
+        assert!(x1 == rect.x1 || x1 % TILE == 0);
+        assert!(y1 == rect.y1 || y1 % TILE == 0);
+        for y in t.y..y1 {
+            for x in t.x..x1 {
+                covered[rect.index(x, y)] += 1;
+            }
+        }
+    }
+    assert!(covered.iter().all(|&n| n == 1));
+    assert_eq!(tiles[0].x, 37);
+    assert_eq!((tiles[0].y, tiles[0].height), (21, 11));
+    assert!(tiles.windows(2).all(|p| p[0].y <= p[1].y));
+    let rows = generate_rows(rect);
+    assert_eq!(rows.len(), 56);
+    assert!(
+        rows.iter()
+            .all(|r| r.x == 37 && r.width == 64 && r.height == 1)
+    );
 }
 
 /// The round schedule (design D8): deterministic, every batch at least 4,
@@ -490,4 +631,31 @@ fn stratified_picks_sample_each_light_count_times_its_probability() {
         }
         assert_eq!(counts, [2, 1, 1]);
     }
+}
+
+/// The region defaults to the frame, is clipped to it, refuses what
+/// clipping empties (keeping nothing of it), and is reset by a new
+/// resolution.
+#[test]
+fn the_region_is_clipped_to_the_frame_and_reset_by_the_resolution() {
+    use super::{PixelRect, RenderSettings};
+    let s = RenderSettings::default().with_resolution(640, 360);
+    assert_eq!(s.region(), PixelRect::full(640, 360));
+    assert!(s.is_full_frame());
+    let r = s
+        .with_region(PixelRect::new(600, 300, 700, 400))
+        .expect("overlaps the frame");
+    assert_eq!(r.region(), PixelRect::new(600, 300, 640, 360));
+    assert!(!r.is_full_frame());
+    // Raster rows count from the bottom.
+    assert_eq!(r.raster_region(), PixelRect::new(600, 0, 640, 60));
+    let err = s
+        .with_region(PixelRect::new(700, 0, 800, 100))
+        .expect_err("outside the frame");
+    assert!(err.to_string().contains("640x360"), "{err}");
+    assert_eq!(
+        r.with_resolution(64, 32).region(),
+        PixelRect::full(64, 32),
+        "a new resolution resets the region"
+    );
 }

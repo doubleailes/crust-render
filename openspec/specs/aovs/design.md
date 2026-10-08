@@ -845,10 +845,12 @@ sample.
 
 ## Follow-ups
 
-- Camera and settings conformance: `dataWindowNDC`, `pixelAspectRatio`,
+- Camera and settings conformance: `pixelAspectRatio`,
   `aspectRatioConformPolicy`, `disableDepthOfField`, `includedPurposes`,
   `materialBindingPurposes`. (`disableMotionBlur` / `instantaneousShutter`
-  are done: "Motion vector AOV" below.)
+  are done: "Motion vector AOV" below. `dataWindowNDC` is done by
+  `add-render-region`: every product of a cropped render is written with the
+  frame as display window and the region as data window; overscan is not.)
 - One render per (camera, resolution) group.
 - `deepRaster` products. Crust's FIS film would need per-sample depth lists.
 - Volume alpha and `C<V.>` volume AOVs with a `ZBack`.

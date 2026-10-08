@@ -43,6 +43,15 @@ pub enum Error {
     /// does not load, lacks a space crust needs, or another config is
     /// already in use. Carries the reason.
     InvalidOcioConfig(String),
+    /// A render region
+    /// ([`RenderSettings::with_region`](crate::RenderSettings::with_region))
+    /// that holds no pixel of the frame once clipped to it. Refused rather
+    /// than rendered as an empty image.
+    EmptyRegion {
+        region: crate::PixelRect,
+        width: usize,
+        height: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -67,6 +76,14 @@ impl fmt::Display for Error {
                 )
             }
             Error::InvalidWorkingSpace(why) | Error::InvalidOcioConfig(why) => write!(f, "{why}"),
+            Error::EmptyRegion {
+                region,
+                width,
+                height,
+            } => write!(
+                f,
+                "region {region} holds no pixel of the {width}x{height} frame"
+            ),
             Error::CameraNotFound { path, available } => {
                 write!(f, "no UsdGeomCamera at {path} on this stage")?;
                 if available.is_empty() {

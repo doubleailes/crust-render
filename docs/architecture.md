@@ -93,11 +93,15 @@ Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
 routine; a render mode is scheduling only, and tiles vs scanlines are
 bit-identical by construction. The adaptive (final) pass runs in rounds (batches
 that grow 25% a round, `max(4, taken / 4)`, capped at the budget) over a
-full-frame convergence-index buffer, so a pixel stops only
+region-sized convergence-index buffer, so a pixel stops only
 when its cross neighbours are not much less converged than it is
 (`crust:adaptiveNeighbourTolerance`, default 1, negative to compare nothing);
 a pixel that has seen no light never stops early, and the minimum is floored
 at `⌈√spp⌉` — see `openspec/specs/rendering/design.md` § Adaptive sampling.
+A render region (`RenderSettings::region`, from `dataWindowNDC` or `--region`)
+is scheduling too: the tiles are the frame's grid clipped to it, every per-pixel
+plane is region-sized and indexed by `PixelRect::index`, and the camera and
+sampling keys stay the full frame's (§ Render regions there).
 
 ## Seams
 
@@ -180,7 +184,8 @@ other. The pairs:
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
   `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔
-  preloaded `u8` textures; tiles ↔ scanlines. Each is pinned by a test that
+  preloaded `u8` textures; tiles ↔ scanlines; a region's pixels ↔ the same
+  pixels of the full frame (with no neighbour hold). Each is pinned by a test that
   compares bits, not tolerances.
 - **Derived, not stored.** A hit's tangent (`tangent_of`) and a subdivided
   mesh's Ptex sub-face corners (`SubFace::corners`) are computed from the

@@ -51,6 +51,7 @@ The flags of `crust render`:
 |------|-------|---------|-----------|
 | [`-i`, `--input`](#input) | path | procedural scene | — |
 | [`-o`, `--output`](#output) | path | `output.exr` | first `productName` |
+| [`--region`](#region) | `X0,Y0,X1,Y1` | scene / full frame | `dataWindowNDC` |
 | [`-s`, `--samples`](#samples) | integer | scene / 128 | `crust:samplesPerPixel` |
 | [`-f`, `--frame`](#frame) | number | default values | `crust:frame` (seed) |
 | [`--camera`](#camera) | prim path | `RenderSettings.camera` | `rel camera` |
@@ -112,6 +113,45 @@ crust render -i shot.usda -o renders/shot.0001.exr
 crust render -i samples/aovs.usda
 # writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr
 ```
+
+### region
+
+`--region <X0,Y0,X1,Y1>`
+
+Render only a rectangle of the frame. The four numbers are pixels, counted from the
+image's **top-left** corner as an image viewer shows them; `X1` and `Y1` are excluded,
+so `--region 100,50,164,114` is a 64×64 crop starting at pixel `(100, 50)`.
+
+Each pixel of the crop is the pixel the full render would have produced: the camera,
+the resolution and every per-pixel sample stay those of the full frame, and only the
+pixels outside the rectangle are skipped. The images record where the crop belongs:
+
+- the **EXR** keeps the full resolution as its *display window* and has the region as
+  its *data window*, so Nuke and other compositors place it correctly in the frame.
+  [Render products](@/docs/usd/aovs.md) follow the same rule;
+- the **PNG** holds only the region, at the region's size.
+
+`--region` overrides the stage's
+[`dataWindowNDC`](@/docs/usd/render-settings.md#datawindowndc). The rectangle is
+clipped to the resolution. It is a usage error, raised before the scene is read, unless
+it is four non-negative integers with `X1 > X0` and `Y1 > Y0`. A rectangle that falls
+entirely outside the image stops the render with an error naming the resolution, and
+nothing is written.
+
+```bash
+crust render -i shot.usda --region 100,50,164,114 -s 16 -o crop.exr
+```
+
+The crop is bit-identical to the same pixels of a full render with the same settings,
+whenever a pixel's sample count does not depend on its neighbours: a fixed count (as at
+`-s 16`, below the default adaptive minimum of 32), or adaptive sampling with
+[`crust:adaptiveNeighbourTolerance`](@/docs/usd/render-settings.md#crust-adaptiveneighbourtolerance)
+negative. Otherwise a pixel on the region's border may stop a little earlier than it
+would in the full frame, since its neighbour outside the region is never sampled.
+[Path guiding](@/docs/usd/render-settings.md#path-guiding) learns from the region's
+paths only, so a guided crop differs from the same pixels of a guided full render.
+
+[`--stats`](#stats) reports the region and the share of the frame it covers.
 
 ## Sampling and time
 
@@ -573,4 +613,7 @@ crust render -i interior.usda --light-selection learned
 
 # textured asset: build the .tx files once, stream them afterwards
 crust render -i asset.usda --auto-tx --stats
+
+# re-render one object of a frame, placed in the frame for compositing
+crust render -i shot.usdc -f 1048 --region 812,240,1100,520 -o fix.1048.exr
 ```

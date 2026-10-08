@@ -13,14 +13,30 @@
 //! come through here at all — it keeps `write_rgb_file`, byte for byte.
 
 use crust_core::{AovFilm, AovProduct, AovVar, Buffer, ChannelKind, Precision};
-use exr::meta::attribute::AttributeValue;
+use exr::meta::attribute::{AttributeValue, IntegerBounds};
 use exr::prelude::{
     AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, Image, Layer,
-    LayerAttributes, LineOrder, Text, WritableImage, f16,
+    LayerAttributes, LineOrder, Text, Vec2, WritableImage, f16,
 };
 use std::io;
 use std::path::Path;
 use tracing::warn;
+
+/// Where a render's pixels sit in its frame, as an EXR says it: the data
+/// window's origin (the layer position) and the display window. The data
+/// window is the render's region, in image space (top-left origin, rows
+/// down, as EXR counts them); the display window is the whole frame. A
+/// full-frame render gets the `(0, 0)` position and the `0..w × 0..h`
+/// display window the `exr` crate writes by default, so its file does not
+/// change by a byte.
+pub fn exr_windows(beauty: &Buffer) -> (Vec2<i32>, IntegerBounds) {
+    let (frame_w, frame_h) = beauty.frame_size();
+    let region = beauty.region();
+    (
+        Vec2(region.x0 as i32, region.y0 as i32),
+        IntegerBounds::new((0, 0), (frame_w, frame_h)),
+    )
+}
 
 /// The Color Interop ID for a working space without one in the config.
 /// The file still says what it can: its chromaticities, when known.
@@ -132,6 +148,7 @@ pub fn write_product(
     let interop = crust_core::color::interop_id(color.working);
     let interop = interop.as_deref().unwrap_or(UNKNOWN_INTEROP_ID);
     let (width, height) = film.dimensions();
+    let (position, display_window) = exr_windows(beauty);
     let mut channels = Vec::new();
     for (var, names) in product_channels(product) {
         for (name, plane) in names.iter().zip(film.var_channels(beauty, var)) {
@@ -160,6 +177,7 @@ pub fn write_product(
 
     let mut attributes = LayerAttributes {
         software_name: Text::new_or_none(concat!("crust-render ", env!("CARGO_PKG_VERSION"))),
+        layer_position: position,
         ..LayerAttributes::default()
     };
     let mut text = vec![("colorInteropID", interop)];
@@ -201,6 +219,7 @@ pub fn write_product(
         channels,
     );
     let mut image = Image::from_layer(layer);
+    image.attributes.display_window = display_window;
     image.attributes.chromaticities = color.exr_chromaticities();
     image
         .write()
@@ -359,6 +378,62 @@ mod tests {
         // Top-down rows: the buffer's top row (y = h - 1) is the file's first.
         let r = &layer.channel_data.list[2];
         assert_eq!(r.name, Text::from("R"));
+        assert_eq!(r.sample_data.value_by_flat_index(0).to_f32(), 1.0);
+    }
+
+    /// The `exr` crate's API for a crop (task 4.1 of `add-render-region`):
+    /// the layer position is the data window's origin, the image's display
+    /// window is the frame, and both read back as written.
+    #[test]
+    fn exr_writes_a_data_window_inside_the_display_window() {
+        use exr::prelude::*;
+        let path = std::env::temp_dir().join("crust_render_exr_windows.exr");
+        let channels = SpecificChannels::rgb(|Vec2(x, _y)| (x as f32, 0.0f32, 0.0f32));
+        let mut image = Image::from_channels((64, 32), channels);
+        image.layer_data.attributes.layer_position = Vec2(100, 50);
+        image.attributes.display_window = IntegerBounds::new((0, 0), (640, 360));
+        image.write().to_file(&path).expect("written");
+        let back = read_all_data_from_file(&path).expect("reads back");
+        assert_eq!(
+            back.attributes.display_window,
+            IntegerBounds::new((0, 0), (640, 360))
+        );
+        let layer = &back.layer_data[0];
+        assert_eq!(layer.attributes.layer_position, Vec2(100, 50));
+        assert_eq!(layer.size, Vec2(64, 32));
+    }
+
+    /// A product of a cropped render: the display window is the frame, the
+    /// data window the region (`(100, 50)–(163, 113)` inclusive, as EXR
+    /// states it), and the pixels the region's, top-down.
+    #[test]
+    fn a_cropped_product_records_both_windows() {
+        let region = crust_core::PixelRect::new(100, 50, 164, 114);
+        let (fw, fh) = (640, 360);
+        let mut beauty = Buffer::with_region(fw, fh, region);
+        // The region's top-left pixel: image row 50 is raster row fh - 1 - 50.
+        beauty.set_pixel(100, fh - 1 - 50, crust_core::Vec3A::new(1.0, 2.0, 3.0));
+        let film = crust_core::AovFilm::empty(region.width(), region.height());
+        let path = std::env::temp_dir().join("crust_render_cropped_product.exr");
+        let p = product(vec![var("beauty", AovSource::Color)]);
+        write_product(&path, &p, &beauty, &film, &crate::tests::rec709()).expect("written");
+        let image = read()
+            .no_deep_data()
+            .largest_resolution_level()
+            .all_channels()
+            .first_valid_layer()
+            .all_attributes()
+            .from_file(&path)
+            .expect("reads back");
+        assert_eq!(
+            image.attributes.display_window,
+            IntegerBounds::new((0, 0), (fw, fh))
+        );
+        let layer = &image.layer_data;
+        let data_window = layer.absolute_bounds();
+        assert_eq!(data_window.position, Vec2(100, 50));
+        assert_eq!(data_window.max(), Vec2(163, 113));
+        let r = &layer.channel_data.list[2];
         assert_eq!(r.sample_data.value_by_flat_index(0).to_f32(), 1.0);
     }
 

@@ -35,6 +35,10 @@ cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; pl
 # --log-file [DIR] (tee the log to crust-<UTC stamp>.log), --scanline
 #   (row order instead of the default 16x16 tiles; -b/--bucket is accepted and ignored),
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
+# --region X0,Y0,X1,Y1 (render a crop: pixels, top-left origin, X1/Y1 excluded;
+#   overrides dataWindowNDC; clap refuses a malformed one before the stage is read,
+#   one outside the frame errors after import naming the resolution; the EXR keeps
+#   the frame as display window with the crop as data window, the PNG is the crop),
 # --strategy (power|balance|light|bsdf), --light-selection (uniform|power|learned),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
 # --indirect-clamp VALUE (firefly clamp on each sample's indirect light; default 10, 0 = off),
@@ -61,6 +65,11 @@ cargo run --release -- render -i samples/cornellbox.usda -l debug --log-file ren
 # interpolated; unanimated attributes read their default). Without -f every
 # attribute reads its *default* value -- not frame 0.
 cargo run --release -- render -i samples/animation.usda -f 5 -o frame.0005.exr
+
+# Crop a frame: only the pixels of the rectangle are traced, each bit-identical to
+# the full render's at -s 16 (the rendering design record's "Render regions" says
+# when it is not). Check placement with exr_diff against a full render, or in Nuke.
+cargo run --release -- render -i samples/cornellbox.usda -s 16 --region 100,50,164,114 -o crop.exr
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
 cargo run --release -- render -i samples/curves.usda --stats

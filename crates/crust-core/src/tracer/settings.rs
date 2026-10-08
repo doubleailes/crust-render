@@ -1,6 +1,7 @@
 //! What a render is asked to do: [`RenderSettings`] and the MIS
 //! [`SamplingStrategy`].
 
+use super::PixelRect;
 use crate::LightSelection;
 use crate::filter::PixelFilter;
 use crate::pdf::PdfSolidAngle;
@@ -143,6 +144,10 @@ pub struct RenderSettings {
     pub(super) max_depth: u32,
     pub(super) width: usize,
     pub(super) height: usize,
+    // The pixels the render traces, in image space (top-left origin); the
+    // whole frame unless `with_region` says otherwise. Always non-empty and
+    // inside `width` × `height`.
+    pub(super) region: PixelRect,
     // Adaptive sampling: a pixel may stop early once it has taken at least
     // `min_samples_per_pixel` samples and the relative standard error of its
     // mean drops below `variance_threshold` (0 disables early stopping).
@@ -195,6 +200,7 @@ impl Default for RenderSettings {
             max_depth: 32,
             width: 640,
             height: 360,
+            region: PixelRect::full(640, 360),
             min_samples_per_pixel: 32,
             variance_threshold: 0.05,
             adaptive_neighbour_tolerance: DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
@@ -214,11 +220,55 @@ impl Default for RenderSettings {
 }
 
 impl RenderSettings {
-    /// Set the image resolution, in pixels.
+    /// Set the image resolution, in pixels. The region becomes the whole
+    /// new frame: a region is in the frame's pixels, so one chosen for
+    /// another resolution means nothing here.
     pub fn with_resolution(mut self, width: usize, height: usize) -> Self {
         self.width = width;
         self.height = height;
+        self.region = PixelRect::full(width, height);
         self
+    }
+
+    /// Trace only the pixels of `region` — image space, top-left origin,
+    /// half-open — clipped to the frame. Everything the resolution drives
+    /// (the camera, ray-cone footprints, the per-pixel sample keys) still
+    /// sees the full frame, so a pixel of a region renders as it does in
+    /// the full frame. A region that is empty once clipped is refused
+    /// ([`Error::EmptyRegion`](crate::Error::EmptyRegion)), and the
+    /// settings keep their own region.
+    ///
+    /// Set it after [`with_resolution`](Self::with_resolution), which
+    /// resets it.
+    pub fn with_region(mut self, region: PixelRect) -> Result<Self, crate::Error> {
+        match region.clip_to(self.width, self.height) {
+            Some(clipped) => {
+                self.region = clipped;
+                Ok(self)
+            }
+            None => Err(crate::Error::EmptyRegion {
+                region,
+                width: self.width,
+                height: self.height,
+            }),
+        }
+    }
+
+    /// The pixels the render traces, in image space (top-left origin): the
+    /// whole frame unless [`with_region`](Self::with_region) narrowed it.
+    pub fn region(&self) -> PixelRect {
+        self.region
+    }
+
+    /// Whether the region is the whole frame.
+    pub fn is_full_frame(&self) -> bool {
+        self.region == PixelRect::full(self.width, self.height)
+    }
+
+    /// The region in the tracer's raster space, whose rows grow upwards
+    /// from the bottom of the frame (see [`PixelRect`]).
+    pub(crate) fn raster_region(&self) -> PixelRect {
+        self.region.flip_y(self.height)
     }
 
     /// Set the longest path, in vertices.

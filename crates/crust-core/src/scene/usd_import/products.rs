@@ -27,6 +27,7 @@ use openusd_schemas::render::{
 use tracing::{debug, warn};
 
 use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
+use crate::tracer::PixelRect;
 
 use super::attrs::{custom_bool, custom_token, decode_bool, decode_number, prim_value, value_at};
 use super::prim_at;
@@ -34,8 +35,8 @@ use super::settings::render_settings_path;
 
 const DRIVER_PARAMETERS: &str = "driver:parameters:";
 
-/// The stage's products, and the camera, resolution and motion-blur switch
-/// the render takes from the first of them.
+/// The stage's products, and the camera, resolution, data window and
+/// motion-blur switch the render takes from the first of them.
 #[derive(Debug)]
 pub(super) struct RenderProducts {
     pub(super) request: AovRequest,
@@ -45,6 +46,10 @@ pub(super) struct RenderProducts {
     /// The first product's resolved resolution, when the settings or the
     /// product author one.
     pub(super) resolution: Option<(usize, usize)>,
+    /// The first product's resolved `dataWindowNDC` (`xmin, ymin, xmax,
+    /// ymax`, bottom-left origin), when the settings or the product author
+    /// one; [`region_from_ndc`] turns it into the render's region.
+    pub(super) data_window: Option<[f32; 4]>,
     /// Whether moving geometry is motion blurred: `false` when the first
     /// product (else the settings prim) authors `disableMotionBlur = true`
     /// or its deprecated synonym `instantaneousShutter = true`. The stage's
@@ -59,6 +64,7 @@ impl Default for RenderProducts {
             request: AovRequest::default(),
             camera: None,
             resolution: None,
+            data_window: None,
             motion_blur: true,
         }
     }
@@ -71,6 +77,7 @@ impl Default for RenderProducts {
 struct Base {
     camera: Option<sdf::Path>,
     resolution: Option<(usize, usize)>,
+    data_window: Option<[f32; 4]>,
     /// `disableMotionBlur` and `instantaneousShutter`, each resolved on its
     /// own: a product that authors one of them inherits the other.
     disable_motion_blur: bool,
@@ -80,6 +87,11 @@ struct Base {
 fn read_resolution(view: &impl RenderSettingsBase) -> Option<(usize, usize)> {
     let v = value_at(&view.resolution_attr())?.try_as_vec_2i()?;
     (v.x > 0 && v.y > 0).then_some((v.x as usize, v.y as usize))
+}
+
+fn read_data_window(view: &impl RenderSettingsBase) -> Option<[f32; 4]> {
+    let v = value_at(&view.data_window_ndc_attr())?.try_as_vec_4f()?;
+    Some([v.x, v.y, v.z, v.w])
 }
 
 fn read_camera(view: &impl RenderSettingsBase) -> Option<sdf::Path> {
@@ -93,6 +105,7 @@ impl Base {
         Base {
             camera: None,
             resolution: None,
+            data_window: None,
             disable_motion_blur: false,
             instantaneous_shutter: false,
         }
@@ -103,6 +116,7 @@ impl Base {
         Base {
             camera: read_camera(view).or_else(|| fallback.camera.clone()),
             resolution: read_resolution(view).or(fallback.resolution),
+            data_window: read_data_window(view).or(fallback.data_window),
             disable_motion_blur: value_at(&view.disable_motion_blur_attr())
                 .and_then(decode_bool)
                 .unwrap_or(fallback.disable_motion_blur),
@@ -118,9 +132,9 @@ impl Base {
     }
 
     /// Whether two products can be rendered by one render: the same camera
-    /// and resolution. The shutter flags are not part of it — the render
-    /// follows the first product's, and a later one that differs is warned
-    /// about, not refused.
+    /// and resolution. The shutter flags and the data window are not part
+    /// of it — the render follows the first product's, and a later one that
+    /// differs is warned about, not refused.
     fn same_render(&self, other: &Base) -> bool {
         self.camera == other.camera && self.resolution == other.resolution
     }
@@ -147,6 +161,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             motion_blur: base.motion_blur(),
             camera: base.camera,
             resolution: base.resolution,
+            data_window: base.data_window,
         };
     }
     warn_unhonoured(&prim_at(stage, path.clone()));
@@ -155,6 +170,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         request: AovRequest::default(),
         camera: base.camera.clone(),
         resolution: base.resolution,
+        data_window: base.data_window,
         motion_blur: base.motion_blur(),
     };
     // The render's own base: the first accepted product's.
@@ -215,6 +231,18 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 );
             }
             Some(_) => {}
+        }
+        if let Some(first) = &render_base
+            && first.data_window != resolved.data_window
+        {
+            // One region per render, like one shutter: the file is still
+            // written, over the first product's region.
+            warn!(
+                "{product_path}: asks for dataWindowNDC {}, but the render's is {} (the first \
+                 product's); its file is written with that",
+                describe_window(resolved.data_window),
+                describe_window(first.data_window),
+            );
         }
         warn_unhonoured(&prim);
 
@@ -279,8 +307,60 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         out.motion_blur = first.motion_blur();
         out.camera = first.camera;
         out.resolution = first.resolution;
+        out.data_window = first.data_window;
     }
     out
+}
+
+fn describe_window(window: Option<[f32; 4]>) -> String {
+    let [x0, y0, x1, y1] = window.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    format!("({x0}, {y0}, {x1}, {y1})")
+}
+
+/// The render region a `dataWindowNDC` selects on a `width` × `height`
+/// frame: the pixels whose centres lie inside the window, `xmin ≤ (x + ½)/W
+/// < xmax` and `ymin ≤ 1 − (y + ½)/H < ymax` — NDC's `y` grows upwards from
+/// the bottom-left, the region's downwards from the top-left. `None` is the
+/// full frame.
+///
+/// A window reaching outside [0, 1] (overscan) is clipped to the frame, with
+/// one warning; one that selects no pixel, or is not finite, is refused with
+/// one warning and the full frame renders.
+pub(super) fn region_from_ndc(window: [f32; 4], width: usize, height: usize) -> Option<PixelRect> {
+    let text = describe_window(Some(window));
+    if window == [0.0, 0.0, 1.0, 1.0] {
+        return None;
+    }
+    if !window.iter().all(|c| c.is_finite()) {
+        warn!("dataWindowNDC = {text} is not finite; rendering the full frame");
+        return None;
+    }
+    if window.iter().any(|c| !(0.0..=1.0).contains(c)) {
+        warn!(
+            "dataWindowNDC = {text} reaches outside the frame; overscan is not supported, \
+             so it is clipped to it"
+        );
+    }
+    let [xmin, ymin, xmax, ymax] = window.map(f64::from);
+    let (w, h) = (width as f64, height as f64);
+    // The first pixel whose centre is at or past `c` (for the `≤` bounds),
+    // and the first whose centre is past `c` (for the strict ones), each
+    // clamped to the frame.
+    let at_or_past = |c: f64, n: f64| (c * n - 0.5).ceil().clamp(0.0, n) as usize;
+    let past = |c: f64, n: f64| ((c * n - 0.5).floor() + 1.0).clamp(0.0, n) as usize;
+    let region = PixelRect::new(
+        at_or_past(xmin, w),
+        past(1.0 - ymax, h),
+        at_or_past(xmax, w),
+        past(1.0 - ymin, h),
+    );
+    if region.is_empty() {
+        warn!(
+            "dataWindowNDC = {text} selects no pixel of the {width}x{height} frame; rendering the full frame"
+        );
+        return None;
+    }
+    Some(region)
 }
 
 fn describe_camera(camera: &Option<sdf::Path>) -> String {
@@ -299,8 +379,8 @@ fn describe_resolution(resolution: Option<(usize, usize)>) -> String {
 /// `RenderSettingsBase` attributes crust does not honour, warned about only
 /// when authored with a value that would change the image — Houdini authors
 /// every one of them at its fallback, and those need no word.
-/// `disableMotionBlur` and `instantaneousShutter` are honoured ([`Base`]),
-/// so they are not here.
+/// `disableMotionBlur`, `instantaneousShutter` and `dataWindowNDC` are
+/// honoured ([`Base`]), so they are not here.
 fn warn_unhonoured(prim: &Prim) {
     let mut ignored = Vec::new();
     let value = |name: &str| prim_value(prim, name);
@@ -308,15 +388,6 @@ fn warn_unhonoured(prim: &Prim) {
         && a != 1.0
     {
         ignored.push(format!("pixelAspectRatio = {a}"));
-    }
-    if let Some(v) = value("dataWindowNDC")
-        && let Some(w) = v.try_as_vec_4f()
-        && [w.x, w.y, w.z, w.w] != [0.0, 0.0, 1.0, 1.0]
-    {
-        ignored.push(format!(
-            "dataWindowNDC = ({}, {}, {}, {})",
-            w.x, w.y, w.z, w.w
-        ));
     }
     if custom_bool(prim, "disableDepthOfField") == Some(true) {
         ignored.push("disableDepthOfField = true".to_owned());

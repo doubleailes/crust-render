@@ -19,6 +19,7 @@
 use glam::Vec3A;
 
 use crate::buffer::Buffer;
+use crate::tracer::PixelRect;
 
 /// What a RenderVar computes: one row of the canonical table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -840,12 +841,14 @@ struct FilmSlot {
     planes: SlotPlanes,
 }
 
-/// The AOVs of a render: full-frame planes beside the beauty [`Buffer`], in
-/// the same pixel order (row `y` is the buffer's row `y`, bottom-up).
+/// The AOVs of a render: planes beside the beauty [`Buffer`], covering the
+/// same pixels — the render's region — in the same order (row `y` is the
+/// buffer's row `y`, bottom-up).
 #[derive(Debug, Clone)]
 pub struct AovFilm {
-    width: usize,
-    height: usize,
+    /// The pixels the planes hold, in raster space (rows bottom-up); every
+    /// plane is indexed through it ([`PixelRect::index`]).
+    rect: PixelRect,
     slots: Vec<FilmSlot>,
     /// Samples per pixel, when a var asks for it.
     sample_count: Option<Vec<f32>>,
@@ -857,11 +860,11 @@ pub struct AovFilm {
 }
 
 impl AovFilm {
-    pub(crate) fn new(layout: &AovLayout, width: usize, height: usize) -> Self {
-        let pixels = width * height;
+    /// A film over `rect`, a rectangle of the frame in raster space.
+    pub(crate) fn new(layout: &AovLayout, rect: PixelRect) -> Self {
+        let pixels = rect.area();
         AovFilm {
-            width,
-            height,
+            rect,
             slots: layout
                 .slots
                 .iter()
@@ -876,11 +879,14 @@ impl AovFilm {
         }
     }
 
+    /// The size of the planes: the render region's, which is the frame's
+    /// unless the render was given a region.
     pub fn dimensions(&self) -> (usize, usize) {
-        (self.width, self.height)
+        (self.rect.width(), self.rect.height())
     }
 
-    /// Copies a unit's pixel `p` into frame pixel `(x, y)`, resolving the
+    /// Copies a unit's pixel `p` into frame pixel `(x, y)` (raster space,
+    /// inside the film's region), resolving the
     /// filtered sums with the beauty's own estimator: `Σ wᵢ·vᵢ / Σ wᵢ`, or
     /// the plain mean where the weights cancel to nothing (see
     /// `PixelState::estimate`). A [`SlotKey::hits_only`] slot divides by
@@ -897,7 +903,7 @@ impl AovFilm {
         taken: u32,
         variance: f64,
     ) {
-        let q = y * self.width + x;
+        let q = self.rect.index(x, y);
         for (slot, src) in self.slots.iter_mut().zip(&unit.planes) {
             let comps = slot.key.source.components();
             let dst = &mut slot.planes;
@@ -957,8 +963,7 @@ impl AovFilm {
     pub(crate) fn blend(films: Vec<AovFilm>, weights: &[f64], total: f64) -> AovFilm {
         let first = films.first().expect("at least one pass");
         let mut out = AovFilm {
-            width: first.width,
-            height: first.height,
+            rect: first.rect,
             slots: first.slots.clone(),
             sample_count: first.sample_count.as_ref().map(|n| vec![0.0; n.len()]),
             variance: first.variance.as_ref().map(|v| vec![0.0; v.len()]),
@@ -975,7 +980,7 @@ impl AovFilm {
             .iter()
             .map(|s| {
                 if s.key.hits_only() {
-                    vec![0.0; out.width * out.height]
+                    vec![0.0; out.rect.area()]
                 } else {
                     Vec::new()
                 }
@@ -1014,7 +1019,7 @@ impl AovFilm {
                     }
                     Accumulation::Closest => {
                         let comps = dst.key.source.components();
-                        for q in 0..out.width * out.height {
+                        for q in 0..out.rect.area() {
                             if dst
                                 .planes
                                 .closer(q, src.planes.in_box[q], src.planes.key[q])
@@ -1071,14 +1076,22 @@ impl AovFilm {
     /// the source's components. `beauty` is the buffer rendered with this
     /// film.
     pub fn var_channels(&self, beauty: &Buffer, var: &AovVar) -> Vec<Vec<f32>> {
-        let (w, h) = (self.width, self.height);
+        let (w, h) = self.dimensions();
         let top_down = |f: &dyn Fn(usize) -> f32| -> Vec<f32> {
             (0..w * h).map(|i| f((h - 1 - i / w) * w + i % w)).collect()
         };
         match var.source {
             AovSource::Color => {
+                // `get_rgb` is already top-down over the same region.
                 let mut out: Vec<Vec<f32>> = (0..3)
-                    .map(|c| top_down(&|q| beauty.get_pixel(q % w, q / w)[c]))
+                    .map(|c| {
+                        (0..w * h)
+                            .map(|i| {
+                                let (r, g, b) = beauty.get_rgb(i % w, i / w);
+                                [r, g, b][c]
+                            })
+                            .collect()
+                    })
                     .collect();
                 if var.with_alpha() {
                     let alpha = self.slot(&ALPHA_OF_BEAUTY);
@@ -1108,7 +1121,7 @@ impl AovFilm {
 impl AovFilm {
     /// The film of a render that asks for no AOV: no planes at all.
     pub fn empty(width: usize, height: usize) -> Self {
-        AovFilm::new(&AovLayout::default(), width, height)
+        AovFilm::new(&AovLayout::default(), PixelRect::full(width, height))
     }
 }
 
@@ -1187,7 +1200,7 @@ mod tests {
         unit.add(&at(10.0), &NONE, 0.5, 0.5, 1.0);
         unit.add(&at(2.0), &NONE, 0.25, 0.75, 1.0);
         unit.add(&at(5.0), &NONE, 0.75, 0.25, 1.0);
-        let mut film = AovFilm::new(&layout, 1, 1);
+        let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 4.0, 4, 0.0);
         let depth = film.var_channels(&Buffer::new(1, 1), &request.products[0].vars[0]);
         // Never a blend of 2, 5 and 10.
@@ -1216,7 +1229,7 @@ mod tests {
         };
         unit.add(&near, &NONE, 1.6, 0.5, 1.0);
         unit.add(&far, &NONE, 1.2, 0.5, 1.0);
-        let mut film = AovFilm::new(&layout, 1, 1);
+        let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 2.0, 2, 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![7.0]]);
     }
@@ -1243,7 +1256,7 @@ mod tests {
         let mut unit = UnitAov::new(&layout, cam, 1);
         unit.add(&surface, &NONE, 0.5, 0.5, 3.0);
         unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.0);
-        let mut film = AovFilm::new(&layout, 1, 1);
+        let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 4.0, 2, 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![0.75]]);
     }
@@ -1275,7 +1288,7 @@ mod tests {
         unit.pixel = 1;
         unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.2);
         unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, -0.2);
-        let mut film = AovFilm::new(&layout, 2, 1);
+        let mut film = AovFilm::new(&layout, PixelRect::full(2, 1));
         film.store(&unit, 0, 0, 0, 1.75, 3, 0.0);
         film.store(&unit, 1, 1, 0, 1.0, 2, 0.0);
         let depth = &film.var_channels(&Buffer::new(2, 1), &v)[0];
@@ -1306,9 +1319,9 @@ mod tests {
         let layout = AovLayout::new(&request);
         let cam = frame();
         let unit = UnitAov::new(&layout, cam, 1);
-        let mut one_spp = AovFilm::new(&layout, 1, 1);
+        let mut one_spp = AovFilm::new(&layout, PixelRect::full(1, 1));
         one_spp.store(&unit, 0, 0, 0, 1.0, 1, f64::INFINITY);
-        let mut trained = AovFilm::new(&layout, 1, 1);
+        let mut trained = AovFilm::new(&layout, PixelRect::full(1, 1));
         trained.store(&unit, 0, 0, 0, 4.0, 4, 0.5);
         let blended = AovFilm::blend(vec![one_spp, trained], &[0.0, 2.0], 2.0);
         assert_eq!(

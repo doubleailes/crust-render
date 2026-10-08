@@ -15,12 +15,14 @@ use crate::{LightList, LightSelection, PathSampler};
 
 mod path;
 pub(crate) use path::{past_medium_boundaries, surface_visibility};
+mod region;
 mod route;
 mod settings;
 
 use path::{K_CAMERA, K_TIME, PathContext, ray_cones_enabled, trace_path};
 
 pub use path::{ray_color, ray_color_with_light_samples};
+pub use region::PixelRect;
 pub use settings::{
     DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, DEFAULT_LIGHT_SAMPLES,
     MAX_LIGHT_SAMPLES, RenderSettings, SamplingStrategy,
@@ -221,10 +223,10 @@ impl Renderer {
         progress: ProgressCallback,
         request: &AovRequest,
     ) -> (Buffer, AovFilm, RayStats) {
-        let (w, h) = (self.settings.width, self.settings.height);
         if !request.needs_film() {
             let (buffer, _, rays) = self.render_impl(tiled, Some(progress), None);
-            return (buffer, AovFilm::empty(w, h), rays);
+            let rect = self.settings.raster_region();
+            return (buffer, AovFilm::new(&AovLayout::default(), rect), rays);
         }
         let mut layout = AovLayout::new(request);
         if !layout.lpes.is_empty() || layout.albedo || layout.diffuse_filter {
@@ -395,12 +397,8 @@ impl Renderer {
                 // training passes — our stand-in for the paper's denoised
                 // accumulated image, and crucially the *same* image for both
                 // sides of the ratio.
-                let ref_lum = blend_luminance(
-                    &passes,
-                    self.settings.width,
-                    self.settings.height,
-                    self.lights.luma(),
-                );
+                let ref_lum =
+                    blend_luminance(&passes, self.settings.raster_region(), self.lights.luma());
                 let mrse_pt = mean_relative_error(var_pt, &ref_lum);
                 let mrse_pg = mean_relative_error(var_pg, &ref_lum);
                 if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0 {
@@ -468,10 +466,10 @@ impl Renderer {
                 .map(|w| (w / total * 100.0).round() as i32)
                 .collect::<Vec<_>>()
         );
-        let (width, height) = (self.settings.width, self.settings.height);
-        let mut out = Buffer::new(width, height);
-        for y in 0..height {
-            for x in 0..width {
+        let rect = self.settings.raster_region();
+        let mut out = Buffer::for_raster_rect(self.settings.width, self.settings.height, rect);
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
                 let mut c = Vec3A::ZERO;
                 for (pass, w) in passes.iter().zip(&weights) {
                     c += pass.0.get_pixel(x, y) * (*w / total) as f32;
@@ -482,16 +480,18 @@ impl Renderer {
         out
     }
 
-    /// One full-frame pass at `spp` samples per pixel. Returns the image,
-    /// its AOVs (when `layout` asks for any), whatever training samples the
-    /// pass recorded (empty unless a training `GuidingContext` is supplied),
-    /// and the pass's [`PassStats`].
+    /// One pass over the render's region at `spp` samples per pixel. Returns
+    /// the image, its AOVs (when `layout` asks for any), whatever training
+    /// samples the pass recorded (empty unless a training `GuidingContext`
+    /// is supplied), and the pass's [`PassStats`] — every one of them sized
+    /// to the region. Rays, cones and sampling keys stay those of the full
+    /// frame: a region decides only which pixels are traced.
     ///
-    /// The work unit is a 16×16 tile or a `width`×1 row; the two differ in
+    /// The work unit is a 16×16 tile or a region-wide row; the two differ in
     /// nothing but the tile list, and a render mode is scheduling only. A
     /// non-adaptive (training) pass is one sweep of every unit to `spp`. An
     /// adaptive pass first sweeps every pixel to the first check point, then
-    /// runs **rounds** over a full-frame convergence-index buffer: each
+    /// runs **rounds** over a region-sized convergence-index buffer: each
     /// round freezes every pixel's index and whether it is still sampling,
     /// decides against that frozen buffer which pixels stop (their own
     /// test, and the cross-neighbour rule of [`held_by_neighbour`]), then
@@ -509,12 +509,16 @@ impl Renderer {
         layout: Option<&AovLayout>,
     ) -> (Buffer, Option<AovFilm>, PassSamples, PassStats) {
         let (w, h) = (self.settings.width, self.settings.height);
-        let mut buffer = Buffer::new(w, h);
+        // The pixels this pass traces, in raster space (rows bottom-up, as
+        // `(i, j)` count them); every per-pixel plane is this size and is
+        // indexed through `rect.index`.
+        let rect = self.settings.raster_region();
+        let mut buffer = Buffer::for_raster_rect(w, h, rect);
         let mut all_samples = PassSamples::default();
         let mut variance_sum = 0.0f64;
         let mut rays = RayStats::default();
-        let mut var_map = vec![0.0f64; w * h];
-        let pixel_count = (w * h) as f64;
+        let mut var_map = vec![0.0f64; rect.area()];
+        let pixel_count = rect.area() as f64;
         // One tabulation per pass, shared read-only by every worker.
         let filter = FilterSampler::new(self.settings.pixel_filter);
         // Read once per pass and dispatched to one of two monomorphisations
@@ -588,9 +592,9 @@ impl Renderer {
         );
 
         let tiles = if cfg.tiled {
-            generate_tiles(w, h, TILE)
+            generate_tiles(rect, TILE)
         } else {
-            generate_rows(w, h)
+            generate_rows(rect)
         };
         let mut units: Vec<Unit> = tiles
             .into_iter()
@@ -649,14 +653,14 @@ impl Renderer {
 
         // The frozen buffers the decisions read: every pixel's index and
         // whether it is still sampling, in image order.
-        let mut index = vec![f32::INFINITY; w * h];
-        let mut active = vec![false; w * h];
+        let mut index = vec![f32::INFINITY; rect.area()];
+        let mut active = vec![false; rect.area()];
         for &target in &schedule {
             let mut any_active = false;
             for unit in &units {
                 unit.for_each_pixel_ref(|i, j, st| {
-                    index[j * w + i] = st.index;
-                    active[j * w + i] = !st.stopped;
+                    index[rect.index(i, j)] = st.index;
+                    active[rect.index(i, j)] = !st.stopped;
                     any_active |= !st.stopped;
                 });
             }
@@ -678,7 +682,7 @@ impl Renderer {
                                 // now), its own test, and no still-sampling
                                 // cross neighbour much less converged than it is.
                                 if st.converged {
-                                    if held_by_neighbour(index, active, w, h, i, j, tolerance) {
+                                    if held_by_neighbour(index, active, rect, i, j, tolerance) {
                                         st.held = true;
                                     } else {
                                         st.stopped = true;
@@ -728,7 +732,7 @@ impl Renderer {
         // The AOVs need no ordering: each pixel's planes were accumulated in
         // its own sample order, so copying them in any order is exact.
         let film = layout.map(|layout| {
-            let mut film = AovFilm::new(layout, w, h);
+            let mut film = AovFilm::new(layout, rect);
             for unit in &units {
                 let aov = unit
                     .work
@@ -743,7 +747,11 @@ impl Renderer {
             film
         });
         let training = units.iter().any(|u| !u.work.samples.is_empty());
-        let tiles_x = units.iter().take_while(|u| u.tile.y == 0).count().max(1);
+        let tiles_x = units
+            .iter()
+            .take_while(|u| u.tile.y == rect.y0)
+            .count()
+            .max(1);
         for unit in &units {
             rays.merge(&unit.work.rays);
         }
@@ -759,7 +767,7 @@ impl Renderer {
                         let st = &unit.pixels[p];
                         let (color, var) = st.estimate();
                         buffer.set_pixel(i, j, color);
-                        var_map[j * w + i] = var;
+                        var_map[rect.index(i, j)] = var;
                         variance_sum += var;
                         if cfg.adaptive {
                             rays.adaptive_pixels += 1;
@@ -1124,15 +1132,16 @@ fn batch_schedule(spp: u32, first_check: u32) -> Vec<u32> {
 /// a more converged neighbour never holds — and absolute, in index units.
 /// A stopped neighbour never holds: converged or out of budget, more
 /// samples here would not change it. Diagonals are not compared, and a
-/// neighbour outside the image does not exist. A negative tolerance skips
+/// neighbour outside `rect` — the pixels the pass traces, which `index` and
+/// `active` cover — does not exist: outside the frame, or outside a render
+/// region, where nothing samples it. A negative tolerance skips
 /// the comparison altogether, so "off" is the per-pixel stop with no
 /// dependence on neighbour values. `+∞ − finite = +∞` holds; two `+∞`
 /// pixels never get here, since each fails its own test.
 fn held_by_neighbour(
     index: &[f32],
     active: &[bool],
-    width: usize,
-    height: usize,
+    rect: PixelRect,
     x: usize,
     y: usize,
     tolerance: f32,
@@ -1140,12 +1149,12 @@ fn held_by_neighbour(
     if tolerance < 0.0 {
         return false;
     }
-    let own = index[y * width + x];
+    let own = index[rect.index(x, y)];
     let holds = |q: usize| active[q] && index[q] - own > tolerance;
-    (x > 0 && holds(y * width + x - 1))
-        || (x + 1 < width && holds(y * width + x + 1))
-        || (y > 0 && holds((y - 1) * width + x))
-        || (y + 1 < height && holds((y + 1) * width + x))
+    (x > rect.x0 && holds(rect.index(x - 1, y)))
+        || (x + 1 < rect.x1 && holds(rect.index(x + 1, y)))
+        || (y > rect.y0 && holds(rect.index(x, y - 1)))
+        || (y + 1 < rect.y1 && holds(rect.index(x, y + 1)))
 }
 
 /// What a work unit's samples write besides the pixel accumulators: its
@@ -1224,17 +1233,13 @@ fn blend_weights(passes: &[(Buffer, f64)]) -> (Vec<f64>, f64) {
     (weights, total)
 }
 
-/// Per-pixel luminance of the inverse-variance blend of `passes` — the
+/// Per-pixel luminance of the inverse-variance blend of `passes` over
+/// `rect` (raster space), indexed as the passes' variance maps are — the
 /// reference image the guiding efficiency estimate normalizes against.
 /// Un-weightable passes (non-finite or zero variance) contribute nothing;
 /// if no pass is weightable the result is black and the floor in
 /// `mean_relative_error` takes over.
-fn blend_luminance(
-    passes: &[(Buffer, f64)],
-    width: usize,
-    height: usize,
-    luma: utils::Luma,
-) -> Vec<f64> {
+fn blend_luminance(passes: &[(Buffer, f64)], rect: PixelRect, luma: utils::Luma) -> Vec<f64> {
     let weights: Vec<f64> = passes
         .iter()
         .map(|(_, var)| {
@@ -1246,14 +1251,14 @@ fn blend_luminance(
         })
         .collect();
     let total: f64 = weights.iter().sum::<f64>().max(f64::MIN_POSITIVE);
-    let mut out = vec![0.0f64; width * height];
-    for y in 0..height {
-        for x in 0..width {
+    let mut out = vec![0.0f64; rect.area()];
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
             let mut c = Vec3A::ZERO;
             for ((pass, _), w) in passes.iter().zip(&weights) {
                 c += pass.get_pixel(x, y) * (*w / total) as f32;
             }
-            out[y * width + x] = luma.of(c) as f64;
+            out[rect.index(x, y)] = luma.of(c) as f64;
         }
     }
     out
@@ -1285,33 +1290,41 @@ struct Tile {
 /// Edge length of a render tile, in pixels.
 const TILE: usize = 16;
 
-/// The scanline work units: one `width`×1 tile per row, in the same order
-/// `generate_tiles` emits (rows by increasing `y`), so both unit shapes
-/// replay in scanline order through the one gather.
-fn generate_rows(image_width: usize, image_height: usize) -> Vec<Tile> {
-    (0..image_height)
+/// The scanline work units over `rect` (raster space): one region-wide ×1
+/// tile per row, in the same order `generate_tiles` emits (rows by
+/// increasing `y`), so both unit shapes replay in scanline order through
+/// the one gather.
+fn generate_rows(rect: PixelRect) -> Vec<Tile> {
+    (rect.y0..rect.y1)
         .map(|y| Tile {
-            x: 0,
+            x: rect.x0,
             y,
-            width: image_width,
+            width: rect.width(),
             height: 1,
         })
         .collect()
 }
 
-/// The tile grid, in tile rows from `y = 0` up, each row left to right —
-/// the order `render_pass` relies on to replay tiles in scanline order.
-fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> Vec<Tile> {
+/// The tile grid over `rect` (raster space), in tile rows from its lowest
+/// `y` up, each row left to right — the order `render_pass` relies on to
+/// replay tiles in scanline order. The grid is the frame's: tile edges sit
+/// on multiples of `tile_size` from the frame's origin, clipped to `rect`,
+/// so a pixel of a region falls in the same tile, at the same place, as in
+/// a full-frame render. Over the full frame, this is the full frame's grid.
+fn generate_tiles(rect: PixelRect, tile_size: usize) -> Vec<Tile> {
+    let grid = |lo: usize, hi: usize| {
+        (lo - lo % tile_size..hi)
+            .step_by(tile_size)
+            .map(move |a| (a.max(lo), (a + tile_size).min(hi)))
+    };
     let mut tiles = Vec::new();
-    for y in (0..image_height).step_by(tile_size) {
-        for x in (0..image_width).step_by(tile_size) {
-            let w = (x + tile_size).min(image_width) - x;
-            let h = (y + tile_size).min(image_height) - y;
+    for (y0, y1) in grid(rect.y0, rect.y1) {
+        for (x0, x1) in grid(rect.x0, rect.x1) {
             tiles.push(Tile {
-                x,
-                y,
-                width: w,
-                height: h,
+                x: x0,
+                y: y0,
+                width: x1 - x0,
+                height: y1 - y0,
             });
         }
     }

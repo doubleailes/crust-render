@@ -63,6 +63,7 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 | attribute | default | meaning |
 |-----------|---------|---------|
 | `int2 resolution` | `(640, 360)` | image width and height in pixels. The first render product's own `resolution` overrides it. |
+| `float4 dataWindowNDC` | `(0, 0, 1, 1)` | the part of the frame to render. The first render product's own value overrides it. See [below](#datawindowndc). |
 | `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
 | `bool disableMotionBlur` | `false` | render moving geometry sharp, at its shutter-open position. The first render product's own value overrides it. See [below](#disablemotionblur). |
@@ -95,6 +96,40 @@ def RenderSettings "settings"
 ```
 
 `samples/motionvector.usda` renders moving geometry this way.
+
+### dataWindowNDC
+
+`uniform float4 dataWindowNDC = (0.5, 0, 1, 1)`
+
+Renders only part of the frame: `(xmin, ymin, xmax, ymax)` in normalized coordinates of
+the image, with `(0, 0)` at the **bottom-left** corner and `(1, 1)` at the top-right, as
+`UsdRender` defines it. A pixel is rendered when its centre lies inside the window, so
+the example renders the right half of the image. The default, `(0, 0, 1, 1)`, is the whole
+frame.
+
+The window changes which pixels are traced, nothing else: the camera, the resolution and
+each pixel's samples are those of the full frame, so the rendered pixels match a full
+render's. The EXR keeps the full resolution as its display window and has the region as
+its data window; the PNG holds the region alone. See
+[`--region`](@/docs/reference/command-line.md#region), which overrides this attribute
+from the command line, in pixels.
+
+It is resolved like the resolution: from the first `RenderProduct` when it authors one,
+else from this prim. A later product that asks for another window is still written, over
+the first product's region, and a warning says so: one render has one region, as it has
+one camera.
+
+- A window reaching outside `[0, 1]` (overscan) is clipped to the frame, with a warning.
+  Rendering outside the frame is not supported.
+- A window that selects no pixel is refused with a warning, and the full frame renders.
+
+```usda
+def RenderSettings "settings"
+{
+    uniform int2 resolution = (1920, 1080)
+    uniform float4 dataWindowNDC = (0.25, 0.25, 0.75, 0.75)
+}
+```
 
 ### renderingColorSpace
 
