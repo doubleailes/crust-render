@@ -316,6 +316,21 @@ impl RenderSettings {
         self
     }
 
+    /// Whether path guiding is on — see [`RenderSettings::with_guiding`].
+    pub fn guiding(&self) -> bool {
+        self.guiding
+    }
+
+    /// Guiding's training iterations (at least 1).
+    pub fn guiding_train_iterations(&self) -> u32 {
+        self.guiding_train_iterations
+    }
+
+    /// Guiding's guide-sampling probability α.
+    pub fn guiding_prob(&self) -> f32 {
+        self.guiding_prob
+    }
+
     /// Select how light sampling and BSDF sampling combine — see
     /// [`SamplingStrategy`].
     pub fn with_sampling_strategy(mut self, strategy: SamplingStrategy) -> Self {

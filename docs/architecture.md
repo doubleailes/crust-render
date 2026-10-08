@@ -45,9 +45,9 @@ graph TD
 | `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
-| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile | image, texture and IES decoding; UI |
+| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown) | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
-| `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG | decoding anything |
+| `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's report | decoding anything |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance` / `Luma`, `align_to_normal` | everything |
 
 Two properties of this graph are deliberate and worth keeping:
@@ -67,7 +67,8 @@ Two properties of this graph are deliberate and worth keeping:
 ## A render, end to end
 
 ```
-crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list_usd)
+crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list_usd;
+                              `crust diagnostic` imports the same way, then diagnostic::run)
  ├─ FileAssets::new()                        crust-assets: residency policy from CRUST_* env
  ├─ Scene::from_usd_with_options(path, &assets, opts)
  │   └─ scene::usd_import::load_scene        crust-core
@@ -134,12 +135,24 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
 | reporting | `stats.rs` (`--stats`), `profile.rs` (`--profile`), `error.rs` |
+| diagnostic | `diagnostic/` — `mod.rs` (`run`: calibration, baseline, crops, tiers 1–3, suggestions), `report.rs` (`Report`, the `crust-diagnostic/1` JSON), `markdown.rs`, `noise.rs` (the light path rows, light groups, tier-1 ordering rules), `crops.rs`, `schedule.rs` (budget and tier shares), `trials.rs` (ΔEff, verdicts, the per-crop reference), `checks.rs` (static findings), `compare.rs` (`--baseline` deltas). It renders through `Renderer::render_measured` (`tracer/mod.rs`: `Instruments` → `Measured`), the only caller of the per-tile timer and the clamp counter |
 
 ## Invariants that span modules
 
 Most bugs this codebase has had were one half of a pair changing without the
 other. The pairs:
 
+- **`Renderer::new` ↔ `Renderer::reconfigure`.** `new` is `reconfigure` on a
+  fresh renderer, and `reconfigure` rebuilds everything that depends on the
+  settings (the light selection, the `learned` pre-pass); every other setting
+  is read per pass. A setting cached at construction must be rebuilt there too,
+  or the diagnostic's trials measure the wrong renderer —
+  `reconfigure_renders_what_new_renders` pins every varied setting bitwise.
+- **The clamp and its counter.** The clamp counter (`PathContext::measure_clamp`)
+  returns the *unclamped* radiance through a copy of the ordinary expression
+  inside the clamp's own branch, and only in the `PROFILE` instantiation. Change
+  the ordinary expression and change the copy: `the_clamp_counter_measures_what_the_clamp_removes`
+  pins the image bitwise and the measured energy against a clamped render.
 - **MIS weights.** Every NEE weight has a bounce-side twin
   (`bounce_emission_weight`, `escaped_emission`), and both go through
   `SamplingStrategy` and `LightList::density` / the `*_at` lookups. Surface

@@ -29,6 +29,7 @@ Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the
 | UV / UDIM textures, `.tx` streaming, Ptex (preload and streaming), ray-cone filtering | `textures` | `docs/ptex_streaming.md`, `docs/color_management.md` |
 | AOVs: `RenderProduct` / `RenderVar` resolution, the source vocabulary and its aliases, accumulation modes, light path expressions and their routing, albedo, light groups, the per-product EXR writer | `aovs` | `site/content/docs/usd/aovs.md` |
 | USD import: streaming import, schema mapping, subdivision, displacement, instancing, time, camera, settings, Moana, ALab | `usd-scene-import` | `docs/alab_profile.md`, `docs/moana_profile.md`, `docs/issues/` |
+| `crust diagnostic`: probe conditions, crops, trials and verdicts, the budget, the `crust-diagnostic/1` report, `--baseline`, the clamp counter's cost | `diagnostics` | `site/content/docs/help/diagnosing-a-render.md` |
 
 Before changing a feature, read its design record: most sections end in a trap that was
 already fallen into once. When a change moves a measurement or retires a gap, update the
@@ -45,6 +46,7 @@ cargo run --release -- render -i scene.usda --profile                  # + per-s
 cargo run --release -- render -i scene.usda -l debug --log-file logs   # tee the log to a timestamped file
 cargo run --release -- render --help                                   # every render flag
 cargo run --release -- ls camera -i scene.usda                         # cameras (or light, material), one path per line
+cargo run --release -- diagnostic -i scene.usda --budget 2m > r.md     # which settings make it faster/cleaner (+ crust-diagnostic.json)
 
 cargo test                                          # integration tests load samples/*.usda
 cargo test -p crust-core loads_cornellbox_usda      # one test by name

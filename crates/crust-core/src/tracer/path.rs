@@ -164,6 +164,13 @@ pub(super) struct PathContext<'a> {
     /// later surface or volume vertex (each at least 1).
     pub(super) light_samples: u32,
     pub(super) light_samples_indirect: u32,
+    /// The diagnostic's clamp counter: `indirect_clamp` is measured into
+    /// [`PathScratch::clamp_removed`] rather than applied, and the path
+    /// returns the unclamped radiance. Read only by the instrumented
+    /// (`PROFILE`) instantiation, which a measuring pass always takes, so
+    /// every other render compiles it away. `false` in every ordinary
+    /// render.
+    pub(super) measure_clamp: bool,
 }
 
 /// One camera path's radiance, with one light sample per vertex — see
@@ -210,6 +217,7 @@ pub fn ray_color_with_light_samples(
         guiding: None,
         light_samples: light_samples.0.max(1),
         light_samples_indirect: light_samples.1.max(1),
+        measure_clamp: false,
     };
     let (training, s) = (&mut no_training, &mut scratch);
     match (
@@ -425,6 +433,10 @@ pub(crate) struct PathScratch {
     /// The thin walls the current segment passed and how it ended — written
     /// by [`pass_cutouts`] in a world with straight transmission only.
     thin: ThinWalls,
+    /// What [`PathContext::measure_clamp`] would have removed from the last
+    /// path — written only while measuring, and taken (reset) by the
+    /// renderer after each sample.
+    pub(super) clamp_removed: Vec3A,
 }
 
 /// What [`pass_cutouts`] leaves for the vertex that ends a segment past thin
@@ -518,6 +530,7 @@ impl PathScratch {
             nee_split: LobeSplit::default(),
             bounce_split: LobeSplit::default(),
             thin: ThinWalls::default(),
+            clamp_removed: Vec3A::ZERO,
         }
     }
 }
@@ -2495,6 +2508,7 @@ pub(super) fn trace_path<
         guiding,
         light_samples,
         light_samples_indirect,
+        measure_clamp,
     } = *cx;
     let training = guiding.is_some_and(|g| g.training);
     // The bounce subtree; each vertex derives its own domain off this by depth.
@@ -3511,16 +3525,33 @@ pub(super) fn trace_path<
             && index == 0
             && records.len() > 1
         {
-            // The primary vertex splits into what `clamp_indirect` leaves
-            // alone and the continuation it clamps. Kept off the ordinary
-            // expression below, which a disabled clamp must reproduce to the
-            // bit.
-            vrec.segment_emit
-                + vrec.atten
-                    * (vrec.emit_here
-                        + vrec.nee
-                        + vrec.factor * (vrec.next_emit * vrec.next_emit_weight + vrec.crossed))
-                + clamp_indirect(vrec.atten * (vrec.factor * radiance), limit)
+            if PROFILE && measure_clamp {
+                // The clamp counter: what the clamp would take from the
+                // continuation, kept aside, and the unclamped radiance —
+                // the ordinary expression below, operation for operation,
+                // so the image is the unclamped one to the bit.
+                let indirect = vrec.atten * (vrec.factor * radiance);
+                scratch.clamp_removed = indirect - clamp_indirect(indirect, limit);
+                vrec.segment_emit
+                    + vrec.atten
+                        * (vrec.emit_here
+                            + vrec.nee
+                            + vrec.factor
+                                * (vrec.next_emit * vrec.next_emit_weight
+                                    + vrec.crossed
+                                    + radiance))
+            } else {
+                // The primary vertex splits into what `clamp_indirect` leaves
+                // alone and the continuation it clamps. Kept off the ordinary
+                // expression below, which a disabled clamp must reproduce to the
+                // bit.
+                vrec.segment_emit
+                    + vrec.atten
+                        * (vrec.emit_here
+                            + vrec.nee
+                            + vrec.factor * (vrec.next_emit * vrec.next_emit_weight + vrec.crossed))
+                    + clamp_indirect(vrec.atten * (vrec.factor * radiance), limit)
+            }
         } else {
             vrec.segment_emit
                 + vrec.atten
@@ -3535,7 +3566,12 @@ pub(super) fn trace_path<
             route.finish_albedo();
         }
         if let Some(ctx) = routing {
-            route.gather(ctx, records, indirect_clamp);
+            // A measured clamp is not applied to the AOVs either.
+            route.gather(
+                ctx,
+                records,
+                if measure_clamp { None } else { indirect_clamp },
+            );
         }
     }
     radiance

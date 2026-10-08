@@ -43,6 +43,13 @@ opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", tag = "0
 crust-mtlx = { path = "../crust-mtlx" }
 ocio.workspace = true
 crust-jit = { path = "../crust-jit", optional = true }
+# The `crust diagnostic` report (`diagnostic/report.rs`): written as JSON
+# for a machine reader, and read back for `--baseline`. Both were already in
+# the lock (criterion's, a dev-dependency), so naming them adds no package;
+# they are new to the renderer's own build. Neither carries `unsafe` on any
+# hot path: they run once per diagnostic, after the renders.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [dev-dependencies]
 criterion = "0.8"

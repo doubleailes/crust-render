@@ -702,6 +702,20 @@ pub fn peak_memory_bytes() -> Option<u64> {
     }
 }
 
+/// The machine's physical memory in bytes (`MemTotal` from
+/// `/proc/meminfo`, same `kB` format as the status fields), if the platform
+/// can report it — what a peak resident size is weighed against.
+pub fn machine_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        parse_proc_status_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemTotal:")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Currently resident set size in bytes. Paired with
 /// [`peak_memory_bytes`], the difference exposes transient allocation:
 /// memory a phase took and gave back. To compare the two, take them from

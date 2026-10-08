@@ -555,6 +555,8 @@ dependencies = [
  "openusd",
  "openusd-schemas",
  "rayon",
+ "serde",
+ "serde_json",
  "tracing",
  "utils",
 ]
@@ -593,6 +595,7 @@ dependencies = [
  "openusd",
  "openusd-schemas",
  "ptex-rust",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

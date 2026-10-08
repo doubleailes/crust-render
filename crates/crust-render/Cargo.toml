@@ -41,6 +41,9 @@ exr.workspace = true
 openusd = { version = "0.7", default-features = false }
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom"] }
 ptex.workspace = true
+# `tests/diagnostic.rs` reads the JSON report back; crust-core already
+# depends on it, so it adds no package.
+serde_json = "1.0.151"
 
 [dependencies.tracing-subscriber]
 version = "0.3.20"

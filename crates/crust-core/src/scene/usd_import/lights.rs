@@ -763,14 +763,15 @@ pub(super) fn emit_dome_light(
     tag_last(lights, prim);
 }
 
-/// Gives the light just added its light-path-expression tag,
-/// `token crust:light:lpeTag` — the label a light group `<L.'tag'>` selects.
-/// Other renderers' tag attributes are not read yet: their exact names are
-/// still to be checked against real exports.
+/// Gives the light just added its name, the prim path, and its
+/// light-path-expression tag, `token crust:light:lpeTag` — the label a light
+/// group `<L.'tag'>` selects. Other renderers' tag attributes are not read
+/// yet: their exact names are still to be checked against real exports.
 fn tag_last(lights: &mut LightList, prim: &Prim) {
+    let index = lights.count() - 1;
+    lights.set_name(index, &prim.path().to_string());
     if let Some(tag) = custom_token(prim, "crust:light:lpeTag") {
         debug!("{}: LPE tag {tag:?}", prim.path());
-        let index = lights.count() - 1;
         lights.set_lpe_tag(index, Some(&tag));
     }
 }

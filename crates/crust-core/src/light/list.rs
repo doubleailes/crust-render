@@ -148,6 +148,9 @@ pub struct LightList {
     /// label its `L` events carry, so `<L.'key'>` selects it. Kept in step
     /// with `lights` by `add_masked` and `remove`.
     pub(super) lpe_tags: Vec<Option<Box<str>>>,
+    /// Per light, the name it was imported under (its USD prim path), for
+    /// messages and reports; kept in step with `lights` like `lpe_tags`.
+    pub(super) names: Vec<Option<Box<str>>>,
     /// The working colour space's luminance weights ([`LightList::luma`]).
     pub(super) luma: utils::Luma,
 }
@@ -175,6 +178,7 @@ impl LightList {
             links: None,
             twinned: Vec::new(),
             lpe_tags: Vec::new(),
+            names: Vec::new(),
             luma: utils::Luma::REC709,
         }
     }
@@ -222,6 +226,7 @@ impl LightList {
         }
         self.lights.push(light);
         self.lpe_tags.push(None);
+        self.names.push(None);
         self.pmf.clear();
         self.cdf.clear();
         self.cache = None;
@@ -242,6 +247,7 @@ impl LightList {
         debug_assert!(self.links.is_none(), "links are set after the last removal");
         let light = self.lights.remove(index);
         self.lpe_tags.remove(index);
+        self.names.remove(index);
         self.by_geom.retain(|_, i| *i != index);
         for i in self.by_geom.values_mut() {
             if *i > index {
@@ -274,6 +280,16 @@ impl LightList {
     /// `L` events it ends, which a light group `<L.'tag'>` selects.
     pub fn lpe_tag(&self, index: usize) -> Option<&str> {
         self.lpe_tags.get(index).and_then(|t| t.as_deref())
+    }
+
+    /// Names light `index` — the importer gives each light its prim path.
+    pub fn set_name(&mut self, index: usize, name: &str) {
+        self.names[index] = Some(name.into());
+    }
+
+    /// Light `index`'s name ([`LightList::set_name`]), if it was given one.
+    pub fn name(&self, index: usize) -> Option<&str> {
+        self.names.get(index).and_then(|n| n.as_deref())
     }
 
     /// The light-list entry whose geometry is `geom_id`, if any — whether a
