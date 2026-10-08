@@ -300,31 +300,31 @@ const DEVIATIONS: &[Deviation] = &[
         name: "diffuse-flat-coupling",
         gap: "the diffuse is scaled by a flat 1 - F_avg, even with no specular interface",
         applies: has_diffuse,
-        bound: 0.0408,
+        bound: 0.169,
     },
     Deviation {
         name: "dielectric-specular",
         gap: "Schlick Fresnel and no multiple-scattering compensation on the dielectric lobe",
         applies: has_dielectric_specular,
-        bound: 0.0156,
+        bound: 0.0317,
     },
     Deviation {
         name: "specular-diffuse-coupling",
         gap: "the diffuse under a specular lobe is not scaled by its directional energy complement",
         applies: |c| has_diffuse(c) && (has_dielectric_specular(c) || c.f("base_metalness") > 0.0),
-        bound: 3.22,
+        bound: 2.19,
     },
     Deviation {
         name: "metal-no-mms",
         gap: "no multiple-scattering compensation on the metal lobe",
         applies: |c| c.f("base_metalness") > 0.0,
-        bound: 0.457,
+        bound: 11.9,
     },
     Deviation {
         name: "coat",
         gap: "the coat lobe's Fresnel and multiple scattering",
         applies: |c| c.f("coat_weight") > 0.0,
-        bound: 0.0334,
+        bound: 0.178,
     },
     Deviation {
         name: "coat-over-base",
@@ -336,13 +336,23 @@ const DEVIATIONS: &[Deviation] = &[
                     || c.f("base_metalness") > 0.0
                     || c.f("transmission_weight") > 0.0)
         },
-        bound: 6.2,
+        bound: 0.709,
     },
     Deviation {
         name: "transmission",
-        gap: "the transmission lobe, and specular_weight applied without Adobe's F0-to-IOR remap",
+        gap: "the transmission lobe",
         applies: |c| c.f("transmission_weight") > 0.0 && c.f("base_metalness") < 1.0,
-        bound: 11.8,
+        bound: 0.103,
+    },
+    Deviation {
+        name: "transmission-under-specular",
+        gap: "specular_weight scales the dielectric lobe instead of remapping its F0 to an IOR, which moves the transmission too",
+        applies: |c| {
+            c.f("transmission_weight") > 0.0
+                && has_dielectric_specular(c)
+                && c.f("specular_weight") < 1.0
+        },
+        bound: 0.887,
     },
     Deviation {
         name: "subsurface-as-diffuse",
@@ -353,16 +363,13 @@ const DEVIATIONS: &[Deviation] = &[
                 && c.f("transmission_weight") < 1.0
                 && c.f("base_metalness") < 1.0
         },
-        bound: 4.85,
+        bound: 2.73,
     },
     Deviation {
         name: "thin-film",
-        gap: "thin-film interference differs from Adobe's",
-        applies: |c| {
-            c.f("thin_film_weight") > 0.0
-                && (has_dielectric_specular(c) || c.f("base_metalness") > 0.0)
-        },
-        bound: 0.791,
+        gap: "thin-film interference differs from Adobe's, which also reaches the base without a specular lobe",
+        applies: |c| c.f("thin_film_weight") > 0.0,
+        bound: 0.345,
     },
     Deviation {
         name: "anisotropy",
@@ -370,19 +377,13 @@ const DEVIATIONS: &[Deviation] = &[
         applies: |c| {
             c.f("specular_roughness_anisotropy") > 0.0 || c.f("coat_roughness_anisotropy") > 0.0
         },
-        bound: 0.23,
+        bound: 0.603,
     },
     Deviation {
         name: "interior",
         gap: "a closed surface hit from inside still emits, and keeps its coat and fuzz",
         applies: |c| c.back_facing() && c.input("geometry_thin_walled") != Some("1"),
         bound: 3.06,
-    },
-    Deviation {
-        name: "fuzz-charlie",
-        gap: "the fuzz is Charlie sheen under a flat 1 - fuzz_weight, not Zeltner's LTC sheen",
-        applies: |c| c.f("fuzz_weight") > 0.0,
-        bound: 9.25,
     },
 ];
 

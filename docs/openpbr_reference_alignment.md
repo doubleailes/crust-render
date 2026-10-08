@@ -147,6 +147,55 @@ it produces. MaterialX's `layer` node is single-scattering (`base·(1 − F) +
 top`) and models no bounce series, so imposing Δ on a promoted coat would
 darken a substrate the source material never darkened.
 
+## Fuzz: Zeltner's sheen over a directional layer
+
+The fuzz is Adobe's fuzz lobe (`impl/openpbr_fuzz_lobe.h`), transcribed
+operation for operation (`brdf::ZeltnerSheen`, `lobes::FuzzLayer`):
+
+- **The lobe** is Zeltner, Burley and Chiang's LTC sheen with Disney's
+  "Volume" table: 32 × 32 entries over (`fuzz_roughness`, cos θ_o) of the
+  inverse LTC coefficients and the directional albedo `R`, read bilinearly as
+  Adobe's array mode reads them. `fuzz_roughness` is the LTC's α as authored,
+  with no floor. The value toward `ω_i` is `fuzz_color · w · R · D_ltc(ω_i)`,
+  where `D_ltc` already carries the cosine, and the lobe samples `D_ltc`
+  exactly, so a fuzz sample weighs `fuzz_color · R`. An LTC sheared below the
+  plane loses that share of its samples, as in Adobe.
+- **The layering** passes `1 − w · R(ω_o)` to everything beneath (coat,
+  specular, metal, diffuse, transmission) and to the emission. This is the view
+  side of Adobe's attenuation; Adobe's default
+  (`OPENPBR_RECIPROCAL_COAT_AND_FUZZ = 0`) omits the light side too, so the
+  factor belongs to the shading point, not to the light.
+- **The coat under the fuzz** is roughened as Adobe's `openpbr_prepare_lobes`
+  roughens it: `⁴√min(1, r⁴ + avg(fuzz_color) · r_f · 0.005 · r_f⁴)`, faded in by
+  `fuzz_weight`.
+- **Lobe selection** weighs the fuzz by `w · R(ω_o) · max(fuzz_color)` and
+  everything beneath by `1 − w · R(ω_o)`, as Adobe's `openpbr_sheen_probability`
+  does.
+
+It is a different look from the Charlie sheen it replaced, not a refinement
+of it. Facing the camera, a smooth fuzz all but vanishes and a rough one
+reflects about twice as much; the albedo against crust's former Imageworks
+fit:
+
+| `fuzz_roughness` | cos θ_o | Zeltner `R` | Imageworks `E` (before) |
+|---|---|---|---|
+| 0.1 | 0.05 | 0.212 | 1.000 |
+| 0.3 | 1.0 | 0.0008 | 0.052 |
+| 0.3 | 0.25 | 0.166 | 0.431 |
+| 0.5 | 0.5 | 0.154 | 0.259 |
+| 1.0 | 1.0 | 0.342 | 0.157 |
+| 1.0 | 0.25 | 0.620 | 0.399 |
+
+One departure from Adobe, deliberately: Adobe gives the fuzz no presence when
+a closed surface is hit from inside (`back_facing && !thin_walled`). crust
+keeps it, as it keeps the coat and the emission there. Fuzz's main use is
+cloth, which is usually an open mesh not authored thin-walled, and Adobe's
+rule would strip the back of every curtain. The oracle's `interior` deviation
+covers it with the rest of that gap.
+
+The Adobe oracle matches every fuzz-only case, from roughness 0 to 1 and from
+grazing to head-on, within 1e-4, emission through the fuzz included.
+
 ## AOV outputs: the diffuse filter
 
 `lobes::diffuse_filter` (behind the `diffuse_albedo` AOV and the raw light AOVs,
@@ -162,16 +211,18 @@ follows:
 |--------|-------|---------------------|-------|
 | `ρ` | `mix(base_color, subsurface_color, subsurface_weight) · base_weight · (1 − base_metalness) · (1 − transmission_weight)`, the EON albedo `eval_diffuse` uses | `base_color · base_weight` into the diffuse BSDF's colour, with metalness, transmission and subsurface applied as `mix` weights over it | the diffuse lobe's albedo, under the same presence weights |
 | `1 − F̄` | the flat energy split of the base specular (`f0_from_ior(specular_ior)`) | the specular `layer`'s throughput, `1 − E_spec(μ_v)`: **directional** | the directional specular energy complement: **directional** |
-| `base_atten` | `1 − fuzz_weight` (the scalar fuzz layering, see "Fuzz" below) | the fuzz `layer`'s throughput: **directional** | the sheen layer's throughput: **directional** |
+| `base_atten` | `1 − fuzz_weight · R(ω_o)`, Adobe's view-side fuzz attenuation (see "Fuzz" above): **view-dependent**, light-independent | the fuzz `layer`'s throughput: **directional** | the sheen layer's throughput, the same factor |
 | `Δ` | `coat_darkening`, the spec's `(1 − K̄)/(1 − K̄·E_base)` faded by `coat_weight · coat_darkening` | none: MaterialX's `layer` is single-scattering, and the importer sets `coat_darkening = 0` | the same Δ (see "Coat passage model" above) |
 | coat passage | **left out**: it depends on the view and light directions, so it belongs to the light, not the colour | the coat `layer`'s throughput | the coat passage |
 
 Where both references are directional, crust's filter uses crust's own
-view-independent factor. The filter is therefore exactly what crust's
-`eval_split` multiplies, so `raw × filter` reproduces crust's lighting. It is
-not a reference quantity. Closing the `(1 − F_avg)` gap below would make the
-filter's second factor directional too; it would then move into the light,
-like the coat passage.
+factor. The filter is therefore exactly what crust's `eval_split` multiplies,
+so `raw × filter` reproduces crust's lighting. It is not a reference quantity.
+`base_atten` depends on the view but not on the light, so it stays in the
+filter: the shading point knows its view (`ShadingPoint`'s `cos_o`). Closing
+the `(1 − F_avg)` gap below would make the filter's second factor depend on
+the light too; it would then move into the light, like the coat passage. So
+would Adobe's reciprocal fuzz mode, which is why crust follows the default.
 
 ## Remaining gaps vs. the Adobe reference
 
@@ -197,10 +248,11 @@ measured on 2026-10-08:
   grazing, so a coloured surface desaturates toward its silhouette. A
   hand-rolled `1 − F(μ_v)` substitute is not a fix — it breaks reciprocity
   unless symmetrised as `√((1 − E(μ_v))(1 − E(μ_l)))`.
-  Oracle: `metal-no-mms` (0.457), `dielectric-specular` (0.0156, which also
-  covers Schlick against Adobe's Fresnel), `specular-diffuse-coupling` (3.22),
-  and `diffuse-flat-coupling` (0.0408: the flat `1 − F_avg` dims the diffuse
-  even at `specular_weight = 0`, where Adobe has no interface to take energy).
+  Oracle: `metal-no-mms` (11.9), `dielectric-specular` (0.0317, which also
+  covers Schlick against Adobe's Fresnel), `specular-diffuse-coupling` (2.19),
+  and `diffuse-flat-coupling` (0.169: the flat `1 − F_avg` dims the diffuse
+  even at `specular_weight = 0`, where Adobe has no interface to take energy,
+  by 4% head-on and more toward grazing).
 - **Random-walk subsurface entry** — non-transmissive SSS materials never
   refract into their interior; they use the tinted-diffuse (EON)
   approximation. Needs an interface refraction event for the SSS fraction
@@ -210,7 +262,7 @@ measured on 2026-10-08:
   subsurface lobe whose selection returns a `ScatterSample::subsurface`
   entry, and its `from_subsurface` van de Hulst medium replaced by the walk's
   Chiang remap, since the two invert the albedo differently.
-  Oracle: `subsurface-as-diffuse` (4.85).
+  Oracle: `subsurface-as-diffuse` (2.73).
 - **`specular_weight` semantics** — `specular_weight` weighs the **dielectric
   base's** specular interface and nothing else: it scales the finished
   dielectric lobe, and the metal lobe takes its coverage from `base_metalness`
@@ -226,13 +278,11 @@ measured on 2026-10-08:
   the IOR remap is still not done.
   Related: the coat-aware base-IOR ratio (TIR fix) and coat-induced
   specular roughening are skipped.
-  Oracle: `transmission` (11.8) for the remap and the transmission lobe;
-  `coat-over-base` (6.2) for the coat's effect on the base; `coat` (0.0334)
-  for the coat lobe itself.
-- **Fuzz** — Charlie sheen D × Imageworks visibility with a scalar
-  `(1 − fuzz_weight)` layer approximation, vs. Adobe's Zeltner LTC sheen
-  with fuzz↔coat roughness cross-coupling.
-  Oracle: `fuzz-charlie` (9.25).
+  Oracle: `transmission-under-specular` (0.887) for the remap, which moves
+  the transmission with the reflection; `transmission` (0.103) for the
+  transmission lobe itself; `coat-over-base` (0.709) for the coat's effect on
+  the base; `coat` (0.178) for the coat lobe itself, which drifts from
+  Adobe's toward grazing (0.17 in albedo at cos θ_o = 0.1, 0.002 at 0.6).
 - **Interior hits** — emission is not suppressed when a closed surface is
   hit from inside, and the coat is not reduced to transmission-tint-only
   there.
@@ -245,12 +295,14 @@ measured on 2026-10-08:
   (`geometry_normal/tangent/coat_normal/coat_tangent`); frames are
   auto-generated (Duff et al.), so anisotropy has no authored orientation
   (Adobe additionally offers a (cos, sin) anisotropy-rotation extension).
-  Oracle: `anisotropy` (0.23). The frames agree at the oracle's normal, so
+  Oracle: `anisotropy` (0.603). The frames agree at the oracle's normal, so
   that bound is the anisotropic lobe itself, not its orientation.
 - **Thin film + thin wall** — thin film applies to reflection only, not to
   thin-walled transmission (Adobe documents the same limitation).
-  Oracle: `thin-film` (0.791), for the interference itself. The thin-walled
-  window model matches Adobe in every case the fixture holds, so it has no rule.
+  Oracle: `thin-film` (0.345), for the interference itself, which in Adobe
+  reaches the base even with no specular lobe (`specular_weight = 0`). The
+  thin-walled window model, and a thin-walled diffuse, match Adobe in every
+  case the fixture holds, so neither has a rule.
 
 Every item above is test-pinned where implemented; the shader's regression
 suite lives in `openpbr/` (`cargo test -p crust-core`).

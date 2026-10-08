@@ -46,52 +46,55 @@
 
 ## 3. The Zeltner lobe
 
-- [ ] 3.1 Add `scripts/tables/ltc_sheen_to_rust.py`. It converts Disney's
+- [x] 3.1 Add `scripts/tables/ltc_sheen_to_rust.py`. It converts Disney's
       `ltc-sheen` "Volume" table to a `[[f32; 3]; 1024]` constant in
       `material/brdf.rs` (or a sibling table module, as `bsdl_tables.rs` is). Verify
       its output equals Adobe's `openpbr_ltc_data.h`, value for value.
-- [ ] 3.2 Implement `ZeltnerSheen` as in design D3: bilinear fetch, `eval → (R·D_ltc,
+- [x] 3.2 Implement `ZeltnerSheen` as in design D3: bilinear fetch, `eval → (R·D_ltc,
       D_ltc)`, `sample`, `albedo = R`, and the azimuth rotation. Verify with unit tests:
       - the pdf integrates to 1 over the hemisphere;
       - the sample histogram matches the pdf;
       - every sample's weight is R;
       - R at the spec's points: (0.3, 1.0) → 0.0008, (0.3, 0.25) → 0.166,
         (1.0, 1.0) → 0.342.
-- [ ] 3.3 Run a white-furnace sweep of the lobe alone, α ∈ {0, 0.005, 0.01, 0.02,
+- [x] 3.3 Run a white-furnace sweep of the lobe alone, α ∈ {0, 0.005, 0.01, 0.02,
       0.05, …, 1}, all cos θ_o. If it gains energy at small α, add a floor and record
       it as an oracle deviation rule (D3). Verify that the test pins whichever outcome
       holds.
-- [ ] 3.4 Correct `brdf.rs`'s `sheen_charlie_v` doc (Neubelt's smoother denominator,
+- [x] 3.4 Correct `brdf.rs`'s `sheen_charlie_v` doc (Neubelt's smoother denominator,
       not Imageworks). Add the `THIRD-PARTY.md` entry for Disney `ltc-sheen` and Adobe
       `openpbr-bsdf` (Apache-2.0), and verify that `cargo deny --locked check` still
       passes.
 
 ## 4. Native OpenPBR fuzz
 
-- [ ] 4.1 Make `base_atten = 1 − w·R(ω_o)` in `eval_all` and `eval_split`, keeping
+- [x] 4.1 Make `base_atten = 1 − w·R(ω_o)` in `eval_all` and `eval_split`, keeping
       the `w == 0` skip as the literal 1.0. Verify with the spec's furnace scenario
       (white diffuse, `specular_weight = 0`, any fuzz) and with the `C.*[LO]` LPE
       bitwise pin.
-- [ ] 4.2 Replace `eval_fuzz` with `ZeltnerSheen`. Give the fuzz its own pdf in
+- [x] 4.2 Replace `eval_fuzz` with `ZeltnerSheen`. Give the fuzz its own pdf in
       `pdf_all` and its own sampler in `mod.rs`. Make `LobePmf::selecting` take the
       view cosine, with fuzz weight `w·R·max(fuzz_color)` and base weights scaled by
       `base_atten`. Verify with new pdf-integration and sample-histogram tests for
       fuzz-only and fuzz-over-base materials at several ω_o, and with
       `the_reduced_lobe_set_samples_what_eval_reports`.
-- [ ] 4.3 Give `diffuse_filter` and `albedo` the view cosine and use the directional
+- [x] 4.3 Give `diffuse_filter` and `albedo` the view cosine and use the directional
       `base_atten` in them. Verify that the diffuse-filter AOV identity
       (`raw × filter` = `eval_split`'s diffuse) still holds.
-- [ ] 4.4 Attenuate emission in `emitted_directional` by `base_atten(cos_θo)` after
+- [x] 4.4 Attenuate emission in `emitted_directional` by `base_atten(cos_θo)` after
       the coat passage. Verify with the spec's "Emission dims behind a fuzz"
-      scenario and an NEE-vs-bounce agreement test on an emissive fuzz surface.
-- [ ] 4.5 Add Adobe's fuzz-to-coat roughness coupling where the coat α is derived,
-      and zero the fuzz for `entering == false`. Verify that oracle cases with
-      coat plus fuzz, and back-facing cases, match.
-- [ ] 4.6 Keep `crates/crust-core/tests/resolve.rs` bit-exact for fuzz materials
+      scenario, and that a resolved fuzzy emitter's emission is bit-exact with
+      `emitted_at` (`tests/resolve.rs`). An emissive OpenPBR has no NEE twin to
+      agree with: only UsdLux lights enter the light list.
+- [x] 4.5 Add Adobe's fuzz-to-coat roughness coupling where the coat α is derived.
+      Keep the fuzz on back faces (unlike Adobe; see design D4), under the
+      oracle's `interior` deviation. Verify that oracle cases with coat plus
+      fuzz match, and that back-facing ones stay within `interior`.
+- [x] 4.6 Keep `crates/crust-core/tests/resolve.rs` bit-exact for fuzz materials
       (D5), and verify that it passes.
-- [ ] 4.7 Delete the fuzz deviation rule. Verify that `adobe_oracle` passes with
+- [x] 4.7 Delete the fuzz deviation rule. Verify that `adobe_oracle` passes with
       every fuzz case matching within the global tolerance.
-- [ ] 4.8 Document it:
+- [x] 4.8 Document it:
       - retire "Fuzz" from `docs/openpbr_reference_alignment.md` and update its
         filter table (`base_atten` is now directional, view-side);
       - update `openspec/specs/materials/design.md`'s OpenPBR section, with the R

@@ -327,11 +327,20 @@ fn iso_matches_aniso_at_zero() {
 
 #[test]
 fn sheen_nonneg() {
-    for &nv in &[0.1, 0.3, 0.5, 0.9] {
-        for &nl in &[0.1, 0.3, 0.5, 0.9] {
-            for &nh in &[0.1, 0.5, 0.9] {
-                let v = sheen_charlie(nv, nl, nh, 0.4);
-                assert!(v.is_finite() && v >= 0.0, "sheen({nv},{nl},{nh}) = {v}");
+    for &r in &[0.0f32, 0.05, 0.4, 1.0] {
+        for &nv in &[0.0f32, 0.1, 0.3, 0.5, 0.9, 1.0] {
+            let lobe = ZeltnerSheen::new(r, nv);
+            let v = Vec3A::new((1.0 - nv * nv).sqrt(), 0.0, nv);
+            for &nl in &[0.0f32, 0.1, 0.3, 0.5, 0.9, 1.0] {
+                for &phi in &[0.0f32, 1.0, 3.0] {
+                    let s = (1.0 - nl * nl).sqrt();
+                    let l = Vec3A::new(s * phi.cos(), s * phi.sin(), nl);
+                    let d = lobe.density(v, l);
+                    assert!(
+                        d.is_finite() && d >= 0.0,
+                        "sheen({r},{nv},{nl},{phi}) = {d}"
+                    );
+                }
             }
         }
     }
@@ -1417,11 +1426,13 @@ fn the_lobe_split_sums_to_eval_within_rounding() {
                 "material {i}, direction {k}: {total} vs {value}"
             );
         }
-        let a = m.albedo();
-        assert!(a.min_element() >= 0.0 && a.max_element() <= 1.0);
+        for cos_v in [0.05, 0.5, 1.0] {
+            let a = m.albedo(cos_v);
+            assert!(a.min_element() >= 0.0 && a.max_element() <= 1.0);
+        }
     }
     // A diffuse material's albedo is its colour.
-    let d = OpenPBR::diffuse(Vec3A::new(0.8, 0.3, 0.2)).albedo();
+    let d = OpenPBR::diffuse(Vec3A::new(0.8, 0.3, 0.2)).albedo(0.7);
     assert!(
         (d - Vec3A::new(0.8, 0.3, 0.2)).abs().max_element() < 0.05,
         "{d}"
@@ -1490,7 +1501,7 @@ fn scatter_split_draws_the_same_direction() {
 fn the_diffuse_filter_is_the_colour_with_its_layer_weights() {
     let c = Vec3A::new(0.8, 0.4, 0.1);
     let f = 1.0 - f0_from_ior(OpenPBR::diffuse(c).specular_ior);
-    let plain = OpenPBR::diffuse(c).diffuse_filter();
+    let plain = OpenPBR::diffuse(c).diffuse_filter(0.7);
     assert!((plain - c * f).abs().max_element() < 1e-6, "{plain}");
 
     // A coat dims it by its (colour-dependent, view-independent) darkening,
@@ -1500,19 +1511,19 @@ fn the_diffuse_filter_is_the_colour_with_its_layer_weights() {
         ..OpenPBR::diffuse(c)
     };
     let expected = c * f * coat_darkening(&coated);
-    assert!((coated.diffuse_filter() - expected).abs().max_element() < 1e-6);
+    assert!((coated.diffuse_filter(0.7) - expected).abs().max_element() < 1e-6);
 
     // No diffuse lobe, no filter.
     let glass = OpenPBR {
         transmission_weight: 1.0,
         ..OpenPBR::default()
     };
-    assert_eq!(glass.diffuse_filter(), Vec3A::ZERO);
+    assert_eq!(glass.diffuse_filter(0.7), Vec3A::ZERO);
     let metal = OpenPBR {
         base_metalness: 1.0,
         ..OpenPBR::default()
     };
-    assert_eq!(metal.diffuse_filter(), Vec3A::ZERO);
+    assert_eq!(metal.diffuse_filter(0.7), Vec3A::ZERO);
 }
 
 /// Thin-walled sheets the straight-transmission tests share: clear and
@@ -1567,8 +1578,9 @@ fn straight_transmittance_is_the_delta_samples_weight() {
         ..HitRecord::new()
     };
     for (name, m) in thin_sheets() {
-        let p_select = LobePmf::selecting::<true>(&m)[Lobe::Transmission].max(1e-4);
         for theta in [0.0f32, 0.6, 1.2] {
+            let p_select =
+                LobePmf::selecting::<true>(&m, theta.cos())[Lobe::Transmission].max(1e-4);
             let d = Vec3A::new(theta.sin(), 0.0, -theta.cos());
             let r_in = Ray::new(-d, d);
             let t = m.straight_transmittance(&r_in, &rec);
@@ -1687,4 +1699,236 @@ fn only_a_thin_transmissive_wall_has_straight_transmission() {
         }
         .has_straight_transmission()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fuzz: Zeltner's sheen over a view-dependent attenuation of the base
+// ---------------------------------------------------------------------------
+
+/// The ray toward a shading point at the origin (normal +Z) from view
+/// direction `v`, and its hit.
+fn fuzz_hit(v: Vec3A) -> (Ray, HitRecord) {
+    let rec = HitRecord {
+        normal: Vec3A::Z,
+        front_face: true,
+        ..HitRecord::new()
+    };
+    (Ray::new(v, -v), rec)
+}
+
+fn view_at(cos: f32) -> Vec3A {
+    let s = (1.0 - cos * cos).max(0.0).sqrt();
+    Vec3A::new(s * 0.8, s * 0.6, cos)
+}
+
+/// `∫ g(ω) dω` over the hemisphere above the surface, by the midpoint rule
+/// in `(t, φ)` with `cos θ = t²`, which crowds the nodes toward the horizon
+/// where a low-roughness sheen lives.
+fn over_hemisphere(g: impl Fn(Vec3A) -> Vec3A) -> Vec3A {
+    const NT: usize = 384;
+    const NP: usize = 192;
+    let mut sum = glam::DVec3::ZERO;
+    for i in 0..NT {
+        let t = (i as f32 + 0.5) / NT as f32;
+        let cos = t * t;
+        let sin = (1.0 - cos * cos).max(0.0).sqrt();
+        for j in 0..NP {
+            let phi = 2.0 * PI * (j as f32 + 0.5) / NP as f32;
+            let w = Vec3A::new(sin * phi.cos(), sin * phi.sin(), cos);
+            sum += g(w).as_dvec3() * (2.0 * t as f64);
+        }
+    }
+    (sum / (NT as f64) * (2.0 * std::f64::consts::PI / NP as f64)).as_vec3a()
+}
+
+/// The directional albedo of `m` at view cosine `cos`: `∫ f·cos dω`.
+fn directional_albedo(m: &OpenPBR, cos: f32) -> Vec3A {
+    let (r_in, rec) = fuzz_hit(view_at(cos));
+    over_hemisphere(|l| m.eval(&r_in, &rec, l).map_or(Vec3A::ZERO, |(f, _)| f))
+}
+
+fn fuzz_only(roughness: f32) -> OpenPBR {
+    OpenPBR {
+        base_weight: 0.0,
+        specular_weight: 0.0,
+        fuzz_weight: 1.0,
+        fuzz_roughness: roughness,
+        ..OpenPBR::default()
+    }
+}
+
+/// The materials spec's numbers: a white fuzz alone reflects the table's R.
+#[test]
+fn a_fuzz_reflects_its_view_dependent_albedo() {
+    let a = directional_albedo(&fuzz_only(0.3), 1.0).x;
+    assert!((a - 0.0008).abs() < 2e-4, "smooth fuzz head-on: {a}");
+    let a = directional_albedo(&fuzz_only(0.3), 0.25).x;
+    assert!((a - 0.166).abs() < 2e-3, "smooth fuzz at cos 0.25: {a}");
+    let a = directional_albedo(&fuzz_only(1.0), 1.0).x;
+    assert!((a - 0.342).abs() < 2e-3, "rough fuzz head-on: {a}");
+}
+
+/// A white diffuse under a white fuzz of any weight and roughness reflects
+/// no more than a white furnace gives it, at any view: the fuzz takes
+/// `w · R` and passes `1 − w · R` to a base that reflects at most all of it.
+#[test]
+fn a_fuzz_over_a_white_diffuse_conserves_energy() {
+    for w in [0.3, 1.0] {
+        for r in [0.0, 0.3, 1.0] {
+            let m = OpenPBR {
+                base_color: Vec3A::ONE,
+                specular_weight: 0.0,
+                fuzz_weight: w,
+                fuzz_roughness: r,
+                ..OpenPBR::default()
+            };
+            for cos in [0.05, 0.3, 0.7, 1.0] {
+                let a = directional_albedo(&m, cos).max_element();
+                assert!(a <= 1.0 + 2e-3, "w {w} r {r} cos {cos}: {a}");
+            }
+        }
+    }
+}
+
+/// The samples of a fuzz alone weigh the fuzz's albedo, `fuzz_color · R`:
+/// the LTC is sampled exactly. Not every one of them: the absent lobes keep
+/// floored selection weights (`LobePmf::selecting`, its KNOWN ISSUE), so a
+/// sample near an absent specular or coat lobe's mirror direction meets its
+/// density too. The median sample, away from those, weighs `R` exactly;
+/// that the mean is unbiased is `a_fuzz_samples_with_the_density_it_reports`.
+#[test]
+fn fuzz_samples_weigh_its_albedo() {
+    for r in [0.1, 0.5, 1.0] {
+        for cos in [0.2, 0.6, 1.0] {
+            let m = OpenPBR {
+                fuzz_color: Vec3A::new(0.9, 0.5, 0.2),
+                ..fuzz_only(r)
+            };
+            let albedo = ZeltnerSheen::new(r, cos).albedo();
+            if albedo < 0.05 {
+                continue;
+            }
+            let (r_in, rec) = fuzz_hit(view_at(cos));
+            let mut sampler = s();
+            let mut weights: Vec<f32> = (0..256)
+                .filter_map(|_| m.scatter_importance(&r_in, &rec, sampler.next()))
+                .map(|x| x.value.x / x.pdf / m.fuzz_color.x)
+                .collect();
+            weights.sort_by(f32::total_cmp);
+            let median = weights[weights.len() / 2];
+            assert!(
+                (median - albedo).abs() <= 2e-3 * albedo,
+                "r {r} cos {cos}: median weight {median}, R = {albedo}"
+            );
+        }
+    }
+}
+
+/// The sampler's density is the one `eval` reports, now that the fuzz's
+/// selection weight depends on the view: the density integrates to the
+/// share of samples that land (an LTC can shear some below the plane, where
+/// a sample is lost), and every sample carries the density `eval` gives its
+/// direction.
+#[test]
+fn a_fuzz_samples_with_the_density_it_reports() {
+    let materials = [
+        fuzz_only(0.4),
+        OpenPBR {
+            fuzz_weight: 0.7,
+            fuzz_roughness: 0.6,
+            ..OpenPBR::default()
+        },
+        OpenPBR {
+            coat_weight: 1.0,
+            coat_roughness: 0.2,
+            fuzz_weight: 0.5,
+            fuzz_roughness: 0.2,
+            ..OpenPBR::default()
+        },
+    ];
+    for (i, m) in materials.iter().enumerate() {
+        for cos in [0.15, 0.5, 0.95] {
+            let (r_in, rec) = fuzz_hit(view_at(cos));
+            let mass =
+                over_hemisphere(|l| Vec3A::splat(m.eval(&r_in, &rec, l).map_or(0.0, |(_, p)| p))).x;
+            let n = 4096;
+            let mut sampler = s();
+            let mut landed = 0;
+            for _ in 0..n {
+                if let Some(x) = m.scatter_importance(&r_in, &rec, sampler.next()) {
+                    landed += 1;
+                    let (_, p) = m
+                        .eval(&r_in, &rec, x.ray.direction())
+                        .expect("an opaque surface evaluates");
+                    assert!(
+                        (p - x.pdf).abs() <= 1e-3 * x.pdf.max(1.0),
+                        "material {i} cos {cos}: sampled pdf {} vs eval {p}",
+                        x.pdf
+                    );
+                }
+            }
+            let landed = landed as f32 / n as f32;
+            assert!(
+                (mass - landed).abs() < 0.02,
+                "material {i} cos {cos}: density mass {mass}, samples landed {landed}"
+            );
+        }
+    }
+}
+
+/// Emission passes the fuzz as the light beneath it does: dimmed by
+/// `1 − fuzz_weight · R(ω_o)`. The materials spec's number.
+#[test]
+fn emission_dims_behind_a_fuzz() {
+    let m = OpenPBR {
+        emission_luminance: 1.0,
+        ..fuzz_only(1.0)
+    };
+    let e = m.emitted_directional(1.0).x;
+    assert!((e - (1.0 - 0.342)).abs() < 2e-3, "{e}");
+    // Without a fuzz, exactly what it was.
+    let bare = OpenPBR {
+        fuzz_weight: 0.0,
+        ..m.clone()
+    };
+    assert_eq!(
+        bare.emitted_directional(0.4),
+        bare.emission_color * bare.emission_luminance
+    );
+}
+
+/// The diffuse filter is still what `eval_split`'s diffuse share is made
+/// of, now that the fuzz's attenuation depends on the view: that share
+/// divided by the filter is the same EON shape the fuzz-free material has.
+#[test]
+fn the_diffuse_filter_follows_the_fuzz() {
+    let c = Vec3A::new(0.7, 0.5, 0.3);
+    let fuzzy = OpenPBR {
+        specular_weight: 0.0,
+        fuzz_weight: 0.8,
+        fuzz_roughness: 0.6,
+        ..OpenPBR::diffuse(c)
+    };
+    let bare = OpenPBR {
+        fuzz_weight: 0.0,
+        ..fuzzy.clone()
+    };
+    for cos in [0.2, 0.7] {
+        let v = view_at(cos);
+        let l = Vec3A::new(-0.3, 0.2, 0.9).normalize();
+        let share = |m: &OpenPBR| {
+            let mut out = crate::lpe::LobeSplit::default();
+            eval_split(m, v, l, true, &mut out);
+            out.iter()
+                .find(|(e, _)| e.label == crate::lpe::LobeLabel::Diffuse)
+                .map(|(_, f)| f)
+                .expect("a diffuse share")
+        };
+        let shape_fuzzy = share(&fuzzy) / fuzzy.diffuse_filter(cos);
+        let shape_bare = share(&bare) / bare.diffuse_filter(cos);
+        assert!(
+            (shape_fuzzy - shape_bare).abs().max_element() < 1e-5,
+            "cos {cos}: {shape_fuzzy} vs {shape_bare}"
+        );
+    }
 }

@@ -7,6 +7,7 @@ mod emissive;
 pub use emissive::Emissive;
 pub(crate) mod brdf;
 pub mod closure;
+mod ltc_sheen_table;
 mod openpbr;
 mod pattern;
 pub use openpbr::{InteriorCache, OpenPBR, ResolvedOpenPBR};

@@ -197,6 +197,16 @@ fn materials() -> Vec<(String, Arc<dyn Material>)> {
             }),
         ),
         (
+            "OpenPBR + Ptex under a fuzz over an emissive coat".into(),
+            Arc::new(OpenPBR {
+                base_color_ptex: ptex.clone(),
+                fuzz_weight: 0.8,
+                fuzz_roughness: 0.4,
+                fuzz_color: Vec3A::new(0.9, 0.6, 0.3),
+                ..coated_emitter.clone()
+            }),
+        ),
+        (
             "OpenPBR glass + Ptex".into(),
             Arc::new(OpenPBR {
                 base_color_ptex: ptex.clone(),

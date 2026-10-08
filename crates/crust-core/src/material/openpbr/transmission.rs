@@ -158,7 +158,7 @@ pub(super) fn lobe_spread(m: &OpenPBR, lobe: Lobe) -> f32 {
             m.specular_roughness_anisotropy,
         )),
         Lobe::Coat => from_alpha(roughness_to_alpha_aniso(
-            m.coat_roughness,
+            super::lobes::coat_roughness(m),
             m.coat_roughness_anisotropy,
         )),
         Lobe::Transmission => from_alpha(transmission_alphas(m)),

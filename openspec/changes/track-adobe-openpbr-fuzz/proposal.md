@@ -48,7 +48,8 @@ This change is the first step toward making native OpenPBR track Adobe as a whol
   - Emission is attenuated by the same `1 − fuzz_weight · R(ω_o)`, after the coat
     passage.
   - The fuzz raises the coat's roughness by Adobe's empirical coupling.
-  - The fuzz has no presence when the surface is hit from inside.
+  - Unlike Adobe's, the fuzz stays on a back-facing hit of a surface that is not
+    thin-walled, as the coat and the emission do: most cloth is an open mesh.
   - The lobe-selection weight becomes `fuzz_weight · R(ω_o) · max(fuzz_color)`.
 - **One Zeltner for both paths.** MaterialX `sheen_bsdf` in `zeltner` mode
   evaluates, samples and layers with the same table:

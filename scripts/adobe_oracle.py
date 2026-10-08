@@ -172,6 +172,10 @@ def corner_cases():
         cases.append((f"metal-r{r}", {"base_metalness": 1.0, "specular_roughness": r}, view_at(0.6)))
     for r in (0.0, 0.3, 0.8):
         cases.append((f"coat-only-r{r}", {**black, "coat_weight": 1.0, "coat_roughness": r}, view_at(0.6)))
+    # The coat under the fuzz-over-coat cases, without the fuzz: their
+    # difference from Adobe is the coat's unless these match.
+    for c in (0.1, 0.5, 1.0):
+        cases.append((f"coat-only-c{c}", {**black, "coat_weight": 1.0, "coat_roughness": 0.2}, view_at(c)))
     cases.append(("coat", {"coat_weight": 1.0, "coat_roughness": 0.3}, view_at(0.6)))
     cases.append(("emission", {**black, "emission_luminance": 3.0}, view_at(0.5)))
     cases.append(("emission-inside", {**black, "emission_luminance": 3.0}, view_at(-0.5)))
@@ -182,6 +186,12 @@ def corner_cases():
     cases.append(("thin-film", {"base_weight": 0.0, "thin_film_weight": 1.0}, view_at(0.6)))
     cases.append(("anisotropic", {"base_weight": 0.0, "specular_roughness_anisotropy": 0.8}, view_at(0.6)))
     cases.append(("thin-walled", {**black, "geometry_thin_walled": 1}, view_at(0.6)))
+    cases.append(("thin-walled-diffuse", {"specular_weight": 0.0, "geometry_thin_walled": 1}, view_at(0.6)))
+    cases.append((
+        "thin-film-without-specular",
+        {"specular_weight": 0.0, "base_color": (0.86, 0.72, 0.04), "thin_film_weight": 0.34, "thin_film_thickness": 0.13},
+        view_at(0.6),
+    ))
     return cases
 
 
@@ -200,10 +210,13 @@ def line(case_id, inputs, view, lights):
 
 
 def cases():
+    # Separate streams, so adding a corner case leaves every random case as
+    # it was.
+    corner_rng = random.Random(SEED + 1)
     rng = random.Random(SEED)
     out = []
     for case_id, inputs, view in corner_cases():
-        out.append(line(case_id, inputs, view, [sphere(rng) for _ in range(LIGHTS_PER_CASE)]))
+        out.append(line(case_id, inputs, view, [sphere(corner_rng) for _ in range(LIGHTS_PER_CASE)]))
     for i in range(RANDOM_CASES):
         inputs = random_inputs(rng)
         cos_v = rng.uniform(0.05, 1.0) * (-1.0 if rng.random() < 0.1 else 1.0)
