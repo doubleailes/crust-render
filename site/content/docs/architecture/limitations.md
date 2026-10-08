@@ -127,6 +127,10 @@ render.
   same stage can differ when that estimate sits near 1.
 - **Surfaces only.** Volumes and phase functions aren't guided.
 - **Luminance only.** The guide is trained on luminance, not per colour channel.
+- **Darker where fireflies carry the image.** On ALab, a guided render of a crop came
+  out 6.9% darker than an unguided one over 40 seeds — a bias, not noise, and not yet
+  diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)).
+  `crust diagnostic` reports guiding as `biased` there, and never suggests it. Scenes without strong fireflies (the Cornell box, `veach_mis`) show no shift.
 
 ## Diagnostic
 

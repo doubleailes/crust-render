@@ -4,7 +4,7 @@
 
 use std::fmt::Write;
 
-use super::report::{Action, Num, Report};
+use super::report::{Action, Finding, FindingKind, Num, Report, Verdict};
 
 /// `x` as the JSON writes it (four significant digits), or `–`.
 fn n(x: Num) -> String {
@@ -25,6 +25,25 @@ fn pct(x: Num) -> String {
     } else {
         "–".into()
     }
+}
+
+/// A signed share: `+0.1%`, `−61%`.
+fn signed_pct(x: Num) -> String {
+    if x.0.is_finite() {
+        let v = super::report::sig4(100.0 * x.0);
+        if v < 0.0 {
+            format!("−{}%", -v)
+        } else {
+            format!("+{v}%")
+        }
+    } else {
+        "–".into()
+    }
+}
+
+/// A finding's evidence `name`, as a [`Num`].
+fn evidence(f: &Finding, name: &str) -> Num {
+    Num(f.evidence.get(name).unwrap_or(f64::NAN))
 }
 
 /// `s` as a table cell: a `|` would end the cell, a line break the row.
@@ -70,16 +89,13 @@ impl Report {
             |p| format!("{} ({})", p.section, pct(p.share)),
         );
         writeln!(o, "- **Top time sink:** {sink}")?;
-        writeln!(
-            o,
-            "- **Top noise source:** {}",
-            or_dash(&self.noise_breakdown.dominant)
-        )?;
+        writeln!(o, "- **Top noise source:** {}", self.noise_source())?;
+        writeln!(o, "- **Picture:** {}", self.picture())?;
         let best = self.suggestions.first().map_or_else(
             || "none".to_owned(),
             |s| {
                 format!(
-                    "{} (ΔEff {})",
+                    "{} (ΔEff {}{})",
                     s.flag
                         .as_ref()
                         .map(|f| code(&format!("{f} {}", s.value)))
@@ -88,15 +104,26 @@ impl Report {
                             .as_ref()
                             .map(|a| code(&format!("{a} = {}", s.value))))
                         .unwrap_or_else(|| s.id.clone()),
-                    n(s.expected_delta_eff)
+                    n(s.expected_delta_eff),
+                    at_target(s.expected_delta_eff, Some(s.expected_delta_eff_at_target))
                 )
             },
         );
         writeln!(o, "- **Best change:** {best}")?;
+        let undecided = self
+            .trials
+            .iter()
+            .filter(|t| t.verdict == Verdict::InsufficientSamples)
+            .count();
         writeln!(
             o,
             "- **Converged:** {}",
-            if self.converged { "yes" } else { "no" }
+            match (self.converged, undecided) {
+                (true, _) => "yes".to_owned(),
+                (false, 0) => "no".to_owned(),
+                (false, k) =>
+                    format!("no — {k} trial(s) need more samples to decide: raise `--budget`"),
+            }
         )?;
         writeln!(o)?;
 
@@ -165,6 +192,13 @@ impl Report {
                 if ph.completed { "" } else { " (incomplete)" }
             )?;
         }
+        writeln!(
+            o,
+            "- seeds {:?}; held back from tier 1: {} s for tier 2, {} s for tier 3",
+            r.seeds,
+            n(r.tier2_reserve_s),
+            n(r.tier3_reserve_s)
+        )?;
         if let Some(phase) = &r.budget_exceeded_in {
             writeln!(o, "- **budget exceeded in {phase}**")?;
         }
@@ -320,7 +354,15 @@ impl Report {
         } else {
             writeln!(
                 o,
-                "| trial | overall ΔEff | verdict | per crop (median [min, max]: verdict) |"
+                "ΔEff is on render time and trimmed MRSE; the luminance shift is the picture \
+                 check against the paired baseline; the floor is the baseline's own spread \
+                 across seeds."
+            )?;
+            writeln!(o)?;
+            writeln!(
+                o,
+                "| trial | overall ΔEff | verdict | per crop (median [min, max]: verdict; shift, \
+                 floor) |"
             )?;
             writeln!(o, "|---|---|---|---|")?;
             for t in &self.trials {
@@ -329,21 +371,26 @@ impl Report {
                     .iter()
                     .map(|c| {
                         format!(
-                            "{} @{} spp: {} [{}, {}]: {}",
+                            "{} @{} spp: {} [{}, {}]: {}; shift {} (z {}), floor {}",
                             c.crop,
                             c.spp,
                             n(c.median),
                             n(c.min),
                             n(c.max),
-                            c.verdict.name()
+                            c.verdict.name(),
+                            signed_pct(c.luminance_shift),
+                            n(c.luminance_shift_z),
+                            opt(c.noise_floor)
                         )
                     })
                     .collect();
                 writeln!(
                     o,
-                    "| {} | {} | {} | {} |",
+                    "| {} | {}{} | {} | {} |",
                     cell(&t.id),
                     opt(t.overall_delta_eff),
+                    t.overall_delta_eff
+                        .map_or_else(String::new, |e| at_target(e, t.delta_eff_at_target)),
                     t.verdict.name(),
                     cell(&per.join("; "))
                 )?;
@@ -367,9 +414,10 @@ impl Report {
                 writeln!(
                     o,
                     "- estimated spp to reach it: {}; projected full-frame render time {} s \
-                     (sampling only)",
+                     (sampling only), and {} s of setup",
                     opt(sb.spp_to_target),
-                    opt(sb.projected_render_s)
+                    opt(sb.projected_render_s),
+                    opt(sb.projected_setup_s)
                 )?;
                 for a in &sb.adaptive {
                     writeln!(
@@ -423,6 +471,18 @@ impl Report {
                 pct(h.mean_luminance_change)
             )?;
         }
+        match &pc.light_sampling_reach {
+            Some(r) => writeln!(
+                o,
+                "- light-sampling reach: {}. Below 100%, part of the energy arrives only on \
+                 paths BSDF sampling finds",
+                r.iter()
+                    .map(|c| format!("{} {} (z {})", c.crop, pct(c.reach), n(c.z)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?,
+            None => writeln!(o, "- light-sampling reach: not measured")?,
+        }
         let sd = &pc.subdivision;
         writeln!(
             o,
@@ -467,12 +527,14 @@ impl Report {
         for s in &self.suggestions {
             writeln!(
                 o,
-                "- **{}**: flag {}, attribute {}, value {}, expected ΔEff {} (evidence: {})",
+                "- **{}**: flag {}, attribute {}, value {}, expected ΔEff {}, {} at the target \
+                 (evidence: {})",
                 s.id,
                 s.flag.as_deref().map_or_else(|| "–".into(), code),
                 s.usd_attribute.as_deref().map_or_else(|| "–".into(), code),
                 code(&s.value),
                 n(s.expected_delta_eff),
+                n(s.expected_delta_eff_at_target),
                 s.evidence.join(", ")
             )?;
         }
@@ -536,6 +598,82 @@ impl Report {
             }
         }
         Ok(())
+    }
+}
+
+/// `, X at the target` when the at-target ΔEff differs from `overall`.
+fn at_target(overall: Num, at: Option<Num>) -> String {
+    match at {
+        Some(a) if n(a) != n(overall) => format!(", {} at the target", n(a)),
+        _ => String::new(),
+    }
+}
+
+impl Report {
+    fn finding(&self, id: &str) -> Option<&Finding> {
+        self.static_findings.iter().find(|f| f.id == id)
+    }
+
+    /// The verdict's top noise source: the dominant row, and when rare
+    /// paths carry the energy, the numbers that say so.
+    fn noise_source(&self) -> String {
+        let mut cites = Vec::new();
+        if let Some(f) = self.finding("firefly_energy") {
+            cites.push(format!(
+                "{} of the energy in {} of the pixels",
+                pct(evidence(f, "luminance_share")),
+                pct(evidence(f, "top_pixels_share"))
+            ));
+        }
+        if let Some(f) = self.finding("light_sampling_misses") {
+            cites.push(format!(
+                "light sampling reaches {}",
+                pct(evidence(f, "reach"))
+            ));
+        }
+        let row = or_dash(&self.noise_breakdown.dominant);
+        if cites.is_empty() {
+            row.to_owned()
+        } else {
+            format!("{row} — {}", cites.join("; "))
+        }
+    }
+
+    /// The verdict's picture line (D6): every correctness finding and every
+    /// `biased` trial, each with its number, or `none`.
+    fn picture(&self) -> String {
+        let mut items: Vec<String> = self
+            .static_findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Correctness)
+            .map(|f| format!("{}: {}", code(&f.id), f.summary))
+            .collect();
+        for t in self.trials.iter().filter(|t| t.verdict == Verdict::Biased) {
+            let worst = t
+                .per_crop
+                .iter()
+                .filter(|c| c.verdict == Verdict::Biased)
+                .max_by(|a, b| {
+                    a.luminance_shift
+                        .0
+                        .abs()
+                        .total_cmp(&b.luminance_shift.0.abs())
+                });
+            items.push(match worst {
+                Some(c) => format!(
+                    "{} changes the picture: luminance {} on {}",
+                    code(&t.id),
+                    signed_pct(c.luminance_shift),
+                    c.crop
+                ),
+                None => format!("{} changes the picture", code(&t.id)),
+            });
+        }
+        if items.is_empty() {
+            "none".into()
+        } else {
+            items.join("; ")
+        }
     }
 }
 

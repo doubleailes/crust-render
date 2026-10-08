@@ -2,7 +2,7 @@
 title = "Diagnosing a render"
 description = "Read crust diagnostic's report, trust its verdicts, and use it in a loop."
 date = 2026-10-08T08:00:00+00:00
-updated = 2026-10-08T08:00:00+00:00
+updated = 2026-10-08T18:00:00+00:00
 draft = false
 weight = 20
 sort_by = "weight"
@@ -28,9 +28,12 @@ The stage is imported once. Then, until the budget is spent:
    comparison below uses. It measures the noise of each kind of light path, the time
    spent in each 16×16 tile, what the clamp would remove, path statistics and cache hit
    rates.
-2. **Static findings**, from the import and the baseline: textures without a `.tx`, a
+2. **Findings**, from the import, the baseline and tier 3: textures without a `.tx`, a
    cache that misses, emissive geometry no shadow ray can find, many lights picked
-   uniformly, guiding on where direct light dominates, memory near the machine's.
+   uniformly, guiding on where direct light dominates, memory near the machine's — and
+   what makes the picture fragile: a clamp that removes a visible share of the image, a
+   few pixels holding much of the energy, light that only BSDF sampling finds, a
+   visualization strategy authored (see [The picture](#the-picture)).
 3. **Crops.** Up to three windows of the frame: the noisiest, the slowest, and one
    typical of both (never pure background). Each is at least 128 pixels square and gives
    every worker thread four tiles. `--region` makes that region the only crop.
@@ -40,79 +43,157 @@ The stage is imported once. Then, until the budget is spent:
    guiding on or off. Then the winners of different settings are tried together.
    `--strategy light` and `--strategy bsdf` are never tried: they show what MIS
    balances between, and on a scene with light only one of them reaches they render
-   darker while looking less noisy.
+   darker while looking less noisy. Every trial is checked for a change of the picture
+   before its efficiency counts.
 5. **Tier 2, sample budget.** The samples per pixel the best settings need to reach a
-   target error, the projected render time, and adaptive sampling measured on each crop.
+   target error, the projected render time and setup, and adaptive sampling measured
+   on each crop.
 6. **Tier 3, picture-changing settings.** What the clamp removes, how many paths
-   `max_depth` cuts and what half the depth saves, what subdivision costs. These change
-   the picture, so they are measured and never ranked.
+   `max_depth` cuts and what half the depth saves, what subdivision costs, and how much
+   of each crop's energy light sampling alone reaches. These change the picture, so
+   they are measured and never ranked.
 
-Tier 1 gets 70% of what the baseline leaves, tiers 2 and 3 15% each; what one tier
-leaves unspent passes to the next. A trial whose estimated cost would overrun is not
-started, and is listed under `not_tried` with the reason `budget`.
+Once the baseline has run, tiers 2 and 3 **reserve** their estimated render cost, and
+tier 1 may spend everything else: the trials' sample count is the largest power of two
+at which all of tier 1 and the later tiers fit. What one tier leaves unspent passes to
+the next. The report states both reserves (`run.tier2_reserve_s`, `run.tier3_reserve_s`).
+A trial or measurement whose estimated cost would overrun is not started, and is listed
+under `not_tried` with the reason `budget` — in every tier, including when tier 1 ran
+long.
 
 ## Efficiency, and how it is measured
 
-A trial is judged by **efficiency**, `E = 1 / (time × MRSE)`, where MRSE is the mean
-over pixels of the variance of the pixel over its squared luminance. Error falls as
-1/spp while time grows as spp, so `E` does not depend on the sample count: a setting
+A trial is judged by **efficiency**, `E = 1 / (render time × MRSE)`, where MRSE is the
+mean over pixels of the variance of the pixel over its squared luminance. Error falls
+as 1/spp while time grows as spp, so `E` does not depend on the sample count: a setting
 that is twice as slow but has a quarter of the error is twice as efficient. The report
 gives `ΔEff = E_trial / E_baseline`: above 1 the trial is better.
 
-Three rules keep the measurement honest:
+These rules keep the measurement honest:
 
-- **Interleaved pairs.** On each crop, the baseline and the trial are rendered
-  alternately, `--repeats` times (B T B T B T), so background load lands on both sides.
-  Each pair gives one ΔEff.
+- **Interleaved pairs, one seed each.** On each crop, the baseline and the trial are
+  rendered alternately, `--repeats` times (B T B T B T), so background load lands on
+  both sides. Both renders of a pair use the same sampler seed, and each pair a
+  different one: pair 0 the scene's own (`crust:frame`, or `-f`), the next ones a fixed
+  step from it, so two runs render the same images. `run.seeds` lists them. Each pair
+  gives one ΔEff, and an independent draw of the error.
+- **The picture first.** Before its efficiency counts, every trial is checked for a
+  change of the picture against the paired baseline (see
+  [The picture check](#the-picture-check)).
 - **One reference per crop.** Every MRSE is measured against the same image: the
-  inverse-variance blend of every unbiased image of that crop. Measuring each image
-  against its own noisy mean would bias the comparison.
+  inverse-variance blend of the baseline's image of every seed and of every trial image
+  that passed the picture check. Measuring each image against its own noisy mean would
+  bias the comparison; letting a darker image in would bias it too.
+- **Trimmed error.** Within a pair, the MRSE leaves out the 0.1% of pixels with the
+  largest relative variance on either side — the same pixels on both — so one firefly
+  that happened to land on one side does not decide the pair. The untrimmed values are
+  reported beside the trimmed ones, and a crop is only `better` (or `worse`) when its
+  untrimmed median ΔEff leans the same way: trimming can withhold a verdict, never
+  create one.
 - **Unbiased conditions.** The clamp is off and adaptive sampling is off, so no trial
   can "win" by removing energy or by stopping where it happens to look converged.
 
-Time includes **setup** — the `learned` light selection's pre-pass and guiding's
-training — because a render pays it. Setup does not grow with the image the way sampling
-does, so it is reported separately, and full-frame projections leave it out.
+**Setup** — the `learned` light selection's pre-pass and guiding's training — is
+reported per pair (`setup_trial_s`) but left out of a pair's ΔEff: on a small crop at a
+few samples it would weigh far more than in the render it stands for. It is charged
+where a render pays it, in the **ΔEff at the target** (`delta_eff_at_target`): the
+baseline's projected full-frame time to reach tier 2's target error, setup included,
+over the trial's. The pre-pass counts as measured (it trains over the whole frame
+whatever the crop), guiding's training scaled from the crop to the frame. Without
+setup on either side it equals the overall ΔEff. It is an estimate, and it can only
+veto a suggestion.
 
 ## Verdicts and their thresholds
 
+A crop's **noise floor** is how far its error estimate moves when only the seed
+changes: the largest over the smallest of the baseline's MRSEs across seeds (each
+trimmed on its own top 0.1%). A gain has to beat it.
+
+On each crop, the verdict is the first that applies:
+
 | verdict | rule |
 |---------|------|
-| `better` | on a crop: **every** pair above 1.05 |
-| `worse` | on a crop: **every** pair below 0.95 |
-| `inconclusive` | anything else — within ±5% is noise, never a gain |
-| `mixed` | overall: one crop `better` and another `worse` |
+| `biased` | the trial changed the picture (see below), whatever its ΔEff |
+| `better` | **every** pair above both 1.05 and the noise floor, and the untrimmed median above 1 |
+| `worse` | **every** pair below both 0.95 and the floor's reciprocal, and the untrimmed median below 1 |
+| `insufficient_samples` | the noise floor is above 1.10: the probe could not have resolved a gain worth suggesting |
+| `inconclusive` | anything else — the setting does not matter here |
 
-The **overall ΔEff** is the geometric mean of the per-crop medians. A trial is `better`
-overall when at least one crop is better, none is worse, and the overall ΔEff itself
-clears 1.05. Pairs of 1.03, 1.08 and 0.98 are `inconclusive`, and not suggested.
+The **overall ΔEff** is the geometric mean of the per-crop medians. Overall, a trial is
+`biased` when any crop is; otherwise `mixed` when one crop is `better` and another
+`worse`; `better` when at least one crop is better, none is worse, and the overall ΔEff
+itself clears 1.05 (`worse` symmetrically); `insufficient_samples` when no crop is
+better or worse and one is `insufficient_samples`; `inconclusive` otherwise. Pairs of
+1.03, 1.08 and 0.98 under a floor of 1.04 are `inconclusive`, and not suggested; a
+baseline whose MRSE reads 2.7, 6.1 and 3.4 across its seeds has a floor of 2.26, and
+its crop is `insufficient_samples` whatever the trial's pairs say.
 
-A trial becomes a **suggestion** only when it is `better` with an overall ΔEff of at
-least **1.10**. The combined trial is suggested when it beats the best single one.
+A trial becomes a **suggestion** only when it is `better` with both an overall ΔEff and
+a ΔEff at the target of at least **1.10**. A `biased` trial is never suggested, never
+one of the winners the combined trial is built from, and never part of a reference.
+The combined trial is suggested when it beats the best single one.
 
-The scene is **converged** when no trial is `better` by 1.10 or more and no `time` or
-`noise` finding has an action left to take.
+The scene is **converged** when no trial clears the suggestion bar, none is
+`insufficient_samples`, and no `time` or `noise` finding has an action left to take.
+
+### The picture check
+
+Every tier-1 trial, the combined one included, is checked on each crop against the
+baseline rendered in the same pair, with the same seed. The **luminance shift** is
+the relative difference of the two crops' mean luminance, `mean_T / mean_B − 1`,
+over the crop's pixels except the 1% whose two values differ most — so a handful of
+fireflies cannot produce it. Its **z** is the shift over its standard error, from both
+images' own per-pixel variance. A crop is `biased` when the shift is beyond **2%**
+(under 0.03 stops: below what a lighting review notices) **and** z is beyond **4**, in
+**every** pair. Each per-crop result reports both mean luminances, the shift and its z,
+so you can read "did this change the picture?" in the report itself.
+
+Why it exists: on ALab (frame 1004), before the check, the diagnostic ranked
+`--strategy light` its best change — ΔEff 14.3, `better` on every crop — and the
+light-only image is **61% darker** (beauty mean 0.361 against 0.937 with MIS). Its
+error was the lowest of every image, because the energy it lost is the energy that
+carried the noise; it then dominated each crop's reference and biased every other
+trial's measurement too. The light-only and BSDF-only strategies are no longer tried,
+and the check guards the trials that remain: every one of them is unbiased by design, so
+a `biased` verdict on one of them points at a renderer bug, not at the setting.
+
+### When the verdict is `insufficient_samples`
+
+`inconclusive` says "this setting does not matter here"; `insufficient_samples` says
+"the probe cannot tell". The trials ran at too few samples for this scene's noise —
+typically one where rare, bright paths carry the picture, which the
+[picture findings](#the-picture) then name. A larger `--budget` buys more samples per
+trial; `--region` on the crop that matters spends them where they count. Each larger
+budget raises the trial spp, but a scene may need more than you will spend: stop at
+the budget you accept, and treat what is still `insufficient_samples` then as not worth
+changing at that budget.
+
+With `--repeats 1` there is one seed and no noise floor (`noise_floor: null`, taken as
+1): such a run cannot report `insufficient_samples`.
 
 ## Reading the report
 
 The Markdown on stdout and the JSON at `--json` hold the same data in the same order;
 the Markdown starts with a short **Verdict**: the top time sink (the largest profile
-section), the top noise source, the best change, and whether the scene has converged.
+section), the top noise source (with the firefly numbers when they are findings), the
+**picture** (every correctness finding and every `biased` trial, each with its number,
+or `none`), the best change, and whether the scene has converged — or that more budget
+is needed to decide.
 
 | section | holds |
 |---------|-------|
 | `scene` | the stage, frame, camera, resolution and region — what makes two reports comparable |
 | `effective_settings` | every setting the diagnosis ran with, each with the flag and the `crust:*` attribute that set it |
-| `run` | budget, time used, import time, threads, repeats, the probe conditions, each phase's time, where the budget ran out, the exit status |
-| `static_findings` | each with an id, a kind (`time`, `noise`, `memory`, `correctness`), numbers, and an action: a flag and/or attribute with a value, or `none` with the reason crust has no setting for it |
+| `run` | budget, time used, import time, threads, repeats, the probe conditions, each phase's time, where the budget ran out, the exit status, each pair's seed, and the reserves held for tiers 2 and 3 |
+| `static_findings` | each with an id, a kind (`time`, `noise`, `memory`, `correctness`), numbers, and an action: a flag and/or attribute with a value, or `none` with the reason crust has no setting for it. Assembled when the run ends, reported first |
 | `baseline` | its spp and time, MRSE, rays per second, path statistics, the largest profile sections, cache hit rates, peak memory |
 | `noise_breakdown` | the relative error of each kind of light path, and of each light group |
 | `crops` | each crop's rectangle (image pixels, top-left origin), why it was chosen, its share of the baseline's work, and its reference's own error |
-| `trials` | per crop: every pair's ΔEff, the median, min and max, both sides' error and time, the verdict; then the overall ΔEff and verdict |
-| `sample_budget` | estimates only: spp and time to a target error; adaptive sampling measured per crop |
-| `picture_changing` | the clamp, `max_depth` and subdivision numbers |
-| `not_tried` | every trial that did not run, and why: `budget` or `not_applicable` |
-| `suggestions` | each with its flag, attribute, value, expected overall ΔEff and the trials that are its evidence |
+| `trials` | per crop: every pair's ΔEff (trimmed, and `delta_eff_untrimmed`), the median, min and max, both sides' error (trimmed and untrimmed), render time (`render_baseline_s`, `render_trial_s`) and setup, the verdict, both sides' mean luminance, the luminance shift and its z, the noise floor; then the overall ΔEff, the verdict and the ΔEff at the target |
+| `sample_budget` | estimates only: spp, render time and setup to a target error; adaptive sampling measured per crop |
+| `picture_changing` | the clamp, `max_depth` and subdivision numbers, and the light-sampling reach per crop |
+| `not_tried` | every trial or measurement that did not run, and why: `budget` or `not_applicable` |
+| `suggestions` | each with its flag, attribute, value, expected overall ΔEff and ΔEff at the target, and the trials that are its evidence |
 | `converged`, `suggested_command` | the verdict, and a `crust render` line applying every suggestion |
 | `deltas` | with `--baseline` only: see below |
 
@@ -144,6 +225,32 @@ first try light selection.
 **Light groups** add one row per `crust:light:lpeTag`, or, with no tags and at most
 eight lights, one per light, named by its prim path. The labels only route light to the
 rows; the image is unchanged by them.
+
+### The picture
+
+Some findings describe the scene rather than a setting: what makes its picture depend
+on rare paths. They lead the verdict block, before the best change.
+
+| finding | kind | fires when | evidence |
+|---------|------|------------|----------|
+| `clamp_bias` | `correctness` | the authored indirect clamp would remove at least **5%** of the baseline's luminance | the limit, the share of luminance removed, the share of pixels touched |
+| `firefly_energy` | `noise` | the brightest **0.1%** of the baseline's pixels hold at least **20%** of its luminance, not counting light seen directly or in one glossy or mirror reflection (the `emission` and `direct_glossy` rows: the brightest thing in a pixel without being noise) | that share, the baseline's spp (more samples spread a firefly over more pixels), the row holding most of it |
+| `light_sampling_misses` | `noise` | light sampling alone reaches less than **90%** of a crop's energy, with \|z\| beyond 4 | the lowest reach, its z, its crop |
+| `visualization_strategy` | `correctness` | the stage authors `--strategy light` or `bsdf` | action: `--strategy power` / `crust:samplingStrategy = power` |
+
+The **light-sampling reach** (`picture_changing.light_sampling_reach`) is one light-only
+render of each crop over the crop's baseline image of the same seed and samples, every
+pixel counted. Both render the same paths, so `1 − reach` is exactly the share of the
+energy that only bounce-hit emission brings: the light MIS has no partner strategy for,
+where fireflies come from. It is `null`, and listed as `not_applicable`, when the scene
+has no light or the stage already authors a single strategy.
+
+The first three have no setting that fixes them: no crust setting makes these paths
+reachable by light sampling, and no clamp value is a gain — the clamp trades this energy
+for fireflies, and `--indirect-clamp` / `crust:indirectClamp` is that trade's knob. So
+their action is `none`, and they never keep the scene from converging. On ALab the
+default clamp removes 66% of the luminance, and the top 0.1% of pixels hold 41% of the
+beauty: the scene's noise *is* its picture.
 
 ## A worked loop
 
@@ -181,8 +288,9 @@ values on the stage: every suggestion names its `crust:*` attribute.
 format version: the deltas then say `not comparable` and hold nothing else.
 
 A `mixed` or `inconclusive` verdict is an answer, not a failure: the setting does not
-reliably help here. If everything reads `inconclusive` on a busy machine, give it more
-`--budget` or `--repeats`.
+reliably help here. `insufficient_samples` is the probe saying it needs a larger
+`--budget` to answer (see above). A `biased` verdict on a tier-1 setting is worth a bug
+report: every one of them is meant to change only noise and time.
 
 ## Limitations
 
@@ -198,5 +306,13 @@ reliably help here. If everything reads `inconclusive` on a busy machine, give i
   crop, the whole frame, and a `--region` smaller than it is used as given, with a
   warning: either way, on many threads, part of what is timed is the pool's ramp-up.
 - **Subdivision's build time is not recorded**, so that number is `null`.
+- **The picture check trims.** A bias only a few pixels show — a caustic one setting
+  drops — can pass it; the light-sampling reach and `firefly_energy`, which count every
+  pixel, report that energy instead.
+- **At a few samples, a biased trial's shift is a sign, not a measure.** Where
+  fireflies carry the image, the shift depends on which pixels each pair leaves out:
+  on ALab at 4 spp guiding read +8–13% brighter, where it is in fact about 7% darker
+  (at 32 spp the check read −4% to −13%). Trust the verdict; read the number at a
+  larger `--budget`.
 - **Thread time, not wall time.** A crop's baseline time is the time its tiles took on
   their workers, summed: a share of the work.

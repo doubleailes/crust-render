@@ -274,11 +274,18 @@ Thresholds are constants in `checks.rs`, beside `MIN_HIT_RATE`:
 - **`clamp_bias` at 5%.** `removed_luminance_share` is the clamp counter's, already
   verified to within 1e-4 of the clamped render's loss. 5% is about 0.07 stops, the
   smallest exposure error worth a correctness line.
-- **`firefly_energy` at 20% of non-emission luminance in the top 0.1% of pixels.**
-  - It is computed in `noise::measure`, which has every row per pixel: the beauty
-    minus the `emission` row.
+- **`firefly_energy` at 20% of the luminance in the top 0.1% of pixels, light seen
+  directly or in one reflection aside.**
+  - It is computed in `noise.rs` (`top_pixels`), from the film the baseline already
+    renders, which has every row per pixel: the beauty minus the `emission` and
+    `direct_glossy` rows.
   - A light seen directly is the brightest thing in a frame without being noise,
-    which is why direct emission is excluded.
+    which is why direct emission is excluded. A light seen in a glossy or mirror
+    reflection is the same case. Calibration found it: `veach_mis`'s lights in its
+    glossy plates put 35% of the image in 0.1% of the pixels at 64 spp, every bit of
+    it `direct_glossy`, and the finding fired on highlights. Its action reason ("no
+    setting makes these paths reachable by light sampling") is also wrong for direct
+    light, which NEE reaches. So `direct_glossy` is excluded too.
   - 0.1% is the repo's existing trim.
   - For scale: in a converged, smooth image, 0.1% of the pixels hold of the order
     of 0.1–1% of the energy. ALab held 41%.

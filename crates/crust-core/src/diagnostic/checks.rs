@@ -1,13 +1,15 @@
-//! Static findings (design D9): what the import and the baseline say about
-//! a scene before any trial. Each check is a function from [`Facts`] to at
-//! most one [`Finding`]; adding a check is adding a function to [`CHECKS`]
-//! and its test.
+//! Static findings (design D9): what the import, the baseline and tier 3's
+//! measurements say about a scene. Each check is a function from [`Facts`]
+//! to at most one [`Finding`]; adding a check is adding a function to
+//! [`CHECKS`] and its test. The list is assembled when the run ends, and
+//! reported first.
 //!
 //! Every action names a flag or attribute crust has, or is `none` with the
 //! reason crust has no setting for it — never an invented one.
 
-use super::report::{Action, Evidence, Finding, FindingKind};
-use crate::LightSelection;
+use super::noise::{TOP_PIXELS, TopPixels};
+use super::report::{Action, Evidence, Finding, FindingKind, sig4};
+use crate::{LightSelection, SamplingStrategy};
 
 /// Above this many lights, picking them uniformly wastes most shadow rays.
 pub const MANY_LIGHTS: usize = 8;
@@ -18,6 +20,25 @@ pub const MIN_HIT_RATE: f64 = 0.90;
 /// A peak resident size above this share of the machine's memory is a
 /// finding.
 pub const MAX_MEMORY_SHARE: f64 = 0.80;
+
+/// An authored clamp removing at least this share of the luminance is a
+/// correctness finding: about 0.07 stops.
+pub const CLAMP_BIAS: f64 = 0.05;
+
+/// The brightest 0.1% of the pixels holding at least this share of the
+/// luminance (light seen directly or in a reflection aside) is a finding:
+/// a converged, smooth image puts of the order of 0.1–1% there.
+pub const FIREFLY_SHARE: f64 = 0.20;
+
+/// Light sampling reaching less than this share of a crop's energy, beyond
+/// [`REACH_Z`] standard errors, is a finding.
+pub const MIN_REACH: f64 = 0.90;
+pub const REACH_Z: f64 = 4.0;
+
+/// Why no setting fixes energy only BSDF sampling finds.
+const NO_SETTING_REACHES: &str = "no crust setting makes these paths reachable by light \
+     sampling; the indirect clamp (--indirect-clamp, crust:indirectClamp) trades this energy \
+     for fireflies, and no clamp value is a gain";
 
 /// What the checks read. The `Option`s are the facts only the baseline
 /// knows: `None` before it has run (or when the platform cannot say).
@@ -39,6 +60,17 @@ pub struct Facts {
     pub indirect_dominant: Option<bool>,
     pub peak_mem_bytes: Option<u64>,
     pub machine_mem_bytes: Option<u64>,
+    /// The authored sampling strategy.
+    pub strategy: SamplingStrategy,
+    /// The authored clamp's limit, and the share of the baseline's
+    /// luminance and of its pixels it would remove and touch.
+    pub clamp: Option<(f64, f64, f64)>,
+    /// Where the baseline's brightest pixels' energy is.
+    pub top_pixels: Option<TopPixels>,
+    /// The baseline's samples per pixel.
+    pub spp: u32,
+    /// Tier 3's light-sampling reach: `(crop, reach, z)` per crop measured.
+    pub reach: Vec<(String, f64, f64)>,
 }
 
 type Check = fn(&Facts) -> Option<Finding>;
@@ -52,6 +84,10 @@ pub const CHECKS: &[Check] = &[
     many_lights_uniform,
     guiding_without_indirect,
     peak_memory,
+    visualization_strategy,
+    clamp_bias,
+    firefly_energy,
+    light_sampling_misses,
 ];
 
 /// Every finding the facts support, in [`CHECKS`] order.
@@ -240,6 +276,118 @@ fn peak_memory(f: &Facts) -> Option<Finding> {
     )
 }
 
+/// A single-strategy mode authored: it shows what MIS balances between,
+/// and does not converge to the same image wherever one strategy alone
+/// cannot reach a light.
+fn visualization_strategy(f: &Facts) -> Option<Finding> {
+    if !matches!(
+        f.strategy,
+        SamplingStrategy::LightOnly | SamplingStrategy::BsdfOnly
+    ) {
+        return None;
+    }
+    finding(
+        "visualization_strategy",
+        FindingKind::Correctness,
+        format!(
+            "the sampling strategy is {}, a visualization mode: it does not converge to the \
+             same image as MIS on every scene, and every trial is measured against it",
+            f.strategy
+        ),
+        Evidence::new(),
+        Action::Set {
+            flag: Some("--strategy".into()),
+            usd_attribute: Some("crust:samplingStrategy".into()),
+            value: "power".into(),
+        },
+    )
+}
+
+/// The authored clamp removes a visible share of the image.
+fn clamp_bias(f: &Facts) -> Option<Finding> {
+    let (limit, removed, touched) = f.clamp?;
+    if removed.is_nan() || removed < CLAMP_BIAS {
+        return None;
+    }
+    finding(
+        "clamp_bias",
+        FindingKind::Correctness,
+        format!(
+            "the indirect clamp ({limit}) removes {}% of the luminance, touching {}% of the \
+             pixels",
+            sig4(100.0 * removed),
+            sig4(100.0 * touched)
+        ),
+        Evidence::new()
+            .with("limit", limit)
+            .with("removed_luminance_share", removed)
+            .with("pixels_affected_share", touched),
+        Action::None {
+            none: NO_SETTING_REACHES.into(),
+        },
+    )
+}
+
+/// A few pixels hold much of the energy: rare paths carry the picture.
+fn firefly_energy(f: &Facts) -> Option<Finding> {
+    let top = f.top_pixels.as_ref()?;
+    if top.share.is_nan() || top.share < FIREFLY_SHARE {
+        return None;
+    }
+    let mut evidence = Evidence::new()
+        .with("top_pixels_share", TOP_PIXELS)
+        .with("luminance_share", top.share)
+        .with("spp", f.spp as f64);
+    let row = match &top.row {
+        Some((row, share)) => {
+            evidence = evidence.with("row_share", *share);
+            format!("; {}% of theirs is {row}", sig4(100.0 * share))
+        }
+        None => String::new(),
+    };
+    finding(
+        "firefly_energy",
+        FindingKind::Noise,
+        format!(
+            "the brightest {}% of the pixels hold {}% of the luminance (light seen directly \
+             or in a reflection aside) at {} spp{row}",
+            sig4(100.0 * TOP_PIXELS),
+            sig4(100.0 * top.share),
+            f.spp
+        ),
+        evidence,
+        Action::None {
+            none: NO_SETTING_REACHES.into(),
+        },
+    )
+}
+
+/// Light sampling alone misses part of a crop's energy: it arrives only on
+/// paths BSDF sampling finds, which MIS has no partner strategy for.
+fn light_sampling_misses(f: &Facts) -> Option<Finding> {
+    let (crop, reach, z) = f
+        .reach
+        .iter()
+        .filter(|(_, r, z)| r.is_finite() && z.abs() > REACH_Z)
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    if *reach >= MIN_REACH {
+        return None;
+    }
+    finding(
+        "light_sampling_misses",
+        FindingKind::Noise,
+        format!(
+            "light sampling alone reaches {}% of {crop}'s energy: the rest arrives only on \
+             paths BSDF sampling finds",
+            sig4(100.0 * reach)
+        ),
+        Evidence::new().with("reach", *reach).with("z", *z),
+        Action::None {
+            none: NO_SETTING_REACHES.into(),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,11 +536,127 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_visualization_strategy_suggests_power() {
+        for strategy in [SamplingStrategy::LightOnly, SamplingStrategy::BsdfOnly] {
+            let found = run(&Facts {
+                strategy,
+                ..Facts::default()
+            });
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].id, "visualization_strategy");
+            assert_eq!(found[0].kind, FindingKind::Correctness);
+            assert_eq!(
+                found[0].action,
+                Action::Set {
+                    flag: Some("--strategy".into()),
+                    usd_attribute: Some("crust:samplingStrategy".into()),
+                    value: "power".into(),
+                }
+            );
+        }
+        for strategy in [SamplingStrategy::PowerMis, SamplingStrategy::BalanceMis] {
+            assert!(
+                ids(&Facts {
+                    strategy,
+                    ..Facts::default()
+                })
+                .is_empty()
+            );
+        }
+    }
+
+    /// The spec's scenario "A clamp that removes most of the image".
+    #[test]
+    fn a_clamp_removing_five_percent_is_a_correctness_finding() {
+        let at = |removed| Facts {
+            clamp: Some((10.0, removed, 0.076)),
+            ..Facts::default()
+        };
+        let found = run(&at(0.66));
+        assert_eq!(found[0].id, "clamp_bias");
+        assert_eq!(found[0].kind, FindingKind::Correctness);
+        assert_eq!(found[0].evidence.get("removed_luminance_share"), Some(0.66));
+        assert_eq!(found[0].evidence.get("pixels_affected_share"), Some(0.076));
+        assert_eq!(found[0].evidence.get("limit"), Some(10.0));
+        assert!(found[0].summary.contains("66%"), "{}", found[0].summary);
+        assert!(!found[0].action.is_actionable());
+        assert_eq!(ids(&at(CLAMP_BIAS)), ["clamp_bias"]);
+        assert!(ids(&at(0.0499)).is_empty());
+        assert!(ids(&Facts::default()).is_empty());
+    }
+
+    #[test]
+    fn energy_in_a_few_pixels_is_a_noise_finding() {
+        let at = |share| Facts {
+            top_pixels: Some(TopPixels {
+                share,
+                row: Some(("indirect_diffuse".into(), 0.62)),
+            }),
+            spp: 16,
+            ..Facts::default()
+        };
+        let found = run(&at(0.41));
+        assert_eq!(found[0].id, "firefly_energy");
+        assert_eq!(found[0].kind, FindingKind::Noise);
+        assert_eq!(found[0].evidence.get("luminance_share"), Some(0.41));
+        assert_eq!(found[0].evidence.get("spp"), Some(16.0));
+        assert_eq!(found[0].evidence.get("row_share"), Some(0.62));
+        assert!(found[0].summary.contains("indirect_diffuse"));
+        assert!(!found[0].action.is_actionable());
+        assert_eq!(ids(&at(FIREFLY_SHARE)), ["firefly_energy"]);
+        assert!(ids(&at(0.199)).is_empty());
+    }
+
+    /// The spec's scenario "Energy only BSDF sampling finds".
+    #[test]
+    fn light_sampling_that_misses_energy_is_a_noise_finding() {
+        let at = |reach: Vec<(String, f64, f64)>| Facts {
+            reach,
+            ..Facts::default()
+        };
+        let found = run(&at(vec![
+            ("crop_a".into(), 0.95, -9.0),
+            ("crop_b".into(), 0.39, -30.0),
+            // The lowest, but within the noise: not the evidence.
+            ("crop_c".into(), 0.2, -3.0),
+        ]));
+        assert_eq!(found[0].id, "light_sampling_misses");
+        assert_eq!(found[0].evidence.get("reach"), Some(0.39));
+        assert_eq!(found[0].evidence.get("z"), Some(-30.0));
+        assert!(found[0].summary.contains("crop_b"));
+        assert!(!found[0].action.is_actionable());
+        assert!(ids(&at(vec![("crop_a".into(), MIN_REACH, -9.0)])).is_empty());
+        assert!(ids(&at(vec![("crop_a".into(), 0.5, 3.9)])).is_empty());
+        assert!(ids(&at(Vec::new())).is_empty());
+    }
+
+    /// The three picture findings have no action: none blocks `converged`.
+    #[test]
+    fn picture_findings_never_block_convergence() {
+        let f = Facts {
+            clamp: Some((10.0, 0.66, 0.076)),
+            top_pixels: Some(TopPixels {
+                share: 0.41,
+                row: None,
+            }),
+            reach: vec![("crop_a".into(), 0.39, -30.0)],
+            ..Facts::default()
+        };
+        let found = run(&f);
+        assert_eq!(found.len(), 3);
+        assert!(crate::diagnostic::converged(&[], &found));
+    }
+
     /// Every flag and attribute an action names is one crust has.
     #[test]
     fn actions_name_only_real_settings() {
-        let flags = ["--auto-tx", "--light-selection"];
-        let attributes = ["crust:lightSelection", "crust:pathGuiding"];
+        let flags = ["--auto-tx", "--light-selection", "--strategy"];
+        let attributes = [
+            "crust:lightSelection",
+            "crust:pathGuiding",
+            "crust:samplingStrategy",
+        ];
         let all = Facts {
             lights: 20,
             light_selection: LightSelection::Uniform,
@@ -404,7 +668,15 @@ mod tests {
             indirect_dominant: Some(false),
             peak_mem_bytes: Some(10),
             machine_mem_bytes: Some(10),
-            ..Facts::default()
+            strategy: SamplingStrategy::LightOnly,
+            clamp: Some((10.0, 0.5, 0.1)),
+            top_pixels: Some(TopPixels {
+                share: 0.5,
+                row: None,
+            }),
+            spp: 4,
+            reach: vec![("crop_a".into(), 0.1, -20.0)],
+            auto_tx: false,
         };
         let found = run(&all);
         assert_eq!(found.len(), CHECKS.len());

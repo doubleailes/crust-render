@@ -135,7 +135,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
 | reporting | `stats.rs` (`--stats`), `profile.rs` (`--profile`), `error.rs` |
-| diagnostic | `diagnostic/` — `mod.rs` (`run`: calibration, baseline, crops, tiers 1–3, suggestions), `report.rs` (`Report`, the `crust-diagnostic/1` JSON), `markdown.rs`, `noise.rs` (the light path rows, light groups, tier-1 ordering rules), `crops.rs`, `schedule.rs` (budget and tier shares), `trials.rs` (ΔEff, verdicts, the per-crop reference), `checks.rs` (static findings), `compare.rs` (`--baseline` deltas). It renders through `Renderer::render_measured` (`tracer/mod.rs`: `Instruments` → `Measured`), the only caller of the per-tile timer and the clamp counter |
+| diagnostic | `diagnostic/` — `mod.rs` (`run`: calibration, baseline, crops, tiers 1–3, suggestions), `report.rs` (`Report`, the `crust-diagnostic/1` JSON), `markdown.rs`, `noise.rs` (the light path rows, light groups, tier-1 ordering rules, the brightest pixels' share), `crops.rs`, `schedule.rs` (budget, trial spp and the later tiers' reserves), `trials.rs` (the picture check, trimmed MRSE, the noise floor, ΔEff and at the target, verdicts, the per-crop reference), `checks.rs` (findings, picture ones included), `compare.rs` (`--baseline` deltas). It renders through `Renderer::render_measured` (`tracer/mod.rs`: `Instruments` → `Measured`), the only caller of the per-tile timer and the clamp counter |
 
 ## Invariants that span modules
 

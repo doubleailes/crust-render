@@ -622,15 +622,15 @@ Its own flags:
 
 | flag | value | default | what it does |
 |------|-------|---------|--------------|
-| `--budget` | duration | `120s` | Time to spend after the import: `90s`, `5m`, `1m30s`, `1h`, `250ms`, or plain seconds. The import is reported, not counted. The baseline always runs; the trials then fit what is left, and one that would overrun is listed under `not_tried`. |
+| `--budget` | duration | `120s` | Time to spend after the import: `90s`, `5m`, `1m30s`, `1h`, `250ms`, or plain seconds. The import is reported, not counted. The baseline always runs; the later tiers reserve their estimated cost, the trials fit what is left, and anything that would overrun is listed under `not_tried`. More budget means more samples per trial: raise it when a trial reads `insufficient_samples`. |
 | `--json` | path | `crust-diagnostic.json` | Where to write the JSON report. |
 | `--baseline` | path | — | A previous report of the same scene, frame, camera, resolution and region. Adds a `deltas` section (what changed in time, error, settings, findings and suggestions); a report of anything else is marked *not comparable*. |
-| `--repeats` | count | 3 | Interleaved baseline/trial pairs per crop. More resolves smaller differences on a busy machine, at the cost of fewer trials. |
+| `--repeats` | count | 3 | Interleaved baseline/trial pairs per crop, each with its own sampler seed. More resolves smaller differences on a busy machine, at the cost of fewer trials. With 1 there is no noise floor, and no trial can read `insufficient_samples`. |
 | `--target-mrse` | number | threshold² | The mean relative squared error the sample-budget estimate aims for. Defaults to the square of the scene's adaptive variance threshold (0.05 → 0.0025). |
 
 ```bash
-$ crust diagnostic -i samples/cornellbox.usda --budget 30s > report.md
-$ crust diagnostic -i samples/cornellbox.usda --strategy bsdf --baseline crust-diagnostic.json
+$ crust diagnostic -i samples/veach_mis.usda --budget 30s > report.md
+$ crust diagnostic -i samples/veach_mis.usda --light-selection learned --baseline crust-diagnostic.json
 ```
 
 ## Exit status
