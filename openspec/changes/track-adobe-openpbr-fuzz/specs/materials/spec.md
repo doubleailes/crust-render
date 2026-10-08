@@ -36,8 +36,8 @@ closure tree. It SHALL NOT pool that tree onto a single `OpenPBR`.
 
 `OpenPBR` lobes SHALL share GGX helpers from `material/brdf.rs`: anisotropic
 visible-normal (VNDF) GGX sampling and its PDF, Schlick/F82 Fresnel, EON
-(energy-preserving Oren-Nayar) diffuse, Charlie sheen, Zeltner LTC sheen,
-thin-film, and Cauchy dispersion. The Zeltner sheen SHALL be the one
+(energy-preserving Oren-Nayar) diffuse, Zeltner LTC sheen, thin-film, and Cauchy
+dispersion. The Zeltner sheen SHALL be the one
 implementation used by both `OpenPBR`'s fuzz and MaterialX's `zeltner` sheen.
 
 #### Scenario: Microfacet lobe samples a direction
@@ -107,8 +107,9 @@ reported.
 `OpenPBR`'s fuzz SHALL reflect `fuzz_weight · fuzz_color · R(θ_o, fuzz_roughness)`
 of the light arriving from a white environment. R is the directional albedo of
 Disney's Zeltner sheen "Volume" table, read bilinearly in cos θ_o and
-`fuzz_roughness`, with no roughness floor. Its BSDF samples SHALL each carry the
-weight `fuzz_color · R`, with no variance from the lobe's shape.
+`fuzz_roughness`, with no roughness floor. The fuzz SHALL be importance-sampled
+exactly: a sample of the lobe carries the weight `fuzz_color · R`, with no
+variance from the lobe's shape.
 
 #### Scenario: A smooth fuzz is a rim
 
@@ -125,17 +126,19 @@ weight `fuzz_color · R`, with no variance from the lobe's shape.
 
 #### Scenario: Fuzz samples are exact
 
-- **WHEN** that material's BSDF is sampled at any view direction
-- **THEN** every sample's weight equals its directional albedo R to float
-  precision
+- **WHEN** that material's BSDF is sampled at a view where R is at least 0.05
+- **THEN** the median sample weighs its directional albedo R, to within 0.2%
+  (samples near an absent lobe's peak meet the selection share the material
+  keeps for it)
 
 ### Requirement: OpenPBR fuzz attenuates the layers beneath by its albedo
 
 Below a fuzz of weight `w`, every layer of `OpenPBR` (coat, specular, metal,
 diffuse, transmission) and its emission SHALL be scaled by `1 − w · R(θ_o)`.
 θ_o is the view angle, and the scale does not depend on the light direction. A
-fuzz SHALL raise the coat's roughness as Adobe's reference does. A surface hit
-from inside SHALL have no fuzz.
+fuzz SHALL raise the coat's roughness as Adobe's reference does. Unlike Adobe's,
+the fuzz SHALL stay present when a surface that is not thin-walled is hit from
+its back.
 
 #### Scenario: A fuzz over a white diffuse conserves energy
 
@@ -149,6 +152,12 @@ from inside SHALL have no fuzz.
 - **WHEN** an `OpenPBR` with `emission_luminance > 0`, no coat, and a fuzz of
   weight 1 and roughness 1 is viewed head-on
 - **THEN** its emission is scaled by 1 − 0.342 (to within 0.002)
+
+#### Scenario: The back of an open cloth mesh keeps its fuzz
+
+- **WHEN** a single-sided mesh that is not authored thin-walled, with a fuzz, is
+  seen from its back
+- **THEN** its fuzz shades as it does from the front
 
 #### Scenario: No fuzz leaves the image unchanged
 

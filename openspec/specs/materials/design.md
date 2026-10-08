@@ -93,11 +93,36 @@
   whose inputs are driven by `UsdUVTexture`s. Two hooks gate the
   per-triangle side tables the importer would otherwise build for every mesh:
   `face_texture()` for Ptex and `uses_uv()` for the `primvars:st` chart. Shared shading helpers (aniso GGX VNDF sampling,
-  Schlick/F82 Fresnel, EON diffuse, Charlie sheen, thin-film, Cauchy dispersion) live in
-  `material/brdf.rs`. The OpenPBR formulas are aligned against the MaterialX nodegraph
-  and Adobe's `openpbr-bsdf` reference — the item-by-item alignment record (with the
-  remaining gaps, e.g. no LUT-based multiple-scattering compensation and no random-walk
-  SSS entry) is `docs/openpbr_reference_alignment.md`.
+  Schlick/F82 Fresnel, EON diffuse, Zeltner's LTC sheen, thin-film, Cauchy dispersion)
+  live in `material/brdf.rs`; the sheen's table is `material/ltc_sheen_table.rs`. The
+  OpenPBR formulas are aligned against the MaterialX nodegraph and Adobe's `openpbr-bsdf`
+  reference — the item-by-item alignment record (with the remaining gaps, e.g. no
+  LUT-based multiple-scattering compensation and no random-walk SSS entry) is
+  `docs/openpbr_reference_alignment.md`, and `crust-core/tests/adobe_oracle.rs` measures
+  it: reference values from Adobe's library at a pinned commit, with each remaining gap a
+  named deviation and a bound, and a deviation every case passes without failing as stale.
+  - **The fuzz is Adobe's.** Zeltner, Burley and Chiang's LTC sheen with Disney's
+    "Volume" table, over everything beneath it, which it attenuates by
+    `1 − fuzz_weight · R(ω_o)` on the view side only (Adobe's default layering), emission
+    included; Adobe's fuzz-to-coat roughening too. The oracle matches every fuzz-only case
+    within 1e-4. It replaced a Charlie sheen under a flat `1 − fuzz_weight`, and the look
+    is not close: head-on, a white fuzz of roughness 0.3 now reflects 0.0008 (Imageworks'
+    fit gave 0.052) and one of roughness 1 reflects 0.342 (0.157); at cos θ_o = 0.25,
+    roughness 0.3 reflects 0.166 (0.431). The full table is in the alignment record.
+  - **No roughness floor.** BSDL clamps its Zeltner roughness at 0.02 because its LTC
+    sampling "gains energy" there, and MaterialX at 0.01. That gain comes from weighing
+    samples with a separately tabulated albedo; here the sample weight and the value share
+    the table's `R`, and a furnace sweep down to roughness 0 never exceeds `R`
+    (`brdf::zeltner_tests::a_sheen_never_gains_energy`).
+  - **The trap: a fuzz with no weight still owns a lobe.** `LobePmf::selecting` floors
+    every lobe's selection weight above zero, so a material with `fuzz_weight = 0` still
+    picks its fuzz one sample in a million. That lobe keeps drawing cosine-weighted, with
+    the cosine density in `pdf_all`: any density is correct for a lobe with no energy, and
+    switching it to the LTC would have changed every image, fuzz or not.
+  - **Kept on back faces, unlike Adobe.** Adobe gives the fuzz no presence when a closed
+    surface is hit from inside. crust keeps it, as it keeps the coat and emission there,
+    because cloth is mostly open meshes not authored thin-walled; the oracle's `interior`
+    deviation records the difference.
 
 ## Material resolution on import
 

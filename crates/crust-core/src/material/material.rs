@@ -416,6 +416,9 @@ impl Resolution {
 /// pattern network and texture fetches between queries.
 pub struct ShadingPoint<'a> {
     rec: HitRecord,
+    /// The cosine between the view and the shading normal, which an
+    /// `OpenPBR`'s fuzz attenuates its base by (`diffuse_filter`, `albedo`).
+    cos_o: f32,
     emitted: Vec3A,
     bsdf: Resolved<'a>,
 }
@@ -442,6 +445,7 @@ impl<'a> ShadingPoint<'a> {
         match mat.resolve(r_in, rec, cos_theta_o) {
             Some(r) => ShadingPoint {
                 rec: r.rec,
+                cos_o: cos_theta_o,
                 emitted: r.emitted,
                 bsdf: match r.bsdf {
                     ResolvedBsdf::OpenPBR(m) => Resolved::OpenPBR(m),
@@ -452,11 +456,13 @@ impl<'a> ShadingPoint<'a> {
                 // `OpenPBR`'s `emitted_at` is the default, `emitted_directional`.
                 Some(m) => ShadingPoint {
                     rec: *rec,
+                    cos_o: cos_theta_o,
                     emitted: m.emitted_directional(cos_theta_o),
                     bsdf: Resolved::Plain(m),
                 },
                 None => ShadingPoint {
                     rec: *rec,
+                    cos_o: cos_theta_o,
                     emitted: mat.emitted_at(r_in, rec, cos_theta_o),
                     bsdf: Resolved::Material(mat),
                 },
@@ -584,8 +590,8 @@ impl<'a> ShadingPoint<'a> {
     pub(crate) fn diffuse_filter(&self) -> Vec3A {
         match &self.bsdf {
             Resolved::Material(_) => Vec3A::ZERO,
-            Resolved::Plain(m) => m.diffuse_filter(),
-            Resolved::OpenPBR(m) => m.params().diffuse_filter(),
+            Resolved::Plain(m) => m.diffuse_filter(self.cos_o),
+            Resolved::OpenPBR(m) => m.params().diffuse_filter(self.cos_o),
             Resolved::Closure(c) => c.diffuse_filter(),
         }
     }
@@ -594,8 +600,8 @@ impl<'a> ShadingPoint<'a> {
     pub(crate) fn albedo(&self) -> Vec3A {
         match &self.bsdf {
             Resolved::Material(m) => m.albedo(&self.rec).unwrap_or(Vec3A::ONE),
-            Resolved::Plain(m) => m.albedo(),
-            Resolved::OpenPBR(m) => m.params().albedo(),
+            Resolved::Plain(m) => m.albedo(self.cos_o),
+            Resolved::OpenPBR(m) => m.params().albedo(self.cos_o),
             Resolved::Closure(c) => c.albedo(),
         }
     }

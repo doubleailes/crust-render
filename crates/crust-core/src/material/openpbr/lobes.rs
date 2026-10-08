@@ -91,12 +91,19 @@ impl LobePmf {
     /// integrator carries the straight transmission itself, as a
     /// pass-through). A thick transmission lobe is continuous and keeps its
     /// share either way.
-    pub(super) fn selecting<const STRAIGHT: bool>(m: &OpenPBR) -> Self {
+    ///
+    /// The fuzz is weighed by what it reflects toward the view, `w · R(ω_o)`,
+    /// at its brightest channel, and everything beneath it by the share it
+    /// lets through, as Adobe's `openpbr_sheen_probability` weighs them; so
+    /// the pmf depends on the view cosine `cos_v`. Without a fuzz that share
+    /// is exactly 1.0 and the pmf is the one it was.
+    pub(super) fn selecting<const STRAIGHT: bool>(m: &OpenPBR, cos_v: f32) -> Self {
         let f0_diel = f0_from_ior(m.specular_ior);
         let f0_coat = f0_from_ior(m.coat_ior);
         let base_luma = m.luma.of(m.base_color).max(0.02);
         let spec_luma = m.luma.of(m.specular_color).max(0.02);
-        let fuzz_luma = m.luma.of(m.fuzz_color).max(0.02);
+        let fuzz = FuzzLayer::at(m, cos_v);
+        let base_atten = fuzz.as_ref().map_or(1.0, FuzzLayer::base_atten);
 
         // Metal reflectivity is base_color · base_weight, covered by
         // base_metalness. No `specular_weight` here, matching `eval_specular`:
@@ -106,7 +113,7 @@ impl LobePmf {
         // returned its full energy — fireflies on every metal.
         let w_metal = m.base_metalness * m.luma.of(m.base_color * m.base_weight).max(0.02);
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
-        let w_specular = (w_metal + w_diel_spec).max(1e-4);
+        let w_specular = (w_metal + w_diel_spec).max(1e-4) * base_atten;
 
         // Transmission displaces the diffuse base (OpenPBR: the base is a
         // mix of the opaque-diffuse and translucent-base substrates), so
@@ -116,7 +123,8 @@ impl LobePmf {
             * m.base_weight
             * base_luma
             * (1.0 - f0_diel))
-            .max(1e-4);
+            .max(1e-4)
+            * base_atten;
 
         // The coat reflection is untinted — coat_color only attenuates the
         // substrate — so its lobe weight ignores the color.
@@ -135,15 +143,17 @@ impl LobePmf {
         // and guard `total` instead; that changes the image, so it needs a
         // converged A/B against `eval_matches_scatter_importance` rather than
         // being folded into a bit-identical change.
-        let w_coat = (m.coat_weight * f0_coat).max(1e-6);
-        let w_fuzz = (m.fuzz_weight * fuzz_luma).max(1e-6);
+        let w_coat = (m.coat_weight * f0_coat).max(1e-6) * base_atten;
+        let w_fuzz = fuzz
+            .map_or(0.0, |f| f.reflected() * m.fuzz_color.max_element())
+            .max(1e-6);
 
         // Transmission: dominant when weight is high. When enabled it
         // steals energy from the dielectric-specular / diffuse pathway.
         let trans_luma = m.luma.of(m.transmission_color).max(0.02);
         let w_transmission = if m.transmission_weight > 0.0 && (STRAIGHT || !m.geometry_thin_walled)
         {
-            ((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4)
+            ((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4) * base_atten
         } else {
             0.0
         };
@@ -435,11 +445,90 @@ pub(super) fn coat_darkening(m: &OpenPBR) -> Vec3A {
     coat_darkening_factor(m.base_color, m.coat_ior, m.coat_weight, m.coat_darkening)
 }
 
-fn eval_fuzz(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, h_local: Vec3A) -> Vec3A {
-    let n_dot_v = v_local.z.max(1e-4);
-    let n_dot_l = l_local.z.max(1e-4);
-    let n_dot_h = h_local.z.max(0.0);
-    m.fuzz_color * m.fuzz_weight * sheen_charlie(n_dot_v, n_dot_l, n_dot_h, m.fuzz_roughness)
+/// The fuzz seen from one view: Zeltner's sheen at `fuzz_roughness`
+/// ([`ZeltnerSheen`]) over everything else, at coverage `fuzz_weight`. It is
+/// Adobe's fuzz layer (`impl/openpbr_fuzz_lobe.h`): the sheen reflects `w · R`
+/// of the light toward the view, and passes the rest, `1 − w · R(ω_o)`
+/// ([`FuzzLayer::base_atten`]), to the layers beneath. The attenuation is
+/// view-side only (Adobe's default, `OPENPBR_RECIPROCAL_COAT_AND_FUZZ = 0`), so
+/// it is a property of the shading point, not of the light.
+///
+/// `None` without a fuzz, where every caller uses a `base_atten` of exactly
+/// 1.0: a finite value times 1.0 is itself, so a surface with no fuzz shades
+/// bit for bit as it did before the fuzz was directional.
+pub(super) struct FuzzLayer {
+    pub(super) lobe: ZeltnerSheen,
+    weight: f32,
+}
+
+impl FuzzLayer {
+    /// The fuzz of `m` viewed at `cos_v`.
+    #[inline]
+    pub(super) fn at(m: &OpenPBR, cos_v: f32) -> Option<Self> {
+        (m.fuzz_weight > 0.0).then(|| FuzzLayer {
+            lobe: ZeltnerSheen::new(m.fuzz_roughness, cos_v),
+            weight: m.fuzz_weight.min(1.0),
+        })
+    }
+
+    /// The share of the light reaching the layers beneath: `1 − w · R(ω_o)`.
+    #[inline]
+    pub(super) fn base_atten(&self) -> f32 {
+        (1.0 - self.weight * self.lobe.albedo()).clamp(0.0, 1.0)
+    }
+
+    /// How much of the light toward the view the fuzz itself reflects,
+    /// `w · R(ω_o)`, for lobe selection.
+    #[inline]
+    fn reflected(&self) -> f32 {
+        self.weight * self.lobe.albedo()
+    }
+
+    /// The fuzz's value toward `l_local`, without the cosine (as every lobe
+    /// here returns it): `fuzz_color · w · R · D_ltc / cos θ_l`, the LTC
+    /// carrying the cosine itself.
+    #[inline]
+    fn eval(&self, m: &OpenPBR, v_local: Vec3A, l_local: Vec3A) -> Vec3A {
+        if l_local.z <= 0.0 {
+            return Vec3A::ZERO;
+        }
+        m.fuzz_color * (self.reflected() * self.lobe.density(v_local, l_local) / l_local.z)
+    }
+}
+
+/// [`FuzzLayer::base_atten`] for `m` viewed at `cos_v`: exactly 1.0 without a
+/// fuzz.
+#[inline]
+pub(super) fn base_atten(m: &OpenPBR, cos_v: f32) -> f32 {
+    FuzzLayer::at(m, cos_v).map_or(1.0, |f| f.base_atten())
+}
+
+/// The coat's roughness under the fuzz. Adobe raises it by an empirical
+/// amount (`openpbr_prepare_lobes`: "Adjust the coat roughness to account for
+/// the fuzz"): `⁴√min(1, r⁴ + avg(fuzz_color) · r_f · 0.005 · r_f⁴)`, faded in
+/// by `fuzz_weight`. Every coat query (value, density, sampler, event, ray
+/// cone) reads it here, so they agree. Without a fuzz it is the authored
+/// roughness, exactly.
+#[inline]
+pub(super) fn coat_roughness(m: &OpenPBR) -> f32 {
+    if m.fuzz_weight <= 0.0 {
+        return m.coat_roughness;
+    }
+    // Adobe's `FuzzEffectOnUnderlyingRoughness`, "at max weight, color, and
+    // roughness".
+    const FUZZ_EFFECT: f32 = 0.005;
+    let fourth = |x: f32| {
+        let xx = x * x;
+        xx * xx
+    };
+    let c = m.fuzz_color;
+    let factor = (c.x + c.y + c.z) * (1.0 / 3.0) * m.fuzz_roughness * FUZZ_EFFECT;
+    let raised = (fourth(m.coat_roughness) + factor * fourth(m.fuzz_roughness))
+        .min(1.0)
+        .sqrt()
+        .sqrt();
+    let w = m.fuzz_weight.min(1.0);
+    m.coat_roughness * (1.0 - w) + raised * w
 }
 
 pub(super) fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3A {
@@ -476,44 +565,44 @@ pub(super) fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bo
         (Vec3A::ZERO, Vec3A::ZERO)
     };
 
-    // Absent layers are skipped, not multiplied by zero. Both lobes end in a
-    // multiply by their weight, and both are finite for every input — every
-    // GGX denominator is floored (`roughness_to_alpha_aniso` clamps α ≥ 1e-4,
-    // the cosines at 1e-4) and `sheen_charlie` is bounded because
-    // `sheen_charlie_d` clamps α ≥ 0.05, so its `powf` argument stays in
-    // [0,1]. A finite value times 0.0 is exactly +0.0, and `+0.0 + x == x`,
-    // so this is bit-identical rather than merely close.
+    // Absent layers are skipped, not multiplied by zero. The coat ends in a
+    // multiply by its weight and is finite for every input — every GGX
+    // denominator is floored (`roughness_to_alpha_aniso` clamps α ≥ 1e-4, the
+    // cosines at 1e-4) — so a finite value times 0.0 is exactly +0.0, and
+    // `+0.0 + x == x`: bit-identical rather than merely close. Without a fuzz
+    // there is no lobe to fetch and the layers beneath take a `base_atten` of
+    // exactly 1.0.
     //
-    // It is also where most of the default material's cost was: `eval_fuzz`
-    // holds the only unconditional `powf` on that path (85M instructions on
-    // cornellbox, one call per `eval_all`), and `eval_coat` a full
-    // anisotropic GGX D + Smith G2 with two `sqrt`s — both for `fuzz_weight`
-    // and `coat_weight` of zero, which is the default.
+    // It is also where most of the default material's cost was: the Charlie
+    // fuzz this replaced held the only unconditional `powf` on that path (85M
+    // instructions on cornellbox, one call per `eval_all`), and `eval_coat` a
+    // full anisotropic GGX D + Smith G2 with two `sqrt`s — both for
+    // `fuzz_weight` and `coat_weight` of zero, which is the default.
     let coat = if m.coat_weight > 0.0 {
         let (ax_coat, ay_coat) =
-            roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
+            roughness_to_alpha_aniso(coat_roughness(m), m.coat_roughness_anisotropy);
         eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat)
     } else {
         Vec3A::ZERO
     };
-    let fuzz = if m.fuzz_weight > 0.0 {
-        eval_fuzz(m, v_local, l_local, h_local)
-    } else {
-        Vec3A::ZERO
-    };
+    let fuzz_layer = FuzzLayer::at(m, v_local.z);
+    let fuzz = fuzz_layer
+        .as_ref()
+        .map_or(Vec3A::ZERO, |f| f.eval(m, v_local, l_local));
 
     // Layered composition (top→bottom): fuzz over coat over base.
-    //  throughput = fuzz + (1 - fuzz_weight) ·
+    //  throughput = fuzz + (1 − w · R(ω_o)) ·
     //               (coat + coat_atten · (dark · (diffuse + metal) + diel))
     // The coat attenuation is per-direction (view in, light out), evaluated
     // against the normal cosines, not the half-vector, and every lobe under the
     // coat pays it. The substrate-albedo darkening `dark` is narrower: it is
     // derived from `base_color`, so it applies to the lobes that colour
     // describes — diffuse and the metal slab — and not to the base dielectric
-    // interface, whose ~4% reflectance is white. See `coat_darkening`.
+    // interface, whose ~4% reflectance is white. See `coat_darkening`. The
+    // fuzz's attenuation is view-side only: see `FuzzLayer`.
     let coat_atten = coat_attenuation(m, v_local.z, l_local.z);
     let dark = coat_darkening(m);
-    let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
+    let base_atten = fuzz_layer.as_ref().map_or(1.0, FuzzLayer::base_atten);
     fuzz + base_atten * (coat + coat_atten * (dark * (diffuse + spec_metal) + spec_diel))
 }
 
@@ -534,7 +623,7 @@ impl Lobe {
             }
             Lobe::Coat => {
                 let (ax, ay) =
-                    roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
+                    roughness_to_alpha_aniso(coat_roughness(m), m.coat_roughness_anisotropy);
                 LobeEvent::reflect(microfacet_scatter((ax * ay).sqrt()), LobeLabel::Coat)
             }
             Lobe::Fuzz => LobeEvent::reflect(Scatter::Glossy, LobeLabel::Sheen),
@@ -588,14 +677,15 @@ pub(super) fn eval_split(
     let f_avg_diel = f0_from_ior(m.specular_ior);
     let coat_atten = coat_attenuation(m, v_local.z, l_local.z);
     let dark = coat_darkening(m);
-    let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
+    let fuzz_layer = FuzzLayer::at(m, v_local.z);
+    let base_atten = fuzz_layer.as_ref().map_or(1.0, FuzzLayer::base_atten);
 
-    if m.fuzz_weight > 0.0 {
-        out.push(Lobe::Fuzz.event(m), eval_fuzz(m, v_local, l_local, h_local));
+    if let Some(f) = &fuzz_layer {
+        out.push(Lobe::Fuzz.event(m), f.eval(m, v_local, l_local));
     }
     if m.coat_weight > 0.0 {
         let (ax_coat, ay_coat) =
-            roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
+            roughness_to_alpha_aniso(coat_roughness(m), m.coat_roughness_anisotropy);
         out.push(
             Lobe::Coat.event(m),
             base_atten * eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat),
@@ -615,25 +705,27 @@ pub(super) fn eval_split(
     }
 }
 
-/// The diffuse lobe's colour — what the raw light AOVs divide its light by:
-/// the factors of [`eval_split`]'s diffuse share that describe the surface,
-/// `ρ · (1 − F̄) · base_atten · dark`, without the ones that depend on
-/// direction (the EON shape, the coat's passage), which are part of the
-/// light. Zero where the material has no diffuse lobe.
-pub(super) fn diffuse_filter(m: &OpenPBR) -> Vec3A {
+/// The diffuse lobe's colour at view cosine `cos_v` — what the raw light AOVs
+/// divide its light by: the factors of [`eval_split`]'s diffuse share that
+/// describe the surface, `ρ · (1 − F̄) · base_atten · dark`, without the ones
+/// that depend on the light's direction (the EON shape, the coat's passage),
+/// which are part of the light. The fuzz's `base_atten` depends on the view
+/// alone, so it belongs here. Zero where the material has no diffuse lobe.
+pub(super) fn diffuse_filter(m: &OpenPBR, cos_v: f32) -> Vec3A {
     let presence = m.base_weight * (1.0 - m.base_metalness) * (1.0 - m.transmission_weight);
     if presence <= 0.0 {
         return Vec3A::ZERO;
     }
     let rho = m.base_color.lerp(m.subsurface_color, m.subsurface_weight) * presence;
-    let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
-    rho * (1.0 - f0_from_ior(m.specular_ior)) * base_atten * coat_darkening(m)
+    rho * (1.0 - f0_from_ior(m.specular_ior)) * base_atten(m, cos_v) * coat_darkening(m)
 }
 
-/// The surface's albedo for denoising (OIDN's feature): every lobe's tint
-/// times its layer weight, with no directional integral — a noise-free
-/// colour that follows the textures. Clamped to [0, 1].
-pub(super) fn albedo(m: &OpenPBR) -> Vec3A {
+/// The surface's albedo for denoising (OIDN's feature) at view cosine
+/// `cos_v`: every lobe's tint times its layer weight — a noise-free colour
+/// that follows the textures. The fuzz covers what is beneath by the share
+/// it reflects toward the view, `w · R(ω_o)`, so a smooth fuzz seen head-on
+/// leaves the base's colour. Clamped to [0, 1].
+pub(super) fn albedo(m: &OpenPBR, cos_v: f32) -> Vec3A {
     let diffuse_color = m.base_color.lerp(m.subsurface_color, m.subsurface_weight) * m.base_weight;
     let tw = m.transmission_weight.clamp(0.0, 1.0);
     let dielectric = diffuse_color * (1.0 - tw) + m.transmission_color * tw;
@@ -643,8 +735,9 @@ pub(super) fn albedo(m: &OpenPBR) -> Vec3A {
     let coat_w = m.coat_weight.clamp(0.0, 1.0);
     let coated = base * Vec3A::ONE.lerp(m.coat_color, coat_w)
         + Vec3A::splat(coat_w * f0_from_ior(m.coat_ior));
+    let fuzz = FuzzLayer::at(m, cos_v).map_or(0.0, |f| f.reflected());
     coated
-        .lerp(m.fuzz_color, m.fuzz_weight.clamp(0.0, 1.0))
+        .lerp(m.fuzz_color, fuzz)
         .clamp(Vec3A::ZERO, Vec3A::ONE)
 }
 
@@ -672,13 +765,15 @@ pub(super) fn pdf_all(
 
     let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
     let (ax_coat, ay_coat) =
-        roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
+        roughness_to_alpha_aniso(coat_roughness(m), m.coat_roughness_anisotropy);
 
-    // Diffuse and fuzz are both sampled cosine-weighted, so their densities
-    // are the same expression — evaluate it once. (Not folded into
-    // `(p_diffuse + p_fuzz) * cosine`: `a·x + b·x` and `(a+b)·x` differ in
-    // float, and the point here is to keep the value identical.)
     let pdf_cosine = l_local.z.max(0.0) / PI;
+    // The fuzz samples its own LTC. Without a fuzz its selection weight is
+    // still floored above zero (see `LobePmf::selecting`), and the sampler
+    // then draws it cosine-weighted, as it always has: any density will do
+    // for a lobe with no energy, and that one leaves the image unchanged.
+    let pdf_fuzz =
+        FuzzLayer::at(m, v_local.z).map_or(pdf_cosine, |f| f.lobe.density(v_local, l_local));
     let pdf_specular = pdf_vndf_ggx_aniso_local(v_local, h_local, ax, ay);
     // The coat density is *not* skippable the way `eval_coat` is: even at
     // `coat_weight == 0`, `LobePmf::selecting` floors the coat's selection
@@ -690,5 +785,5 @@ pub(super) fn pdf_all(
     pmf[Lobe::Diffuse] * pdf_cosine
         + pmf[Lobe::Specular] * pdf_specular
         + pmf[Lobe::Coat] * pdf_coat
-        + pmf[Lobe::Fuzz] * pdf_cosine
+        + pmf[Lobe::Fuzz] * pdf_fuzz
 }

@@ -166,7 +166,12 @@ with the coat and base terms:
   `coat_r = mix(coat_r, ⁴√min(1, coat_r⁴ + avg(fuzz_color)·fuzz_r·0.005·fuzz_r⁴), w)`
   is applied where the coat α is derived. It is applied once, so `eval` and `sample`
   see the same α.
-- Interior: `entering == false` makes the fuzz weight 0 for that query.
+- Interior: **not** Adobe's. Adobe gives the fuzz no presence on a back-facing,
+  non-thin-walled hit. Applying that, found while implementing, would strip the
+  fuzz from the back of every open cloth mesh not authored thin-walled, which is
+  most cloth. So crust keeps the fuzz there, as it keeps the coat and the
+  emission, and the oracle's `interior` deviation covers the difference with the
+  rest of that gap.
 
 ### D5. The resolve contract carries R as derived state, not a parameter
 
