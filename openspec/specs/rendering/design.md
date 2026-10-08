@@ -319,9 +319,18 @@ consumed as ordinary dependencies:
      boundaries goes to `medium_shadow` → `through_boundaries`, which walks hit by hit with
      `cross_boundary`'s rules, Beer–Lambert per stretch, cutouts and thin walls as
      their `P = (1 − α) + α·T`, anything else blocking — deterministic where the path tracks free flights, the
-     same transmittance either way. The depth-exhausted emission lookup passes
-     boundaries with `pass_boundaries`. The light cache's training visibility sees
-     a boundary as clear. A world with no boundary renders every sample
+     same transmittance either way. Its boundaries count against the path's own
+     `MAX_PATH_CROSSINGS` (4096), its cutouts and walls against `MAX_CUTOUT_CROSSINGS`
+     (256): on one shared count of 256, a light behind 150 fog slabs — 300
+     crossings, which any path makes — was blocked to every shadow ray
+     (`shadow_rays_cross_as_many_boundaries_as_a_path`). The depth-exhausted emission
+     lookup passes boundaries with `pass_boundaries`, on the same 4096. The light
+     cache's training visibility sees a boundary as clear (a choice: the cache only
+     steers selection, and region media are left out of it too), and its training
+     rays cross boundaries rather than shading them: shaded, the boundary's empty
+     closure trained a receiver that saw no light and ended the path, so nothing
+     inside or behind the fog was trained
+     (`training_crosses_a_medium_boundary_to_the_wall_behind`). A world with no boundary renders every sample
      bit-identically, and at +0.04% instructions on cornellbox (callgrind, 2 spp):
      the integrator is monomorphised on `MEDIA` (`advance_pixel` / `trace_path` /
      `shadow_transmittance` / `volume_nee`), chosen per render from

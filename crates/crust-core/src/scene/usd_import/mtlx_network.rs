@@ -13,7 +13,7 @@
 //! parser would have produced from the equivalent XML — the category and type
 //! from the nodedef name, each input's literal formatted as the text a `value`
 //! attribute holds and read back through the same
-//! [`crust_mtlx::value::parse_literal`] — so a network shades exactly as the
+//! [`crust_mtlx::parse_literal`] — so a network shades exactly as the
 //! same network in a `.mtlx` does. Connections through `NodeGraph` outputs and
 //! through `Material` / `NodeGraph` interface inputs are followed to the
 //! shader output or the literal they forward.
@@ -175,8 +175,13 @@ impl Builder<'_> {
                     .unwrap_or(usd_type);
                 let mtype = mtlx_type(&ty);
                 let text = self.literal_text(&owner, mtype)?;
-                let source =
-                    Source::Value(crust_mtlx::parse_literal(&text, mtype).unwrap_or(Val::ZERO));
+                let Some(value) = literal_value(&text, mtype) else {
+                    // Left unauthored, so it takes its nodedef default.
+                    self.reported
+                        .push(format!("{}: {text:?} is not a {mtype} value", owner.path()));
+                    return None;
+                };
+                let source = Source::Value(value);
                 let colorspace = owner
                     .get_metadata::<sdf::Value>("colorSpace")
                     .ok()
@@ -419,6 +424,16 @@ fn mtlx_type(usd: &str) -> &'static str {
     }
 }
 
+/// The numeric value of a literal of MaterialX type `mtype`. A `filename` or
+/// `string` rides in the input's `text`, beside a zero no operator reading
+/// those types looks at — the XML parser's convention; any other type whose
+/// text is not a number has no value (`None`), rather than a zero that would
+/// shade as if authored.
+fn literal_value(text: &str, mtype: &str) -> Option<Val> {
+    crust_mtlx::parse_literal(text, mtype)
+        .or_else(|| matches!(mtype, "string" | "filename").then_some(Val::ZERO))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +484,17 @@ mod tests {
         assert_eq!(mtlx_type("texCoord2f"), "vector2");
         assert_eq!(mtlx_type("asset"), "filename");
         assert_eq!(mtlx_type("token"), "string");
+    }
+
+    #[test]
+    fn a_numeric_literal_that_is_not_a_number_has_no_value() {
+        assert_eq!(literal_value("0.5", "float").map(|v| v.x()), Some(0.5));
+        assert_eq!(literal_value("true", "boolean").map(|v| v.x()), Some(1.0));
+        // Not a zero that shades as if authored: unset, so the default holds.
+        assert!(literal_value("fast", "float").is_none());
+        assert!(literal_value("", "color3").is_none());
+        // Text-valued types keep the XML parser's zero beside their text.
+        assert_eq!(literal_value("linear", "string").map(|v| v.x()), Some(0.0));
+        assert_eq!(literal_value("a.png", "filename").map(|v| v.x()), Some(0.0));
     }
 }
