@@ -4,7 +4,7 @@
 //! and agreement with `openusd_schemas::render::compute_render_spec`.
 
 use crust_core::{
-    Accumulation, AovRequest, AovSource, NoAssets, Precision, Scene, UsdImportOptions,
+    Accumulation, AovRequest, AovSource, NoAssets, PixelRect, Precision, Scene, UsdImportOptions,
 };
 use std::path::PathBuf;
 
@@ -1213,6 +1213,141 @@ fn a_product_differing_only_in_motion_blur_is_kept_and_warned_about() {
         warnings
             .iter()
             .all(|w| !w.contains("motion blur") && !w.contains("no file is written")),
+        "{warnings:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// dataWindowNDC
+// ---------------------------------------------------------------------------
+
+/// The settings prim authoring `resolution` and `dataWindowNDC`, with the
+/// forwarding product (which authors neither) when `product` is set.
+fn window_stage(resolution: (u32, u32), window: &str, product: bool) -> String {
+    let (w, h) = resolution;
+    let products = if product {
+        format!("rel products = [</Render/p>]\n    }}\n{FORWARD_PRODUCT}")
+    } else {
+        "}".to_owned()
+    };
+    format!(
+        r#"
+    def RenderSettings "settings"
+    {{
+        uniform int2 resolution = ({w}, {h})
+        uniform float4 dataWindowNDC = {window}
+        {products}"#
+    )
+}
+
+/// The region a window selects, and the import's warnings about windows.
+fn window_region(name: &str, resolution: (u32, u32), window: &str) -> (PixelRect, Vec<String>) {
+    let (scene, warnings) = load_warnings(name, &window_stage(resolution, window, true));
+    let window_warnings = warnings
+        .into_iter()
+        .filter(|w| w.contains("dataWindowNDC"))
+        .collect();
+    (scene.settings.region(), window_warnings)
+}
+
+#[test]
+fn a_window_selects_the_right_half_without_a_warning() {
+    let (region, warnings) = window_region("window_right_half", (640, 360), "(0.5, 0, 1, 1)");
+    assert_eq!(region, PixelRect::new(320, 0, 640, 360));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn ndc_y_counts_from_the_bottom() {
+    let (region, _) = window_region("window_bottom_quarter", (100, 100), "(0, 0, 1, 0.25)");
+    assert_eq!(region, PixelRect::new(0, 75, 100, 100));
+}
+
+#[test]
+fn the_default_window_is_the_full_frame() {
+    let (region, warnings) = window_region("window_default", (64, 36), "(0, 0, 1, 1)");
+    assert_eq!(region, PixelRect::full(64, 36));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    // Unauthored, with no product either.
+    let scene = load(
+        "window_unauthored",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform int2 resolution = (64, 36)
+    }
+"#,
+    );
+    assert!(scene.settings.is_full_frame());
+}
+
+#[test]
+fn a_window_on_the_settings_applies_without_products() {
+    let scene = load(
+        "window_no_products",
+        &window_stage((640, 360), "(0.5, 0, 1, 1)", false),
+    );
+    assert!(scene.aovs.products.is_empty());
+    assert_eq!(scene.settings.region(), PixelRect::new(320, 0, 640, 360));
+}
+
+/// A pixel is in when its centre is: a window edge exactly on a pixel
+/// centre takes that pixel on the low side and leaves it on the high side.
+#[test]
+fn window_edges_on_pixel_boundaries_and_centres() {
+    // Edges on pixel boundaries: 0.25 × 8 = 2, 0.75 × 8 = 6.
+    let (region, _) = window_region("window_boundaries", (8, 4), "(0.25, 0.25, 0.75, 0.75)");
+    assert_eq!(region, PixelRect::new(2, 1, 6, 3));
+    // Edges on pixel centres: (2.5 / 8, 3.5 / 8) — pixel 2 in, pixel 3 out.
+    let (region, _) = window_region("window_centres", (8, 4), "(0.3125, 0, 0.4375, 1)");
+    assert_eq!(region, PixelRect::new(2, 0, 3, 4));
+}
+
+#[test]
+fn a_one_pixel_window() {
+    // The centre of pixel (3, 1) on a 10×4 frame: x 3.5/10, NDC y 1 − 1.5/4.
+    let (region, warnings) = window_region("window_one_pixel", (10, 4), "(0.3, 0.6, 0.4, 0.7)");
+    assert_eq!(region, PixelRect::new(3, 1, 4, 2));
+    assert_eq!(region.area(), 1);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn the_product_window_overrides_the_settings() {
+    let scene = load(
+        "window_product_overrides",
+        &window_stage((100, 100), "(0, 0, 0.5, 0.5)", true).replace(
+            "token productName",
+            "uniform float4 dataWindowNDC = (0.5, 0.5, 1, 1)\n        token productName",
+        ),
+    );
+    assert_eq!(scene.settings.region(), PixelRect::new(50, 0, 100, 50));
+}
+
+#[test]
+fn overscan_is_clipped_with_one_warning() {
+    let (region, warnings) = window_region("window_overscan", (640, 360), "(-0.1, 0, 1.1, 1)");
+    assert_eq!(region, PixelRect::full(640, 360));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("clipped"), "{warnings:?}");
+}
+
+#[test]
+fn an_empty_window_renders_the_full_frame_with_one_warning() {
+    let (region, warnings) = window_region("window_empty", (640, 360), "(0.5, 0.5, 0.5, 0.6)");
+    assert_eq!(region, PixelRect::full(640, 360));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("selects no pixel"), "{warnings:?}");
+}
+
+#[test]
+fn a_window_is_no_longer_listed_as_not_honoured() {
+    let (_, warnings) = load_warnings(
+        "window_honoured",
+        &window_stage((64, 36), "(0.25, 0, 1, 1)", true),
+    );
+    assert!(
+        !warnings.iter().any(|w| w.contains("not honoured")),
         "{warnings:?}"
     );
 }

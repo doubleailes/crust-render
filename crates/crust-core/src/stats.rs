@@ -338,8 +338,17 @@ impl RayStats {
 pub struct ImageCounters {
     pub width: usize,
     pub height: usize,
+    /// The render region, when it is smaller than the frame (image space).
+    pub region: Option<crate::PixelRect>,
     pub samples_per_pixel: u32,
     pub max_depth: u32,
+}
+
+impl ImageCounters {
+    /// The pixels the render traced: the region's, else the frame's.
+    pub fn pixels(&self) -> usize {
+        self.region.map_or(self.width * self.height, |r| r.area())
+    }
 }
 
 impl From<&crate::tracer::RenderSettings> for ImageCounters {
@@ -348,6 +357,7 @@ impl From<&crate::tracer::RenderSettings> for ImageCounters {
         ImageCounters {
             width,
             height,
+            region: (!s.is_full_frame()).then(|| s.region()),
             samples_per_pixel: s.samples_per_pixel(),
             max_depth: s.max_depth(),
         }
@@ -774,6 +784,17 @@ impl RenderStats {
         let img = &self.image;
         if img.width > 0 && img.height > 0 {
             writeln!(f, "  {:<28} {}x{}", "resolution", img.width, img.height)?;
+            if let Some(r) = img.region {
+                writeln!(
+                    f,
+                    "  {:<28} {} {}x{}, {:.1}% of the frame",
+                    "region",
+                    r,
+                    r.width(),
+                    r.height(),
+                    100.0 * r.area() as f64 / (img.width * img.height) as f64
+                )?;
+            }
             writeln!(f, "  {:<28} {}", "samples per pixel", img.samples_per_pixel)?;
             writeln!(f, "  {:<28} {}", "max path depth", img.max_depth)?;
         }
@@ -1082,7 +1103,7 @@ impl RenderStats {
                 r.mean_path_length()
             )?;
 
-            let pixels = (self.image.width * self.image.height) as u64;
+            let pixels = self.image.pixels() as u64;
             if pixels > 0 {
                 // Over every pass, training included — the samples the
                 // render actually paid for, not the budget it was given.
@@ -1805,6 +1826,7 @@ mod tests {
             image: ImageCounters {
                 width: 2,
                 height: 2,
+                region: None,
                 samples_per_pixel: 4,
                 max_depth: 8,
             },
@@ -1843,6 +1865,33 @@ mod tests {
         // no `--profile`, so no render profile.
         assert!(!out.contains("adaptive:"));
         assert!(!out.contains("Render profile"));
+    }
+
+    /// A cropped render reports its region and frame share, and averages
+    /// its samples over the region's pixels, not the frame's.
+    #[test]
+    fn report_states_the_region_and_its_share_of_the_frame() {
+        let s = RenderStats {
+            image: ImageCounters {
+                width: 640,
+                height: 360,
+                region: Some(crate::PixelRect::new(320, 0, 640, 360)),
+                samples_per_pixel: 4,
+                max_depth: 8,
+            },
+            rays: RayStats {
+                camera_rays: 320 * 360 * 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = s.report();
+        for needle in [
+            "region                       (320, 0)–(640, 360) 320x360, 50.0% of the frame",
+            "average samples / pixel      4.00",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in\n{out}");
+        }
     }
 
     #[test]

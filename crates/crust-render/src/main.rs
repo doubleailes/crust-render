@@ -14,6 +14,7 @@ use crust_assets::FileAssets;
 use crust_core::Buffer;
 use crust_core::LightSelection;
 use crust_core::PixelFilter;
+use crust_core::PixelRect;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
 use crust_core::Scene;
@@ -95,6 +96,15 @@ struct RenderArgs {
     /// husk's `-o` does; the other products keep theirs.
     #[arg(short, long)]
     output: Option<String>,
+    /// Render only a rectangle of the frame: `X0,Y0,X1,Y1` in pixels, from
+    /// the image's top-left corner, `X1` and `Y1` excluded. Each pixel
+    /// renders exactly as in the full frame; the EXR keeps the full
+    /// resolution as its display window with the region as its data
+    /// window, and the PNG holds only the region. Overrides the stage's
+    /// `dataWindowNDC`. Clipped to the resolution; a region with nothing
+    /// left is an error.
+    #[arg(long, value_name = "X0,Y0,X1,Y1", value_parser = parse_region)]
+    region: Option<PixelRect>,
     /// Also write the log to a file named for the time the run started
     /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
     /// current directory; given a directory, it writes there and creates it
@@ -287,6 +297,29 @@ fn parse_count(s: &str) -> std::result::Result<u32, String> {
     }
 }
 
+/// `--region`'s parser: four non-negative integers `X0,Y0,X1,Y1` with
+/// `X1 > X0` and `Y1 > Y0`. Whether the rectangle meets the frame needs
+/// the resolution, so that is checked once the stage is loaded.
+fn parse_region(s: &str) -> std::result::Result<PixelRect, String> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    let [x0, y0, x1, y1] = parts[..] else {
+        return Err(format!(
+            "{s:?} is not four comma-separated integers X0,Y0,X1,Y1"
+        ));
+    };
+    let int = |v: &str| {
+        v.parse::<usize>()
+            .map_err(|_| format!("{v:?} is not a non-negative integer"))
+    };
+    let (x0, y0, x1, y1) = (int(x0)?, int(y0)?, int(x1)?, int(y1)?);
+    if x1 <= x0 || y1 <= y0 {
+        return Err(format!(
+            "{s} is empty: X1 must be greater than X0, and Y1 than Y0 (X1 and Y1 are excluded)"
+        ));
+    }
+    Ok(PixelRect::new(x0, y0, x1, y1))
+}
+
 /// A clap parser for one of the engine's named settings: the possible values
 /// and their `--help` lines come from the enum's own table (`CHOICES`), and
 /// the value from its `FromStr`, so the CLI holds no second spelling.
@@ -361,14 +394,15 @@ fn tone_map(rgb: &mut [f32], color: &OutputColor) -> Vec<u8> {
         .collect()
 }
 
-/// Tone-map the render buffer to an 8-bit PNG at `path`.
+/// Tone-map the render buffer to an 8-bit PNG at `path`: the buffer's
+/// region, at the region's size — a PNG has no data window to place it in a
+/// larger frame with.
 fn write_png(
     buffer: &Buffer,
-    width: usize,
-    height: usize,
     path: &Path,
     color: &OutputColor,
 ) -> std::result::Result<(), image::ImageError> {
+    let (width, height) = buffer.size();
     let mut rgb = Vec::with_capacity(width * height * 3);
     for y in 0..height {
         for x in 0..width {
@@ -389,20 +423,23 @@ fn write_png(
 /// `output`, then the tone-mapped PNG next to it. What `write_rgb_file` writes
 /// — in `lin_rec709` this output has the header and pixels it had before AOVs —
 /// plus, in any other working space, the chromaticities and `colorInteropID`
-/// that say which.
+/// that say which. A cropped render's EXR holds the region as its data
+/// window inside the full frame's display window (`products::exr_windows`).
 fn write_beauty(
     buffer: &Buffer,
-    img_width: usize,
-    img_height: usize,
     output: &str,
     color: &OutputColor,
 ) -> std::result::Result<(), ExitCode> {
+    let (img_width, img_height) = buffer.size();
     debug!(
         "Writing {}x{} linear EXR to {}",
         img_width, img_height, output
     );
     let channels = SpecificChannels::rgb(|Vec2(x, y)| buffer.get_rgb(x, y));
     let mut image = Image::from_channels((img_width, img_height), channels);
+    let (position, display_window) = products::exr_windows(buffer);
+    image.layer_data.attributes.layer_position = position;
+    image.attributes.display_window = display_window;
     if let Some(chromaticities) = color.exr_chromaticities() {
         image.attributes.chromaticities = Some(chromaticities);
         if let Some(id) =
@@ -423,7 +460,7 @@ fn write_beauty(
     }
     let png_path = Path::new(output).with_extension("png");
     debug!("Tone mapping to sRGB PNG at {}", png_path.display());
-    match write_png(buffer, img_width, img_height, &png_path, color) {
+    match write_png(buffer, &png_path, color) {
         Ok(_) => info!("Image written to: {:?}", png_path),
         Err(e) => {
             error!("Error writing PNG: {}", e);
@@ -657,7 +694,24 @@ fn render(cli: &RenderArgs) -> ExitCode {
     // Import phases and scene counts come from the loader; render and
     // output are timed here.
     let mut stats = scene.stats;
-    let settings = apply_overrides(cli, scene.settings);
+    let mut settings = apply_overrides(cli, scene.settings);
+    // After the import, because clipping needs the resolution; it replaces
+    // whatever region the stage's `dataWindowNDC` chose.
+    if let Some(region) = cli.region {
+        settings = match settings.with_region(region) {
+            Ok(s) => {
+                debug!(
+                    "--region {} overrides the scene's dataWindowNDC",
+                    s.region()
+                );
+                s
+            }
+            Err(e) => {
+                error!("--region: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+    }
     // A BVH can only cull primitives whose bounds are small against the
     // whole scene. Report the ratio so a scene whose instance boxes all
     // span everything -- where no split can help -- is visible.
@@ -686,9 +740,15 @@ fn render(cli: &RenderArgs) -> ExitCode {
     let (img_width, img_height) = settings.get_dimensions();
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
     info!(
-        "Rendering {}x{} at {} spp, max depth {} ({} order){}{}",
+        "Rendering {}x{}{} at {} spp, max depth {} ({} order){}{}",
         img_width,
         img_height,
+        if settings.is_full_frame() {
+            String::new()
+        } else {
+            let r = settings.region();
+            format!(" region {r} ({}x{})", r.width(), r.height())
+        },
         settings.samples_per_pixel(),
         settings.max_depth(),
         if cli.scanline { "scanline" } else { "bucket" },
@@ -774,7 +834,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
         let first = &aovs.products[0];
         if first.beauty().is_some() {
             let png_path = Path::new(&first.name).with_extension("png");
-            match write_png(&buffer, img_width, img_height, &png_path, &output_color) {
+            match write_png(&buffer, &png_path, &output_color) {
                 Ok(_) => info!("Image written to: {:?}", png_path),
                 Err(e) => {
                     error!("Error writing PNG: {}", e);
@@ -786,8 +846,6 @@ fn render(cli: &RenderArgs) -> ExitCode {
         }
     } else if let Err(code) = write_beauty(
         &buffer,
-        img_width,
-        img_height,
         output.as_deref().unwrap_or("output.exr"),
         &output_color,
     ) {
@@ -1030,6 +1088,48 @@ mod tests {
     }
 
     #[test]
+    fn cli_region_is_four_integers_with_x1_and_y1_past_x0_and_y0() {
+        let region = |v: &str| render(["--region", v]).map(|c| c.region);
+        assert_eq!(
+            region("100,50,164,114").unwrap(),
+            Some(PixelRect::new(100, 50, 164, 114))
+        );
+        assert_eq!(
+            region(" 0, 0, 1, 1").unwrap(),
+            Some(PixelRect::new(0, 0, 1, 1))
+        );
+        assert_eq!(render([]).unwrap().region, None);
+        for bad in [
+            "10,10,5,20",
+            "0,0,4,0",
+            "4,0,4,4",
+            "1,2,3",
+            "1,2,3,4,5",
+            "-1,0,4,4",
+            "a,b,c,d",
+            "",
+        ] {
+            assert!(region(bad).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn write_png_writes_only_the_region() {
+        let mut buffer = Buffer::with_region(8, 4, PixelRect::new(2, 1, 5, 3));
+        // Image (2, 1), the region's top-left: raster row 4 - 1 - 1.
+        buffer.set_pixel(2, 2, crust_core::Vec3A::new(1.0, 0.0, 0.0));
+        let dir = std::env::temp_dir().join("crust_render_png_region_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.png");
+        write_png(&buffer, &path, &rec709()).expect("png written");
+        let img = image::open(&path).expect("readable").to_rgba8();
+        assert_eq!((img.width(), img.height()), (3, 2));
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0, 255]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn write_png_flips_rows_and_tone_maps() {
         let (w, h) = (3usize, 2usize);
         let mut buffer = Buffer::new(w, h);
@@ -1038,7 +1138,7 @@ mod tests {
         let dir = std::env::temp_dir().join("crust_render_png_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.png");
-        write_png(&buffer, w, h, &path, &rec709()).expect("png written");
+        write_png(&buffer, &path, &rec709()).expect("png written");
         let img = image::open(&path).expect("readable").to_rgba8();
         assert_eq!((img.width(), img.height()), (3, 2));
         // Image row 0 is the top: the scene's y = 1 row.

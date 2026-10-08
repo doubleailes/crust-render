@@ -657,7 +657,11 @@ same point.
   ray has `time = 0`, `transforms_at` returns the start transforms, and the beauty is sharp
   at the authored positions while the motion records stay for the `motionvector` AOV. The
   two left `warn_unhonoured` when they became honoured; it still warns about
-  `disableDepthOfField`, `pixelAspectRatio` and `dataWindowNDC`. Houdini authors both at
+  `disableDepthOfField` and `pixelAspectRatio`. `dataWindowNDC` left it too
+  (`add-render-region`): it is resolved like `resolution` (first product, else the
+  settings prim) and `region_from_ndc` turns it into the render's region — the pixels
+  whose centres lie inside the window, NDC `y` bottom-up, overscan clipped and an empty
+  window refused, one warning each. Houdini authors both at
   their `false` fallback, so Solaris exports are unaffected. There is deliberately no CLI
   flag or environment switch: this is a scene setting, not an optimisation to A/B.
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the

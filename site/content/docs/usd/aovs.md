@@ -499,6 +499,13 @@ In any working space other than linear Rec.709, the header also carries the spac
 is Rec.709 by the format's definition.) The single beauty EXR written without products
 carries the same two attributes in a non-Rec.709 working space, and none in `lin_rec709`.
 
+A render of part of the frame, through
+[`dataWindowNDC`](@/docs/usd/render-settings.md#datawindowndc) or
+[`--region`](@/docs/reference/command-line.md#region), writes every product the same
+way: the display window is the full resolution, the data window is the region, and the
+file holds only the region's pixels. Every product of a render shares the first
+product's region.
+
 ## Guarantees
 
 - Asking for AOVs never changes the beauty. It is bit-identical to the same render
@@ -521,10 +528,12 @@ Each of these is refused with a warning when authored, never ignored silently:
 - the geometric normal `Ng`;
 - deep output (`productType = "deepRaster"`);
 - more than one camera or resolution in a render;
-- `pixelAspectRatio`, `dataWindowNDC` and `disableDepthOfField` (warned only when
-  authored with a value that would change the image). `disableMotionBlur` and
-  `instantaneousShutter` are honoured: see
-  [Render settings](@/docs/usd/render-settings.md#disablemotionblur).
+- `pixelAspectRatio` and `disableDepthOfField` (warned only when authored with a value
+  that would change the image). `disableMotionBlur` and `instantaneousShutter` are
+  honoured: see [Render settings](@/docs/usd/render-settings.md#disablemotionblur), and
+  so is `dataWindowNDC`: see
+  [Render settings](@/docs/usd/render-settings.md#datawindowndc);
+- a `dataWindowNDC` reaching outside the frame (overscan): it is clipped to the frame.
 
 The `resolution` fallback is crust's 640×360, not the schema's 2048×1080, so scenes
 without a `resolution` keep their size.

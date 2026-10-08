@@ -808,6 +808,17 @@ pub(crate) fn load_scene(
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }
+    // The region, after the resolution it is counted in. A host's region
+    // (`--region`) replaces it later, on the settings.
+    if let Some(window) = products.data_window {
+        let (w, h) = settings.get_dimensions();
+        if let Some(region) = products::region_from_ndc(window, w, h) {
+            settings = settings
+                .with_region(region)
+                .expect("region_from_ndc returns a region inside the frame");
+            debug!("dataWindowNDC: rendering region {region} of the {w}x{h} frame");
+        }
+    }
     settings = settings.with_motion_blur(products.motion_blur);
     let domes_seen_by_camera = dome_light_camera_visibility(&index);
     // The working colour space, before any colour is read: every texture

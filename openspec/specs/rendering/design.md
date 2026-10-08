@@ -560,6 +560,50 @@ adaptive sampling existed, because a black pixel in glass looks like a shadow; a
 the rounds' progress counter must advance whether or not a callback is attached,
 or the walk-to-total loop never ends on a render without one.
 
+## Render regions
+
+A render can trace a rectangle of the frame only (`RenderSettings::region`, a
+`PixelRect`; set from `dataWindowNDC` or `--region`). It is built so that a crop
+renders *exactly* the pixels the full frame would, because the diagnostic trial
+renders (`add-diagnostic-command`) are only meaningful on that condition:
+
+- **Nothing derived from the resolution moves.** The camera, `Camera::pixel_span`
+  (ray cones), adaptive subdivision's screen rate and frustum culling, the learned
+  light cache and every sampling key keep the full frame. Shrinking the resolution or
+  the camera window instead would have changed all of them.
+- **Only the work units change.** `generate_tiles` / `generate_rows` take the region
+  (raster space). Tiles keep the *frame's* 16-pixel grid, clipped to the region, so a
+  pixel sits in the same tile, at the same place, in the same scanline-replay order as
+  in a full render; over the full frame the generators emit exactly the old units
+  (pinned by `a_full_frame_region_yields_the_frame_tiles_and_rows`).
+- **Everything per pixel is region-sized** — `Buffer`, `AovFilm`, the variance map,
+  the convergence-index and active planes, the guiding reference luminance — and is
+  indexed through the one `PixelRect::index`, so an offset region cannot be read with
+  the frame's stride.
+- **Two coordinate spaces.** The region is stored in image space (top-left origin, as
+  `--region`, a viewer and the EXR data window count). The tracer's `(i, j)` are raster
+  coordinates with row 0 at the *bottom* (the camera's `v = 0`), so it works on
+  `settings.raster_region()`, the region's `flip_y`. `Buffer::get_rgb` is top-down over
+  the region; `get_pixel` / `set_pixel` take frame raster coordinates.
+
+Bit-identity holds whenever a pixel's sample count does not depend on its neighbours —
+a fixed count (`-s 16` with the default minimum of 32), or adaptive sampling with a
+negative `crust:adaptiveNeighbourTolerance` (pinned in `crust-core/tests/region.rs`
+for the beauty, an LPE, depth and `sampleCount`, and tiles ↔ scanlines on a region).
+Two exceptions, by design:
+
+- **The neighbour hold.** A neighbour outside the region is never sampled, so it is
+  *absent* (`held_by_neighbour` checks the region's bounds, as it checked the frame's):
+  a border pixel that a still-sampling outside neighbour would have held stops earlier
+  than in the full frame.
+- **Path guiding** trains on the region's paths only; the field, and therefore a guided
+  crop, differs from a guided full render. A guided render is not bit-identical across
+  schedules anyway, and a field trained on the region is arguably the better one for it.
+
+A full-frame region is the old render: same units, same planes, same order. Verified
+with `scripts/check_images.sh check` against goldens of the parent commit and with the
+zero-AOV callgrind count (see the change's tasks).
+
 ## QMC sampling through the domain tree
 
 Sampling goes through the **`openqmc`** crate's native domain-tree API (see the workspace
