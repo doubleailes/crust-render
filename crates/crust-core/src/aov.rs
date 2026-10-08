@@ -336,6 +336,12 @@ pub struct AovVar {
     /// per camera sample, by that sample's diffuse filter (`rawLight` …, or
     /// `crust:aov:raw`). Its expression starts with a diffuse reflection.
     pub raw: bool,
+    /// A light path expression's variance (`crust:aov:variance`): an
+    /// [`AovSource::Lpe`] var, filtered, whose one scalar channel is the
+    /// per-pixel variance of the expression's luminance mean — the
+    /// `variance` source's estimator over the expression's (raw, if `raw`)
+    /// share of each sample. `components` is 1.
+    pub variance: bool,
 }
 
 impl AovVar {
@@ -343,6 +349,20 @@ impl AovVar {
     /// `color4*` beauty or light path expression.
     pub fn with_alpha(&self) -> bool {
         matches!(self.source, AovSource::Color | AovSource::Lpe) && self.components == 4
+    }
+
+    /// How the var's channels are laid out: its source's, except that an
+    /// expression's variance is one scalar.
+    pub fn channel_kind(&self) -> ChannelKind {
+        if self.is_lpe_variance() {
+            ChannelKind::Scalar
+        } else {
+            self.source.channel_kind()
+        }
+    }
+
+    fn is_lpe_variance(&self) -> bool {
+        self.variance && self.source == AovSource::Lpe
     }
 
     /// The film slot holding this var's per-sample accumulation, if any.
@@ -358,6 +378,7 @@ impl AovVar {
             clear_bits: self.clear.to_bits(),
             lpe,
             raw: self.raw,
+            variance: self.is_lpe_variance(),
         })
     }
 }
@@ -420,11 +441,26 @@ pub(crate) struct SlotKey {
     /// A raw light slot: the expression's value over the diffuse filter. The
     /// raw and plain slots of one expression share its DFA bit.
     raw: bool,
+    /// An expression's variance slot: per sample, the luminance of the
+    /// expression's weighted value goes into the unit's [`VarPlanes`]; the
+    /// film holds the variance of the mean. It shares the expression's DFA
+    /// bit with the value slot, as raw does.
+    variance: bool,
 }
 
 impl SlotKey {
     pub(crate) fn clear(&self) -> f32 {
         f32::from_bits(self.clear_bits)
+    }
+
+    /// Components per pixel in the film: one for a variance slot, else the
+    /// source's.
+    fn components(&self) -> usize {
+        if self.variance {
+            1
+        } else {
+            self.source.components()
+        }
     }
 
     /// A filtered slot whose clear value cannot be averaged — depth and
@@ -433,7 +469,7 @@ impl SlotKey {
     /// averages only the samples that hit something, and keeps the clear
     /// value where none did.
     fn hits_only(&self) -> bool {
-        self.accumulation == Accumulation::Filtered && !self.clear().is_finite()
+        self.accumulation == Accumulation::Filtered && !self.variance && !self.clear().is_finite()
     }
 }
 
@@ -455,6 +491,9 @@ pub(crate) struct AovLayout {
     /// Whether a var asks for the motion vector, so the integrator looks up
     /// the first hit's motion at all.
     pub(crate) motion: bool,
+    /// The working space's luminance weights, which an expression's
+    /// variance reduces each sample by — the beauty's (`LightList::luma`).
+    pub(crate) luma: utils::Luma,
     /// The compiled expressions and event symbols, built by the renderer
     /// (it needs the lights' tags) when `lpes` or `albedo` ask for routing.
     pub(crate) route: Option<std::sync::Arc<crate::tracer::RouteCtx>>,
@@ -504,6 +543,7 @@ const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
     clear_bits: 0,
     lpe: NO_LPE,
     raw: false,
+    variance: false,
 };
 
 /// What one camera sample carries for the AOVs besides its first hit: the
@@ -707,11 +747,24 @@ struct SlotPlanes {
     /// the count of the samples that hit.
     hit_weight: Vec<f32>,
     hits: Vec<u32>,
+    /// A unit's variance slot only: the luminance moments its samples
+    /// accumulate. The film's planes hold the resolved variance in
+    /// `values` instead, so a frame costs no more than a scalar AOV.
+    var: Option<VarPlanes>,
+}
+
+/// Per pixel, the sum and sum of squares of a variance slot's per-sample
+/// luminance, in f64 like the beauty's `PixelState`. The sample count is
+/// the pixel's own `taken`: every sample lands in every slot, zero or not.
+#[derive(Debug, Clone)]
+struct VarPlanes {
+    sum: Vec<f64>,
+    sq: Vec<f64>,
 }
 
 impl SlotPlanes {
     fn new(slot: &SlotKey, pixels: usize) -> Self {
-        let comps = slot.source.components();
+        let comps = slot.components();
         let hits_only = slot.hits_only();
         match slot.accumulation {
             Accumulation::Filtered => SlotPlanes {
@@ -728,6 +781,7 @@ impl SlotPlanes {
                 } else {
                     Vec::new()
                 },
+                var: None,
             },
             Accumulation::Closest => SlotPlanes {
                 values: vec![slot.clear(); pixels * comps],
@@ -735,6 +789,7 @@ impl SlotPlanes {
                 in_box: vec![false; pixels],
                 hit_weight: Vec::new(),
                 hits: Vec::new(),
+                var: None,
             },
         }
     }
@@ -764,6 +819,7 @@ pub(crate) struct UnitAov {
     /// is advanced.
     pub(crate) pixel: usize,
     planes: Vec<SlotPlanes>,
+    luma: utils::Luma,
 }
 
 impl UnitAov {
@@ -775,8 +831,18 @@ impl UnitAov {
             planes: layout
                 .slots
                 .iter()
-                .map(|s| SlotPlanes::new(s, pixels))
+                .map(|s| {
+                    let mut planes = SlotPlanes::new(s, pixels);
+                    if s.variance {
+                        planes.var = Some(VarPlanes {
+                            sum: vec![0.0; pixels],
+                            sq: vec![0.0; pixels],
+                        });
+                    }
+                    planes
+                })
                 .collect(),
+            luma: layout.luma,
         }
     }
 
@@ -795,8 +861,19 @@ impl UnitAov {
         let in_box = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
         let mut v = [0.0f32; 3];
         for (slot, planes) in self.slots.iter().zip(&mut self.planes) {
-            let comps = slot.source.components();
+            let comps = slot.components();
             match slot.accumulation {
+                Accumulation::Filtered if slot.variance => {
+                    // The beauty's own reduction (`advance_pixel`): the
+                    // luminance of the weighted colour, as f64. For
+                    // `C.*[LO]` the colour is the beauty's bit for bit, so
+                    // the moments are too.
+                    sample_value(slot, hit, extras, cam, &mut v);
+                    let x = self.luma.of(Vec3A::from_array(v) * weight) as f64;
+                    let var = planes.var.as_mut().expect("a unit's variance slot");
+                    var.sum[p] += x;
+                    var.sq[p] += x * x;
+                }
                 Accumulation::Filtered => {
                     sample_value(slot, hit, extras, cam, &mut v);
                     if slot.hits_only() {
@@ -905,9 +982,13 @@ impl AovFilm {
     ) {
         let q = self.rect.index(x, y);
         for (slot, src) in self.slots.iter_mut().zip(&unit.planes) {
-            let comps = slot.key.source.components();
+            let comps = slot.key.components();
             let dst = &mut slot.planes;
             match slot.key.accumulation {
+                Accumulation::Filtered if slot.key.variance => {
+                    let var = src.var.as_ref().expect("a unit's variance slot");
+                    dst.values[q] = crate::tracer::var_of_mean(var.sum[p], var.sq[p], taken) as f32;
+                }
                 Accumulation::Filtered if slot.key.hits_only() => {
                     let (w, n) = (src.hit_weight[p], src.hits[p]);
                     for c in 0..comps {
@@ -953,7 +1034,8 @@ impl AovFilm {
     /// guided render is the same linear combination of passes as the
     /// beauty. Closest slots take the closest sample across passes, the
     /// sample count sums, and the variance of the blended mean is
-    /// `Σ (wₖ/total)² · varₖ`.
+    /// `Σ (wₖ/total)² · varₖ` — for the `variance` source and an
+    /// expression's variance alike, in the same arithmetic.
     ///
     /// A pass with no weight (its variance could not be estimated, as at
     /// 1 spp) adds nothing to the variance, and nothing non-finite to a
@@ -991,11 +1073,19 @@ impl AovFilm {
             for ((dst, src), hit_share) in out.slots.iter_mut().zip(&film.slots).zip(&mut hit_share)
             {
                 match dst.key.accumulation {
+                    Accumulation::Filtered if dst.key.variance => {
+                        if share > 0.0 {
+                            let share = share * share;
+                            for (d, s) in dst.planes.values.iter_mut().zip(&src.planes.values) {
+                                *d = (*d as f64 + share * *s as f64) as f32;
+                            }
+                        }
+                    }
                     Accumulation::Filtered if dst.key.hits_only() => {
                         if share == 0.0 {
                             continue;
                         }
-                        let comps = dst.key.source.components();
+                        let comps = dst.key.components();
                         for (q, h) in hit_share.iter_mut().enumerate() {
                             let v = &src.planes.values[q * comps..(q + 1) * comps];
                             if v.iter().all(|x| x.is_finite()) {
@@ -1018,7 +1108,7 @@ impl AovFilm {
                         }
                     }
                     Accumulation::Closest => {
-                        let comps = dst.key.source.components();
+                        let comps = dst.key.components();
                         for q in 0..out.rect.area() {
                             if dst
                                 .planes
@@ -1050,7 +1140,7 @@ impl AovFilm {
             if !slot.key.hits_only() {
                 continue;
             }
-            let comps = slot.key.source.components();
+            let comps = slot.key.components();
             for (q, h) in hit_share.iter().enumerate() {
                 for d in &mut slot.planes.values[q * comps..(q + 1) * comps] {
                     *d = if *h > 0.0 {
@@ -1108,8 +1198,9 @@ impl AovFilm {
                 vec![top_down(&|q| v[q])]
             }
             _ => {
-                let slot = self.slot(&var.slot_key(&self.lpes).expect("a slotted source"));
-                let comps = var.source.components();
+                let key = var.slot_key(&self.lpes).expect("a slotted source");
+                let slot = self.slot(&key);
+                let comps = key.components();
                 (0..comps)
                     .map(|c| top_down(&|q| slot.planes.values[q * comps + c]))
                     .collect()
@@ -1164,6 +1255,7 @@ mod tests {
             clear: source.default_clear(),
             expression: None,
             raw: false,
+            variance: false,
         }
     }
 

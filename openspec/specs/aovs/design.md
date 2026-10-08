@@ -1037,6 +1037,36 @@ the points to keep here:
   is routed twice. The filter is computed only when a raw or
   `diffuse_albedo` AOV asks for it.
 
+## Expression variance (`add-lpe-variance`)
+
+`bool crust:aov:variance = true` on an `lpe` var: one scalar channel, the
+per-pixel variance of the expression's luminance mean. The change's
+`design.md` has the reasoning; the points to keep here:
+
+- **One estimator.** `tracer::var_of_mean(sum, sq, n)` is the free function
+  behind `PixelState` (adaptive stop, the `variance` AOV) and the variance
+  slot alike, `+∞` below two samples. Per sample the slot reduces
+  `luma(w · v)` with the layout's `luma` (the lights' working-space luma) —
+  the beauty's own expression in `advance_pixel` — so `C.*[LO]`'s variance
+  is the `variance` AOV bit for bit (`tests/lpe.rs`, guided passes and the
+  Cornell box included). Passes blend it with the beauty's `Σ share² · var`.
+- **Zeros count.** Every sample lands in every slot, so `n` is the pixel's
+  own `taken`; no count plane is kept (the proposal's `n` plane would
+  always equal it).
+- **Moments live only in the unit.** `SlotKey::variance` gives the unit's
+  `SlotPlanes` a `VarPlanes { sum, sq }` (f64); `store` resolves them, and
+  the film's plane is one f32 per pixel like any scalar. A frame costs 4
+  bytes per pixel per variance var, a tile 16 more while it renders.
+- **Sharing.** The variance and value slots of one expression share its DFA
+  bit (distinct `SlotKey`s, one `lpes` entry), as raw and plain do. A
+  variance slot is never `hits_only` whatever its clear value.
+- **Refusals at import** (`products.rs`): not `sourceType = "lpe"`
+  (`rawLight` included), `closest` accumulation, or a type that is not one
+  float/half/double; an unauthored type is `float`.
+- **Not additive.** The components of one sample are correlated, so the
+  variances of a partition do not sum to the beauty's; the user page says
+  so and the diagnostic reports each on its own.
+
 ## Motion vector AOV (`add-motion-vector-aov`)
 
 `motionvector`: the pass VectorBlur2 blurs a sharp beauty along, and the

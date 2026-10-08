@@ -229,6 +229,7 @@ impl Renderer {
             return (buffer, AovFilm::new(&AovLayout::default(), rect), rays);
         }
         let mut layout = AovLayout::new(request);
+        layout.luma = self.lights.luma();
         if !layout.lpes.is_empty() || layout.albedo || layout.diffuse_filter {
             // One DFA for every expression of the render, over the lights'
             // tags; shared read-only by every worker.
@@ -1004,6 +1005,21 @@ impl Renderer {
     }
 }
 
+/// The unbiased variance of a mean over `n` samples whose sum is `sum` and
+/// sum of squares `sq`: `(Σx² − (Σx)²/n) / (n−1) / n`, clamped at 0, and
+/// `+∞` below two samples, where it cannot be estimated.
+///
+/// The one estimator behind adaptive sampling's stop rule, the `variance`
+/// AOV and the light path expressions' variance modifier, so `C.*[LO]`'s
+/// variance is the `variance` AOV bit for bit.
+pub(crate) fn var_of_mean(sum: f64, sq: f64, n: u32) -> f64 {
+    if n < 2 {
+        return f64::INFINITY;
+    }
+    let n = n as f64;
+    ((sq - sum * sum / n) / (n - 1.0) / n).max(0.0)
+}
+
 /// One pixel's accumulators across the rounds of a pass, plus where it
 /// stands in the adaptive stop rule.
 #[derive(Clone, Copy)]
@@ -1052,8 +1068,7 @@ impl PixelState {
 
     /// Unbiased variance of the pixel-mean luminance over `taken` samples.
     fn var_of_mean(&self) -> f64 {
-        let n = self.taken as f64;
-        ((self.lum_sq - self.lum_sum * self.lum_sum / n) / (n - 1.0) / n).max(0.0)
+        var_of_mean(self.lum_sum, self.lum_sq, self.taken)
     }
 
     /// After a round's samples: out of budget stops the pixel; otherwise
@@ -1085,11 +1100,7 @@ impl PixelState {
 
     /// The pixel's colour and the variance of its mean luminance.
     fn estimate(&self) -> (Vec3A, f64) {
-        let variance = if self.taken >= 2 {
-            self.var_of_mean()
-        } else {
-            f64::INFINITY
-        };
+        let variance = self.var_of_mean();
         // Weighted-average film estimator. A Mitchell pixel whose few
         // samples all landed on negative lobes could zero the denominator;
         // the plain mean is the sane fallback there.

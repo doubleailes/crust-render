@@ -39,6 +39,7 @@ fn var(name: &str, source: AovSource, expression: Option<&str>) -> AovVar {
         clear: source.default_clear(),
         expression: expression.map(str::to_owned),
         raw: false,
+        variance: false,
     }
 }
 
@@ -46,6 +47,11 @@ fn vars() -> Vec<AovVar> {
     vec![
         var("beauty", AovSource::Color, None),
         var("direct_diffuse", AovSource::Lpe, Some("C<RD>L")),
+        AovVar {
+            components: 1,
+            variance: true,
+            ..var("direct_diffuse_variance", AovSource::Lpe, Some("C<RD>L"))
+        },
         var("depth", AovSource::Depth, None),
         var("sampleCount", AovSource::SampleCount, None),
     ]

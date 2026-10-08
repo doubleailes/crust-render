@@ -27,6 +27,7 @@ fn lpe(expr: &str) -> AovVar {
         clear: 0.0,
         expression: Some(expr.to_owned()),
         raw: false,
+        variance: false,
     }
 }
 
@@ -42,6 +43,7 @@ fn raw(name: &str, source: AovSource) -> AovVar {
         clear: source.default_clear(),
         expression: None,
         raw: false,
+        variance: false,
     }
 }
 
@@ -615,6 +617,7 @@ fn diffuse_filter_var() -> AovVar {
         clear: 0.0,
         expression: None,
         raw: false,
+        variance: false,
     }
 }
 
@@ -850,4 +853,180 @@ fn raw_light_is_flat_across_a_checkerboard_and_zero_on_a_mirror() {
         assert_eq!(fl[c][centre], 0.0, "filter on the mirror");
         assert_eq!(rw[c][centre], 0.0, "raw light on the mirror");
     }
+}
+
+// ---------------------------------------------------------------------------
+// crust:aov:variance
+// ---------------------------------------------------------------------------
+
+/// `expr`'s variance var: one scalar, the variance of its luminance mean.
+fn variance_of(expr: &str) -> AovVar {
+    AovVar {
+        name: format!("{expr} variance"),
+        components: 1,
+        variance: true,
+        ..lpe(expr)
+    }
+}
+
+/// The full path's variance is the beauty's `variance`, bit for bit: one
+/// estimator over the same per-sample luminance — through the clamp, the
+/// guided passes' blend, hidden lights and several light samples.
+#[test]
+fn the_full_path_variance_is_the_variance_aov_bitwise() {
+    for (clamp, guiding, hidden, light_samples) in [
+        (0.0, false, false, (1, 1)),
+        (10.0, false, true, (1, 1)),
+        (0.0, true, false, (1, 1)),
+        (0.5, false, false, (4, 2)),
+    ] {
+        let o = Opts {
+            clamp,
+            guiding,
+            hidden,
+            light_samples,
+            ..Opts::default()
+        };
+        let all = variance_of("C.*[LO]");
+        let variance = raw("variance", AovSource::Variance);
+        let (beauty, film) = render(&o, &[all.clone(), variance.clone()]);
+        let (a, b) = (
+            film.var_channels(&beauty, &all),
+            film.var_channels(&beauty, &variance),
+        );
+        assert_eq!(a.len(), 1);
+        assert!(
+            bits(&a) == bits(&b),
+            "clamp {clamp}, guiding {guiding}, hidden {hidden}, light samples {light_samples:?}"
+        );
+        assert!(a[0].iter().any(|&v| v > 0.0));
+    }
+}
+
+/// The same on the Cornell box from USD at 16 spp, with its own filter.
+#[test]
+fn the_cornell_box_full_path_variance_is_the_variance_aov_bitwise() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/cornellbox.usda");
+    let scene = crust_core::Scene::from_usd(&path).expect("load cornellbox.usda");
+    let settings = scene
+        .settings
+        .with_resolution(32, 32)
+        .with_samples_per_pixel(16);
+    let r = Renderer::new(scene.camera, scene.world, scene.lights, settings);
+    let all = variance_of("C.*[LO]");
+    let variance = raw("variance", AovSource::Variance);
+    let (b, f, _) = r.render_with_aovs(
+        true,
+        &|_, _| {},
+        &request(vec![all.clone(), variance.clone()]),
+    );
+    let a = f.var_channels(&b, &all);
+    assert!(bits(&a) == bits(&f.var_channels(&b, &variance)));
+    assert!(a[0].iter().any(|&v| v > 0.0));
+}
+
+/// Asking for an expression's variance beside its value changes neither the
+/// value, nor the beauty, nor any other expression.
+#[test]
+fn a_variance_var_disturbs_no_other_channel() {
+    for guiding in [false, true] {
+        let o = Opts {
+            guiding,
+            ..Opts::default()
+        };
+        let gi = lpe("C<RD>.+[LO]");
+        let direct = lpe("C<RD>[LO]");
+        let rawv = raw_lpe("C<RD>[LO]");
+        let (b0, f0) = render(&o, &[gi.clone(), direct.clone(), rawv.clone()]);
+        let (b1, f1) = render(
+            &o,
+            &[
+                gi.clone(),
+                variance_of("C<RD>.+[LO]"),
+                direct.clone(),
+                rawv.clone(),
+                AovVar {
+                    raw: true,
+                    ..variance_of("C<RD>[LO]")
+                },
+                variance_of("C<RG>[LO]"),
+            ],
+        );
+        assert!(bits(&beauty_planes(&f0, &b0)) == bits(&beauty_planes(&f1, &b1)));
+        for v in [&gi, &direct, &rawv] {
+            assert!(
+                bits(&f0.var_channels(&b0, v)) == bits(&f1.var_channels(&b1, v)),
+                "guiding {guiding}: {}",
+                v.name
+            );
+        }
+    }
+}
+
+/// The variance of a mean falls as 1/N: the channel's frame mean at 16,
+/// 64 and 256 spp drops by about 4 each step, rather than plateauing.
+///
+/// Without the glass ball: its caustics on the wall are so heavy-tailed
+/// that one pixel's lucky sample decides the frame mean at 16 spp (the
+/// estimate is unbiased, its spread is not small), which would test the
+/// scene's tail rather than the estimator.
+#[test]
+fn an_expression_variance_falls_as_one_over_the_sample_count() {
+    let gi = variance_of("C<RD>.+[LO]");
+    let means: Vec<f64> = [16, 64, 256]
+        .iter()
+        .map(|&spp| {
+            let o = Opts {
+                spp,
+                glass: false,
+                ..Opts::default()
+            };
+            let (b, f) = render(&o, std::slice::from_ref(&gi));
+            mean(&f.var_channels(&b, &gi)[0])
+        })
+        .collect();
+    assert!(means[0] > 0.0, "{means:?}");
+    for k in 0..2 {
+        let ratio = means[k] / means[k + 1];
+        assert!((3.0..5.5).contains(&ratio), "{means:?}: ratio {ratio}");
+    }
+}
+
+/// Zero samples count: a pixel whose one lit sample in N carries `x` has
+/// the variance of a mean of N values that are mostly zero, which is
+/// greater than zero — the estimator does not skip the paths an expression
+/// rejects. Checked through the film directly, with a box filter.
+#[test]
+fn samples_an_expression_rejects_count_as_zeros() {
+    let o = Opts {
+        filter: PixelFilter::BoxFilter { radius: 0.5 },
+        glass: false,
+        ..Opts::default()
+    };
+    // Indirect diffuse light is rare here: most pixels' samples carry none,
+    // and those that see any see it in a few samples.
+    let indirect = variance_of("C<RD>.+[LO]");
+    let value = lpe("C<RD>.+[LO]");
+    let (b, f) = render(&o, &[indirect.clone(), value.clone()]);
+    let var = &f.var_channels(&b, &indirect)[0];
+    let val = &f.var_channels(&b, &value);
+    let lum = |q: usize| 0.2126 * val[0][q] + 0.7152 * val[1][q] + 0.0722 * val[2][q];
+    let n = o.spp as f64;
+    let mut checked = 0;
+    for (q, &v) in var.iter().enumerate() {
+        let m = lum(q) as f64;
+        if m <= 0.0 {
+            continue;
+        }
+        // Σx² ≥ (Σx)²/k for the k samples that carry anything, so with
+        // k < N the variance of the mean is at least m²·(N/k − 1)/(N − 1)
+        // ≥ 0; it is 0 only when every sample carries the same light.
+        // Counting only the k lit samples would instead allow 0 for a
+        // single lit sample. Here: positive wherever the mean is.
+        assert!(v > 0.0, "pixel {q}: mean {m}, variance {v}");
+        assert!(v as f64 <= m * m * n, "pixel {q}");
+        checked += 1;
+    }
+    assert!(checked > 0);
 }

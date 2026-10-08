@@ -172,7 +172,7 @@ case-sensitive.
 | `Neye` | `Nn` | `normal3f` | filtered | The same normal in camera space. |
 | `primvars:st` | `st`, `uv`, `UV` | `texCoord2f` | filtered | The first hit's texture coordinates. |
 | `sampleCount` | `__sampleCount` | `float` / `int` | per pixel | Samples the pixel took: shows where adaptive sampling stopped early. |
-| `variance` | `crust:variance` | `float` | per pixel | Variance of the pixel's luminance mean: the quantity adaptive sampling stops on. |
+| `variance` | `crust:variance` | `float` | per pixel | Variance of the pixel's luminance mean: the quantity adaptive sampling stops on. Per light path expression: [`crust:aov:variance`](#variance-of-an-expression). |
 | `albedo` | `DiffuseAlbedoSD` | `color3f` | filtered | The surface colour at the first hit that is not a perfect mirror or clear glass, for denoisers. See [Albedo](#albedo). |
 | `diffuse_albedo` | `DiffuseFilter`, `diffuseFilter` | `color3f` | filtered | The diffuse colour of the surface the camera ray hits: what [raw light](#raw-light) is divided by. 0 off a surface and on surfaces with no diffuse part (mirrors, metals, clear glass). |
 | `rawLight` | `RawLighting`, `rawLighting` | `color3f` / `color4f` | filtered | Direct diffuse light without the surface's colour. See [Raw light](#raw-light). |
@@ -425,6 +425,102 @@ write `<RD'diffuse'>` for the label.
 `diffuse_albedo` used to be another name for `albedo`. It is now the diffuse colour
 alone, at the first surface; `albedo` is unchanged.
 {% end %}
+
+## Variance of an expression
+
+The `variance` source says *where* the image is noisy. `crust:aov:variance` on a light
+path expression says *which light* makes the noise: direct or indirect, diffuse or
+glossy, caustics, one light group or another. That decides which setting helps: light
+sampling settings help noisy direct light, path guiding helps indirect light and
+caustics.
+
+```usda
+def RenderVar "gi_variance"
+{
+    uniform token dataType = "float"
+    uniform string sourceName = "C<RD>.+[LO]"
+    uniform token sourceType = "lpe"
+    bool crust:aov:variance = 1
+}
+```
+
+The var writes one scalar channel: the per-pixel variance of the expression's luminance
+mean. It is the `variance` source's estimator applied to the expression instead of the
+beauty:
+
+- each sample's contribution to the expression, weighted by its pixel filter weight, is
+  reduced to luminance in the working colour space;
+- the variance is the unbiased sample variance of the mean,
+  `(Σx² − (Σx)²/N) / (N − 1) / N`, over the N samples the pixel took;
+- a sample the expression does not select counts as a zero. Skipping it would hide the
+  noise of rare paths, which are the noisy ones;
+- with fewer than two samples it is `+inf`, like `variance`.
+
+So `C.*[LO]` with the modifier is bit-identical to `variance`. With a Gaussian or
+Mitchell pixel filter both are the same approximation (see
+[Accumulation](#accumulation)). The value falls as 1/N with the sample count.
+
+Combinations:
+
+- With `crust:aov:raw = 1` it is the variance of the raw light.
+- The data type is `float` (the default when none is authored), `half` or `double`.
+  Anything else is refused with a warning.
+- It needs every sample, so `closest` accumulation (`multiSampled = 0`, a `zmin` rule,
+  `closest_filter`) is refused with a warning naming the var.
+- On a var whose `sourceType` is not `lpe`, including the `rawLight` family, it is
+  refused with a warning.
+- A refused var writes no channel.
+
+One expression can be asked for twice, once for its value and once for its variance;
+the two share all the routing work, and the value is bit-identical to the same product
+without the variance var. A product holding a partition of the paths with each part's
+value and variance:
+
+```usda
+def RenderProduct "noise"
+{
+    token productName = "noise.exr"
+    rel orderedVars = [</Render/Vars/direct>, </Render/Vars/direct_var>,
+                       </Render/Vars/indirect>, </Render/Vars/indirect_var>,
+                       </Render/Vars/glossy>, </Render/Vars/glossy_var>,
+                       </Render/Vars/variance>]
+}
+def Scope "Vars"
+{
+    def RenderVar "direct"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C<RD>[LO]"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "direct_var"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "C<RD>[LO]"
+        uniform token sourceType = "lpe"
+        bool crust:aov:variance = 1
+    }
+    # … "indirect" (C<RD>.+[LO]) and "glossy" (C<RG>.*[LO]) the same way
+    def RenderVar "variance"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "variance"
+    }
+}
+```
+
+{% alert(icon="⚠️") %}
+The variances of a partition do **not** add up to the beauty's `variance`. One camera
+sample feeds several expressions at once, and an expression that gets nothing from a
+sample records a zero while another records the light, so the parts are correlated.
+Read each one as that light's own noise, for example relative to its own mean
+(`sqrt(var) / mean`) or to the beauty's mean, never as a share of the total.
+{% end %}
+
+**Cost.** Nothing unless asked for. Each variance var adds a luminance, a square and
+two additions per sample, and two 8-byte accumulators per pixel of the tile or row
+being rendered; the finished frame holds one float per pixel, like any scalar AOV.
+
 
 ## Motion vectors
 

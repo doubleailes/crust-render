@@ -1218,6 +1218,135 @@ fn a_product_differing_only_in_motion_blur_is_kept_and_warned_about() {
 }
 
 // ---------------------------------------------------------------------------
+// crust:aov:variance
+// ---------------------------------------------------------------------------
+
+/// `crust:aov:variance` on an `lpe` var: one float channel, filtered,
+/// beside the expression's value var; refused, with one warning naming the
+/// var, on a non-`lpe` var, with closest accumulation, and as anything but
+/// one float channel.
+#[test]
+fn an_expression_variance_resolves_and_its_misuses_are_refused() {
+    let (scene, warnings) = load_warnings(
+        "lpe_variance",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/gi>, </Render/gi_var>, </Render/gi_var_half>,
+                           </Render/raw_var>, </Render/on_raw_source>,
+                           </Render/on_variance>, </Render/closest>, </Render/as_color>]
+    }
+    def RenderVar "gi"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C<RD>.+[LO]"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "gi_var"
+    {
+        uniform string sourceName = "C<RD>.+[LO]"
+        uniform token sourceType = "lpe"
+        bool crust:aov:variance = 1
+    }
+    def RenderVar "gi_var_half"
+    {
+        uniform token dataType = "half"
+        uniform string sourceName = "C<RD>.+[LO]"
+        uniform token sourceType = "lpe"
+        bool crust:aov:variance = 1
+        bool driver:parameters:aov:multiSampled = 1
+    }
+    def RenderVar "raw_var"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "C<RD>[LO]"
+        uniform token sourceType = "lpe"
+        bool crust:aov:raw = 1
+        bool crust:aov:variance = 1
+    }
+    def RenderVar "on_raw_source"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "rawLight"
+        bool crust:aov:variance = 1
+    }
+    def RenderVar "on_variance"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "variance"
+        bool crust:aov:variance = 1
+    }
+    def RenderVar "closest"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "C<RD>.+[LO]"
+        uniform token sourceType = "lpe"
+        bool crust:aov:variance = 1
+        bool driver:parameters:aov:multiSampled = 0
+    }
+    def RenderVar "as_color"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C<RD>.+[LO]"
+        uniform token sourceType = "lpe"
+        bool crust:aov:variance = 1
+    }
+"#,
+    );
+    let got: Vec<_> = scene.aovs.products[0]
+        .vars
+        .iter()
+        .map(|v| {
+            (
+                v.name.as_str(),
+                v.expression.as_deref(),
+                v.components,
+                v.precision,
+                v.accumulation,
+                v.raw,
+                v.variance,
+            )
+        })
+        .collect();
+    let gi = Some("C<RD>.+[LO]");
+    let filtered = Accumulation::Filtered;
+    assert_eq!(
+        got,
+        [
+            ("gi", gi, 3, Precision::Float, filtered, false, false),
+            ("gi_var", gi, 1, Precision::Float, filtered, false, true),
+            ("gi_var_half", gi, 1, Precision::Half, filtered, false, true),
+            (
+                "raw_var",
+                Some("C<RD>[LO]"),
+                1,
+                Precision::Float,
+                filtered,
+                true,
+                true
+            ),
+        ]
+    );
+    assert_eq!(
+        scene.aovs.products[0].vars[1].channel_kind(),
+        crust_core::aov::ChannelKind::Scalar
+    );
+    for refused in ["on_raw_source", "on_variance", "closest", "as_color"] {
+        let named: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.contains(&format!("/Render/{refused}:")))
+            .collect();
+        assert_eq!(named.len(), 1, "{refused}: {warnings:#?}");
+    }
+    assert_eq!(warnings.len(), 4, "{warnings:#?}");
+}
+
+// ---------------------------------------------------------------------------
 // dataWindowNDC
 // ---------------------------------------------------------------------------
 
