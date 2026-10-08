@@ -33,8 +33,25 @@ fn the_cornell_box_is_diagnosed_within_its_budget() {
             .iter()
             .any(|n| n.id == "light_selection" && n.reason == "not_applicable")
     );
-    // Every planned trial either ran or says why not.
-    assert!(r.trials.len() + r.not_tried.iter().filter(|n| n.tier == 1).count() >= 7);
+    // Every planned trial either ran or says why not: on one light, the
+    // other MIS heuristic (never light- or BSDF-only), more light samples,
+    // guiding.
+    for id in [
+        "strategy=balance",
+        "light_samples=2",
+        "light_samples=4",
+        "light_samples_indirect=2",
+        "guiding=true",
+    ] {
+        let ran = r.trials.iter().any(|t| t.id == id);
+        let skipped = r.not_tried.iter().any(|n| n.id == id);
+        assert!(ran != skipped, "{id}: ran {ran}, not tried {skipped}");
+    }
+    assert!(
+        !r.trials
+            .iter()
+            .any(|t| t.id == "strategy=light" || t.id == "strategy=bsdf")
+    );
     assert_eq!(
         r.run.exit,
         if r.run.budget_exceeded_in.is_some() {

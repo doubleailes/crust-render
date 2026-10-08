@@ -169,9 +169,17 @@ fn changes(factor: &str, base: RenderSettings, lights: usize) -> Result<Vec<Chan
         return Err("the scene has no light-list entry".into());
     }
     Ok(match factor {
+        // The other MIS heuristic only. `light` and `bsdf` are modes that
+        // show what MIS balances between, not swaps: on a scene whose light
+        // one strategy alone cannot reach they lose energy, and their low
+        // variance then reads as a gain (ALab: light-only ranked ΔEff 14,
+        // its image 61% darker).
         "strategy" => SamplingStrategy::CHOICES
             .iter()
-            .filter(|(v, _, _)| *v != base.sampling_strategy())
+            .filter(|(v, _, _)| {
+                *v != base.sampling_strategy()
+                    && matches!(v, SamplingStrategy::PowerMis | SamplingStrategy::BalanceMis)
+            })
             .map(|(_, name, _)| {
                 change(
                     "strategy",
@@ -387,6 +395,16 @@ fn references(runs: &[Running], crops: usize) -> Vec<CropImage> {
         .collect()
 }
 
+/// The Ptex reader cache's `(lookups, hits)` between two snapshots, from its
+/// own hits and misses. Not against `PtexCacheStats::lookups`: ptex-rs
+/// counts a hit per cache operation, and one reader lookup of a tiled face
+/// can make several, so that ratio can pass 100%.
+fn ptex_cache_delta(before: &PtexCacheStats, after: &PtexCacheStats) -> (u64, u64) {
+    let hits = after.cache_hits.saturating_sub(before.cache_hits);
+    let misses = after.cache_misses.saturating_sub(before.cache_misses);
+    (hits + misses, hits)
+}
+
 /// Seconds as a [`Num`].
 fn secs(d: Duration) -> Num {
     Num(d.as_secs_f64())
@@ -495,11 +513,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         (after_p1.0.micro_hits + after_p1.0.hits)
             .saturating_sub(before_p1.0.micro_hits + before_p1.0.hits),
     );
-    let ptex_hits = |p: &PtexCacheStats| p.micro_hits + p.cache_hits;
-    let ptex_delta = (
-        after_p1.1.lookups().saturating_sub(before_p1.1.lookups()),
-        ptex_hits(&after_p1.1).saturating_sub(ptex_hits(&before_p1.1)),
-    );
+    let ptex_delta = ptex_cache_delta(&before_p1.1, &after_p1.1);
     let rate = |(n, hits): (u64, u64)| (n > 0).then(|| Num(hits as f64 / n as f64));
     let peak_mem = crate::peak_memory_bytes();
     let baseline = Baseline {
@@ -652,6 +666,11 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let mut setup_by_factor: Vec<(&'static str, f64)> = Vec::new();
     let mut runs: Vec<Running> = Vec::new();
     let mut tier1_complete = exceeded.is_none();
+    // The baseline's own setup per crop render, which every pair pays too:
+    // the light selection's (crop-independent) and guiding's training
+    // (scaling with the pixels).
+    let baseline_setup_s =
+        selection.as_secs_f64() * picked.len() as f64 + p1.setup_s * crop_pixels as f64 / pixels;
     let measure = |renderer: &mut Renderer,
                    sched: &mut schedule::Schedule,
                    setup_by_factor: &mut Vec<(&'static str, f64)>,
@@ -660,21 +679,39 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                    factor: String,
                    value: String|
      -> Option<Running> {
-        let setup = changes
-            .iter()
-            .filter_map(|c| {
-                setup_by_factor
-                    .iter()
-                    .find(|(f, _)| *f == c.factor)
-                    .map(|(_, s)| *s)
-            })
-            .sum::<f64>();
+        // Setup, per trial render: what this factor cost last time, else
+        // measured (a `learned` pre-pass, over the full frame whatever the
+        // crop) or estimated (guiding's training passes) before admitting
+        // the trial — a first trial estimated at no setup could overrun.
+        let mut setup_total = 0.0f64;
+        for c in &changes {
+            let known = setup_by_factor
+                .iter()
+                .find(|(f, _)| *f == c.factor)
+                .map(|(_, s)| *s);
+            setup_total += match known {
+                Some(s) => s * picked.len() as f64,
+                None if c.factor == "light_selection" && c.value == "learned" => {
+                    let s = renderer
+                        .reconfigure((c.apply)(crop_settings(full, 0, spp_t), &c.value))
+                        .as_secs_f64();
+                    setup_by_factor.push((c.factor, s));
+                    s * picked.len() as f64
+                }
+                None if c.factor == "guiding" && c.value == "true" => {
+                    per_px_spp
+                        * crop_pixels as f64
+                        * schedule::guiding_training_spp(full.guiding_train_iterations()) as f64
+                }
+                None => 0.0,
+            };
+        }
         let estimate = schedule::trial_cost_s(
             per_px_spp,
             crop_pixels,
             spp_t,
             repeats,
-            setup * picked.len() as f64 * repeats as f64,
+            (setup_total + baseline_setup_s) * repeats as f64,
         );
         sched.set_spent(elapsed());
         if !sched.fits(1, estimate) {
@@ -697,6 +734,15 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                 pairs.push((b, t));
             }
             per_crop.push(CropRun { pairs });
+            // Past the budget, the rest of the trial is not run: its
+            // measurements so far are dropped, and it is listed as not tried.
+            if elapsed() > budget_s && k + 1 < picked.len() {
+                debug!(
+                    "diagnostic: {id} abandoned after {} crop(s): out of budget",
+                    k + 1
+                );
+                return None;
+            }
         }
         for c in &changes {
             setup_by_factor.retain(|(f, _)| *f != c.factor);
@@ -821,6 +867,12 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         .iter()
         .map(|r| judge(r, &crops_out, &refs, spp_t))
         .collect();
+    // Every trial ran, but past the whole budget: the budget ran out before
+    // tier 1 completed.
+    sched.set_spent(elapsed());
+    if sched.exhausted() {
+        tier1_complete = false;
+    }
     phases.push(PhaseRun {
         name: "tier 1".into(),
         time_s: secs(tier1_start.elapsed()),

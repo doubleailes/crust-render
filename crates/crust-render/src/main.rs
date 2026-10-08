@@ -288,14 +288,20 @@ impl std::ops::Deref for RenderArgs {
 
 /// `--budget`'s parser: one or more `<number><unit>` terms (`h`, `m`, `s`,
 /// `ms`), as in `90s`, `5m` or `1m30s`, or a bare number of seconds. The
-/// total must be positive.
+/// total must be positive, and small enough for a `Duration`
+/// (`from_secs_f64` would panic on `1e20`).
 fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
     let bad = || format!("{s:?} is not a duration like 90s, 5m or 1m30s");
+    let positive = |secs: f64| {
+        if secs > 0.0 {
+            Duration::try_from_secs_f64(secs).map_err(|_| format!("{s:?} is too long a duration"))
+        } else {
+            Err(bad())
+        }
+    };
     let t = s.trim();
     if let Ok(secs) = t.parse::<f64>() {
-        return (secs.is_finite() && secs > 0.0)
-            .then(|| Duration::from_secs_f64(secs))
-            .ok_or_else(bad);
+        return positive(secs);
     }
     let mut total = 0.0f64;
     let mut rest = t;
@@ -318,9 +324,7 @@ fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
         total += value * scale;
         rest = &rest[unit_len..];
     }
-    (total.is_finite() && total > 0.0)
-        .then(|| Duration::from_secs_f64(total))
-        .ok_or_else(bad)
+    positive(total)
 }
 
 /// `--target-mrse`'s parser: a finite, positive error.
@@ -1555,6 +1559,12 @@ mod tests {
         for bad in ["", "0s", "-5s", "5x", "s", "m5", "nan", "inf"] {
             assert!(parse_duration(bad).is_err(), "{bad:?}");
         }
+        // Finite but past what a `Duration` holds: a usage error, not a
+        // panic in the parser.
+        for huge in ["1e20", "99999999999999999999h", "1e300", "1e400"] {
+            assert!(parse_duration(huge).is_err(), "{huge:?}");
+        }
+        assert!(diagnose(["-i", "s.usda", "--budget", "1e20"]).is_err());
         assert!(diagnose(["--repeats", "0"]).is_err());
         assert!(diagnose(["--target-mrse", "0"]).is_err());
         assert_eq!(

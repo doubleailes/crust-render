@@ -69,6 +69,10 @@ pub fn deltas(previous_json: &str, current: &Report) -> Deltas {
         comparable: true,
         note: None,
         baseline_time_s: Some(change(prev.baseline.time_s.0, current.baseline.time_s.0)),
+        baseline_spp: Some(change(
+            prev.baseline.spp as f64,
+            current.baseline.spp as f64,
+        )),
         baseline_mrse: Some(change(prev.baseline.mrse.0, current.baseline.mrse.0)),
         settings_changed,
         findings_resolved: before

@@ -35,9 +35,12 @@ The stage is imported once. Then, until the budget is spent:
    typical of both (never pure background). Each is at least 128 pixels square and gives
    every worker thread four tiles. `--region` makes that region the only crop.
 4. **Tier 1, unbiased swaps.** Each setting that changes only noise and time is tried
-   on its own: every other MIS strategy, every other light selection, 2 and 4 light
-   samples at the camera vertex, 2 at the indirect ones, guiding on or off. Then the
-   winners of different settings are tried together.
+   on its own: the other MIS heuristic (`power` ↔ `balance`), every other light
+   selection, 2 and 4 light samples at the camera vertex, 2 at the indirect ones,
+   guiding on or off. Then the winners of different settings are tried together.
+   `--strategy light` and `--strategy bsdf` are never tried: they show what MIS
+   balances between, and on a scene with light only one of them reaches they render
+   darker while looking less noisy.
 5. **Tier 2, sample budget.** The samples per pixel the best settings need to reach a
    target error, the projected render time, and adaptive sampling measured on each crop.
 6. **Tier 3, picture-changing settings.** What the clamp removes, how many paths
@@ -165,9 +168,12 @@ crust diagnostic -i shot.usda --light-selection learned --budget 3m \
     --baseline r1.json --json r2.json > r2.md
 ```
 
-`r2.json`'s `deltas` lists `light_selection: power → learned`, the baseline's time and
-MRSE before and after, and which findings and suggestions went away — so you can check
-the change did what `r1` predicted. Repeat until `converged` is `true`, then render with
+`r2.json`'s `deltas` lists `light_selection: power → learned`, the baseline's MRSE
+before and after (with each run's baseline spp: error falls as 1/spp), and which
+findings and suggestions went away — so you can check the change did what `r1`
+predicted. It also gives the baseline's time before and after, but that compares two
+runs made minutes apart, under whatever load each met: read it as indicative only.
+The evidence that a setting is faster is the trials' interleaved ΔEff. Repeat until `converged` is `true`, then render with
 the flags of the last `suggested_command` (adding `-s` and `-o`), or author the same
 values on the stage: every suggestion names its `crust:*` attribute.
 

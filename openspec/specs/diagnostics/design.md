@@ -134,7 +134,10 @@ Light groups: one `C.*<L.'tag'>` per authored `crust:light:lpeTag`; with none
 and at most 8 lights, the diagnostic labels its own copy of the light list by
 prim path. `LightList` now keeps each light's name (`set_name` / `name`, set by
 the importer's `tag_last`) beside its tag. Labels route only;
-`labelling_lights_changes_no_value` pins the beauty bitwise.
+`labelling_lights_changes_no_value` pins the beauty bitwise. A tag a label
+cannot hold (a quote ends it) gets no group, with one warning: one expression
+that does not compile disables the routing of *every* expression, which left
+the whole breakdown black (`an_unwritable_tag_is_left_out_not_the_breakdown`).
 
 The ordering rules are data (`noise::RULES`): more than 8 lights → light
 selection first; direct rows dominant → light selection, light samples; indirect,
@@ -143,18 +146,32 @@ only when the budget cannot fit tier 1.
 
 ## Trials, budget, tiers (D8, D10)
 
-Tier 1: every other strategy; every other light selection (not applicable with
+Tier 1: the other MIS heuristic (`power` ↔ `balance`; both, when the stage
+authors a single strategy); every other light selection (not applicable with
 fewer than two lights); light samples 2 and 4 when at 1; indirect light samples
-2; guiding toggled. A factor that cannot change anything is `not_applicable`
+2; guiding toggled. `light` and `bsdf` were trials at first and are not: they
+are modes that show what MIS balances between, and on a scene whose light one
+strategy alone cannot reach they lose energy while their variance falls. On
+ALab (frame 1004) light-only was ranked `better` on every crop, ΔEff 14.31,
+and renders 61% darker (beauty mean 0.361 against power's 0.937) — the error
+measure never sees the lost energy (`tier_one_never_tries_a_single_strategy`;
+the bias guard that would catch any such trial is `harden-diagnostic-verdicts`). A factor that cannot change anything is `not_applicable`
 with its reason. Then one combined trial of the best `better` value of each
 factor, when at least two factors have one.
 
 The budget covers everything after import. Tier 1 gets 70% of what the
 baseline leaves, tiers 2 and 3 15% each; tier ends are cumulative, so unspent
 time rolls forward. A trial's estimate is the baseline's sampling seconds per
-pixel per spp × crop pixels × spp × 2R, plus the setup its factor last cost; a
-trial that would overrun is listed under `not_tried` (`budget`) and the
-scheduler moves on to cheaper ones. Trial spp is the largest power of two in
+pixel per spp × crop pixels × spp × 2R, plus setup: the baseline's own per
+render, and the trial's — what its factor last cost, else measured before
+admission (one `learned` pre-pass, which covers the full frame whatever the
+crop) or estimated (guiding's training passes, `guiding_training_spp`: 2 + 2 +
+4 + 8 samples of the crops at four iterations). The first version priced an
+unseen factor's setup at zero, so a first `learned` or guided trial could
+overrun unseen. A trial that would overrun is listed under `not_tried`
+(`budget`) and the scheduler moves on to cheaper ones; one that runs out of
+budget mid-way is abandoned after its current crop; and a tier 1 that ends past
+the whole budget did not complete (exit 3). Trial spp is the largest power of two in
 2..=256 that fits every tier-1 trial (combined included) in the tier's share.
 `schedule.rs` is pure bookkeeping over seconds, tested on a fake clock.
 
@@ -204,7 +221,17 @@ reads the keys off the text (a `serde_json::Value` would sort them). Floats are
 
 `--baseline` parses the previous file as a `Value` first, to refuse another
 format before reading it as a `Report`; then compares scene path, frame,
-camera, resolution and region.
+camera, resolution and region. Its baseline-time change compares two runs made
+minutes apart, which `CLAUDE.md` ("Measuring a change") says lies: it is
+labelled indicative, and the evidence for a gain stays each run's interleaved
+trials. Each run's calibration picks its own baseline spp, and MRSE scales as
+1/spp, so `deltas` carries the spp change beside the MRSE change.
+
+The Ptex hit rate is the reader cache's own, `hits / (hits + misses)`: ptex-rs
+counts a hit per cache operation, and one reader lookup of a tiled face can
+make several, so dividing by `PtexCacheStats::lookups` could pass 100%.
+Report strings reach the Markdown escaped (`|` in table cells, a code span
+fenced past any backticks): a light's tag or path is authored text.
 
 Every action names a flag or attribute crust has (`actions_name_only_real_settings`)
 or is `none` with the reason. Guiding has no `crust render` flag, so its
