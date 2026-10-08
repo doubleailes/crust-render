@@ -615,3 +615,34 @@ fn a_restricted_dome_is_nee_only_whoever_builds_the_links() {
     assert!(!lights.nee_only(1), "the restricted sun keeps its twin");
     assert_eq!(lights.twinned_lights(), &[1]);
 }
+
+/// A sphere or tube under a rotation and a uniform scale of its curved axes
+/// takes the closed-form area rather than the grid, and that area is the
+/// exact one: 4πs² for the sphere, 2π·r·L for the tube.
+#[test]
+fn similarity_placed_shapes_have_closed_form_area() {
+    let rot = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.3, -1.1, 2.0);
+    let sphere = Affine3A::from_scale_rotation_translation(
+        glam::Vec3::splat(0.03),
+        rot,
+        glam::Vec3::new(5.0, -2.0, 7.0),
+    );
+    let area = AffineShape::new(UnitShape::Sphere, sphere).unwrap().area();
+    let exact = 4.0 * std::f64::consts::PI * 0.03f64 * 0.03;
+    assert!(
+        (area as f64 / exact - 1.0).abs() < 1e-6,
+        "{area} vs {exact}"
+    );
+
+    let tube = Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(2.5, 0.2, 0.2),
+        rot,
+        glam::Vec3::ZERO,
+    );
+    let area = AffineShape::new(UnitShape::Cylinder, tube).unwrap().area();
+    let exact = 2.0 * std::f64::consts::PI * 0.2 * 2.5;
+    assert!(
+        (area as f64 / exact - 1.0).abs() < 1e-6,
+        "{area} vs {exact}"
+    );
+}
