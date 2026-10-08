@@ -250,6 +250,64 @@ fn a_volume_terminal_is_the_interior_under_a_materialx_surface() {
     assert_eq!(m.sigma_s, Vec3A::splat(2.0));
 }
 
+/// Each surface context is checked for MaterialX on its own: an `mtlx`
+/// surface that is not a MaterialX shader does not hide the universal one
+/// that is, so the volume still finds its surface. Filtered after the
+/// fallback, the `mtlx` context's preview shader was the only one looked at
+/// and the volume was dropped.
+#[test]
+fn a_universal_materialx_surface_pairs_with_the_volume_past_a_foreign_mtlx_one() {
+    let scene = load(
+        "foreign_mtlx",
+        r#"
+    def Material "Glass"
+    {
+        token outputs:surface.connect = </World/Glass/Surface.outputs:out>
+        token outputs:mtlx:surface.connect = </World/Glass/Preview.outputs:surface>
+        token outputs:mtlx:volume.connect = </World/Glass/Volume.outputs:out>
+        def Shader "Preview"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            token outputs:surface
+        }
+        def Shader "Surface"
+        {
+            uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+            float inputs:transmission_weight = 1
+            token outputs:out
+        }
+        def Shader "Volume"
+        {
+            uniform token info:id = "ND_volume"
+            token inputs:vdf.connect = </World/Glass/Vdf.outputs:out>
+            token outputs:out
+        }
+        def Shader "Vdf"
+        {
+            uniform token info:id = "ND_anisotropic_vdf"
+            vector3f inputs:absorption = (0.5, 0.5, 0.5)
+            vector3f inputs:scattering = (2, 2, 2)
+            token outputs:out
+        }
+    }
+    def Sphere "Ball" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 1
+        rel material:binding = </World/Glass>
+    }
+"#,
+    );
+    let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
+    let hit = scene.world.intersect(&ray, 1e-3, 1e4).expect("the ball");
+    assert_eq!(hit.mat.kind(), "MaterialX");
+    let inside = hit.mat.make_ray(&hit.rec, Vec3A::Z);
+    let m = inside
+        .medium()
+        .expect("a refracted ray carries the volume terminal's interior");
+    assert_eq!(m.sigma_a, Vec3A::splat(0.5));
+    assert_eq!(m.sigma_s, Vec3A::splat(2.0));
+}
+
 /// An inline MaterialX surface with no volume shades as the surface alone;
 /// before inline networks were read it fell back to grey OpenPBR.
 #[test]
@@ -388,5 +446,133 @@ fn a_white_surface_inside_the_fog_keeps_the_furnace_at_one() {
     assert!(
         (got - Vec3A::ONE).abs().max_element() < 0.025,
         "furnace mean {got}"
+    );
+}
+
+/// A floor lit by a sphere light through a stack of 150 thin, all but
+/// clear fog slabs — 300 boundary crossings, past the 256 a shadow ray may
+/// pass cutouts through, within the 4096 a path may cross boundaries. Shadow
+/// rays count boundaries against the path's budget, so the stack changes
+/// next to nothing; counted against the cutout budget, every shadow ray was
+/// blocked and the floor lost its direct light.
+#[test]
+fn shadow_rays_cross_as_many_boundaries_as_a_path() {
+    let stage = |slabs: usize| {
+        let (mut counts, mut indices, mut points) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..slabs {
+            let (y0, y1) = (1.0 + 0.02 * i as f32, 1.01 + 0.02 * i as f32);
+            let base = points.len() / 3;
+            for (x, y, z) in [
+                (-3.0, y0, -3.0),
+                (3.0, y0, -3.0),
+                (3.0, y1, -3.0),
+                (-3.0, y1, -3.0),
+                (-3.0, y0, 3.0),
+                (3.0, y0, 3.0),
+                (3.0, y1, 3.0),
+                (-3.0, y1, 3.0),
+            ] {
+                points.extend([x, y, z]);
+            }
+            // The sample's cube windings: outward-facing.
+            for k in [
+                0, 3, 2, 1, 4, 5, 6, 7, 0, 4, 7, 3, 1, 2, 6, 5, 0, 1, 5, 4, 3, 7, 6, 2,
+            ] {
+                indices.push((base + k).to_string());
+            }
+            counts.extend(["4"; 6]);
+        }
+        let points: Vec<String> = points
+            .chunks(3)
+            .map(|p| format!("({}, {}, {})", p[0], p[1], p[2]))
+            .collect();
+        let fog = if slabs == 0 {
+            String::new()
+        } else {
+            format!(
+                r#"
+        def Mesh "Slabs" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {{
+            uniform token subdivisionScheme = "none"
+            rel material:binding = </World/Looks/Fog>
+            int[] faceVertexCounts = [{}]
+            int[] faceVertexIndices = [{}]
+            point3f[] points = [{}]
+        }}"#,
+                counts.join(", "),
+                indices.join(", "),
+                points.join(", ")
+            )
+        };
+        format!(
+            r#"
+    def Scope "Looks"
+    {{
+        def Material "Fog"
+        {{
+            token outputs:mtlx:volume.connect = </World/Looks/Fog/Volume.outputs:out>
+            def Shader "Volume"
+            {{
+                uniform token info:id = "ND_volume"
+                token inputs:vdf.connect = </World/Looks/Fog/Vdf.outputs:out>
+                token outputs:out
+            }}
+            def Shader "Vdf"
+            {{
+                uniform token info:id = "ND_absorption_vdf"
+                vector3f inputs:absorption = (0.001, 0.001, 0.001)
+                token outputs:out
+            }}
+        }}
+        def Material "White"
+        {{
+            token outputs:mtlx:surface.connect = </World/Looks/White/Surface.outputs:out>
+            def Shader "Surface"
+            {{
+                uniform token info:id = "ND_surface"
+                token inputs:bsdf.connect = </World/Looks/White/Diffuse.outputs:out>
+                token outputs:out
+            }}
+            def Shader "Diffuse"
+            {{
+                uniform token info:id = "ND_oren_nayar_diffuse_bsdf"
+                color3f inputs:color = (1, 1, 1)
+                token outputs:out
+            }}
+        }}
+    }}
+    def Xform "Geo"
+    {{
+        def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {{
+            uniform token subdivisionScheme = "none"
+            rel material:binding = </World/Looks/White>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 3, 2, 1]
+            point3f[] points = [(-20, 0, -20), (20, 0, -20), (20, 0, 20), (-20, 0, 20)]
+        }}{fog}
+    }}
+    def SphereLight "Key"
+    {{
+        float inputs:intensity = 20
+        float inputs:radius = 0.5
+        double3 xformOp:translate = (0, 5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+"#
+        )
+    };
+    // Below the stack, at the floor under the light.
+    let ray = Ray::new(Vec3A::new(0.0, 0.5, -5.0), Vec3A::new(0.0, -0.5, 5.0));
+    let clear = mean_radiance(&load("stack_0", &stage(0)), &ray, 512, 1);
+    let scene = load("stack_150", &stage(150));
+    assert!(scene.world.has_medium_boundaries());
+    let through = mean_radiance(&scene, &ray, 512, 1);
+    assert!(clear.x > 0.0, "the floor is lit: {clear}");
+    // e^{-0.001 x 1.5} through the slabs' 1.5 units of fog.
+    let ratio = through / clear;
+    assert!(
+        (ratio - Vec3A::splat(0.9985)).abs().max_element() < 0.02,
+        "through 300 boundaries {through} vs clear {clear}"
     );
 }

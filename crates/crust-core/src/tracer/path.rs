@@ -1098,6 +1098,9 @@ fn medium_shadow(
 /// `attenuate`, the medium the ray is in at each stretch dims it by
 /// Beer–Lambert — deterministic where the path tracks free flights, the same
 /// transmittance either way. `inside` is the enclosure the ray starts in.
+/// Boundaries count against the path's own [`MAX_PATH_CROSSINGS`] and
+/// cutouts and thin walls against [`MAX_CUTOUT_CROSSINGS`], so a light any
+/// path can reach is never blocked by the shadow ray's budget alone.
 #[allow(clippy::too_many_arguments)]
 fn through_boundaries(
     world: &World,
@@ -1112,7 +1115,9 @@ fn through_boundaries(
     let mut medium = inside.map(|e| e.medium);
     let (mut t, mut segment) = (0.0, ray.clone());
     let mut kept = Vec3A::ONE;
-    for crossing in 0..=MAX_CUTOUT_CROSSINGS {
+    let mut boundaries = 0usize;
+    // Every hit, boundary or pass-through: it keys the thin-wall draws.
+    for crossing in 0usize.. {
         stats.cutout_rays += 1;
         let hit = world
             .intersect(&segment, TRACE_T_MIN, f32::INFINITY)
@@ -1124,12 +1129,16 @@ fn through_boundaries(
         let Some(h) = hit else {
             return kept;
         };
-        if crossing == MAX_CUTOUT_CROSSINGS {
-            return Vec3A::ZERO;
-        }
         if h.mat.is_medium_boundary() {
+            boundaries += 1;
+            if boundaries > MAX_PATH_CROSSINGS {
+                return Vec3A::ZERO;
+            }
             medium = cross_boundary(&h, &segment.clone().with_medium(medium), &mut inside, world);
         } else {
+            if crossing - boundaries == MAX_CUTOUT_CROSSINGS {
+                return Vec3A::ZERO;
+            }
             let cutout = h.mat.has_cutout();
             let straight = h.mat.has_straight_transmission();
             if !(cutout || straight) {
@@ -1155,7 +1164,7 @@ fn through_boundaries(
         t = resume_before(t + h.rec.t);
         segment = restarted(ray, t);
     }
-    unreachable!("the last crossing returns")
+    unreachable!("both budgets end the walk")
 }
 
 /// `ray` restarted at its own parameter `t`, in the same direction, with the
@@ -2278,7 +2287,8 @@ fn pass_boundaries<'w>(
     let len = ray.direction().length();
     let mut medium = ray.medium().copied();
     let (mut tr, mut from) = (Vec3A::ONE, 0.0);
-    for _ in 0..MAX_CUTOUT_CROSSINGS {
+    // The path's own budget: the lookup must reach whatever a path could.
+    for _ in 0..MAX_PATH_CROSSINGS {
         let Some(h) = hit.as_ref() else {
             return tr;
         };
@@ -2294,6 +2304,20 @@ fn pass_boundaries<'w>(
     }
     *hit = None;
     Vec3A::ZERO
+}
+
+/// Makes `hit` the first hit along `ray` that is not a medium boundary, as
+/// a path crossing them would meet it — `None` past the path's crossing
+/// budget. For the light cache's training rays, which shade every hit as a
+/// receiver and have no medium to track.
+pub(crate) fn past_medium_boundaries<'w>(
+    world: &'w World,
+    ray: &Ray,
+    hit: &mut Option<WorldHit<'w>>,
+) {
+    if hit.as_ref().is_some_and(|h| h.mat.is_medium_boundary()) {
+        pass_boundaries(world, ray, hit, None);
+    }
 }
 
 /// The integrator: an iterative path tracer in two passes. The forward walk

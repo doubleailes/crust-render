@@ -1084,7 +1084,6 @@ impl Choice {
     }
 }
 
-/// Finite and non-negative, per channel.
 /// The interior medium `closures.volume` describes at the evaluated `slots`:
 /// coefficients sanitised to finite and non-negative, anisotropy clamped
 /// inside (−1, 1), and `None` for vacuum. The one mapping, for a thick
@@ -1105,6 +1104,7 @@ pub(crate) fn volume_medium(closures: &Closures, slots: &[Val]) -> Option<Medium
     })
 }
 
+/// Finite and non-negative, per channel.
 fn sanitize(v: Vec3A) -> Vec3A {
     let f = |x: f32| if x.is_finite() { x.max(0.0) } else { 0.0 };
     Vec3A::new(f(v.x), f(v.y), f(v.z))

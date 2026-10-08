@@ -515,9 +515,14 @@ fn resolve_material_uncached(
     if let Some(volume) = terminal_shader(mat.compute_volume_source(VOLUME_RENDER_CONTEXTS))
         .filter(|s| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id)))
     {
+        // Each context is checked for MaterialX on its own: an `mtlx`
+        // surface that is not a MaterialX shader must not hide a universal
+        // one that is.
+        let is_mtlx =
+            |s: &Shader| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id));
         let surface = terminal_shader(mat.compute_surface_source(&["mtlx"]))
-            .or_else(|| terminal_shader(mat.compute_surface_source(&[""])))
-            .filter(|s| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id)));
+            .filter(is_mtlx)
+            .or_else(|| terminal_shader(mat.compute_surface_source(&[""])).filter(is_mtlx));
         if surface.is_none()
             && let Some(other) =
                 terminal_shader(mat.compute_surface_source(SURFACE_RENDER_CONTEXTS))
