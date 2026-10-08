@@ -104,9 +104,13 @@ impl Options<'_> {
 /// Above this many lights, the light groups are not one per light.
 const MAX_GROUP_LIGHTS: usize = 8;
 
-/// What decorrelates one pair's seed from the next: the constant guiding
-/// already steps its passes' seeds by.
-const SEED_STEP: u32 = 0x9E37_79B9;
+/// What decorrelates one pair's seed from the next (MurmurHash3's
+/// `0x85EB_CA6B`). Not guiding's pass step: a guided render's training
+/// passes add that to the pair's seed, and with the same step pass `k` of
+/// pair `i` drew pair `i + k + 1`'s samples. With this one no pair or pass
+/// seed meets another over 64 pairs and 32 training iterations
+/// (`no_pair_or_pass_shares_a_seed`).
+const SEED_STEP: u32 = 0x85EB_CA6B;
 
 /// The sampler seed of pair `i` (D7): the scene's own for pair 0, then a
 /// fixed step per pair, so two runs render the same images.
@@ -844,9 +848,16 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     } else {
         Ok(())
     };
+    // The authored settings' setup per render of crop `k`: the `learned`
+    // pre-pass covers the full frame whatever the crop, guiding's training
+    // scales with the pixels. Tier 3 renders these settings; tier 2's are
+    // not known yet, so its reserve assumes them too.
+    let setup_at = |k: usize| p1_selection + p1_training * areas[k] as f64 / pixels;
     let later = schedule::Later {
         tier2_s: if threshold > 0.0 {
-            per_px_spp * crop_pixels as f64 * spp_a as f64
+            (0..areas.len())
+                .map(|k| schedule::render_cost_s(per_px_spp, areas[k], spp_a, 1.0, setup_at(k)))
+                .sum()
         } else {
             0.0
         },
@@ -856,6 +867,15 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             0.0
         } + if reach_applies.is_ok() {
             crop_pixels as f64
+        } else {
+            0.0
+        },
+        tier3_setup_s: if half_depth_applies {
+            2.0 * repeats as f64 * setup_at(0)
+        } else {
+            0.0
+        } + if reach_applies.is_ok() {
+            (0..areas.len()).map(setup_at).sum()
         } else {
             0.0
         },
@@ -1219,7 +1239,16 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     if threshold > 0.0 {
         for (k, p) in picked.iter().enumerate() {
             let fixed = crop_settings(best_settings, k, spp_a);
-            let estimate = per_px_spp * p.rect.area() as f64 * spp_a as f64 * time_ratio;
+            // The best settings' setup on this crop, as tier 1 measured it.
+            let setup = runs
+                .iter()
+                .find(|r| best.is_some_and(|b| b.id == r.id))
+                .map_or_else(
+                    || setup_at(k),
+                    |r| median(r.per_crop[k].pairs.iter().map(|(_, t)| t.setup_s())),
+                );
+            let estimate =
+                schedule::render_cost_s(per_px_spp * time_ratio, p.rect.area(), spp_a, 1.0, setup);
             sched.set_spent(elapsed());
             if !sched.fits(2, estimate) {
                 not_tried.push(NotTried {
@@ -1314,8 +1343,13 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         let k = 0;
         let full_s = crop_settings(full, k, spp_t);
         let half_s = full_s.with_max_depth(max_depth / 2);
-        let estimate =
-            2.0 * repeats as f64 * per_px_spp * picked[k].rect.area() as f64 * spp_t as f64;
+        let estimate = schedule::render_cost_s(
+            per_px_spp,
+            picked[k].rect.area(),
+            spp_t,
+            2.0 * repeats as f64,
+            setup_at(k),
+        );
         sched.set_spent(elapsed());
         if sched.fits(3, estimate) {
             let (mut tf, mut th) = (Vec::new(), Vec::new());
@@ -1361,7 +1395,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                 let base = crop_settings(full, k, spp_t);
                 let known = runs.first().map(|r| &r.per_crop[k].pairs[0].0.image);
                 let renders = if known.is_some() { 1.0 } else { 2.0 };
-                let estimate = renders * per_px_spp * p.rect.area() as f64 * spp_t as f64;
+                let estimate =
+                    schedule::render_cost_s(per_px_spp, p.rect.area(), spp_t, renders, setup_at(k));
                 sched.set_spent(elapsed());
                 if !sched.fits(3, estimate) {
                     not_tried.push(NotTried {

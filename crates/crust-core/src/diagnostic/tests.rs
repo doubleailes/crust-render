@@ -48,7 +48,7 @@ pub(super) fn fixture() -> Report {
             }],
             budget_exceeded_in: None,
             exit: 0,
-            seeds: vec![0, 2_654_435_769, 5_308_871_538],
+            seeds: vec![0, 2_246_822_507, 4_493_645_014],
             tier2_reserve_s: n(4.0),
             tier3_reserve_s: n(1.5),
         },
@@ -656,10 +656,12 @@ fn the_ptex_hit_rate_never_passes_one() {
 #[test]
 fn each_pair_has_its_own_fixed_seed() {
     assert_eq!(super::seed(1004, 0), 1004);
-    assert_eq!(super::seed(1004, 1), 1004 + 0x9E37_79B9);
+    assert_eq!(super::seed(1004, 1), 1004 + 0x85EB_CA6B);
     assert_eq!(super::seed(1004, 2), super::seed(1004, 2));
     let scene = sample("cornellbox.usda");
-    let settings = super::probe(scene.settings.with_resolution(48, 32), 4);
+    // 16 spp, as every image comparison here: adaptive sampling is off in
+    // a probe, so every pixel takes exactly that many.
+    let settings = super::probe(scene.settings.with_resolution(48, 32), 16);
     let mut r = Renderer::new(scene.camera, scene.world, scene.lights, settings);
     let mut image = |s: crate::RenderSettings| bits(&super::shoot(&mut r, s).1.buffer);
     let today = image(settings);
@@ -669,6 +671,30 @@ fn each_pair_has_its_own_fixed_seed() {
     assert!(one != today, "pairs 0 and 1 render the same image");
     assert!(image(settings.with_frame(super::seed(frame, 1))) == one);
     assert!(image(settings.with_frame(super::seed(frame, 2))) != one);
+}
+
+/// Every pair is an independent draw (D7): no pair's seed is another's, and
+/// no guided render's training pass — `seed + (k + 1) · step`, which a
+/// guided pair or a guided baseline blends into its image — draws another
+/// pair's or pass's samples. The tracer seeds with `frame as u32`, so the
+/// check is modulo 2³², and it does not depend on the frame.
+#[test]
+fn no_pair_or_pass_shares_a_seed() {
+    let step = crate::tracer::GUIDING_PASS_SEED_STEP;
+    for frame in [0isize, 1004, -7] {
+        let mut seen = std::collections::HashMap::new();
+        for i in 0..64u32 {
+            let base = super::seed(frame, i) as u32;
+            // k = 0 is the pair's own seed, its final pass; k ≥ 1 its
+            // training passes.
+            for k in 0..=32u32 {
+                let s = base.wrapping_add(k.wrapping_mul(step));
+                if let Some(other) = seen.insert(s, (i, k)) {
+                    panic!("frame {frame}: pair {i} pass {k} reuses {other:?}'s seed");
+                }
+            }
+        }
+    }
 }
 
 /// A 20×20 crop rendered at luminance `lum`, every pixel's variance `var`.

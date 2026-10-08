@@ -497,7 +497,7 @@ impl Renderer {
         for k in 0..cfg.train_iterations {
             let spp = (1u32 << k.min(16)).max(2);
             // Decorrelate the Sobol sequences between passes.
-            let seed = base_seed.wrapping_add((k + 1).wrapping_mul(0x9E37_79B9));
+            let seed = base_seed.wrapping_add((k + 1).wrapping_mul(GUIDING_PASS_SEED_STEP));
             let gctx = GuidingContext {
                 field: &field,
                 training: true,
@@ -1563,6 +1563,10 @@ struct Tile {
     pub width: usize,
     pub height: usize,
 }
+
+/// What a guided render steps its training passes' seeds by: pass `k`
+/// renders with `frame + (k + 1) · step`, the final pass with `frame`.
+pub(crate) const GUIDING_PASS_SEED_STEP: u32 = 0x9E37_79B9;
 
 /// Edge length of a render tile, in pixels.
 const TILE: usize = 16;
