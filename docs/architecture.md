@@ -240,8 +240,10 @@ other. The pairs:
   (`MotionRecord::of`, read back by `World::motion`), so the importer never
   states a prim's motion twice and the vector cannot fall out of step with the
   blur. A producer of a new kind of motion (a rotating end transform, nested
-  motion) gets a vector of zero and one summarised `WARN` at commit, not a
-  silently wrong one; extend `MotionRecord` rather than adding a second table.
+  motion, an id a forwarding `InstanceHitId::As` / `Offset` instance reports
+  its inner hits under) gets a vector of zero and one summarised `WARN` at
+  commit, not a silently wrong one; extend `MotionRecord` rather than adding
+  a second table.
   `disableMotionBlur` gates only the shutter draw (`Renderer::shutter`, decided
   once per pass in `PassConfig`),
   never the records, so the vector is the same with blur on and off

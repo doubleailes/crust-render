@@ -116,6 +116,14 @@ impl Base {
     fn motion_blur(&self) -> bool {
         !(self.disable_motion_blur || self.instantaneous_shutter)
     }
+
+    /// Whether two products can be rendered by one render: the same camera
+    /// and resolution. The shutter flags are not part of it — the render
+    /// follows the first product's, and a later one that differs is warned
+    /// about, not refused.
+    fn same_render(&self, other: &Base) -> bool {
+        self.camera == other.camera && self.resolution == other.resolution
+    }
 }
 
 /// Resolves the render settings prim's products. Empty when the stage has no
@@ -183,7 +191,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         let resolved = Base::resolve(&product, &base);
         match &render_base {
             None => render_base = Some(resolved.clone()),
-            Some(first) if *first != resolved => {
+            Some(first) if !first.same_render(&resolved) => {
                 warn!(
                     "{product_path}: renders through {} at {}, but the render is {} at {} \
                      (the first product's); crust renders one camera and resolution per \
@@ -194,6 +202,17 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                     describe_resolution(first.resolution),
                 );
                 continue;
+            }
+            Some(first) if first.motion_blur() != resolved.motion_blur() => {
+                // One shutter per stage, like one camera: the file is still
+                // written, with the first product's blur.
+                let state = |on: bool| if on { "on" } else { "off" };
+                warn!(
+                    "{product_path}: asks for motion blur {}, but the render has it {} (the \
+                     first product's); its file is written with that",
+                    state(resolved.motion_blur()),
+                    state(first.motion_blur()),
+                );
             }
             Some(_) => {}
         }

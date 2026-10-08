@@ -1137,3 +1137,82 @@ fn other_renderers_motion_names_are_refused() {
         [("ok".to_owned(), AovSource::MotionVector)]
     );
 }
+
+/// Products are refused only for a different camera or resolution. One
+/// that differs in its shutter flags alone is still written, with the first
+/// product's blur, and warned about; two spellings of the same setting are
+/// not a difference at all.
+#[test]
+fn a_product_differing_only_in_motion_blur_is_kept_and_warned_about() {
+    let products = |first: &str, second: &str| {
+        format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/a>, </Render/b>]
+    }}
+    def RenderProduct "a"
+    {{
+        {first}
+        token productName = "a.exr"
+        rel orderedVars = [</Render/beauty>]
+    }}
+    def RenderProduct "b"
+    {{
+        {second}
+        token productName = "b.exr"
+        rel orderedVars = [</Render/beauty>]
+    }}
+    def RenderVar "beauty"
+    {{
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }}
+"#
+        )
+    };
+    // Different effective settings: both written, the render sharp (the
+    // first's), one warning naming the second and motion blur.
+    let (scene, warnings) = load_warnings(
+        "blur_products_differ",
+        &products(
+            "uniform bool disableMotionBlur = 1",
+            "uniform bool disableMotionBlur = 0",
+        ),
+    );
+    let names: Vec<&str> = scene
+        .aovs
+        .products
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["a.exr", "b.exr"]);
+    assert!(!scene.settings.motion_blur());
+    let blur: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("motion blur"))
+        .collect();
+    assert_eq!(blur.len(), 1, "{warnings:?}");
+    assert!(blur[0].contains("/Render/b") && blur[0].contains("asks for motion blur on"));
+    assert!(
+        warnings.iter().all(|w| !w.contains("no file is written")),
+        "{warnings:?}"
+    );
+
+    // The same setting under its two names: both written, nothing to say.
+    let (scene, warnings) = load_warnings(
+        "blur_products_synonyms",
+        &products(
+            "uniform bool disableMotionBlur = 1",
+            "uniform bool instantaneousShutter = 1",
+        ),
+    );
+    assert_eq!(scene.aovs.products.len(), 2);
+    assert!(!scene.settings.motion_blur());
+    assert!(
+        warnings
+            .iter()
+            .all(|w| !w.contains("motion blur") && !w.contains("no file is written")),
+        "{warnings:?}"
+    );
+}
