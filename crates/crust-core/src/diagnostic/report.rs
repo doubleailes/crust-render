@@ -492,7 +492,13 @@ pub struct Deltas {
     pub comparable: bool,
     /// Why not, when not.
     pub note: Option<String>,
+    /// Indicative only: two runs measured minutes apart, under whatever
+    /// load each met. The evidence for a gain is a run's own interleaved
+    /// trials, never this ratio.
     pub baseline_time_s: Option<Change>,
+    /// The baselines' sample counts, which each run's calibration picks:
+    /// MRSE scales as 1/spp, so read `baseline_mrse` against this.
+    pub baseline_spp: Option<Change>,
     pub baseline_mrse: Option<Change>,
     pub settings_changed: Vec<SettingChange>,
     pub findings_resolved: Vec<String>,

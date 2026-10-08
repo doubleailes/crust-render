@@ -27,6 +27,24 @@ fn pct(x: Num) -> String {
     }
 }
 
+/// `s` as a table cell: a `|` would end the cell, a line break the row.
+fn cell(s: &str) -> String {
+    s.replace('|', "\\|").replace(['\n', '\r'], " ")
+}
+
+/// `s` as inline code, whatever backticks it holds: fenced by one backtick
+/// more than its longest run of them, and padded when it starts or ends
+/// with one (CommonMark code spans).
+fn code(s: &str) -> String {
+    let longest = s.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    if longest == 0 {
+        format!("{fence}{s}{fence}")
+    } else {
+        format!("{fence} {s} {fence}")
+    }
+}
+
 fn or_dash(s: &Option<String>) -> &str {
     s.as_deref().unwrap_or("–")
 }
@@ -64,11 +82,11 @@ impl Report {
                     "{} (ΔEff {})",
                     s.flag
                         .as_ref()
-                        .map(|f| format!("`{f} {}`", s.value))
+                        .map(|f| code(&format!("{f} {}", s.value)))
                         .or_else(|| s
                             .usd_attribute
                             .as_ref()
-                            .map(|a| format!("`{a} = {}`", s.value)))
+                            .map(|a| code(&format!("{a} = {}", s.value))))
                         .unwrap_or_else(|| s.id.clone()),
                     n(s.expected_delta_eff)
                 )
@@ -86,7 +104,7 @@ impl Report {
         writeln!(o, "## Scene")?;
         writeln!(o)?;
         let s = &self.scene;
-        writeln!(o, "- path: `{}`", s.path)?;
+        writeln!(o, "- path: {}", code(&s.path))?;
         writeln!(
             o,
             "- frame: {}",
@@ -111,10 +129,10 @@ impl Report {
             writeln!(
                 o,
                 "| {} | {} | {} | {} |",
-                s.name,
-                s.value,
-                or_dash(&s.flag),
-                or_dash(&s.usd_attribute)
+                cell(&s.name),
+                cell(&s.value),
+                cell(or_dash(&s.flag)),
+                cell(or_dash(&s.usd_attribute))
             )?;
         }
         writeln!(o)?;
@@ -176,7 +194,7 @@ impl Report {
                     [flag.as_deref(), usd_attribute.as_deref()]
                         .into_iter()
                         .flatten()
-                        .map(|x| format!("`{x}`"))
+                        .map(code)
                         .collect::<Vec<_>>()
                         .join(" / ")
                 ),
@@ -260,9 +278,9 @@ impl Report {
         for row in nb.components.iter().chain(&nb.light_groups) {
             writeln!(
                 o,
-                "| {} | `{}` | {} | {} | {} |",
-                row.key,
-                row.expression,
+                "| {} | {} | {} | {} | {} |",
+                cell(&row.key),
+                cell(&code(&row.expression)),
                 n(row.mean_luminance),
                 n(row.relative_error),
                 n(row.relative_error_vs_beauty)
@@ -284,9 +302,9 @@ impl Report {
             writeln!(
                 o,
                 "| {} | {:?} | {} | {} | {} | {} |",
-                c.id,
+                cell(&c.id),
                 c.rect,
-                c.reason,
+                cell(&c.reason),
                 n(c.relative_variance),
                 n(c.baseline_thread_s),
                 opt(c.reference_mrse)
@@ -324,10 +342,10 @@ impl Report {
                 writeln!(
                     o,
                     "| {} | {} | {} | {} |",
-                    t.id,
+                    cell(&t.id),
                     opt(t.overall_delta_eff),
                     t.verdict.name(),
-                    per.join("; ")
+                    cell(&per.join("; "))
                 )?;
             }
         }
@@ -449,15 +467,11 @@ impl Report {
         for s in &self.suggestions {
             writeln!(
                 o,
-                "- **{}**: flag {}, attribute {}, value `{}`, expected ΔEff {} (evidence: {})",
+                "- **{}**: flag {}, attribute {}, value {}, expected ΔEff {} (evidence: {})",
                 s.id,
-                s.flag
-                    .as_ref()
-                    .map_or_else(|| "–".into(), |f| format!("`{f}`")),
-                s.usd_attribute
-                    .as_ref()
-                    .map_or_else(|| "–".into(), |a| format!("`{a}`")),
-                s.value,
+                s.flag.as_deref().map_or_else(|| "–".into(), code),
+                s.usd_attribute.as_deref().map_or_else(|| "–".into(), code),
+                code(&s.value),
                 n(s.expected_delta_eff),
                 s.evidence.join(", ")
             )?;
@@ -483,16 +497,20 @@ impl Report {
                 if let Some(c) = &d.baseline_time_s {
                     writeln!(
                         o,
-                        "- baseline time {} s → {} s (×{})",
+                        "- baseline time {} s → {} s (×{}; two runs apart, under different \
+                         load: indicative only — the trials' interleaved ΔEff is the evidence)",
                         n(c.from),
                         n(c.to),
                         n(c.ratio)
                     )?;
                 }
                 if let Some(c) = &d.baseline_mrse {
+                    let spp = d.baseline_spp.as_ref().map_or_else(String::new, |s| {
+                        format!(" at {} → {} spp (MRSE scales as 1/spp)", n(s.from), n(s.to))
+                    });
                     writeln!(
                         o,
-                        "- baseline MRSE {} → {} (×{})",
+                        "- baseline MRSE {} → {} (×{}){spp}",
                         n(c.from),
                         n(c.to),
                         n(c.ratio)
@@ -518,5 +536,46 @@ impl Report {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cell, code};
+
+    #[test]
+    fn code_spans_survive_backticks() {
+        assert_eq!(code("C<RD>[LO]"), "`C<RD>[LO]`");
+        assert_eq!(code("a`b"), "`` a`b ``");
+        assert_eq!(code("``x"), "``` ``x ```");
+    }
+
+    #[test]
+    fn cells_keep_their_columns() {
+        assert_eq!(cell("a|b"), "a\\|b");
+        assert_eq!(cell("a\nb"), "a b");
+    }
+
+    /// A light tag holding `|` and a backtick stays one row of five cells.
+    #[test]
+    fn scene_text_cannot_break_the_noise_table() {
+        let mut r = crate::diagnostic::tests::fixture();
+        r.noise_breakdown
+            .light_groups
+            .push(crate::diagnostic::report::NoiseRow {
+                key: "key|light`".into(),
+                expression: "C.*<L.'key|light`'>".into(),
+                mean_luminance: 1.0.into(),
+                relative_error: 0.1.into(),
+                relative_error_vs_beauty: 0.1.into(),
+            });
+        let md = r.to_markdown();
+        let row = md
+            .lines()
+            .find(|l| l.starts_with("| key"))
+            .expect("the group's row");
+        // Unescaped pipes delimit the cells: six for five cells.
+        let delimiters = row.matches('|').count() - row.matches("\\|").count();
+        assert_eq!(delimiters, 6, "{row}");
     }
 }

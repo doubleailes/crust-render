@@ -3,6 +3,8 @@
 //! its own relative error — never a share of the beauty's variance, which
 //! the components do not partition (`add-lpe-variance`).
 
+use tracing::warn;
+
 use super::report::NoiseRow;
 use crate::{
     Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, Buffer, LightList, Precision,
@@ -64,14 +66,33 @@ pub struct Groups {
 pub fn label_groups(lights: &mut LightList, max_lights: usize) -> Groups {
     let n = lights.count();
     let mut tags: Vec<(String, String)> = Vec::new();
+    let mut authored = false;
+    let mut unwritable = Vec::new();
     for i in 0..n {
-        if let Some(t) = lights.lpe_tag(i)
-            && !tags.iter().any(|(_, x)| x == t)
-        {
+        let Some(t) = lights.lpe_tag(i) else {
+            continue;
+        };
+        authored = true;
+        if tags.iter().any(|(_, x)| x == t) || unwritable.iter().any(|x: &String| x == t) {
+            continue;
+        }
+        // One expression that does not compile disables the routing of
+        // every expression, so a tag that cannot be written as a label (a
+        // quote ends it) is left out, not the breakdown.
+        if writable(t) {
             tags.push((t.to_owned(), t.to_owned()));
+        } else {
+            unwritable.push(t.to_owned());
         }
     }
-    if !tags.is_empty() {
+    if !unwritable.is_empty() {
+        warn!(
+            "diagnostic: {} light tag(s) cannot be written in a light path expression and get no \
+             light group: {unwritable:?}",
+            unwritable.len()
+        );
+    }
+    if authored {
         return Groups {
             by: "lpe_tag",
             tags,
@@ -84,15 +105,19 @@ pub fn label_groups(lights: &mut LightList, max_lights: usize) -> Groups {
         };
     }
     for i in 0..n {
-        // A quote would end the label inside the expression.
         let name = match lights.name(i) {
-            Some(name) if !name.contains('\'') => name.to_owned(),
+            Some(name) if writable(name) => name.to_owned(),
             _ => format!("light{i}"),
         };
         lights.set_lpe_tag(i, Some(&name));
         tags.push((name.clone(), name));
     }
     Groups { by: "light", tags }
+}
+
+/// Whether `tag` can be a light group's label: its expression parses.
+fn writable(tag: &str) -> bool {
+    crate::lpe::validate(&group_expression(tag)).is_ok()
 }
 
 fn var(key: &str, expression: &str, variance: bool) -> AovVar {
@@ -275,6 +300,34 @@ mod tests {
             crate::lpe::validate(e).unwrap_or_else(|err| panic!("{e}: {err:?}"));
         }
         crate::lpe::validate(&group_expression("/World/lights/key")).expect("a group");
+    }
+
+    /// A tag a label cannot hold gets no group; the other groups, and every
+    /// expression of the request, still compile.
+    #[test]
+    fn an_unwritable_tag_is_left_out_not_the_breakdown() {
+        let mut lights = crate::LightList::new();
+        for _ in 0..3 {
+            lights.add(crate::DistantLight::new(
+                crate::Vec3A::Y,
+                crate::Vec3A::ONE,
+                0.0,
+            ));
+        }
+        lights.set_lpe_tag(0, Some("key'light"));
+        lights.set_lpe_tag(1, Some("fill"));
+        let g = label_groups(&mut lights, 8);
+        assert_eq!(g.by, "lpe_tag");
+        assert_eq!(g.tags, [("fill".to_owned(), "fill".to_owned())]);
+        for (_, e) in rows(&g) {
+            crate::lpe::validate(&e).unwrap_or_else(|err| panic!("{e}: {err:?}"));
+        }
+        // Only unwritable tags authored: no group, and no per-light labels
+        // over the authored ones.
+        lights.set_lpe_tag(1, None);
+        let g = label_groups(&mut lights, 8);
+        assert_eq!((g.by, g.tags.len()), ("lpe_tag", 0));
+        assert_eq!(lights.lpe_tag(2), None);
     }
 
     #[test]

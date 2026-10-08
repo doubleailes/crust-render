@@ -301,8 +301,16 @@ fn a_comparable_baseline_gives_deltas() {
             to: "learned".into(),
         }]
     );
-    let t = d.baseline_time_s.expect("time");
+    let t = d.baseline_time_s.as_ref().expect("time");
     assert_eq!((t.from.0, t.to.0, t.ratio.0), (3.2, 1.6, 0.5));
+    // The spp each calibration picked travels with the MRSE, and the
+    // Markdown says the time ratio is no evidence.
+    let spp = d.baseline_spp.as_ref().expect("spp");
+    assert_eq!((spp.from.0, spp.to.0), (16.0, 16.0));
+    now.deltas = Some(d.clone());
+    let md = now.to_markdown();
+    assert!(md.contains("indicative only"), "{md}");
+    assert!(md.contains("at 16 → 16 spp"), "{md}");
     // From the JSON: four significant digits on the way.
     assert!((d.baseline_mrse.expect("mrse").from.0 - 0.01235).abs() < 1e-12);
     assert_eq!(d.findings_resolved, ["textures_without_tx"]);
@@ -553,4 +561,45 @@ fn the_suggested_command_applies_every_suggestion() {
         cmd.contains("--region 0,0,64,32") && !cmd.contains('#'),
         "{cmd}"
     );
+}
+
+// -- Review fixes -------------------------------------------------------------------
+
+/// Tier 1 tries the other MIS heuristic only: `light` and `bsdf` are not
+/// swaps (ALab: light-only was ranked ΔEff 14 and renders 61% darker).
+#[test]
+fn tier_one_never_tries_a_single_strategy() {
+    use crate::SamplingStrategy::{BalanceMis, BsdfOnly, LightOnly, PowerMis};
+    let values = |base: crate::SamplingStrategy| -> Vec<String> {
+        let s = crate::RenderSettings::default().with_sampling_strategy(base);
+        super::changes("strategy", s, 4)
+            .expect("applicable")
+            .into_iter()
+            .map(|c| c.value)
+            .collect()
+    };
+    assert_eq!(values(PowerMis), ["balance"]);
+    assert_eq!(values(BalanceMis), ["power"]);
+    // A stage authoring a single strategy gets both heuristics tried.
+    assert_eq!(values(LightOnly), ["power", "balance"]);
+    assert_eq!(values(BsdfOnly), ["power", "balance"]);
+}
+
+/// The Ptex rate is the reader cache's own: a tiled lookup can make
+/// several cache operations, so hits can outnumber reader lookups.
+#[test]
+fn the_ptex_hit_rate_never_passes_one() {
+    let before = crate::PtexCacheStats::default();
+    let after = crate::PtexCacheStats {
+        micro_hits: 100,
+        reader_lookups: 50,
+        cache_hits: 140,
+        cache_misses: 10,
+        ..Default::default()
+    };
+    // The old ratio, (micro + cache hits) / (micro + reader lookups): 1.6.
+    assert!((100 + 140) as f64 / (100 + 50) as f64 > 1.0);
+    let (lookups, hits) = super::ptex_cache_delta(&before, &after);
+    assert_eq!((lookups, hits), (150, 140));
+    assert!(hits <= lookups);
 }
