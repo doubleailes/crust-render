@@ -2414,6 +2414,7 @@ mod tests {
             "textures.errors",
             "textures.evictions",
             "textures.files",
+            "textures.held_peak_bytes",
             "textures.hit_rate",
             "textures.hits",
             "textures.loaded_tiles",
