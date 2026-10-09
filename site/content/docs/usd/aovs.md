@@ -642,8 +642,9 @@ product, from the samples it traced, and each EXR says so with one more header a
 An EXR of a render that completed has no `crust:renderStatus` at all, so its header is
 exactly what it was before renders could be interrupted. In an interrupted EXR,
 `crust:sppTaken` says how far the render got: the fewest and most samples a pixel took (of
-a guided render, in its final pass; a guided render stopped before its final pass records
-the budget there). A pixel that took no sample is black, and each of its AOVs holds the
+a guided render, in its final pass; a guided render whose image holds no final pass —
+stopped in training, or before the final pass gave every pixel two samples — records
+`(0, 0)` there). A pixel that took no sample is black, and each of its AOVs holds the
 var's clear value.
 
 ### Crops

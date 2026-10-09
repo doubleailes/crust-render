@@ -36,12 +36,17 @@ pub(crate) use path::PathScratch;
 pub(crate) use route::RouteCtx;
 
 /// Render-progress callback: invoked with `(completed, total)` steps as a
-/// pass advances — one per work unit (scanline row, or tile under bucket
-/// rendering) per stage of the first sweep, then one per adaptive round.
-/// Called from worker threads, hence `Sync`, but never concurrently and always
+/// pass advances. Each work unit (scanline row, or tile under bucket
+/// rendering) has one step per sample per pixel it is scheduled — or, past
+/// 64 spp, 64 steps shared out in proportion to the samples — reported as
+/// the unit finishes the stage of the first sweep or the adaptive round that
+/// takes it there, so the steps track the scheduled work and `total` is
+/// units × min(spp, 64). Called
+/// from worker threads, hence `Sync`, but never concurrently and always
 /// with `completed` increasing by one — a host can show the last value it was
-/// given. A completed render reaches `total`; a cancelled one stops where it
-/// was. Presentation (progress bars,
+/// given. A completed render reaches `total` (an adaptive render whose
+/// pixels all stopped early walks the rest at once); a cancelled one stops
+/// where it was. Presentation (progress bars,
 /// logging) is the caller's concern — the engine has no UI dependencies.
 pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
 
@@ -53,7 +58,11 @@ pub struct Rendered {
     /// request needs none, as [`Renderer::render_with_aovs`] returns.
     pub film: Option<AovFilm>,
     /// What the integrator did — every sample traced, a cancelled render's
-    /// included.
+    /// included. The adaptive counters describe the final pass, and are
+    /// empty when a cancel leaves the image without one (a guided render
+    /// cancelled in training, or before its final pass gave every pixel two
+    /// samples). A completed guided render at 1 spp keeps them although its
+    /// blend gives that pass no weight.
     pub rays: RayStats,
     /// Whether the render completed or was cancelled.
     pub outcome: RenderOutcome,
@@ -388,7 +397,8 @@ impl Renderer {
     /// image, the AOVs and the counters of the samples it traced, each pixel
     /// estimated from its own samples, a pixel that took none black (and its
     /// AOVs at their clear values); a cancelled guided render returns the
-    /// blend of the passes it completed. `progress` reports as it does for
+    /// blend of the passes it completed, and the adaptive counters only of a
+    /// final pass that joined it. `progress` reports as it does for
     /// the other entry points, and stops where the render stopped.
     pub fn render_with_control(
         &self,
@@ -805,6 +815,9 @@ impl Renderer {
                      the {} completed pass(es) alone",
                     passes.len()
                 );
+                // The counters a final pass fills describe the image's pixels;
+                // this one is not in the image (training passes fill none).
+                rays.forget_adaptive();
             }
         }
 
@@ -1006,17 +1019,32 @@ impl Renderer {
             .into_iter()
             .map(|tile| Unit::new(tile, layout, cam, cfg.measure_clamp.is_some()))
             .collect();
-        let total = units.len() as u64 * stages.len() as u64 + rounds as u64;
+        // Each unit's steps follow its samples: the stages add 1, 1, 2, 4, …
+        // samples and the rounds a quarter more each, so counting units alone
+        // would let the first stages race through the bar. A unit reaching
+        // `taken` samples has done `steps_at(taken)` of its `per_unit` steps
+        // — one a sample up to `PROGRESS_STEPS`, the same share of the budget
+        // past it, so no budget makes the reporting cost scale with it. The
+        // last stage or round always targets `spp`, so the steps telescope
+        // to `per_unit` a unit.
+        let spp = cfg.spp.max(1) as u64;
+        let per_unit = spp.min(PROGRESS_STEPS);
+        let steps_at = |taken: u32| taken as u64 * per_unit / spp;
+        let total = units.len() as u64 * per_unit;
         // Incremented and reported under one lock, so the callback sees
-        // completions in increasing order even though units finish on many
-        // threads at once (see `ProgressCallback`). Taken once per unit per
-        // stage, which no render will notice.
+        // completions in increasing order, one at a time, even though units
+        // finish on many threads at once (see `ProgressCallback`). Taken once
+        // per unit per stage or round, for at most `PROGRESS_STEPS` reports a
+        // unit over the pass, which no render will notice.
         let done = std::sync::Mutex::new(0u64);
-        let report = |n: &mut u64| {
-            *n += 1;
-            if let Some(cb) = progress {
-                cb(*n, total);
+        let report = |n: &mut u64, steps: u64| match progress {
+            Some(cb) => {
+                for _ in 0..steps {
+                    *n += 1;
+                    cb(*n, total);
+                }
             }
+            None => *n += steps,
         };
         let route_ctx = layout.and_then(|l| l.route.clone());
         let motion_aov = layout.is_some_and(|l| l.motion);
@@ -1056,6 +1084,7 @@ impl Renderer {
                 interrupted.store(true, Ordering::Relaxed);
                 break;
             }
+            let added = steps_at(target) - steps_at(if s == 0 { 0 } else { stages[s - 1] });
             // The convergence test runs once, after the last stage: at the
             // `taken` an unstaged sweep tests at.
             let finish = s == last_stage;
@@ -1099,10 +1128,12 @@ impl Renderer {
                     if traced {
                         publish(unit);
                     }
+                    // Reported only while the render runs: a cancelled
+                    // render's progress stays where it stopped.
                     if skipped {
                         interrupted.store(true, Ordering::Relaxed);
-                    } else {
-                        report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
+                    } else if !cancelled() {
+                        report(&mut done.lock().unwrap_or_else(|e| e.into_inner()), added);
                     }
                 });
         }
@@ -1111,10 +1142,13 @@ impl Renderer {
         // whether it is still sampling, in image order.
         let mut index = vec![f32::INFINITY; rect.area()];
         let mut active = vec![false; rect.area()];
+        let mut previous = sweep_to;
         for &target in &schedule {
             if interrupted.load(Ordering::Relaxed) {
                 break;
             }
+            let added = steps_at(target) - steps_at(previous);
+            previous = target;
             let mut any_active = false;
             for unit in &units {
                 unit.for_each_pixel_ref(|i, j, st| {
@@ -1179,22 +1213,23 @@ impl Renderer {
                     if traced {
                         publish(unit);
                     }
+                    // The round's steps whether or not the unit had a pixel
+                    // still sampling — they are what was scheduled — but only
+                    // while the render runs, as in the first sweep.
                     if skipped {
                         interrupted.store(true, Ordering::Relaxed);
+                    } else if !cancelled() {
+                        report(&mut done.lock().unwrap_or_else(|e| e.into_inner()), added);
                     }
                 });
-            if !interrupted.load(Ordering::Relaxed) {
-                report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
-            }
         }
         // An early finish still walks the callback to the total, one step at
         // a time, as the contract says; a cancelled pass stops where it was.
         let interrupted = interrupted.into_inner();
         if !interrupted {
             let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
-            while *n < total {
-                report(&mut n);
-            }
+            let left = total - *n;
+            report(&mut n, left);
         }
 
         // Units finish in unit order, but what the pass hands on — the
@@ -1657,18 +1692,6 @@ impl PixelState {
     }
 }
 
-/// The `taken` count every active pixel reaches after each round of an
-/// adaptive pass at `spp`, once the first sweep has brought it to
-/// `first_check`. Empty when the budget never reaches the first check.
-///
-/// Batches grow 25% a round — `max(4, taken / 4)` — so a 1024 spp pass from
-/// 32 runs 16 rounds rather than 248: each round is a fork/join whose tail
-/// (the last unit finishing while every other worker idles) cost 8% of a
-/// cornellbox render at a fixed batch of 4, with callgrind counting fewer
-/// instructions, not more. The price is overshoot: a pixel that converges
-/// mid-batch stops at the batch's end, at most 25% past what it had taken.
-/// A pure function of its inputs, computed once per pass, so the round
-/// count — and the progress total — is known before the pass starts.
 /// The adaptive minimum and the first check point of a `spp` budget whose
 /// authored minimum is `authored_min`.
 ///
@@ -1710,6 +1733,19 @@ fn sweep_stages(sweep_to: u32) -> Vec<u32> {
     stages
 }
 
+/// The `taken` count every active pixel reaches after each round of an
+/// adaptive pass at `spp`, once the first sweep has brought it to
+/// `first_check`. Empty when the budget never reaches the first check.
+///
+/// Batches grow 25% a round — `max(4, taken / 4)` — so a 1024 spp pass from
+/// 32 runs 16 rounds rather than 248: each round is a fork/join whose tail
+/// (the last unit finishing while every other worker idles) cost 8% of a
+/// cornellbox render at a fixed batch of 4, with callgrind counting fewer
+/// instructions, not more. The price is overshoot: a pixel that converges
+/// mid-batch stops at the batch's end, at most 25% past what it had taken.
+/// A pure function of its inputs, computed once per pass, so the round
+/// count is known before the pass starts; it ends at `spp`, which the
+/// progress total relies on.
 fn batch_schedule(spp: u32, first_check: u32) -> Vec<u32> {
     let mut schedule = Vec::new();
     let mut taken = first_check;
@@ -1895,6 +1931,12 @@ pub(crate) const GUIDING_PASS_SEED_STEP: u32 = 0x9E37_79B9;
 
 /// Edge length of a render tile, in pixels.
 const TILE: usize = 16;
+
+/// Progress steps a work unit has at most over a pass ([`ProgressCallback`]):
+/// one a sample up to this budget, the same share of the budget past it.
+/// Bounds the reports — each a callback under the progress lock — whatever
+/// the budget.
+const PROGRESS_STEPS: u64 = 64;
 
 /// The scanline work units over `rect` (raster space): one region-wide ×1
 /// tile per row, in the same order `generate_tiles` emits (rows by

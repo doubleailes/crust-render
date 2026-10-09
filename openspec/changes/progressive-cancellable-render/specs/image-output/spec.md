@@ -9,8 +9,14 @@ written before this change.
 
 #### Scenario: An interrupted render's EXR
 
-- **WHEN** a render is interrupted with Ctrl-C and its EXR is written
+- **WHEN** Ctrl-C cuts a render short and its EXR is written
 - **THEN** the EXR's header has `crust:renderStatus` set to `interrupted`
+
+#### Scenario: A Ctrl-C after the last sample
+
+- **WHEN** Ctrl-C arrives after the render traced its last sample, before its
+  outputs are being written
+- **THEN** its EXRs are complete and carry no `crust:renderStatus`
 
 #### Scenario: A completed render's EXR
 

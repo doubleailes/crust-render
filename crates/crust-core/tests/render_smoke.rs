@@ -245,14 +245,15 @@ fn a_different_frame_changes_the_noise_but_not_the_mean_much() {
 #[test]
 fn progress_callback_reaches_the_total() {
     let (w, h) = (16, 20);
-    // At 1 spp the first sweep is one stage; at 8 (adaptive sampling off)
-    // it is four — 1, 2, 4 and 8 — each reporting every unit.
-    for (spp, stages) in [(1, 1u64), (8, 4)] {
-        progress_reaches_the_total(w, h, spp, stages);
+    // One step per unit per sample per pixel: at 1 spp the first sweep is
+    // one stage; at 8 (adaptive sampling off) it is four — 1, 2, 4 and 8 —
+    // and their steps add up to the budget.
+    for spp in [1, 8] {
+        progress_reaches_the_total(w, h, spp);
     }
 }
 
-fn progress_reaches_the_total(w: usize, h: usize, spp: u32, stages: u64) {
+fn progress_reaches_the_total(w: usize, h: usize, spp: u32) {
     let r = emissive_ball_scene(1.0, w, h, spp);
     for tiled in [false, true] {
         let last = AtomicU64::new(0);
@@ -279,21 +280,18 @@ fn progress_reaches_the_total(w: usize, h: usize, spp: u32, stages: u64) {
             t,
             "tiled={tiled}: progress must finish at total"
         );
-        assert!(
-            calls.load(Ordering::SeqCst) >= t,
-            "one report per work unit at least"
-        );
+        assert!(calls.load(Ordering::SeqCst) >= t, "one report per step");
         if !tiled {
             assert_eq!(
                 t,
-                h as u64 * stages,
-                "row rendering reports one unit per scanline per stage"
+                h as u64 * spp as u64,
+                "row rendering reports each scanline's samples per pixel"
             );
         } else {
             assert_eq!(
                 t,
-                (w as u64).div_ceil(16) * (h as u64).div_ceil(16) * stages,
-                "one unit per 16x16 tile per stage"
+                (w as u64).div_ceil(16) * (h as u64).div_ceil(16) * spp as u64,
+                "each 16x16 tile's samples per pixel"
             );
         }
     }

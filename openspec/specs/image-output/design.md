@@ -74,8 +74,9 @@ maps each to the flag and USD attribute it mirrors.
   settings only hold the floored sampler seed, so `-f 10.5` would otherwise stamp `10`).
 - **One function writes it** (`products::stamp`), called by both `write_beauty` and
   `write_product`, so the two writers cannot drift; a test per writer reads it back.
-- **`crust:sppTaken`** comes from the adaptive counters, which only adaptive passes fill;
-  without one every pixel took `spp`.
+- **`crust:sppTaken`** comes from the adaptive counters, which every final pass fills
+  (adaptive sampling on or off; training passes do not); without them every pixel took
+  `spp` — unless the render was cancelled (`for_outcome`, below).
 - **Typed, not text**, so Nuke and `exrheader` show numbers. Named `crust:` + the USD
   attribute (`crust:indirectClamp`) rather than OpenEXR's `renderer/key`: one vocabulary
   across USD, CLI and EXR. The working space is not repeated: `colorInteropID` has it.
@@ -98,9 +99,14 @@ name too. A test per writer reads it back (`products.rs`, `tests/interrupt.rs`).
 
 A status attribute rather than a different stamp: `crust:sppTaken` already says how far
 the render got (the fewest and most samples a pixel took), and a reader that only wants
-to skip partial frames looks at one name. Of a guided render stopped before its final
-pass, `crust:sppTaken` is the budget — the adaptive counters cover the final pass alone
-(`rendering/design.md` § Progressive output and cancellation, Known gaps).
+to skip partial frames looks at one name. Of a guided render whose image holds no final
+pass — stopped in training, or before the final pass gave every pixel the two samples it
+needs to join the blend, when `render_guided` forgets that pass's adaptive counters with
+it — `SamplingStamp::for_outcome` stamps `crust:sppTaken = (0, 0)`: no pixel took a
+final-pass sample. Not `SamplingStamp::new`'s no-counters fallback, the budget, which
+would claim the whole budget for a partial frame and fool a `hi < crust:spp` check. The
+rule lives in the engine, so a library host stamps what the CLI does (`rendering/design.md` § Progressive
+output and cancellation, Known gaps).
 
 ## `-o` with products
 

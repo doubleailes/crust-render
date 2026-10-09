@@ -143,8 +143,12 @@ render.
 - **A guided preview gets noisier when the last pass starts.** Its first samples replace
   the last training pass's image, tile by tile, until it catches up.
 - **An interrupted guided render's `crust:sppTaken`** counts its last pass's samples only,
-  and is the full budget when it was stopped during training. `crust:renderStatus` still
-  says the frame is partial.
+  and is `(0, 0)` when its image holds no last pass: stopped during training, or before
+  the last pass gave every pixel two samples (that pass is then left out). The training
+  samples the image does hold are not counted there. `crust:renderStatus` says the frame
+  is partial.
+- **The progress bar counts scheduled samples.** In an adaptive render it runs ahead once
+  most pixels have stopped, and a guided render's training passes don't move it.
 
 ## Diagnostic
 

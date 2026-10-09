@@ -211,9 +211,12 @@ pub struct RayStats {
     pub light_samples: u64,
     /// Shadow rays the occlusion query found blocked.
     pub shadow_occluded: u64,
-    /// Adaptive sampling, over the pixels of adaptive passes only: pixels,
-    /// samples they took, how many stopped before the full budget, and the
-    /// fewest and most any pixel took.
+    /// Adaptive sampling, over the pixels of final passes: pixels, samples
+    /// they took, how many stopped before the full budget, and the fewest
+    /// and most any pixel took. Every final pass counts, whether or not its
+    /// variance threshold lets a pixel stop early; a guided render's training
+    /// passes do not, so a guided render cancelled before its final pass, or
+    /// whose cancel left that pass out of the image, has none.
     pub adaptive_pixels: u64,
     pub adaptive_samples: u64,
     pub early_stopped: u64,
@@ -226,6 +229,47 @@ pub struct RayStats {
 }
 
 impl RayStats {
+    /// Forgets the adaptive counters: those of a final pass that does not
+    /// reach the image — a guided render's interrupted final pass, left out
+    /// of the blend. Every other counter keeps the work it records.
+    pub(crate) fn forget_adaptive(&mut self) {
+        // Destructured, as in `merge`: a counter added to the struct must be
+        // sorted here into the image's (cleared) or the work's (kept).
+        let RayStats {
+            camera_rays: _,
+            closest_hit: _,
+            shadow_rays: _,
+            vertices: _,
+            rr_tested: _,
+            rr_killed: _,
+            ended_escaped: _,
+            ended_depth: _,
+            ended_absorbed: _,
+            volume_scatters: _,
+            medium_scatters: _,
+            sss_walks: _,
+            sss_exits: _,
+            sss_steps: _,
+            sss_rays: _,
+            cutout_passes: _,
+            cutout_rays: _,
+            light_samples: _,
+            shadow_occluded: _,
+            adaptive_pixels,
+            adaptive_samples,
+            early_stopped,
+            spp_min,
+            spp_max,
+            neighbour_held,
+        } = self;
+        *adaptive_pixels = 0;
+        *adaptive_samples = 0;
+        *early_stopped = 0;
+        *spp_min = 0;
+        *spp_max = 0;
+        *neighbour_held = 0;
+    }
+
     /// All ray queries, of every kind.
     pub fn total_rays(&self) -> u64 {
         self.closest_hit + self.shadow_rays + self.sss_rays + self.cutout_rays

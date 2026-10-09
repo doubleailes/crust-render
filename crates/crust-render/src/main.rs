@@ -1264,6 +1264,14 @@ impl Interrupt {
         self.stage.store(stage, Ordering::SeqCst);
     }
 
+    /// Moves from rendering to writing once the render has returned, in one
+    /// atomic step against the handler, and says whether a Ctrl-C was
+    /// accepted while rendering — one that may have landed after the last
+    /// sample, cancelling nothing, but that still asked the run to stop.
+    fn leave_rendering(&self) -> bool {
+        self.stage.swap(Self::WRITING, Ordering::SeqCst) == Self::WRITING
+    }
+
     /// The SIGINT handler: the first Ctrl-C while rendering cancels the
     /// render and moves on to writing; any other quits at once, with
     /// [`INTERRUPTED`], writing nothing further. It runs on `ctrlc`'s own
@@ -1346,11 +1354,15 @@ fn checkpoints(
 }
 
 /// What an interrupted render reached, for its warning: the fewest and most
-/// samples a pixel of its final pass took. A guided render stopped during
-/// training never reached the final pass, which alone fills those counters.
+/// samples a pixel of its final pass took. Every final pass fills those
+/// counters, adaptive or not; a guided render has none when it stopped in
+/// training, or before its final pass gave every pixel the two samples it
+/// needs to join the blend — its image is then its training passes'.
 fn samples_reached(rays: &RayStats, spp: u32) -> String {
     if rays.adaptive_pixels == 0 {
-        "it stopped in path guiding's training passes".to_owned()
+        "it stopped before path guiding's final pass gave every pixel two samples, so the \
+         image is made of its training passes"
+            .to_owned()
     } else if rays.spp_min == rays.spp_max {
         format!("every pixel took {} of {spp} samples", rays.spp_min)
     } else {
@@ -1542,8 +1554,10 @@ fn render(cli: &RenderArgs) -> ExitCode {
         rendered
     });
     // From here on a Ctrl-C quits: the render has returned, and what is left
-    // is writing it.
-    interrupt.enter(Interrupt::WRITING);
+    // is writing it. A Ctrl-C accepted while rendering ends the run with
+    // `INTERRUPTED` whether or not it cut the render short; the outputs say
+    // they are partial only when it did.
+    let stopped = interrupt.leave_rendering();
     let interrupted = rendered.outcome == RenderOutcome::Cancelled;
     let (buffer, film, ray_stats) = (rendered.buffer, rendered.film, rendered.rays);
     if interrupted {
@@ -1581,11 +1595,14 @@ fn render(cli: &RenderArgs) -> ExitCode {
             "Render interrupted after {duration:?}: {}; writing what it traced",
             samples_reached(&ray_stats, settings.samples_per_pixel())
         );
+    } else if stopped {
+        info!("Render finished in {duration:?}, as Ctrl-C arrived; writing its complete outputs");
     } else {
         info!("Render finished in {duration:?}");
     }
     // How the pixels were sampled, recorded in every EXR written.
-    let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time);
+    let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time)
+        .for_outcome(rendered.outcome, &ray_stats);
     let output_start = Instant::now();
     if let Some(film) = &film {
         // One EXR per product, then the PNG from the first one's beauty.
@@ -1675,7 +1692,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
             debug!("Statistics written to {}", path.display());
         }
     }
-    if interrupted {
+    if stopped || interrupted {
         ExitCode::from(INTERRUPTED)
     } else {
         ExitCode::SUCCESS
@@ -1948,6 +1965,46 @@ mod tests {
         assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
         assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0, 255]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The Ctrl-C state machine keeps a Ctrl-C it accepted while rendering
+    /// until the render returns, even one that landed after the render's
+    /// last sample and so cancelled nothing: the run then still exits 130.
+    /// Without one, leaving the render reports none.
+    #[test]
+    fn a_ctrl_c_accepted_while_rendering_survives_the_render_returning() {
+        let undisturbed = Interrupt::new(false);
+        undisturbed.enter(Interrupt::RENDERING);
+        assert!(!undisturbed.leave_rendering());
+        assert!(!undisturbed.control.is_cancelled());
+        // The render has finished; the handler runs before the main thread
+        // leaves the rendering stage.
+        let late = Interrupt::new(false);
+        late.enter(Interrupt::RENDERING);
+        late.on_signal();
+        assert!(late.control.is_cancelled());
+        assert!(late.leave_rendering(), "the accepted Ctrl-C was lost");
+    }
+
+    /// The interruption warning says how far the final pass got, and that a
+    /// guided render without one in its image shows its training passes.
+    #[test]
+    fn the_interruption_warning_names_the_samples_reached() {
+        let pass = |pixels, min, max| crust_core::RayStats {
+            adaptive_pixels: pixels,
+            spp_min: min,
+            spp_max: max,
+            ..Default::default()
+        };
+        assert_eq!(
+            samples_reached(&pass(1536, 4, 4), 64),
+            "every pixel took 4 of 64 samples"
+        );
+        assert_eq!(
+            samples_reached(&pass(1536, 0, 9), 64),
+            "pixels took 0 to 9 of 64 samples"
+        );
+        assert!(samples_reached(&pass(0, 0, 0), 64).contains("training passes"));
     }
 
     /// `--checkpoint` takes a positive number of seconds, fractions
