@@ -15,13 +15,15 @@ The CLI SHALL require a subcommand:
 
 - `render`, which renders;
 - `ls`, which lists;
+- `check`, which imports a stage as a render would and reports on it without
+  rendering (see the `scene-check` capability);
 - `diff`, which compares two EXRs (see the `image-comparison` capability);
 - `diagnostic`, which measures and reports how to make the render faster
   or cleaner (see the `diagnostics` capability).
 
 The render flags, `--log-file` among them, SHALL belong to `render`. The
 flags that shape the scene and its settings SHALL also be accepted by
-`diagnostic`, with the same names, values and defaults:
+`diagnostic` and `check`, with the same names, values and defaults:
 
 - `-i`, `-f`, `--camera`, `--region`;
 - `--strategy`, `--light-selection`, `--light-samples`,
@@ -54,6 +56,11 @@ where it could take a subcommand's name or a positional as that directory.
 
 - **WHEN** the user runs `crust diff a.exr b.exr`
 - **THEN** the two files are compared and nothing is rendered
+
+#### Scenario: Render-only flags are refused by check
+
+- **WHEN** the user runs `crust check -i scene.usda -o out.exr`
+- **THEN** the arguments are refused as a usage error and nothing is loaded
 
 ### Requirement: Listing what a stage holds
 
