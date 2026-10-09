@@ -1,7 +1,8 @@
 # Streaming Ptex
 
-How `CRUST_PTEX_STREAM=1` works, what it is bit-identical to, where it is
-deliberately not, and what it costs. Written the way `docs/color_management.md`
+How Ptex streaming works — on by default for large files since
+`stream-ptex-by-default` — what it is bit-identical to, where it is deliberately
+not, and what it costs. Written the way `docs/color_management.md`
 is — as the record you consult before blaming the streaming path for something,
 rather than as a feature announcement.
 
@@ -44,7 +45,8 @@ the `.tx` path. `maketx` exists because a `.png` is not tiled or mip-mapped; a
 | `CRUST_PTEX_MAX_LOG2` unset | 32×32 per face | **uncapped** |
 | `CRUST_PTEX_MAX_LOG2` set | that ceiling | that ceiling |
 | memory scales with | the scene's Ptex | `CRUST_PTEX_CACHE_MB` |
-| mip chain | reduced in linear light, in memory | the file's, off disk |
+| mip chain at and below the cap | reduced in linear light, in memory | the same, derived in the reader's cache (`capped`) |
+| mip chain above the cap | none | the file's, off disk |
 
 An unset cap meaning "uncapped" is the point of the feature. An explicitly set
 one still applies, because that is what makes the two backends comparable at a
@@ -108,12 +110,13 @@ presents as a filtering bug — a surface that goes slightly dark and muddy with
 distance — which is indistinguishable by eye from a mip level chosen one step
 too coarse. Describing a defect nobody can see is not a control.
 
-So the default policy is `MipSpace::Linear`: a texture whose lookups could
-reach a level the file reduced is **declined and preloaded**, where the pyramid
-is rebuilt in linear light from the decoded base. `--stats` names it:
+So the first policy, `MipSpace::Linear` (the default until the `capped` chain
+below replaced it, and still available), **declines and preloads** a texture
+whose lookups could reach a level the file reduced, where the pyramid is
+rebuilt in linear light from the decoded base. `--stats` names it:
 
 ```
-  backend    39 preloaded for a linear mip chain (CRUST_PTEX_STREAM_MIPSPACE=file to stream them)
+  backend    39 preloaded for a linear mip chain (CRUST_PTEX_STREAM_MIPSPACE=capped to stream them)
 ```
 
 The gate is a question about the texture, not a flat refusal
@@ -129,29 +132,143 @@ and stream under the default:
 
 ### The opt-in, and what it costs to decline
 
-`CRUST_PTEX_STREAM_MIPSPACE=file` takes the file's own chain instead. It is a
-real mode rather than a debug switch: it is what the C++ `PtexCache` and every
-production Ptex renderer do, and it is what **every measurement in this
-document was taken with**, the island's included. The trade is the 0.147 above
-against the residency below.
+`CRUST_PTEX_STREAM_MIPSPACE=file` takes the file's own whole chain instead. It
+is a real mode rather than a debug switch: it is what the C++ `PtexCache` and
+every production Ptex renderer do, and it is what the island figures in
+"Measured on the Moana island" below were taken with. The trade is the 0.147
+above against the residency.
 
-The cost of the default is worth stating plainly rather than discovering:
+Under `linear`, with the mip pyramid on, **a mipmapped `.ptx` never streams**:
+that was the cost of the old default, and `CRUST_PTEX_STREAM=1` alone streamed
+nothing on a normal render. Declining is no longer the default because the
+refusal turned out to protect more than the preload itself holds — see the
+next section.
 
-> With the mip pyramid on — which it is unless `CRUST_PTEX_MIP=0` —
-> `CRUST_PTEX_STREAM=1` **alone now streams nothing** on a normal render.
+## The capped chain
 
-That is a deliberate choice of correctness over residency at the default, and
-it is reversible in one environment variable. It is not the end state. The fix
-that would need neither refusal nor opt-in is to build the linear chain from
-streamed base tiles, and the reason it is not here is structural rather than
-hard: it needs a pyramid cache of crust's own, which is exactly the design
-"Known gaps: texture residency" (`openspec/specs/textures/design.md`) rules
-out, and it would read level 0 to answer a
-coarse-level lookup — defeating streaming precisely where the island uses it.
-The honest place for it is upstream, beside the tile cache: a reader that
-reduces in a declared working space would let both backends share one chain,
-and neither the refusal nor the opt-in would need to exist. Until then the
-refusal is the conservative half and the opt-in is the measured one.
+**The preload's own base is the file's level at the cap.** `PtexColor` fetches
+each face with `get_data_at_res(min(authored, cap))`, the cap being
+`CRUST_PTEX_MAX_LOG2` (32×32 by default). On a face authored larger than that,
+those texels *are* the file's reduced level, reduction in the file's encoding
+included; only the levels *coarser* than the cap are rebuilt in linear light.
+So the exact part of the preloaded chain is "the file at the cap, linear below
+it", and a streamed texture can reproduce exactly that. The refusal was
+protecting an oracle that, on the island, the preload does not reach either.
+
+`CRUST_PTEX_STREAM_MIPSPACE=capped`, the default, reads three regions of a
+face differently:
+
+| region | source |
+| --- | --- |
+| finer than the cap | the file's stored levels, read as tiles, as `file` reads them |
+| at the cap | the file's face at the cap resolution, the bytes `PtexColor` fetches |
+| coarser than the cap | derived from the cap level in linear light, by the preload's own reduction |
+
+**The derived levels live in the reader's cache.** `ptex-rs` 0.4.0 gained
+`DerivedLevels`: a host installs a decode and a reduction, and
+`SharedReader::get_derived(face, k)` serves level `k` out of the same LRU,
+under the same byte budget, as decoded file blocks. Level 0 is the file at the
+cap through the host's decode; level `k` is derived from level `k - 1` alone,
+so a coarse lookup reads at most the cap-level face (32×32) and never level 0.
+crust's adapter (`CappedLevels` in `ptex_stream.rs`) decodes through
+`decode_face` and reduces through `reduce_level`, which are the two functions
+`PtexColor` builds its arena with. That is the point: the two chains are equal
+because they are the same calls, not two implementations that agree. There is
+still no second cache in crust, and `--stats` counts the derived blocks inside
+`streamed resident`.
+
+**Lookups are routed by the footprint against the cap level.** A footprint
+wider than one cap texel goes through the derived chain with the preload's
+level selection, measured against the cap level's width. Measured against the
+authored width instead, `log2` would see a different argument and could round
+the blend weight differently, and "bit-identical" would become "close". Only a
+footprint inside one cap texel, where the preload has nothing finer to give,
+reads the file's finer levels: `file`'s chain from the authored resolution down
+to the step where the widest axis reaches the cap level's, and that last step
+is the cap level itself. On a non-square face the halved level there has
+lost short-axis texels the cap level keeps (1024×512 halves to 32×16 where the
+cap holds 32×32). Stepping the short axis more slowly instead would ask for
+levels the file does not store, which the reader reduces from the
+full-resolution face: the read streaming exists to avoid.
+
+What that buys, pinned in `tests/ptex_stream.rs`:
+
+- `capped_streaming_and_the_preload_agree_at_and_below_the_cap`: bit-identical
+  to `PtexColor` for every face of the four fixtures, every cap from 0 to the
+  authored resolution, pyramid on and off, at every footprint no finer than one
+  cap texel.
+- `capped_streaming_under_an_explicit_cap_is_the_preload_everywhere`: with
+  `CRUST_PTEX_MAX_LOG2` set, the stream holds nothing finer than the preload and
+  matches it at every footprint, `width = 0` included.
+- `capped_streaming_resolves_detail_finer_than_the_cap`: inside one cap texel
+  it reads the file's own levels (equal to `file` there) and differs from the
+  preload, which can only magnify its cap level.
+
+### Measured
+
+`samples/ptex_quads.usda`, 16 spp, `CRUST_PTEX_STREAM_MIN_MB=0` so its kilobyte
+fixtures stream at all:
+
+- with `CRUST_PTEX_MAX_LOG2=5` on both sides, `capped` against
+  `CRUST_PTEX_STREAM=0`: **0 of 57 600 pixels differ**;
+- with the cap unset, 8 898 of 57 600 differ (15.4%, max 0.19). That is the
+  1024×512 face resolving detail the preload capped at 32×32.
+
+The Moana island at `shotCam`, 640×360, 4 spp, `--indirect-clamp 0`, 2026-10-09,
+on the 72-vCPU machine of `docs/moana_profile.md` (93 GiB). The preload and
+`file` columns are the parent commit; the parent and this change preloading
+(`CRUST_PTEX_STREAM=0`) are bit-identical, and so are their two `file` renders.
+
+| | preload (`CRUST_PTEX_STREAM=0`) | `file` | **`capped` (default)** |
+| --- | --- | --- | --- |
+| textures | 3 632 preloaded | 53 streamed + 3 579 preloaded | 53 streamed + 3 579 preloaded |
+| Ptex resident | 7.34 GiB | 0.60 GiB + 6.0 MiB streamed | **0.60 GiB + 18.5 MiB streamed** |
+| · derived levels | — | — | 129 207 blocks, 17.5 MiB, 0 evictions |
+| peak RSS | 31.3–31.6 GiB | 23.7 GiB | **23.9–24.1 GiB** |
+| `Load assets` | 1:36.8–1:40.5 | 31.8 s | **28.1–29.2 s** |
+| image against the preload | — | 27.6% of pixels, relMSE 0.197 (trimmed 2.8e-3) | **267 pixels (0.12%), relMSE 1.4e-9** |
+
+The last row is the point. Under `capped` the island's image is the preload's
+except on 267 pixels, max 6.2e-3, where a footprint is finer than one cap texel
+and authored detail shows; `file` darkens a quarter of the frame. Coarse regions
+match the preload, not `file`. Memory and import time are `file`'s.
+
+**The render pays for the first touch of each face.** Interleaved, three runs a
+side, the same binary with `CRUST_PTEX_STREAM=0` against the default:
+
+| `Render` (min / mean) | preload | `capped` | |
+| --- | --- | --- | --- |
+| 4 spp | 1.027 / 1.047 s | 1.285 / 1.315 s | +0.26 s (+25%) |
+| 16 spp (two runs a side) | 3.721 / 3.768 s | 4.221 / 4.316 s | +0.50 s (+13%) |
+
+A coarse lookup on a face nothing has read yet reads the face at the cap,
+decodes it and reduces it down to the level asked for: 705 890 derives over the
+render, against `file`'s reading a few stored texels. That cost is not a fixed toll. At 16 spp the
+render touches more faces at more levels (1 076 204 derives; 195 972 blocks,
+25.4 MiB resident, still no evictions) and pays +0.50 s, a smaller share of a
+longer render. It is what `capped` costs over `file`, which measured
++1.8% / +3.2% on the island at 8 spp (2026-10-05, below), and the whole run is
+still 72 s shorter than preloading. The obvious place to take it back is the
+decode: a derived level decodes the cap-level face through the scalar curve
+(`decode_face`, the preload's), where `PtexStream` already has a `u8` table
+pinned bit-identical to it.
+
+**What the cache holds, and why it holds so little.** The first version of the
+derived API cached every level on the way down from the cap, plus the file
+block the cap level was read from. On the island that held about 16 KiB of
+`f32` per face for faces read only at a coarse level, and the 53 readers'
+shares (18 MiB each) thrashed: 1.04 M evictions and 985 K derives for 586 K
+texel fetches. `ptex-rs` now caches only the level asked for, derives it from
+the deepest ancestor already resident (or from the cap level), and drops the
+file block it read, including both blocks of a reduction. Most island faces are
+non-square (64×8, 64×4, 8×64), so a cap of 32 asks for 32×8, a level the file
+does not store. Resident fell from 605 MiB to 18.5 MiB, with no evictions. The
+image is the same: each level is still its parent's reduction.
+
+`thread microcache hits` reads lower under `capped` (34% against 84% for
+`file`) for an uninteresting reason: a derived block is a whole level, so the
+four taps of a bilinear lookup are one microcache access, not four.
+
 
 ## Four microcache slots, not two
 
@@ -333,15 +450,23 @@ ran:
 
 ```
 Ptex
-  backend                      streamed
+  backend                      streamed (capped chain)
   textures                     2 (6 faces)
-  streamed resident / budget   11.98 KiB / 8.00 MiB over 2 textures
-  texel fetches                5 612 932
-    thread microcache hits     5 612 515 (100.0%)
-    reader cache hits          366
-    reads from disk            8
+  streamed resident / budget   29.34 KiB / 951.00 MiB over 2 textures
+    derived levels             7 blocks, 29.34 KiB, 7 derives
+  thread tiles / reserve       701.44 KiB / 73.00 MiB
+  texel fetches                335 008
+    thread microcache hits     334 894 (100.0%)
+    reader cache hits          107
+    reads from disk            7
   evictions                    0
 ```
+
+(`samples/ptex_quads.usda`, 16 spp, `CRUST_PTEX_STREAM_MIN_MB=0
+CRUST_PTEX_MAX_LOG2=5`.) `derived levels` is part of `streamed resident`, not
+an addition to it: derived blocks live in the readers' caches. `derives` counts
+every derived block produced, so a figure well above `blocks` means they are
+being evicted and derived again.
 
 against a preloaded run's:
 
@@ -358,10 +483,11 @@ different to whoever reads it:
 
 | reason | what it says |
 | --- | --- |
-| `N streamed` | admitted |
+| `N streamed (capped chain)` | admitted, reading the default chain |
+| `N streamed` | admitted, under `CRUST_PTEX_STREAM_MIPSPACE=file` (or a mix) |
 | `N preloaded under the size threshold` | the admission rule working — see above |
 | `N preloaded for want of budget` | raise `CRUST_PTEX_CACHE_MB` |
-| `N preloaded for a linear mip chain` | the default policy; `CRUST_PTEX_STREAM_MIPSPACE=file` streams them |
+| `N preloaded for a linear mip chain` | `CRUST_PTEX_STREAM_MIPSPACE=linear` declined them; the default `capped` streams them |
 | `N PRELOADED BECAUSE STREAMING FAILED` | a file is broken — the one to look at |
 
 `evictions` running with the misses is the line that says the budget is under
@@ -379,11 +505,11 @@ feature was built for: `island.usda` at `shotCam`, 640x360, 8 spp,
 Measured 2026-10-05 at `4143c58`, two runs per side, alternating, on the
 72-vCPU machine of `docs/moana_profile.md`.
 
-**These numbers are the `CRUST_PTEX_STREAM_MIPSPACE=file` ones**, which is
-what the default now declines — the island's `.ptx` files are all mipmapped,
-so `CRUST_PTEX_STREAM=1` on its own reproduces the preloaded column exactly.
-The table is therefore what the opt-in buys, and the 0.147 mip-chain bias
-above is what it costs. Reading them together is the point of recording both.
+**These numbers are the `CRUST_PTEX_STREAM_MIPSPACE=file` ones**, taken
+before `capped` existed, when `linear` declined every mipmapped `.ptx`. They
+are what the file's whole chain buys, and the 0.147 mip-chain bias above is
+what it costs. The default `capped` chain's figures are in "The capped chain"
+above: the same memory and import time, and the preload's image.
 
 | | preloaded (min / mean) | streamed (min / mean) | |
 | --- | --- | --- | --- |
@@ -467,31 +593,44 @@ change"), uncapped preload against a 4 MiB streamed budget:
 and neither is what a real frame looks like; what the table is for is the
 shape — residency bounded by a number you choose, paid for in fetch cost.
 
+The default as it ships, measured 2026-10-09: the same binary with
+`CRUST_PTEX_STREAM=0` against the default, both at `CRUST_PTEX_STREAM_MIN_MB=0`
+and 256 spp, so the default side streams uncapped under `capped` and the other
+preloads at 32×32. Interleaved:
+
+| threads | preload (min / mean) | `capped` (min / mean) | |
+| --- | --- | --- | --- |
+| 8 | 0.772 / 0.818 s | 0.888 / 0.975 s | +15% / +19% |
+| 72 | 0.300 / 0.465 s | 0.312 / 0.639 s | +4% / +37% |
+
+At 72 threads a 0.3 s render is mostly scheduling noise (the medians are 0.48
+and 0.61 s), so the 8-thread row is the one to read. The cost includes the
+detail above the cap that the stream reads and the preload does not have.
+
 ## Testing it yourself
 
-Note the `CRUST_PTEX_STREAM_MIPSPACE=file` on every line that expects
-something to stream: under the default policy a mipmapped `.ptx` preloads, so
-without it these compare a preloaded render against a preloaded render and
-agree for the wrong reason. `--stats` says which backend ran, and the
-`backend` line names this variable when it is the one that declined.
+Note the `CRUST_PTEX_STREAM_MIN_MB=0` on every line that expects something to
+stream: the sample scene's fixtures are kilobytes, so by default they preload
+and a comparison would set a preloaded render against a preloaded render.
+`--stats` says which backend ran.
 
 ```bash
-# The equality. `file` here so the streamed side really streams; at a cap both
-# backends hold, the two images are bit-identical.
-CRUST_PTEX_MAX_LOG2=5 cargo run --release -- render -i samples/ptex_quads.usda -o a.exr
-CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
-    CRUST_PTEX_STREAM_MIPSPACE=file \
-    cargo run --release -- render -i samples/ptex_quads.usda -o b.exr
+# The equality: the default `capped` chain against the preload, at a cap both
+# hold. Bit-identical at any footprint.
+CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=0 \
+    cargo run --release -- render -i samples/ptex_quads.usda -s 16 -o a.exr
+CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM_MIN_MB=0 \
+    cargo run --release -- render -i samples/ptex_quads.usda -s 16 -o b.exr
 cargo run --release -- diff a.exr b.exr
 
-# The configuration that streams under the *default* policy: no pyramid, so
-# no chain to be reduced in the wrong space. Exact, uncapped, and aliasing.
-CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 CRUST_PTEX_MIP=0 \
-    cargo run --release -- render -i samples/ptex_quads.usda --stats -o c.exr
+# The point: uncapped, under a budget, with the counters. Differs from `a.exr`
+# only where a footprint is finer than one cap texel.
+CRUST_PTEX_STREAM_MIN_MB=0 CRUST_PTEX_CACHE_MB=64 \
+    cargo run --release -- render -i samples/ptex_quads.usda -s 16 --stats -o c.exr
 
-# The point: uncapped, under a budget, with the counters.
-CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 CRUST_PTEX_STREAM_MIPSPACE=file \
-    cargo run --release -- render -i samples/ptex_quads.usda --stats -o d.exr
+# The file's whole chain, for the 0.147 comparison.
+CRUST_PTEX_STREAM_MIN_MB=0 CRUST_PTEX_STREAM_MIPSPACE=file \
+    cargo run --release -- render -i samples/ptex_quads.usda -s 16 -o d.exr
 
 # The unit invariants.
 cargo test -p crust-assets --test ptex_stream -- --nocapture
@@ -505,14 +644,20 @@ and the rendered one cannot be checked against different bytes.
 
 ## Known gaps
 
-- **Not the default**, on two levels. `CRUST_PTEX_STREAM=1` is opt-in, and
-  under it a mipmapped `.ptx` still preloads unless
-  `CRUST_PTEX_STREAM_MIPSPACE=file` is also set. `PtexColor` stays the oracle.
-- **The mip chain cannot be built in linear light from streamed tiles**, which
-  is what makes that second gate necessary rather than tidy. The fix is a
-  reader that reduces in a declared working space, upstream beside the tile
-  cache — see the section above for why building it here would mean a second
-  pyramid cache and a level-0 read per coarse lookup.
+- **The levels above the cap are the file's**, reduced in its own encoding, so a
+  close-up that blends two of them is a shade darker than a linear reduction of
+  level 0 would be. The preload holds nothing there at all; making them
+  linear-exact would mean a level-0 read per lookup.
+- **The admission threshold splits detail.** A file under
+  `CRUST_PTEX_STREAM_MIN_MB` preloads, capped at 32×32; a larger one streams and
+  keeps its authored detail. Two textures authored alike can therefore differ
+  in a close-up.
+- **One file descriptor per streamed `.ptx`** for the whole render, uncovered by
+  `CRUST_TEX_MAX_OPEN_FILES`. At the defaults the island streams 53 files; a
+  lower threshold or a larger budget that streams thousands can exceed
+  `ulimit -n` (`docs/moana_profile.md`).
+- **`ptex-rs` 0.4.0 is pinned by `rev`** to the fork's `derived-levels` branch
+  until it is released to crates.io.
 - **Ptex has no per-texture colour space.** Both backends decode `half` and
   `float` samples at full range, but both apply the display decode `powf(2.2)`
   to every `.ptx`, so a linear HDR `.ptx` is mis-decoded; the island's files

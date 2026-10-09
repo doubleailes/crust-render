@@ -190,8 +190,11 @@ incrementally, under fixed budgets:
 - **UV textures stream from `.tx` files** (tiled, mip-mapped TIFF or EXR) in 64×64 tiles,
   through a cache with a byte budget
   ([`CRUST_TEX_CACHE_MB`](@/docs/reference/environment-variables.md#crust-tex-cache-mb)).
-- **Ptex can stream** through the `ptex-rs` reader's own cache
+- **Large Ptex files stream** through the `ptex-rs` reader's own cache
   ([`CRUST_PTEX_STREAM`](@/docs/reference/environment-variables.md#crust-ptex-stream)).
+  Below the per-face cap, the mip levels are the ones a loaded texture builds in linear
+  light, held in that same cache, so streaming changes no texel the loaded texture
+  has.
 
 **Why.** Preloading makes memory track the scene's total texture footprint. Capping
 resolution to fit throws authored detail away and still fails on a scene that binds more

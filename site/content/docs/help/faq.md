@@ -72,8 +72,9 @@ render a mesh flat-faceted, author `subdivisionScheme = "none"` on it.
   textures are streamed instead of loaded whole, and lower
   [`CRUST_TEX_CACHE_MB`](@/docs/reference/environment-variables.md#crust-tex-cache-mb) if
   needed.
-- Stream Ptex with
-  [`CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file`](@/docs/reference/environment-variables.md#crust-ptex-stream).
+- Stream more Ptex files, by lowering
+  [`CRUST_PTEX_STREAM_MIN_MB`](@/docs/reference/environment-variables.md#crust-ptex-stream-min-mb)
+  (large files already stream by default).
 - Use the smaller triangle layout,
   [`CRUST_TRI_PACKETS=indexed`](@/docs/reference/environment-variables.md#crust-tri-packets).
 - Lower `--subdiv-level`. Each level multiplies the face count by four.
