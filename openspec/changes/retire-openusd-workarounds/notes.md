@@ -61,3 +61,32 @@ deterministic ulp-level placement change, not noise.
 Below the noise floor, so instructions were counted (callgrind, `RAYON_NUM_THREADS=1`,
 cornellbox `-s 1`): `load_scene` inclusive 252.94 M → 252.67 M (−0.1%). Not a
 regression, so `xformOpOrder` is not read once. ALab (`-f 1004`) is still to measure.
+
+## Phase 2: openusd `main` (`933aa8f`), against `ef14d26` (openusd 0.7.0)
+
+### Images (`--indirect-clamp 0`, 16 spp, every `samples/*.usd*`)
+
+37 of 38 samples are **bit-identical**. The one that differs is `animation` without
+`-f`: an `xformOp` now reads its default value, as every other attribute does, so the
+sphere sits at its off-screen default translate instead of holding its time-0 sample.
+That is task 5.3's intended change; at `-f 1`, `5.5` and `10` it is bit-identical.
+So the bump moves no pixel through transforms (`XformQuery` composes as 0.7's
+`local_to_parent_transform` did), schema fallbacks (`value_at` keeps unauthored reads
+`None`) or light links (openusd's `includeRoot` fallback equals the removed one).
+
+### Import A/B (`bench_ab.sh -n 15 -x "-s 1"`, seconds, min / mean)
+
+| scene | phase | 0.7.0 | `main` |
+|---|---|---|---|
+| cornellbox | Parse USD stage | 0.019 / 0.021 | 0.014 / 0.014 |
+| cornellbox | Traverse prims | 0.015 / 0.015 | 0.008 / 0.009 |
+| hair | Parse USD stage | 0.007 / 0.007 | 0.008 / 0.008 |
+| hair | Traverse prims | 0.004 / 0.004 | 0.003 / 0.004 |
+| PointInstancedMedCity | Parse USD stage | 0.003 / 0.003 | 0.004 / 0.004 |
+| materialx_lion | Parse USD stage | 0.001 / 0.001 | 0.003 / 0.003 |
+| openpbr_showcase | Parse USD stage | 0.003 / 0.003 | 0.005 / 0.005 |
+
+The ~2 ms (and ~1.3 MiB) every scene now pays once is building the schema registry
+(`openusd_schemas::schema_registry()`); past it, cornellbox imports in about half the
+time. ALab and the Moana island, where mxpv/openusd#106's gains are measured, are not
+available in the session container: still to measure.
