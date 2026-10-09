@@ -96,17 +96,17 @@
 - [x] 4.2 Validate the change with `openspec validate retire-openusd-workarounds
       --strict`. Done when it passes.
 
-## 5. openusd bump (phase 2, D6). Blocked until an openusd release after 0.7.0 contains `fe8e9e8`
+## 5. openusd bump (phase 2, D6). Done against openusd `main` (`933aa8f`) through `[patch.crates-io]`, ahead of a release
 
-- [ ] 5.1 Bump `openusd` / `openusd-schemas` in the workspace `Cargo.toml` and
+- [x] 5.1 Bump `openusd` / `openusd-schemas` in the workspace `Cargo.toml` and
       `Cargo.lock`. Port `Collection::new(…).compute_membership_query(stage)` to
       `CollectionAPI`, plus any other API break the release notes list. Done when
       `cargo build --workspace` and `cargo deny --locked check` pass.
-- [ ] 5.2 In `light_links.rs`, delete the pseudo-root insertion and the
+- [x] 5.2 In `light_links.rs`, delete the pseudo-root insertion and the
       `include_root.is_some()` / expansion-rule branch in `link_query`, and update its
       doc comment. Done when `cargo test -p crust-core --test light_linking` passes
       unchanged, including the unauthored-`includeRoot` case.
-- [ ] 5.3 Replace the D1 newtype with `XformQuery::for_prim(prim)?.local_transformation(eval_time())`
+- [x] 5.3 Replace the D1 newtype with `XformQuery::for_prim(prim)?.local_transformation(eval_time())`
       and `.resets_xform_stack()`, and delete `xform_time()`. Re-check whether openusd
       now reports unknown op kinds, and if it does, delete the D3 list. Turn the delta
       spec's two known-gap scenarios into normal behaviour, with tests:
@@ -115,7 +115,10 @@
       - a `Scope`'s ops are ignored.
 
       Done when those tests and `check_images.sh check` pass.
-- [ ] 5.4 Update the `usd-scene-import` design record (`openusd version and API
+      *openusd still reads an unknown op kind as identity silently, so the D3 list
+      stays. Composed through `Xformable::from_prim` + `XformQuery::new` (what
+      `for_prim` does) so the D3 warning only fires on an `Xformable` prim.*
+- [x] 5.4 Update the `usd-scene-import` design record (`openusd version and API
       history`; delete the remaining workaround gaps; in "Light links are decided after
       the last chunk", say the `includeRoot` fallback now comes from openusd). Done when no "workaround" for an openusd bug remains in
       "Known gaps: openusd bugs and workarounds".

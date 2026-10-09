@@ -34,7 +34,7 @@ use crate::warning;
 use std::collections::HashMap;
 
 use openusd::sdf;
-use openusd::usd::{CollectionAPI, ExpansionRule, MembershipQuery, PathRule, Prim, Stage};
+use openusd::usd::{CollectionAPI, MembershipQuery, Prim, Stage};
 use tracing::debug;
 
 use crate::light::{EVERY_CLASS, Light, LightLinks as RuntimeLinks, LightList};
@@ -58,9 +58,8 @@ const ALLOCATED: usize = 28;
 /// `includeRoot = 1` and no `includes` / `excludes`).
 ///
 /// UsdLux gives these two collections an `includeRoot` fallback of **true**,
-/// where `UsdCollectionAPI`'s is false — and openusd applies the latter. So
-/// when `includeRoot` is not authored the pseudo-root is added to the rule map
-/// here, unless an opinion on `/` is already there.
+/// where `UsdCollectionAPI`'s is false. openusd resolves it from `LightAPI`'s
+/// schema, so an unauthored `includeRoot` already reaches the query.
 pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<MembershipQuery> {
     let Opinions {
         includes,
@@ -108,22 +107,7 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
             break;
         }
     }
-    if include_root.is_some() {
-        return Some(query);
-    }
-    let rule = match collection
-        .expansion_rule()
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-    {
-        ExpansionRule::ExplicitOnly => return Some(query),
-        ExpansionRule::ExpandPrims => PathRule::ExpandPrims,
-        ExpansionRule::ExpandPrimsAndProperties => PathRule::ExpandPrimsAndProperties,
-    };
-    let mut map = query.rule_map().clone();
-    map.entry(sdf::Path::abs_root()).or_insert(rule);
-    Some(MembershipQuery::new(map))
+    Some(query)
 }
 
 /// A link collection's authored opinions, as far as membership depends on

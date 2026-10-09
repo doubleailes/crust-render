@@ -2342,15 +2342,12 @@ fn animated_stage_is_evaluated_at_the_requested_frame() {
     let after = load(Some(25.0));
     assert!(sphere_at(&after, 2.0).is_some());
 
-    // No frame: every attribute reads its default — except an `xformOp`,
-    // which openusd 0.7 composes at time 0.0 (its transform API has no
-    // default-time arm), so the sphere holds its first sample rather than
-    // its off-screen default translate. The openusd bump in
-    // `retire-openusd-workarounds` (phase 2) restores the default here.
+    // No frame: every attribute reads its default, an `xformOp` included, so
+    // the sphere sits at its off-screen default translate.
     let default = load(None);
     assert!(
-        sphere_at(&default, -2.0).is_some(),
-        "no frame: the sphere's translate is read at time 0, holding frame 1"
+        sphere_at(&default, -2.0).is_none(),
+        "no frame: the sphere's translate is its default, off-screen"
     );
     assert!(sphere_at(&default, 2.0).is_none());
 }

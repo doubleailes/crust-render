@@ -237,13 +237,11 @@ def DomeLight "Sky" {}
 /// collection bindings reach their material; one bound only for the preview
 /// purpose, and one bound by nothing, do not.
 ///
-/// `strongerThanDescendants` is where `bound` and the authored intent part:
-/// openusd 0.7 parses a `.usda`'s `bindMaterialAs` as a string, and
-/// openusd-schemas' `compute_bound_material` only recognises the token, so
-/// the import — and with it the render — resolves the mesh to its own
-/// binding (`Overridden`), not the ancestor's (`Stronger`). `bound` reports
-/// what the render does; this pins it, and flips with the openusd fix (see
-/// the `usd-scene-import` design record's known gaps).
+/// `strongerThanDescendants` decides it: the ancestor's binding (`Stronger`)
+/// wins over the mesh's own (`Overridden`), for the import — and with it the
+/// render — as for C++ USD. (openusd 0.7 read a `.usda`'s `bindMaterialAs` as
+/// a string that `compute_bound_material` did not recognise, and this pinned
+/// the opposite.)
 #[test]
 fn material_records_follow_the_binding_resolution() {
     let quad = |name: &str, binding: &str| {
@@ -319,9 +317,8 @@ def Xform "geo"
         ("/mtl/Direct", true),
         ("/mtl/Inherited", true),
         ("/mtl/Collected", true),
-        // Under the openusd gap above; `false` / `true` once it is fixed.
-        ("/mtl/Overridden", true),
-        ("/mtl/Stronger", false),
+        ("/mtl/Overridden", false),
+        ("/mtl/Stronger", true),
         ("/mtl/Preview", false),
         ("/mtl/Nothing", false),
         ("/mtl/Empty", false),
