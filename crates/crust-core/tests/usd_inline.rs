@@ -5,7 +5,7 @@
 
 use crust_core::{
     Light, MASK_CAMERA, NoAssets, PathSampler, Ray, SamplingStrategy, Scene, UsdImportOptions,
-    Vec3A, Volumes, ray_color,
+    Vec3A, Volumes, WarningCode, ray_color,
 };
 use std::path::PathBuf;
 
@@ -1392,6 +1392,162 @@ fn distant_light_units_follow_the_spec() {
     assert!(
         want > 0.0 && (narrow / want - 1.0).abs() < 1e-5,
         "{narrow} vs {want}"
+    );
+}
+
+/// Everything `scene`'s only light answers to NEE from a few points around
+/// the origin, over an 8 × 8 grid of `(u, v)`: two lights that agree on all
+/// of it are the same light to the renderer.
+fn light_samples(scene: &Scene) -> Vec<Option<(Vec3A, f32, Vec3A, f32)>> {
+    assert_eq!(scene.lights.count(), 1);
+    let light = &scene.lights.lights()[0];
+    let froms = [
+        Vec3A::new(0.0, 0.0, -3.0),
+        Vec3A::new(1.5, -2.0, -2.5),
+        Vec3A::new(0.5, 3.0, 1.0),
+    ];
+    froms
+        .into_iter()
+        .flat_map(|from| {
+            (0..64).map(move |i| {
+                let (u, v) = ((i % 8) as f32 + 0.5, (i / 8) as f32 + 0.5);
+                light
+                    .sample_li(from, u / 8.0, v / 8.0)
+                    .map(|s| (s.direction, s.distance, s.radiance, s.pdf.get()))
+            })
+        })
+        .collect()
+}
+
+/// `DistantLight` overrides `LightAPI`'s `inputs:intensity` fallback of 1
+/// with 50000, "a high default intensity to approximate the Sun"
+/// (usdLux/schema.usda). A sun that authors none, blocks it, or authors a
+/// non-finite one (refused with a warning) is that sun, not a 1-nit one.
+#[test]
+fn an_unauthored_distant_light_is_the_schema_sun() {
+    let sun = |name: &str, intensity: &str| {
+        load(name, &format!("def DistantLight \"Sun\" {{ {intensity} }}"))
+    };
+    let refusal = |scene: &Scene| {
+        scene
+            .warnings
+            .iter()
+            .find(|w| w.code == WarningCode::LightNonFiniteInput)
+            .map(|w| w.message.clone())
+    };
+    let schema = sun("sun_schema", "float inputs:intensity = 50000");
+    for (name, intensity) in [
+        ("sun_unauthored", ""),
+        ("sun_blocked", "float inputs:intensity = None"),
+        ("sun_inf", "float inputs:intensity = inf"),
+    ] {
+        let scene = sun(name, intensity);
+        assert_eq!(light_samples(&scene), light_samples(&schema), "{name}");
+        match refusal(&scene) {
+            Some(message) => {
+                assert_eq!(name, "sun_inf", "{message}");
+                assert!(message.contains("fallback 50000"), "{message}");
+            }
+            None => assert_ne!(name, "sun_inf", "a non-finite intensity warns"),
+        }
+    }
+    // 50000 times the sun authored at 1 nit, which is what an unauthored one
+    // used to be.
+    let one = light_samples(&sun("sun_one", "float inputs:intensity = 1"));
+    let schema = light_samples(&schema);
+    assert!(schema.iter().any(Option::is_some));
+    for (a, b) in schema.iter().zip(&one) {
+        let ((_, _, a, _), (_, _, b, _)) = (a.unwrap(), b.unwrap());
+        assert!((a / b - 50000.0).abs().max_element() < 0.05, "{a} vs {b}");
+    }
+}
+
+/// Each light type imports the same whether an input is unauthored or
+/// authored at the UsdLux schema's fallback for that type (OpenUSD
+/// `pxr/usd/usdLux/schema.usda`), for every input crust reads: the
+/// importer's hand-written fallbacks are the schema's. A shaped twin has
+/// `ShapingAPI` applied on both sides, since the cone's 90° fallback exists
+/// only with it. Without a profile, which needs a host to load it,
+/// `ies:normalize` and `ies:angleScale` act on nothing, so their fallbacks
+/// are written out here but not pinned.
+#[test]
+fn unauthored_light_inputs_are_the_schema_fallbacks() {
+    const LIGHT_API: &str = "float inputs:exposure = 0\n \
+         color3f inputs:color = (1, 1, 1)\n bool inputs:normalize = 0\n \
+         bool inputs:enableColorTemperature = 0\n float inputs:colorTemperature = 6500\n";
+    let shaping = "prepend apiSchemas = [\"ShapingAPI\"]";
+    let twins = [
+        (
+            "sphere",
+            "SphereLight",
+            "",
+            "float inputs:intensity = 1\n float inputs:radius = 0.5",
+        ),
+        (
+            "disk",
+            "DiskLight",
+            "",
+            "float inputs:intensity = 1\n float inputs:radius = 0.5",
+        ),
+        (
+            "cylinder",
+            "CylinderLight",
+            "",
+            "float inputs:intensity = 1\n float inputs:radius = 0.5\n float inputs:length = 1",
+        ),
+        (
+            "rect",
+            "RectLight",
+            "",
+            "float inputs:intensity = 1\n float inputs:width = 1\n float inputs:height = 1",
+        ),
+        (
+            "distant",
+            "DistantLight",
+            "",
+            "float inputs:intensity = 50000\n float inputs:angle = 0.53",
+        ),
+        (
+            "dome",
+            "DomeLight",
+            "",
+            "float inputs:intensity = 1\n token inputs:texture:format = \"automatic\"",
+        ),
+        (
+            "shaped",
+            "SphereLight",
+            shaping,
+            "float inputs:intensity = 1\n float inputs:radius = 0.5\n \
+             float inputs:shaping:focus = 0\n color3f inputs:shaping:focusTint = (0, 0, 0)\n \
+             float inputs:shaping:cone:angle = 90\n float inputs:shaping:cone:softness = 0\n \
+             bool inputs:shaping:ies:normalize = 0\n float inputs:shaping:ies:angleScale = 0",
+        ),
+    ];
+    for (name, ty, api, authored) in twins {
+        let light = |suffix: &str, body: &str| {
+            load(
+                &format!("fallbacks_{name}_{suffix}"),
+                &format!("def {ty} \"L\" ( {api} ) {{\n {body}\n }}"),
+            )
+        };
+        let unauthored = light_samples(&light("unauthored", ""));
+        assert!(unauthored.iter().any(Option::is_some), "{name}: no sample");
+        assert_eq!(
+            unauthored,
+            light_samples(&light("authored", &format!("{LIGHT_API} {authored}"))),
+            "{name}"
+        );
+    }
+    // With the colour temperature on, the temperature's own fallback.
+    let warm = |suffix: &str, body: &str| {
+        light_samples(&load(
+            &format!("fallbacks_temperature_{suffix}"),
+            &format!("def SphereLight \"L\" {{ bool inputs:enableColorTemperature = 1\n {body} }}"),
+        ))
+    };
+    assert_eq!(
+        warm("unauthored", ""),
+        warm("authored", "float inputs:colorTemperature = 6500")
     );
 }
 

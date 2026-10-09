@@ -372,12 +372,31 @@ paths, for direct-light variance falling about as 1/N.
   light type, `normalize`, colour temperature, a shaped spot, an IES fixture from
   `samples/ies/spot30.ies`, a squashed sphere light, and a textured window card from
   `samples/textures/window_card.exr`).
+- **An unauthored input takes the schema's fallback for the light's type.** openusd 0.7
+  resolves no schema fallbacks (its compiled-in `SchemaRegistry` registers nothing), so an
+  unauthored or blocked attribute reads `None` and the importer writes each fallback
+  beside its read. Among the inputs crust reads, one concrete type overrides a `LightAPI`
+  fallback: `DistantLight`'s `inputs:intensity` is **50000**, not 1. That fallback is
+  `LightSchema::INTENSITY` (`lights.rs`), a trait every imported light type implements
+  and `light_inputs` requires, so the import and `crust ls light` share it. A non-finite
+  authored value takes the same fallback with `light.non_finite_input`.
+  `unauthored_light_inputs_are_the_schema_fallbacks` (`tests/usd_inline.rs`) imports each
+  light type with nothing authored and with every read input authored at its schema
+  value, and requires the two to sample bitwise alike. A fallback that drifts from the
+  schema fails there. The audit of every input against OpenUSD's
+  `pxr/usd/usdLux/schema.usda` is in the `usdlux-schema-fallbacks` change's design.
+  *History:* every light used to fall back to 1, so an unauthored sun lit a facing
+  surface with 6.7·10⁻⁵ lux instead of 3.4. No sample left it unauthored.
+  When openusd registers UsdLux's schema data (`retire-openusd-workarounds`), `attr_f32`
+  returns these values itself, and the hand-written fallbacks become redundant but
+  still agree.
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
   0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
   made singular, so the integrator keeps one MIS path instead of a delta special case.
-  **`intensity` is the sun disk's luminance in nits** — so an un-normalised 0.53° sun
+  **`intensity` is the sun disk's luminance in nits**, so an un-normalised 0.53° sun
   needs an intensity in the tens of thousands to light anything, exactly as in Hydra.
+  That is why the schema's fallback for it is 50000: 3.4 lux on a facing surface.
   With **`inputs:normalize`** it is the **illuminance in lux** on a surface facing the
   light, and widening the angle softens shadows without changing exposure. A zero angle
   is a delta light whose intensity the spec and hdEmbree both deliver as illuminance.
@@ -704,8 +723,9 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
 ## Known gaps: lighting
 
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
-  light filters and `ShadowAPI` are not read. Light and shadow linking are read, with
-  these gaps: membership is judged on the prim that brought the geometry in, so a
+  light filters and `ShadowAPI` are not read. (Unauthored, `ShadowAPI`'s fallbacks are
+  enabled, unbounded black shadows, which is what crust renders.) Light and shadow
+  linking are read, with these gaps: membership is judged on the prim that brought the geometry in, so a
   collection target inside a native instance's prototype, or one `PointInstancer`
   instance, cannot be told apart from its siblings (warned per collection);
   `membershipExpression` is refused with a `WARN` and read as the default; a
@@ -729,3 +749,15 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   shadow rays as an equally powerful near one, and a dome or sun only its uniform share
   however much it lights (a light BVH, `docs/light_sampling.md` §6.3, is the fix). Neither infinite light
   is visible to the guiding field's spatial structure (they have no position).
+- **Where an unauthored input is not the schema's fallback, on purpose.**
+  - An unauthored `inputs:shaping:cone:angle` is 180° (no cone) on a light *without*
+    `ShapingAPI` applied. The schema's 90° belongs to the API, and that attribute
+    exists only where the API is applied. Hydra hands hdEmbree nothing there, and
+    90° everywhere would cut the back half off every sphere light (see "UsdLux
+    import").
+  - `DomeLight_1`'s `poleAxis` is not read, and neither is the stage's `upAxis`. A
+    dome's pole is always the light's +Y. The schema's fallback `"scene"` puts it on
+    the stage's up axis, so an untransformed `DomeLight_1` on a Z-up stage lies on its
+    side, with its pole along the stage's +Y instead of +Z. A Y-up stage, an authored
+    `poleAxis = "Y"` and a `DomeLight` are unaffected. Reading it means a rotation that
+    applies to the dome itself and not to its namespace children, as the schema says.

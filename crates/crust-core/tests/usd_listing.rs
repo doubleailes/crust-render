@@ -183,7 +183,8 @@ fn the_render_camera_is_the_one_the_import_uses() {
 }
 
 /// Lights as authored, at the time code asked for: an animated intensity
-/// reads its default without one and its sample with one.
+/// reads its default without one and its sample with one, and an unauthored
+/// input reads the schema fallback of the light's own type.
 #[test]
 fn light_records_are_the_authored_inputs_at_the_time_code() {
     let lux = lights(&sample("usdlux.usda"), None);
@@ -208,6 +209,7 @@ def SphereLight "Key"
     bool inputs:normalize = 1
 }
 def DomeLight "Sky" {}
+def DistantLight "Sun" {}
 "#,
     );
     let at = |frame| lights(&path, frame);
@@ -227,6 +229,14 @@ def DomeLight "Sky" {}
     );
     assert_eq!(sky.color, [1.0, 1.0, 1.0]);
     assert!(!sky.normalize);
+    // `DistantLight` overrides `LightAPI`'s intensity fallback with 50000.
+    let sun = &at(None)[2];
+    assert_eq!(sun.kind, "distant");
+    assert_eq!(
+        (sun.intensity, sun.exposure),
+        (50000.0, 0.0),
+        "schema fallbacks"
+    );
     assert!(matches!(
         Scene::list_usd_records(&path, ListKind::Light, Some(f64::NAN)),
         Err(crust_core::Error::InvalidFrame(_))

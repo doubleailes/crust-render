@@ -38,10 +38,36 @@ struct LuxParams {
     pub(super) normalize: bool,
 }
 
+/// The fallbacks of a concrete UsdLux light type, where it overrides one of
+/// `LightAPI`'s (`apiSchemaOverride` in usdLux/schema.usda).
+///
+/// openusd 0.7 reports no schema fallback — an unauthored or blocked input
+/// reads `None` — so the importer supplies them. A per-type one lives on the
+/// type rather than at each call site, so the import and the listing cannot
+/// disagree about it, and a newly imported light type has to implement this,
+/// overriding what its schema overrides, before [`light_inputs`] accepts it.
+pub(super) trait LightSchema: UsdLight {
+    /// `inputs:intensity`: `LightAPI`'s 1.
+    const INTENSITY: f32 = 1.0;
+}
+
+impl LightSchema for SphereLight {}
+impl LightSchema for DiskLight {}
+impl LightSchema for CylinderLight {}
+impl LightSchema for RectLight {}
+impl LightSchema for DomeLight {}
+impl LightSchema for UsdDistantLight {
+    /// 50000, "a high default intensity to approximate the Sun": the sun
+    /// disk's luminance in nits, so an unauthored 0.53° sun delivers 3.4 lux
+    /// to a facing surface where `LightAPI`'s 1 would deliver 6.7e-5.
+    const INTENSITY: f32 = 50000.0;
+}
+
 /// The `LightAPI` inputs as authored — before any colour space conversion,
 /// colour temperature or transform — with each unauthored or non-finite one
-/// at its schema fallback: what [`lux_params`] computes the emission from,
-/// and what `crust ls light --json` reports.
+/// at its schema fallback for the light's type ([`LightSchema`]): what
+/// [`lux_params`] computes the emission from, and what `crust ls light
+/// --json` reports.
 pub(super) struct LightInputs {
     pub(super) intensity: f32,
     pub(super) exposure: f32,
@@ -50,7 +76,7 @@ pub(super) struct LightInputs {
 }
 
 /// Reads [`LightInputs`], warning about a non-finite value.
-pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
+pub(super) fn light_inputs<L: LightSchema>(prim: &Prim, light: &L) -> LightInputs {
     // A non-finite value would reach both MIS halves as NaN radiance, so it
     // falls back to the schema default like the shaping inputs do.
     let finite = |name: &str, v: Option<f32>, fallback: f32| match v {
@@ -65,7 +91,7 @@ pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
         }
         v => v.unwrap_or(fallback),
     };
-    let intensity = finite("intensity", attr_f32(&light.intensity_attr()), 1.0);
+    let intensity = finite("intensity", attr_f32(&light.intensity_attr()), L::INTENSITY);
     let exposure = finite("exposure", attr_f32(&light.exposure_attr()), 0.0);
     let color = match attr_vec3(&light.color_attr()) {
         Some(c) if !c.is_finite() => {
@@ -92,7 +118,7 @@ pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
 /// cannot honour, since each makes the image differ from what was authored:
 /// `diffuse` / `specular` are per-lobe multipliers, and crust's light
 /// transport does not split a light's contribution by lobe.
-fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
+fn lux_params(prim: &Prim, light: &impl LightSchema, working: Space) -> LuxParams {
     let LightInputs {
         intensity,
         exposure,

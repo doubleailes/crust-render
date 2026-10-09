@@ -20,13 +20,13 @@ use openusd_schemas::geom::{
     Sphere as UsdSphere,
 };
 use openusd_schemas::lux::{
-    CylinderLight, DiskLight, DistantLight, DomeLight, Light as UsdLight, RectLight, SphereLight,
+    CylinderLight, DiskLight, DistantLight, DomeLight, RectLight, SphereLight,
 };
 use openusd_schemas::shade::Material as UsdMaterial;
 use tracing::debug;
 
 use super::camera::camera_lens;
-use super::lights::{LightInputs, light_inputs};
+use super::lights::{LightInputs, LightSchema, light_inputs};
 use super::materials::{bound_material, surface_shader_id};
 use super::products::import_render_products;
 use super::settings::{CameraPick, import_render_settings, pick_camera, wanted_camera};
@@ -242,7 +242,7 @@ fn record(
 }
 
 /// A light's type name and its inputs.
-fn read(kind: &'static str, prim: &Prim, light: &impl UsdLight) -> (&'static str, LightInputs) {
+fn read(kind: &'static str, prim: &Prim, light: &impl LightSchema) -> (&'static str, LightInputs) {
     (kind, light_inputs(prim, light))
 }
 

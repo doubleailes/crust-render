@@ -2,7 +2,7 @@
 title = "Lights"
 description = "Camera visibility and light groups of UsdLux lights."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-09T08:00:00+00:00
 draft = false
 weight = 40
 sort_by = "weight"
@@ -29,6 +29,26 @@ Crust Render reads these UsdLux light types with their standard `inputs:intensit
 | `DistantLight` | `inputs:angle` |
 | `DomeLight` | `inputs:texture:file`, a lat-long environment map (`inputs:texture:format` unauthored, `latlong` or `automatic`) |
 
+An input a light doesn't author takes the fallback the UsdLux schema gives it for that
+light's type, as in other UsdLux renderers. A blocked input, or a value that isn't a
+finite number (refused with a warning), takes the same fallback.
+
+| input | fallback |
+|-------|----------|
+| `inputs:intensity` | **50000** on a `DistantLight`, 1 on every other light |
+| `inputs:exposure` | 0 |
+| `inputs:color` | (1, 1, 1) |
+| `inputs:normalize` | false |
+| `inputs:enableColorTemperature`, `inputs:colorTemperature` | false, 6500 |
+| `inputs:radius` (sphere, disk, cylinder) | 0.5 |
+| `inputs:length` (cylinder), `inputs:width`, `inputs:height` (rect) | 1 |
+| `inputs:angle` (distant) | 0.53 |
+
+A distant light's `inputs:intensity` is the luminance of the sun's disk in nits, which is
+why its fallback is so high. An unauthored 0.53° sun puts about 3.4 lux on a surface
+facing it. Earlier releases used 1 for every light, which left a distant light that
+authors no intensity 50000 times too dark.
+
 A lat-long dome is oriented as the UsdLux schema specifies (the OpenEXR convention): in
 the light's own frame the top row is +Y, the centre of the image faces **+Z**, a quarter
 of the way in faces +X and three quarters faces −X. The prim's transform then rotates
@@ -48,14 +68,22 @@ sRGB and a float image (EXR, `.hdr`) is taken as already in the working space.
 Area lights also read `ShapingAPI`: the cone (`inputs:shaping:cone:angle`,
 `inputs:shaping:cone:softness`), focus (`inputs:shaping:focus`,
 `inputs:shaping:focusTint`) and IES profiles (`inputs:shaping:ies:file`,
-`inputs:shaping:ies:angleScale`, `inputs:shaping:ies:normalize`).
+`inputs:shaping:ies:angleScale`, `inputs:shaping:ies:normalize`). These inputs are read
+even on a light that doesn't apply `ShapingAPI`. They fall back to the schema's
+values (no focus, a black focus tint, no softness, no IES scaling), with one
+exception: the cone. An unauthored `inputs:shaping:cone:angle` is the schema's **90°**
+only when the light applies `ShapingAPI`. Without the API it is **180°**, no cone at
+all, because the 90° belongs to the API and would otherwise cut off the back half of
+every sphere light.
 
 Light linking and shadow linking use the standard `collection:lightLink` and
 `collection:shadowLink` collections. See `samples/light_linking.usda`.
 
-Not supported: mesh lights (`MeshLightAPI`), portal lights, light filters, and shaping on
-distant and dome lights. `inputs:diffuse` and `inputs:specular` are ignored with a
-warning.
+Not supported: mesh lights (`MeshLightAPI`), portal lights, light filters, `ShadowAPI`,
+and shaping on distant and dome lights. `inputs:diffuse` and `inputs:specular` are
+ignored with a warning. A `DomeLight_1`'s `poleAxis` is not read either: its pole is
+always the light's +Y, as a `DomeLight`'s is. On a Z-up stage, the schema's fallback
+(`"scene"`) would put the pole on +Z. Rotate such a dome with its transform instead.
 
 ## Camera visibility
 
