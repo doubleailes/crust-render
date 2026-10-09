@@ -1060,6 +1060,14 @@ fn samples_reached_follow_the_first_sweep() {
     control.cancel();
     small_cornell(64).render_with_control(true, None, None, &control);
     assert_eq!(control.samples_reached(), 0, "cancelled before any stage");
+    // Each pass starts over: a count left from an earlier pass (as a guided
+    // render's training passes leave one for its final pass) is cleared
+    // before the pass's first stage.
+    let control = RenderControl::new();
+    control.reach(8);
+    control.cancel();
+    small_cornell(64).render_with_control(true, None, None, &control);
+    assert_eq!(control.samples_reached(), 0, "a new pass starts at zero");
 }
 
 /// Snapshots read from another thread while the render runs only move

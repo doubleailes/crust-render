@@ -112,9 +112,12 @@ impl Open {
     }
 
     /// `undo` (design D4): the layer as it was before the last edit batch of
-    /// this process, saved and imported.
+    /// this process, saved and imported. The step leaves the history only
+    /// once the restored layer has imported: when its restore or import
+    /// fails, the layer goes back to its current bytes, the scene stays the
+    /// one it renders, and the same `undo` can be tried again.
     pub fn undo(&mut self) -> Result<serde_json::Value, String> {
-        let Some(before) = self.undo.pop() else {
+        let Some(before) = self.undo.last().cloned() else {
             return Err(
                 "nothing to undo: no edit batch in this session (undo history does \
                         not survive a resume)"
@@ -122,8 +125,23 @@ impl Open {
             );
         };
         let cancelled = self.renders.stop();
-        self.restore(&before)?;
-        let scene = import(&self.output)?;
+        let current =
+            std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
+        let imported = self.restore(&before).and_then(|()| import(&self.output));
+        let scene = match imported {
+            Ok(scene) => scene,
+            Err(e) => {
+                let back = match self.restore(&current) {
+                    Ok(()) => "the layer is as it was".to_owned(),
+                    Err(r) => format!("putting the layer back failed too ({r})"),
+                };
+                return Err(format!(
+                    "{e}; the undo was not applied: {back}, and the step is still there \
+                     to undo"
+                ));
+            }
+        };
+        self.undo.pop();
         let mut result = self.swap(scene);
         result["cancelled_render"] = cancelled.into();
         Ok(result)
@@ -359,12 +377,14 @@ impl Open {
 
 impl State {
     /// `open_session` (spec: "Opening a session creates an override layer",
-    /// "Resuming a session"): closes the session already open, then creates
-    /// or resumes `output` on `input` and imports it. Refused before anything
-    /// is written when `output` is the input, is not a `.usda`, or exists
-    /// without being an override layer of `input`.
+    /// "Resuming a session", "One session at a time"): cancels the open
+    /// session's render, creates or resumes `output` on `input` and imports
+    /// it, and only then closes the session that was open. Refused before
+    /// anything is written when `output` is the input, is not a `.usda`, or
+    /// exists without being an override layer of `input`; a refused or
+    /// failed call leaves the open session as it was, its history included.
     pub fn open_session(&mut self, input: &str, output: &str) -> Result<serde_json::Value, String> {
-        let cancelled = self.close();
+        let cancelled = self.open.as_mut().and_then(|open| open.renders.stop());
         let input = absolute(Path::new(input))?;
         let output = absolute(Path::new(output))?;
         if !input.is_file() {
@@ -440,6 +460,7 @@ impl State {
             output.display(),
             input.display()
         );
+        self.close();
         self.open = Some(Open {
             input,
             output,

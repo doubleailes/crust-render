@@ -17,18 +17,78 @@ fn asset_json(asset: &sdf::AssetPath) -> Value {
     json!({ "authored": asset.authored_path, "resolved": asset.resolved_path() })
 }
 
-/// A value as JSON, long arrays shortened.
+/// A long array as its length and first elements.
+fn shortened(length: usize, first: Value) -> Value {
+    json!({ "length": length, "first": first })
+}
+
+/// A value as JSON, long arrays shortened. An array is cut before it is
+/// serialized, so a mesh's million points cost sixteen.
 fn value_json(value: &sdf::Value) -> Value {
+    use sdf::Value as V;
+    // Every array variant: serialize its first elements only.
+    macro_rules! arrays {
+        ($($variant:ident),* $(,)?) => {
+            match value {
+                $(V::$variant(items) if items.len() > MAX_ELEMENTS => {
+                    return shortened(
+                        items.len(),
+                        serde_json::to_value(&items[..MAX_ELEMENTS]).unwrap_or(Value::Null),
+                    );
+                })*
+                _ => {}
+            }
+        };
+    }
+    arrays!(
+        BoolVec,
+        UcharVec,
+        IntVec,
+        UintVec,
+        Int64Vec,
+        Uint64Vec,
+        HalfVec,
+        FloatVec,
+        DoubleVec,
+        StringVec,
+        TokenVec,
+        QuathVec,
+        QuatfVec,
+        QuatdVec,
+        Vec2hVec,
+        Vec2fVec,
+        Vec2dVec,
+        Vec2iVec,
+        Vec3hVec,
+        Vec3fVec,
+        Vec3dVec,
+        Vec3iVec,
+        Vec4hVec,
+        Vec4fVec,
+        Vec4dVec,
+        Vec4iVec,
+        Matrix2dVec,
+        Matrix3dVec,
+        Matrix4dVec,
+        PathVec,
+        TimeCodeVec,
+        LayerOffsetVec,
+        ValueVec,
+    );
     let full = match value {
         sdf::Value::AssetPath(a) => asset_json(a),
+        sdf::Value::AssetPathVec(v) if v.len() > MAX_ELEMENTS => {
+            let first = v[..MAX_ELEMENTS].iter().map(asset_json).collect();
+            return shortened(v.len(), Value::Array(first));
+        }
         sdf::Value::AssetPathVec(v) => Value::Array(v.iter().map(asset_json).collect()),
         other => serde_json::to_value(other).unwrap_or(Value::Null),
     };
+    // Anything else long (a variant the list above misses) is cut after.
     match full {
-        Value::Array(items) if items.len() > MAX_ELEMENTS => json!({
-            "length": items.len(),
-            "first": items[..MAX_ELEMENTS],
-        }),
+        Value::Array(items) if items.len() > MAX_ELEMENTS => {
+            shortened(items.len(), Value::Array(items[..MAX_ELEMENTS].to_vec()))
+        }
         other => other,
     }
 }
@@ -211,5 +271,35 @@ pub fn query(stage: &Stage, path: &str) -> Result<Value, String> {
         attribute_json(stage, &path)
     } else {
         Ok(prim_json(stage, &prim_at(stage, &path)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A long array answers with its length and first elements, the same as
+    /// when the whole value was serialized and then cut; a short one whole.
+    #[test]
+    fn long_arrays_are_cut_before_they_are_serialized() {
+        let points: Vec<f32> = (0..100_000).map(|i| i as f32).collect();
+        let v = value_json(&sdf::Value::FloatVec(points.clone()));
+        assert_eq!(v["length"], 100_000);
+        let whole = serde_json::to_value(sdf::Value::FloatVec(points)).unwrap();
+        assert_eq!(
+            v["first"],
+            Value::Array(whole.as_array().unwrap()[..16].to_vec())
+        );
+        let p3: Vec<openusd::gf::Vec3f> = (0..20)
+            .map(|i| openusd::gf::Vec3f::from([i as f32, 0.0, 1.0]))
+            .collect();
+        let v = value_json(&sdf::Value::Vec3fVec(p3));
+        assert_eq!(v["length"], 20);
+        assert_eq!(v["first"][1], json!([1.0, 0.0, 1.0]));
+        assert_eq!(
+            value_json(&sdf::Value::IntVec(vec![1, 2, 3])),
+            json!([1, 2, 3])
+        );
+        assert_eq!(value_json(&sdf::Value::Float(0.5)), json!(0.5));
     }
 }

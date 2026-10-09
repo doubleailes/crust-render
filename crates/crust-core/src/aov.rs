@@ -1235,6 +1235,36 @@ impl AovFilm {
             }
         }
     }
+
+    /// One pixel of [`var_channels`](Self::var_channels): the value of each
+    /// of `var`'s channels at (`x`, `y`) of the region, top-down, without
+    /// building the planes. Pinned equal to `var_channels` at every pixel.
+    pub fn var_pixel(&self, beauty: &Buffer, var: &AovVar, x: usize, y: usize) -> Vec<f32> {
+        let (w, h) = self.dimensions();
+        // The bottom-up plane index of a top-down pixel, as `var_channels`'
+        // `top_down` maps it.
+        let q = (h - 1 - y) * w + x;
+        match var.source {
+            AovSource::Color => {
+                let (r, g, b) = beauty.get_rgb(x, y);
+                let mut out = vec![r, g, b];
+                if var.with_alpha() {
+                    out.push(self.slot(&ALPHA_OF_BEAUTY).planes.values[q]);
+                }
+                out
+            }
+            AovSource::SampleCount => vec![self.sample_count.as_ref().expect("laid out")[q]],
+            AovSource::Variance => vec![self.variance.as_ref().expect("laid out")[q]],
+            _ => {
+                let key = var.slot_key(&self.lpes).expect("a slotted source");
+                let slot = self.slot(&key);
+                let comps = key.components();
+                (0..comps)
+                    .map(|c| slot.planes.values[q * comps + c])
+                    .collect()
+            }
+        }
+    }
 }
 
 impl AovFilm {

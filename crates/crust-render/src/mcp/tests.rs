@@ -107,6 +107,47 @@ fn session_matches_cli(name: &str, sample: &str, region: [usize; 4]) {
     }
 }
 
+/// An `undo` whose restored layer does not import is not applied: the layer
+/// keeps its bytes, the scene stays the one it renders, and the step stays
+/// in the history to be tried again.
+#[test]
+fn an_undo_that_does_not_import_is_not_applied() {
+    let dir = work_dir("undo_fails");
+    let layer = dir.join("lookdev.usda");
+    let mut state = State::default();
+    state
+        .open_session(
+            samples().join("cornellbox.usda").to_str().unwrap(),
+            layer.to_str().unwrap(),
+        )
+        .expect("opened");
+    let open = state.session().expect("open");
+    let edit = super::edit::Snippet::parse(
+        "over \"scene\" { over \"Sky\" { float inputs:exposure = -1 } }",
+    )
+    .expect("a snippet");
+    open.edit(&edit).expect("edited");
+    let edited = std::fs::read(&layer).unwrap();
+    // A step whose bytes are no layer: its restore cannot import.
+    open.undo.push(b"#usda 1.0\nover \"scene\" {".to_vec());
+    let depth = open.undo.len();
+    let e = open.undo().expect_err("the restored layer does not import");
+    assert!(e.contains("not applied"), "{e}");
+    assert_eq!(
+        std::fs::read(&layer).unwrap(),
+        edited,
+        "the layer is as it was"
+    );
+    assert_eq!(open.undo.len(), depth, "the step is still there");
+    // The stage was put back too: the edit is still what it composes.
+    let exposure = super::query::query(&open.stage, "/scene/Sky.inputs:exposure")
+        .expect("the edited attribute");
+    assert_eq!(exposure["value"], -1.0);
+    // Drop the bad step: the real one undoes.
+    open.undo.pop();
+    open.undo().expect("undone");
+}
+
 #[test]
 fn a_session_render_is_the_clis_render_of_its_layer() {
     session_matches_cli("repro_cornellbox", "cornellbox.usda", [256, 96, 352, 192]);

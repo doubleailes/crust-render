@@ -410,12 +410,13 @@ pub fn probe(job: &Job, x: usize, y: usize) -> Result<Value, String> {
     if let Some(f) = &finished
         && let Some(film) = &f.film
     {
-        let (w, _) = film.dimensions();
         for product in &job.aovs.products {
             let mut values = serde_json::Map::new();
             for (var, names) in crate::products::product_channels(product) {
-                for (name, plane) in names.into_iter().zip(film.var_channels(&f.buffer, var)) {
-                    values.insert(name, json!(plane[ly * w + lx]));
+                // One pixel, not the planes: a probe reads one value each.
+                let pixel = film.var_pixel(&f.buffer, var, lx, ly);
+                for (name, value) in names.into_iter().zip(pixel) {
+                    values.insert(name, json!(value));
                 }
             }
             aovs.insert(product.prim_path.clone(), Value::Object(values));
