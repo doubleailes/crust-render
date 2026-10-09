@@ -272,8 +272,9 @@ enum PreloadReason {
     /// Streaming it would have read a mip chain reduced in the file's own
     /// encoding, which `PtexColor` builds in linear light — see
     /// [`ptex_stream::MipSpace`]. A correctness refusal rather than an
-    /// efficiency one, and under the default policy the reason *most*
-    /// mipmapped textures preload, so it is reported on its own line.
+    /// efficiency one, made only under `CRUST_PTEX_STREAM_MIPSPACE=linear`,
+    /// where it is the reason *most* mipmapped textures preload, so it is
+    /// reported on its own line.
     MipSpace,
     StreamFailed,
 }
@@ -309,18 +310,23 @@ impl FileAssets {
         let ptex_streaming = config.ptex_stream;
         let ptex_mip_space = config.ptex_mip_space;
         if ptex_streaming {
-            info!(
-                "Streaming Ptex with a {:.0} MiB cache",
+            // DEBUG, not INFO: streaming is the default, and a default
+            // render's INFO lines are the four that do not scale with
+            // anything. A non-default chain is said at INFO below.
+            debug!(
+                "Large Ptex files stream through a {:.0} MiB cache \
+                 (CRUST_PTEX_STREAM=0 preloads everything)",
                 texture_cache::bytes_to_mib(ptex_stream::budget_bytes(&config) as u64)
             );
             // Said at construction rather than per texture, because under
-            // the default policy it is the line that explains a render where
-            // streaming was asked for and nothing streamed.
+            // `linear` it is the line that explains a render where streaming
+            // was on and nothing streamed.
             match ptex_mip_space {
+                ptex_stream::MipSpace::Capped => {}
                 ptex_stream::MipSpace::Linear => info!(
-                    "Ptex mip chains must be reduced in linear light, so a mipmapped .ptx \
-                     preloads — CRUST_PTEX_STREAM_MIPSPACE=file takes the file's own chain \
-                     instead (darker minified texture; see docs/ptex_streaming.md)"
+                    "CRUST_PTEX_STREAM_MIPSPACE=linear: a mipmapped .ptx preloads — the \
+                     default `capped` streams it with the preloaded pyramid below the cap \
+                     (see docs/ptex_streaming.md)"
                 ),
                 ptex_stream::MipSpace::File => info!(
                     "CRUST_PTEX_STREAM_MIPSPACE=file: streaming the .ptx's own mip chain, \
@@ -623,6 +629,10 @@ impl FileAssets {
                     out.evictions += st.cache.evictions;
                     out.resident_bytes += st.cache.bytes_resident as u64;
                     out.budget_bytes += st.cache.bytes_budget as u64;
+                    out.capped += u32::from(s.is_capped());
+                    out.derived_blocks += st.cache.derived_blocks as u64;
+                    out.derived_bytes += st.cache.derived_bytes as u64;
+                    out.derives += st.cache.derives;
                 }
             }
         }
@@ -964,7 +974,8 @@ impl AssetLoader for FileAssets {
                         debug!(
                             "Ptex {} has a mip chain reduced in the file's own encoding — \
                              preloading it so the pyramid is built in linear light \
-                             (CRUST_PTEX_STREAM_MIPSPACE=file to stream it anyway)",
+                             (the default CRUST_PTEX_STREAM_MIPSPACE=capped streams it with \
+                             that pyramid)",
                             path.display(),
                         );
                     } else {

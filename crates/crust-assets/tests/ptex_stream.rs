@@ -14,11 +14,12 @@
 //! resolution both backends hold, a streamed lookup equals a preloaded one
 //! bit for bit.** That is what makes streaming a residency change rather than
 //! an appearance change, and it is the same invariant the `.tx` path states.
-//! The one place they cannot agree is the mip chain: a preloaded pyramid is
+//! The one place they could disagree is the mip chain: a preloaded pyramid is
 //! reduced in linear light, a `.ptx`'s stored levels in the file's own
-//! encoding. That is refused rather than described — `MipSpace::Linear`, the
-//! default, declines to stream such a texture at all — so the tests here both
-//! pin the refusal and measure what the `file` opt-in accepts instead.
+//! encoding. The default `capped` chain closes that by reading the preload's
+//! own pyramid below the cap (`capped_*` tests); `linear` refuses such a
+//! texture outright, and the tests here pin that refusal too and measure what
+//! the `file` opt-in accepts instead.
 
 use crust_assets::{PtexColor, PtexStream, ptex_micro_slot_max, ptex_micro_thread_bytes};
 
@@ -1031,6 +1032,221 @@ fn streamed_and_preloaded_agree_when_raw() {
                 let b = stream.eval(face, u, v, 0.0);
                 assert_eq!(bits(a), bits(b), "{name} raw face {face} at ({u}, {v})");
             }
+        }
+    }
+}
+
+/// The footprints the `capped` tests sweep, as fractions of a face: from far
+/// inside one texel of the largest fixture to the whole face and past it, off
+/// the powers of two so the blend weight is never exactly zero.
+const WIDTHS: &[f32] = &[
+    0.0, 0.0007, 0.003, 0.011, 0.023, 0.047, 0.09, 0.19, 0.37, 0.73, 1.0, 3.1,
+];
+
+/// The face's widest axis, in texels, once `PtexColor` has applied `cap` —
+/// what a footprint is measured against on the preloaded side.
+fn cap_texels(path: &Path, face: u32, cap: i8) -> f32 {
+    let reader = ptex::SharedReader::open(path).expect("reader");
+    let res = reader.face_info(face as usize).expect("face").res;
+    let tri = reader.mesh_type() == ptex::MeshType::Triangle;
+    let (u, v) = if tri {
+        let l = res.ulog2.min(res.vlog2).min(cap);
+        (l, l)
+    } else {
+        (res.ulog2.min(cap), res.vlog2.min(cap))
+    };
+    (1usize << u.max(v)) as f32
+}
+
+/// **The `capped` chain's invariant.** Streamed under the default chain, a
+/// texture equals the preload bit for bit wherever the preload holds the
+/// texels: every face, at every footprint no finer than one texel of the
+/// face at the cap, for every cap from one texel up to the authored
+/// resolution, with and without the pyramid — across the `u8` one- and
+/// four-channel, `uint16` triangle and `float32` fixtures.
+///
+/// This is what lets streaming be on by default: a coarse lookup reads the
+/// preload's own levels — the file's face at the cap, through the preload's
+/// decode, reduced by the preload's reduction — rather than the file's
+/// chain, which `the_file_mip_chain_is_darker_which_is_what_the_default_refuses`
+/// measures as up to 0.147 darker.
+#[test]
+fn capped_streaming_and_the_preload_agree_at_and_below_the_cap() {
+    use crust_core::ColorSpace;
+    const BUDGET: usize = 8 << 20;
+    for &(name, authored) in FIXTURES {
+        let path = fixture(name);
+        for cap in 0..=authored {
+            for mip in [true, false] {
+                let pre = PtexColor::open_with(&path, mip, cap).expect(name);
+                let stream = PtexStream::open_capped(
+                    &path,
+                    ColorSpace::GAMMA22,
+                    BUDGET,
+                    micro_max(BUDGET),
+                    None,
+                    cap,
+                    mip,
+                )
+                .expect(name);
+                assert!(stream.chain_is_exact() && stream.is_capped());
+                let faces = PtexTexture::num_faces(&pre) as u32;
+                let mut compared = 0usize;
+                for face in 0..faces {
+                    let texels = cap_texels(&path, face, cap);
+                    for &width in WIDTHS {
+                        // Finer than one cap texel, the stream reads authored
+                        // detail the preload discarded; see the next test.
+                        if width * texels <= 1.0 {
+                            continue;
+                        }
+                        for &(u, v) in &grid() {
+                            assert_eq!(
+                                bits(pre.eval(face, u, v, width)),
+                                bits(stream.eval(face, u, v, width)),
+                                "{name} cap {cap} mip {mip} face {face} at ({u}, {v}) \
+                                 width {width}"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+                assert!(compared > 0, "{name} cap {cap}: nothing compared");
+            }
+        }
+    }
+}
+
+/// An explicit cap (`CRUST_PTEX_MAX_LOG2` set) is the preload's cap too, so
+/// under `capped` the stream then holds nothing finer than the preload and
+/// agrees with it at **every** footprint, `width = 0` included — the
+/// comparison the two backends are pinned by everywhere else.
+#[test]
+fn capped_streaming_under_an_explicit_cap_is_the_preload_everywhere() {
+    use crust_core::ColorSpace;
+    const BUDGET: usize = 8 << 20;
+    for &(name, authored) in FIXTURES {
+        let path = fixture(name);
+        for cap in [0, authored / 2, authored] {
+            let pre = PtexColor::open_with(&path, true, cap).expect(name);
+            let stream = PtexStream::open_capped(
+                &path,
+                ColorSpace::GAMMA22,
+                BUDGET,
+                micro_max(BUDGET),
+                Some(cap),
+                cap,
+                true,
+            )
+            .expect(name);
+            for face in 0..PtexTexture::num_faces(&pre) as u32 {
+                for &width in WIDTHS {
+                    for &(u, v) in &grid() {
+                        assert_eq!(
+                            bits(pre.eval(face, u, v, width)),
+                            bits(stream.eval(face, u, v, width)),
+                            "{name} cap {cap} face {face} at ({u}, {v}) width {width}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **What the `capped` chain buys.** At a footprint finer than one texel of
+/// the face at the cap, on a face authored above the cap, the stream reads
+/// the file's stored levels finer than the cap — the `file` chain's, bit for
+/// bit — where the preload can only magnify its cap level. So the two
+/// differ there, and the difference is detail the preload discarded.
+///
+/// Compared with the `file` chain at footprints that stay above the cap
+/// level's own blend (`texels_F <= 2^(steps - 1)`), since the last step is
+/// where the two chains differ by construction on a non-square face: `file`
+/// halves both axes into it, `capped` reads the cap level.
+#[test]
+fn capped_streaming_resolves_detail_finer_than_the_cap() {
+    use crust_core::ColorSpace;
+    const BUDGET: usize = 8 << 20;
+    for &(name, authored) in FIXTURES {
+        let path = fixture(name);
+        let reader = ptex::SharedReader::open(&path).expect(name);
+        // A cap two levels under the largest face, so it has finer levels.
+        let cap = authored - 2;
+        let pre = PtexColor::open_with(&path, true, cap).expect(name);
+        let capped = PtexStream::open_capped(
+            &path,
+            ColorSpace::GAMMA22,
+            BUDGET,
+            micro_max(BUDGET),
+            None,
+            cap,
+            true,
+        )
+        .expect(name);
+        let file = PtexStream::open_with(&path, BUDGET, micro_max(BUDGET), None, true).expect(name);
+        let mut differs = false;
+        for face in 0..reader.num_faces() as u32 {
+            let res = reader.face_info(face as usize).expect(name).res;
+            let fine = res.ulog2.max(res.vlog2);
+            let steps = fine - cap;
+            if steps <= 0 {
+                continue;
+            }
+            for &width in WIDTHS {
+                let texels = width * (1usize << fine) as f32;
+                if texels > (1usize << (steps - 1)) as f32 {
+                    continue;
+                }
+                for &(u, v) in &grid() {
+                    let c = capped.eval(face, u, v, width);
+                    assert_eq!(
+                        bits(c),
+                        bits(file.eval(face, u, v, width)),
+                        "{name} face {face} at ({u}, {v}) width {width}: finer than \
+                         the cap, `capped` reads the file's own levels"
+                    );
+                    differs |= bits(c) != bits(pre.eval(face, u, v, width));
+                }
+            }
+        }
+        assert!(
+            differs,
+            "{name}: nothing finer than the cap was read, so the preload and \
+             the stream agreed where the stream should resolve more"
+        );
+    }
+}
+
+/// The derived levels live in the reader's cache, inside its budget, and are
+/// reported: a coarse sweep under `capped` leaves derived blocks resident and
+/// counted, and never pushes the resident total past the budget.
+#[test]
+fn capped_derived_levels_are_counted_inside_the_budget() {
+    use crust_core::ColorSpace;
+    for budget in [8usize << 20, 64 << 10] {
+        let path = fixture("quad_tiled");
+        let stream = PtexStream::open_capped(
+            &path,
+            ColorSpace::GAMMA22,
+            budget,
+            micro_max(budget),
+            None,
+            5,
+            true,
+        )
+        .expect("stream");
+        for &(u, v) in &grid() {
+            for face in 0..2 {
+                let _ = stream.eval(face, u, v, 0.4);
+            }
+        }
+        let st = stream.stats().cache;
+        assert!(st.derives > 0, "budget {budget}: nothing was derived");
+        assert!(st.derived_bytes <= st.bytes_resident, "budget {budget}");
+        assert!(st.bytes_resident <= st.bytes_budget, "budget {budget}");
+        if budget == 8 << 20 {
+            assert!(st.derived_blocks > 0, "the derived levels stay resident");
         }
     }
 }

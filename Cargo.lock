@@ -1309,9 +1309,8 @@ dependencies = [
 
 [[package]]
 name = "ptex-rust"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "096e33ca25172648f7ac51267472223c2c7f74aa6dd79fe2050efef8850116bb"
+version = "0.4.0"
+source = "git+https://github.com/doubleailes/ptex-rs?rev=aaa68eef8fd7f259136a9dd344b8c02684505364#aaa68eef8fd7f259136a9dd344b8c02684505364"
 dependencies = [
  "flate2",
  "lru",

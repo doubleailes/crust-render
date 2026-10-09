@@ -89,27 +89,29 @@ impl From<TriPackets> for crust_rt::PacketLayout {
 /// A `.ptx` has no such marker and needs none — the answer is known. Crust
 /// binds Ptex colour as display-encoded and decodes it by 2.2, while a
 /// `.ptx`'s stored levels were reduced in the file's own encoding. That is the
-/// mismatch, always, so the default is [`PtexMipSpace::Linear`]: a texture
-/// that would read a curve-decoded chain is declined and preloaded, where the
-/// preloading backend builds the pyramid in linear light from the decoded
-/// base.
+/// mismatch, always.
 ///
-/// [`PtexMipSpace::File`] is the opt-in that takes the file's chain instead.
-/// It is what every production Ptex cache does and what the measured
-/// residency figures in `docs/ptex_streaming.md` were taken with, so it is a
-/// real mode and not a debug switch — but it is a render that trades a known
-/// bias (darker minified texture, up to 0.147 on the tiled fixture) for the
-/// memory, and that trade is the operator's to make rather than the default.
+/// **But the preload does not escape it either, and that is what
+/// [`PtexMipSpace::Capped`], the default, is built on.** The preloading
+/// backend fetches each face at the `CRUST_PTEX_MAX_LOG2` cap (32x32 by
+/// default), and on a face authored larger than that those texels *are* the
+/// file's own reduced level. Only the levels coarser than the cap are rebuilt
+/// in linear light. So a streamed texture that reads the file above and at the
+/// cap, and derives the levels below it from the cap level with the preload's
+/// own reduction, is bit-identical to the preload at every resolution the
+/// preload holds, and resolves the authored detail above it besides.
 ///
-/// The cost of the default is worth stating plainly: with the mip pyramid on
-/// — which it is unless `CRUST_PTEX_MIP=0` — every mipmapped `.ptx` preloads,
-/// so `CRUST_PTEX_STREAM=1` alone buys nothing on a normal render.
-/// `CRUST_PTEX_STREAM_MIPSPACE=file` is how the island's 5.98 -> 0.61 GiB
-/// comes back.
+/// [`PtexMipSpace::Linear`] keeps the old refusal: a mipmapped texture is
+/// declined and preloaded. [`PtexMipSpace::File`] takes the file's whole
+/// chain, as every production Ptex cache does — darker under minification
+/// than the preloaded pyramid (up to 0.147 on the tiled fixture).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PtexMipSpace {
-    /// Refuse a chain reduced in the file's encoding; preload such a texture.
+    /// The file's levels above and at the preload cap; below it, levels
+    /// reduced in linear light from the cap level, as the preload builds them.
     #[default]
+    Capped,
+    /// Refuse a chain reduced in the file's encoding; preload such a texture.
     Linear,
     /// Accept the file's own chain, bias and all.
     File,
@@ -120,6 +122,7 @@ impl FromStr for PtexMipSpace {
 
     fn from_str(s: &str) -> Result<Self, ()> {
         match s {
+            "capped" => Ok(PtexMipSpace::Capped),
             "linear" => Ok(PtexMipSpace::Linear),
             "file" => Ok(PtexMipSpace::File),
             _ => Err(()),
@@ -130,6 +133,7 @@ impl FromStr for PtexMipSpace {
 impl std::fmt::Display for PtexMipSpace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            PtexMipSpace::Capped => "capped",
             PtexMipSpace::Linear => "linear",
             PtexMipSpace::File => "file",
         })
@@ -140,7 +144,7 @@ impl std::fmt::Display for PtexMipSpace {
 /// every switch unset; [`config()`] is the process's environment.
 ///
 /// Booleans name the optimization, so `true` is the new behaviour and `false`
-/// the one it replaced — except `ptex_stream`, which is off by default.
+/// the one it replaced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// `CRUST_STREAM_IMPORT`: import one masked stage per subtree (`false`:
@@ -204,8 +208,9 @@ pub struct Config {
     pub ptex_max_log2: Option<i8>,
     /// `CRUST_PTEX_MIP`: build per-face mip pyramids.
     pub ptex_mip: bool,
-    /// `CRUST_PTEX_STREAM`: page Ptex tiles through the reader's cache. Off
-    /// by default.
+    /// `CRUST_PTEX_STREAM`: page large Ptex files through the reader's cache
+    /// (`false`: preload every one, as before streaming was the default).
+    /// Files under `ptex_stream_min_mb` preload either way.
     pub ptex_stream: bool,
     /// `CRUST_PTEX_CACHE_MB`: the Ptex streaming budget, in MiB, shared by all
     /// streamed files.
@@ -213,8 +218,9 @@ pub struct Config {
     /// `CRUST_PTEX_STREAM_MIN_MB`: files that would preload in less than this
     /// preload even when streaming. `0` admits everything.
     pub ptex_stream_min_mb: usize,
-    /// `CRUST_PTEX_STREAM_MIPSPACE`: which mip chain a streamed `.ptx` may
-    /// read.
+    /// `CRUST_PTEX_STREAM_MIPSPACE`: which mip chain a streamed `.ptx` reads
+    /// (`capped` by default; `linear` refuses a mipmapped file, `file` takes
+    /// the file's whole chain).
     pub ptex_mip_space: PtexMipSpace,
     /// `OCIO`: the OpenColorIO config to use when the host names none — a
     /// path or an `ocio://` URI, `None` when unset or empty. Not validated
@@ -262,10 +268,10 @@ impl Default for Config {
             ptex: true,
             ptex_max_log2: None,
             ptex_mip: true,
-            ptex_stream: false,
+            ptex_stream: true,
             ptex_cache_mb: NonZeroUsize::new(DEFAULT_CACHE_MB).unwrap(),
             ptex_stream_min_mb: DEFAULT_PTEX_STREAM_MIN_MB,
-            ptex_mip_space: PtexMipSpace::Linear,
+            ptex_mip_space: PtexMipSpace::Capped,
             ocio: None,
         }
     }
@@ -344,7 +350,7 @@ impl Config {
                 &lookup,
                 "CRUST_PTEX_STREAM_MIPSPACE",
                 d.ptex_mip_space,
-                "`linear` or `file`",
+                "`capped`, `linear` or `file`",
             ),
             // OCIO's own convention: an empty `OCIO` is no config.
             ocio: lookup("OCIO").filter(|v| !v.is_empty()),
@@ -486,7 +492,8 @@ mod tests {
         assert!(!with(&[("CRUST_DISPLACE", "0")]).displace);
         assert!(with(&[]).adaptive_frustum);
         assert!(!with(&[("CRUST_ADAPTIVE_FRUSTUM", "0")]).adaptive_frustum);
-        assert!(!with(&[("CRUST_PTEX_STREAM", "")]).ptex_stream);
+        assert!(with(&[]).ptex_stream, "Ptex streams by default");
+        assert!(!with(&[("CRUST_PTEX_STREAM", "0")]).ptex_stream);
     }
 
     #[test]
@@ -525,9 +532,12 @@ mod tests {
     }
 
     #[test]
-    fn mip_space_parses_its_two_names() {
+    fn mip_space_parses_its_three_names() {
+        assert_eq!(with(&[]).ptex_mip_space, PtexMipSpace::Capped);
         let file = with(&[("CRUST_PTEX_STREAM_MIPSPACE", "file")]);
         assert_eq!(file.ptex_mip_space, PtexMipSpace::File);
+        let linear = with(&[("CRUST_PTEX_STREAM_MIPSPACE", "linear")]);
+        assert_eq!(linear.ptex_mip_space, PtexMipSpace::Linear);
         for (spelling, want) in [
             ("gathered", TriPackets::Gathered),
             ("indexed", TriPackets::Indexed),
@@ -540,8 +550,12 @@ mod tests {
         let bad = Config::from_lookup(|n| (n == "CRUST_TRI_PACKETS").then(|| "fast".to_string()));
         assert_eq!(bad.tri_packets, TriPackets::Auto);
         let bad = with(&[("CRUST_PTEX_STREAM_MIPSPACE", "srgb")]);
-        assert_eq!(bad.ptex_mip_space, PtexMipSpace::Linear);
-        for m in [PtexMipSpace::Linear, PtexMipSpace::File] {
+        assert_eq!(bad.ptex_mip_space, PtexMipSpace::Capped);
+        for m in [
+            PtexMipSpace::Capped,
+            PtexMipSpace::Linear,
+            PtexMipSpace::File,
+        ] {
             assert_eq!(m.to_string().parse::<PtexMipSpace>(), Ok(m));
         }
     }
