@@ -471,7 +471,8 @@ The conversion records the colour space of its mip levels in the file (see
 `--scanline`
 
 Render one image row at a time (rows run in parallel) instead of the default 16×16 tiles.
-The image is bit-identical. The progress bar counts rows.
+The image is bit-identical. The progress bar counts each row's samples instead of each
+tile's.
 
 `-b` / `--bucket` is still accepted so older command lines keep working, but it does
 nothing: tiles are the default.
@@ -519,8 +520,13 @@ Ctrl-C while `crust render` renders stops the render and keeps its work:
   [An interrupted render](@/docs/usd/aovs.md#an-interrupted-render)).
 - The command exits with status `130`.
 
-A second Ctrl-C, while those outputs are written, quits at once without writing more. So
-does a Ctrl-C before the render has started (while the stage loads), which writes nothing.
+A Ctrl-C that lands as the render finishes, before its outputs are being written, stops
+nothing: the outputs are complete and carry no `crust:renderStatus`, and the command
+still exits with `130`.
+
+A second Ctrl-C, while those outputs are written, quits at once without writing more, as
+does a first one once a render's outputs are being written. So does a Ctrl-C before the
+render has started (while the stage loads), which writes nothing.
 
 A [path-guided](@/docs/usd/render-settings.md#path-guiding) render stopped in its final pass blends the
 passes it completed with the partial final pass once every pixel of it has two samples or
@@ -905,9 +911,10 @@ other output stays where it is without the flag.
 ## Exit status
 
 `crust render` exits with `0` when the images are written, and `crust ls` when the list
-is printed. `crust render` exits with `130` when Ctrl-C stopped the render (its partial
-outputs are written: see [Interrupting a render](#interrupting-a-render)) or quit it before
-or after. It exits with a non-zero status
+is printed. `crust render` exits with `130` after any Ctrl-C: one that stopped the render
+(its partial outputs are written: see [Interrupting a render](#interrupting-a-render)), one
+that landed as it finished (its outputs are complete), and one that quit it before or
+after. It exits with a non-zero status
 when the arguments are invalid (a missing command included), the scene or the requested
 camera can't be loaded, the log
 file can't be created, or an image or a JSON report can't be written.

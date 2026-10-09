@@ -380,14 +380,24 @@ until both agree, kinds included. Raise it on the importing thread (see
 the handler (stopping, and that a second Ctrl-C quits without writing) and, once the
 render returns, one `WARN` in place of "Render finished": the samples the stage or `-s`
 asked for were not honoured, so it is the WARN meaning, and it names the fewest and most
-samples a pixel took. `--checkpoint` logs each rewrite at `DEBUG` — their count grows
+samples a pixel took (or, for a guided render whose image holds no final pass, that it is
+made of training passes). A Ctrl-C that lands after the render's last sample but
+before writing starts stopped nothing: "Render finished …, as Ctrl-C arrived" stays
+`INFO`, the outputs are complete and unmarked, and the run exits 130 all the same.
+Once writing has started, any Ctrl-C quits at once (a completed render's files may then
+be missing or truncated, as they always could be). `--checkpoint` logs each rewrite at `DEBUG` — their count grows
 with the render's length — and a failed write once at `WARN`. The handler is the one
 place `crust render` exits without returning through `main`: `ctrlc` runs it on a thread
-of its own, so `process::exit(130)` is sound there, and it is only taken when nothing is
-left to write (before the render, or on a second Ctrl-C). Its state machine is an
+of its own, so `process::exit(130)` is sound there, and it is only taken when nothing
+more is to be written: before the render, on a second Ctrl-C, or on a first one once the
+outputs are being written. Its state machine is an
 `AtomicU8` (loading → exit; rendering → cancel the `RenderControl` and move to writing;
 writing → exit), entered *before* the "Rendering" banner, so a Ctrl-C after the banner
-always finds the render to stop — the integration test waits for the banner.
+always finds the render to stop — the integration test waits for the banner. The render
+leaves that stage by an atomic `swap` to writing (`leave_rendering`), never a plain store:
+a Ctrl-C the handler accepted after the render's last sample cancelled nothing, but the
+swap still sees it, so the run writes its complete outputs (unmarked) and exits 130 rather
+than 0 — a shell loop over frames stops either way.
 
 The practical consequence when adding a log: if you can write a stage that makes your new
 line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel or per

@@ -1171,46 +1171,72 @@ fn a_render_cancelled_mid_way_returns_promptly_with_what_it_traced() {
         assert_eq!(rays.camera_rays, rays.adaptive_samples, "tiled {tiled}");
         assert!(rays.spp_max < 4096, "tiled {tiled}: {rays:?}");
         let (last, total) = (last.load(Ordering::SeqCst), total.load(Ordering::SeqCst));
-        assert!(
-            last < total,
-            "tiled {tiled}: progress walked to {last}/{total}"
-        );
+        // 64 steps a unit (the cap): six tiles, or 32 rows. At 4096 spp a
+        // unit's first step comes at its 64th sample, so the render may have
+        // stopped before any report.
+        let all = if tiled { 6 } else { 32 } * 64;
+        assert!(total == 0 || total == all, "tiled {tiled}: total {total}");
+        assert!(last < all, "tiled {tiled}: progress walked to {last}/{all}");
     }
 }
 
 /// Cancelled once its 4 spp stage is done, a render holds exactly that stage
 /// in every pixel: the same image, AOVs and counters as a render of 4 spp
 /// (whose first check point is past its budget), since each pixel is
-/// estimated from its own samples alone.
+/// estimated from its own samples alone — adaptive or not: a final pass
+/// with adaptive sampling off fills the per-pixel sample counters too, so
+/// the interruption warning reports its samples like any other.
 #[test]
 fn a_render_cancelled_after_a_stage_is_that_stage_everywhere() {
     use crate::{RenderControl, RenderOutcome};
     use std::sync::atomic::{AtomicU64, Ordering};
     let request = every_kind_of_aov();
-    let r = small_cornell(256);
-    let control = RenderControl::new();
-    let last = AtomicU64::new(0);
-    // Six tiles a stage: the third stage (4 spp) ends at report 18.
-    let progress = |n: u64, _: u64| {
-        last.store(n, Ordering::SeqCst);
-        if n == 18 {
-            control.cancel();
-        }
-    };
-    let out = r.render_with_control(true, Some(&progress), Some(&request), &control);
-    assert_eq!(out.outcome, RenderOutcome::Cancelled);
-    assert_eq!(last.load(Ordering::SeqCst), 18, "not walked to the total");
-    assert_eq!((out.rays.spp_min, out.rays.spp_max), (4, 4));
-    assert_eq!(out.rays.camera_rays, 48 * 32 * 4);
-    let four = small_cornell(4);
-    let (image, film, rays) = four.render_with_aovs(true, &|_, _| {}, &request);
-    assert!(
-        bits(&out.buffer) == bits(&image),
-        "the image is not the 4 spp one"
-    );
-    let partial = out.film.expect("a request gives a film");
-    assert!(film_bits(&request, &partial, &out.buffer) == film_bits(&request, &film, &image));
-    assert_eq!(out.rays, rays);
+    // The scene's own threshold, then adaptive sampling off.
+    for threshold in [None, Some(0.0)] {
+        let cornell = |spp: u32| {
+            let r = small_cornell(spp);
+            match threshold {
+                Some(t) => {
+                    let s = r.settings.with_adaptive_sampling(32, t);
+                    crate::Renderer::new(r.camera, r.world, r.lights, s)
+                }
+                None => r,
+            }
+        };
+        // 64 spp: one progress step per tile per sample, so on six tiles the
+        // third stage (4 spp) ends at step 24.
+        let r = cornell(64);
+        let control = RenderControl::new();
+        let last = AtomicU64::new(0);
+        let progress = |n: u64, _: u64| {
+            last.store(n, Ordering::SeqCst);
+            if n == 24 {
+                control.cancel();
+            }
+        };
+        let out = r.render_with_control(true, Some(&progress), Some(&request), &control);
+        let case = format!("threshold {threshold:?}");
+        assert_eq!(out.outcome, RenderOutcome::Cancelled, "{case}");
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            24,
+            "{case}: walked to the total"
+        );
+        assert_eq!((out.rays.spp_min, out.rays.spp_max), (4, 4), "{case}");
+        assert_eq!(out.rays.adaptive_pixels, 48 * 32, "{case}");
+        assert_eq!(out.rays.camera_rays, 48 * 32 * 4, "{case}");
+        let (image, film, rays) = cornell(4).render_with_aovs(true, &|_, _| {}, &request);
+        assert!(
+            bits(&out.buffer) == bits(&image),
+            "{case}: the image is not the 4 spp one"
+        );
+        let partial = out.film.expect("a request gives a film");
+        assert!(
+            film_bits(&request, &partial, &out.buffer) == film_bits(&request, &film, &image),
+            "{case}"
+        );
+        assert_eq!(out.rays, rays, "{case}");
+    }
 }
 
 /// A guided render cancelled in its final pass blends what it can weigh
@@ -1229,7 +1255,7 @@ fn a_guided_render_cancelled_in_its_final_pass_blends_what_it_can_weigh() {
         .with_samples_per_pixel(64)
         .with_guiding(true, 3, 0.5);
     let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
-    // Only the final pass reports progress: six tiles a stage.
+    // Only the final pass reports progress: one step per tile per sample.
     let render = |cancel_at: u64| {
         let control = RenderControl::new();
         let progress = |n: u64, _: u64| {
@@ -1250,12 +1276,22 @@ fn a_guided_render_cancelled_in_its_final_pass_blends_what_it_can_weigh() {
         }
         (image, planes, out.rays)
     };
-    let after_four = render(18);
+    let after_four = render(24);
     let after_one = render(6);
     let within_one = render(1);
-    // The final pass's own counters (training passes count no spp).
+    // The final pass's own counters (training passes count no spp) — and
+    // none at all once the final pass is left out of the image, so the
+    // interruption warning and `crust:sppTaken` never describe it.
     assert_eq!((after_four.2.spp_min, after_four.2.spp_max), (4, 4));
-    assert_eq!((after_one.2.spp_min, after_one.2.spp_max), (1, 1));
+    assert_eq!(after_four.2.adaptive_pixels, 48 * 32);
+    for dropped in [&after_one.2, &within_one.2] {
+        assert_eq!(dropped.adaptive_pixels, 0, "{dropped:?}");
+        assert_eq!((dropped.spp_min, dropped.spp_max), (0, 0), "{dropped:?}");
+        assert_eq!(dropped.adaptive_samples, 0, "{dropped:?}");
+        assert!(dropped.camera_rays > 0, "the work is still counted");
+    }
+    // The training passes' 2 + 2 + 4 samples and the dropped pass's 1.
+    assert_eq!(after_one.2.camera_rays, (2 + 2 + 4 + 1) * 48 * 32);
     assert!(after_one.0 == within_one.0, "the training blend moved");
     assert!(after_one.1 == within_one.1, "the training AOV blend moved");
     assert!(
@@ -1330,4 +1366,42 @@ fn a_control_without_snapshots_only_cancels() {
     let out = r.render_with_control(true, None, None, &control);
     assert_eq!(out.outcome, RenderOutcome::Cancelled);
     assert_eq!(out.rays.camera_rays, 0);
+}
+
+/// Progress counts samples, not units — one step per sample per pixel each
+/// unit is scheduled, up to 64 a unit, shared out in proportion past that —
+/// one step at a time, and a render reaches its total whether its pixels
+/// ran the whole budget or stopped early.
+#[test]
+fn progress_steps_count_samples_and_reach_their_total() {
+    use std::sync::Mutex;
+    // (spp, threshold): adaptive, adaptive and mostly stopping early, off,
+    // and a budget past the cap that converges long before it.
+    for (spp, threshold) in [(64, 0.05f32), (64, 0.5), (24, 0.0), (1000, 0.5)] {
+        let scene = sample_scene("cornellbox.usda");
+        let s = scene
+            .settings
+            .with_resolution(48, 32)
+            .with_samples_per_pixel(spp)
+            .with_adaptive_sampling(16, threshold);
+        let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
+        let seen = Mutex::new((0u64, 0u64));
+        let cb = |done: u64, total: u64| {
+            let mut seen = seen.lock().unwrap();
+            assert_eq!(done, seen.0 + 1, "spp {spp}, threshold {threshold}");
+            *seen = (done, total);
+        };
+        let (_, rays) = r.render_with_stats(true, &cb);
+        let (done, total) = *seen.lock().unwrap();
+        // 48×32 is six 16×16 tiles.
+        assert_eq!(
+            total,
+            6 * (spp as u64).min(64),
+            "spp {spp}, threshold {threshold}"
+        );
+        assert_eq!(done, total, "spp {spp}, threshold {threshold}");
+        if threshold == 0.5 {
+            assert!(rays.early_stopped > 0, "{rays:?}");
+        }
+    }
 }

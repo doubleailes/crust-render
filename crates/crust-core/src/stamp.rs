@@ -14,7 +14,7 @@
 //! and the EXR.
 
 use crate::stats::RayStats;
-use crate::tracer::RenderSettings;
+use crate::tracer::{RenderOutcome, RenderSettings};
 
 /// The prefix every stamped attribute carries, and that a RenderProduct may
 /// not author.
@@ -72,8 +72,10 @@ impl SamplingStamp {
     /// through `camera_path` at `time` (see [`crate::Scene::camera_path`]
     /// and [`crate::Scene::time`]).
     ///
-    /// `crust:sppTaken` comes from the adaptive counters, which only
-    /// adaptive passes fill; without one, every pixel took `spp`.
+    /// `crust:sppTaken` comes from the adaptive counters, which every final
+    /// pass fills, adaptive sampling on or off; without them (counters no
+    /// render produced), every pixel took `spp`. A cancelled render's stamp
+    /// goes through [`SamplingStamp::for_outcome`] too.
     pub fn new(
         settings: &RenderSettings,
         rays: &RayStats,
@@ -150,10 +152,49 @@ impl SamplingStamp {
     }
 }
 
+impl SamplingStamp {
+    /// The stamp of a render that ended with `outcome`. A cancelled render
+    /// without adaptive counters is a guided one whose image holds no final
+    /// pass — stopped in training, or before the final pass gave every pixel
+    /// the two samples it needs to join the blend: no pixel took a
+    /// final-pass sample, so `crust:sppTaken` is `(0, 0)`, not the budget
+    /// [`SamplingStamp::new`] falls back to, which would claim all of it for
+    /// a partial frame. Anything else is left as `new` made it.
+    pub fn for_outcome(mut self, outcome: RenderOutcome, rays: &RayStats) -> Self {
+        if outcome == RenderOutcome::Cancelled && rays.adaptive_pixels == 0 {
+            self.spp_taken = (0, 0);
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::PixelFilter;
+
+    /// A cancelled render whose image holds no final pass took no final-pass
+    /// sample anywhere; a completed or cancelled render with counters keeps
+    /// them, and a completed one without keeps the budget.
+    #[test]
+    fn a_cancelled_render_without_a_final_pass_took_none() {
+        let none = RayStats::default();
+        let stamp = |outcome, rays: &RayStats| {
+            SamplingStamp::new(&settings(), rays, None, None)
+                .for_outcome(outcome, rays)
+                .spp_taken
+        };
+        assert_eq!(stamp(RenderOutcome::Cancelled, &none), (0, 0));
+        assert_eq!(stamp(RenderOutcome::Completed, &none), (16, 16));
+        let partial = RayStats {
+            adaptive_pixels: 4,
+            spp_min: 4,
+            spp_max: 8,
+            ..RayStats::default()
+        };
+        assert_eq!(stamp(RenderOutcome::Cancelled, &partial), (4, 8));
+        assert_eq!(stamp(RenderOutcome::Completed, &partial), (4, 8));
+    }
 
     fn settings() -> RenderSettings {
         crate::get_settings().1.with_samples_per_pixel(16)

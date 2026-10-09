@@ -471,10 +471,21 @@ served its purpose. What stays pinned: the same sample indices whatever the
 schedule, "exactly the samples the pixel would take alone" under `t < 0`, and
 tiles ↔ scanlines. Work units are tiles or rows as before — rows are now
 `width`×1 tiles through the one gather — with one `PathScratch` per rayon
-worker (`for_each_init`). Progress reports one tick per unit per stage of the
-first sweep, then one per round; an early finish walks the remaining ticks so
-`completed` reaches `total` one step at a time, and the counter advances
-whether or not a callback is attached. A cancelled render stops where it was.
+worker (`for_each_init`). Progress counts samples, not units: each unit has
+`min(spp, 64)` steps (`PROGRESS_STEPS`), and a unit finishing a stage of the first
+sweep or a round reports the share of them that stage or round scheduled —
+`taken · steps / spp`, so one a sample up to 64 spp. A step per unit per stage let the
+first stages (1, 1, 2, 4, … new samples) race through the bar and fooled the CLI's
+ETA. The cap is there because reports stay one at a time and +1 each, every one a
+callback under the progress lock: one a sample would let `-s 4294967295` (or an
+authored `crust:samplesPerPixel = -1`) spend days walking callbacks. The last stage or
+round always targets `spp`, so the shares telescope and `total` is units ×
+min(spp, 64), known before the pass starts. An early finish walks the rest in one call;
+without a callback the counter just adds. A unit reports only while the render runs, so
+a cancelled render's progress stays where it stopped. The steps follow *scheduled*
+samples: a round reports its share for a unit whose pixels have all stopped (it is
+instant), so an adaptive render's bar runs ahead in late rounds and the ETA corrects
+itself; and a guided render's training passes report nothing.
 
 **Staged first sweep.** The first sweep does not take a pixel to the first check
 point in one advance: it runs in stages of 1, 2, 4, … spp up to it (`sweep_stages`),
@@ -576,8 +587,10 @@ for.
 
 Traps already fallen into: the per-pixel loop hid the all-zero stop for as long as
 adaptive sampling existed, because a black pixel in glass looks like a shadow; and
-the rounds' progress counter must advance whether or not a callback is attached,
-or the walk-to-total loop never ends on a render without one.
+the progress counter must advance whether or not a callback is attached, or a
+walk-to-total that loops until the counter reaches the total never ends on a render
+without one (the walk is one call now); and a progress step per sample, uncapped,
+made a huge budget's early finish walk billions of callbacks.
 
 ## Render regions
 
@@ -725,8 +738,20 @@ so the API is honest before any Hydra or FFI code depends on it.
   and the `learned` light selection's pre-pass never read the flag. The CLI exits at
   once (status 130) on a Ctrl-C there; a library caller waits for them.
 - **An interrupted guided render's `crust:sppTaken`** describes its final pass alone —
-  the adaptive counters cover nothing else — and is the budget when the render stopped
-  in training. `crust:renderStatus = "interrupted"` says the frame is partial either way.
+  the adaptive counters cover nothing else — and is `(0, 0)` when the image holds no
+  final pass: stopped in training, or before the final pass gave every pixel two samples
+  (the pass is left out of the blend, and `RayStats::forget_adaptive` drops its counters
+  with it, so neither the stamp nor the CLI's warning describes a pass that is not in the
+  image; `SamplingStamp::for_outcome` stamps `(0, 0)` rather than `new`'s
+  no-counters fallback, the budget). The image's training samples are not counted there.
+  `crust:renderStatus = "interrupted"` says the frame is partial either way.
+- **A completed guided render at 1 spp has the same mismatch, before this change too.**
+  Its final pass has no variance estimate, so the blend gives it no weight and the image
+  is the training passes', yet its counters (and `crust:sppTaken = (1, 1)`) describe it.
+  Only the cancelled case clears them.
+- **Progress counts scheduled samples, capped at 64 steps a unit** (§ Adaptive sampling,
+  "Rounds"): adaptive renders run ahead in late rounds, and guided training passes are
+  silent.
 - **The per-stage call cost** (§ Adaptive sampling, "Staged first sweep"): +1.6% of
   cornellbox's instructions at 2 spp, +0.3% at 32, for nobody watching. Paid by every
   final pass, with or without a control.

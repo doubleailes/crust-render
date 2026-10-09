@@ -186,6 +186,11 @@ consulted after a cancel, so a half-trained field cannot leak into anything.
   - *rendering*: it calls `control.cancel()` and moves to *writing*.
   - *writing*: it calls `process::exit(130)`.
 
+  *Revised after review:* the render leaves *rendering* by an atomic swap, not a
+  store, and exits 130 when the swap finds *writing*: a Ctrl-C the handler accepted
+  after the render's last sample cancelled nothing, and its outputs are complete
+  and unmarked, but the run still reports the interruption.
+
   `ctrlc` contains `unsafe` in its handler setup. It is not on the render path, so
   it does not cross the project's "unsafe on the hot path" line. `crust-render` stays
   `forbid(unsafe_code)`. `cargo deny --locked check` gates the licence and
@@ -226,8 +231,13 @@ today, so the byte-identity requirement for completed renders holds trivially.
   6 passes over about 64 B per pixel. Measure with `bench_ab.sh` on a texture-heavy
   scene as well as cornellbox. If it shows up, cap the stage list (e.g. start at
   4 spp), which is still bit-identical.
-- [Progress counts change (units × stages + rounds)] → The contract (one report at
-  a time, +1 per report) is unchanged. Update any test that pins the total.
+- [Progress counts change] → Each unit has min(spp, 64) steps, reported in
+  proportion to the samples a stage or round schedules (total units × min(spp, 64)),
+  so the stages' uneven work (1, 1, 2, 4, … samples) moves the bar in proportion;
+  counting unit-stages, the first version let the early stages race through the bar.
+  The cap bounds the reports, each a callback under the progress lock, whatever the
+  budget. The contract (one report at a time, +1 per report) is unchanged. Update any
+  test that pins the total.
 - [Cancellation does not cover scene import, `Renderer::new` or the `learned`
   pre-pass] → The CLI exits at once on Ctrl-C before rendering. For a library
   caller, this is a stated limitation in the `rendering` design record.

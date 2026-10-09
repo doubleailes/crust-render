@@ -134,6 +134,9 @@ pub enum RenderOutcome {
     /// early by the adaptive rule).
     Completed,
     /// The control was cancelled: the image, the AOVs and the counters are
-    /// those of the samples traced before it stopped.
+    /// those of the samples traced before it stopped — the adaptive
+    /// counters only for a final pass the image holds (a guided render
+    /// leaves out a final pass whose pixels lack the two samples a blend
+    /// weight needs).
     Cancelled,
 }

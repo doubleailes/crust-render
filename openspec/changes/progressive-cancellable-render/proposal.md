@@ -40,8 +40,11 @@ exists.
     snapshot while the render runs.
 - **Interrupted EXRs say so:** an image written from a cancelled render records
   that in its header.
-- The progress callback counts unit-stages as well as rounds. Its contract (one
-  report at a time, increasing by one) is unchanged.
+- The progress callback counts samples: each unit has one step per sample per pixel
+  it is scheduled, capped at 64 and shared out in proportion past that, so the staged
+  sweep's uneven stages still move the bar in step with the work (revised after
+  review; it first counted unit-stages). Its contract (one report at a time,
+  increasing by one) is unchanged.
 
 ## Capabilities
 
