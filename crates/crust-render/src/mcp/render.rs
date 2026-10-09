@@ -30,6 +30,15 @@ pub const RETAINED: usize = 8;
 /// The long side of a render's image as a tool returns it, at most.
 pub const MAX_IMAGE_SIDE: usize = 1024;
 
+/// The samples every pixel has taken when `render` answers by default: the
+/// first stage of the first sweep that reads as an image (design D1 of
+/// `mcp-first-pixel`; 1 spp is mostly noise).
+pub const FIRST_IMAGE_SPP: u32 = 4;
+
+/// How often a wait for the first image looks at the render's progress,
+/// which has no notification of its own (design D2).
+const FIRST_IMAGE_POLL: Duration = Duration::from_millis(10);
+
 /// What a render left when it returned.
 pub struct Finished {
     pub buffer: Buffer,
@@ -80,6 +89,23 @@ impl Job {
     pub async fn wait(&self, budget: Duration) {
         let mut returned = self.signal.subscribe();
         let _ = tokio::time::timeout(budget, returned.wait_for(|r| *r)).await;
+    }
+
+    /// Waits, for at most `budget`, until every pixel has taken
+    /// [`FIRST_IMAGE_SPP`] samples or the render returned. A render of that
+    /// many samples or fewer waits for its return: its first image is the
+    /// whole render, and answering on its last stage would race the return.
+    pub async fn wait_for_image(&self, budget: Duration) {
+        if self.settings.samples_per_pixel() <= FIRST_IMAGE_SPP {
+            return self.wait(budget).await;
+        }
+        let returned = self.signal.subscribe();
+        let first_image = async {
+            while !*returned.borrow() && self.control.samples_reached() < FIRST_IMAGE_SPP {
+                tokio::time::sleep(FIRST_IMAGE_POLL).await;
+            }
+        };
+        let _ = tokio::time::timeout(budget, first_image).await;
     }
 
     /// The image so far: the final beauty once returned, else the latest
@@ -169,12 +195,10 @@ impl Renders {
     ) -> Result<(Arc<Job>, Vec<u64>), String> {
         self.stop();
         let scene = Arc::get_mut(renderer).ok_or("the scene is still held by a render")?;
-        // Reconfiguring rebuilds the light selection (and trains the
-        // `learned` one): for the settings the renderer has, it would build
-        // the same, so it is skipped.
-        if scene.settings != settings {
-            scene.reconfigure(settings);
-        }
+        // Retuning keeps the light selection (and the `learned` pre-pass the
+        // import already ran) when the call changes only the samples or the
+        // region; it rebuilds it otherwise.
+        scene.retune(settings);
         self.next += 1;
         let (signal, _) = tokio::sync::watch::channel(false);
         let job = Arc::new(Job {

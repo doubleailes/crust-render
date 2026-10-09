@@ -731,6 +731,43 @@ fn reconfigure_renders_what_new_renders() {
     }
 }
 
+/// `new(s0).retune(s)` renders what `new(s)` renders, bit for bit, under
+/// `learned`: kept when only the samples or the region changed (no second
+/// pre-pass), rebuilt when the resolution or the strategy did.
+#[test]
+fn retune_renders_what_new_renders() {
+    use super::PixelRect;
+    use crate::{LightSelection, Renderer};
+    let name = "veach_mis.usda";
+    let s0 = sample_scene(name)
+        .settings
+        .with_resolution(48, 32)
+        .with_samples_per_pixel(16)
+        .with_light_selection(LightSelection::Learned);
+    let cropped = s0
+        .with_samples_per_pixel(8)
+        .with_region(PixelRect::new(8, 4, 40, 28))
+        .expect("region inside the frame");
+    let cases = [
+        (s0.with_samples_per_pixel(4), true),
+        (cropped, true),
+        (s0.with_resolution(32, 24), false),
+        (s0.with_light_selection(LightSelection::Power), false),
+    ];
+    for (k, (s, kept)) in cases.into_iter().enumerate() {
+        let scene = sample_scene(name);
+        let fresh = Renderer::new(scene.camera, scene.world, scene.lights, s).render_with_tiles();
+        let scene = sample_scene(name);
+        let mut r = Renderer::new(scene.camera, scene.world, scene.lights, s0);
+        let setup = r.retune(s);
+        assert_eq!(setup.is_zero(), kept, "case {k}: kept the selection");
+        assert!(
+            bits(&fresh) == bits(&r.render_with_tiles()),
+            "case {k} differs after retune"
+        );
+    }
+}
+
 /// The clamp counter observes only: the image is the unclamped one, bit
 /// for bit, and what it measures is exactly the luminance the clamp takes
 /// from the image when it is on.

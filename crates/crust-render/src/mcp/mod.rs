@@ -32,7 +32,9 @@ use tracing::{debug, error};
 const INSTRUCTIONS: &str = "crust renders USD stages. A session edits one stage through an \
 override layer that sublayers it, and renders the result. Call open_session first, with \
 absolute paths; every edit is an opinion in the override layer, saved and re-imported at \
-once. Renders return within their time budget and keep refining: use snapshot to see more.";
+once. Renders answer at their first image (4 samples per pixel) or their time budget, \
+whichever comes first, and keep refining: snapshot with a budget_s waits for the finished \
+image, and render with wait=\"done\" waits for it from the start.";
 
 /// The server's protocol side: each tool sends its command to the session
 /// thread and answers with what comes back.
@@ -144,6 +146,32 @@ struct Render {
     spp: Option<u32>,
     /// Return after at most this many seconds (default 10) with the latest
     /// image; the render goes on refining.
+    #[serde(default)]
+    budget_s: Option<f64>,
+    /// When to answer, within `budget_s`: `image` (the default) as soon as
+    /// every pixel has 4 samples, `done` once the render completes.
+    #[serde(default)]
+    wait: Wait,
+}
+
+/// When `render` answers (within its budget either way).
+#[derive(Deserialize, JsonSchema, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum Wait {
+    /// As soon as every pixel has 4 samples, or the render returned. A
+    /// render of 4 samples per pixel or fewer answers when it returns.
+    #[default]
+    Image,
+    /// Once the render returned.
+    Done,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Snapshot {
+    /// The id `render` returned.
+    render_id: u64,
+    /// Wait for the render to return for at most this many seconds before
+    /// answering (default 0: answer at once).
     #[serde(default)]
     budget_s: Option<f64>,
 }
@@ -298,10 +326,12 @@ impl Server {
         reply(self.session.call(|state| state.session()?.undo()).await)
     }
 
-    /// Starts a progressive render of the session's scene and returns within
-    /// `budget_s` with the latest image (PNG, at most 1024 pixels on its long
-    /// side, tone-mapped as `crust render`'s preview), the samples per pixel
-    /// reached, whether it is done, and its id. The render keeps refining
+    /// Starts a progressive render of the session's scene and returns with
+    /// the latest image (PNG, at most 1024 pixels on its long side,
+    /// tone-mapped as `crust render`'s preview), the samples per pixel
+    /// reached, whether it is done, and its id: by default as soon as every
+    /// pixel has 4 samples, with `wait = "done"` once the render completes,
+    /// and within `budget_s` either way. The render keeps refining
     /// after the call returns, until it completes, `cancel` stops it, or an
     /// edit or a new render cancels it. The session keeps its 8 latest
     /// renders for `snapshot`, `probe` and `diff`.
@@ -319,13 +349,18 @@ impl Server {
                 "budget_s {budget_s} is not a positive number of seconds"
             ))]));
         };
+        let wait = p.wait;
         let started = self
             .session
             .call(move |state| state.session()?.start_render(p.region, p.spp))
             .await;
         match started {
             Ok(Ok((job, evicted))) => {
-                job.wait(budget.saturating_sub(asked.elapsed())).await;
+                let left = budget.saturating_sub(asked.elapsed());
+                match wait {
+                    Wait::Image => job.wait_for_image(left).await,
+                    Wait::Done => job.wait(left).await,
+                }
                 Ok(render::answer(
                     &job,
                     serde_json::json!({ "evicted": evicted }),
@@ -336,17 +371,29 @@ impl Server {
         }
     }
 
-    /// The latest image and progress of a render, without waiting.
+    /// The latest image and progress of a render: at once, or after waiting
+    /// at most `budget_s` for the render to return.
     #[tool]
     async fn snapshot(
         &self,
-        Parameters(p): Parameters<RenderId>,
+        Parameters(p): Parameters<Snapshot>,
     ) -> Result<CallToolResult, ErrorData> {
-        job_answer(
-            self.session
-                .call(move |state| state.session()?.renders.get(p.render_id))
-                .await,
-        )
+        let budget_s = p.budget_s.unwrap_or(0.0);
+        let Ok(budget) = Duration::try_from_secs_f64(budget_s) else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "budget_s {budget_s} is not a number of seconds, 0 or more"
+            ))]));
+        };
+        let job = self
+            .session
+            .call(move |state| state.session()?.renders.get(p.render_id))
+            .await;
+        if let Ok(Ok(job)) = &job
+            && !budget.is_zero()
+        {
+            job.wait(budget).await;
+        }
+        job_answer(job)
     }
 
     /// Stops a render and keeps what it has done: its image, AOVs and samples

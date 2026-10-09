@@ -109,8 +109,8 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | `bind_material(prim, material)` | binds a Material to a prim |
 | `author_usda(text)` | merges a USDA snippet of `over`, `def` and `class` specs into the layer, as one edit |
 | `undo()` | the layer as it was before the last edit |
-| `render(region?, spp?, budget_s?)` | starts a progressive render and answers within `budget_s` (default 10) with the image so far |
-| `snapshot(render_id)` | the render's latest image and progress, without waiting |
+| `render(region?, spp?, budget_s?, wait?)` | starts a progressive render and answers with the image so far: at 4 samples per pixel by default, at completion with `wait="done"`, within `budget_s` (default 10) either way |
+| `snapshot(render_id, budget_s?)` | the render's latest image and progress, at once, or after waiting at most `budget_s` for the render to finish |
 | `cancel(render_id)` | stops a render, keeping what it traced |
 | `probe(render_id, x, y)` | the beauty and every AOV at a pixel, in the working space |
 | `diff(render_a, render_b)` | compares two renders as [`crust diff`](@/docs/reference/command-line.md#diff) compares two files |
@@ -143,10 +143,16 @@ once, and the layer is left as it was.
 
 ### Rendering
 
-- **`render` never blocks for a whole render.** It answers within `budget_s` with a PNG
-  of the image so far (at most 1024 pixels on its long side, tone-mapped as `crust
-  render`'s preview), the samples every pixel has reached, `done`, and a `render_id`. The
-  render goes on refining; `snapshot` shows it later.
+- **`render` answers at the first image.** As soon as every pixel has 4 samples, it
+  answers with a PNG of the image so far (at most 1024 pixels on its long side,
+  tone-mapped as `crust render`'s preview), the samples every pixel has reached, `done`,
+  and a `render_id`. On the Cornell box that is about half a second, where a whole
+  render takes ten. A render of 4 samples per pixel or fewer answers when it completes.
+  The render goes on refining after the answer.
+- **Waiting for the finished image.** `snapshot(render_id, budget_s)` waits for the render
+  to finish, for at most `budget_s`, without restarting it. `render(wait="done")` waits
+  from the start. Either way, nothing waits longer than its budget: `render`'s defaults
+  to 10 s, and a render that needs longer answers with `done = false`.
 - **`progress` counts what the progress bar counts.** On a guided render
   (`crust:pathGuiding`) it counts the final pass only and stays at 0 while guiding
   trains, as `crust render`'s bar does. `spp_reached` (each pass's completed stage) and
@@ -173,7 +179,7 @@ open_session(input="C:/shots/cornellbox.usda", output="C:/shots/lookdev/cornellb
   → camera /scene/camera1, 640 × 360, 1 warning (material.fallback_default)
 query("/scene/Sky")
   → DomeLight, inputs:texture:file = sky_gradient.exr (authored in cornellbox.usda)
-render(region=[160, 90, 480, 270], spp=16, budget_s=10)
+render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait="done")
   → render 1: the crop around the spheres, done
 set_attribute("/scene/Sky.inputs:exposure", -1, type="float")
   → saved, no warning gained
@@ -189,7 +195,7 @@ author_usda("""
       }
   }""")
   → saved, no warning gained
-render(region=[160, 90, 480, 270], spp=16, budget_s=10)
+render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait="done")
   → render 2: the same crop
 diff(render_a=1, render_b=2)
   → not identical, relative MSE …

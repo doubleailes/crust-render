@@ -1,6 +1,6 @@
 //! The session's scene: the saved override layer imported exactly as `crust
 //! render <output>` imports it (design D1), kept as a renderer that every
-//! session render reconfigures, beside the `crust-check/1` report of that
+//! session render retunes, beside the `crust-check/1` report of that
 //! same import.
 
 use crate::{CheckArgs, Checked, Cli, Command};
@@ -16,7 +16,7 @@ use tracing::debug;
 /// One import of the override layer.
 pub struct Imported {
     /// The scene, ready to render. Shared with a running render, so it is
-    /// reconfigured only once that render has been joined.
+    /// retuned only once that render has been joined.
     pub renderer: Arc<Renderer>,
     /// The scene's own render settings, which a session render overrides
     /// with its region and samples only.
