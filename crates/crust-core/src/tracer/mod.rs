@@ -1078,6 +1078,11 @@ impl Renderer {
         // budget), stage by stage. The path scratch is held per rayon worker
         // rather than per unit; one buffer serves every sample of every
         // pixel it sees.
+        // A pass starts with no sample taken: a guided render's final pass
+        // must not report its last training pass's count.
+        if let Some(control) = control {
+            control.reach(0);
+        }
         let last_stage = stages.len() - 1;
         for (s, &target) in stages.iter().enumerate() {
             if cancelled() {

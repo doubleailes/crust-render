@@ -112,8 +112,12 @@ authors `subLayers` or `subLayerOffsets` is refused. The merge into the layer is
 `Stage::batch_edit`, so one undo step and one re-import, and works field by field, as a
 stronger layer sits over a weaker one: a field the snippet authors replaces the layer's,
 the namespace-children lists are unioned (authoring one prim or property keeps its
-siblings), a variant selection or a dictionary merges key by key, and an `over` never
-downgrades a `def` or a `class` already there. List ops are replaced as a whole.
+siblings), a variant selection or a dictionary merges key by key, a token or string list
+op (`apiSchemas`, `variantSetNames`) merges item by item unless either side is explicit
+(so `bind_material`'s `prepend apiSchemas = ["MaterialBindingAPI"]` keeps a schema an
+earlier edit applied), and an `over` never downgrades a `def` or a `class` already
+there. The other list ops (references, payloads, relationship targets) are replaced as
+a whole: `bind_material` rebinds.
 
 *Alternative rejected:* openusd's spec copy (`sdf/copy.rs`) **replaces** the destination
 subtree, so a second edit of a prim would erase the first's opinions.
@@ -158,7 +162,10 @@ change, with re-recorded goldens, when the release lands; the session's part of 
 ### D4. Undo is a stack of layer files
 
 Before each batch, the override layer's bytes on disk are pushed onto a stack. `undo`
-pops them, writes them back, reopens the authoring stage on the file and re-imports.
+writes the top entry back, reopens the authoring stage on the file and re-imports, and
+pops the entry only once that import has succeeded: an undo whose restore or import
+fails puts the layer's current bytes back and leaves the scene and the stack as they
+were, so the layer, the scene and the history never disagree.
 Override layers are small (opinions only), so this is cheap and exact: the file after
 `undo` is byte-equal to the file before the edit, which is the spec's test. (The bytes
 on disk rather than `export_to_string`: the first edit after `open_session` would

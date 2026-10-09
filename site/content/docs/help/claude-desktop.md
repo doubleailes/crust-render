@@ -147,6 +147,10 @@ once, and the layer is left as it was.
   of the image so far (at most 1024 pixels on its long side, tone-mapped as `crust
   render`'s preview), the samples every pixel has reached, `done`, and a `render_id`. The
   render goes on refining; `snapshot` shows it later.
+- **`progress` counts what the progress bar counts.** On a guided render
+  (`crust:pathGuiding`) it counts the final pass only and stays at 0 while guiding
+  trains, as `crust render`'s bar does. `spp_reached` (each pass's completed stage) and
+  `generation` (bumped with every image update) move through training too.
 - **One render at a time.** A new render, an edit, `undo` or `open_session` cancels the
   one running, and the cancelled render's id is in the result.
 - **The render settings are opinions.** `render` takes only a region and a sample count;

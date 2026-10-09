@@ -1081,7 +1081,7 @@ fn diff_compares_renders_and_refuses_mismatches() {
         assert_eq!(r["status"], "done", "{r:#}");
         r["render_id"].as_u64().unwrap()
     };
-    let a = render(&mut client, 4);
+    let a = render(&mut client, 16);
     // An edit that changes nothing visible: the format the source already has.
     client
         .call(
@@ -1089,7 +1089,7 @@ fn diff_compares_renders_and_refuses_mismatches() {
             json!({ "path": "/scene/Sky.inputs:texture:format", "value": "latlong" }),
         )
         .expect("set");
-    let b = render(&mut client, 4);
+    let b = render(&mut client, 16);
     let same = client
         .call("diff", json!({ "render_a": a, "render_b": b }))
         .expect("compared");
@@ -1101,7 +1101,7 @@ fn diff_compares_renders_and_refuses_mismatches() {
             json!({ "path": "/scene/Sky.inputs:exposure", "value": 1, "type": "float" }),
         )
         .expect("set");
-    let c = render(&mut client, 4);
+    let c = render(&mut client, 16);
     let changed = client
         .call("diff", json!({ "render_a": a, "render_b": c }))
         .expect("compared");
@@ -1147,7 +1147,7 @@ def Scope "Render"
 {
     def RenderSettings "settings"
     {
-        int crust:samplesPerPixel = 2
+        int crust:samplesPerPixel = 16
         int2 resolution = (96, 54)
     }
 }
@@ -1414,4 +1414,96 @@ fn the_desktop_bundle_manifest_matches_the_server() {
     let mut spec: Vec<&str> = TOOLS.to_vec();
     spec.sort_unstable();
     assert_eq!(spec, served, "the spec's tool list");
+}
+
+#[test]
+fn binding_a_material_keeps_the_api_schemas_the_layer_applies() {
+    let dir = work_dir("api_schemas");
+    let input = variant_stage(&dir);
+    let output = dir.join("asset_lookdev.usda");
+    let mut client = Client::start(&[]);
+    client
+        .call("open_session", json!({ "input": input, "output": output }))
+        .expect("opened");
+    client
+        .call(
+            "author_usda",
+            json!({ "text": r#"over "World" { over "key" ( prepend apiSchemas = ["ShadowAPI"] ) { } }"# }),
+        )
+        .expect("ShadowAPI");
+    client
+        .call(
+            "author_usda",
+            json!({ "text": r#"over "World" { over "key" ( prepend apiSchemas = ["ShapingAPI"] ) { } }"# }),
+        )
+        .expect("ShapingAPI");
+    client.finish();
+    let stage = openusd::usd::Stage::open(output.to_str().unwrap()).expect("opens");
+    let schemas: Vec<String> = stage
+        .prim("/World/key")
+        .unwrap()
+        .authored_api_schemas()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().to_owned())
+        .collect();
+    assert!(
+        schemas.contains(&"ShadowAPI".to_owned()) && schemas.contains(&"ShapingAPI".to_owned()),
+        "{schemas:?}"
+    );
+
+    // And bind_material, whose snippet prepends MaterialBindingAPI.
+    let mut client = Client::start(&[]);
+    client
+        .call("open_session", json!({ "input": input, "output": output }))
+        .expect("resumed");
+    client
+        .call(
+            "author_usda",
+            json!({ "text": r#"over "World" { over "asset" { over "ball" ( prepend apiSchemas = ["CollectionAPI:lights"] ) { } } }"# }),
+        )
+        .expect("a collection");
+    client
+        .call(
+            "bind_material",
+            json!({ "prim": "/World/asset/ball", "material": "/World/Looks/red" }),
+        )
+        .expect("bound");
+    client.finish();
+    let stage = openusd::usd::Stage::open(output.to_str().unwrap()).expect("opens");
+    let schemas: Vec<String> = stage
+        .prim("/World/asset/ball")
+        .unwrap()
+        .authored_api_schemas()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().to_owned())
+        .collect();
+    assert!(
+        schemas.contains(&"CollectionAPI:lights".to_owned())
+            && schemas.contains(&"MaterialBindingAPI".to_owned()),
+        "{schemas:?}"
+    );
+}
+
+#[test]
+fn a_failed_open_session_keeps_the_session_that_was_open() {
+    let (mut client, _input, output) = cornellbox_session("bad_open", &[]);
+    client
+        .call(
+            "set_attribute",
+            json!({ "path": "/scene/Sky.inputs:exposure", "value": -1, "type": "float" }),
+        )
+        .expect("set");
+    let e = client
+        .call(
+            "open_session",
+            json!({ "input": output.with_file_name("missing.usda"), "output": output.with_file_name("other.usda") }),
+        )
+        .expect_err("no such input");
+    assert!(e.contains("not a file"), "{e}");
+    // The first session is still open, its history with it.
+    let undone = client.call("undo", json!({})).expect("still open");
+    assert_eq!(undone["undo_depth"], 0, "{undone:#}");
+    client.finish();
 }

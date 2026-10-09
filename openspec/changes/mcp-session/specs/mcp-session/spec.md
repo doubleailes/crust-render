@@ -155,7 +155,9 @@ warning codes the import gained or lost, and the import time.
 
 `undo` SHALL restore the override layer to its content before the most recent edit
 batch, save it, and re-import it. Undo history SHALL last for the session. After a
-resume, undo SHALL NOT reach edits made in earlier sessions.
+resume, undo SHALL NOT reach edits made in earlier sessions. An `undo` whose import
+fails SHALL NOT be applied: the layer and the scene stay as they were, and the step
+stays in the history.
 
 #### Scenario: Undoing an exposure change
 
@@ -252,11 +254,20 @@ its PNG beside the layer. The result SHALL list the files written.
 ### Requirement: One session at a time
 
 The server SHALL hold at most one session. `open_session` while a session is open
-SHALL close the current one first, cancelling its render. Its override layer is
-already saved, so nothing is lost.
+SHALL cancel the current session's render, and SHALL close the current session once
+the new one is open. Its override layer is already saved, so nothing is lost. An
+`open_session` that is refused or fails SHALL leave the current session open, its
+undo history included.
 
 #### Scenario: Switching stages
 
 - **WHEN** the agent opens a second stage while a render is running on the first
 - **THEN** the first render is cancelled, its layer stays on disk as last saved,
   and the second session opens
+
+#### Scenario: A mistyped stage
+
+- **WHEN** the agent calls `open_session` with an input that does not exist while
+  a session is open
+- **THEN** the call fails, and the open session still answers its tools, `undo`
+  included

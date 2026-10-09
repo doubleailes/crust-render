@@ -9,10 +9,12 @@
 //! - the namespace-children lists are unioned, so authoring one prim or
 //!   property keeps its siblings;
 //! - a variant selection or a dictionary merges key by key;
+//! - a token or string list op (`apiSchemas`, `variantSetNames`) merges item
+//!   by item, unless either side is explicit;
 //! - an `over` never downgrades a `def` or a `class` already there.
 //!
-//! List ops (`apiSchemas`, `references`, …) are replaced as a whole, as any
-//! other field.
+//! The other list ops (`references`, `payload`, relationship targets, …)
+//! are replaced as a whole, as any other field: `bind_material` rebinds.
 
 use openusd::sdf::{self, AbstractData, Specifier, Value};
 use openusd::usd::Stage;
@@ -123,6 +125,12 @@ impl Snippet {
                         all.extend(new.iter().map(|(k, v)| (k.clone(), v.clone())));
                         Value::Dictionary(all)
                     }
+                    (_, Value::TokenListOp(new), Some(Value::TokenListOp(old))) => {
+                        Value::TokenListOp(merge_list_op(old, new))
+                    }
+                    (_, Value::StringListOp(new), Some(Value::StringListOp(old))) => {
+                        Value::StringListOp(merge_list_op(old, new))
+                    }
                     _ => value.into_owned(),
                 };
                 dst.set_field(&path, &field, merged);
@@ -144,6 +152,47 @@ impl Snippet {
             .map(|_| ())
             .map_err(|e| format!("cannot author the USDA: {e}"))
     }
+}
+
+/// A token or string list op the snippet authors over the layer's
+/// (`apiSchemas`, `variantSetNames`): item by item, so applying one schema
+/// keeps the others the layer applies. An explicit list on either side
+/// replaces, as it does in composition.
+fn merge_list_op<T: Default + Clone + PartialEq>(
+    old: sdf::ListOp<T>,
+    new: &sdf::ListOp<T>,
+) -> sdf::ListOp<T> {
+    if new.explicit || old.explicit {
+        return new.clone();
+    }
+    let union = |into: &mut Vec<T>, from: &[T]| {
+        for item in from {
+            if !into.contains(item) {
+                into.push(item.clone());
+            }
+        }
+    };
+    let mut out = old;
+    // An item the snippet adds is no longer deleted, and the reverse.
+    for item in new
+        .prepended_items
+        .iter()
+        .chain(&new.appended_items)
+        .chain(&new.added_items)
+    {
+        out.deleted_items.retain(|d| d != item);
+    }
+    for item in &new.deleted_items {
+        out.prepended_items.retain(|d| d != item);
+        out.appended_items.retain(|d| d != item);
+        out.added_items.retain(|d| d != item);
+    }
+    union(&mut out.prepended_items, &new.prepended_items);
+    union(&mut out.appended_items, &new.appended_items);
+    union(&mut out.added_items, &new.added_items);
+    union(&mut out.deleted_items, &new.deleted_items);
+    union(&mut out.ordered_items, &new.ordered_items);
+    out
 }
 
 /// `prim`'s path as nested `over`s around `body` — the snippet that authors

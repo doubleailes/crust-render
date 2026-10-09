@@ -261,9 +261,14 @@ jobs:
           target/${{ matrix.target }}/release/crust render \
             -i samples/cornellbox.usda -o "$RUNNER_TEMP/smoke.exr" -s 1
           test -s "$RUNNER_TEMP/smoke.exr"
-          # And the MCP server the Desktop bundle launches answers `initialize`.
-          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
-            | target/${{ matrix.target }}/release/crust mcp | grep -q '"serverInfo"'
+          # And the MCP server the Desktop bundle launches answers the
+          # handshake. Its reply goes to a file, checked on its own, so the
+          # step's status is the server's exit and the check's, not a pipe's.
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            | target/${{ matrix.target }}/release/crust mcp > "$RUNNER_TEMP/mcp.out"
+          grep -q '"serverInfo"' "$RUNNER_TEMP/mcp.out"
       - name: Package
         run: |
           name=crust-nightly-${{ matrix.target }}

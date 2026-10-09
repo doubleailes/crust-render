@@ -151,6 +151,32 @@ fn the_beauty_is_bit_identical_with_and_without_aovs() {
     }
 }
 
+/// `var_pixel` reads, at every pixel, exactly what `var_channels` lays out
+/// there, for every source: the one-pixel reader and the planes cannot drift.
+#[test]
+fn var_pixel_is_var_channels_at_every_pixel() {
+    let r = scene(4, 0.0, false, true);
+    let vars = every_source();
+    let req = request(vars.clone());
+    let (beauty, film) = render(&r, true, &req);
+    let (w, h) = film.dimensions();
+    for v in &vars {
+        let planes = film.var_channels(&beauty, v);
+        for y in 0..h {
+            for x in 0..w {
+                let pixel = film.var_pixel(&beauty, v, x, y);
+                let laid: Vec<f32> = planes.iter().map(|p| p[y * w + x]).collect();
+                assert_eq!(
+                    pixel.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                    laid.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                    "{} at ({x}, {y})",
+                    v.prim_path
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn every_channel_is_bit_identical_across_tiles_and_scanlines() {
     for guiding in [false, true] {
