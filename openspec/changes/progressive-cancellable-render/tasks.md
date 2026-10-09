@@ -9,8 +9,8 @@
 - [x] 2.1 In `render_pass`, replace the single first sweep with the stage list `[1, 2, 4, …, sweep_to]`, one `par_iter_mut` per stage. Call `finish_round` only after the last stage. Leave training passes (a training `GuidingContext`) unstaged. Add an internal `PassConfig::staged` (default true) for tests. Verify `cargo test -p crust-core` passes.
 - [x] 2.2 Count progress as units × stages + rounds and update any test that pins the total. Verify the existing progress-order test (one report at a time, +1 each) passes under tiles and scanlines.
 - [x] 2.3 Add a bitwise test in `tracer/tests.rs`: staged vs. unstaged × tiles vs. scanlines, on an adaptive render, a non-adaptive one, one with AOVs (film compared plane by plane), and a guided one. Verify it passes.
-- [ ] 2.4 Run `scripts/check_images.sh check <dir>` against the 1.1 goldens and verify there are zero differences. Run callgrind as in 1.1 and verify the instruction count is within noise. Run `scripts/bench_ab.sh` against the `main` binary on cornellbox and one texture-heavy sample, and record min and mean in the `rendering` design record (§ Adaptive sampling, a "staged first sweep" paragraph).
-  - Result: goldens identical (37/37; Kitchen_set is not in the repository). `bench_ab.sh`: cornellbox −1.9% / +1.8%, `usdpreview_textured` −3.1% / +1.1% (min / mean) — noise. **Callgrind is not within noise:** +1.61% at 2 spp (4.2439 G → 4.3124 G), +0.29% at 32 spp on a 160×90 crop — 216 instructions of hoisted setup per `advance_pixel` call, paid once per pixel per stage. Open: accept and document (done in the design record), start the stage list at 2 or 4 spp (a spec change), or move the pixel loop inside the integrator.
+- [x] 2.4 Run `scripts/check_images.sh check <dir>` against the 1.1 goldens and verify there are zero differences. Run callgrind as in 1.1 and verify the instruction count is within noise. Run `scripts/bench_ab.sh` against the `main` binary on cornellbox and one texture-heavy sample, and record min and mean in the `rendering` design record (§ Adaptive sampling, a "staged first sweep" paragraph).
+  - Result: goldens identical (37/37; Kitchen_set is not in the repository). `bench_ab.sh`: cornellbox −1.9% / +1.8%, `usdpreview_textured` −3.1% / +1.1% (min / mean) — noise. **Callgrind is not within noise:** +1.61% at 2 spp (4.2439 G → 4.3124 G), +0.29% at 32 spp on a 160×90 crop — 216 instructions of hoisted setup per `advance_pixel` call, paid once per pixel per stage. Accepted as documented (the `rendering` design record, § Adaptive sampling and Known gaps). Alternatives left for later: start the stage list at 2 or 4 spp (a spec change), or move the pixel loop inside the integrator.
 
 ## 3. Render control, snapshots, cancellation (D2–D5)
 
@@ -23,8 +23,8 @@
   - cancelled from a second thread mid-render → returns promptly, no NaN, `RayStats` equals the sum the units traced.
 
   Verify they pass.
-- [ ] 3.6 Verify the zero-control path is unchanged by re-running 2.4's callgrind and `check_images.sh check`.
-  - Result: `check_images.sh check` identical. The no-control and cancel-only (`RenderControl::without_snapshots`, the CLI's default) paths publish nothing; their remaining cost is 2.4's staging cost.
+- [x] 3.6 Verify the zero-control path is unchanged by re-running 2.4's callgrind and `check_images.sh check`.
+  - Result: `check_images.sh check` identical. The no-control and cancel-only (`RenderControl::without_snapshots`, the CLI's default) paths publish nothing; their remaining cost is 2.4's staging cost, accepted as documented.
 
 ## 4. Guided renders (D6)
 

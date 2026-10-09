@@ -37,6 +37,9 @@ for the requirements.
   thread, with a generation counter and an outcome.
 - No measurable cost to a render that nobody watches: callgrind instruction count
   on cornellbox within noise, `bench_ab.sh` within noise.
+  *Measured:* `bench_ab.sh` is noise; callgrind is +1.61% at 2 spp and +0.29% at
+  32 spp (216 instructions of setup per `advance_pixel` call, once per pixel per
+  stage). Accepted as documented in the `rendering` design record.
 
 **Non-Goals:**
 
