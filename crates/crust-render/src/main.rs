@@ -4,7 +4,6 @@
 //! counting allocator) and `crust-jit` (calling generated code).
 #![forbid(unsafe_code)]
 
-mod check;
 mod logging;
 mod products;
 
@@ -19,8 +18,13 @@ use crust_core::PixelRect;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
 use crust_core::Scene;
+use crust_core::check::{CheckReport, ProductInfo};
+use crust_core::diagnostic::checks::{self, Facts};
+use crust_core::diagnostic::report::SceneInfo;
+use crust_core::diagnostic::{SceneFlags, effective_settings};
 use crust_core::stamp::SamplingStamp;
 use crust_core::{AovRequest, RenderSettings};
+use crust_core::{WarningKind, WarningScope, warning};
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
 use indicatif::ProgressBar;
@@ -148,7 +152,7 @@ struct CheckArgs {
     /// `refused`, `approximated`, `skipped`, or `all`, comma-separated. The
     /// reports are written either way, with the matching codes in `denied`.
     #[arg(long, value_name = "KIND[,KIND…]", value_enum, value_delimiter = ',')]
-    deny: Vec<check::DenyKind>,
+    deny: Vec<DenyKind>,
 }
 
 /// `crust ls`'s kinds, each the engine's [`crust_core::ListKind`].
@@ -754,8 +758,9 @@ fn apply_scene_overrides(cli: &SceneArgs, mut settings: RenderSettings) -> Rende
 }
 
 /// The stage's RenderProducts that can be written, with `-o` replacing the
-/// first one's path; each refusal is warned about. Empty means the single
-/// beauty EXR at `-o`.
+/// first one's path; each refusal is a coded warning (`product.no_name`,
+/// `product.no_writable_vars`, `product.shared_path`), which `crust check`
+/// collects. Empty means the single beauty EXR at `-o`.
 fn select_products(aovs: &mut AovRequest, output: Option<&str>) {
     if let (Some(first), Some(o)) = (aovs.products.first_mut(), output) {
         debug!(
@@ -767,12 +772,16 @@ fn select_products(aovs: &mut AovRequest, output: Option<&str>) {
     if !aovs.products.is_empty() {
         aovs.products.retain(|p| {
             if p.name.is_empty() {
-                warn!(
+                warning!(
+                    ProductNoName,
+                    at = p.prim_path,
                     "{} authors no productName; nothing written for it",
                     p.prim_path
                 );
             } else if p.vars.is_empty() {
-                warn!(
+                warning!(
+                    ProductNoWritableVars,
+                    at = p.prim_path,
                     "{}: no RenderVar crust can write; nothing written for it",
                     p.prim_path
                 );
@@ -838,7 +847,7 @@ fn main() -> ExitCode {
             frame,
         } => ls(*kind, input, json.as_deref(), *frame),
         Command::Diagnostic(args) => diagnostic(args),
-        Command::Check(args) => check::run(args),
+        Command::Check(args) => check(args),
         Command::Diff { a, b, json } => diff(a, b, json.as_deref()),
     }
 }
@@ -894,6 +903,153 @@ fn diff(a: &Path, b: &Path, json: Option<&Path>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+/// `crust check`'s exit status when a denied warning was raised: the
+/// diagnostic's "report written, condition not met".
+const DENIED: u8 = 3;
+
+/// A `--deny` entry: a warning kind, or every kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DenyKind {
+    /// An invalid authored value was replaced by a fallback.
+    Refused,
+    /// A valid authored value is rendered differently from what it asks for.
+    Approximated,
+    /// Something authored contributes nothing.
+    Skipped,
+    /// Every kind.
+    All,
+}
+
+impl DenyKind {
+    fn kinds(self) -> &'static [WarningKind] {
+        match self {
+            DenyKind::Refused => &[WarningKind::Refused],
+            DenyKind::Approximated => &[WarningKind::Approximated],
+            DenyKind::Skipped => &[WarningKind::Skipped],
+            DenyKind::All => &WarningKind::ALL,
+        }
+    }
+}
+
+/// `crust check`: import a stage as `crust render` would, render nothing,
+/// and report what the render would use, what the import refused,
+/// approximated or skipped, and which settings are worth changing — as text
+/// on stdout, or as `crust-check/1` JSON. 0 clean, 3 a denied warning was
+/// raised, 1 an error.
+fn check(args: &CheckArgs) -> ExitCode {
+    let Some(input) = &args.scene.input else {
+        use clap::CommandFactory;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "crust check needs a stage: -i <INPUT>",
+            )
+            .exit();
+    };
+    if let Some(ocio) = &crust_core::config().ocio
+        && let Err(e) = crust_core::color::use_config(ocio)
+    {
+        error!("$OCIO: {e}");
+        return ExitCode::FAILURE;
+    }
+    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let mut scene = match load_scene(&args.scene, None, &assets) {
+        Ok(scene) => scene,
+        Err(code) => return code,
+    };
+    let import_peak = crust_core::peak_memory_bytes();
+    let mut settings = apply_scene_overrides(&args.scene, scene.settings);
+    if let Some(region) = args.scene.region {
+        settings = match settings.with_region(region) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("--region: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+    }
+    scene.settings = settings;
+    let (w, h) = settings.get_dimensions();
+
+    // What the render would write, resolved as it resolves it. The products
+    // it refuses are the import's warnings too.
+    let mut aovs = std::mem::take(&mut scene.aovs);
+    let selecting = WarningScope::enter();
+    select_products(&mut aovs, None);
+    scene.warnings.extend(selecting.finish());
+    let products = if aovs.products.is_empty() {
+        vec![ProductInfo {
+            prim: None,
+            file: beauty_output(None).to_owned(),
+            channels: ["R", "G", "B"].map(String::from).to_vec(),
+        }]
+    } else {
+        aovs.products
+            .iter()
+            .map(|p| ProductInfo {
+                prim: Some(p.prim_path.clone()),
+                file: p.name.clone(),
+                channels: crate::products::product_channels(p)
+                    .into_iter()
+                    .flat_map(|(_, names)| names)
+                    .collect(),
+            })
+            .collect()
+    };
+
+    let flags = SceneFlags {
+        subdivision_level: args.scene.subdiv_level,
+        subdivision_edge_length: args.scene.subdiv_edge_length,
+        auto_tx: args.scene.auto_tx,
+    };
+    let preloaded = assets.texture_cache_stats().preloaded;
+    let facts = Facts::from_import(&scene, args.scene.auto_tx, preloaded, import_peak);
+    let warnings = std::mem::take(&mut scene.warnings);
+    let kinds: Vec<WarningKind> = args.deny.iter().flat_map(|d| d.kinds()).copied().collect();
+    let report = CheckReport {
+        scene: SceneInfo {
+            path: input.clone(),
+            frame: args.scene.frame,
+            camera: scene.camera_path.clone(),
+            resolution: [w, h],
+            region: (!settings.is_full_frame()).then(|| {
+                let r = settings.region();
+                [r.x0, r.y0, r.x1, r.y1]
+            }),
+        },
+        products,
+        effective_settings: effective_settings(&settings, &flags),
+        import: scene.stats.phases.clone(),
+        counts: scene.stats.scene,
+        findings: checks::run(&facts),
+        denied: crust_core::check::denied(&warnings, &kinds),
+        warnings,
+    };
+    assets.release_texture_files();
+
+    // The reports first, the status after: a report that cannot be written
+    // is an error even when a warning was denied. The JSON file before the
+    // text, so a failed write prints no report.
+    match args.json.as_deref() {
+        Some(path) => {
+            if let Err(e) = write_json(path, &report.to_json()) {
+                error!("--json {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+            if !is_stdout(path) {
+                print!("{}", report.to_text());
+                info!("Report written to {}", path.display());
+            }
+        }
+        None => print!("{}", report.to_text()),
+    }
+    if report.denied.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(DENIED)
     }
 }
 

@@ -306,8 +306,8 @@ fn two_broken_materials_share_one_code() {
 }
 
 /// Without a host that decodes assets, a dome's map is declined by the
-/// default loader (`asset.unsupported_by_host`) and counted against the
-/// light that asked for it.
+/// default loader (`asset.unsupported_by_host`), which is the whole story:
+/// the file was never read, so it is not also `light_map.unreadable`.
 #[test]
 fn a_dome_map_without_a_decoder() {
     let scene = load(
@@ -319,14 +319,7 @@ fn a_dome_map_without_a_decoder() {
 "#,
         "",
     );
-    assert_eq!(
-        codes(&scene),
-        [
-            WarningCode::AssetUnsupportedByHost,
-            WarningCode::LightMapUnreadable
-        ]
-    );
-    assert_eq!(scene.warnings[1].prims, ["/World/sky"]);
+    assert_eq!(codes(&scene), [WarningCode::AssetUnsupportedByHost]);
 }
 
 /// Every sample imports to the same records twice, and every code it raises

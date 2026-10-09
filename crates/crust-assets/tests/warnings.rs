@@ -186,6 +186,28 @@ fn a_missing_texture_shared_by_three_materials() {
     );
 }
 
+/// `CRUST_TEX=0` declines every texture on purpose: the inputs read their
+/// fallbacks, but no file was unreadable, so nothing is recorded.
+#[test]
+fn textures_declined_by_crust_tex_0_are_not_unreadable() {
+    let dir = scratch("tex_off");
+    let path = stage(&dir, &textured(&["A", "B"], "missing_albedo.png"));
+    let assets = FileAssets::with_config(crust_core::Config {
+        tex: false,
+        ..crust_core::Config::default()
+    });
+    let scene = Scene::from_usd_with_options(&path, &assets, &UsdImportOptions::default())
+        .expect("stage loads");
+    assert!(
+        scene
+            .warnings
+            .iter()
+            .all(|w| w.code != WarningCode::TextureUnreadable),
+        "{:#?}",
+        scene.warnings
+    );
+}
+
 /// A UDIM set with a tile that does not decode records the skipped tile.
 #[test]
 fn a_udim_set_with_a_bad_tile() {

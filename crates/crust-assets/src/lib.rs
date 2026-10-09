@@ -454,7 +454,8 @@ impl FileAssets {
         let chunk = stale.len().div_ceil(workers.max(1));
         // Failures are reported after the workers join, on this thread: a
         // coded warning raised on a worker would be logged but not recorded
-        // in the import's warnings.
+        // in the import's warnings. Sorted by source, so which one gives the
+        // record its message does not depend on which worker finished first.
         let failures = std::sync::Mutex::new(Vec::new());
         std::thread::scope(|scope| {
             for part in stale.chunks(chunk.max(1)) {
@@ -469,23 +470,23 @@ impl FileAssets {
                                 m.kind,
                                 m.space
                             ),
-                            Err(e) => {
-                                failures
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .push(format!(
-                                        "--auto-tx: could not convert {}: {e}",
-                                        src.display()
-                                    ))
-                            }
+                            Err(e) => failures
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push((src, e.to_string())),
                         }
                     }
                 });
             }
         });
-        let failures = failures.into_inner().unwrap_or_else(|e| e.into_inner());
-        for failure in &failures {
-            warning!(TextureTxConvertFailed, "{failure}");
+        let mut failures = failures.into_inner().unwrap_or_else(|e| e.into_inner());
+        failures.sort();
+        for (src, e) in &failures {
+            warning!(
+                TextureTxConvertFailed,
+                "--auto-tx: could not convert {}: {e}",
+                src.display()
+            );
         }
         let failed = failures.len();
         self.tx_converted.fetch_add(stale.len() - failed, Relaxed);

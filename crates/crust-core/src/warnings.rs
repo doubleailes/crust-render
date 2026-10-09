@@ -188,6 +188,12 @@ warning_codes! {
         "dataWindowNDC is not finite or selects no pixel; the full frame is rendered.";
     ProductDataWindowClipped => "product.data_window_clipped", Approximated, Each,
         "dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped.";
+    ProductNoName => "product.no_name", Skipped, Each,
+        "A RenderProduct authors no productName; nothing is written for it.";
+    ProductNoWritableVars => "product.no_writable_vars", Skipped, Each,
+        "A RenderProduct has no RenderVar crust can write; nothing is written for it.";
+    ProductSharedPath => "product.shared_path", Skipped, Each,
+        "A RenderProduct writes the path an earlier one already writes; nothing is written for it.";
     AovNotARenderVar => "aov.not_a_render_var", Skipped, Each,
         "orderedVars targets a prim that is not a RenderVar.";
     AovUnsupportedSource => "aov.unsupported_source", Skipped, Each,
@@ -401,6 +407,29 @@ thread_local! {
     static LOGGED_OUTSIDE: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     /// Whether this thread has a scope, read without borrowing the collector.
     static IN_SCOPE: Cell<bool> = const { Cell::new(false) };
+    /// How many [`cause_warning!`](crate::cause_warning)s this thread has
+    /// raised, scope or not ([`causes_raised`]).
+    static CAUSES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many causes this thread has explained so far. A host load that comes
+/// back `None` with this unchanged declined on purpose (a switch turned it
+/// off, or the host does not decode that asset) rather than failing to read
+/// the file — the importer counts only the failures.
+pub(crate) fn causes_raised() -> u64 {
+    CAUSES.with(Cell::get)
+}
+
+/// Whether this thread is collecting an import's warnings — for a site met
+/// far more often outside an import than in one (a cache hit on every
+/// decoded texel) that should record only an import's occurrences.
+pub(crate) fn in_scope() -> bool {
+    IN_SCOPE.with(Cell::get)
+}
+
+#[doc(hidden)]
+pub fn __caused() {
+    CAUSES.with(|c| c.set(c.get() + 1));
 }
 
 /// Scopes active on any thread — for the debug check that no recording macro
@@ -615,6 +644,7 @@ macro_rules! cause_warning {
         let __code = $crate::warnings::WarningCode::$code;
         let __message = ::std::format!($($fmt)+);
         $crate::warnings::__tracing::warn!("[{}] {}", __code.as_str(), __message);
+        $crate::warnings::__caused();
         if $crate::warnings::__wants_message(__code) {
             $crate::warnings::__set_message(__code, __message);
         }

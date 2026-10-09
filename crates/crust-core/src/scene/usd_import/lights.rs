@@ -21,7 +21,7 @@ use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::Emissive;
 use crate::rt_world::WorldBuilder;
 
-use super::assets::{asset_path, cached_asset, timed_asset};
+use super::assets::{asset_path, cached_asset, explained, timed_asset};
 use super::attrs::{
     attr_bool, attr_f32, attr_own_color_space, attr_vec3, custom_bool, custom_color, custom_f32,
     custom_token, decode_text, in_working, infinite_light_escape_mask, light_ray_mask, value_at,
@@ -218,11 +218,11 @@ fn lux_shaping(
             &mut caches.ies,
             &mut caches.asset_time,
             path.clone(),
-            |path| assets.load_ies(path),
+            |path| explained(&mut caches.failed_assets, path, || assets.load_ies(path)),
         );
-        // Every light referencing a profile the host could not load counts,
+        // Every light referencing a profile the host could not read counts,
         // a cache hit included; the host logged the cause once per file.
-        if profile.is_none() {
+        if profile.is_none() && caches.failed_assets.contains(&path) {
             record_warning!(
                 IesUnreadable,
                 at = prim.path(),
@@ -533,7 +533,9 @@ fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crat
         &mut caches.asset_time,
         (path.clone(), space),
         |(path, space)| {
-            let loaded = assets.load_light_texture(path, *space);
+            let loaded = explained(&mut caches.failed_assets, path, || {
+                assets.load_light_texture(path, *space)
+            });
             if let Some(t) = &loaded {
                 debug!(
                     "RectLight {}: texture {} ({}x{})",
@@ -547,7 +549,7 @@ fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crat
         },
     );
     // Counted per light, a cache hit included; the host logged the cause.
-    if loaded.is_none() {
+    if loaded.is_none() && caches.failed_assets.contains(&path) {
         record_warning!(
             LightMapUnreadable,
             at = prim.path(),
@@ -776,8 +778,13 @@ pub(super) fn emit_dome_light(
             // images a dome light normally carries that means latlong.
             None | Some("latlong") | Some("automatic") => {
                 let space = texture_color_space(&light.texture_file_attr(), working);
-                let loaded = timed_asset(asset_time, || assets.load_environment(&texture, space));
-                if loaded.is_none() {
+                let failed = &mut ctx.caches.failed_assets;
+                let loaded = timed_asset(asset_time, || {
+                    explained(failed, &texture, || {
+                        assets.load_environment(&texture, space)
+                    })
+                });
+                if loaded.is_none() && failed.contains(&texture) {
                     record_warning!(
                         LightMapUnreadable,
                         at = prim.path(),

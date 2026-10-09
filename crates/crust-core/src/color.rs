@@ -43,7 +43,7 @@
 //!
 //! See `docs/color_management.md` for which input is decoded from which space.
 
-use crate::warning;
+use crate::{record_warning, warning};
 use glam::{Mat3A, Vec3A};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -640,29 +640,54 @@ fn build(src: Space, dst: Space) -> Result<Conversion, String> {
 }
 
 /// The conversion `src -> dst`, built once per pair and shared. A pair whose
-/// processor has no curve-and-matrix shape is refused once, with a warning,
-/// and converts as the identity.
+/// processor has no curve-and-matrix shape is refused, with a warning logged
+/// once per process, and converts as the identity.
+///
+/// The cache outlives an import, so a refused pair is remembered as refused:
+/// a later import asking for it records `color.no_conversion` again, without
+/// logging it again. Only an import records it — texture decodes ask on
+/// every texel, at render time too, on threads collecting nothing.
 pub fn conversion(src: Space, dst: Space) -> Arc<Conversion> {
-    type Cache = RwLock<HashMap<(Space, Space), Arc<Conversion>>>;
+    /// The conversion, and why the pair was refused when it was.
+    type Cache = RwLock<HashMap<(Space, Space), (Arc<Conversion>, Option<Arc<str>>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(c) = cache.read().expect("conversion cache").get(&(src, dst)) {
-        return c.clone();
+    let hit = cache
+        .read()
+        .expect("conversion cache")
+        .get(&(src, dst))
+        .cloned();
+    if let Some((c, refused)) = hit {
+        if let Some(why) = refused
+            && crate::warnings::in_scope()
+        {
+            record_warning!(
+                ColorNoConversion,
+                "colour space `{}` -> `{}` is not converted ({why}); values are used as stored",
+                src.name(),
+                dst.name()
+            );
+        }
+        return c;
     }
-    let built = build(src, dst).unwrap_or_else(|why| {
-        warning!(
-            ColorNoConversion,
-            "colour space `{}` -> `{}` is not converted ({why}); values are used as stored",
-            src.name(),
-            dst.name()
-        );
-        Conversion::IDENTITY
-    });
+    let (built, refused) = match build(src, dst) {
+        Ok(c) => (c, None),
+        Err(why) => {
+            warning!(
+                ColorNoConversion,
+                "colour space `{}` -> `{}` is not converted ({why}); values are used as stored",
+                src.name(),
+                dst.name()
+            );
+            (Conversion::IDENTITY, Some(Arc::from(why)))
+        }
+    };
     cache
         .write()
         .expect("conversion cache")
         .entry((src, dst))
-        .or_insert_with(|| Arc::new(built))
+        .or_insert_with(|| (Arc::new(built), refused))
+        .0
         .clone()
 }
 
@@ -1019,6 +1044,30 @@ mod tests {
         assert_eq!(config_source(), DEFAULT_CONFIG);
         assert!(use_config(DEFAULT_CONFIG).is_ok());
         assert!(use_config("ocio://studio-config-latest").is_err());
+    }
+
+    /// A refused pair stays refused in the process-wide cache, and every
+    /// import that asks for it records `color.no_conversion`, not only the
+    /// first. ACEScc changes primaries before its curve, which a
+    /// curve-and-matrix conversion cannot express.
+    #[test]
+    fn a_refused_pair_is_recorded_by_every_import() {
+        use crate::warnings::{WarningCode, WarningScope};
+        let acescc = Space::named("ACEScc").expect("the builtin config defines ACEScc");
+        for import in 0..2 {
+            let scope = WarningScope::enter();
+            assert!(conversion(acescc, Space::LIN_REC709).is_identity());
+            let records = scope.finish();
+            assert_eq!(records.len(), 1, "import {import}: {records:#?}");
+            assert_eq!(records[0].code, WarningCode::ColorNoConversion);
+            assert!(
+                records[0].message.contains("ACEScc"),
+                "{}",
+                records[0].message
+            );
+        }
+        // Outside an import a hit records nothing and costs no lookup.
+        assert!(conversion(acescc, Space::LIN_REC709).is_identity());
     }
 
     #[test]

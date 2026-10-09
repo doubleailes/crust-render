@@ -1175,6 +1175,10 @@ struct ImportCaches<'a> {
     /// Resolved path → a `RectLight`'s decoded colour map, for the same reason.
     light_textures:
         HashMap<(std::path::PathBuf, crate::ColorSpace), Option<Arc<crate::LightTexture>>>,
+    /// Asset files the host failed to read, as opposed to ones it declined on
+    /// purpose ([`assets::explained`]): only references to these count a
+    /// `*.unreadable` warning.
+    failed_assets: std::collections::HashSet<std::path::PathBuf>,
     /// The working colour space every texture and authored colour is
     /// converted into ([`crate::color`]).
     pub(super) working: crate::color::Space,
@@ -1225,6 +1229,7 @@ impl<'a> ImportCaches<'a> {
             asset_time: Duration::ZERO,
             ies: HashMap::new(),
             light_textures: HashMap::new(),
+            failed_assets: std::collections::HashSet::new(),
             working,
             luma: crate::color::luma(working),
         }

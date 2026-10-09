@@ -44,7 +44,13 @@ counted in the import's warnings)".
 
 A texture or other asset that fails to load is explained once, by the loader, naming the
 file. Each material or light that references it is counted, so `count` is the number of
-references, not of files.
+references, not of files. A texture that was never read — turned off with `CRUST_TEX=0`,
+or an asset the host does not decode, which raises `asset.unsupported_by_host` — falls
+back the same way but is not counted as unreadable.
+
+The `product.no_name`, `product.no_writable_vars` and `product.shared_path` codes are
+raised when the render chooses which products to write, after the import. `crust check`
+makes that choice too and reports them with the import's records.
 
 ## Compatibility
 
@@ -90,6 +96,9 @@ plain text and are not counted.
 | `product.camera_mismatch` | skipped | A product renders through another camera or resolution than the first; no file is written for it. | Render the other camera or resolution as a separate render. |
 | `product.motion_blur_mismatch` | approximated | A product asks for other motion blur than the first; its file is written with the first's. | Give every product the same motion-blur setting. |
 | `product.region_mismatch` | approximated | A product asks for another dataWindowNDC than the first; its file is written over the first's. | Give every product the same `dataWindowNDC`. |
+| `product.no_name` | skipped | A RenderProduct authors no productName; nothing is written for it. | Author `productName`, the file the product writes. |
+| `product.no_writable_vars` | skipped | A RenderProduct has no RenderVar crust can write; nothing is written for it. | Point `orderedVars` at RenderVars whose source crust produces; their own warnings say why each was dropped. |
+| `product.shared_path` | skipped | A RenderProduct writes the path an earlier one already writes; nothing is written for it. | Give each product its own `productName` (with `-o`, the first product's path is the one given). |
 | `product.unhonoured_attribute` | approximated | A product authors a setting crust does not honour; it renders without it. | Remove the attribute, or accept that it is ignored. |
 | `product.invalid_data_window` | refused | dataWindowNDC is not finite or selects no pixel; the full frame is rendered. | Author a finite window that covers at least one pixel. |
 | `product.data_window_clipped` | approximated | dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped. | Keep `dataWindowNDC` inside 0..1. |

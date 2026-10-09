@@ -359,6 +359,104 @@ fn products_are_listed_with_their_channels_and_not_written() {
     assert_eq!(files(&dir), ["stage.usda"], "neither product is written");
 }
 
+/// Products the render would refuse when it selects what to write — no
+/// `productName`, or a path an earlier product already writes — are warning
+/// records like the import's, so `--deny skipped` catches them.
+#[test]
+fn products_the_render_would_refuse_are_denied() {
+    let dir = work_dir("refused_products");
+    let root = r#"def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/main>, </Render/unnamed>, </Render/again>]
+        uniform int2 resolution = (32, 16)
+    }
+    def RenderProduct "main"
+    {
+        token productName = "main.exr"
+        rel orderedVars = [</Render/color>]
+    }
+    def RenderProduct "unnamed"
+    {
+        rel orderedVars = [</Render/color>]
+    }
+    def RenderProduct "again"
+    {
+        token productName = "main.exr"
+        rel orderedVars = [</Render/color>]
+    }
+    def RenderVar "color"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }
+}
+"#;
+    let path = stage(&dir, "", root);
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            path.to_str().unwrap(),
+            "--json",
+            "-",
+            "--deny",
+            "skipped",
+        ],
+    );
+    assert_eq!(code(&out), 3, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    let products = v["products"].as_array().unwrap();
+    assert_eq!(products.len(), 1, "{products:#?}");
+    assert_eq!(products[0]["prim"], "/Render/main");
+    let record = |code: &str| {
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["code"] == code)
+            .unwrap_or_else(|| panic!("no {code} in {:#?}", v["warnings"]))
+            .clone()
+    };
+    assert_eq!(
+        record("product.no_name")["prims"],
+        serde_json::json!(["/Render/unnamed"])
+    );
+    assert_eq!(
+        record("product.shared_path")["prims"],
+        serde_json::json!(["/Render/again"])
+    );
+    let denied: Vec<&str> = v["denied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(denied.contains(&"product.no_name"), "{denied:?}");
+    assert!(denied.contains(&"product.shared_path"), "{denied:?}");
+}
+
+/// A `--json` file that cannot be written is an error, and no report is
+/// printed: the text would read as if the check had completed.
+#[test]
+fn a_report_that_cannot_be_written_prints_nothing() {
+    let dir = work_dir("unwritable");
+    let path = stage(&dir, "", "");
+    // The directory itself: a file cannot be written over it.
+    let out = crust(
+        &dir,
+        &["check", "-i", path.to_str().unwrap(), "--json", "."],
+    );
+    assert_eq!(code(&out), 1, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// `RenderSettings.camera` naming a prim that is not a camera: the report's
 /// camera is the one a render falls back to.
 #[test]

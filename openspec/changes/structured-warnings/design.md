@@ -137,9 +137,15 @@ Its plain `warn!("{e} — …")` line becomes a `cause_warning!` with the code
 (`texture.unreadable`, `ies.unreadable`, `light.map_unreadable`). That logs the
 coded line and sets the record's `message` if it has none, but does not count. The
 core's memoized helpers (`load_uv_texture`, `load_ptex`, the light and dome maps,
-IES) take the referencing prim. Every lookup that returns `None`, on a cache miss or
-a cache hit, calls `record_warning!` with the same code and that prim, without
-logging. That is the occurrence that counts.
+IES) take the referencing prim. Every lookup of a file the loader failed to read, on
+a cache miss or a cache hit, calls `record_warning!` with the same code and that prim,
+without logging. That is the occurrence that counts.
+
+A failure is a `None` that came with a `cause_warning!` during the load (the core
+compares a per-thread count of causes before and after). A `None` without one is the
+host declining on purpose: `CRUST_TEX=0` / `CRUST_PTEX=0`, or a host that does not
+decode that asset at all, which raises its own `asset.unsupported_by_host`. Counting
+those as unreadable would blame a file nobody tried to read.
 
 The result is one record per code:
 
