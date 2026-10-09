@@ -19,4 +19,4 @@ Prerequisite: `mcp-session` is archived before this change is (its spec is the o
 
 ## 4. Integration
 
-- [ ] 4.1 Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and the crust-core and crust-render tests, and verify all are clean.
+- [x] 4.1 Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and the crust-core and crust-render tests, and verify all are clean.

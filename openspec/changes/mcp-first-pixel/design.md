@@ -114,6 +114,20 @@ calls `retune`.
   spp and region, and adding a training input to `train` without adding it to the key
   breaks that test.
 
+## Measured
+
+Through the server's pipes (release build, Linux, 4 cores, 2026-10-09), on
+`cornellbox.usda`: `open_session`, then `render` with no arguments (the stage's
+128 spp), three runs each. The client is a stdio script that times each call.
+
+| `render` waits for | first image (open + render) | answered with |
+|---|---|---|
+| `"image"` (default) | 0.43 / 0.51 / 0.54 s | 4 spp, rendering |
+| `"done"` (the old rule) | 10.06 / 10.06 / 10.11 s | 32 spp, rendering (the budget ran out) |
+
+`open_session` took 22–48 ms in every run, so the first image is now nearly all
+render time. The answer is 4 spp, where `samples_reached` is checked every 10 ms.
+
 ## Follow-ups
 
 - **Parallel or deferred texture decoding at import.** Textures decode serially on the
