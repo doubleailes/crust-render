@@ -14,6 +14,25 @@ toc = true
 top = false
 +++
 
+## Check before you render
+
+A diagnostic spends a budget rendering. Before that, or before any long render,
+`crust check` answers in the time of one import what the render would do, as text or as
+JSON (`--json -`):
+
+```bash
+crust check -i shot.usda
+```
+
+It imports the stage exactly as the render would, renders nothing, and reports the
+camera, resolution and files the render would use, its effective settings, what the
+import cost, the diagnostic's findings that need no render (textures without a `.tx`,
+many lights picked uniformly, a visualisation strategy, peak memory), and every
+[warning](@/docs/reference/warnings.md) the import raised: what crust refused,
+approximated or skipped. In a pipeline, `--deny refused,skipped` makes it exit `3`
+when the stage raised a warning of those kinds, so a broken stage stops before it is
+rendered. See [`crust check`](@/docs/reference/command-line.md#check).
+
 ## What it does
 
 ```bash

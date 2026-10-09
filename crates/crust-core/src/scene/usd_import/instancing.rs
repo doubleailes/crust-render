@@ -18,6 +18,7 @@
 //! island's isDunesB put 64 724 identical boxes over its dune field
 //! (`docs/moana_profile.md`).
 
+use crate::warning;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,7 +32,7 @@ use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Mesh as UsdMesh, PointInstancer, Sphere as UsdSphere,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
@@ -163,7 +164,9 @@ pub(super) fn collect_proto_parts(
 ) -> Vec<ProtoPart> {
     let mut parts = Vec::new();
     if depth > MAX_INSTANCE_NESTING {
-        warn!(
+        warning!(
+            InstancingNestingTooDeep,
+            at = root.path(),
             "Prototype {} exceeds {MAX_INSTANCE_NESTING} levels of instance nesting — not expanded",
             root.path()
         );
@@ -199,7 +202,9 @@ pub(super) fn collect_proto_parts(
                     }));
                     continue;
                 }
-                _ => warn!(
+                _ => warning!(
+                    InstancingInstanceableWithoutPrototype,
+                    at = prim.path(),
                     "Prim {} is instanceable but has no prototype — importing directly",
                     prim.path()
                 ),
@@ -289,7 +294,9 @@ pub(super) fn collect_proto_parts(
             // Volumes live outside the surface BVH entirely (their bounds
             // must not occlude shadow rays), so they cannot ride an
             // instance transform. Say so rather than dropping silently.
-            warn!(
+            warning!(
+                VolumeInPrototype,
+                at = prim.path(),
                 "Volume at {} is inside a prototype — volumes cannot be instanced, skipped",
                 prim.path()
             );
@@ -759,7 +766,9 @@ fn read_instancer(
         Ok(t) if !t.is_empty() => t,
         _ => {
             if report {
-                warn!(
+                warning!(
+                    InstancingNoPrototypes,
+                    at = prim.path(),
                     "PointInstancer at {} has no `prototypes` targets — skipped",
                     prim.path()
                 );
@@ -771,7 +780,9 @@ fn read_instancer(
     let Some(proto_indices) = value_at(&instancer.proto_indices_attr()).and_then(decode_i32_array)
     else {
         if report {
-            warn!(
+            warning!(
+                InstancingNoProtoIndices,
+                at = prim.path(),
                 "PointInstancer at {} has no `protoIndices` — skipped",
                 prim.path()
             );
@@ -791,7 +802,9 @@ fn read_instancer(
         .unwrap_or_default();
 
     if positions.len() < proto_indices.len() && report {
-        warn!(
+        warning!(
+            InstancingMissingPositions,
+            at = prim.path(),
             "PointInstancer at {}: {} protoIndices but only {} positions — extra instances skipped",
             prim.path(),
             proto_indices.len(),
@@ -817,7 +830,9 @@ fn read_instancer(
             .filter(|k| *k < targets.len())
         else {
             if report {
-                warn!(
+                warning!(
+                    InstancingProtoIndexOutOfRange,
+                    at = prim.path(),
                     "PointInstancer at {}: protoIndices[{i}] = {proto_index} is out of range — instance skipped",
                     prim.path()
                 );
@@ -902,7 +917,11 @@ fn build_parts(
     let root = prim_at(stage, proto_path.clone());
     let parts = collect_proto_parts(stage, &root, caches, depth, place);
     if parts.is_empty() {
-        warn!("Prototype {proto_path} contributed no geometry");
+        warning!(
+            InstancingEmptyPrototype,
+            at = proto_path,
+            "Prototype {proto_path} contributed no geometry"
+        );
     } else {
         debug!(
             "Prototype {proto_path} (epoch {}, nesting depth {depth}, {}): built {} part(s) in {:?}",

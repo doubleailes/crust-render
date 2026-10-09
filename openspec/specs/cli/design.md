@@ -283,6 +283,15 @@ cargo run --release -- diagnostic -i scene.usda --repeats 5 --budget 10m  # busy
 cargo run --release -- diagnostic -i scene.usda -l debug 2> diag.log      # per-trial lines
 # For a *code* change, bench_ab.sh below stays the tool: this one varies settings.
 
+# --- Check a stage before rendering it: one import, no render --------------
+# What the render would use (camera, resolution, products and channels, effective
+# settings), the import's cost, the diagnostic's import-only findings and the import's
+# coded warnings. Text on stdout, log on stderr; crust-check/1 with --json PATH|-.
+# Exit 0, or 3 when --deny matched a warning kind (reports still written).
+cargo run --release -- check -i samples/cornellbox.usda
+cargo run --release -- check -i scene.usda --json - | jq '.warnings[] | [.code, .count]'
+cargo run --release -- check -i scene.usda --deny refused,skipped   # a pipeline gate
+
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
@@ -327,6 +336,27 @@ and the Moana island. So:
   When the cause can repeat per lookup, the WARN is bounded by what failed, not by how
   often: an unreadable streamed `.tx` is named once per file, and the render ends with
   one WARN counting the tile reads that used a fallback.
+
+**Import warnings carry a code.** Every WARN the USD import raises goes through
+`crust_core::warning!` (`crust-core/src/warnings.rs`) with a `WarningCode`, and the macro
+writes the code into the message itself — `[light.degenerate_shape] RectLight at …` — so
+every subscriber shows it, `--log-file` included, and `logging.rs` is unchanged. One code
+per *cause*; each has one kind (`refused` / `approximated` / `skipped`) and one log
+policy. `Each` logs every occurrence. `Once` logs the first occurrence in an import and
+then only counts — it replaced the `cage_warned` / `legacy_warned` / `ptex_cage_warned`
+booleans in `mesh.rs`, whose "(and possibly others)" is now "(further occurrences are
+counted in the import's warnings)" — and, outside an import, logs once per thread.
+While `load_scene`'s `WarningScope` lives, every occurrence is also recorded: one
+`Warning` per code (count, the first 16 distinct prims, the first message) on
+`Scene::warnings`. An asset that fails is explained once by the loader
+(`cause_warning!`, which logs and supplies the message without counting) and counted per
+referencing material or light by the core (`record_warning!`, which counts without
+logging). Environment, render-time and diagnostic-analysis warnings keep plain `warn!`.
+
+Adding an import warning means adding a code to the table in `warnings.rs` and a row to
+`site/content/docs/reference/warnings.md`: `the_reference_page_lists_every_code` fails
+until both agree, kinds included. Raise it on the importing thread (see
+`docs/architecture.md` § Invariants).
 
 The practical consequence when adding a log: if you can write a stage that makes your new
 line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel or per
@@ -423,6 +453,32 @@ and pays for none of this. `material`'s `bound` resolves every geometry prim's b
 second walk); measured `ls material --json` against text `ls` at 1.03× on
 `PointInstancedMedCity.usd`, 0.93× on the Cornell box and 1.12× on `materialx_showcase`
 (min of 5). ALab, where the binding walk would matter, was not available to measure.
+
+`crust check` writes **`crust-check/1`** (`crust_core::check::CheckReport`), built
+from pieces other reports already own, so it adds no vocabulary:
+`format`, `crust_version`; `scene` (the diagnostic's `SceneInfo`: `path`, `frame`,
+`camera` — the camera the import resolved, after any fallback — `resolution`,
+`region`); `products[]` (`prim` — `null` for the default beauty — `file`, `channels`);
+`effective_settings[]` (`name`, `value`, `flag`, `usd_attribute`, from the one
+`diagnostic::effective_settings`); `import[]` (`crust-stats/1`'s phase objects:
+`name`, `depth`, `time_s`, `rss_end_bytes`, `peak_end_bytes`); `counts`
+(`crust-stats/1`'s `scene` object, `geometries` / `top_level` / `unique` / `footprint`
+/ `lights` / `volumes`); `findings[]` (the diagnostic's `id`, `kind`, `summary`,
+`evidence`, `action`); `warnings[]` (the import's records: `code`, `kind`, `count`,
+`prims`, `message`); `denied` (codes). `check_json_keys_are_pinned` pins the order and
+these paths. Findings come from `checks::run(&Facts::from_import(..))`, the same import
+facts the diagnostic builds its own `Facts` on (it adds the baseline's with `..`), so the
+two cannot disagree on an import-only finding
+(`import_only_findings_match_the_diagnostics`). Products go through the render's own
+`select_products` (which applies `refuse_shared_paths`) and `product_channels`, and the
+default beauty path through `beauty_output`, which `render` calls too.
+
+**Known gap: products refused by the CLI are not warning records.** A product with no
+`productName`, no writable var, or a path another product already claims is dropped by
+`select_products` / `refuse_shared_paths` with a plain `warn!` on stderr: that happens
+in the CLI, after the import's `WarningScope` has closed, so it is absent from
+`products` but has no code and no record, and `--deny` cannot see it. Coding it needs a
+CLI-side scope.
 
 Comparability's adaptive note reads the tracer's own rule (`tracer::samples_adaptively`,
 over the `adaptive_check_points` `render_pass` uses), not `spp > minSpp`: with the

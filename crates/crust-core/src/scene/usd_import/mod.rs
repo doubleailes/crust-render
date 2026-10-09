@@ -32,13 +32,14 @@
 //! dependency list. The traversal is single-threaded; see [`time`] for why
 //! that matters.
 
+use crate::warning;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::{Mat4 as GMat4, Vec3};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::camera::Camera;
 use crate::light::LightList;
@@ -326,7 +327,9 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                         .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
                     continue;
                 }
-                _ => warn!(
+                _ => warning!(
+                    InstancingInstanceableWithoutPrototype,
+                    at = prim.path(),
                     "Prim {} is instanceable but has no prototype — importing directly",
                     prim.path()
                 ),
@@ -439,7 +442,12 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
                 ctx.camera = Some((c, prim.path().clone()));
             }
             Some(c) => ctx.first_camera = Some((c, prim.path().clone())),
-            None => warn!("Failed to build camera from {}", prim.path()),
+            None => warning!(
+                CameraUnreadable,
+                at = prim.path(),
+                "Failed to build camera from {}",
+                prim.path()
+            ),
         }
     }
     true
@@ -722,7 +730,9 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(Camera, Option<String>), crate
             (Some(c), _) => with_path(c),
             (None, Some((c, first))) => {
                 if let Some(p) = wanted.as_ref().map(CameraChoice::path) {
-                    warn!(
+                    warning!(
+                        CameraNotACamera,
+                        at = p,
                         "RenderSettings.camera targets {p}, which is not a camera on this \
                          stage — rendering through {first} instead"
                     );
@@ -732,7 +742,10 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(Camera, Option<String>), crate
             (None, None) => unreachable!("a camera was met"),
         },
         CameraPick::Procedural => {
-            warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
+            warning!(
+                CameraMissing,
+                "USD stage has no UsdGeomCamera — falling back to world::get_settings camera"
+            );
             (crate::world::get_settings().0, None)
         }
     })
@@ -787,6 +800,9 @@ pub(crate) fn load_scene(
         working: host_working,
     } = ValidOptions::check(options)?;
     let _time_scope = EvalTimeScope::enter(time);
+    // Every coded warning this import raises, on this thread, is recorded
+    // here and handed back on the scene.
+    let warning_scope = crate::WarningScope::enter();
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
 
@@ -1001,6 +1017,7 @@ pub(crate) fn load_scene(
     scene.working_space = working;
     scene.camera_path = camera_path;
     scene.time = time;
+    scene.warnings = warning_scope.finish();
     Ok(scene)
 }
 
@@ -1030,7 +1047,8 @@ fn subdiv_policy(
         return Ok(SubdivPolicy::new(subdiv_level));
     };
     let Some(choice) = wanted_camera else {
-        warn!(
+        warning!(
+            SubdivAdaptiveNeedsCamera,
             "Adaptive subdivision ({target} px) needs the render camera before the stage \
              is read — name it with --camera or RenderSettings.camera. Using the uniform \
              level {subdiv_level}"
@@ -1054,7 +1072,9 @@ fn subdiv_policy(
         }
     };
     let Some(projection) = projection else {
-        warn!(
+        warning!(
+            SubdivAdaptiveNeedsCamera,
+            at = camera_path,
             "Adaptive subdivision ({target} px): {camera_path} is not a camera on this stage. \
              Using the uniform level {subdiv_level}"
         );

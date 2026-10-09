@@ -17,6 +17,7 @@
 //! prim, and gets no file or channel rather than a black one that looks
 //! valid.
 
+use crate::warning;
 use std::collections::HashMap;
 
 use openusd::sdf;
@@ -24,7 +25,7 @@ use openusd::usd::{Prim, Stage};
 use openusd_schemas::render::{
     RenderProduct, RenderSettings as UsdRenderSettings, RenderSettingsBase, RenderVar,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
 use crate::tracer::PixelRect;
@@ -186,14 +187,20 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             .ok()
             .flatten()
         else {
-            warn!("{path}.products targets {product_path}, which is not a RenderProduct; skipped");
+            warning!(
+                ProductNotARenderProduct,
+                at = product_path,
+                "{path}.products targets {product_path}, which is not a RenderProduct; skipped"
+            );
             continue;
         };
         let prim = prim_at(stage, product_path.clone());
         let product_type =
             custom_token(&prim, "productType").unwrap_or_else(|| "raster".to_owned());
         if product_type != "raster" {
-            warn!(
+            warning!(
+                ProductUnsupportedType,
+                at = product_path,
                 "{product_path}: productType {product_type:?} is not supported (only \
                  \"raster\"); no file is written for it"
             );
@@ -208,7 +215,9 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         match &render_base {
             None => render_base = Some(resolved.clone()),
             Some(first) if !first.same_render(&resolved) => {
-                warn!(
+                warning!(
+                    ProductCameraMismatch,
+                    at = product_path,
                     "{product_path}: renders through {} at {}, but the render is {} at {} \
                      (the first product's); crust renders one camera and resolution per \
                      stage, so no file is written for it",
@@ -223,7 +232,9 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 // One shutter per stage, like one camera: the file is still
                 // written, with the first product's blur.
                 let state = |on: bool| if on { "on" } else { "off" };
-                warn!(
+                warning!(
+                    ProductMotionBlurMismatch,
+                    at = product_path,
                     "{product_path}: asks for motion blur {}, but the render has it {} (the \
                      first product's); its file is written with that",
                     state(resolved.motion_blur()),
@@ -239,7 +250,9 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         {
             // One region per render, like one shutter: the file is still
             // written, over the first product's region.
-            warn!(
+            warning!(
+                ProductRegionMismatch,
+                at = product_path,
                 "{product_path}: asks for dataWindowNDC {}, but the render's is {} (the first \
                  product's); its file is written with that",
                 describe_window(resolved.data_window),
@@ -279,7 +292,11 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 let mut set: Vec<&str> = lpes.iter().map(String::as_str).collect();
                 set.push(e);
                 if let Err(err) = crate::lpe::Lpe::compile(&set) {
-                    warn!("{var_path}: light path expression {e:?} refused: {err}");
+                    warning!(
+                        LpeInvalid,
+                        at = var_path,
+                        "{var_path}: light path expression {e:?} refused: {err}"
+                    );
                     refused.push(e.clone());
                     continue;
                 }
@@ -343,7 +360,10 @@ pub(super) fn region_from_ndc(window: [f32; 4], width: usize, height: usize) -> 
         return None;
     }
     if !window.iter().all(|c| c.is_finite()) {
-        warn!("dataWindowNDC = {text} is not finite; rendering the full frame");
+        warning!(
+            ProductInvalidDataWindow,
+            "dataWindowNDC = {text} is not finite; rendering the full frame"
+        );
         return None;
     }
     let [xmin, ymin, xmax, ymax] = window.map(f64::from);
@@ -360,7 +380,8 @@ pub(super) fn region_from_ndc(window: [f32; 4], width: usize, height: usize) -> 
         past(1.0 - ymin, h),
     );
     if region.is_empty() {
-        warn!(
+        warning!(
+            ProductInvalidDataWindow,
             "dataWindowNDC = {text} selects no pixel of the {width}x{height} frame; rendering the full frame"
         );
         return None;
@@ -368,7 +389,8 @@ pub(super) fn region_from_ndc(window: [f32; 4], width: usize, height: usize) -> 
     // Only once the clipped window is known to select something: a window
     // wholly outside the frame is the empty case above, not a clipped one.
     if window.iter().any(|c| !(0.0..=1.0).contains(c)) {
-        warn!(
+        warning!(
+            ProductDataWindowClipped,
             "dataWindowNDC = {text} reaches outside the frame; overscan is not supported, \
              so it is clipped to it"
         );
@@ -406,7 +428,9 @@ fn warn_unhonoured(prim: &Prim) {
         ignored.push("disableDepthOfField = true".to_owned());
     }
     if !ignored.is_empty() {
-        warn!(
+        warning!(
+            ProductUnhonouredAttribute,
+            at = prim.path(),
             "{}: {} not honoured; rendering without it",
             prim.path(),
             ignored.join(", ")
@@ -549,7 +573,9 @@ fn authored_accumulation(prim: &Prim) -> Option<Accumulation> {
                 "zmin" => Some(Accumulation::Closest),
                 "filter" | "" => Some(Accumulation::Filtered),
                 other => {
-                    warn!(
+                    warning!(
+                        AovUnknownAccumulation,
+                        at = prim.path(),
                         "{}: {name} = {other:?} is not supported (only \"zmin\" and the \
                          filtered default); using the source's default",
                         prim.path()
@@ -566,7 +592,11 @@ fn authored_accumulation(prim: &Prim) -> Option<Accumulation> {
 /// honour it.
 fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     if RenderVar::get(stage, path.clone()).ok().flatten().is_none() {
-        warn!("orderedVars targets {path}, which is not a RenderVar; skipped");
+        warning!(
+            AovNotARenderVar,
+            at = path,
+            "orderedVars targets {path}, which is not a RenderVar; skipped"
+        );
         return None;
     }
     let prim = prim_at(stage, path.clone());
@@ -584,7 +614,9 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     let raw_authored = custom_bool(&prim, "crust:aov:raw") == Some(true);
     let variance = custom_bool(&prim, "crust:aov:variance") == Some(true);
     if variance && source_type != "lpe" {
-        warn!(
+        warning!(
+            AovInvalidVariance,
+            at = path,
             "{path}: crust:aov:variance applies to light path expressions (sourceType \
              \"lpe\"), not sourceType {source_type:?}; no channel written"
         );
@@ -598,7 +630,9 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
                 &source_name
             };
             if raw_authored {
-                warn!(
+                warning!(
+                    AovRawIgnored,
+                    at = path,
                     "{path}: crust:aov:raw applies to light path expressions \
                      (sourceType \"lpe\"); ignored on {lookup:?}"
                 );
@@ -613,11 +647,17 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
                 match AovSource::from_raw(lookup) {
                     Some(s) => s,
                     None if AovSource::is_planned(lookup) => {
-                        warn!("{path}: source {lookup:?} is not supported yet; no channel written");
+                        warning!(
+                            AovUnsupportedSource,
+                            at = path,
+                            "{path}: source {lookup:?} is not supported yet; no channel written"
+                        );
                         return None;
                     }
                     None => {
-                        warn!(
+                        warning!(
+                            AovUnknownSource,
+                            at = path,
                             "{path}: unknown raw source {lookup:?}; no channel written (crust's \
                          AOV names are listed in the user documentation, usd/aovs)"
                         );
@@ -629,7 +669,11 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         "lpe" => {
             let expr = crate::lpe::strip_prefix(&source_name);
             if let Err(e) = crate::lpe::validate(expr) {
-                warn!("{path}: light path expression {expr:?}: {e}; no channel written");
+                warning!(
+                    LpeInvalid,
+                    at = path,
+                    "{path}: light path expression {expr:?}: {e}; no channel written"
+                );
                 return None;
             }
             if raw_authored {
@@ -639,12 +683,18 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
                 let lpe = match crate::lpe::Lpe::compile(&[expr]) {
                     Ok(lpe) => lpe,
                     Err(e) => {
-                        warn!("{path}: light path expression {expr:?}: {e}; no channel written");
+                        warning!(
+                            LpeInvalid,
+                            at = path,
+                            "{path}: light path expression {expr:?}: {e}; no channel written"
+                        );
                         return None;
                     }
                 };
                 if !lpe.starts_with_diffuse_reflection(0) {
-                    warn!(
+                    warning!(
+                        AovInvalidRaw,
+                        at = path,
                         "{path}: crust:aov:raw needs an expression whose every path starts \
                          with a diffuse reflection (C<RD>…); {expr:?} does not, so no channel \
                          written"
@@ -657,20 +707,28 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             AovSource::Lpe
         }
         "primvar" => {
-            warn!(
+            warning!(
+                AovUnsupportedSource,
+                at = path,
                 "{path}: primvar source {source_name:?} is not supported yet; no channel written"
             );
             return None;
         }
         "intrinsic" => {
-            warn!(
+            warning!(
+                AovUnsupportedSource,
+                at = path,
                 "{path}: sourceType \"intrinsic\" is unimplemented in UsdRender itself; no \
                  channel written"
             );
             return None;
         }
         other => {
-            warn!("{path}: unknown sourceType {other:?}; no channel written");
+            warning!(
+                AovUnknownSource,
+                at = path,
+                "{path}: unknown sourceType {other:?}; no channel written"
+            );
             return None;
         }
     };
@@ -680,11 +738,17 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         .or_else(|| custom_token(&prim, "dataType"))
         .unwrap_or_else(|| if variance { "float" } else { "color3f" }.to_owned());
     let Some((components, precision)) = parse_data_type(&type_name) else {
-        warn!("{path}: data type {type_name:?} is not a numeric type; no channel written");
+        warning!(
+            AovTypeMismatch,
+            at = path,
+            "{path}: data type {type_name:?} is not a numeric type; no channel written"
+        );
         return None;
     };
     if variance && (components != 1 || precision == Precision::Uint) {
-        warn!(
+        warning!(
+            AovInvalidVariance,
+            at = path,
             "{path}: the variance of {:?} is one float channel and cannot be written as \
              {type_name:?}; no channel written",
             expression.as_deref().unwrap_or_default()
@@ -692,7 +756,9 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         return None;
     }
     if !variance && !type_fits(source, components, precision) {
-        warn!(
+        warning!(
+            AovTypeMismatch,
+            at = path,
             "{path}: {} cannot be written as {type_name:?}; no channel written",
             source.name()
         );
@@ -703,7 +769,9 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     let authored = authored_accumulation(&prim);
     if variance && authored == Some(Accumulation::Closest) {
         // One sample's value per pixel has no sample variance.
-        warn!(
+        warning!(
+            AovInvalidVariance,
+            at = path,
             "{path}: crust:aov:variance needs every sample, so it cannot be accumulated \
              as Closest; no channel written"
         );
@@ -711,7 +779,9 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     }
     let accumulation = match authored {
         Some(mode) if !source.accepts_accumulation() && mode != default => {
-            warn!(
+            warning!(
+                AovAccumulationIgnored,
+                at = path,
                 "{path}: {} is a per-pixel quantity and cannot be accumulated as {mode:?}; \
                  using {default:?}",
                 source.name()

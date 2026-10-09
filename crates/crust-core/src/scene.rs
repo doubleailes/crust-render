@@ -5,6 +5,7 @@ use crate::rt_world::World;
 use crate::stats::RenderStats;
 use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
+use crate::warning;
 
 /// The renderer's runtime scene, produced from a USD stage
 /// (`Scene::from_usd`) or assembled by hand (`Scene::new`, e.g. from the
@@ -40,6 +41,10 @@ pub struct Scene {
     /// included, unlike the sampler seed [`RenderSettings::frame`] holds,
     /// which is its integer part. `None` when attributes read their defaults.
     pub time: Option<f64>,
+    /// The coded warnings the import raised, one record per code in the
+    /// order they first fired ([`crate::warnings`]). Empty for a
+    /// hand-assembled scene.
+    pub warnings: Vec<crate::Warning>,
 }
 
 impl Scene {
@@ -55,6 +60,7 @@ impl Scene {
             working_space: crate::color::Space::LIN_REC709,
             camera_path: None,
             time: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -400,7 +406,8 @@ pub trait AssetLoader: Send + Sync {
         space: crate::ColorSpace,
     ) -> Option<std::sync::Arc<dyn crate::Texture2D>> {
         let _ = space;
-        tracing::warn!(
+        warning!(
+            AssetUnsupportedByHost,
             "Asset loader does not decode UV textures: {} ignored — the input \
              falls back to its constant value.",
             path.display()
@@ -433,7 +440,8 @@ pub trait AssetLoader: Send + Sync {
         space: crate::ColorSpace,
     ) -> Option<std::sync::Arc<dyn crate::PtexTexture>> {
         let _ = space;
-        tracing::warn!(
+        warning!(
+            AssetUnsupportedByHost,
             "Asset loader does not decode Ptex: {} ignored — the surface falls \
              back to its constant baseColor.",
             path.display()
@@ -453,7 +461,8 @@ pub trait AssetLoader: Send + Sync {
         space: crate::ColorSpace,
     ) -> Option<std::sync::Arc<crate::LightTexture>> {
         let _ = space;
-        tracing::warn!(
+        warning!(
+            AssetUnsupportedByHost,
             "Asset loader does not decode light textures: {} ignored — the light \
              emits its uniform colour.",
             path.display()
@@ -467,7 +476,8 @@ pub trait AssetLoader: Send + Sync {
     /// from the light's shaping — the rest of it (focus, cone) still applies —
     /// so the light renders unshaped by the profile rather than not at all.
     fn load_ies(&self, path: &std::path::Path) -> Option<std::sync::Arc<crate::IesProfile>> {
-        tracing::warn!(
+        warning!(
+            AssetUnsupportedByHost,
             "Asset loader does not decode IES profiles: {} ignored — the light \
              renders without it.",
             path.display()
@@ -486,7 +496,8 @@ impl AssetLoader for NoAssets {
         path: &std::path::Path,
         _space: crate::ColorSpace,
     ) -> Option<EnvironmentMap> {
-        tracing::warn!(
+        warning!(
+            AssetUnsupportedByHost,
             "No asset loader: environment map {} ignored — the dome falls back \
              to its uniform colour. Use Scene::from_usd_with_assets to supply one.",
             path.display()

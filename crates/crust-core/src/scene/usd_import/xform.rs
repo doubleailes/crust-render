@@ -1,11 +1,11 @@
 //! Prim transforms: openusd's `UsdGeomXformable` composition, reached for any
 //! prim type, and the conversion to glam.
 
+use crate::warning;
 use glam::Mat4 as GMat4;
 use openusd::gf::Matrix4d;
 use openusd::usd::{Prim, SchemaBase, SchemaKind};
 use openusd_schemas::geom::{Imageable, Xformable};
-use tracing::warn;
 
 use super::time::xform_time;
 
@@ -85,7 +85,9 @@ fn local_matrix(xf: &AnyXformable<'_>) -> GMat4 {
             .map(String::as_str)
             .collect();
         if !unknown.is_empty() {
-            warn!(
+            warning!(
+                XformUnknownOp,
+                at = xf.0.path(),
                 "{}: xformOpOrder lists {} — not a UsdGeomXformOp kind, read as identity",
                 xf.0.path(),
                 unknown.join(", ")
@@ -95,7 +97,9 @@ fn local_matrix(xf: &AnyXformable<'_>) -> GMat4 {
     match xf.local_to_parent_transform(xform_time()) {
         Ok(m) => usd_mat_to_glam(m),
         Err(e) => {
-            warn!(
+            warning!(
+                XformUncomposable,
+                at = xf.0.path(),
                 "{}: could not compose its xformOp stack ({e}) — its local transform is \
                  identity",
                 xf.0.path()

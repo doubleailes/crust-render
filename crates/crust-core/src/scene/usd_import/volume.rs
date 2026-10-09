@@ -1,8 +1,9 @@
 //! `crust:volume:*` prims → [`VolumeRegion`]s.
 
+use crate::warning;
 use glam::{Mat4 as GMat4, Vec3A};
 use openusd::usd::Prim;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::color::Space;
 use crate::volume::{DensityField, VolumeRegion};
@@ -47,7 +48,9 @@ pub(super) fn emit_volume(
                         d[2].max(1) as usize,
                     );
                     if nx * ny * nz != data.len() {
-                        warn!(
+                        warning!(
+                            VolumeInvalidGrid,
+                            at = prim.path(),
                             "Volume at {}: gridDims {}x{}x{} does not match gridData length {} — skipped",
                             prim.path(),
                             nx,
@@ -60,7 +63,9 @@ pub(super) fn emit_volume(
                     DensityField::Grid { nx, ny, nz, data }
                 }
                 _ => {
-                    warn!(
+                    warning!(
+                        VolumeInvalidGrid,
+                        at = prim.path(),
                         "Volume at {}: grid type needs int[3] crust:volume:gridDims and float[] crust:volume:gridData — skipped",
                         prim.path()
                     );
@@ -69,7 +74,9 @@ pub(super) fn emit_volume(
             }
         }
         other => {
-            warn!(
+            warning!(
+                VolumeUnknownType,
+                at = prim.path(),
                 "Volume at {}: unknown crust:volume:type \"{}\" (expected homogeneous | smoke | grid) — skipped",
                 prim.path(),
                 other

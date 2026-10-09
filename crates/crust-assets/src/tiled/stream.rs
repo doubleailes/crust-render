@@ -116,7 +116,8 @@ impl StreamingTexture {
             });
             match opened {
                 Ok((f, want_space)) if !f.mip_space_matches(want_space) => {
-                    tracing::warn!(
+                    crust_core::warning!(
+                        TextureStreamFallback,
                         "{}: mip chain was reduced in {:?}, not {want_space} — \
                          falling back to the preloaded texture",
                         p.display(),

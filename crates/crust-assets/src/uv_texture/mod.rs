@@ -53,7 +53,7 @@ use std::path::Path;
 use crust_core::{ColorSpace, ResolvedColorSpace, Texture2D};
 
 use crate::TransferCurve;
-use tracing::warn;
+use crust_core::warning;
 
 use crate::error::AssetError;
 
@@ -208,7 +208,7 @@ impl UvTexture {
             for tile in existing_tiles(&name) {
                 match decode(&tile.path, tile.number) {
                     Ok(t) => tiles.push(t),
-                    Err(e) => warn!("{e} — skipping that UDIM tile"),
+                    Err(e) => warning!(TextureUdimTileMissing, "{e} — skipping that UDIM tile"),
                 }
             }
             if tiles.is_empty() {
@@ -291,7 +291,7 @@ impl UvTexture {
             for tile in &found {
                 match decode_exr_tile(&tile.path, tile.number, max_edge, decode) {
                     Ok(t) => tiles.push(t),
-                    Err(e) => warn!("{e} — skipping that UDIM tile"),
+                    Err(e) => warning!(TextureUdimTileMissing, "{e} — skipping that UDIM tile"),
                 }
             }
             if tiles.is_empty() {

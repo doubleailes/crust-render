@@ -19,6 +19,7 @@ top = false
 ```bash
 crust render [OPTIONS]              # render a scene
 crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materials
+crust check -i <SCENE> [OPTIONS]    # what a render would use, and what crust refused
 crust diff <A> <B>                  # did the image change, and by how much?
 crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or cleaner
 ```
@@ -27,6 +28,7 @@ crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or clea
 |---------|--------------|
 | `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` belongs to it. |
 | [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line, or as JSON with the values a render reads for each. |
+| [`check`](#check) | imports the stage as a render would and reports on it without rendering: the render it describes, its effective settings, the import's cost, findings and warnings. Takes the scene flags of `render`. |
 | [`diff`](#diff) | compares two EXRs: whether they are identical, by how much they differ, and whether they can be compared at all. |
 | [`diagnostic`](#diagnostic) | measures which settings make the stage's render faster or cleaner, within a time budget, and reports the evidence. Takes the scene flags of `render`. |
 
@@ -654,6 +656,49 @@ $ crust ls camera -i samples/cornellbox.usda --json - | jq -c '.prims[] | [.path
 (non-time-sampled) value, as a render without `-f` does. Which prims are listed does not
 depend on it.
 
+## check
+
+`crust check -i <SCENE> [--json PATH|-] [--deny KIND[,KIND…]] [OPTIONS]`
+
+Imports the stage exactly as `crust render` with the same flags would, renders nothing,
+and reports:
+
+- **the render it describes**: the stage, the frame, the camera the render goes through
+  (after any fallback), the resolution, the region, and every file the render would write
+  with its channels. A stage with no `RenderProduct` reports the one beauty EXR a render
+  writes, `output.exr`;
+- **effective settings**: every setting the render would run with, each with the flag
+  and the `crust:*` attribute that change it, as the diagnostic reports them;
+- **the import**: its phases with their time and peak memory, and the scene counts
+  (geometries, primitives, lights, volumes), with the keys `--stats-json` uses;
+- **findings**: the [diagnostic](#diagnostic)'s findings that need no render — textures
+  without a `.tx`, many lights picked uniformly, a visualisation strategy, peak memory —
+  with the same ids, evidence and actions;
+- **warnings**: what the import refused, approximated or skipped, one record per
+  [warning code](@/docs/reference/warnings.md) with its count and first prims.
+
+It writes **no image** and no file beside the stage, except the `.tx` files `--auto-tx`
+creates, as a render would. The text report goes to stdout and the log to stderr.
+
+It accepts the same scene flags as [`diagnostic`](#diagnostic), with the same names,
+values and defaults: [`-i`](#input) (required), [`-f`](#frame), [`--camera`](#camera),
+[`--region`](#region), [`--strategy`](#strategy), [`--light-selection`](#light-selection),
+[`--light-samples`](#light-samples), [`--light-samples-indirect`](#light-samples-indirect),
+[`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
+[`--filter-radius`](#filter-radius), [`--subdiv-level`](#subdiv-level),
+[`--subdiv-edge-length`](#subdiv-edge-length) and [`--auto-tx`](#auto-tx). The rest of
+`render`'s flags (`-s`, `-o`, the colour and statistics flags) are refused. Its own flags:
+
+| flag | value | default | what it does |
+|------|-------|---------|--------------|
+| `--json` | path or `-` | off | Also write the report as JSON, format `crust-check/1`. With `-`, the JSON replaces the text report on stdout. |
+| `--deny` | kinds | off | Exit `3` when the import raises a warning of one of these kinds: `refused`, `approximated`, `skipped`, or `all`, comma-separated. The reports are still written, and name the matching codes (`denied`). Findings never deny. |
+
+```bash
+$ crust check -i samples/cornellbox.usda
+$ crust check -i shot.usdc -f 1048 --deny refused,skipped --json check.json
+```
+
 ## diff
 
 `crust diff <A> <B> [--json <PATH|->]`
@@ -790,8 +835,8 @@ $ crust diagnostic -i samples/veach_mis.usda --light-selection learned --baselin
 
 ## JSON reports
 
-`--stats-json`, `ls --json` and `diff --json` (and the [`diagnostic`](#diagnostic)'s
-report) share one shape, so a script reads them the same way:
+`--stats-json`, `ls --json`, `check --json` and `diff --json` (and the
+[`diagnostic`](#diagnostic)'s report) share one shape, so a script reads them the same way:
 
 - each is one JSON object, opening with `format` — the report and its version, such as
   `crust-stats/1` — and `crust_version`;
@@ -815,6 +860,15 @@ file can't be created, or an image or a JSON report can't be written.
 
 `crust diff` exits with `0` when the files are identical, `1` when they differ and `2` on
 an error (see [diff](#diff)).
+
+`crust check` exits with:
+
+| status | when |
+|--------|------|
+| `0` | the import succeeded and no warning of a `--deny` kind was raised |
+| `3` | a warning of a `--deny` kind was raised; the reports are still written |
+| `1` | an error: the stage can't be opened or imported, the region is outside the frame, or a report can't be written. No report is written. |
+| `2` | a usage error: an unknown or render-only flag, an unknown `--deny` kind, no `-i` |
 
 `crust diagnostic` exits with:
 
@@ -855,6 +909,9 @@ crust diff before.exr after.exr
 
 # render statistics for a script
 crust render -i scene.usda --stats-json - > stats.json
+
+# before a long render: what will it use, and did the import drop anything?
+crust check -i shot.usdc -f 1048 --deny skipped
 
 # what would make this shot faster or cleaner, in five minutes
 crust diagnostic -i shot.usdc -f 1048 --camera /shot/cam/renderCam --budget 5m > report.md

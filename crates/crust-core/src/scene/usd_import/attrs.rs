@@ -2,11 +2,11 @@
 //! per-prim geometry flags (ray mask, motion), the subdivision level, and
 //! schema-attribute value decoding. Every read resolves at [`eval_time`].
 
+use crate::warning;
 use glam::{Vec3, Vec3A};
 use openusd::gf::Vec3f;
 use openusd::sdf;
 use openusd::usd::{Attribute, Prim};
-use tracing::warn;
 
 use crate::color::Space;
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, RayMask};
@@ -124,9 +124,15 @@ pub(super) fn resolve_subdiv_level(host: Option<u32>, authored: Option<i32>) -> 
         (None, None) => (i64::from(DEFAULT_SUBDIV_LEVEL), "the default"),
     };
     if level > i64::from(MAX_SUBDIV_LEVEL) {
-        warn!("Subdivision level {level} from {source} clamped to {MAX_SUBDIV_LEVEL}");
+        warning!(
+            SubdivLevelClamped,
+            "Subdivision level {level} from {source} clamped to {MAX_SUBDIV_LEVEL}"
+        );
     } else if level < 0 {
-        warn!("Subdivision level {level} from {source} clamped to 0");
+        warning!(
+            SubdivInvalidSetting,
+            "Subdivision level {level} from {source} clamped to 0"
+        );
     }
     level.clamp(0, i64::from(MAX_SUBDIV_LEVEL)) as u32
 }
@@ -146,7 +152,8 @@ pub(super) fn resolve_subdiv_edge_length(host: Option<f32>, authored: Option<f32
         if l.is_finite() && l > 0.0 {
             Some(l)
         } else {
-            warn!(
+            warning!(
+                SubdivInvalidSetting,
                 "Subdivision edge length {l} from {source} is not a positive pixel length — ignored"
             );
             None
@@ -364,7 +371,9 @@ fn own_color_space_name(attr: &Attribute) -> Option<String> {
 fn named_space(attr: &Attribute, name: &str) -> Option<Space> {
     let space = Space::named(name);
     if space.is_none() {
-        warn!(
+        warning!(
+            ColorUnknownSpace,
+            at = attr.path(),
             "{}: colorSpace `{name}` is not defined by the OCIO config — the value is used as \
              authored",
             attr.path()

@@ -4,6 +4,7 @@
 //! counting allocator) and `crust-jit` (calling generated code).
 #![forbid(unsafe_code)]
 
+mod check;
 mod logging;
 mod products;
 
@@ -80,6 +81,17 @@ enum Command {
     /// ran out first (the report is still written), 1 on error, 2 on a
     /// usage error.
     Diagnostic(Box<DiagnosticArgs>),
+    /// Import a stage as `crust render` would and report on it, rendering
+    /// nothing: the render it describes (camera, resolution, products), its
+    /// effective settings, the import's costs, the findings that need no
+    /// render, and what the import refused, approximated or skipped.
+    ///
+    /// Writes no image and changes no file beside the stage (but for the
+    /// `.tx` files `--auto-tx` creates, as a render would). The text report
+    /// goes to stdout, the log to stderr. Exits 0 when no denied warning was
+    /// raised, 3 when one was (the reports are still written), 1 on error,
+    /// 2 on a usage error.
+    Check(Box<CheckArgs>),
     /// Compare two EXRs: did the image change, and by how much?
     ///
     /// Every channel of every layer is compared bitwise; on the beauty
@@ -124,6 +136,21 @@ struct DiagnosticArgs {
     target_mrse: Option<f64>,
 }
 
+#[derive(Args)]
+struct CheckArgs {
+    #[command(flatten)]
+    scene: SceneArgs,
+    /// Also write the report as JSON (format `crust-check/1`) to PATH; with
+    /// `-`, the JSON goes to stdout instead of the text report.
+    #[arg(long, value_name = "PATH|-")]
+    json: Option<std::path::PathBuf>,
+    /// Exit 3 when the import raises a warning of one of these kinds:
+    /// `refused`, `approximated`, `skipped`, or `all`, comma-separated. The
+    /// reports are written either way, with the matching codes in `denied`.
+    #[arg(long, value_name = "KIND[,KIND…]", value_enum, value_delimiter = ',')]
+    deny: Vec<check::DenyKind>,
+}
+
 /// `crust ls`'s kinds, each the engine's [`crust_core::ListKind`].
 #[derive(Clone, Copy, ValueEnum)]
 enum LsKind {
@@ -149,9 +176,9 @@ impl From<LsKind> for crust_core::ListKind {
     }
 }
 
-/// The flags that shape the scene and its settings, shared by `render` and
-/// `diagnostic` with the same names, values and defaults — so a diagnostic
-/// suggestion given as a flag means the same in a render.
+/// The flags that shape the scene and its settings, shared by `render`,
+/// `diagnostic` and `check` with the same names, values and defaults — so a
+/// diagnostic suggestion given as a flag means the same in a render.
 #[derive(Args)]
 struct SceneArgs {
     /// Input scene path — .usda / .usdc / .usdz.
@@ -614,6 +641,12 @@ fn write_beauty(
     Ok(())
 }
 
+/// Where a render of a stage without RenderProducts writes its beauty EXR:
+/// `-o`, else `output.exr` — what `render` writes and `check` reports.
+fn beauty_output(output: Option<&str>) -> &str {
+    output.unwrap_or("output.exr")
+}
+
 /// The scene to render: the USD stage `-i` names, imported under the CLI's
 /// options, or the procedural fallback without one. A failure is already
 /// logged; the error is the exit code.
@@ -788,7 +821,7 @@ fn main() -> ExitCode {
             },
             args.log_file.as_deref(),
         ),
-        Command::Ls { .. } | Command::Diagnostic(_) | Command::Diff { .. } => {
+        Command::Ls { .. } | Command::Diagnostic(_) | Command::Check(_) | Command::Diff { .. } => {
             (logging::Terminal::Stderr, None)
         }
     };
@@ -805,6 +838,7 @@ fn main() -> ExitCode {
             frame,
         } => ls(*kind, input, json.as_deref(), *frame),
         Command::Diagnostic(args) => diagnostic(args),
+        Command::Check(args) => check::run(args),
         Command::Diff { a, b, json } => diff(a, b, json.as_deref()),
     }
 }
@@ -1205,7 +1239,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
         }
     } else if let Err(code) = write_beauty(
         &buffer,
-        output.as_deref().unwrap_or("output.exr"),
+        beauty_output(output.as_deref()),
         &output_color,
         &sampling,
     ) {

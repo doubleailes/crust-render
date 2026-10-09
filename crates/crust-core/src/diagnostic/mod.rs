@@ -24,7 +24,7 @@
 //! The engine writes nothing: [`run`] returns a [`Report`], which the host
 //! prints ([`Report::to_markdown`]) and saves ([`Report::to_json`]).
 
-mod checks;
+pub mod checks;
 mod compare;
 mod crops;
 mod markdown;
@@ -586,8 +586,16 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let mut phases: Vec<PhaseRun> = Vec::new();
     let mut not_tried: Vec<NotTried> = Vec::new();
     let mut exceeded: Option<String> = None;
-    let import_stats = scene.stats;
     let textures_after_import = cache().0;
+    // What the import alone says, as `crust check` reports it; the baseline
+    // adds its own facts to these below.
+    let import_facts = checks::Facts::from_import(
+        &scene,
+        options.auto_tx,
+        textures_after_import.preloaded,
+        None,
+    );
+    let import_stats = scene.stats;
 
     // -- P1: calibration and the full-frame baseline -----------------------
     let mut lights = scene.lights;
@@ -716,23 +724,17 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     });
     // The findings are assembled when the run ends: the reach comes from
     // tier 3.
+    debug_assert_eq!(import_facts.lights, light_count);
     let mut facts = checks::Facts {
-        lights: light_count,
-        light_selection: authored.light_selection(),
-        auto_tx: options.auto_tx,
-        textures_without_tx: textures_after_import.preloaded,
         texture_lookups: Some(tex_delta),
         ptex_lookups: Some(ptex_delta),
         unlit_emission: unlit,
-        guiding: authored.guiding(),
         indirect_dominant: Some(
             dominant
                 .as_deref()
                 .is_some_and(|d| noise::INDIRECT_ROWS.contains(&d)),
         ),
         peak_mem_bytes: peak_mem,
-        machine_mem_bytes: crate::machine_memory_bytes(),
-        strategy: authored.sampling_strategy(),
         clamp: clamp.as_ref().map(|c| {
             (
                 c.limit.0,
@@ -743,6 +745,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         top_pixels: noise::top_pixels(&rows, film, &p1.buffer, luma),
         spp: spp_p1,
         reach: Vec::new(),
+        ..import_facts
     };
 
     // -- Crops ---------------------------------------------------------------
@@ -1611,6 +1614,30 @@ fn converged(trials: &[Trial], findings: &[Finding]) -> bool {
 
 /// Every setting the diagnosis ran with, by the names that set it.
 fn effective(s: &RenderSettings, options: &Options) -> Vec<Setting> {
+    effective_settings(
+        s,
+        &SceneFlags {
+            subdivision_level: options.subdivision_level,
+            subdivision_edge_length: options.subdivision_edge_length,
+            auto_tx: options.auto_tx,
+        },
+    )
+}
+
+/// The scene-shaping flags a host passed that the settings do not carry:
+/// the import's subdivision choices and `--auto-tx`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SceneFlags {
+    pub subdivision_level: Option<u32>,
+    pub subdivision_edge_length: Option<f32>,
+    pub auto_tx: bool,
+}
+
+/// Every setting a render with `s` and `flags` runs with, each by the
+/// `crust render` flag and the `crust:*` attribute that change it — the
+/// diagnostic's `effective_settings`, and `crust check`'s.
+pub fn effective_settings(s: &RenderSettings, flags: &SceneFlags) -> Vec<Setting> {
+    let options = flags;
     let row = |name: &str, value: String, flag: Option<&str>, attr: Option<&str>| Setting {
         name: name.into(),
         value,

@@ -458,3 +458,60 @@ fn a_string_info_id_is_read() {
     let y = height_at(&scene, 0.5, 0.5).expect("hit");
     assert!((y - 0.1).abs() < 1e-5, "{y}");
 }
+
+/// Counts the WARN events logged while it is the default subscriber.
+struct CountWarnings(Arc<Mutex<usize>>);
+
+impl tracing::Subscriber for CountWarnings {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            *self.0.lock().unwrap() += 1;
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Three meshes displaced at their cage: the warning is logged once, and its
+/// record counts all three, naming each.
+#[test]
+fn displaced_at_cage_logs_once_and_counts_every_mesh() {
+    let material = preview_material("Height", &format!("float {TEXTURED}"));
+    // Distinct points, so no two share one displaced copy; grouped, so the
+    // stage has too few top-level prims to stream.
+    let grounds: String = ["A", "B", "C"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            ground(name, "none", "Height", "").replace("(0, 0, 0)", &format!("({i}, 0, 0)"))
+        })
+        .collect();
+    let body = format!("{material}    def Xform \"Geo\"\n    {{\n{grounds}    }}\n");
+    let assets = RampAssets::default();
+    let logged = Arc::new(Mutex::new(0));
+    let scene = tracing::subscriber::with_default(CountWarnings(logged.clone()), || {
+        load_with("cage_three", &body, 0, &assets)
+    });
+    assert_eq!(scene.stats.displacement.at_cage, 3);
+    assert_eq!(*logged.lock().unwrap(), 1, "one log line");
+    let record = scene
+        .warnings
+        .iter()
+        .find(|w| w.code == crust_core::WarningCode::MeshDisplacedAtCage)
+        .expect("a mesh.displaced_at_cage record");
+    assert_eq!(record.kind, crust_core::WarningKind::Approximated);
+    assert_eq!(record.count, 3);
+    // In the traversal's order, which visits siblings last to first.
+    assert_eq!(
+        record.prims,
+        ["/World/Geo/C", "/World/Geo/B", "/World/Geo/A"]
+    );
+}
