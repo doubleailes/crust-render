@@ -196,7 +196,9 @@ conformance"). They are listed in Known gaps, not silently dropped.
   OpenPBR or MaterialX output). Possible later, through the MaterialX program.
 - An in-process denoiser. OIDN is FFI and `unsafe`, so that is a project
   decision.
-- Display drivers and progressive output.
+- Progressive AOV snapshots and display drivers. A render publishes only its beauty
+  while it runs (`RenderControl`, `rendering/design.md` § Progressive output and
+  cancellation); the AOVs are gathered once, when it returns — cancelled or not.
 - A CLI for adding AOVs without USD. A follow-up could add `--aov name=source`
   that builds the same request.
 

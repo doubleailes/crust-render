@@ -986,7 +986,9 @@ impl AovFilm {
     /// the plain mean where the weights cancel to nothing (see
     /// `PixelState::estimate`). A [`SlotKey::hits_only`] slot divides by
     /// the weight (or count) of its hits instead, and keeps its clear value
-    /// where nothing was hit.
+    /// where nothing was hit. A pixel that took no sample — only a cancelled
+    /// render leaves one — keeps every plane at its clear value, where the
+    /// estimators would divide `0 / 0`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn store(
         &mut self,
@@ -999,6 +1001,14 @@ impl AovFilm {
         variance: f64,
     ) {
         let q = self.rect.index(x, y);
+        if taken == 0 {
+            for slot in &mut self.slots {
+                let comps = slot.key.components();
+                slot.planes.values[q * comps..(q + 1) * comps].fill(slot.key.clear());
+            }
+            // The sample count and the variance planes are created at 0.
+            return;
+        }
         for (slot, src) in self.slots.iter_mut().zip(&unit.planes) {
             let comps = slot.key.components();
             let dst = &mut slot.planes;

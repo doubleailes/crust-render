@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use glam::Vec3A;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
@@ -13,6 +15,7 @@ use crate::stats::RayStats;
 use crate::volume::Volumes;
 use crate::{LightList, LightSelection, PathSampler};
 
+mod control;
 mod path;
 pub(crate) use path::{past_medium_boundaries, surface_visibility};
 mod region;
@@ -21,6 +24,7 @@ mod settings;
 
 use path::{K_CAMERA, K_TIME, PathContext, ray_cones_enabled, trace_path};
 
+pub use control::{RenderControl, RenderOutcome};
 pub use path::{ray_color, ray_color_with_light_samples};
 pub use region::PixelRect;
 pub use settings::{
@@ -31,13 +35,29 @@ pub use settings::{
 pub(crate) use path::PathScratch;
 pub(crate) use route::RouteCtx;
 
-/// Render-progress callback: invoked with `(completed, total)` work units
-/// (scanline rows, or tiles under bucket rendering) as a pass advances.
+/// Render-progress callback: invoked with `(completed, total)` steps as a
+/// pass advances — one per work unit (scanline row, or tile under bucket
+/// rendering) per stage of the first sweep, then one per adaptive round.
 /// Called from worker threads, hence `Sync`, but never concurrently and always
 /// with `completed` increasing by one — a host can show the last value it was
-/// given. Presentation (progress bars,
+/// given. A completed render reaches `total`; a cancelled one stops where it
+/// was. Presentation (progress bars,
 /// logging) is the caller's concern — the engine has no UI dependencies.
 pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
+
+/// What [`Renderer::render_with_control`] returns.
+pub struct Rendered {
+    /// The beauty, over the render's region.
+    pub buffer: Buffer,
+    /// The AOVs, when the call passed a request: an empty film when the
+    /// request needs none, as [`Renderer::render_with_aovs`] returns.
+    pub film: Option<AovFilm>,
+    /// What the integrator did — every sample traced, a cancelled render's
+    /// included.
+    pub rays: RayStats,
+    /// Whether the render completed or was cancelled.
+    pub outcome: RenderOutcome,
+}
 
 /// Per-pass guiding state handed down the integrator.
 struct GuidingContext<'a> {
@@ -67,6 +87,13 @@ struct PassConfig {
     /// The clamp whose effect this pass measures without applying it
     /// ([`Instruments::clamp`]).
     measure_clamp: Option<f32>,
+    /// Sweep to the first check point in stages of 1, 2, 4, … spp
+    /// ([`sweep_stages`]) rather than in one go. Scheduling only: the image
+    /// is bit-identical either way. On for every final pass; off for
+    /// training passes, whose samples must sit contiguously per pixel in
+    /// their unit's buffer, and for the unstaged reference the tests pin
+    /// staging against ([`Instruments::unstaged`]).
+    staged: bool,
 }
 
 /// What a diagnostic render measures beside its image
@@ -87,6 +114,10 @@ pub(crate) struct Instruments {
     /// The render is one of many (the diagnostic's trials): what a render
     /// says once at `INFO` goes to `DEBUG`, so the log stays bounded.
     pub(crate) quiet: bool,
+    /// Sweep the final pass to its first check point in one go, as before
+    /// the sweep was staged: the reference the staged sweep is pinned
+    /// bit-identical against. For tests; no render sets it.
+    pub(crate) unstaged: bool,
 }
 
 /// What [`Instruments::clamp`] measured on the pass it watched.
@@ -119,6 +150,8 @@ pub(crate) struct Measured {
     pub(crate) setup_s: f64,
     /// Wall-clock seconds of the final (or only) pass.
     pub(crate) render_s: f64,
+    /// Whether a [`RenderControl`] cut the render short.
+    pub(crate) outcome: RenderOutcome,
 }
 
 /// Image-quality statistics of one render pass.
@@ -173,6 +206,34 @@ struct PassStats {
     /// Each unit's rectangle and seconds, when the pass was timed.
     tiles: Vec<(PixelRect, f64)>,
     clamp: ClampMeasure,
+    /// Fewest samples any pixel took: the pass's budget (or the adaptive
+    /// minimum) unless it was cut short.
+    min_taken: u32,
+    /// A [`RenderControl`] stopped the pass before every pixel took what it
+    /// was scheduled to.
+    interrupted: bool,
+}
+
+/// A guided render's pass that a [`RenderControl`] cut short: what the end
+/// of the render needs to decide whether it joins the blend (design D6).
+struct PartialPass {
+    buffer: Buffer,
+    film: Option<AovFilm>,
+    variance: f64,
+    var_map: Vec<f64>,
+    min_taken: u32,
+}
+
+impl PartialPass {
+    fn new(buffer: Buffer, film: Option<AovFilm>, stats: PassStats) -> Self {
+        PartialPass {
+            buffer,
+            film,
+            variance: stats.variance,
+            var_map: stats.var_map,
+            min_taken: stats.min_taken,
+        }
+    }
 }
 
 pub struct Renderer {
@@ -260,12 +321,12 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Buffer {
-        self.render_impl(false, None, None, Instruments::default())
+        self.render_impl(false, None, None, Instruments::default(), None)
             .buffer
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
-        self.render_impl(true, None, None, Instruments::default())
+        self.render_impl(true, None, None, Instruments::default(), None)
             .buffer
     }
 
@@ -273,7 +334,7 @@ impl Renderer {
     /// guiding enabled, only the final pass reports (training passes are
     /// silent, as before).
     pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
-        self.render_impl(tiled, Some(progress), None, Instruments::default())
+        self.render_impl(tiled, Some(progress), None, Instruments::default(), None)
             .buffer
     }
 
@@ -285,7 +346,7 @@ impl Renderer {
     /// With guiding enabled the counters cover **every** pass, training
     /// included, since all of them spend time.
     pub fn render_with_stats(&self, tiled: bool, progress: ProgressCallback) -> (Buffer, RayStats) {
-        let m = self.render_impl(tiled, Some(progress), None, Instruments::default());
+        let m = self.render_impl(tiled, Some(progress), None, Instruments::default(), None);
         (m.buffer, m.rays)
     }
 
@@ -307,12 +368,54 @@ impl Renderer {
             Some(progress),
             layout.as_ref(),
             Instruments::default(),
+            None,
         );
         let film = match m.film {
             Some(film) => film,
             None => AovFilm::new(&AovLayout::default(), self.settings.raster_region()),
         };
         (m.buffer, film, m.rays)
+    }
+
+    /// The render a host watches and can stop: as
+    /// [`Renderer::render_with_aovs`] (or [`Renderer::render_with_stats`]
+    /// without a `request`), publishing the beauty into `control` as it
+    /// improves and stopping when `control` is cancelled — see
+    /// [`RenderControl`] for the contract.
+    ///
+    /// A render that completes returns exactly what the other entry points
+    /// return for the same settings, bit for bit. A cancelled one returns the
+    /// image, the AOVs and the counters of the samples it traced, each pixel
+    /// estimated from its own samples, a pixel that took none black (and its
+    /// AOVs at their clear values); a cancelled guided render returns the
+    /// blend of the passes it completed. `progress` reports as it does for
+    /// the other entry points, and stops where the render stopped.
+    pub fn render_with_control(
+        &self,
+        tiled: bool,
+        progress: Option<ProgressCallback>,
+        request: Option<&AovRequest>,
+        control: &RenderControl,
+    ) -> Rendered {
+        let layout = request.and_then(|r| self.layout_for(r));
+        let m = self.render_impl(
+            tiled,
+            progress,
+            layout.as_ref(),
+            Instruments::default(),
+            Some(control),
+        );
+        let film = request.map(|_| {
+            m.film.unwrap_or_else(|| {
+                AovFilm::new(&AovLayout::default(), self.settings.raster_region())
+            })
+        });
+        Rendered {
+            buffer: m.buffer,
+            film,
+            rays: m.rays,
+            outcome: m.outcome,
+        }
     }
 
     /// A tiled render of `request`'s AOVs (none when `None`), with the
@@ -324,7 +427,7 @@ impl Renderer {
         instruments: Instruments,
     ) -> Measured {
         let layout = request.and_then(|r| self.layout_for(r));
-        self.render_impl(true, None, layout.as_ref(), instruments)
+        self.render_impl(true, None, layout.as_ref(), instruments, None)
     }
 
     /// The film layout `request` needs, or `None` when it needs no film (no
@@ -361,11 +464,12 @@ impl Renderer {
         progress: Option<ProgressCallback>,
         layout: Option<&AovLayout>,
         instruments: Instruments,
+        control: Option<&RenderControl>,
     ) -> Measured {
         if self.settings.guiding {
-            return self.render_guided(tiled, progress, layout, instruments);
+            return self.render_guided(tiled, progress, layout, instruments, control);
         }
-        self.render_unguided(tiled, progress, layout, instruments)
+        self.render_unguided(tiled, progress, layout, instruments, control)
     }
 
     /// One final pass, as everything but a guided render is.
@@ -375,11 +479,17 @@ impl Renderer {
         progress: Option<ProgressCallback>,
         layout: Option<&AovLayout>,
         instruments: Instruments,
+        control: Option<&RenderControl>,
     ) -> Measured {
         let start = std::time::Instant::now();
         let cfg = self.final_pass_config(tiled, instruments);
-        let (buffer, film, _, pass) = self.render_pass(cfg, None, progress, layout);
+        let (buffer, film, _, pass) = self.render_pass(cfg, None, progress, layout, control);
         Measured {
+            outcome: if pass.interrupted {
+                RenderOutcome::Cancelled
+            } else {
+                RenderOutcome::Completed
+            },
             buffer,
             film,
             rays: pass.rays,
@@ -421,6 +531,7 @@ impl Renderer {
             measure_clamp: instruments
                 .clamp
                 .filter(|_| self.settings.indirect_clamp.is_none()),
+            staged: !instruments.unstaged,
         }
     }
 
@@ -444,12 +555,21 @@ impl Renderer {
     /// `ΔEff = E_pg+/E_pg− < 1`, guiding costs more than the variance it
     /// removes here, and the final pass renders unguided instead (the
     /// training passes still blend in — they are unbiased either way).
+    ///
+    /// Every pass publishes into `control` as its units finish, so a
+    /// snapshot shows the pass in progress over the previous pass. When the
+    /// control cancels the render, no further pass starts and the guiding
+    /// field is not consulted again: the render returns the blend of the
+    /// passes it completed, plus the interrupted one when every pixel in it
+    /// took at least the two samples its variance needs — or the interrupted
+    /// pass alone when none completed.
     fn render_guided(
         &self,
         tiled: bool,
         progress: Option<ProgressCallback>,
         layout: Option<&AovLayout>,
         instruments: Instruments,
+        control: Option<&RenderControl>,
     ) -> Measured {
         // Every pass costs time, training included, so the counters cover
         // all of them rather than the final pass alone.
@@ -458,7 +578,7 @@ impl Renderer {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                return self.render_unguided(tiled, progress, layout, instruments);
+                return self.render_unguided(tiled, progress, layout, instruments, control);
             }
         };
         // Training time (setup), each pass's variance map when the caller
@@ -485,6 +605,9 @@ impl Renderer {
         let mut passes: Vec<(Buffer, f64)> = Vec::new();
         // Each pass's AOVs, blended with the beauty's own weights at the end.
         let mut films: Vec<AovFilm> = Vec::new();
+        // The pass the control cut short, kept apart from the completed ones
+        // until the end decides whether it joins them.
+        let mut interrupted: Option<PartialPass> = None;
         // (per-pixel variance map, seconds) of the first pass (untrained
         // field → effectively unguided) and of the last training pass
         // (most-trained field) — the two endpoints of the efficiency
@@ -512,18 +635,32 @@ impl Renderer {
                 timed: instruments.tile_times,
                 // The clamp is measured on the final pass alone.
                 measure_clamp: None,
+                // A training pass's samples must sit contiguously per pixel.
+                staged: false,
             };
             let start = std::time::Instant::now();
             let (buffer, film, samples, stats) =
-                self.render_pass(train_cfg, Some(&gctx), None, layout);
-            films.extend(film);
+                self.render_pass(train_cfg, Some(&gctx), None, layout, control);
             rays.merge(&stats.rays);
             add_tiles(&stats.tiles);
             let secs = start.elapsed().as_secs_f64();
             setup_s += secs;
+            if stats.interrupted {
+                // Its samples never reach the field: nothing trained on a
+                // partial pass is consulted.
+                debug!(
+                    "path guiding: training pass {}/{} cancelled at {} spp or more per pixel",
+                    k + 1,
+                    cfg.train_iterations,
+                    stats.min_taken
+                );
+                interrupted = Some(PartialPass::new(buffer, film, stats));
+                break;
+            }
             if instruments.variance {
                 var_maps.push(stats.var_map.clone());
             }
+            films.extend(film);
             debug!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
                 k + 1,
@@ -548,78 +685,138 @@ impl Renderer {
             passes.push((buffer, stats.variance));
         }
 
-        let guide_final = match (&eff_unguided, &eff_guided) {
-            (Some((var_pt, cost_pt)), Some((var_pg, cost_pg))) if *cost_pg > 0.0 => {
-                // Reference image for relative error: the blend of all
-                // training passes — our stand-in for the paper's denoised
-                // accumulated image, and crucially the *same* image for both
-                // sides of the ratio.
-                let ref_lum =
-                    blend_luminance(&passes, self.settings.raster_region(), self.lights.luma());
-                let mrse_pt = mean_relative_error(var_pt, &ref_lum);
-                let mrse_pg = mean_relative_error(var_pg, &ref_lum);
-                if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0 {
-                    let delta_eff = (cost_pt * mrse_pt) / (cost_pg * mrse_pg);
-                    // INFO once per render; DEBUG when the render is one of
-                    // a diagnostic's many.
-                    macro_rules! say {
-                        ($($t:tt)*) => {
-                            if instruments.quiet { debug!($($t)*) } else { info!($($t)*) }
-                        };
-                    }
-                    say!(
-                        "path guiding: estimated efficiency improvement ΔEff = {:.2} (>1 means guiding pays off)",
-                        delta_eff
-                    );
-                    if delta_eff < 1.0 {
+        let mut clamp = ClampMeasure::default();
+        let mut render_s = 0.0;
+        if interrupted.is_none() {
+            let guide_final = match (&eff_unguided, &eff_guided) {
+                (Some((var_pt, cost_pt)), Some((var_pg, cost_pg))) if *cost_pg > 0.0 => {
+                    // Reference image for relative error: the blend of all
+                    // training passes — our stand-in for the paper's denoised
+                    // accumulated image, and crucially the *same* image for both
+                    // sides of the ratio.
+                    let ref_lum =
+                        blend_luminance(&passes, self.settings.raster_region(), self.lights.luma());
+                    let mrse_pt = mean_relative_error(var_pt, &ref_lum);
+                    let mrse_pg = mean_relative_error(var_pg, &ref_lum);
+                    if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0
+                    {
+                        let delta_eff = (cost_pt * mrse_pt) / (cost_pg * mrse_pg);
+                        // INFO once per render; DEBUG when the render is one of
+                        // a diagnostic's many.
+                        macro_rules! say {
+                            ($($t:tt)*) => {
+                                if instruments.quiet { debug!($($t)*) } else { info!($($t)*) }
+                            };
+                        }
                         say!(
-                            "path guiding: ΔEff < 1 — guiding costs more than the variance it removes here; rendering the final pass unguided"
+                            "path guiding: estimated efficiency improvement ΔEff = {:.2} (>1 means guiding pays off)",
+                            delta_eff
                         );
+                        if delta_eff < 1.0 {
+                            say!(
+                                "path guiding: ΔEff < 1 — guiding costs more than the variance it removes here; rendering the final pass unguided"
+                            );
+                        }
+                        delta_eff >= 1.0
+                    } else {
+                        true
                     }
-                    delta_eff >= 1.0
-                } else {
-                    true
                 }
-            }
-            // A single training iteration never runs a guided pass, and
-            // degenerate statistics give no basis to overrule the scene's
-            // explicit opt-in — keep guiding.
-            _ => true,
-        };
+                // A single training iteration never runs a guided pass, and
+                // degenerate statistics give no basis to overrule the scene's
+                // explicit opt-in — keep guiding.
+                _ => true,
+            };
 
-        debug!(
-            "path guiding: final pass at {} spp ({})",
-            self.settings.samples_per_pixel,
-            if guide_final { "guided" } else { "unguided" }
-        );
-        let gctx = GuidingContext {
-            field: &field,
-            training: false,
+            debug!(
+                "path guiding: final pass at {} spp ({})",
+                self.settings.samples_per_pixel,
+                if guide_final { "guided" } else { "unguided" }
+            );
+            let gctx = GuidingContext {
+                field: &field,
+                training: false,
+            };
+            let final_gctx = if guide_final { Some(&gctx) } else { None };
+            let start = std::time::Instant::now();
+            let (final_buffer, final_film, _, final_stats) = self.render_pass(
+                self.final_pass_config(tiled, instruments),
+                final_gctx,
+                progress,
+                layout,
+                control,
+            );
+            render_s = start.elapsed().as_secs_f64();
+            rays.merge(&final_stats.rays);
+            add_tiles(&final_stats.tiles);
+            clamp = final_stats.clamp;
+            if final_stats.interrupted {
+                debug!(
+                    "path guiding: final pass cancelled at {} spp or more per pixel",
+                    final_stats.min_taken
+                );
+                interrupted = Some(PartialPass::new(final_buffer, final_film, final_stats));
+            } else {
+                if instruments.variance {
+                    var_maps.push(final_stats.var_map);
+                }
+                passes.push((final_buffer, final_stats.variance));
+                films.extend(final_film);
+            }
+        }
+
+        let outcome = if interrupted.is_some() {
+            RenderOutcome::Cancelled
+        } else {
+            RenderOutcome::Completed
         };
-        let final_gctx = if guide_final { Some(&gctx) } else { None };
-        let start = std::time::Instant::now();
-        let (final_buffer, final_film, _, final_stats) = self.render_pass(
-            self.final_pass_config(tiled, instruments),
-            final_gctx,
-            progress,
-            layout,
-        );
-        let render_s = start.elapsed().as_secs_f64();
-        rays.merge(&final_stats.rays);
-        add_tiles(&final_stats.tiles);
-        passes.push((final_buffer, final_stats.variance));
-        films.extend(final_film);
+        if let Some(partial) = interrupted {
+            if passes.is_empty() {
+                // Nothing completed: the partial pass is the image, unsampled
+                // pixels black, as an unguided render cancelled as early.
+                debug!("path guiding: no pass completed; returning the interrupted one alone");
+                return Measured {
+                    buffer: partial.buffer,
+                    film: partial.film,
+                    rays,
+                    var_map: if instruments.variance {
+                        partial.var_map
+                    } else {
+                        Vec::new()
+                    },
+                    tiles,
+                    clamp,
+                    setup_s,
+                    render_s,
+                    outcome,
+                };
+            }
+            // A pixel at fewer than two samples has no variance estimate, and
+            // would skew the pass's weight: such a pass is left out.
+            if partial.min_taken >= 2 {
+                if instruments.variance {
+                    var_maps.push(partial.var_map);
+                }
+                passes.push((partial.buffer, partial.variance));
+                films.extend(partial.film);
+            } else {
+                debug!(
+                    "path guiding: the interrupted pass has a pixel below 2 samples; blending \
+                     the {} completed pass(es) alone",
+                    passes.len()
+                );
+            }
+        }
 
         let (weights, total) = blend_weights(&passes);
         // The blend's own variance: Σₖ (wₖ/W)² · varₖ per pixel, for passes
         // that are independent. With nothing weightable the blend is the
-        // final pass, and so is its variance.
+        // last pass, and so is its variance.
         let var_map = if !instruments.variance {
             Vec::new()
         } else if total <= 0.0 {
-            final_stats.var_map
+            var_maps.pop().unwrap_or_default()
         } else {
-            var_maps.push(final_stats.var_map);
             let mut out = vec![0.0f64; var_maps[0].len()];
             for (map, w) in var_maps.iter().zip(&weights) {
                 let share = (w / total) * (w / total);
@@ -644,9 +841,10 @@ impl Renderer {
             rays,
             var_map,
             tiles,
-            clamp: final_stats.clamp,
+            clamp,
             setup_s,
             render_s,
+            outcome,
         }
     }
 
@@ -689,24 +887,32 @@ impl Renderer {
     ///
     /// The work unit is a 16×16 tile or a region-wide row; the two differ in
     /// nothing but the tile list, and a render mode is scheduling only. A
-    /// non-adaptive (training) pass is one sweep of every unit to `spp`. An
-    /// adaptive pass first sweeps every pixel to the first check point, then
-    /// runs **rounds** over a region-sized convergence-index buffer: each
-    /// round freezes every pixel's index and whether it is still sampling,
-    /// decides against that frozen buffer which pixels stop (their own
-    /// test, and the cross-neighbour rule of [`held_by_neighbour`]), then
-    /// traces the next batch of samples ([`batch_schedule`]) for the pixels
-    /// still active. Nothing writes the buffer while a decision reads it,
-    /// so no decision depends on the order the units run in, and tiles and
-    /// scanlines stay bit-identical with the comparison on. Each pixel
-    /// draws the same sample indices, and checks at the same `taken`
-    /// values, as it would if it ran alone.
+    /// non-adaptive pass sweeps every unit to `spp`; an adaptive pass first
+    /// sweeps every pixel to the first check point, then runs **rounds**
+    /// over a region-sized convergence-index buffer: each round freezes
+    /// every pixel's index and whether it is still sampling, decides against
+    /// that frozen buffer which pixels stop (their own test, and the
+    /// cross-neighbour rule of [`held_by_neighbour`]), then traces the next
+    /// batch of samples ([`batch_schedule`]) for the pixels still active.
+    /// Nothing writes the buffer while a decision reads it, so no decision
+    /// depends on the order the units run in, and tiles and scanlines stay
+    /// bit-identical with the comparison on. A final pass sweeps in stages
+    /// ([`PassConfig::staged`]): every unit to 1 spp, then 2, 4, …, then the
+    /// sweep's end, with the convergence test run only after the last — so
+    /// staging is scheduling too. Each pixel draws the same sample indices,
+    /// and checks at the same `taken` values, as it would if it ran alone.
+    ///
+    /// With a `control`, each unit publishes its pixels' estimates as it
+    /// finishes a stage or a round, and every pixel's advance first checks
+    /// whether the control was cancelled: a cancelled pass stops scheduling,
+    /// and gathers what its units hold.
     fn render_pass(
         &self,
         cfg: PassConfig,
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
         layout: Option<&AovLayout>,
+        control: Option<&RenderControl>,
     ) -> (Buffer, Option<AovFilm>, PassSamples, PassStats) {
         let (w, h) = (self.settings.width, self.settings.height);
         // The pixels this pass traces, in raster space (rows bottom-up, as
@@ -745,6 +951,12 @@ impl Renderer {
         } else {
             cfg.spp
         };
+        // The first sweep's stages: every unit is taken to each in turn.
+        let stages = if cfg.staged {
+            sweep_stages(sweep_to)
+        } else {
+            vec![sweep_to]
+        };
         // Rounds: one decision plus one batch each, until the budget is
         // spent. None when adaptive sampling is off or never gets to check.
         let schedule = if adaptive {
@@ -759,8 +971,9 @@ impl Renderer {
         // block costs nothing an integrator would notice.
         let pass_start = std::time::Instant::now();
         debug!(
-            "pass: {} spp, seed {}, {}, adaptive {} (min {} spp, variance threshold {}, \
-             neighbour tolerance {}, {} rounds), filter {} radius {}, strategy {:?}, guiding {}",
+            "pass: {} spp, seed {}, {}, {} sweep stage(s), adaptive {} (min {} spp, variance \
+             threshold {}, neighbour tolerance {}, {} rounds), filter {} radius {}, strategy {:?}, \
+             guiding {}",
             cfg.spp,
             cfg.seed,
             if cfg.tiled {
@@ -768,6 +981,7 @@ impl Renderer {
             } else {
                 "scanlines"
             },
+            stages.len(),
             cfg.adaptive,
             min_spp,
             self.settings.variance_threshold,
@@ -792,11 +1006,11 @@ impl Renderer {
             .into_iter()
             .map(|tile| Unit::new(tile, layout, cam, cfg.measure_clamp.is_some()))
             .collect();
-        let total = units.len() as u64 + rounds as u64;
+        let total = units.len() as u64 * stages.len() as u64 + rounds as u64;
         // Incremented and reported under one lock, so the callback sees
         // completions in increasing order even though units finish on many
-        // threads at once (see `ProgressCallback`). Taken once per unit,
-        // which no render will notice.
+        // threads at once (see `ProgressCallback`). Taken once per unit per
+        // stage, which no render will notice.
         let done = std::sync::Mutex::new(0u64);
         let report = |n: &mut u64| {
             *n += 1;
@@ -812,47 +1026,95 @@ impl Renderer {
             s.motion = motion_aov;
             s
         };
+        // Read before every pixel's advance (one relaxed load; nothing at
+        // all without a control), so a cancelled render waits only for the
+        // advances already in flight, not for a unit — a row, under
+        // `--scanline` — or a round.
+        let cancelled = || control.is_some_and(RenderControl::is_cancelled);
+        // Set when a unit skipped a pixel, or the schedule a stage or a
+        // round, because of a cancel: the pass is then incomplete.
+        let interrupted = AtomicBool::new(false);
+        // A unit's estimates into the control's display, once per unit per
+        // stage or round in which it traced anything — unless the control
+        // takes no snapshots.
+        let display = control.filter(|c| c.takes_snapshots());
+        let publish = |unit: &Unit| {
+            if let Some(control) = display {
+                control.publish(w, h, rect, |display| {
+                    unit.for_each_pixel_ref(|i, j, st| display.set_pixel(i, j, st.estimate().0));
+                });
+            }
+        };
 
         // First sweep: every pixel to the first check point (or to the
-        // budget). The path scratch is held per rayon worker rather than
-        // per unit; one buffer serves every sample of every pixel it sees.
-        units
-            .par_iter_mut()
-            .for_each_init(scratch, |scratch, unit| {
-                // Per unit, and only when the pass is timed.
-                let started = cfg.timed.then(std::time::Instant::now);
-                // Stamped once per `AOV` and chosen per unit, not per pixel:
-                // a per-pixel branch on the film cost the beauty-only render
-                // 0.02% of its instructions (callgrind, cornellbox at 2 spp).
-                macro_rules! sweep {
-                    ($aov:literal) => {
-                        unit.for_each_pixel(|i, j, p, work, st| {
-                            self.advance::<$aov>(
-                                profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
-                                sweep_to,
-                            );
-                            st.finish_round(cfg.spp, threshold);
-                        })
-                    };
-                }
-                if aov {
-                    sweep!(true)
-                } else {
-                    sweep!(false)
-                }
-                if let Some(t) = started {
-                    unit.work.secs += t.elapsed().as_secs_f64();
-                }
-                // Once per unit, and a no-op unless `--profile` is on.
-                profile::flush();
-                report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
-            });
+        // budget), stage by stage. The path scratch is held per rayon worker
+        // rather than per unit; one buffer serves every sample of every
+        // pixel it sees.
+        let last_stage = stages.len() - 1;
+        for (s, &target) in stages.iter().enumerate() {
+            if cancelled() {
+                interrupted.store(true, Ordering::Relaxed);
+                break;
+            }
+            // The convergence test runs once, after the last stage: at the
+            // `taken` an unstaged sweep tests at.
+            let finish = s == last_stage;
+            units
+                .par_iter_mut()
+                .for_each_init(scratch, |scratch, unit| {
+                    // Per unit, and only when the pass is timed.
+                    let started = cfg.timed.then(std::time::Instant::now);
+                    let (mut traced, mut skipped) = (false, false);
+                    // Stamped once per `AOV` and chosen per unit, not per pixel:
+                    // a per-pixel branch on the film cost the beauty-only render
+                    // 0.02% of its instructions (callgrind, cornellbox at 2 spp).
+                    macro_rules! sweep {
+                        ($aov:literal) => {
+                            unit.for_each_pixel(|i, j, p, work, st| {
+                                if cancelled() {
+                                    skipped = true;
+                                    return;
+                                }
+                                self.advance::<$aov>(
+                                    profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
+                                    target,
+                                );
+                                if finish {
+                                    st.finish_round(cfg.spp, threshold);
+                                }
+                                traced = true;
+                            })
+                        };
+                    }
+                    if aov {
+                        sweep!(true)
+                    } else {
+                        sweep!(false)
+                    }
+                    if let Some(t) = started {
+                        unit.work.secs += t.elapsed().as_secs_f64();
+                    }
+                    // Once per unit, and a no-op unless `--profile` is on.
+                    profile::flush();
+                    if traced {
+                        publish(unit);
+                    }
+                    if skipped {
+                        interrupted.store(true, Ordering::Relaxed);
+                    } else {
+                        report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
+                    }
+                });
+        }
 
         // The frozen buffers the decisions read: every pixel's index and
         // whether it is still sampling, in image order.
         let mut index = vec![f32::INFINITY; rect.area()];
         let mut active = vec![false; rect.area()];
         for &target in &schedule {
+            if interrupted.load(Ordering::Relaxed) {
+                break;
+            }
             let mut any_active = false;
             for unit in &units {
                 unit.for_each_pixel_ref(|i, j, st| {
@@ -864,16 +1126,25 @@ impl Renderer {
             if !any_active {
                 break;
             }
+            if cancelled() {
+                interrupted.store(true, Ordering::Relaxed);
+                break;
+            }
             let (index, active) = (&index, &active);
             units
                 .par_iter_mut()
                 .for_each_init(scratch, |scratch, unit| {
                     let started = cfg.timed.then(std::time::Instant::now);
+                    let (mut traced, mut skipped) = (false, false);
                     // Per unit, as in the first sweep.
                     macro_rules! round {
                         ($aov:literal) => {
                             unit.for_each_pixel(|i, j, p, work, st| {
                                 if st.stopped {
+                                    return;
+                                }
+                                if cancelled() {
+                                    skipped = true;
                                     return;
                                 }
                                 // The stop rule: past the minimum (always, by
@@ -892,6 +1163,7 @@ impl Renderer {
                                     target,
                                 );
                                 st.finish_round(cfg.spp, threshold);
+                                traced = true;
                             })
                         };
                     }
@@ -904,12 +1176,21 @@ impl Renderer {
                         unit.work.secs += t.elapsed().as_secs_f64();
                     }
                     profile::flush();
+                    if traced {
+                        publish(unit);
+                    }
+                    if skipped {
+                        interrupted.store(true, Ordering::Relaxed);
+                    }
                 });
-            report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
+            if !interrupted.load(Ordering::Relaxed) {
+                report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
+            }
         }
         // An early finish still walks the callback to the total, one step at
-        // a time, as the contract says.
-        {
+        // a time, as the contract says; a cancelled pass stops where it was.
+        let interrupted = interrupted.into_inner();
+        if !interrupted {
             let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
             while *n < total {
                 report(&mut n);
@@ -955,6 +1236,7 @@ impl Renderer {
             .max(1);
         let mut clamp = ClampMeasure::default();
         let mut tile_times = Vec::new();
+        let mut min_taken = u32::MAX;
         for unit in &units {
             rays.merge(&unit.work.rays);
             if cfg.timed {
@@ -971,8 +1253,11 @@ impl Renderer {
             for (st, &removed) in unit.pixels.iter().zip(&unit.work.clamp) {
                 let removed = if st.weight_sum > 0.0 {
                     removed / st.weight_sum
-                } else {
+                } else if st.taken > 0 {
                     removed / st.taken as f32
+                } else {
+                    // Not sampled: a cancelled pass's.
+                    0.0
                 };
                 clamp.pixels += 1;
                 if removed != 0.0 {
@@ -993,12 +1278,17 @@ impl Renderer {
                         let st = &unit.pixels[p];
                         let (color, var) = st.estimate();
                         buffer.set_pixel(i, j, color);
+                        min_taken = min_taken.min(st.taken);
                         var_map[rect.index(i, j)] = var;
                         variance_sum += var;
                         if cfg.adaptive {
                             rays.adaptive_pixels += 1;
                             rays.adaptive_samples += st.taken as u64;
-                            if st.taken < cfg.spp {
+                            // Stopped by the adaptive rule short of the
+                            // budget. Every pixel of a completed pass ends
+                            // stopped; a cancelled pass's unfinished pixels
+                            // did not stop, they were left.
+                            if st.stopped && st.taken < cfg.spp {
                                 rays.early_stopped += 1;
                             }
                             if st.held {
@@ -1059,6 +1349,8 @@ impl Renderer {
                 rays,
                 tiles: tile_times,
                 clamp,
+                min_taken,
+                interrupted,
             },
         )
     }
@@ -1174,7 +1466,6 @@ impl Renderer {
             measure_clamp: PROFILE && cfg.measure_clamp.is_some(),
         };
         let measuring = PROFILE && cfg.measure_clamp.is_some();
-        let mut removed = 0.0f32;
         for sample in state.taken..target {
             let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);
             let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
@@ -1234,18 +1525,19 @@ impl Renderer {
             }
             if measuring {
                 // What `trace_path` found the clamp would remove from this
-                // sample, weighted as the sample is.
+                // sample, weighted as the sample is. Summed per sample, in
+                // sample order, so the total is the same however the pixel's
+                // samples were split into stages and rounds.
                 let r = std::mem::take(&mut scratch.clamp_removed);
-                removed += self.lights.luma().of(r) * (wx * wy);
+                if let Some(c) = unit.clamp.get_mut(p) {
+                    *c += self.lights.luma().of(r) * (wx * wy);
+                }
             }
             state.sum += color;
             state.weight_sum += wx * wy;
             let lum = self.lights.luma().of(color) as f64;
             state.lum_sum += lum;
             state.lum_sq += lum * lum;
-        }
-        if measuring && let Some(c) = unit.clamp.get_mut(p) {
-            *c += removed;
         }
         state.taken = target;
         state.samples_end = unit.samples.len() as u32;
@@ -1345,8 +1637,13 @@ impl PixelState {
         self.index = (rel / threshold) as f32;
     }
 
-    /// The pixel's colour and the variance of its mean luminance.
+    /// The pixel's colour and the variance of its mean luminance. A pixel
+    /// that took no sample — only a cancelled render leaves one — is black,
+    /// with no variance, rather than the NaN of `0 / 0`.
     fn estimate(&self) -> (Vec3A, f64) {
+        if self.taken == 0 {
+            return (Vec3A::ZERO, 0.0);
+        }
         let variance = self.var_of_mean();
         // Weighted-average film estimator. A Mitchell pixel whose few
         // samples all landed on negative lobes could zero the denominator;
@@ -1395,6 +1692,22 @@ pub(crate) fn adaptive_check_points(spp: u32, authored_min: u32) -> (u32, u32) {
 /// has a round. What `crust diff`'s comparability reads off two stamps.
 pub(crate) fn samples_adaptively(spp: u32, authored_min: u32, threshold: f32) -> bool {
     threshold > 0.0 && adaptive_check_points(spp, authored_min).1 < spp
+}
+
+/// The stages of a final pass's first sweep (design D1): 1, 2, 4, … spp
+/// below `sweep_to`, then `sweep_to` itself. Every unit is taken to each
+/// stage before any goes on to the next, so a watcher sees the whole region
+/// at 1 spp first and the image sharpen from there. Never empty: a sweep to
+/// 1 (or 0) is the one stage.
+fn sweep_stages(sweep_to: u32) -> Vec<u32> {
+    let mut stages = Vec::new();
+    let mut stage = 1u32;
+    while stage < sweep_to {
+        stages.push(stage);
+        stage = stage.saturating_mul(2);
+    }
+    stages.push(sweep_to);
+    stages
 }
 
 fn batch_schedule(spp: u32, first_check: u32) -> Vec<u32> {

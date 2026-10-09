@@ -836,3 +836,498 @@ fn the_tile_timer_times_every_unit_when_asked() {
     assert_eq!(m.var_map.len(), 800);
     assert!(m.render_s > 0.0 && m.setup_s == 0.0);
 }
+
+/// The first sweep's stages (design D1) double from 1 up to the sweep's end,
+/// which they always include, and never overflow.
+#[test]
+fn sweep_stages_double_up_to_the_sweep_end() {
+    use super::sweep_stages;
+    // The adaptive default: the first check at 32.
+    assert_eq!(sweep_stages(32), vec![1, 2, 4, 8, 16, 32]);
+    // Adaptive sampling off at 100 spp: the budget is the last stage.
+    assert_eq!(sweep_stages(100), vec![1, 2, 4, 8, 16, 32, 64, 100]);
+    assert_eq!(sweep_stages(3), vec![1, 2, 3]);
+    assert_eq!(sweep_stages(1), vec![1]);
+    let s = sweep_stages(u32::MAX);
+    assert_eq!(s.len(), 33);
+    assert_eq!(s.last(), Some(&u32::MAX));
+    assert!(s.windows(2).all(|w| w[0] < w[1]), "strictly increasing");
+}
+
+/// A pixel that took no sample (only a cancelled render leaves one) is black
+/// with no variance, never the NaN of `0 / 0`.
+#[test]
+fn a_pixel_with_no_sample_estimates_to_zero() {
+    let (color, variance) = super::PixelState::new().estimate();
+    assert_eq!(color, glam::Vec3A::ZERO);
+    assert_eq!(variance, 0.0);
+}
+
+/// An AOV request over every kind of plane: the beauty with its alpha, a
+/// closest depth (cleared to `+inf`), a filtered one (averaged over hits
+/// only), the normal, a light path expression, the sample count and the
+/// variance.
+fn every_kind_of_aov() -> crate::AovRequest {
+    use crate::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
+    let var = |name: &str, source: AovSource| AovVar {
+        prim_path: format!("/Render/Vars/{name}"),
+        name: name.to_owned(),
+        channel_prefix: None,
+        source,
+        components: source.components(),
+        precision: Precision::Float,
+        accumulation: source.default_accumulation(),
+        clear: source.default_clear(),
+        expression: None,
+        raw: false,
+        variance: false,
+    };
+    let mut beauty = var("beauty", AovSource::Color);
+    beauty.components = 4;
+    let mut filtered_depth = var("depth_filtered", AovSource::Depth);
+    filtered_depth.accumulation = Accumulation::Filtered;
+    let mut diffuse = var("diffuse", AovSource::Lpe);
+    diffuse.expression = Some("C<RD>[LO]".into());
+    AovRequest {
+        products: vec![AovProduct {
+            prim_path: "/Render/p".into(),
+            name: "p.exr".into(),
+            vars: vec![
+                beauty,
+                var("depth", AovSource::Depth),
+                filtered_depth,
+                var("N", AovSource::Normal),
+                diffuse,
+                var("sampleCount", AovSource::SampleCount),
+                var("variance", AovSource::Variance),
+            ],
+            attributes: Vec::new(),
+        }],
+    }
+}
+
+/// Every plane `request` writes from `film`, as bits, in request order.
+fn film_bits(
+    request: &crate::AovRequest,
+    film: &crate::AovFilm,
+    beauty: &crate::Buffer,
+) -> Vec<Vec<u32>> {
+    request
+        .products
+        .iter()
+        .flat_map(|p| &p.vars)
+        .flat_map(|v| film.var_channels(beauty, v))
+        .map(|plane| plane.iter().map(|x| x.to_bits()).collect())
+        .collect()
+}
+
+/// Cornellbox at a small resolution and `spp`, for the render-control
+/// tests below: 48×32 is six 16×16 tiles.
+fn small_cornell(spp: u32) -> crate::Renderer {
+    let scene = sample_scene("cornellbox.usda");
+    let s = scene
+        .settings
+        .with_resolution(48, 32)
+        .with_samples_per_pixel(spp);
+    crate::Renderer::new(scene.camera, scene.world, scene.lights, s)
+}
+
+/// Staging is scheduling only (design D1): a staged final pass renders the
+/// image, every AOV plane and every counter of the same pass swept in one
+/// go, bit for bit, under tiles and scanlines alike — adaptive, adaptive
+/// sampling off, with AOVs, and guided.
+#[test]
+fn a_staged_sweep_renders_the_unstaged_one_bit_for_bit() {
+    use super::Instruments;
+    use crate::Renderer;
+    let cornell = |settings: fn(super::RenderSettings) -> super::RenderSettings| {
+        let scene = sample_scene("cornellbox.usda");
+        let s = settings(scene.settings.with_resolution(48, 32));
+        Renderer::new(scene.camera, scene.world, scene.lights, s)
+    };
+    let aovs = every_kind_of_aov();
+    let cases: Vec<(&str, Renderer, Option<&crate::AovRequest>)> = vec![
+        // The first check at 32 (stages 1 … 32), then rounds to 64, with a
+        // threshold loose enough that pixels do stop early.
+        (
+            "adaptive",
+            cornell(|s| s.with_samples_per_pixel(64).with_adaptive_sampling(32, 0.2)),
+            None,
+        ),
+        // Stages 1 … 16, then 24: the budget.
+        (
+            "non-adaptive",
+            cornell(|s| s.with_samples_per_pixel(24).with_adaptive_sampling(32, 0.0)),
+            None,
+        ),
+        (
+            "AOVs",
+            cornell(|s| s.with_samples_per_pixel(40).with_adaptive_sampling(16, 0.2)),
+            Some(&aovs),
+        ),
+        // One training iteration: with more, whether the final pass is
+        // guided follows a ΔEff measured in wall-clock time.
+        (
+            "guided",
+            cornell(|s| {
+                s.with_samples_per_pixel(40)
+                    .with_adaptive_sampling(16, 0.2)
+                    .with_guiding(true, 1, 0.5)
+            }),
+            Some(&aovs),
+        ),
+    ];
+    for (name, r, request) in &cases {
+        let render = |tiled: bool, unstaged: bool| {
+            let layout = request.and_then(|q| r.layout_for(q));
+            let instruments = Instruments {
+                unstaged,
+                ..Instruments::default()
+            };
+            let m = r.render_impl(tiled, None, layout.as_ref(), instruments, None);
+            let planes = match (request, &m.film) {
+                (Some(q), Some(film)) => film_bits(q, film, &m.buffer),
+                _ => Vec::new(),
+            };
+            (bits(&m.buffer), planes, m.rays)
+        };
+        let reference = render(true, true);
+        assert!(!reference.0.is_empty());
+        if request.is_some() {
+            assert!(!reference.1.is_empty(), "{name}: no AOV planes");
+        }
+        if *name == "adaptive" {
+            assert!(reference.2.early_stopped > 0, "{name}: {:?}", reference.2);
+        }
+        for (tiled, unstaged) in [(true, false), (false, true), (false, false)] {
+            let (image, planes, rays) = render(tiled, unstaged);
+            let case = format!("{name}, tiled {tiled}, unstaged {unstaged}");
+            assert!(image == reference.0, "{case}: the image differs");
+            assert_eq!(planes.len(), reference.1.len(), "{case}");
+            for (k, (a, b)) in planes.iter().zip(&reference.1).enumerate() {
+                assert!(a == b, "{case}: AOV plane {k} differs");
+            }
+            assert_eq!(rays, reference.2, "{case}: the counters differ");
+        }
+    }
+}
+
+/// The control's last snapshot of an unguided render that completed is the
+/// image the render returned, bit for bit, at the control's generation —
+/// and that image is the one a render without a control returns. Before
+/// the render there is no snapshot.
+#[test]
+fn the_last_snapshot_is_the_returned_image() {
+    use crate::{RenderControl, RenderOutcome};
+    let r = small_cornell(64);
+    for tiled in [true, false] {
+        let control = RenderControl::new();
+        assert!(control.snapshot().is_none());
+        assert_eq!(control.generation(), 0);
+        let out = r.render_with_control(tiled, None, None, &control);
+        assert_eq!(out.outcome, RenderOutcome::Completed);
+        assert!(out.film.is_none(), "no request, no film");
+        let (generation, snapshot) = control.snapshot().expect("the render published");
+        assert_eq!(generation, control.generation());
+        // At least once per unit per stage (1 … 32): 6 tiles, or 32 rows.
+        let units = if tiled { 6 } else { 32 };
+        assert!(generation >= units * 6, "tiled {tiled}: {generation}");
+        assert!(
+            bits(&snapshot) == bits(&out.buffer),
+            "tiled {tiled}: the snapshot is not the image"
+        );
+        let (plain, rays) = r.render_with_stats(tiled, &|_, _| {});
+        assert!(bits(&plain) == bits(&out.buffer), "tiled {tiled}");
+        assert_eq!(rays, out.rays);
+    }
+}
+
+/// Snapshots read from another thread while the render runs only move
+/// forward: each new generation is above the last one read, and no
+/// snapshot holds a NaN (unsampled pixels read as zero).
+#[test]
+fn snapshots_read_from_another_thread_only_move_forward() {
+    use crate::{RenderControl, RenderOutcome};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let r = small_cornell(256);
+    let control = RenderControl::new();
+    let done = AtomicBool::new(false);
+    let (outcome, reads) = std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            let mut reads: Vec<u64> = Vec::new();
+            while !done.load(Ordering::SeqCst) {
+                if let Some((generation, image)) = control.snapshot() {
+                    assert!(
+                        bits(&image).iter().all(|&b| !f32::from_bits(b).is_nan()),
+                        "a NaN at generation {generation}"
+                    );
+                    if reads.last() != Some(&generation) {
+                        reads.push(generation);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            reads
+        });
+        let out = r.render_with_control(true, None, None, &control);
+        done.store(true, Ordering::SeqCst);
+        (out.outcome, reader.join().expect("the reader"))
+    });
+    assert_eq!(outcome, RenderOutcome::Completed);
+    assert!(reads.len() >= 2, "{reads:?}");
+    assert!(reads.windows(2).all(|w| w[0] < w[1]), "{reads:?}");
+}
+
+/// A control cancelled before the render is called stops it before any
+/// sample: the image is black, every AOV holds its clear value, and the
+/// counters are zero — guided or not.
+#[test]
+fn a_render_cancelled_before_it_starts_traces_nothing() {
+    use crate::{AovSource, RenderControl, RenderOutcome};
+    let request = every_kind_of_aov();
+    for guided in [false, true] {
+        let scene = sample_scene("cornellbox.usda");
+        let s = scene
+            .settings
+            .with_resolution(40, 20)
+            .with_samples_per_pixel(64)
+            .with_guiding(guided, 3, 0.5);
+        let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
+        let control = RenderControl::new();
+        control.cancel();
+        let out = r.render_with_control(true, None, Some(&request), &control);
+        assert_eq!(out.outcome, RenderOutcome::Cancelled, "guided {guided}");
+        assert_eq!(out.rays.camera_rays, 0, "guided {guided}");
+        assert!(bits(&out.buffer).iter().all(|&b| b == 0), "guided {guided}");
+        let film = out.film.expect("a request gives a film");
+        for var in request.products.iter().flat_map(|p| &p.vars) {
+            let clear = match var.source {
+                AovSource::Color | AovSource::SampleCount | AovSource::Variance => 0.0,
+                _ => var.clear,
+            };
+            for plane in film.var_channels(&out.buffer, var) {
+                assert!(
+                    plane.iter().all(|v| v.to_bits() == clear.to_bits()),
+                    "guided {guided}: {} is not at its clear value {clear}",
+                    var.name
+                );
+            }
+        }
+        assert!(control.is_cancelled(), "cancel is sticky");
+    }
+}
+
+/// Cancelled from another thread mid-render, a render returns promptly with
+/// what it traced: no NaN anywhere, the counters exactly the samples its
+/// pixels took, and the progress left where it stopped.
+#[test]
+fn a_render_cancelled_mid_way_returns_promptly_with_what_it_traced() {
+    use crate::{RenderControl, RenderOutcome};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+    // Minutes in a debug build, were it not cancelled.
+    let r = small_cornell(4096);
+    let request = every_kind_of_aov();
+    for tiled in [true, false] {
+        let control = RenderControl::new();
+        let (last, total) = (AtomicU64::new(0), AtomicU64::new(0));
+        let progress = |n: u64, all: u64| {
+            last.store(n, Ordering::SeqCst);
+            total.store(all, Ordering::SeqCst);
+        };
+        let (out, latency) = std::thread::scope(|s| {
+            let canceller = s.spawn(|| {
+                while control.generation() < 4 {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                control.cancel();
+                Instant::now()
+            });
+            let out = r.render_with_control(tiled, Some(&progress), Some(&request), &control);
+            let returned = Instant::now();
+            let cancelled = canceller.join().expect("the canceller");
+            (out, returned.saturating_duration_since(cancelled))
+        });
+        assert_eq!(out.outcome, RenderOutcome::Cancelled, "tiled {tiled}");
+        assert!(
+            latency < Duration::from_secs(10),
+            "tiled {tiled}: {latency:?}"
+        );
+        assert!(
+            bits(&out.buffer)
+                .iter()
+                .all(|&b| !f32::from_bits(b).is_nan()),
+            "tiled {tiled}: a NaN in the image"
+        );
+        let film = out.film.expect("a request gives a film");
+        for plane in film_bits(&request, &film, &out.buffer) {
+            assert!(
+                plane.iter().all(|&b| !f32::from_bits(b).is_nan()),
+                "tiled {tiled}: a NaN in an AOV"
+            );
+        }
+        let rays = out.rays;
+        assert!(rays.camera_rays > 0, "tiled {tiled}");
+        assert_eq!(rays.camera_rays, rays.adaptive_samples, "tiled {tiled}");
+        assert!(rays.spp_max < 4096, "tiled {tiled}: {rays:?}");
+        let (last, total) = (last.load(Ordering::SeqCst), total.load(Ordering::SeqCst));
+        assert!(
+            last < total,
+            "tiled {tiled}: progress walked to {last}/{total}"
+        );
+    }
+}
+
+/// Cancelled once its 4 spp stage is done, a render holds exactly that stage
+/// in every pixel: the same image, AOVs and counters as a render of 4 spp
+/// (whose first check point is past its budget), since each pixel is
+/// estimated from its own samples alone.
+#[test]
+fn a_render_cancelled_after_a_stage_is_that_stage_everywhere() {
+    use crate::{RenderControl, RenderOutcome};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let request = every_kind_of_aov();
+    let r = small_cornell(256);
+    let control = RenderControl::new();
+    let last = AtomicU64::new(0);
+    // Six tiles a stage: the third stage (4 spp) ends at report 18.
+    let progress = |n: u64, _: u64| {
+        last.store(n, Ordering::SeqCst);
+        if n == 18 {
+            control.cancel();
+        }
+    };
+    let out = r.render_with_control(true, Some(&progress), Some(&request), &control);
+    assert_eq!(out.outcome, RenderOutcome::Cancelled);
+    assert_eq!(last.load(Ordering::SeqCst), 18, "not walked to the total");
+    assert_eq!((out.rays.spp_min, out.rays.spp_max), (4, 4));
+    assert_eq!(out.rays.camera_rays, 48 * 32 * 4);
+    let four = small_cornell(4);
+    let (image, film, rays) = four.render_with_aovs(true, &|_, _| {}, &request);
+    assert!(
+        bits(&out.buffer) == bits(&image),
+        "the image is not the 4 spp one"
+    );
+    let partial = out.film.expect("a request gives a film");
+    assert!(film_bits(&request, &partial, &out.buffer) == film_bits(&request, &film, &image));
+    assert_eq!(out.rays, rays);
+}
+
+/// A guided render cancelled in its final pass blends what it can weigh
+/// (design D6): the partial final pass joins the training passes once every
+/// pixel in it has two samples or more; before that it is left out, so
+/// wherever its 1 spp stage was cut, the image is the training passes'
+/// blend alone.
+#[test]
+fn a_guided_render_cancelled_in_its_final_pass_blends_what_it_can_weigh() {
+    use crate::{RenderControl, RenderOutcome};
+    let request = every_kind_of_aov();
+    let scene = sample_scene("cornellbox.usda");
+    let s = scene
+        .settings
+        .with_resolution(48, 32)
+        .with_samples_per_pixel(64)
+        .with_guiding(true, 3, 0.5);
+    let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
+    // Only the final pass reports progress: six tiles a stage.
+    let render = |cancel_at: u64| {
+        let control = RenderControl::new();
+        let progress = |n: u64, _: u64| {
+            if n == cancel_at {
+                control.cancel();
+            }
+        };
+        let out = r.render_with_control(true, Some(&progress), Some(&request), &control);
+        assert_eq!(out.outcome, RenderOutcome::Cancelled, "at {cancel_at}");
+        let film = out.film.as_ref().expect("a request gives a film");
+        let planes = film_bits(&request, film, &out.buffer);
+        let image = bits(&out.buffer);
+        for b in image.iter().chain(planes.iter().flatten()) {
+            assert!(
+                !f32::from_bits(*b).is_nan(),
+                "a NaN, cancelled at {cancel_at}"
+            );
+        }
+        (image, planes, out.rays)
+    };
+    let after_four = render(18);
+    let after_one = render(6);
+    let within_one = render(1);
+    // The final pass's own counters (training passes count no spp).
+    assert_eq!((after_four.2.spp_min, after_four.2.spp_max), (4, 4));
+    assert_eq!((after_one.2.spp_min, after_one.2.spp_max), (1, 1));
+    assert!(after_one.0 == within_one.0, "the training blend moved");
+    assert!(after_one.1 == within_one.1, "the training AOV blend moved");
+    assert!(
+        after_four.0 != after_one.0,
+        "the 4 spp final pass did not join"
+    );
+}
+
+/// A guided render cancelled in its first training pass returns that partial
+/// pass alone: the pixels it sampled (two samples each) and black elsewhere,
+/// no NaN anywhere.
+#[test]
+fn a_guided_render_cancelled_in_its_first_training_pass_returns_it_alone() {
+    use crate::{RenderControl, RenderOutcome};
+    let (w, h) = (160usize, 120usize);
+    let request = every_kind_of_aov();
+    let scene = sample_scene("cornellbox.usda");
+    let s = scene
+        .settings
+        .with_resolution(w, h)
+        .with_samples_per_pixel(64)
+        .with_guiding(true, 3, 0.5);
+    let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
+    let control = RenderControl::new();
+    // Rows, cancelled as soon as the first one has published: the pass's
+    // other 119 rows are still to come.
+    let out = std::thread::scope(|s| {
+        s.spawn(|| {
+            while control.generation() == 0 {
+                std::thread::yield_now();
+            }
+            control.cancel();
+        });
+        r.render_with_control(false, None, Some(&request), &control)
+    });
+    assert_eq!(out.outcome, RenderOutcome::Cancelled);
+    let traced = out.rays.camera_rays;
+    assert!(
+        traced > 0 && traced < (w * h * 2) as u64,
+        "not cut inside the first training pass: {traced} camera rays"
+    );
+    let image = bits(&out.buffer);
+    assert!(image.iter().all(|&b| !f32::from_bits(b).is_nan()));
+    let film = out.film.expect("a request gives a film");
+    for plane in film_bits(&request, &film, &out.buffer) {
+        assert!(plane.iter().all(|&b| !f32::from_bits(b).is_nan()));
+    }
+    // Two samples a sampled pixel: at most that many pixels are not black.
+    let lit = image
+        .chunks(3)
+        .filter(|p| p.iter().any(|&b| b != 0))
+        .count();
+    assert!(
+        lit as u64 <= traced / 2,
+        "{lit} lit pixels from {traced} rays"
+    );
+}
+
+/// A control without snapshots still cancels, and the render publishes
+/// nothing into it; a completed render through it is the plain render.
+#[test]
+fn a_control_without_snapshots_only_cancels() {
+    use crate::{RenderControl, RenderOutcome};
+    let r = small_cornell(16);
+    let control = RenderControl::without_snapshots();
+    let out = r.render_with_control(true, None, None, &control);
+    assert_eq!(out.outcome, RenderOutcome::Completed);
+    assert!(control.snapshot().is_none());
+    assert_eq!(control.generation(), 0);
+    assert!(bits(&out.buffer) == bits(&r.render_with_tiles()));
+    control.cancel();
+    let out = r.render_with_control(true, None, None, &control);
+    assert_eq!(out.outcome, RenderOutcome::Cancelled);
+    assert_eq!(out.rays.camera_rays, 0);
+}

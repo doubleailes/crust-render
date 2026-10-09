@@ -15,6 +15,7 @@ use crust_core::Buffer;
 use crust_core::LightSelection;
 use crust_core::PixelFilter;
 use crust_core::PixelRect;
+use crust_core::RayStats;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
 use crust_core::Scene;
@@ -24,12 +25,15 @@ use crust_core::diagnostic::report::SceneInfo;
 use crust_core::diagnostic::{SceneFlags, effective_settings};
 use crust_core::stamp::SamplingStamp;
 use crust_core::{AovRequest, RenderSettings};
+use crust_core::{RenderControl, RenderOutcome};
 use crust_core::{WarningKind, WarningScope, warning};
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
 use indicatif::ProgressBar;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -47,7 +51,10 @@ struct Cli {
 enum Command {
     /// Render a USD stage to a linear EXR and a tone-mapped PNG preview.
     ///
-    /// Without -i, renders the hard-coded procedural fallback scene.
+    /// Without -i, renders the hard-coded procedural fallback scene. Ctrl-C
+    /// while it renders stops the render and writes what it has traced, its
+    /// EXRs marked `crust:renderStatus = "interrupted"`, and exits 130; a
+    /// second Ctrl-C, or one before the render starts, exits 130 at once.
     Render(Box<RenderArgs>),
     /// List a USD stage's cameras, lights or materials, one prim path per
     /// line on stdout.
@@ -341,6 +348,12 @@ struct RenderArgs {
     /// transform instead. The EXR is never affected.
     #[arg(long, value_name = "VIEW", default_value = crust_core::color::PREVIEW_VIEW)]
     view: String,
+    /// While the render runs, rewrite the tone-mapped PNG preview every
+    /// SECONDS (a positive number, fractions allowed) from the image so far,
+    /// at the path the final PNG takes, whenever the image changed since the
+    /// last rewrite. The final EXR and PNG are the same with or without it.
+    #[arg(long, value_name = "SECONDS", allow_negative_numbers = true, value_parser = parse_checkpoint)]
+    checkpoint: Option<Duration>,
 }
 
 /// A render's scene flags read as its own (`cli.strategy`), as they were
@@ -351,6 +364,19 @@ impl std::ops::Deref for RenderArgs {
     fn deref(&self) -> &SceneArgs {
         &self.scene
     }
+}
+
+/// `--checkpoint`'s parser: a positive, finite number of seconds that a
+/// `Duration` can hold.
+fn parse_checkpoint(s: &str) -> std::result::Result<Duration, String> {
+    let secs: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{s}` is not a number of seconds"))?;
+    if secs.is_nan() || secs <= 0.0 {
+        return Err(format!("{s} is not a positive number of seconds"));
+    }
+    Duration::try_from_secs_f64(secs).map_err(|_| format!("{s} seconds is too long an interval"))
 }
 
 /// `--budget`'s parser: one or more `<number><unit>` terms (`h`, `m`, `s`,
@@ -567,9 +593,9 @@ fn tone_map(rgb: &mut [f32], color: &OutputColor) -> Vec<u8> {
         .collect()
 }
 
-/// Tone-map the render buffer to an 8-bit PNG at `path`: the buffer's
-/// region, at the region's size — a PNG has no data window to place it in a
-/// larger frame with.
+/// Tone-map the render buffer to an 8-bit PNG at `path`, whatever its
+/// extension: the buffer's region, at the region's size — a PNG has no data
+/// window to place it in a larger frame with.
 fn write_png(
     buffer: &Buffer,
     path: &Path,
@@ -589,7 +615,13 @@ fn write_png(
         let (x, y) = (i % width, i / width);
         img.put_pixel(x as u32, y as u32, image::Rgba([r, g, b, 255]));
     }
-    img.save(path)
+    img.save_with_format(path, image::ImageFormat::Png)
+}
+
+/// The tone-mapped preview beside an EXR: the same path, extension `.png`.
+/// Where the final PNG goes, and so where `--checkpoint` rewrites it.
+fn preview_png(exr: &str) -> PathBuf {
+    Path::new(exr).with_extension("png")
 }
 
 /// The render of a stage without RenderProducts: the beauty as an RGB EXR at
@@ -603,6 +635,7 @@ fn write_beauty(
     output: &str,
     color: &OutputColor,
     sampling: &SamplingStamp,
+    interrupted: bool,
 ) -> std::result::Result<(), ExitCode> {
     let (img_width, img_height) = buffer.size();
     debug!(
@@ -626,6 +659,9 @@ fn write_beauty(
         }
     }
     products::stamp(&mut image.layer_data.attributes, sampling);
+    if interrupted {
+        products::mark_interrupted(&mut image.layer_data.attributes);
+    }
     match image.write().to_file(output) {
         Ok(_) => info!("Image written to: {:?}", output),
         Err(e) => {
@@ -633,7 +669,7 @@ fn write_beauty(
             return Err(ExitCode::FAILURE);
         }
     }
-    let png_path = Path::new(output).with_extension("png");
+    let png_path = preview_png(output);
     debug!("Tone mapping to sRGB PNG at {}", png_path.display());
     match write_png(buffer, &png_path, color) {
         Ok(_) => info!("Image written to: {:?}", png_path),
@@ -1186,8 +1222,156 @@ fn ls(kind: LsKind, input: &Path, json: Option<&Path>, frame: Option<f64>) -> Ex
     }
 }
 
+/// The exit status of a render Ctrl-C stopped: 128 + SIGINT, what a shell
+/// reports for a process the signal ended.
+const INTERRUPTED: u8 = 130;
+
+/// What Ctrl-C does to `crust render` depends on where it stands (design
+/// D7); this is what the `ctrlc` handler, on a thread of its own, shares
+/// with the render.
+struct Interrupt {
+    /// [`Interrupt::LOADING`], [`Interrupt::RENDERING`] or
+    /// [`Interrupt::WRITING`].
+    stage: AtomicU8,
+    /// The render's control: the first Ctrl-C while rendering cancels it.
+    control: RenderControl,
+}
+
+impl Interrupt {
+    /// Importing the stage and building the renderer: nothing to keep yet,
+    /// and nothing there can be cancelled.
+    const LOADING: u8 = 0;
+    /// Tracing: Ctrl-C stops the render, whose outputs are then written.
+    const RENDERING: u8 = 1;
+    /// Writing the outputs, or about to: Ctrl-C quits.
+    const WRITING: u8 = 2;
+
+    /// Loading, with a control nothing has cancelled, which takes the
+    /// render's snapshots only when `snapshots` (`--checkpoint`) asks for
+    /// them: publishing costs the render a copy per unit per stage.
+    fn new(snapshots: bool) -> Self {
+        Interrupt {
+            stage: AtomicU8::new(Self::LOADING),
+            control: if snapshots {
+                RenderControl::new()
+            } else {
+                RenderControl::without_snapshots()
+            },
+        }
+    }
+
+    fn enter(&self, stage: u8) {
+        self.stage.store(stage, Ordering::SeqCst);
+    }
+
+    /// The SIGINT handler: the first Ctrl-C while rendering cancels the
+    /// render and moves on to writing; any other quits at once, with
+    /// [`INTERRUPTED`], writing nothing further. It runs on `ctrlc`'s own
+    /// thread, not in signal context, so exiting from it is sound — and it
+    /// is the one place this binary exits without returning through `main`.
+    fn on_signal(&self) {
+        let rendering = self.stage.compare_exchange(
+            Self::RENDERING,
+            Self::WRITING,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        if rendering.is_ok() {
+            self.control.cancel();
+            info!(
+                "Ctrl-C: stopping the render to write what it has traced; Ctrl-C again quits \
+                 without writing"
+            );
+        } else {
+            std::process::exit(i32::from(INTERRUPTED));
+        }
+    }
+}
+
+/// How often the `--checkpoint` thread looks whether the render has ended,
+/// so the final outputs never wait on it for longer than this.
+const CHECKPOINT_POLL: Duration = Duration::from_millis(50);
+
+/// `--checkpoint`: until `finished`, every `every` rewrites the PNG preview
+/// at `path` from `control`'s latest snapshot, when the render published
+/// since the last rewrite. Each rewrite goes to a sibling file renamed over
+/// `path`, so a viewer reloading it never reads half an image. A failed
+/// write is said once; the render goes on either way.
+fn checkpoints(
+    control: &RenderControl,
+    every: Duration,
+    path: &Path,
+    color: &OutputColor,
+    finished: &AtomicBool,
+) {
+    // A product's directory is otherwise created by its EXR, at the end.
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let partial = path.with_extension("png.partial");
+    let (mut written, mut failed) = (0u64, false);
+    let mut next = Instant::now() + every;
+    while !finished.load(Ordering::Acquire) {
+        let now = Instant::now();
+        if now < next {
+            std::thread::sleep((next - now).min(CHECKPOINT_POLL));
+            continue;
+        }
+        next = now + every;
+        if control.generation() == written {
+            continue;
+        }
+        let Some((generation, image)) = control.snapshot() else {
+            continue;
+        };
+        let wrote = write_png(&image, &partial, color)
+            .map_err(|e| e.to_string())
+            .and_then(|()| std::fs::rename(&partial, path).map_err(|e| e.to_string()));
+        match wrote {
+            // Once per interval: a count that grows with the render's length.
+            Ok(()) => {
+                written = generation;
+                debug!("--checkpoint: {} rewritten", path.display());
+            }
+            Err(e) if !failed => {
+                failed = true;
+                warn!(
+                    "--checkpoint: cannot write {}: {e}; the render goes on",
+                    path.display()
+                );
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// What an interrupted render reached, for its warning: the fewest and most
+/// samples a pixel of its final pass took. A guided render stopped during
+/// training never reached the final pass, which alone fills those counters.
+fn samples_reached(rays: &RayStats, spp: u32) -> String {
+    if rays.adaptive_pixels == 0 {
+        "it stopped in path guiding's training passes".to_owned()
+    } else if rays.spp_min == rays.spp_max {
+        format!("every pixel took {} of {spp} samples", rays.spp_min)
+    } else {
+        format!(
+            "pixels took {} to {} of {spp} samples",
+            rays.spp_min, rays.spp_max
+        )
+    }
+}
+
 /// `crust render`: build the scene, render it, write the images.
 fn render(cli: &RenderArgs) -> ExitCode {
+    // First, so a Ctrl-C during the import quits as it always did, but with
+    // the status a render it stopped exits with.
+    let interrupt = Arc::new(Interrupt::new(cli.checkpoint.is_some()));
+    {
+        let interrupt = Arc::clone(&interrupt);
+        if let Err(e) = ctrlc::set_handler(move || interrupt.on_signal()) {
+            warn!("Ctrl-C cannot be caught ({e}): it will end the render without writing anything");
+        }
+    }
     let output = cli.output.clone();
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
@@ -1286,6 +1470,8 @@ fn render(cli: &RenderArgs) -> ExitCode {
     // Camera
     let (img_width, img_height) = settings.get_dimensions();
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
+    // Before the banner, so a Ctrl-C after it always finds the render to stop.
+    interrupt.enter(Interrupt::RENDERING);
     info!(
         "Rendering {}x{}{} at {} spp, max depth {} ({} order){}{}",
         img_width,
@@ -1327,14 +1513,44 @@ fn render(cli: &RenderArgs) -> ExitCode {
         }
         progress_bar.set_position(done);
     };
-    let (buffer, film, ray_stats) = if aovs.products.is_empty() {
-        let (buffer, rays) = renderer.render_with_stats(!cli.scanline, &progress);
-        (buffer, None, rays)
+    // `--checkpoint`'s preview: where the final PNG goes, if anywhere.
+    let checkpoint = cli.checkpoint.and_then(|every| {
+        let path = match aovs.products.first() {
+            None => preview_png(beauty_output(output.as_deref())),
+            Some(first) if first.beauty().is_some() => preview_png(&first.name),
+            Some(first) => {
+                warn!(
+                    "--checkpoint: {} has no beauty var, so no preview will be written",
+                    first.prim_path
+                );
+                return None;
+            }
+        };
+        Some((every, path))
+    });
+    let control = &interrupt.control;
+    let request = (!aovs.products.is_empty()).then_some(&aovs);
+    let finished = AtomicBool::new(false);
+    let rendered = std::thread::scope(|s| {
+        if let Some((every, path)) = &checkpoint {
+            let (color, finished) = (&output_color, &finished);
+            s.spawn(move || checkpoints(control, *every, path, color, finished));
+        }
+        let rendered =
+            renderer.render_with_control(!cli.scanline, Some(&progress), request, control);
+        finished.store(true, Ordering::Release);
+        rendered
+    });
+    // From here on a Ctrl-C quits: the render has returned, and what is left
+    // is writing it.
+    interrupt.enter(Interrupt::WRITING);
+    let interrupted = rendered.outcome == RenderOutcome::Cancelled;
+    let (buffer, film, ray_stats) = (rendered.buffer, rendered.film, rendered.rays);
+    if interrupted {
+        bar.abandon();
     } else {
-        let (buffer, film, rays) = renderer.render_with_aovs(!cli.scanline, &progress, &aovs);
-        (buffer, Some(film), rays)
-    };
-    bar.finish();
+        bar.finish();
+    }
     // Close Timer
     let duration: Duration = start.elapsed();
     stats.record("Render", 0, duration);
@@ -1359,7 +1575,15 @@ fn render(cli: &RenderArgs) -> ExitCode {
     // Before any output is written, so a render that streamed thousands of
     // `.tx` files never fails its write for want of a descriptor.
     assets.release_texture_files();
-    info!("Render finished in {duration:?}");
+    if interrupted {
+        // The spp budget the stage or `-s` asked for was not honoured.
+        warn!(
+            "Render interrupted after {duration:?}: {}; writing what it traced",
+            samples_reached(&ray_stats, settings.samples_per_pixel())
+        );
+    } else {
+        info!("Render finished in {duration:?}");
+    }
     // How the pixels were sampled, recorded in every EXR written.
     let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time);
     let output_start = Instant::now();
@@ -1368,7 +1592,15 @@ fn render(cli: &RenderArgs) -> ExitCode {
         let mut written = Vec::new();
         for product in &aovs.products {
             let path = Path::new(&product.name);
-            match products::write_product(path, product, &buffer, film, &output_color, &sampling) {
+            match products::write_product(
+                path,
+                product,
+                &buffer,
+                film,
+                &output_color,
+                &sampling,
+                interrupted,
+            ) {
                 Ok(channels) => {
                     debug!("{}: {}", path.display(), channels.join(" "));
                     written.push(format!("{} ({} channels)", path.display(), channels.len()));
@@ -1382,7 +1614,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
         info!("Products written: {}", written.join(", "));
         let first = &aovs.products[0];
         if first.beauty().is_some() {
-            let png_path = Path::new(&first.name).with_extension("png");
+            let png_path = preview_png(&first.name);
             match write_png(&buffer, &png_path, &output_color) {
                 Ok(_) => info!("Image written to: {:?}", png_path),
                 Err(e) => {
@@ -1398,6 +1630,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
         beauty_output(output.as_deref()),
         &output_color,
         &sampling,
+        interrupted,
     ) {
         return code;
     }
@@ -1442,7 +1675,11 @@ fn render(cli: &RenderArgs) -> ExitCode {
             debug!("Statistics written to {}", path.display());
         }
     }
-    ExitCode::SUCCESS
+    if interrupted {
+        ExitCode::from(INTERRUPTED)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]
@@ -1711,6 +1948,21 @@ mod tests {
         assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
         assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0, 255]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `--checkpoint` takes a positive number of seconds, fractions
+    /// allowed; zero, a negative, a non-number or an interval no `Duration`
+    /// holds is a usage error. Without it, nothing is rewritten mid-render.
+    #[test]
+    fn cli_checkpoint_is_a_positive_number_of_seconds() {
+        assert_eq!(render([]).unwrap().checkpoint, None);
+        let every = |s: &str| render(["--checkpoint", s]).map(|r| r.checkpoint);
+        assert_eq!(every("10").unwrap(), Some(Duration::from_secs(10)));
+        assert_eq!(every("0.25").unwrap(), Some(Duration::from_millis(250)));
+        for bad in ["0", "-1", "0.0", "nan", "inf", "1e30", "soon", ""] {
+            let err = every(bad).expect_err(bad);
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{bad}");
+        }
     }
 
     #[test]

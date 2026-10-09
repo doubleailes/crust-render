@@ -423,6 +423,7 @@ fn baseline(name: &str, label: bool) -> crate::tracer::Measured {
             clamp: Some(1.0),
             variance: true,
             quiet: true,
+            ..Instruments::default()
         },
     )
 }

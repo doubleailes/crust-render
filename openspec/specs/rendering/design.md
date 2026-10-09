@@ -471,10 +471,29 @@ served its purpose. What stays pinned: the same sample indices whatever the
 schedule, "exactly the samples the pixel would take alone" under `t < 0`, and
 tiles ↔ scanlines. Work units are tiles or rows as before — rows are now
 `width`×1 tiles through the one gather — with one `PathScratch` per rayon
-worker (`for_each_init`). Progress reports one tick per unit in the first
-sweep, then one per round; an early finish walks the remaining ticks so
+worker (`for_each_init`). Progress reports one tick per unit per stage of the
+first sweep, then one per round; an early finish walks the remaining ticks so
 `completed` reaches `total` one step at a time, and the counter advances
-whether or not a callback is attached.
+whether or not a callback is attached. A cancelled render stops where it was.
+
+**Staged first sweep.** The first sweep does not take a pixel to the first check
+point in one advance: it runs in stages of 1, 2, 4, … spp up to it (`sweep_stages`),
+each over the whole region, so a watched render shows the full frame at 1 spp first
+(§ Progressive output and cancellation). Scheduling only, and pinned bitwise against
+the unstaged sweep. Its cost is one more `advance_pixel` call per pixel per stage,
+and that call has a fixed price: LLVM hoists ~200 instructions of loop-invariant setup
+(renderer fields, constants, spills) out of the inlined path loop to the function's
+entry, 216 instructions a call by callgrind's per-instruction counts. On cornellbox
+(9 k instructions a sample, the cheapest scene here, `RAYON_NUM_THREADS=1`) that is
+**+1.61%** at 2 spp (stages 1, 2: 4.2439 G → 4.3124 G) and **+0.29%** at 32 spp (six
+stages; a 160×90 crop, 7.0492 G → 7.0697 G), images identical; the share falls with
+the cost of a sample and with the budget past the first check. `bench_ab.sh`:
+10 interleaved runs per scene (min / mean, the
+change against its parent, the CLI attaching a cancel-only control), cornellbox at its
+default 128 spp **−1.9% / +1.8%**, `usdpreview_textured` (64 spp, textured) **−3.1% /
++1.1%** — noise, the signs disagreeing. If it ever matters, starting the list at 2 or 4 spp is still
+bit-identical (it changes the spec's stage list, not the image), and moving the pixel
+loop inside the monomorphised integrator would pay the setup once per unit instead.
 
 **Costs.** Truly black pixels now run the full budget, and hold their lit cross
 neighbours while they do; pixels beside noise take more samples — that is the
@@ -625,6 +644,95 @@ light samples per vertex"). Unbounded/incidental draws — Russian roulette, vol
 carried-medium free flight, the guide's quadtree descent — use `draw_rnd` or a `pcg::Rng` seeded from a domain
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
 randomness use `openqmc::pcg::Rng`.
+
+## Progressive output and cancellation
+
+A render can be watched while it runs and stopped (`RenderControl`, `RenderOutcome`,
+`tracer/control.rs`; change `progressive-cancellable-render`). It was built in the engine
+first, with the CLI as its first consumer (Ctrl-C and `--checkpoint`, `cli` design record),
+so the API is honest before any Hydra or FFI code depends on it.
+
+- **Staged first sweep (D1).** See § Adaptive sampling: stages of 1, 2, 4, … spp, the
+  convergence test only after the last (at the `taken` an unstaged sweep tests at — a
+  `finish_round` at `taken = 2` could set `converged`, which no stop rule reads before
+  the first round, but keeping it out avoids the question). Always on for final passes:
+  one code path, so the bitwise test (`a_staged_sweep_renders_the_unstaged_one_bit_for_bit`:
+  adaptive, adaptive off, AOVs plane by plane, guided; tiles and scanlines) exercises
+  what users run. `Instruments::unstaged` exists for that test alone — not a switch,
+  since there is nothing to A/B. Training passes stay unstaged: each pixel's
+  `SampleData` must sit contiguously in its unit's buffer for the scanline-order replay
+  the SD-tree needs. One quantity was not keyed on the sample index: the clamp counter
+  summed a pixel's removals per `advance_pixel` call and then added that sum, so
+  splitting an advance re-associated the f32 sum. It now sums per sample, which makes it
+  independent of every schedule (stages and rounds alike); the diagnostic's clamp
+  figures moved in their last bits, once. The learned light cache is built before the
+  passes and read-only during them; texture caches change timing, not values.
+- **Per-unit publish (D2).** After each stage or round in which it traced anything, a
+  unit writes its pixels' estimates into the control's region-sized `Buffer` under one
+  `Mutex` and bumps an `AtomicU64` generation under the same lock, so a snapshot's
+  image and generation agree. Not round-boundary snapshots: a late round of a 1024 spp
+  render is ~200 spp a pixel over the whole frame, and the viewer would freeze for it.
+  A reader clones the buffer under the lock (O(pixels), fine at checkpoint rates). The
+  last snapshot of an unguided render that completed is the returned image, bit for bit
+  (`the_last_snapshot_is_the_returned_image`).
+- **One caller-owned control (D3).** `RenderControl::new()` / `without_snapshots()`,
+  `cancel`, `is_cancelled`, `generation`, `snapshot`; `Renderer::render_with_control(tiled,
+  progress, request, &control) -> Rendered { buffer, film, rays, outcome }`. The other
+  `render*` methods go through the same `render_impl` with no control and keep their
+  signatures. One control per render (cancel is sticky; a restart takes a fresh one).
+  Not a callback pushed from the workers — Hydra pulls, and user code would run on rayon
+  workers inside the hot loop — and not a session owning a thread: threading is the
+  host's policy. A control `without_snapshots` publishes nothing: the CLI takes one
+  unless `--checkpoint` asks for previews, since each publish costs ~60 instructions a
+  pixel (a 0.66% of cornellbox at 2 spp that nobody would read).
+- **Cancel per pixel (D4).** Each pixel's advance first reads the flag (one relaxed
+  load; nothing without a control), so latency is bounded by the advances in flight,
+  not by a unit (a whole row under `--scanline`) or a round (~200 spp a pixel). Between
+  stages and rounds the driving thread stops scheduling. A pass is *interrupted* when a
+  unit skipped a pixel or the driver a stage or round; a cancel landing after the last
+  advance leaves the render `Completed`. The gather then runs as usual: pixels of one
+  unit may differ in `taken`, which the per-pixel estimator handles. The progress
+  callback is not walked to the total, and `RayStats::early_stopped` counts only pixels
+  the adaptive rule stopped (`stopped && taken < spp`, which every pixel of a completed
+  pass satisfies exactly when it did before) — a pixel the cancel left is not "stopped
+  early". The counters cover exactly the samples traced (`camera_rays ==
+  adaptive_samples`), and a render cancelled after its 4 spp stage is the 4 spp render,
+  image, AOVs and counters (`a_render_cancelled_after_a_stage_is_that_stage_everywhere`).
+- **A pixel with no sample is zero (D5).** `PixelState::estimate` returns `(0, 0)` at
+  `taken == 0` instead of `0 / 0`, and `AovFilm::store` leaves every plane at its clear
+  value. Unreachable in a completed render (every pixel takes at least one sample), so
+  nothing there moves.
+- **Guided renders (D6).** Every pass publishes (training ones included), so the
+  display shows the pass in progress over the previous one. On cancel no further pass
+  starts and the field is never consulted again (an interrupted training pass's samples
+  never reach `field.update`). The render blends the completed passes, plus the
+  interrupted one when every pixel in it took `≥ 2` samples — fewer has no variance
+  estimate and would skew the pass weight — or returns the interrupted pass alone when
+  none completed. The blends (`blend_passes`, `AovFilm::blend`) run unchanged.
+  `a_guided_render_cancelled_in_its_final_pass_blends_what_it_can_weigh` cancels from the
+  progress callback (deterministic: only the final pass reports) after the 4 spp stage
+  and within or after the 1 spp stage; the latter two give the same training blend, bit
+  for bit.
+
+## Known gaps: progressive output and cancellation
+
+- **Progressive AOVs.** Only the beauty is published while the render runs; the AOVs
+  are gathered once, when it returns (cancelled or not).
+- **The guided preview gets noisier when the final pass starts.** Its 1 spp stage
+  overwrites the last training pass's units with a noisier estimate, until the final
+  pass catches up. Accepted for now.
+- **Not everything can be cancelled.** The import, `Renderer::new` / `reconfigure`
+  and the `learned` light selection's pre-pass never read the flag. The CLI exits at
+  once (status 130) on a Ctrl-C there; a library caller waits for them.
+- **An interrupted guided render's `crust:sppTaken`** describes its final pass alone —
+  the adaptive counters cover nothing else — and is the budget when the render stopped
+  in training. `crust:renderStatus = "interrupted"` says the frame is partial either way.
+- **The per-stage call cost** (§ Adaptive sampling, "Staged first sweep"): +1.6% of
+  cornellbox's instructions at 2 spp, +0.3% at 32, for nobody watching. Paid by every
+  final pass, with or without a control.
+- **The snapshot is a clone under the lock workers publish through.** Fine at
+  checkpoint rates (at 4K, ~100 MB/s at 1 Hz); a 60 Hz viewport will want the double
+  buffer D2 leaves room for, without an API change.
 
 ## Known gaps: path guiding
 

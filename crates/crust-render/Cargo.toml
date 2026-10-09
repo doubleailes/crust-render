@@ -32,6 +32,10 @@ image.workspace = true
 indicatif = "0.18.0"
 tracing.workspace = true
 exr.workspace = true
+# Ctrl-C: the first one cancels the render through its `RenderControl` and
+# the partial outputs are written. Its `unsafe` is in installing the signal
+# handler, never on the render path; this crate stays `forbid(unsafe_code)`.
+ctrlc = "3.4"
 
 # The probe examples read a stage directly (`ptex_verify`, `proto_probe`,
 # `rel_probe`, ...) and read `.ptx` headers and faces through the raw reader

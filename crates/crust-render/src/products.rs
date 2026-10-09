@@ -39,6 +39,21 @@ pub fn exr_windows(beauty: &Buffer) -> (Vec2<i32>, IntegerBounds) {
     )
 }
 
+/// The header attribute every EXR of an interrupted render carries
+/// (`image-output`), as a string: `"interrupted"`. A completed render writes
+/// none, so its headers are exactly those it wrote before renders could be
+/// interrupted.
+pub const RENDER_STATUS: &str = "crust:renderStatus";
+
+/// Marks a layer's header as an interrupted render's ([`RENDER_STATUS`]).
+/// The one function both writers call, after [`stamp`].
+pub fn mark_interrupted(attributes: &mut LayerAttributes) {
+    attributes.other.insert(
+        Text::from(RENDER_STATUS),
+        AttributeValue::Text(Text::from("interrupted")),
+    );
+}
+
 /// Writes `stamp` into a layer's header, each attribute typed as the stamp
 /// types it (`int`, `v2i`, `float`, `double`, `string`) and replacing any
 /// attribute of the same name already there. The one function both writers
@@ -169,7 +184,8 @@ pub fn refuse_shared_paths(products: &mut Vec<AovProduct>) {
 ///
 /// The colour channels are tagged with the working space's ASWF Color
 /// Interop ID (`colorInteropID`, `docs/color_management.md`) and, off
-/// Rec.709, its chromaticities.
+/// Rec.709, its chromaticities. An `interrupted` render's product says so
+/// ([`RENDER_STATUS`]).
 pub fn write_product(
     path: &Path,
     product: &AovProduct,
@@ -177,6 +193,7 @@ pub fn write_product(
     film: &AovFilm,
     color: &super::OutputColor,
     sampling: &SamplingStamp,
+    interrupted: bool,
 ) -> io::Result<Vec<String>> {
     let interop = crust_core::color::interop_id(color.working);
     let interop = interop.as_deref().unwrap_or(UNKNOWN_INTEROP_ID);
@@ -247,6 +264,9 @@ pub fn write_product(
         }
     }
     stamp(&mut attributes, sampling);
+    if interrupted {
+        mark_interrupted(&mut attributes);
+    }
 
     let layer = Layer::new(
         (width, height),
@@ -400,7 +420,7 @@ mod tests {
         let p = product(vec![var("beauty", AovSource::Color)]);
         let rec709 = crate::tests::rec709();
         let written =
-            write_product(&path, &p, &beauty, &film, &rec709, &sampling()).expect("written");
+            write_product(&path, &p, &beauty, &film, &rec709, &sampling(), false).expect("written");
         assert_eq!(written, ["B", "G", "R"]);
         let image = read()
             .no_deep_data()
@@ -476,6 +496,7 @@ mod tests {
             &film,
             &crate::tests::rec709(),
             &sampling(),
+            false,
         )
         .expect("written");
         let image = read()
@@ -552,6 +573,45 @@ mod tests {
         );
     }
 
+    /// An interrupted render's product says so in its header; a completed
+    /// one's carries no `crust:renderStatus` at all.
+    #[test]
+    fn an_interrupted_product_is_marked() {
+        let (w, h) = (2, 2);
+        let beauty = Buffer::new(w, h);
+        let film = crust_core::AovFilm::empty(w, h);
+        let p = product(vec![var("beauty", AovSource::Color)]);
+        for interrupted in [false, true] {
+            let path = std::env::temp_dir().join(format!("crust_render_status_{interrupted}.exr"));
+            write_product(
+                &path,
+                &p,
+                &beauty,
+                &film,
+                &crate::tests::rec709(),
+                &sampling(),
+                interrupted,
+            )
+            .expect("written");
+            let image = read()
+                .no_deep_data()
+                .largest_resolution_level()
+                .all_channels()
+                .first_valid_layer()
+                .all_attributes()
+                .from_file(&path)
+                .expect("reads back");
+            let status = image
+                .layer_data
+                .attributes
+                .other
+                .get(&Text::from(RENDER_STATUS))
+                .cloned();
+            let expected = interrupted.then(|| AttributeValue::Text(Text::from("interrupted")));
+            assert_eq!(status, expected, "interrupted {interrupted}");
+        }
+    }
+
     /// A product may not author crust's own stamp: the written value is the
     /// render's, and the authored one is warned about, naming the product.
     #[test]
@@ -571,6 +631,7 @@ mod tests {
                 &film,
                 &crate::tests::rec709(),
                 &sampling(),
+                false,
             )
             .expect("written")
         });

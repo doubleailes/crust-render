@@ -102,6 +102,7 @@ without an API change.
 pub struct RenderControl { /* cancel: AtomicBool, generation: AtomicU64, display: Mutex<Option<Buffer>> */ }
 impl RenderControl {
     pub fn new() -> Self;
+    pub fn without_snapshots() -> Self;                // cancels only; the render publishes nothing
     pub fn cancel(&self);
     pub fn is_cancelled(&self) -> bool;
     pub fn generation(&self) -> u64;
@@ -120,6 +121,12 @@ engine change.
 
 The control is per render, so cancelling one render never leaks into the next.
 A cancelled control stays cancelled. A restart takes a fresh control.
+
+*Added while implementing:* `RenderControl::without_snapshots()`, a control that
+only cancels. Each publish costs ~60 instructions a pixel (0.66% of cornellbox at
+2 spp, callgrind), which a host that never shows the render in progress — the CLI
+without `--checkpoint`, the diagnostic's time budget later — should not pay. The
+CLI takes it unless `--checkpoint` is given.
 
 *Alternatives:*
 

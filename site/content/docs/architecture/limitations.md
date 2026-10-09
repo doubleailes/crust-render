@@ -2,7 +2,7 @@
 title = "Limitations"
 description = "What Crust Render does not do, or does only partly."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-08T08:00:00+00:00
+updated = 2026-10-09T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
@@ -131,6 +131,20 @@ render.
   out 6.9% darker than an unguided one over 40 seeds — a bias, not noise, and not yet
   diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)).
   `crust diagnostic` reports guiding as `biased` there, and never suggests it. Scenes without strong fireflies (the Cornell box, `veach_mis`) show no shift.
+
+## Watching and stopping a render
+
+- **Only the beauty is previewed.** [`--checkpoint`](@/docs/reference/command-line.md#checkpoint)
+  rewrites the PNG from the image so far; the AOVs are written once, when the render ends
+  or is [interrupted](@/docs/reference/command-line.md#interrupting-a-render).
+- **Loading can't be stopped and kept.** A Ctrl-C while the stage loads (or while the
+  `learned` light selection trains, before the render starts) quits at once and writes
+  nothing.
+- **A guided preview gets noisier when the last pass starts.** Its first samples replace
+  the last training pass's image, tile by tile, until it catches up.
+- **An interrupted guided render's `crust:sppTaken`** counts its last pass's samples only,
+  and is the full budget when it was stopped during training. `crust:renderStatus` still
+  says the frame is partial.
 
 ## Diagnostic
 

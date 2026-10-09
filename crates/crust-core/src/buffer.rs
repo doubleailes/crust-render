@@ -10,6 +10,7 @@ use crate::tracer::PixelRect;
 /// coordinates either way: [`set_pixel`](Self::set_pixel) and
 /// [`get_pixel`](Self::get_pixel) take frame raster coordinates (rows
 /// bottom-up), [`get_rgb`](Self::get_rgb) the rectangle's own top-down ones.
+#[derive(Clone)]
 pub struct Buffer {
     /// The width of the frame in pixels.
     width: usize,

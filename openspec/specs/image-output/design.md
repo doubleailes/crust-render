@@ -87,6 +87,21 @@ maps each to the flag and USD attribute it mirrors.
   compared whole headers, and the goldens of `check_images.sh` are compared channel by
   channel (`crust diff`), so old unstamped goldens still pass, reading `unknown`.
 
+## The interrupted-render attribute
+
+An EXR written from a render Ctrl-C stopped carries `crust:renderStatus = "interrupted"`
+(a `string`), and one from a completed render carries nothing more than before, so the
+byte-identity of completed renders holds trivially. One function marks a header
+(`products::mark_interrupted`), called by both writers after the stamp, so they cannot
+drift; the product writer's refusal of an authored `driver:parameters:crust:*` covers this
+name too. A test per writer reads it back (`products.rs`, `tests/interrupt.rs`).
+
+A status attribute rather than a different stamp: `crust:sppTaken` already says how far
+the render got (the fewest and most samples a pixel took), and a reader that only wants
+to skip partial frames looks at one name. Of a guided render stopped before its final
+pass, `crust:sppTaken` is the budget — the adaptive counters cover the final pass alone
+(`rendering/design.md` § Progressive output and cancellation, Known gaps).
+
 ## `-o` with products
 
 `-o` replaces the first product's `productName` (husk's rule) and leaves the
