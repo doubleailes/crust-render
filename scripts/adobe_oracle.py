@@ -61,6 +61,19 @@ def fetch(url, commit, dest):
     run("checkout", "-q", "FETCH_HEAD")
 
 
+def verify(dest, commit):
+    """Refuse a source tree that is not exactly the pinned commit: the fixture
+    header names the pins, so evaluating anything else would record a
+    reference that was never run. A `--keep` directory is reused only if it
+    passes."""
+    git = lambda *a: subprocess.run(["git", *a], cwd=dest, check=True, capture_output=True, text=True).stdout.strip()
+    head = git("rev-parse", "HEAD")
+    dirty = git("status", "--porcelain")
+    if head != commit or dirty:
+        state = "with local changes" if head == commit else f"at {head}"
+        sys.exit(f"{dest} is {state}, not the pinned {commit}; remove it or use another --keep directory")
+
+
 def fmt(x):
     """Four decimals: the replay parses the same string, so both sides
     read one f32."""
@@ -131,7 +144,8 @@ def random_inputs(rng):
 
 def corner_cases():
     """Hand-picked cases: each layer on its own, at its extremes. The fuzz
-    ones are the ones `adobe_oracle.rs` requires to match exactly."""
+    ones are the ones `adobe_oracle.rs` requires to match within 1e-4
+    (`fuzz_cases_match_to_float_precision`)."""
     black = {"base_weight": 0.0, "specular_weight": 0.0}
     cases = []
     for r in (0.0, 0.05, 0.1, 0.3, 0.5, 0.8, 1.0):
@@ -239,6 +253,8 @@ def main():
             fetch(ADOBE_URL, ADOBE_COMMIT, adobe)
         if not os.path.isdir(glm):
             fetch(GLM_URL, GLM_COMMIT, glm)
+        verify(adobe, ADOBE_COMMIT)
+        verify(glm, GLM_COMMIT)
         probe = os.path.join(work, "probe")
         cxx = os.environ.get("CXX", "c++")
         subprocess.run(

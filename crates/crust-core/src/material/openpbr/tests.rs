@@ -1556,6 +1556,14 @@ fn thin_sheets() -> Vec<(&'static str, OpenPBR)> {
             OpenPBR {
                 specular_roughness: 0.4,
                 transmission_color: Vec3A::new(0.3, 0.8, 0.6),
+                ..glass.clone()
+            },
+        ),
+        (
+            "fuzzy",
+            OpenPBR {
+                fuzz_weight: 0.8,
+                fuzz_roughness: 0.7,
                 ..glass
             },
         ),
@@ -1929,6 +1937,58 @@ fn the_diffuse_filter_follows_the_fuzz() {
         assert!(
             (shape_fuzzy - shape_bare).abs().max_element() < 1e-5,
             "cos {cos}: {shape_fuzzy} vs {shape_bare}"
+        );
+    }
+}
+
+/// The fuzz covers the transmission too: light passing through a fuzzy glass
+/// pays the `1 − w · R(ω_o)` every other layer beneath the fuzz pays. Without
+/// it the glass reflected the fuzz's `w · R` *and* transmitted everything, so
+/// a white furnace returned more than it was given.
+#[test]
+fn a_fuzz_dims_what_passes_through_the_glass_beneath_it() {
+    let glass = OpenPBR {
+        specular_roughness: 0.3,
+        fuzz_weight: 1.0,
+        fuzz_roughness: 1.0,
+        ..OpenPBR::glass(1.5)
+    };
+    for cos in [0.3, 0.7, 1.0] {
+        let (r_in, rec) = fuzz_hit(view_at(cos));
+        let eval = |l: Vec3A| glass.eval(&r_in, &rec, l).map_or(Vec3A::ZERO, |(f, _)| f);
+        let reflected = over_hemisphere(eval);
+        let transmitted = over_hemisphere(|l| eval(Vec3A::new(l.x, l.y, -l.z)));
+        let total = (reflected + transmitted).max_element();
+        assert!(
+            total <= 1.0 + 5e-3,
+            "cos {cos}: {reflected} + {transmitted} = {total}"
+        );
+    }
+
+    // A thin sheet's straight transmission, which a delta sample carries,
+    // pays the same factor.
+    let sheet = OpenPBR {
+        geometry_thin_walled: true,
+        ..glass.clone()
+    };
+    let bare = OpenPBR {
+        fuzz_weight: 0.0,
+        ..sheet.clone()
+    };
+    let rec = HitRecord {
+        normal: Vec3A::Z,
+        front_face: true,
+        ..HitRecord::new()
+    };
+    for cos in [0.3f32, 0.7, 1.0] {
+        let d = -view_at(cos);
+        let r_in = Ray::new(-d, d);
+        let want = bare.straight_transmittance(&r_in, &rec)
+            * (1.0 - ZeltnerSheen::new(sheet.fuzz_roughness, cos).albedo());
+        let got = sheet.straight_transmittance(&r_in, &rec);
+        assert!(
+            (got - want).abs().max_element() < 1e-5,
+            "cos {cos}: {got} vs {want}"
         );
     }
 }
