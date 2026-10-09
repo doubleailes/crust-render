@@ -76,6 +76,7 @@ The flags of `crust render`:
 | [`--view`](#view) | view | `Un-tone-mapped` | — |
 | [`--auto-tx`](#auto-tx) | flag | off | — |
 | [`--scanline`](#scanline) | flag | off (tiles) | — |
+| [`--checkpoint`](#checkpoint) | seconds | off | — |
 | [`--stats`](#stats) | flag | off | — |
 | [`--profile`](#profile) | flag | off | — |
 | [`--stats-json`](#stats-json) | path or `-` | off | — |
@@ -475,6 +476,57 @@ The image is bit-identical. The progress bar counts rows.
 `-b` / `--bucket` is still accepted so older command lines keep working, but it does
 nothing: tiles are the default.
 
+### checkpoint
+
+`--checkpoint <SECONDS>`
+
+While the render runs, rewrite the tone-mapped PNG preview every `SECONDS` from the image
+so far, at the path the final PNG takes (see [output](#output)). An interval in which the
+image did not change rewrites nothing. Fractions are allowed (`--checkpoint 0.5`); `0` or a
+negative number is refused.
+
+The whole frame shows early: a render first takes every pixel to 1 sample, then 2, 4, 8, …
+up to the adaptive minimum, frame-wide, before the adaptive rounds refine the pixels that
+are still noisy. A preview is the full image, noisy at first, not finished tiles on black.
+(This order is how every render runs, with or without the flag, and it does not change the
+image.)
+
+The final EXR and PNG are the same files a render without the flag writes, and without
+the flag nothing is written before the render ends. Each rewrite goes to a file beside the
+PNG (`<name>.png.partial`) that is then renamed over it, so a viewer reloading the PNG
+never reads half an image. Only the beauty is previewed: AOVs are written when the render
+ends.
+
+With [render products](@/docs/usd/aovs.md), the preview is the first product's beauty. When
+the first product has no beauty var, a warning says no preview will be written, and the
+render goes on.
+
+```bash
+crust render -i scene.usda -s 4096 --checkpoint 10 -o out.exr
+# out.png appears within about ten seconds and is rewritten every ten
+```
+
+### Interrupting a render
+
+Ctrl-C while `crust render` renders stops the render and keeps its work:
+
+- No new sample starts; the render waits only for the pixels being traced at that moment.
+- Every output the render would have written is written from the samples it traced: the
+  EXR or the products, and the PNG. A pixel that took no sample is black, and its AOVs
+  hold their clear values.
+- A warning says the render was interrupted and how many samples its pixels reached.
+- Every EXR carries `crust:renderStatus = "interrupted"` in its header (see
+  [An interrupted render](@/docs/usd/aovs.md#an-interrupted-render)).
+- The command exits with status `130`.
+
+A second Ctrl-C, while those outputs are written, quits at once without writing more. So
+does a Ctrl-C before the render has started (while the stage loads), which writes nothing.
+
+A [path-guided](@/docs/usd/render-settings.md#path-guiding) render stopped in its final pass blends the
+passes it completed with the partial final pass once every pixel of it has two samples or
+more, and the completed passes alone before that. Stopped during its training passes, it
+writes those it completed, or the first one as far as it got.
+
 ## Diagnostics
 
 ### stats
@@ -853,7 +905,9 @@ other output stays where it is without the flag.
 ## Exit status
 
 `crust render` exits with `0` when the images are written, and `crust ls` when the list
-is printed. It exits with a non-zero status
+is printed. `crust render` exits with `130` when Ctrl-C stopped the render (its partial
+outputs are written: see [Interrupting a render](#interrupting-a-render)) or quit it before
+or after. It exits with a non-zero status
 when the arguments are invalid (a missing command included), the scene or the requested
 camera can't be loaded, the log
 file can't be created, or an image or a JSON report can't be written.

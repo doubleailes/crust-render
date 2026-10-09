@@ -2,7 +2,7 @@
 title = "Overview"
 description = "The crates that make up Crust Render, and how a render flows through them."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-08T08:00:00+00:00
+updated = 2026-10-09T08:00:00+00:00
 draft = false
 weight = 10
 sort_by = "weight"
@@ -80,7 +80,11 @@ extracted too.
 5. **Rendering.** Tiles run in parallel. For each pixel and sample, a path is traced:
    intersect, shade the hit once, sample a light, pick the next direction, repeat. Path
    guiding (training passes) and adaptive sampling (stopping pixels early) wrap that same
-   per-pixel routine.
+   per-pixel routine. The whole frame is taken to 1 sample per pixel first, then 2, 4, 8,
+   … up to the adaptive minimum, so a render watched with
+   [`--checkpoint`](@/docs/reference/command-line.md#checkpoint) shows the full image early;
+   the order changes no pixel. Ctrl-C [stops the render](@/docs/reference/command-line.md#interrupting-a-render)
+   and keeps what it traced.
 6. **Output** (`crust-render`). The linear EXR and the tone-mapped PNG are written, and
    the `--stats` report is printed.
 
@@ -99,3 +103,4 @@ The crates meet at a few interfaces. Each has one contract that both sides keep:
 | `Material` | shaded once per path vertex into a `ShadingPoint`, which answers every later question about that hit |
 | `Light` | light sampling and BSDF sampling compute the same density for the same point on a light |
 | `ProgressCallback` | the engine reports progress and never prints |
+| `RenderControl` | the host owns it: it can read the image so far from any thread, and cancel the render, which then returns what it traced |

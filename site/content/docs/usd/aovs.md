@@ -2,7 +2,7 @@
 title = "Render products and AOVs"
 description = "RenderProduct and RenderVar: which files a render writes, and which AOVs go in them."
 date = 2026-10-03T08:00:00+00:00
-updated = 2026-10-03T08:00:00+00:00
+updated = 2026-10-09T08:00:00+00:00
 draft = false
 weight = 25
 sort_by = "weight"
@@ -628,6 +628,23 @@ The working space is not repeated: `colorInteropID` already records it. The stam
 changes no pixel, and costs nothing during the render: it is written once, with the
 file. [`crust diff`](@/docs/reference/command-line.md#diff) reads it to warn when two
 images cannot be compared pixel for pixel.
+
+### An interrupted render
+
+A render stopped with Ctrl-C ([Interrupting a
+render](@/docs/reference/command-line.md#interrupting-a-render)) still writes every
+product, from the samples it traced, and each EXR says so with one more header attribute:
+
+| attribute | EXR type | value |
+|-----------|----------|-------|
+| `crust:renderStatus` | `string` | `interrupted` |
+
+An EXR of a render that completed has no `crust:renderStatus` at all, so its header is
+exactly what it was before renders could be interrupted. In an interrupted EXR,
+`crust:sppTaken` says how far the render got: the fewest and most samples a pixel took (of
+a guided render, in its final pass; a guided render stopped before its final pass records
+the budget there). A pixel that took no sample is black, and each of its AOVs holds the
+var's clear value.
 
 ### Crops
 

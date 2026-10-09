@@ -80,19 +80,25 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
  │       ├─ mesh::flush_meshes               bake-once vs instance, now that counts are final
  │       └─ WorldBuilder::commit             top-level SBVH (crust-rt)
  ├─ Renderer::new(scene)                     light selection table, optional learned light cache
- ├─ Renderer::render_with_stats(tiled, progress)     no products
- │  or Renderer::render_with_aovs(…, &scene.aovs)    products: + AovFilm
+ ├─ Renderer::render_with_control(tiled, progress, aovs, &control)
+ │  (the CLI's call; render_with_stats / render_with_aovs are the same render without a control)
+ │   ├─ first sweep in stages 1, 2, 4, … spp, then adaptive rounds; each unit publishes
+ │   │    its estimates into the control after each, and checks its cancel flag per pixel
  │   └─ per tile → per pixel → per sample: advance_pixel → trace_path
  │         forward walk: intersect, resolve material (ShadingPoint), NEE, scatter
  │         backward gather: MIS-weighted radiance, guiding training samples
  │         AOV instantiation only: the first hit → the unit's AOV planes
  └─ write EXR (linear) + PNG (tone-mapped) — crust-render only
        no products: write_rgb_file at -o; products: one scanline EXR each (main.rs, products.rs)
+       --checkpoint: a scoped thread rewrites the PNG from the control's snapshots meanwhile;
+       Ctrl-C (ctrlc) cancels the control, the partial outputs are written, exit 130
 ```
 
 Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
 routine; a render mode is scheduling only, and tiles vs scanlines are
-bit-identical by construction. The adaptive (final) pass runs in rounds (batches
+bit-identical by construction. So is the staged first sweep (every unit to 1, 2,
+4, … spp, frame-wide, then the first check point): it exists so a host watching
+the render sees the whole frame early, and changes no bit of the image. The adaptive (final) pass runs in rounds (batches
 that grow 25% a round, `max(4, taken / 4)`, capped at the budget) over a
 region-sized convergence-index buffer, so a pixel stops only
 when its cross neighbours are not much less converged than it is
@@ -118,6 +124,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | `Material` | `crust-core/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
 | `Light`, `LightShape` | `crust-core/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
 | `ProgressCallback` | `crust-core/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
+| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`); later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; a cancelled render returns what it traced and `Cancelled` |
 | `RenderStats`, `profile::Section` | `crust-core/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
 
 ## `crust-core` module map
@@ -203,9 +210,12 @@ other. The pairs:
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
   `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔
-  preloaded `u8` textures; tiles ↔ scanlines; a region's pixels ↔ the same
-  pixels of the full frame (with no neighbour hold). Each is pinned by a test that
-  compares bits, not tolerances.
+  preloaded `u8` textures; tiles ↔ scanlines; a staged first sweep ↔ one
+  unstaged sweep (`a_staged_sweep_renders_the_unstaged_one_bit_for_bit`: image, AOV
+  planes, counters; the clamp counter sums per sample for the same reason); a region's
+  pixels ↔ the same pixels of the full frame (with no neighbour hold). Each is pinned by
+  a test that compares bits, not tolerances. A render with a `RenderControl` that
+  completes is the render without one, bit for bit (`the_last_snapshot_is_the_returned_image`).
 - **Derived, not stored.** A hit's tangent (`tangent_of`) and a subdivided
   mesh's Ptex sub-face corners (`SubFace::corners`) are computed from the
   kernel's shared vertices and a 4-byte cell at the hit; the tests that pin

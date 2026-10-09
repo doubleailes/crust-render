@@ -628,6 +628,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             clamp: authored.indirect_clamp(),
             variance: true,
             quiet: true,
+            ..Instruments::default()
         },
     );
     let prof = profile::take();

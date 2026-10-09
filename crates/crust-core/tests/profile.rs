@@ -46,8 +46,9 @@ fn profile_counts_match_ray_stats_and_leave_the_image_alone() {
         assert!(same_image(&plain, &profiled), "tiled={tiled}");
         assert_eq!(plain_stats, stats, "tiled={tiled}");
 
-        // Each section is entered exactly where its counter is bumped.
-        assert_eq!(p.section(Section::MainLoop).calls, (W * H) as u64);
+        // Each section is entered exactly where its counter is bumped:
+        // `MainLoop` once per pixel per stage of the first sweep (1, 2, 4).
+        assert_eq!(p.section(Section::MainLoop).calls, (W * H) as u64 * 3);
         assert_eq!(p.section(Section::GeneratePrimary).calls, stats.camera_rays);
         assert_eq!(p.section(Section::Contributions).calls, stats.camera_rays);
         assert_eq!(p.section(Section::Trace).calls, stats.closest_hit);

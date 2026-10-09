@@ -57,7 +57,8 @@ cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; pl
 # --stats (per-phase profile + scene statistics),
 # --profile (implies --stats; adds a Guerilla-style per-section render profile),
 # --stats-json PATH|- (the same statistics as crust-stats/1 JSON; `-` moves the log to stderr),
-# --auto-tx (convert UV textures to a .tx beside the original on first use)
+# --auto-tx (convert UV textures to a .tx beside the original on first use),
+# --checkpoint SECONDS (rewrite the PNG preview from the render's snapshots while it runs)
 
 # Keep a full record of a render. The file gets the same events as the terminal
 # at the same -l level, so DEBUG has to be asked for; bare --log-file writes
@@ -73,6 +74,14 @@ cargo run --release -- render -i samples/animation.usda -f 5 -o frame.0005.exr
 # the full render's at -s 16 (the rendering design record's "Render regions" says
 # when it is not). Check placement with crust diff against a full render, or in Nuke.
 cargo run --release -- render -i samples/cornellbox.usda -s 16 --region 100,50,164,114 -o crop.exr
+
+# Watch a long render and stop it once it looks good enough. The PNG beside the EXR
+# is rewritten every 10 s from the control's latest snapshot (the whole frame from
+# 1 spp up: the first sweep is staged); Ctrl-C cancels the render, writes the partial
+# EXR and PNG (the EXR stamped crust:renderStatus = "interrupted") and exits 130; a
+# second Ctrl-C quits without writing. The final files are byte-identical with or
+# without --checkpoint (pinned by crust-render/tests/interrupt.rs).
+cargo run --release -- render -i samples/cornellbox.usda -s 4096 --checkpoint 10 -o out.exr
 
 # The same figures for a script: crust-stats/1, one JSON object on stdout (the log,
 # the progress bar and any text report go to stderr). Add --stats for both forms.
@@ -366,6 +375,19 @@ Adding an import warning means adding a code to the table in `warnings.rs` and a
 `site/content/docs/reference/warnings.md`: `the_reference_page_lists_every_code` fails
 until both agree, kinds included. Raise it on the importing thread (see
 `docs/architecture.md` § Invariants).
+
+**Interrupting and watching a render.** Ctrl-C while rendering logs one `INFO` line from
+the handler (stopping, and that a second Ctrl-C quits without writing) and, once the
+render returns, one `WARN` in place of "Render finished": the samples the stage or `-s`
+asked for were not honoured, so it is the WARN meaning, and it names the fewest and most
+samples a pixel took. `--checkpoint` logs each rewrite at `DEBUG` — their count grows
+with the render's length — and a failed write once at `WARN`. The handler is the one
+place `crust render` exits without returning through `main`: `ctrlc` runs it on a thread
+of its own, so `process::exit(130)` is sound there, and it is only taken when nothing is
+left to write (before the render, or on a second Ctrl-C). Its state machine is an
+`AtomicU8` (loading → exit; rendering → cancel the `RenderControl` and move to writing;
+writing → exit), entered *before* the "Rendering" banner, so a Ctrl-C after the banner
+always finds the render to stop — the integration test waits for the banner.
 
 The practical consequence when adding a log: if you can write a stage that makes your new
 line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel or per

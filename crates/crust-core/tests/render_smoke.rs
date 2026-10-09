@@ -245,7 +245,15 @@ fn a_different_frame_changes_the_noise_but_not_the_mean_much() {
 #[test]
 fn progress_callback_reaches_the_total() {
     let (w, h) = (16, 20);
-    let r = emissive_ball_scene(1.0, w, h, 1);
+    // At 1 spp the first sweep is one stage; at 8 (adaptive sampling off)
+    // it is four — 1, 2, 4 and 8 — each reporting every unit.
+    for (spp, stages) in [(1, 1u64), (8, 4)] {
+        progress_reaches_the_total(w, h, spp, stages);
+    }
+}
+
+fn progress_reaches_the_total(w: usize, h: usize, spp: u32, stages: u64) {
+    let r = emissive_ball_scene(1.0, w, h, spp);
     for tiled in [false, true] {
         let last = AtomicU64::new(0);
         let total = AtomicU64::new(0);
@@ -276,12 +284,16 @@ fn progress_callback_reaches_the_total() {
             "one report per work unit at least"
         );
         if !tiled {
-            assert_eq!(t, h as u64, "row rendering reports one unit per scanline");
+            assert_eq!(
+                t,
+                h as u64 * stages,
+                "row rendering reports one unit per scanline per stage"
+            );
         } else {
             assert_eq!(
                 t,
-                (w as u64).div_ceil(16) * (h as u64).div_ceil(16),
-                "one unit per 16x16 tile"
+                (w as u64).div_ceil(16) * (h as u64).div_ceil(16) * stages,
+                "one unit per 16x16 tile per stage"
             );
         }
     }

@@ -69,8 +69,9 @@ impl Category {
 /// matches, so a profile reads the same in either renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Section {
-    /// One pixel's sample loop, adaptive stop included — the root every
-    /// other section nests under.
+    /// One pixel's sample loop over one stage of the first sweep or one
+    /// adaptive round (so several calls per pixel) — the root every other
+    /// section nests under.
     MainLoop,
     /// Filter importance sampling, the camera ray and its cone.
     GeneratePrimary,

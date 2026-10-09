@@ -40,11 +40,12 @@ frozen neighbour state.
 
 ### Requirement: A render publishes snapshots while it runs
 
-When a render is given a control, each work unit SHALL publish its pixels' current
-estimates to the control as it finishes a stage or an adaptive round. Any thread
-SHALL be able to read the latest region-sized beauty image and a generation count
-that increases with every publish. A pixel not yet sampled reads as zero. A render
-without a control publishes nothing.
+When a render is given a control that takes snapshots, each work unit SHALL
+publish its pixels' current estimates to the control as it finishes a stage or an
+adaptive round. Any thread SHALL be able to read the latest region-sized beauty
+image and a generation count that increases with every publish. A pixel not yet
+sampled reads as zero. A render without a control, or with a control that only
+cancels, publishes nothing.
 
 #### Scenario: The image improves while the render runs
 
@@ -56,6 +57,12 @@ without a control publishes nothing.
 
 - **WHEN** an unguided render completes and the control's snapshot is read
 - **THEN** it equals the returned image bitwise
+
+#### Scenario: A control that only cancels
+
+- **WHEN** a render runs with a control created without snapshots
+- **THEN** no snapshot is ever available from it, and cancelling it still stops the
+  render
 
 ### Requirement: A guided render publishes its passes
 
