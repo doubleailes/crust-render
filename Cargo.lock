@@ -536,6 +536,7 @@ dependencies = [
  "half",
  "image",
  "ptex-rust",
+ "rayon",
  "tiff",
  "tracing",
 ]

@@ -38,7 +38,7 @@
 use super::{TileReader, TiledFile};
 use crate::texture_cache::{Ways, mib_to_bytes};
 use half::f16;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -608,9 +608,9 @@ impl TileCache {
             resident: AtomicU64::new(0),
             budget,
             held: Arc::default(),
-            // The thread count the Ptex stream sizes its slots by: what rayon
-            // defaults its pool to, an overestimate under a smaller
-            // `RAYON_NUM_THREADS`, which errs on the safe side.
+            // The thread count the Ptex stream sizes its slots by: the render
+            // pool or the cores, whichever is larger, plus the thread that
+            // drives the pool. An overestimate errs on the safe side.
             micro_share: budget / 2 / crate::ptex_stream::micro_threads() as u64,
             sweeping: Mutex::new(0),
             stats: CacheStats::default(),
@@ -900,9 +900,24 @@ impl TileCache {
             height,
             tile.data.len()
         );
-        let bytes = tile.bytes();
-        self.stats.bytes_read.fetch_add(bytes, Ordering::Relaxed);
+        self.stats
+            .bytes_read
+            .fetch_add(tile.bytes(), Ordering::Relaxed);
+        self.stats.decoded.fetch_add(1, Ordering::Relaxed);
+        Some(self.admit(id, tile))
+    }
 
+    /// Puts a freshly decoded tile in the shard map, and returns the tile the
+    /// caller should use: `decoded` itself, or the one already there when
+    /// another thread decoded the same tile first.
+    ///
+    /// **A raced fill keeps the first tile.** Replacing it would drop the
+    /// map's reference to a tile another lookup may still hold, in hand or in
+    /// its microcache: alive, yet counted in neither `resident` (which goes on
+    /// counting the replacement) nor `held` (which only the sweep marks). The
+    /// second decode is dropped here instead, before anyone saw it.
+    fn admit(&self, id: TileId, decoded: Arc<Tile>) -> Arc<Tile> {
+        let bytes = decoded.bytes();
         // The shard guard is scoped tightly and dropped before `make_room`.
         // `std::sync::Mutex` is not reentrant and the sweep walks *every*
         // shard, so holding this one across the call deadlocks the thread
@@ -913,20 +928,26 @@ impl TileCache {
         // shard's lock to evict the entry, so counting after the drop lets
         // another thread evict it and subtract its bytes first, wrapping
         // `resident` below zero.
-        let resident = match lock(self.shard(&id)) {
-            Some(mut m) => m
-                .insert(
-                    id,
-                    Entry {
-                        tile: tile.clone(),
+        let (tile, resident) = match lock(self.shard(&id)) {
+            Some(mut m) => match m.entry(id) {
+                hash_map::Entry::Occupied(mut first) => {
+                    let first = first.get_mut();
+                    if !first.used {
+                        first.used = true;
+                    }
+                    (first.tile.clone(), None)
+                }
+                hash_map::Entry::Vacant(slot) => {
+                    slot.insert(Entry {
+                        tile: decoded.clone(),
                         used: true,
-                    },
-                )
-                .is_none()
-                .then(|| self.resident.fetch_add(bytes, Ordering::Relaxed) + bytes),
-            None => None,
+                    });
+                    let now = self.resident.fetch_add(bytes, Ordering::Relaxed) + bytes;
+                    (decoded, Some(now))
+                }
+            },
+            None => (decoded, None),
         };
-        self.stats.decoded.fetch_add(1, Ordering::Relaxed);
         if let Some(now) = resident {
             self.stats.peak_bytes.fetch_max(now, Ordering::Relaxed);
             if now + self.held() > self.budget {
@@ -939,7 +960,7 @@ impl TileCache {
             // would be indistinguishable if they shared a counter.
             self.stats.raced.fetch_add(1, Ordering::Relaxed);
         }
-        Some(tile)
+        tile
     }
 
     /// Clock sweep: one pass giving each entry a second chance, dropping the
@@ -1062,6 +1083,10 @@ thread_local! {
     /// Bytes of tiles this thread's microcache holds, whichever cache they
     /// came from. Read and written on the miss path only.
     static RETAINED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// The set [`retain`] last gave a tile back from: a clock hand, so room is
+    /// made across all the sets rather than always from the first.
+    static HAND: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The microcache set a key lives in: a one-multiply (Fibonacci) hash of the
@@ -1085,27 +1110,54 @@ fn micro_set(key: &(u32, TileId)) -> usize {
     (x.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - MICRO_SETS.trailing_zeros())) as usize
 }
 
-/// Puts `tile` in front of its set, unless that would take this thread past
-/// `cache`'s share; the oldest way falls off the end (see `Ways`).
+/// Puts `tile` in front of its set — the oldest way falls off the end (see
+/// `Ways`) — then gives back this thread's oldest tiles until it is within
+/// `cache`'s share again.
 ///
-/// A tile left out was still used for the lookup that read it: only the next
-/// one pays a shard. With a share below one tile, which a small budget on many
-/// threads gives, the microcache keeps nothing and every lookup takes the
-/// shard path — slower, and still right.
+/// **Making room, never refusing.** A share can fill before the slots do (at
+/// 1 GiB on 72 threads it holds about 290 `half` tiles of the 512), and it
+/// fills with whatever came first — another cache's tiles included, a dropped
+/// one's among them. Refusing a tile that does not fit would leave those
+/// pinned and send every later miss into an under-full set to the shard
+/// path. So the newcomer always goes in, and a clock hand over the sets drops
+/// one oldest entry per set it passes until the bytes fit; the newcomer itself
+/// is never among them. Only on a miss, so a hit is unchanged.
+///
+/// A tile bigger than the whole share is not kept: it was still used for the
+/// lookup that read it, and the next one pays a shard. With a share below one
+/// tile, which a small budget on many threads gives, the microcache keeps
+/// nothing and every lookup takes the shard path — slower, and still right.
 fn retain(cache: &TileCache, set: usize, key: (u32, TileId), tile: Arc<Tile>) {
-    let evicted = MICRO.with(|m| {
+    let new = tile.bytes();
+    if new > cache.micro_share {
+        return;
+    }
+    MICRO.with(|m| {
         let mut slots = m.borrow_mut();
-        let out = slots[set].oldest_if_full().map_or(0, |t| t.bytes());
-        let now = RETAINED.get() - out + tile.bytes();
-        if now > cache.micro_share {
-            return None;
+        let mut kept = RETAINED.get() + new;
+        if let Some((_, out)) = slots[set].push(key, tile) {
+            kept -= out.bytes();
         }
-        RETAINED.set(now);
-        slots[set].push(key, tile)
+        let mut hand = HAND.get();
+        let mut idle = 0;
+        while kept > cache.micro_share && idle < MICRO_SETS {
+            hand = (hand + 1) & (MICRO_SETS - 1);
+            // The newcomer is the front of its set: not when it is alone there.
+            if hand == set && slots[set].len() <= 1 {
+                idle += 1;
+                continue;
+            }
+            match slots[hand].pop_oldest() {
+                Some((_, out)) => {
+                    kept -= out.bytes();
+                    idle = 0;
+                }
+                None => idle += 1,
+            }
+        }
+        HAND.set(hand);
+        RETAINED.set(kept);
     });
-    // After the borrow ends, as before: the last reference to a tile the map
-    // evicted gives its bytes back to `held` as it drops.
-    drop(evicted);
 }
 
 /// Reads `id` through the per-thread microcache and hands the tile to `f`.
@@ -1652,6 +1704,121 @@ mod tests {
 
         clear_microcache();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Two threads decoding the same tile at once: the second fill must hand
+    /// back the first tile, not replace it — a replaced tile still held by
+    /// the first lookup would be alive yet counted nowhere.
+    #[test]
+    fn a_raced_fill_keeps_the_first_tile() {
+        clear_microcache();
+        let path = fixture("raced", 256, 256);
+        let tf = TiledFile::open(&path).expect("open");
+        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let file = cache.intern(tf.clone()).expect("intern");
+        let id = TileId {
+            file,
+            level: 0,
+            tile: 0,
+        };
+        let mut dec = tf.reader().expect("reader");
+        let decode = |dec: &mut TileReader| {
+            let data = tf.read_tile(dec, 0, 0).expect("decode");
+            let (w, h) = tf.level(0).tile_size(0, TILE_EDGE);
+            Arc::new(Tile::new(data, w, h))
+        };
+        let first = cache.admit(id, decode(&mut dec));
+        let second = cache.admit(id, decode(&mut dec));
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the raced fill got its own copy"
+        );
+        assert_eq!(cache.resident(), first.bytes(), "counted once");
+        assert_eq!(cache.counters().raced, 1);
+        let held = cache.get(id).expect("tile");
+        assert!(Arc::ptr_eq(&held, &first), "the map kept the first");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Distinct level-0 tile ids of one file, `n` of them.
+    fn level0(file: u32, n: u32) -> impl Iterator<Item = TileId> {
+        (0..n).map(move |tile| TileId {
+            file,
+            level: 0,
+            tile,
+        })
+    }
+
+    /// Whether a lookup of `id` is answered by this thread's microcache.
+    fn hits(cache: &TileCache, id: TileId) -> bool {
+        let before = cache.counters().micro_hits;
+        with_tile(cache, id, |t| t.width).expect("tile");
+        cache.counters().micro_hits == before + 1
+    }
+
+    /// A share that fills before the slots do must still take each new tile,
+    /// giving back older ones, rather than refuse it: the tiles that filled it
+    /// would otherwise stay pinned and every later miss go to the shards.
+    #[test]
+    fn a_full_share_makes_room_for_the_next_tile() {
+        clear_microcache();
+        let path = fixture("share_full", 512, 512);
+        let tf = TiledFile::open(&path).expect("open");
+        let tile = full_u8_tile_bytes();
+        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+            .with_micro_share(3 * tile);
+        let file = cache.intern(tf).expect("intern");
+        for id in level0(file, 8) {
+            with_tile(&cache, id, |t| t.width).expect("tile");
+            assert!(hits(&cache, id), "tile {} was refused", id.tile);
+            assert!(RETAINED.get() <= 3 * tile, "over the share");
+        }
+        clear_microcache();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Tiles a larger cache left in this thread's microcache must not keep a
+    /// smaller cache's tiles out: they are given back to make room.
+    #[test]
+    fn another_caches_tiles_do_not_block_a_smaller_share() {
+        clear_microcache();
+        let path = fixture("share_other", 512, 512);
+        let tf = TiledFile::open(&path).expect("open");
+        let tile = full_u8_tile_bytes();
+        let large = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+            .with_micro_share(16 * tile);
+        let small = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+            .with_micro_share(2 * tile);
+        let l = large.intern(tf.clone()).expect("intern");
+        let s = small.intern(tf).expect("intern");
+        for id in level0(l, 8) {
+            with_tile(&large, id, |t| t.width).expect("tile");
+        }
+        assert!(
+            RETAINED.get() > 2 * tile,
+            "the large cache filled past the small share"
+        );
+        for id in level0(s, 2) {
+            with_tile(&small, id, |t| t.width).expect("tile");
+            assert!(
+                hits(&small, id),
+                "the small cache's tile {} was refused",
+                id.tile
+            );
+        }
+        assert!(RETAINED.get() <= 2 * tile);
+        clear_microcache();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The threads a share is split across cover the render pool, even when
+    /// `RAYON_NUM_THREADS` exceeds the cores, plus the thread driving it.
+    #[test]
+    fn the_share_counts_the_pool_and_its_driver() {
+        let threads = crate::ptex_stream::micro_threads();
+        assert!(threads > rayon::current_num_threads());
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert!(threads > cores);
     }
 
     /// Striping must not lose counts: each thread increments its own line and

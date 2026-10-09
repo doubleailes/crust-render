@@ -347,9 +347,22 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     - **Inside the budget.**
       - Each thread keeps at most `budget / 2 / threads` bytes of a cache's
         tiles. That is checked on the miss path, so a hit reads nothing new.
+        `threads` is the render pool or the cores, whichever is larger, plus
+        the thread that drives the pool: dividing by the cores alone let a
+        larger `RAYON_NUM_THREADS` pass the half-budget bound.
+      - **A full share makes room; it never refuses.** The new tile goes in, and
+        a clock hand over the sets gives back one oldest entry per set until the
+        bytes fit. A share can fill before the slots do (about 290 `half` tiles
+        of the 512 at 1 GiB on 72 threads), and refusing then pinned whatever
+        filled it, another cache's tiles included: every later miss into an
+        under-full set went to the shards.
       - An evicted tile that a thread still holds, in its microcache or in hand
         during the lookup that read it, counts in `held` until its last
         reference drops. The sweep keeps `resident + held` within the budget.
+      - **A raced fill keeps the first tile.** When two threads decode the same
+        tile, the second gets the one already in the map. Replacing it dropped
+        the map's reference to a tile the first lookup could still hold, alive
+        and counted in neither `resident` nor `held`.
       - It is counted at eviction rather than reserved like the Ptex stream's
         `micro_reserve`. ALab holds nothing beyond the map, and a reserve would
         have taken up to 890 MiB of its 1 GiB for nothing.

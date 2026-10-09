@@ -256,9 +256,11 @@ The memory budget, in MiB, of the tile cache for streamed `.tx` textures. `0` is
 The budget covers the tiles each render thread keeps for itself as well as the shared
 cache:
 - **Each thread keeps at most half the budget divided by the thread count** (up to 512
-  tiles). With a small budget on many threads that can be less than one tile. The
-  threads then keep nothing, and every lookup goes to the shared cache: slower, with the
-  same image.
+  tiles). The thread count is the render pool's (`RAYON_NUM_THREADS`) or the core
+  count, whichever is larger, plus one. A thread that reaches its share gives back its
+  oldest tiles to keep a new one. With a small budget on many threads the share can be
+  less than one tile. The threads then keep nothing, and every lookup goes to the shared
+  cache: slower, with the same image.
 - **A tile the shared cache evicts while a thread still holds it keeps counting** until
   the thread lets go. `--stats` reports the most such bytes at once as
   `peak held after eviction`, beside `peak resident / budget`.

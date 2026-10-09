@@ -144,7 +144,10 @@ ratio.
 | 32 spp, `--profile` | 41.38 s | 8.02 s | 5.16× |
 | default 128 spp, adaptive | 2:31.7 | 29.27 s | **5.18×** |
 
-- **72 threads buy 5.16× over 8.** The two 72-thread runs agree within 0.3%.
+- **72 threads buy 5.16× over 8.** These are renders run one after the other
+  on an idle machine, not interleaved: the two 72-thread runs agree within
+  0.3%. `bench_ab.sh` with thread-count wrappers ("Reproducing the scaling
+  pair") is the interleaved form, which a later measurement should use.
   At 128 spp, adaptive sampling stops only 1.1% of pixels, so each of its
   rounds is nearly a full sweep and the ratio matches 32 spp's.
 - **The 5.4× this section used to report was an extrapolation.** It came from
@@ -245,7 +248,7 @@ at 32 spp:
 | **Texture** | **770 ns** | **1.24 µs** | **1.61×** | 895 ns / 1.71 µs, 1.91× |
 | Trace | 3.89 µs | 5.71 µs | 1.47× | 1.45× |
 | Occlusion | 1.91 µs | 2.71 µs | 1.42× | 1.41× |
-| Render (profiled) | 37.80 s | 6.86 s | **5.51×** | 41.38 s / 8.02 s, 5.16× |
+| Render (profiled, run one after the other) | 37.80 s | 6.86 s | **5.51×** | 41.38 s / 8.02 s, 5.16× |
 
 - **Texture's slowdown is now the machine's own 1.6×.** The contention is gone.
 - **The 72-thread render is 15.9% faster** (`bench_ab.sh -n 3`, unprofiled,
@@ -661,9 +664,16 @@ not a render.
 
 ```bash
 CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
-# the pair, at equal spp (--stats for the ratio, --profile for per-call times):
-RAYON_NUM_THREADS=72 cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --stats
-RAYON_NUM_THREADS=8  cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --stats
+# the ratio, interleaved: one wrapper per thread count, alternated by bench_ab.sh
+# (the 8 -> 72 ratio is A min / B min)
+for t in 8 72; do
+  printf '#!/bin/sh\nRAYON_NUM_THREADS=%s exec %s "$@"\n' $t "$PWD/target/release/crust" > /tmp/crust_t$t
+  chmod +x /tmp/crust_t$t
+done
+scripts/bench_ab.sh -a /tmp/crust_t8 -b /tmp/crust_t72 -n 3 -x "-f 1004 --camera $CAM -s 32" samples/ALab/entry.usda
+# per-call times: one --profile run at each count
+RAYON_NUM_THREADS=72 cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --profile
+RAYON_NUM_THREADS=8  cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --profile
 # what the machine allows: N single-threaded copies at once (N = 1, 8, ..., 72);
 # a lone copy's Render time over each copy's here is the machine's efficiency at N
 N=72; mkdir -p /tmp/cal$N
