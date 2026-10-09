@@ -161,7 +161,7 @@ face differently:
 | region | source |
 | --- | --- |
 | finer than the cap | the file's stored levels, read as tiles, as `file` reads them |
-| at the cap | the file's face at the cap resolution, the bytes `PtexColor` fetches |
+| at the cap | the file's face at the cap resolution, the bytes `PtexColor` fetches, read as tiles |
 | coarser than the cap | derived from the cap level in linear light, by the preload's own reduction |
 
 **The derived levels live in the reader's cache.** `ptex-rs` 0.4.0 gained
@@ -176,6 +176,20 @@ crust's adapter (`CappedLevels` in `ptex_stream.rs`) decodes through
 because they are the same calls, not two implementations that agree. There is
 still no second cache in crust, and `--stats` counts the derived blocks inside
 `streamed resident`.
+
+**The cap level itself is read as tiles, and only coarser levels are
+derived.** The cap level holds the file's own texels, and a tile read decodes
+them bit-identically to the preload already (the invariant above). A derived
+block is a whole level of a face: under a large explicit cap, the cap level
+would be megabytes of `f32` (6 MiB for `quad_tiled`'s face at 10), past a
+microcache slot and past a small reader share, decoded again on every tap. So
+lookups ask the reader for levels 1 and coarser, and level 0 is produced only
+as the parent of a derivation and dropped.
+
+**Without a pyramid (`CRUST_PTEX_MIP=0`) the footprint is ignored**, as it is
+for every single-level texture: a lookup reads the finest level held, the
+uncapped authored face unless `CRUST_PTEX_MAX_LOG2` is set (and then the
+preload's own level).
 
 **Lookups are routed by the footprint against the cap level.** A footprint
 wider than one cap texel goes through the derived chain with the preload's
@@ -195,8 +209,11 @@ What that buys, pinned in `tests/ptex_stream.rs`:
 
 - `capped_streaming_and_the_preload_agree_at_and_below_the_cap`: bit-identical
   to `PtexColor` for every face of the four fixtures, every cap from 0 to the
-  authored resolution, pyramid on and off, at every footprint no finer than one
-  cap texel.
+  authored resolution, at every footprint no finer than one cap texel.
+- `the_cap_level_is_read_as_tiles_not_derived`: a lookup at the cap level
+  derives nothing, even under a cap whose level would not fit the share.
+- `capped_streaming_without_mips_ignores_the_footprint`: with the pyramid off,
+  every footprint reads the same level, the `file` stream's level 0.
 - `capped_streaming_under_an_explicit_cap_is_the_preload_everywhere`: with
   `CRUST_PTEX_MAX_LOG2` set, the stream holds nothing finer than the preload and
   matches it at every footprint, `width = 0` included.
@@ -227,6 +244,11 @@ on the 72-vCPU machine of `docs/moana_profile.md` (93 GiB). The preload and
 | peak RSS | 31.3–31.6 GiB | 23.7 GiB | **23.9–24.1 GiB** |
 | `Load assets` | 1:36.8–1:40.5 | 31.8 s | **28.1–29.2 s** |
 | image against the preload | — | 27.6% of pixels, relMSE 0.197 (trimmed 2.8e-3) | **267 pixels (0.12%), relMSE 1.4e-9** |
+
+These were measured while the cap level was still a derived block; it is read
+as tiles now (see above). That cannot move the image, which the tests pin
+bitwise on both sides of it, but the cache and `Render` figures were not
+re-measured.
 
 The last row is the point. Under `capped` the island's image is the preload's
 except on 267 pixels, max 6.2e-3, where a footprint is finer than one cap texel
@@ -452,13 +474,13 @@ ran:
 Ptex
   backend                      streamed (capped chain)
   textures                     2 (6 faces)
-  streamed resident / budget   29.34 KiB / 951.00 MiB over 2 textures
-    derived levels             7 blocks, 29.34 KiB, 7 derives
-  thread tiles / reserve       701.44 KiB / 73.00 MiB
-  texel fetches                335 008
-    thread microcache hits     334 894 (100.0%)
-    reader cache hits          107
-    reads from disk            7
+  streamed resident / budget   5.16 KiB / 951.00 MiB over 2 textures
+    derived levels             1 blocks, 288 B, 2 derives
+  thread tiles / reserve       120.62 KiB / 73.00 MiB
+  texel fetches                1 340 029
+    thread microcache hits     1 339 922 (100.0%)
+    reader cache hits          82
+    reads from disk            11
   evictions                    0
 ```
 
@@ -656,6 +678,12 @@ and the rendered one cannot be checked against different bytes.
   `CRUST_TEX_MAX_OPEN_FILES`. At the defaults the island streams 53 files; a
   lower threshold or a larger budget that streams thousands can exceed
   `ulimit -n` (`docs/moana_profile.md`).
+- **A derived level is a whole level of a face.** At the default cap the
+  largest is 16×16 `f32` (3 KiB). Under a large explicit cap the levels just
+  below it can be megabytes, and one that exceeds a reader's share is returned
+  uncached (`oversized`) and derived again on the next lookup. The cap level
+  itself is read as tiles, so this costs only footprints a level or two
+  coarser than a large cap.
 - **`ptex-rs` 0.4.0 is pinned by `rev`** to the fork's `derived-levels` branch
   until it is released to crates.io.
 - **Ptex has no per-texture colour space.** Both backends decode `half` and

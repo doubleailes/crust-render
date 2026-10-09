@@ -95,6 +95,12 @@ SharedReader::get_derived(faceid, k) -> Result<PixelData>
   ~16 KiB of `f32` per face read only at a coarse level, and the 53 readers thrashed
   (1.04 M evictions and 985 K derives for 586 K texel fetches), where `=file` keeps a
   few texels per face. Values are unchanged: each level is still its parent's reduction.
+- **The cap level is read as tiles; only coarser levels are derived.** A derived block
+  is a whole level, so under a large explicit cap the cap level would be a
+  multi-megabyte `f32` block, re-decoded on every tap once it outgrows a microcache
+  slot or a reader's share (Qodo review). Tiles at the cap are already bit-identical
+  to the preload. Without a pyramid (`CRUST_PTEX_MIP=0`) the footprint is ignored and
+  every lookup reads `A` (or an explicit cap).
 - **The base read for a derivation is not cached either.** A stored base block, or the
   reduction that builds a base the file does not store (most island faces are
   non-square, so 64x8 capped at 32 is a 32x8 reduction of 64x8) together with its

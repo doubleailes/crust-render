@@ -862,10 +862,18 @@ impl MipSource for StreamFace<'_> {
 }
 
 /// One face under the `capped` chain, at and below the preload's cap: `base`
-/// is the cap level, every level is a derived block, and the chain is
-/// [`PtexColor`]'s exactly — the same levels, the same texels, the same
-/// `texels_across`, so the shared [`trilinear`] selects and blends as it does
-/// there and the result is bit-identical.
+/// is the cap level, and the chain is [`PtexColor`]'s exactly — the same
+/// levels, the same texels, the same `texels_across`, so the shared
+/// [`trilinear`] selects and blends as it does there and the result is
+/// bit-identical.
+///
+/// **Level 0 is read as file tiles; only the coarser levels are derived
+/// blocks.** The cap level holds the file's own texels, which a tile read
+/// decodes bit-identically to the preload already (the invariant
+/// `streamed_and_preloaded_agree_texel_for_texel` pins), and a derived block
+/// is a whole level: at an explicit cap of 8 the cap level would be a 768 KiB
+/// `f32` block, past a microcache slot and possibly past a reader's share, so
+/// every tap would decode the whole face again.
 struct CappedFace<'a> {
     tex: &'a PtexStream,
     face: u32,
@@ -888,6 +896,9 @@ impl MipSource for CappedFace<'_> {
 
     #[inline(always)]
     fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<Vec3A> {
+        if level == 0 {
+            return self.tex.sample_level(self.face, self.base, u, v);
+        }
         let res = level_res(self.base, level as u8);
         self.tex.sample_derived(self.face, level, res, u, v)
     }
@@ -937,9 +948,8 @@ impl MipSource for FinerFace<'_> {
     #[inline(always)]
     fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<Vec3A> {
         if level >= self.steps {
-            // The cap level is the derived chain's first block, which holds
-            // the preload's own texels.
-            self.tex.sample_derived(self.face, 0, self.base, u, v)
+            // The cap level, read as tiles as [`CappedFace`] reads it.
+            self.tex.sample_level(self.face, self.base, u, v)
         } else {
             let res = level_res(self.fine, level as u8);
             self.tex.sample_level(self.face, res, u, v)
@@ -959,7 +969,9 @@ impl MipSource for FinerFace<'_> {
 /// [`PtexColor`] fetches — through [`decode_face`], the preload's own decode;
 /// each further level is [`reduce_level`] of its parent, the preload's own
 /// reduction. Interleaved linear `f32` RGB, little-endian, exactly the
-/// texels the preloaded arena holds for that face and level.
+/// texels the preloaded arena holds for that face and level. Lookups ask for
+/// levels 1 and coarser only (level 0 is read as tiles, see [`CappedFace`]),
+/// so level 0 is produced as the parent of a derivation and not kept.
 struct CappedLevels {
     max_log2: i8,
     triangle: bool,
@@ -1021,6 +1033,12 @@ impl PtexStream {
     /// could round the blend weight differently). Only a footprint inside one
     /// cap texel — where the preload has nothing finer to give — reads the
     /// file's finer levels through [`FinerFace`].
+    ///
+    /// **Without a pyramid (`CRUST_PTEX_MIP=0`) the footprint is ignored**,
+    /// as [`MipSource`] promises for a single level: every lookup reads
+    /// `fine`, the uncapped authored face unless a cap was set. Routing by
+    /// the footprint there would switch from the authored face to the cap
+    /// face as a surface recedes, a jump in detail with distance.
     #[allow(clippy::too_many_arguments)]
     fn eval_capped(
         &self,
@@ -1032,16 +1050,17 @@ impl PtexStream {
         fv: f32,
         width: f32,
     ) -> Vec3A {
+        if !self.mip {
+            return self
+                .sample_level(face, fine, fu, fv)
+                .unwrap_or(self.fallback);
+        }
         let base = capped_res(authored, max_log2, self.triangle);
         let coarse = CappedFace {
             tex: self,
             face,
             base,
-            levels: if self.mip {
-                level_count(base) as usize
-            } else {
-                1
-            },
+            levels: level_count(base) as usize,
         };
         let wide = width.is_finite() && width > 0.0 && width * coarse.texels_across() > 1.0;
         // `fine` is never coarser than `base`: an explicit cap is the
@@ -1056,7 +1075,7 @@ impl PtexStream {
             fine,
             base,
             steps,
-            levels: if self.mip { steps + 1 } else { 1 },
+            levels: steps + 1,
         };
         trilinear(&finer, fu, fv, width).unwrap_or(self.fallback)
     }
