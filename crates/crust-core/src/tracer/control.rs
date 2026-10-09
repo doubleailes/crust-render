@@ -46,6 +46,8 @@ pub struct RenderControl {
     /// The samples every pixel of the pass in progress has taken: the last
     /// completed stage of its first sweep.
     reached: AtomicU32,
+    /// The most `reached` has been, over every pass so far.
+    reached_max: AtomicU32,
     /// The latest published beauty, region-sized; `None` before the first
     /// publish. Workers publish under the lock, readers clone under it.
     display: Mutex<Option<Buffer>>,
@@ -65,6 +67,7 @@ impl RenderControl {
             snapshots: true,
             generation: AtomicU64::new(0),
             reached: AtomicU32::new(0),
+            reached_max: AtomicU32::new(0),
             display: Mutex::new(None),
         }
     }
@@ -112,9 +115,20 @@ impl RenderControl {
         self.reached.load(Ordering::Relaxed)
     }
 
+    /// The most samples every pixel of one pass had taken, over every pass
+    /// so far: [`samples_reached`](Self::samples_reached), except that a new
+    /// pass does not start it over. A guided render's training pass that
+    /// reached 4 spp keeps this at 4 after the next pass starts at 0, so a
+    /// host that polls for "an image of at least N spp exists" cannot miss
+    /// it between two passes.
+    pub fn max_samples_reached(&self) -> u32 {
+        self.reached_max.load(Ordering::Relaxed)
+    }
+
     /// Records that every pixel of the pass has taken `spp` samples.
     pub(crate) fn reach(&self, spp: u32) {
         self.reached.store(spp, Ordering::Relaxed);
+        self.reached_max.fetch_max(spp, Ordering::Relaxed);
     }
 
     /// A copy of the latest published beauty, with the generation it

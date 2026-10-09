@@ -378,6 +378,9 @@ impl Server {
         &self,
         Parameters(p): Parameters<Snapshot>,
     ) -> Result<CallToolResult, ErrorData> {
+        // As `render`'s, the budget counts from the call: a lookup queued
+        // behind another command on the session thread is inside it.
+        let asked = std::time::Instant::now();
         let budget_s = p.budget_s.unwrap_or(0.0);
         let Ok(budget) = Duration::try_from_secs_f64(budget_s) else {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
@@ -388,10 +391,11 @@ impl Server {
             .session
             .call(move |state| state.session()?.renders.get(p.render_id))
             .await;
+        let left = budget.saturating_sub(asked.elapsed());
         if let Ok(Ok(job)) = &job
-            && !budget.is_zero()
+            && !left.is_zero()
         {
-            job.wait(budget).await;
+            job.wait(left).await;
         }
         job_answer(job)
     }

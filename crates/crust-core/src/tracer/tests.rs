@@ -733,7 +733,8 @@ fn reconfigure_renders_what_new_renders() {
 
 /// `new(s0).retune(s)` renders what `new(s)` renders, bit for bit, under
 /// `learned`: kept when only the samples or the region changed (no second
-/// pre-pass), rebuilt when the resolution or the strategy did.
+/// pre-pass), rebuilt when the resolution or the strategy did. `s0` is at 8
+/// spp so every case changes the samples, and every compared image is at 16.
 #[test]
 fn retune_renders_what_new_renders() {
     use super::PixelRect;
@@ -742,17 +743,17 @@ fn retune_renders_what_new_renders() {
     let s0 = sample_scene(name)
         .settings
         .with_resolution(48, 32)
-        .with_samples_per_pixel(16)
-        .with_light_selection(LightSelection::Learned);
-    let cropped = s0
         .with_samples_per_pixel(8)
+        .with_light_selection(LightSelection::Learned);
+    let at16 = s0.with_samples_per_pixel(16);
+    let cropped = at16
         .with_region(PixelRect::new(8, 4, 40, 28))
         .expect("region inside the frame");
     let cases = [
-        (s0.with_samples_per_pixel(4), true),
+        (at16, true),
         (cropped, true),
-        (s0.with_resolution(32, 24), false),
-        (s0.with_light_selection(LightSelection::Power), false),
+        (at16.with_resolution(32, 24), false),
+        (at16.with_light_selection(LightSelection::Power), false),
     ];
     for (k, (s, kept)) in cases.into_iter().enumerate() {
         let scene = sample_scene(name);
@@ -1082,7 +1083,8 @@ fn the_last_snapshot_is_the_returned_image() {
 /// The samples a control reports reached are the first sweep's completed
 /// stages: none before the render or under a cancel that came first, the
 /// whole budget when the sweep covers it (4 spp, below the first check
-/// point), and the first check point when adaptive rounds follow it.
+/// point), and the first check point when adaptive rounds follow it. A new
+/// pass starts the count over, but not its maximum.
 #[test]
 fn samples_reached_follow_the_first_sweep() {
     use crate::RenderControl;
@@ -1105,6 +1107,24 @@ fn samples_reached_follow_the_first_sweep() {
     control.cancel();
     small_cornell(64).render_with_control(true, None, None, &control);
     assert_eq!(control.samples_reached(), 0, "a new pass starts at zero");
+    assert_eq!(
+        control.max_samples_reached(),
+        8,
+        "the most any pass reached outlives the pass"
+    );
+    // A guided render's training passes (2, 2, 4 and 8 spp) each start over,
+    // and its final pass ends at its own 2: the maximum keeps the 8.
+    let scene = sample_scene("cornellbox.usda");
+    let s = scene
+        .settings
+        .with_resolution(48, 32)
+        .with_samples_per_pixel(2)
+        .with_guiding(true, 4, 0.5);
+    let control = RenderControl::new();
+    crate::Renderer::new(scene.camera, scene.world, scene.lights, s)
+        .render_with_control(true, None, None, &control);
+    assert_eq!(control.samples_reached(), 2, "the final pass's own count");
+    assert_eq!(control.max_samples_reached(), 8, "the last training pass's");
 }
 
 /// Snapshots read from another thread while the render runs only move

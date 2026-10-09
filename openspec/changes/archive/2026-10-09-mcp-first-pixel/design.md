@@ -44,7 +44,7 @@ is the last first-sweep stage (1, 2, 4, … spp) that every pixel has completed.
 
 `render`'s default wait (`wait = "image"`) ends at the first of three events:
 
-- `samples_reached >= 4`;
+- `max_samples_reached >= 4` (every pixel of some pass has 4 samples);
 - the render returned (done or cancelled);
 - `budget_s` passed.
 
@@ -60,9 +60,13 @@ returns. Answering on that stage would report `done = false` for a render that i
 fact complete, depending on a race. Waiting costs nothing, since that stage *is* the
 whole render.
 
-A guided render restarts `samples_reached` with each training pass, so its first image
-is a training pass at 4 spp. That is still an image of the scene. The docs already say
-a guided render's snapshot shows the pass in progress.
+A guided render restarts `samples_reached` with each training pass (2, 2, 4 and 8 spp),
+so its first image is a training pass at 4 spp. That is still an image of the scene, and
+the docs already say a guided render's snapshot shows the pass in progress. Because each
+pass starts the count over at 0, the 4 that a training pass reaches lasts only until the
+next pass begins, and a poll can fall between the two (found in review). So the wait reads
+`RenderControl::max_samples_reached`, the most any pass has reached, which a new pass
+does not reset.
 
 **Alternatives considered:**
 
@@ -73,11 +77,12 @@ a guided render's snapshot shows the pass in progress.
 
 ### D2. The wait is polled on the protocol side
 
-`samples_reached` is an atomic store with no notification, and adding one to
-crust-core's `RenderControl` would put a wake-up on the render's hot path. The
-handler polls it every 10 ms alongside the render's existing `returned` signal.
-That is at most 100 cheap loads a second, on the one tokio thread, while a tool call
-is waiting anyway. The render does no extra work.
+`max_samples_reached` is an atomic, updated with one `fetch_max` per stage, with no
+notification. Adding one to crust-core's `RenderControl` would put a wake-up on the
+render's hot path. The handler polls it every 10 ms alongside the render's existing
+`returned` signal. That is at most 100 cheap loads a second, on the one tokio thread,
+while a tool call is waiting anyway. The render does no extra work beyond that
+`fetch_max`.
 
 ### D3. `snapshot(budget_s)` waits for the render to return
 
@@ -118,7 +123,10 @@ calls `retune`.
 
 Through the server's pipes (release build, Linux, 4 cores, 2026-10-09), on
 `cornellbox.usda`: `open_session`, then `render` with no arguments (the stage's
-128 spp), three runs each. The client is a stdio script that times each call.
+128 spp). The client is a stdio script that times each call. The two waits alternate
+in one loop (image, done, image, done, image, done), so background load lands on both,
+as `bench_ab.sh` arranges for binaries. `bench_ab.sh` itself does not apply: it times
+`crust render`'s Render phase, not a tool call.
 
 | `render` waits for | first image (open + render) | answered with |
 |---|---|---|
@@ -126,7 +134,9 @@ Through the server's pipes (release build, Linux, 4 cores, 2026-10-09), on
 | `"done"` (the old rule) | 10.06 / 10.06 / 10.11 s | 32 spp, rendering (the budget ran out) |
 
 `open_session` took 22–48 ms in every run, so the first image is now nearly all
-render time. The answer is 4 spp, where `samples_reached` is checked every 10 ms.
+render time. The answer is 4 spp, where the samples reached are checked every 10 ms.
+The `"done"` side is the 10 s budget running out, a timeout rather than a measured
+cost, and the gap (about 20×) is far outside the ~15% run-to-run noise.
 
 ## Follow-ups
 
