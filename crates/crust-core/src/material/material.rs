@@ -580,22 +580,24 @@ impl<'a> ShadingPoint<'a> {
     /// The colour of this surface's diffuse reflection lobes, which the raw
     /// light AOVs divide by and `diffuse_albedo` reports. Zero for a
     /// material queried directly (no `OpenPBR`, no closure): crust cannot
-    /// tell its diffuse part.
-    pub(crate) fn diffuse_filter(&self) -> Vec3A {
+    /// tell its diffuse part. `cos_o` is the view cosine this point was
+    /// resolved with, which an `OpenPBR`'s fuzz attenuates its base by.
+    pub(crate) fn diffuse_filter(&self, cos_o: f32) -> Vec3A {
         match &self.bsdf {
             Resolved::Material(_) => Vec3A::ZERO,
-            Resolved::Plain(m) => m.diffuse_filter(),
-            Resolved::OpenPBR(m) => m.params().diffuse_filter(),
+            Resolved::Plain(m) => m.diffuse_filter(cos_o),
+            Resolved::OpenPBR(m) => m.params().diffuse_filter(cos_o),
             Resolved::Closure(c) => c.diffuse_filter(),
         }
     }
 
-    /// The albedo the `albedo` AOV reports here, in [0, 1].
-    pub(crate) fn albedo(&self) -> Vec3A {
+    /// The albedo the `albedo` AOV reports here, in [0, 1], seen at the view
+    /// cosine `cos_o` this point was resolved with.
+    pub(crate) fn albedo(&self, cos_o: f32) -> Vec3A {
         match &self.bsdf {
             Resolved::Material(m) => m.albedo(&self.rec).unwrap_or(Vec3A::ONE),
-            Resolved::Plain(m) => m.albedo(),
-            Resolved::OpenPBR(m) => m.params().albedo(),
+            Resolved::Plain(m) => m.albedo(cos_o),
+            Resolved::OpenPBR(m) => m.params().albedo(cos_o),
             Resolved::Closure(c) => c.albedo(),
         }
     }

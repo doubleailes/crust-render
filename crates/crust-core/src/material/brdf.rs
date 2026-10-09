@@ -266,23 +266,128 @@ pub fn from_tangent(v_local: Vec3A, t: Vec3A, b: Vec3A, n: Vec3A) -> Vec3A {
     t * v_local.x + b * v_local.y + n * v_local.z
 }
 
-/// Estevez–Kulla "Charlie" sheen distribution, as used by glTF and OpenPBR
-/// fuzz. `roughness` is the fuzz roughness in [0, 1].
-pub fn sheen_charlie_d(n_dot_h: f32, roughness: f32) -> f32 {
-    let alpha = roughness.max(0.05);
-    let inv_alpha = 1.0 / alpha;
-    let sin_theta_h_sq = (1.0 - n_dot_h * n_dot_h).max(0.0);
-    (2.0 + inv_alpha) * sin_theta_h_sq.powf(inv_alpha * 0.5) / (2.0 * PI)
+/// Zeltner, Burley and Chiang's sheen ("Practical Multiple-Scattering Sheen
+/// Using Linearly Transformed Cosines", 2022) for one view direction: the
+/// linearly transformed cosine fitted to a volumetric layer of fibres, and
+/// its directional albedo `R`. This is Adobe's OpenPBR fuzz lobe
+/// (`impl/openpbr_fuzz_lobe.h`), transcribed operation for operation, with
+/// Disney's "Volume" table ([`super::ltc_sheen_table`]).
+///
+/// All directions are in a z-up local frame with the view `wo` above the
+/// plane. The value toward `wi` is `R · density(wi)`: the BRDF times the
+/// cosine, which the LTC already contains. The density is the lobe's own pdf
+/// and [`ZeltnerSheen::sample`] draws from it exactly, so every sample's
+/// weight is `R`.
+#[derive(Clone, Copy, Debug)]
+pub struct ZeltnerSheen {
+    a_inv: f32,
+    b_inv: f32,
+    r: f32,
 }
 
-/// Sony Imageworks visibility approximation for Charlie sheen.
-pub fn sheen_charlie_v(n_dot_v: f32, n_dot_l: f32) -> f32 {
-    1.0 / (4.0 * (n_dot_l + n_dot_v - n_dot_l * n_dot_v).max(1e-4))
+impl ZeltnerSheen {
+    /// The lobe at sheen roughness `roughness` (the LTC α, `√σ` of the
+    /// fibres' SGGX cross-section, which OpenPBR's `fuzz_roughness` is) seen
+    /// at `cos_theta_o`. Both are clamped into the table, as Adobe's array
+    /// lookup clamps them; there is no roughness floor.
+    pub fn new(roughness: f32, cos_theta_o: f32) -> Self {
+        use super::ltc_sheen_table::{LTC_SHEEN_VOLUME as T, N};
+        // Adobe's `OpenPBR_LargestFloatBelowOne`: keeps `i + 1` in the table.
+        const BELOW_ONE: f32 = 0.999_999_94;
+        let row = roughness.clamp(0.0, BELOW_ONE) * (N - 1) as f32;
+        let col = cos_theta_o.clamp(0.0, BELOW_ONE) * (N - 1) as f32;
+        let (r, c) = (row.floor(), col.floor());
+        let (rf, cf) = (row - r, col - c);
+        let (ri, ci) = (r as usize, c as usize);
+        // GLSL's `mix`, `x·(1 − t) + y·t`, in Adobe's order.
+        let mix = |x: [f32; 3], y: [f32; 3], t: f32| {
+            [
+                x[0] * (1.0 - t) + y[0] * t,
+                x[1] * (1.0 - t) + y[1] * t,
+                x[2] * (1.0 - t) + y[2] * t,
+            ]
+        };
+        let at = |i: usize, j: usize| T[i * N + j];
+        let k = mix(
+            mix(at(ri, ci), at(ri, ci + 1), cf),
+            mix(at(ri + 1, ci), at(ri + 1, ci + 1), cf),
+            rf,
+        );
+        Self {
+            a_inv: k[0],
+            b_inv: k[1],
+            r: k[2],
+        }
+    }
+
+    /// The directional albedo `R`: how much of the light arriving over the
+    /// hemisphere the lobe reflects toward `wo`.
+    #[inline]
+    pub fn albedo(&self) -> f32 {
+        self.r
+    }
+
+    /// The LTC density toward `wi` (cosine included), which is both the
+    /// lobe's shape and its sampling pdf. Zero below the plane or with `wo`
+    /// at or below it.
+    pub fn density(&self, wo: Vec3A, wi: Vec3A) -> f32 {
+        if wo.z <= 0.0 || wi.z <= 0.0 {
+            return 0.0;
+        }
+        // Into the frame where `wo` has azimuth 0, the one the LTC is fitted in.
+        let wi = rotate_azimuth(wi, wo.x, -wo.y);
+        let a_inv = self.a_inv;
+        let original = Vec3A::new(a_inv * wi.x + self.b_inv * wi.z, a_inv * wi.y, wi.z);
+        let z = wi.z.max(0.0);
+        let len_squared = original.dot(original);
+        if len_squared == 0.0 || a_inv == 0.0 || z == 0.0 {
+            return 0.0;
+        }
+        // Adobe's factorisation, which keeps tiny grazing densities
+        // representable: `(1/π) · z · a⁻² / |M⁻¹ wi|⁴`.
+        let a_inv_over_len_squared = a_inv / len_squared;
+        // Adobe's `OpenPBR_RcpPi` literal rounds to this `f32`.
+        std::f32::consts::FRAC_1_PI * (z * a_inv_over_len_squared) * a_inv_over_len_squared
+    }
+
+    /// A direction drawn with [`ZeltnerSheen::density`] from the 2D sample
+    /// `u`, or `None` when it falls below the plane (Adobe's failed sample) or
+    /// the lobe has no extent there (`a⁻¹ = 0`, where the table holds `R = 0`).
+    pub fn sample(&self, wo: Vec3A, u: [f32; 2]) -> Option<Vec3A> {
+        if wo.z <= 0.0 || self.a_inv == 0.0 {
+            return None;
+        }
+        // Adobe's `openpbr_sample_unit_hemisphere_cosine`.
+        let phi = 2.0 * PI * u[0];
+        let z = u[1].sqrt();
+        let s = (1.0 - u[1]).sqrt();
+        let original = Vec3A::new(phi.cos() * s, phi.sin() * s, z);
+        let a = 1.0 / self.a_inv;
+        let wi = Vec3A::new(
+            original.x * a - original.z * self.b_inv * a,
+            original.y * a,
+            original.z,
+        )
+        .normalize();
+        let wi = rotate_azimuth(wi, wo.x, wo.y).normalize();
+        (wi.z > 0.0).then_some(wi)
+    }
 }
 
-/// Full analytic Charlie sheen BRDF value (D * V, no Fresnel).
-pub fn sheen_charlie(n_dot_v: f32, n_dot_l: f32, n_dot_h: f32, roughness: f32) -> f32 {
-    sheen_charlie_d(n_dot_h, roughness) * sheen_charlie_v(n_dot_v, n_dot_l)
+/// Rotates `v` about +z by the azimuth of `(x, y)`; `v` itself when that is
+/// the zero vector. Adobe's `openpbr_disney_sheen_rotate_vector`.
+fn rotate_azimuth(v: Vec3A, x: f32, y: f32) -> Vec3A {
+    let r2 = x * x + y * y;
+    if r2 == 0.0 {
+        return v;
+    }
+    let inv_r = 1.0 / r2.sqrt();
+    let (sin_phi, cos_phi) = (y * inv_r, x * inv_r);
+    Vec3A::new(
+        cos_phi * v.x + sin_phi * -v.y,
+        cos_phi * v.y + sin_phi * v.x,
+        v.z,
+    )
 }
 
 /// The darkening a physical coat produces on the base beneath it through
@@ -445,4 +550,162 @@ fn fresnel_amplitude(eta_i: f32, eta_t: f32, cos_i: f32, cos_t: f32) -> f32 {
     let rs = (eta_i * cos_i - eta_t * cos_t) / (eta_i * cos_i + eta_t * cos_t);
     let rp = (eta_t * cos_i - eta_i * cos_t) / (eta_t * cos_i + eta_i * cos_t);
     0.5 * (rs + rp)
+}
+
+#[cfg(test)]
+mod zeltner_tests {
+    use super::*;
+
+    /// The midpoint nodes and solid-angle weights of the upper hemisphere:
+    /// the midpoint rule in `(t, φ)` with `cos θ = t²`, which crowds the
+    /// nodes toward the horizon where a low-roughness sheen lives.
+    fn nodes() -> impl Iterator<Item = (Vec3A, f64)> {
+        const NT: usize = 1024;
+        const NP: usize = 512;
+        (0..NT * NP).map(|k| {
+            let t = ((k / NP) as f32 + 0.5) / NT as f32;
+            let cos = t * t;
+            let sin = (1.0 - cos * cos).max(0.0).sqrt();
+            let phi = 2.0 * PI * ((k % NP) as f32 + 0.5) / NP as f32;
+            // dω = d(cos θ) dφ = 2t dt dφ.
+            let dw = 2.0 * t as f64 / NT as f64 * (2.0 * std::f64::consts::PI / NP as f64);
+            (Vec3A::new(sin * phi.cos(), sin * phi.sin(), cos), dw)
+        })
+    }
+
+    /// `∫ g(ω) dω` over the upper hemisphere.
+    fn integrate(g: impl Fn(Vec3A) -> f32) -> f64 {
+        nodes().map(|(w, dw)| g(w) as f64 * dw).sum()
+    }
+
+    fn view(cos: f32) -> Vec3A {
+        // Off the x axis, so the azimuth rotation is exercised.
+        let s = (1.0 - cos * cos).max(0.0).sqrt();
+        Vec3A::new(s * 0.6, s * 0.8, cos)
+    }
+
+    /// Stratified 2D samples on a `n × n` grid.
+    fn grid(n: usize) -> impl Iterator<Item = [f32; 2]> {
+        (0..n * n).map(move |k| {
+            [
+                ((k / n) as f32 + 0.5) / n as f32,
+                ((k % n) as f32 + 0.5) / n as f32,
+            ]
+        })
+    }
+
+    const ROUGHNESS: [f32; 7] = [0.0, 0.05, 0.1, 0.3, 0.5, 0.8, 1.0];
+    const COS: [f32; 4] = [0.05, 0.25, 0.5, 1.0];
+
+    /// R at the points the materials spec states.
+    #[test]
+    fn the_albedo_is_the_tables() {
+        let r = |a: f32, c: f32| ZeltnerSheen::new(a, c).albedo();
+        assert!((r(0.3, 1.0) - 0.0008).abs() < 2e-4, "{}", r(0.3, 1.0));
+        assert!((r(0.3, 0.25) - 0.166).abs() < 2e-3, "{}", r(0.3, 0.25));
+        assert!((r(1.0, 1.0) - 0.342).abs() < 2e-3, "{}", r(1.0, 1.0));
+    }
+
+    /// The density is a pdf: its mass above the plane is the probability that
+    /// a sample lands there, and at most 1 (an LTC can shear some of its mass
+    /// below the plane, where a sample fails).
+    #[test]
+    fn the_density_is_the_samplers_pdf() {
+        for a in ROUGHNESS {
+            for c in COS {
+                let lobe = ZeltnerSheen::new(a, c);
+                if lobe.albedo() == 0.0 {
+                    continue;
+                }
+                let wo = view(c);
+                let mass = integrate(|wi| lobe.density(wo, wi));
+                let n = 256;
+                let landed =
+                    grid(n).filter_map(|u| lobe.sample(wo, u)).count() as f64 / (n * n) as f64;
+                assert!(mass <= 1.0 + 2e-3, "α {a} μ {c}: mass {mass}");
+                assert!(
+                    (mass - landed).abs() < 5e-3,
+                    "α {a} μ {c}: mass {mass} but {landed} of the samples land"
+                );
+            }
+        }
+    }
+
+    /// Samples fall where the density says: a coarse histogram over
+    /// `(cos θ, φ)` against the density's integral over each bin.
+    #[test]
+    fn samples_follow_the_density() {
+        const BT: usize = 8;
+        const BP: usize = 16;
+        let bin = |w: Vec3A| {
+            let t = w.z.max(0.0).sqrt().min(0.999_999);
+            let phi = w.y.atan2(w.x).rem_euclid(2.0 * PI);
+            (t * BT as f32) as usize * BP + ((phi / (2.0 * PI) * BP as f32) as usize).min(BP - 1)
+        };
+        for a in [0.1, 0.3, 0.6, 1.0] {
+            for c in [0.25, 0.7] {
+                let lobe = ZeltnerSheen::new(a, c);
+                let wo = view(c);
+                let n = 256;
+                let total = (n * n) as f64;
+                let mut counts = vec![0.0f64; BT * BP];
+                for wi in grid(n).filter_map(|u| lobe.sample(wo, u)) {
+                    counts[bin(wi)] += 1.0 / total;
+                }
+                let mut wants = vec![0.0f64; BT * BP];
+                for (wi, dw) in nodes() {
+                    wants[bin(wi)] += lobe.density(wo, wi) as f64 * dw;
+                }
+                for (k, (&got, &want)) in counts.iter().zip(&wants).enumerate() {
+                    assert!(
+                        (got - want).abs() < 4e-3 + 0.02 * want,
+                        "α {a} μ {c} bin {k}: sampled {got:.5}, density {want:.5}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The value is `R · density` and the density is the pdf, so a sample's
+    /// weight is exactly `R`: no variance from the lobe's shape.
+    #[test]
+    fn every_sample_weighs_the_albedo() {
+        for a in ROUGHNESS {
+            for c in COS {
+                let lobe = ZeltnerSheen::new(a, c);
+                let wo = view(c);
+                for wi in grid(16).filter_map(|u| lobe.sample(wo, u)) {
+                    let p = lobe.density(wo, wi);
+                    if p > 0.0 {
+                        let w = lobe.albedo() * p / p;
+                        assert!(
+                            (w - lobe.albedo()).abs() <= 1e-6 * lobe.albedo(),
+                            "α {a} μ {c}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A white sheen alone in a white furnace reflects `R` times the mass the
+    /// LTC keeps above the plane — never more than `R`, never more than 1 —
+    /// down to roughness 0. So crust needs no roughness floor (BSDL clamps at
+    /// 0.02 because its sampled albedo came from a separate table; here the
+    /// weight and the value share `R`).
+    #[test]
+    fn a_sheen_never_gains_energy() {
+        for a in [0.0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.7, 1.0] {
+            for c in [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0] {
+                let lobe = ZeltnerSheen::new(a, c);
+                let wo = view(c);
+                let albedo = integrate(|wi| lobe.albedo() * lobe.density(wo, wi));
+                assert!(
+                    albedo <= lobe.albedo() as f64 + 2e-3,
+                    "α {a} μ {c}: {albedo}"
+                );
+                assert!(albedo <= 1.0, "α {a} μ {c}: {albedo}");
+            }
+        }
+    }
 }

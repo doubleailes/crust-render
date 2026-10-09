@@ -730,10 +730,10 @@ fn has_shader_id(stage: &Stage, mat_path: &sdf::Path, id: &str) -> bool {
 ///
 /// `sheen` is deliberately **not** mapped onto `fuzz_weight`, despite both
 /// being "the retroreflective one". Disney's sheen is a small term *added* at
-/// grazing angles; OpenPBR's fuzz is a Charlie layer *mixed over* everything
-/// beneath it, so at the island's authored `sheen = 1` the fuzz lobe replaced
-/// the base entirely — the lava rocks lost their Ptex detail and rendered as
-/// smooth blue-grey plastic. A weight is not a weight just because it shares a
+/// grazing angles; OpenPBR's fuzz is a layer *over* everything beneath it,
+/// so at the island's authored `sheen = 1` the fuzz lobe (then a Charlie sheen
+/// under a flat `1 − fuzz_weight`) replaced the base entirely — the lava rocks
+/// lost their Ptex detail and rendered as smooth blue-grey plastic. A weight is not a weight just because it shares a
 /// name, and there is no honest scalar between the two.
 fn disney_to_openpbr(
     stage: &Stage,

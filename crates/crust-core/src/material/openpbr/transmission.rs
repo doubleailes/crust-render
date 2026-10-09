@@ -95,6 +95,13 @@ pub(super) fn sample_transmission_thin(
     // strictly incorrect for delta lobes but matches the rest of the
     // renderer's estimator).
     let throughput = tint * (window_transmittance * m.transmission_weight);
+    // Beneath the fuzz, the sheet passes what the fuzz lets through, as every
+    // other layer does; `cos_i` is the view's cosine against the facing normal.
+    let throughput = if m.fuzz_weight > 0.0 {
+        throughput * super::lobes::base_atten(m, cos_i)
+    } else {
+        throughput
+    };
     // Delta pdf: use 1.0 so tracer's `brdf / pdf` returns the throughput
     // unmodified. Direct-light MIS won't hit a delta lobe.
     (Ray::new(rec.p, l_world), throughput, 1.0)
@@ -158,7 +165,7 @@ pub(super) fn lobe_spread(m: &OpenPBR, lobe: Lobe) -> f32 {
             m.specular_roughness_anisotropy,
         )),
         Lobe::Coat => from_alpha(roughness_to_alpha_aniso(
-            m.coat_roughness,
+            super::lobes::coat_roughness(m),
             m.coat_roughness_anisotropy,
         )),
         Lobe::Transmission => from_alpha(transmission_alphas(m)),

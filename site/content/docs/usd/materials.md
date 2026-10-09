@@ -221,9 +221,17 @@ read as values, not as connections to texture nodes. For textures, use
 
 | input | type | default | meaning |
 |-------|------|---------|---------|
-| `inputs:fuzzWeight` | `float` | 0.0 | weight of the fuzz (sheen) layer |
+| `inputs:fuzzWeight` | `float` | 0.0 | coverage of the fuzz (sheen) layer |
 | `inputs:fuzzColor` | `color3f` | (1, 1, 1) | fuzz colour |
-| `inputs:fuzzRoughness` | `float` | 0.5 | fuzz roughness |
+| `inputs:fuzzRoughness` | `float` | 0.5 | fuzz roughness, from 0 (a narrow rim at grazing angles) to 1 (a soft, broad sheen) |
+
+The fuzz is the one Adobe's OpenPBR reference implements: Zeltner, Burley and Chiang's
+sheen, a fit to a layer of fibres. How much light it reflects depends on the angle you see
+it from. A smooth fuzz is almost invisible head-on and shows as a bright rim toward the
+silhouette; a rough one reflects about a third of the light even head-on. Whatever the
+fuzz reflects toward you, it takes from the layers beneath it (coat, specular, base and
+emission), so a fuzzy surface never gains energy. Unlike Adobe's, crust's fuzz is also
+seen on the back of a surface that is not thin-walled, as cloth usually is.
 
 ### Coat
 

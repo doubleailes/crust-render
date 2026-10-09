@@ -353,6 +353,7 @@ documentation (`site/content/docs/reference/environment-variables.md`), and make
 | kernel exactness (bitwise, every SIMD codegen) | `crust-rt/tests/kernel.rs`, `scripts/test_simd_matrix.sh` |
 | MaterialX parsing, evaluation, optimization | `crust-mtlx/tests/`; JIT ↔ interpreter in `crust-jit/tests/jit.rs` |
 | MaterialX node semantics against the reference implementation | `crust-mtlx/tests/osl_oracle.rs` (committed OSL values; `scripts/osl_oracle.py` regenerates them) |
+| native OpenPBR against Adobe's `openpbr-bsdf` | `crust-core/tests/adobe_oracle.rs` (committed reference values, one named deviation per known gap; `scripts/adobe_oracle.py` regenerates them) |
 | USD import against the checked-in samples | `crust-core/tests/usd_scene.rs`; inline stages in `usd_inline.rs` |
 | lights, materials, volumes, guiding, stats, profile | the matching file in `crust-core/tests/` |
 | decoders, `.tx` streaming, Ptex streaming | `crust-assets/tests/` |

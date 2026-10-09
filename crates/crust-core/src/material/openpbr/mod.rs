@@ -23,8 +23,11 @@
 //! - Coat: untinted reflection lobe + per-passage view-dependent
 //!   absorption (`√coat_color` per crossing, refracted path length),
 //!   multi-bounce darkening, coat-attenuated emission.
-//! - Fuzz (Charlie sheen) and 3-wavelength thin-film interference on both
-//!   the dielectric and metal Fresnel.
+//! - Fuzz: Zeltner's LTC sheen over everything beneath it, which it
+//!   attenuates by `1 − fuzz_weight · R(ω_o)`, view side only (Adobe's fuzz
+//!   lobe and default layering), emission included.
+//! - 3-wavelength thin-film interference on both the dielectric and metal
+//!   Fresnel.
 //!
 //! ## Not implemented (see the alignment doc for the full gap list)
 //!
@@ -49,7 +52,7 @@ use crate::ray::Ray;
 mod lobes;
 mod transmission;
 
-use lobes::{Frame, Lobe, LobePmf, coat_passage, eval_all, pdf_all};
+use lobes::{Frame, FuzzLayer, Lobe, LobePmf, coat_passage, coat_roughness, eval_all, pdf_all};
 use transmission::{
     lobe_spread, sample_transmission_rough, sample_transmission_thin, transmission_is_continuous,
 };
@@ -531,7 +534,7 @@ impl OpenPBR {
         let s = sampler.draw_sample_f32::<4>();
         let dir_uv = [s[1], s[2]];
 
-        let pmf = LobePmf::selecting::<STRAIGHT>(self);
+        let pmf = LobePmf::selecting::<STRAIGHT>(self, v_local.z);
         let lobe = pmf.pick(s[0]);
 
         if matches!(lobe, Lobe::Transmission) {
@@ -593,7 +596,16 @@ impl OpenPBR {
 
         // Reflection lobes — sample a direction from the picked lobe.
         let l_local = match lobe {
-            Lobe::Diffuse | Lobe::Fuzz => cosine_hemisphere(dir_uv),
+            Lobe::Diffuse => cosine_hemisphere(dir_uv),
+            // The fuzz samples its LTC exactly; one that falls below the
+            // plane is lost, which `pdf_all`'s fuzz density accounts for (its
+            // mass above the plane is the chance a sample lands). Without a
+            // fuzz the lobe still holds a sliver of the selection mass, and
+            // draws cosine-weighted (see `pdf_all`).
+            Lobe::Fuzz => match FuzzLayer::at(self, v_local.z) {
+                Some(f) => f.lobe.sample(v_local, dir_uv)?,
+                None => cosine_hemisphere(dir_uv),
+            },
             Lobe::Specular => {
                 let (ax, ay) = roughness_to_alpha_aniso(
                     self.specular_roughness,
@@ -608,7 +620,7 @@ impl OpenPBR {
             }
             Lobe::Coat => {
                 let (ax, ay) =
-                    roughness_to_alpha_aniso(self.coat_roughness, self.coat_roughness_anisotropy);
+                    roughness_to_alpha_aniso(coat_roughness(self), self.coat_roughness_anisotropy);
                 let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, dir_uv);
                 let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
                 if l.z <= 0.0 {
@@ -678,7 +690,7 @@ impl OpenPBR {
             return None;
         }
         let l_local = frame.to_local(wi.normalize());
-        let pmf = LobePmf::selecting::<STRAIGHT>(self);
+        let pmf = LobePmf::selecting::<STRAIGHT>(self, v_local.z);
         let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
         Some((
             eval_all(self, v_local, l_local, rec.front_face) * l_local.z.abs(),
@@ -764,14 +776,15 @@ impl OpenPBR {
         Lobe::Transmission.event(self)
     }
 
-    /// The albedo for denoising — see `lobes::albedo`.
-    pub(crate) fn albedo(&self) -> Vec3A {
-        lobes::albedo(self)
+    /// The albedo for denoising at view cosine `cos_v` — see `lobes::albedo`.
+    pub(crate) fn albedo(&self, cos_v: f32) -> Vec3A {
+        lobes::albedo(self, cos_v)
     }
 
-    /// The diffuse lobe's colour — see `lobes::diffuse_filter`.
-    pub(crate) fn diffuse_filter(&self) -> Vec3A {
-        lobes::diffuse_filter(self)
+    /// The diffuse lobe's colour at view cosine `cos_v` — see
+    /// `lobes::diffuse_filter`.
+    pub(crate) fn diffuse_filter(&self, cos_v: f32) -> Vec3A {
+        lobes::diffuse_filter(self, cos_v)
     }
 }
 
@@ -859,23 +872,47 @@ impl Material for OpenPBR {
         self.emission_color * self.emission_luminance
     }
 
-    /// Emission seen through the coat: one outbound passage of the Adobe
-    /// reference coating model (`openpbr_compute_emission` scales emission
-    /// by the view-side base-layer factor) — `√coat_color` raised to the
-    /// refracted path length, the coat's directional Fresnel transmission,
-    /// and the multi-bounce darkening, all fading with `coat_weight`.
+    /// Emission seen through the coat and the fuzz: one outbound passage of
+    /// the Adobe reference's layers (`openpbr_compute_emission` scales
+    /// emission by each layer's view-side base-layer factor). Through the coat,
+    /// `√coat_color` raised to the refracted path length, the coat's
+    /// directional Fresnel transmission, and the multi-bounce darkening, all
+    /// fading with `coat_weight`; then through the fuzz, the share it lets
+    /// pass, `1 − fuzz_weight · R(ω_o)`.
+    ///
+    /// Every hit asks, so the common surface — no coat, no fuzz — answers
+    /// here, inlined, and the layers are out of line: while they were one
+    /// function LLVM stopped inlining it, which cost cornellbox 0.4% of its
+    /// instructions.
+    #[inline]
     fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {
         let uncoated = self.emission_color * self.emission_luminance;
-        if self.coat_weight <= 0.0 {
+        if self.coat_weight <= 0.0 && self.fuzz_weight <= 0.0 {
             return uncoated;
         }
-        let dark = coat_darkening_factor(
-            self.base_color,
-            self.coat_ior,
-            self.coat_weight,
-            self.coat_darkening,
-        );
-        uncoated * coat_passage(self, cos_theta_o) * dark
+        self.emitted_through_layers(uncoated, cos_theta_o)
+    }
+}
+
+impl OpenPBR {
+    /// [`Material::emitted_directional`] through a coat or a fuzz.
+    #[inline(never)]
+    fn emitted_through_layers(&self, uncoated: Vec3A, cos_theta_o: f32) -> Vec3A {
+        let coated = if self.coat_weight <= 0.0 {
+            uncoated
+        } else {
+            let dark = coat_darkening_factor(
+                self.base_color,
+                self.coat_ior,
+                self.coat_weight,
+                self.coat_darkening,
+            );
+            uncoated * coat_passage(self, cos_theta_o) * dark
+        };
+        match FuzzLayer::at(self, cos_theta_o) {
+            Some(f) => coated * f.base_atten(),
+            None => coated,
+        }
     }
 }
 

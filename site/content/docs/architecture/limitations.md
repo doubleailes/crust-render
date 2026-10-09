@@ -81,8 +81,10 @@ render.
 - **Curves are round, open tubes.** `BasisCurves` `normals` (ribbons) and `wrap`
   (periodic curves) are not read, and curve primvars don't reach materials.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
-  Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. Zeltner
-  sheen is evaluated as Imageworks sheen.
+  Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
+  Zeltner sheen uses the table Adobe's reference uses rather than MaterialX's own curve
+  fits, which differ from it by up to 0.08 in reflectance for very smooth sheens seen at
+  grazing angles.
 - **Texture filtering is isotropic.** Mip levels are chosen from ray cones, but the filter
   has no direction. A texture seen at a grazing angle is blurred more than an anisotropic
   (EWA) filter would blur it.

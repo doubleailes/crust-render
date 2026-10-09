@@ -61,6 +61,8 @@ scripts/bench_ab.sh -a <binA> -b <binB> [scenes...] # interleaved A/B of two bin
 cargo run --release -- diff a.exr b.exr             # did the image change? exit 0/1/2 (+ relmse, --json -)
 cargo test -p crust-mtlx --test osl_oracle          # MaterialX nodes vs MaterialX's own OSL implementation
 scripts/osl_oracle.py                               # regenerate those values (needs materialx + exact-math OSL)
+cargo test -p crust-core --test adobe_oracle        # native OpenPBR vs Adobe's openpbr-bsdf, gap by gap
+scripts/adobe_oracle.py                             # regenerate those values (needs a C++17 compiler + network)
 
 # CI (toolchain pinned by rust-toolchain.toml, Cargo.lock committed,
 # RUSTFLAGS=-D warnings), four parallel jobs; skipped when a change touches only
