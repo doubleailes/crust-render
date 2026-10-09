@@ -22,6 +22,7 @@ crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materi
 crust check -i <SCENE> [OPTIONS]    # what a render would use, and what crust refused
 crust diff <A> <B>                  # did the image change, and by how much?
 crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or cleaner
+crust mcp                           # serve a live editing session to Claude Desktop
 ```
 
 | command | what it does |
@@ -31,6 +32,7 @@ crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or clea
 | [`check`](#check) | imports the stage as a render would and reports on it without rendering: the render it describes, its effective settings, the import's cost, findings and warnings. Takes the scene flags of `render`. |
 | [`diff`](#diff) | compares two EXRs: whether they are identical, by how much they differ, and whether they can be compared at all. |
 | [`diagnostic`](#diagnostic) | measures which settings make the stage's render faster or cleaner, within a time budget, and reports the evidence. Takes the scene flags of `render`. |
+| [`mcp`](#mcp) | serves a live session to an MCP client (Claude Desktop) on stdin/stdout: the agent opens a stage, edits it through an override layer, and renders it. Takes no flag but `-l`. |
 
 `-l, --level` applies to every command, and can go before or after it. `--log-file` belongs to
 `render`: its directory is optional, so anywhere else it could take the next word as one.
@@ -891,6 +893,28 @@ $ crust diagnostic -i samples/veach_mis.usda --budget 30s > report.md
 $ crust diagnostic -i samples/veach_mis.usda --light-selection learned --baseline crust-diagnostic.json
 ```
 
+## mcp
+
+`crust mcp`
+
+Runs a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin and
+stdout until stdin closes, for Claude Desktop or any MCP client to launch. stdout carries
+only protocol messages: the log goes to stderr, and no progress bar is drawn. Nothing is
+loaded until the client opens a session.
+
+A session works on one stage at a time, through an override layer that sublayers it:
+every edit is an opinion saved in that layer, and what is rendered is always the saved
+layer, imported as `crust render <layer>` imports it. The tools, what a session writes
+and a worked look-dev session are in
+[Look-dev with Claude Desktop](@/docs/help/claude-desktop.md).
+
+It takes no flag but [`-l`](#level). The command exists in builds with the `mcp`
+cargo feature, which is on by default; `cargo build --no-default-features` leaves it out.
+
+```bash
+$ crust mcp -l debug        # what Claude Desktop runs; the log on stderr
+```
+
 ## JSON reports
 
 `--stats-json`, `ls --json`, `check --json` and `diff --json` (and the
@@ -921,6 +945,9 @@ file can't be created, or an image or a JSON report can't be written.
 
 `crust diff` exits with `0` when the files are identical, `1` when they differ and `2` on
 an error (see [diff](#diff)).
+
+`crust mcp` exits with `0` when the client closes stdin, and `1` when the protocol cannot
+start. A tool that fails answers its call with an error and the server goes on.
 
 `crust check` exits with:
 

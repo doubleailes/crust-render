@@ -47,7 +47,7 @@ graph TD
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
 | `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown) | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
-| `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's report | decoding anything |
+| `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's report; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance` / `Luma`, `align_to_normal` | everything |
 
 Two properties of this graph are deliberate and worth keeping:
@@ -94,6 +94,30 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
        Ctrl-C (ctrlc) cancels the control, the partial outputs are written, exit 130
 ```
 
+`crust render`'s body after the Ctrl-C setup is `render_and_write` (main.rs): import,
+`select_products`, render, the product writers, the PNG. An MCP session's final render
+calls the same function, and its import is `import_checked`, `crust check`'s body. So
+"renders like `crust render <layer>`" holds by construction rather than by a copy.
+
+### An MCP session (`crust mcp`)
+
+```
+crust-render::mcp::run                       stdio JSON-RPC (rmcp) on a one-thread tokio runtime
+ ├─ each tool → Session::call(closure)       sent over a channel to the session thread
+ └─ session thread (owns State)              the only owner of openusd's Stage (Rc/RefCell)
+     ├─ open_session: write <output>.usda    `subLayers = [@<input>@]`, nothing else
+     │   ├─ authoring Stage on <output>      payloads unloaded; loaded where a query reaches
+     │   └─ import_checked(<output>)         as `crust check -i <output>`: the report is kept,
+     │                                        the scene becomes one Renderer, reconfigured per render
+     └─ every edit batch: author into <output>, Layer::save, re-import the saved file
+```
+
+The file on disk *is* the session: what is imported, rendered and left behind is the
+saved override layer, read by the unchanged `load_scene`, so the streaming import's
+masked stages see every edit with no special case. Nothing else is written but the
+final render's files and the `.tx` files `--auto-tx` creates. Design record:
+`openspec/specs/mcp-session/` (until it is archived, `openspec/changes/mcp-session/`).
+
 Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
 routine; a render mode is scheduling only, and tiles vs scanlines are
 bit-identical by construction. So is the staged first sweep (every unit to 1, 2,
@@ -124,7 +148,8 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | `Material` | `crust-core/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
 | `Light`, `LightShape` | `crust-core/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
 | `ProgressCallback` | `crust-core/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
-| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`); later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; a cancelled render returns what it traced and `Cancelled` |
+| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage; a cancelled render returns what it traced and `Cancelled` |
+| `mcp::session::Session` | `crust-render/src/mcp/session.rs` | the tools in `mcp/mod.rs` | commands are closures run one at a time on the session thread, in the order sent; nothing the thread owns (the `Stage`) ever leaves it |
 | `RenderStats`, `profile::Section` | `crust-core/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
 
 ## `crust-core` module map
@@ -148,6 +173,12 @@ both sides must keep; the contract lives in the doc comment at the definition.
 
 Most bugs this codebase has had were one half of a pair changing without the
 other. The pairs:
+
+- **`crust render` ↔ an MCP session.** Both import through the CLI's own argument
+  defaults (`Cli::try_parse_from`), through `import_checked` / `load_scene`, and the
+  session's final render is `render_and_write`, the CLI's render body. A render flag
+  that changes the import or the outputs belongs in those functions, never in one
+  caller.
 
 - **`Renderer::new` ↔ `Renderer::reconfigure`.** `new` is `reconfigure` on a
   fresh renderer, and `reconfigure` rebuilds everything that depends on the

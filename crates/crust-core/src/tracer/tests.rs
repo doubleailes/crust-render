@@ -1042,6 +1042,26 @@ fn the_last_snapshot_is_the_returned_image() {
     }
 }
 
+/// The samples a control reports reached are the first sweep's completed
+/// stages: none before the render or under a cancel that came first, the
+/// whole budget when the sweep covers it (4 spp, below the first check
+/// point), and the first check point when adaptive rounds follow it.
+#[test]
+fn samples_reached_follow_the_first_sweep() {
+    use crate::RenderControl;
+    let control = RenderControl::new();
+    assert_eq!(control.samples_reached(), 0);
+    small_cornell(4).render_with_control(true, None, None, &control);
+    assert_eq!(control.samples_reached(), 4);
+    let control = RenderControl::new();
+    small_cornell(64).render_with_control(true, None, None, &control);
+    assert_eq!(control.samples_reached(), 32, "the first check point");
+    let control = RenderControl::new();
+    control.cancel();
+    small_cornell(64).render_with_control(true, None, None, &control);
+    assert_eq!(control.samples_reached(), 0, "cancelled before any stage");
+}
+
 /// Snapshots read from another thread while the render runs only move
 /// forward: each new generation is above the last one read, and no
 /// snapshot holds a NaN (unsampled pixels read as zero).

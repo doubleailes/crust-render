@@ -32,6 +32,14 @@ cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; pl
 # (`usd_import/listing.rs`) — keep the two walks agreeing when either changes.
 # `ls --json` adds each prim's values (`Scene::list_usd_records`, read through the
 # import's own readers), `diff A B` compares two EXRs (`crust_core::compare`).
+# `mcp` (cargo feature `mcp`, on by default) serves a live session to an MCP client
+# over stdio: crates/crust-render/src/mcp/, design record openspec/specs/mcp-session/.
+# Its import is `import_checked` (`check`'s body) and its final render
+# `render_and_write` (`render`'s body after the Ctrl-C setup), both called with the
+# arguments `Cli::try_parse_from` gives `crust check|render -i <layer>`, so a session
+# can never default a flag differently from the CLI.
+cargo run --release -- mcp -l debug   # what Claude Desktop launches; log on stderr
+cargo test -p crust-render --test mcp # the server driven over its pipes, tool by tool
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
 # --log-file [DIR] (tee the log to crust-<UTC stamp>.log), --scanline
@@ -327,7 +335,10 @@ cargo test --workspace --no-fail-fast
 
 Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (default `info`).
 A render logs to stdout, as it always has; `crust ls`, `crust diff` and `crust diagnostic`
-log to stderr, because their stdout is their result and is read by scripts. One flag moves
+log to stderr, because their stdout is their result and is read by scripts. So does
+`crust mcp`, whose stdout is the protocol: a stray line there breaks the client, so it
+draws no progress bar either (`RenderRun::progress_bar`), and each session import is one
+`DEBUG` line, since edits make them grow with the session. One flag moves
 a render's log: `--stats-json -`. `main` picks the stream (`logging::Terminal`) before
 the subscriber is built, from the parsed command, so the decision is made once and the
 whole run — the log, the `--stats` text report, the progress bar (always stderr) — lands
