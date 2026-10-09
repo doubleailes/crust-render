@@ -19,6 +19,9 @@ ptex.workspace = true
 tiff.workspace = true
 flate2.workspace = true
 half.workspace = true
+# The render pool's size, read once, to size the per-thread texture caches'
+# share of the budget (`ptex_stream::micro_threads`).
+rayon = "1.10.0"
 tracing.workspace = true
 
 [dev-dependencies]

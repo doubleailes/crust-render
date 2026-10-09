@@ -51,10 +51,16 @@ impl<K: PartialEq, V, const N: usize> Ways<K, V, N> {
         evicted
     }
 
-    /// The value the next [`Ways::push`] would hand back, if the set is full.
-    #[inline]
-    pub(crate) fn oldest_if_full(&self) -> Option<&V> {
-        self.0[N - 1].as_ref().map(|(_, v)| v)
+    /// Entries held. They are always the first `len` ways: `push` fills from
+    /// the front and only ever empties the back.
+    pub(crate) fn len(&self) -> usize {
+        self.0.iter().take_while(|s| s.is_some()).count()
+    }
+
+    /// Removes and returns the oldest entry, if any.
+    pub(crate) fn pop_oldest(&mut self) -> Option<(K, V)> {
+        let last = self.len().checked_sub(1)?;
+        self.0[last].take()
     }
 
     /// The values held, newest first.
@@ -77,6 +83,22 @@ mod tests {
         assert_eq!(w.push(3, "c"), Some((1, "a")));
         assert!(w.get(&1).is_none());
         assert_eq!(w.values().copied().collect::<Vec<_>>(), ["c", "b"]);
+    }
+
+    #[test]
+    fn pop_oldest_takes_from_the_back_and_keeps_the_rest_in_order() {
+        let mut w: Ways<u32, &str, 3> = Ways::EMPTY;
+        assert!(w.pop_oldest().is_none());
+        w.push(1, "a");
+        w.push(2, "b");
+        assert_eq!(w.len(), 2);
+        assert_eq!(w.pop_oldest(), Some((1, "a")));
+        assert_eq!(w.len(), 1);
+        w.push(3, "c");
+        assert_eq!(w.values().copied().collect::<Vec<_>>(), ["c", "b"]);
+        assert_eq!(w.pop_oldest(), Some((2, "b")));
+        assert_eq!(w.pop_oldest(), Some((3, "c")));
+        assert_eq!(w.len(), 0);
     }
 
     #[test]

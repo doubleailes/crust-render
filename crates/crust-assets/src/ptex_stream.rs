@@ -200,14 +200,21 @@ pub const MICRO_SLOTS: usize = 4;
 /// than being quietly exceeded by them.
 const MICRO_SLOT_MAX: usize = 256 * 1024;
 
-/// Worker threads to size the microcache reserve for.
+/// Threads to size the per-thread microcaches' allowances for: this one and
+/// the `.tx` cache's `micro_share`.
 ///
-/// The allowance is per *thread*, since every one has its own slots.
-/// `available_parallelism` is what rayon defaults its pool to, memoised
-/// because this is read per texture open and the answer cannot change.
+/// The allowance is per *thread*, since every one has its own slots, so the
+/// count has to cover every thread that looks a texture up, or their slots
+/// together pass the bound they were sized to. That is the render pool —
+/// `RAYON_NUM_THREADS` when it is set, which may exceed the cores — or the
+/// cores if more, plus one for the thread that drives the pool. Memoised:
+/// this is read per texture open, and the pool is built once.
 pub fn micro_threads() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+    *N.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        cores.max(rayon::current_num_threads()) + 1
+    })
 }
 
 /// The share of a render's Ptex budget set aside for thread-local tiles.
