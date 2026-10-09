@@ -29,7 +29,8 @@ use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::geom::{
-    BasisCurves as UsdBasisCurves, Mesh as UsdMesh, PointInstancer, Sphere as UsdSphere,
+    BasisCurves as UsdBasisCurves, Mesh as UsdMesh, PointInstancer, PointInstancerSchema,
+    Sphere as UsdSphere,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;

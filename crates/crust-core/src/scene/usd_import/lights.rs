@@ -7,8 +7,10 @@ use crust_rt::Geometry;
 use glam::{Affine3A, Mat3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::lux::{
-    CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
-    RectLight, ShapingAPI, SphereLight,
+    BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema,
+    DistantLight as UsdDistantLight, DistantLightSchema, DomeLight, DomeLightSchema, LightAPI,
+    NonboundableLightBaseSchema, RectLight, RectLightSchema, ShapingAPI, SphereLight,
+    SphereLightSchema,
 };
 use tracing::debug;
 
@@ -50,7 +52,7 @@ pub(super) struct LightInputs {
 }
 
 /// Reads [`LightInputs`], warning about a non-finite value.
-pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
+pub(super) fn light_inputs(prim: &Prim, light: &LightAPI) -> LightInputs {
     // A non-finite value would reach both MIS halves as NaN radiance, so it
     // falls back to the schema default like the shaping inputs do.
     let finite = |name: &str, v: Option<f32>, fallback: f32| match v {
@@ -92,7 +94,7 @@ pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
 /// cannot honour, since each makes the image differ from what was authored:
 /// `diffuse` / `specular` are per-lobe multipliers, and crust's light
 /// transport does not split a light's contribution by lobe.
-fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
+fn lux_params(prim: &Prim, light: &LightAPI, working: Space) -> LuxParams {
     let LightInputs {
         intensity,
         exposure,
@@ -436,7 +438,7 @@ pub(super) fn emit_sphere_light(
     world_xf: GMat4,
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
-    let params = lux_params(prim, light, ctx.caches.working);
+    let params = lux_params(prim, &light.light_api(), ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     emit_round_light(
         &mut ctx.world,
@@ -461,7 +463,7 @@ pub(super) fn emit_disk_light(
     world_xf: GMat4,
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
-    let params = lux_params(prim, light, ctx.caches.working);
+    let params = lux_params(prim, &light.light_api(), ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     emit_round_light(
         &mut ctx.world,
@@ -489,7 +491,7 @@ pub(super) fn emit_cylinder_light(
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
     let length = attr_f32(&light.length_attr()).unwrap_or(1.0);
-    let params = lux_params(prim, light, ctx.caches.working);
+    let params = lux_params(prim, &light.light_api(), ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     emit_round_light(
         &mut ctx.world,
@@ -585,7 +587,7 @@ pub(super) fn emit_rect_light(
         );
         return;
     }
-    let params = lux_params(prim, light, ctx.caches.working);
+    let params = lux_params(prim, &light.light_api(), ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     let texture = rect_light_texture(prim, &mut ctx.caches);
 
@@ -708,7 +710,7 @@ pub(super) fn emit_distant_light(
         return;
     }
     let angle = attr_f32(&light.angle_attr()).unwrap_or(0.53).max(0.0);
-    let params = lux_params(prim, light, working);
+    let params = lux_params(prim, &light.light_api(), working);
     let direction = Vec3A::new(direction.x, direction.y, direction.z);
 
     // Everything becomes the illuminance the *authored* cone delivers to a
@@ -766,7 +768,7 @@ pub(super) fn emit_dome_light(
     // separate "decoding a 14k HDRI" from the rest of the traversal.
     let asset_time = &mut ctx.caches.asset_time;
     // `normalize` does not apply to a dome (its sizeFactor is 1).
-    let tint = lux_params(prim, light, working).emission;
+    let tint = lux_params(prim, &light.light_api(), working).emission;
 
     let format = value_at(&light.texture_format_attr()).and_then(decode_text);
     // The authoring layer anchors the path, not the root layer: the Moana

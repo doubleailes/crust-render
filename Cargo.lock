@@ -1394,8 +1394,7 @@ source = "git+https://github.com/doubleailes/OpenSubdiv-rs?tag=0.5.0#c672796f958
 [[package]]
 name = "openusd"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d4f9438bafa6114b57ff495a22bca9ee51421d3c9c95b5609eafffad12c93e4"
+source = "git+https://github.com/mxpv/openusd?branch=main#933aa8f10edb0841301e62b7de92d68465673c3c"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -1403,22 +1402,39 @@ dependencies = [
  "half",
  "logos",
  "lz4_flex",
+ "memmap2",
  "num-traits",
  "regex-lite",
  "serde",
  "strum",
  "thiserror",
+ "windows-sys 0.61.2",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "openusd-build"
+version = "0.7.0"
+source = "git+https://github.com/mxpv/openusd?branch=main#933aa8f10edb0841301e62b7de92d68465673c3c"
+dependencies = [
+ "openusd",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 3.0.6",
+ "textwrap",
+ "thiserror",
 ]
 
 [[package]]
 name = "openusd-schemas"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac7e2e085b70ee43385f39f017ddb21904844b10a90ebe1e89df09889981d0f2"
+source = "git+https://github.com/mxpv/openusd?branch=main#933aa8f10edb0841301e62b7de92d68465673c3c"
 dependencies = [
  "derive_more",
  "openusd",
+ "openusd-build",
  "thiserror",
 ]
 
@@ -1496,6 +1512,16 @@ name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "prettyplease"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.6",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -1888,6 +1914,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
+name = "smawk"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1947,6 +1979,16 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "textwrap"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ecfad6c3abc80a577f2b91c1e412ee57e7a060d430b553c1b0c940974ebcd49"
+dependencies = [
+ "smawk",
+ "unicode-width",
+]
 
 [[package]]
 name = "thiserror"

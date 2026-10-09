@@ -7,7 +7,8 @@ use crust_rt::{CubicCurveSegment, CurveSegment, Geometry, SceneBuilder as RtScen
 use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::usd::Prim;
 use openusd_schemas::geom::{
-    BasisCurves as UsdBasisCurves, Curves as UsdCurves, PointBased, Sphere as UsdSphere,
+    BasisCurves as UsdBasisCurves, CurvesSchema, PointBasedSchema, Sphere as UsdSphere,
+    SphereSchema,
 };
 use tracing::debug;
 

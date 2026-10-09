@@ -188,7 +188,7 @@ fn preview_uv_input(
     caches: &mut ImportCaches<'_>,
 ) -> Option<(crate::material::preview_surface::UvInput, Option<String>)> {
     use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
-    use shade::tokens as tk;
+    use shade::nodes::tokens as tk;
 
     let surface_input = shader.input(name);
     let produced = surface_input
@@ -222,7 +222,7 @@ fn preview_uv_input(
     let tex = Shader::get(stage, source.path().prim_path())
         .ok()
         .flatten()?;
-    if shader_info_id(&tex).as_deref() != Some(tk::SHADER_ID_UV_TEXTURE) {
+    if shader_info_id(&tex).as_deref() != Some(tk::USD_UV_TEXTURE) {
         return None;
     }
 
@@ -235,7 +235,7 @@ fn preview_uv_input(
     let float4 = |input: &str| value(&tex.input(input)).and_then(decode_float4);
 
     let file = tex
-        .input(tk::TEX_FILE)
+        .input(tk::FILE)
         .value_producing_attributes(ProducerFilter::Any)
         .ok()
         .and_then(|p| p.into_iter().next())
@@ -262,7 +262,7 @@ fn preview_uv_input(
     // curve that token can name, so the curve alone, as before colour
     // management.
     let source =
-        crate::ColorSpace::from_usd(token(tk::TEX_SOURCE_COLOR_SPACE).as_deref(), caches.working);
+        crate::ColorSpace::from_usd(token(tk::SOURCE_COLOR_SPACE).as_deref(), caches.working);
     let space = if role != TexRole::Colour {
         match source.resolved() {
             None if role == TexRole::Data => crate::ColorSpace::RAW,
@@ -270,7 +270,7 @@ fn preview_uv_input(
         }
     } else {
         let file_space = tex
-            .input(tk::TEX_FILE)
+            .input(tk::FILE)
             .value_producing_attributes(ProducerFilter::Any)
             .ok()
             .and_then(|p| p.into_iter().next())
@@ -283,7 +283,7 @@ fn preview_uv_input(
 
     // Which chart the texture reads. crust carries one per mesh (see
     // `mesh_uvs`), so a reader naming another primvar is approximated by it.
-    let st = tex.input(tk::TEX_ST);
+    let st = tex.input(tk::ST);
     let mut varname = None;
     if let Some(reader) = st
         .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
@@ -293,9 +293,9 @@ fn preview_uv_input(
         let reader = Shader::get(stage, reader.path().prim_path()).ok().flatten();
         let id = reader.as_ref().and_then(shader_info_id);
         match (&reader, id.as_deref()) {
-            (Some(reader), Some(tk::SHADER_ID_PRIMVAR_READER_FLOAT2)) => {
-                varname = value(&reader.input(tk::PVR_VARNAME))
-                    .and_then(|v| v.as_str().map(str::to_owned));
+            (Some(reader), Some(tk::USD_PRIMVAR_READER_FLOAT2)) => {
+                varname =
+                    value(&reader.input(tk::VARNAME)).and_then(|v| v.as_str().map(str::to_owned));
             }
             _ => warning!(
                 PreviewUnreadSt,
@@ -317,7 +317,7 @@ fn preview_uv_input(
     // constant, and black there is not neutral — ALab's wrench references a
     // roughness map the dataset does not ship, and roughness 0 turned it into
     // a mirror where the schema's 0.5 is an ordinary surface.
-    let fallback = float4(tk::TEX_FALLBACK)
+    let fallback = float4(tk::FALLBACK)
         .or_else(|| value_at(surface_input.attribute()).and_then(decode_float4))
         .or_else(|| preview_surface_default(name))
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
@@ -335,12 +335,12 @@ fn preview_uv_input(
     let input = UvInput {
         tex: loaded,
         output,
-        scale: float4(tk::TEX_SCALE).unwrap_or([1.0; 4]),
-        bias: float4(tk::TEX_BIAS).unwrap_or([0.0; 4]),
+        scale: float4(tk::SCALE).unwrap_or([1.0; 4]),
+        bias: float4(tk::BIAS).unwrap_or([0.0; 4]),
         fallback,
         wrap: [
-            Wrap::from_token(token(tk::TEX_WRAP_S).as_deref()),
-            Wrap::from_token(token(tk::TEX_WRAP_T).as_deref()),
+            Wrap::from_token(token(tk::WRAP_S).as_deref()),
+            Wrap::from_token(token(tk::WRAP_T).as_deref()),
         ],
         tiled,
     };

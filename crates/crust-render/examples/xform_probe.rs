@@ -12,7 +12,7 @@
 //! ```
 
 use openusd::{sdf, usd};
-use openusd_schemas::geom::{Xform, Xformable};
+use openusd_schemas::geom::{Xform, XformableExt};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -21,6 +21,7 @@ fn main() {
         std::process::exit(2);
     }
     let stage = usd::Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
         .load(usd::InitialLoadSet::LoadAll)
         .open(&args[0])
         .expect("open");
@@ -29,7 +30,7 @@ fn main() {
     let x = Xform::get(&stage, path.clone())
         .expect("Xform::get")
         .expect("prim is an Xform");
-    match x.local_to_parent_transform(0.0) {
+    match x.local_transformation(usd::TimeCode::new(0.0)) {
         Ok(m) => {
             println!("openusd local_transformation for {}:", args[1]);
             // Row-major as USD stores it; the translation is the last row.

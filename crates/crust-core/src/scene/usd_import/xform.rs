@@ -4,8 +4,8 @@
 use crate::warning;
 use glam::Mat4 as GMat4;
 use openusd::gf::Matrix4d;
-use openusd::usd::{Prim, SchemaBase, SchemaKind};
-use openusd_schemas::geom::{Imageable, Xformable};
+use openusd::usd::Prim;
+use openusd_schemas::geom::{Xformable, XformableExt, XformableSchema};
 
 use super::time::xform_time;
 
@@ -18,27 +18,13 @@ fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
     GMat4::from_cols_array(&m.0.map(|v| v as f32))
 }
 
-/// Any prim, viewed as `UsdGeomXformable`.
-///
-/// openusd 0.7 reaches its transform composition only through the
-/// `Xformable` trait, implemented per typed schema whose `get` checks the
-/// prim's type. Every method this module calls is a default method over
-/// `prim()`, so this one view composes the stack on every prim type — the
-/// scope crust has always given `xformOp`s — instead of a list of types
-/// that drifts (a type missing from it composed to identity).
-struct AnyXformable<'a>(&'a Prim);
-
-impl SchemaBase for AnyXformable<'_> {
-    const KIND: SchemaKind = SchemaKind::AbstractTyped;
-
-    fn prim(&self) -> &Prim {
-        self.0
-    }
+/// Any prim, viewed as `UsdGeomXformable` without asking its type
+/// (`Xformable::from_prim_unchecked`), so the stack composes on every prim
+/// type — the scope crust has always given `xformOp`s — instead of a list of
+/// types that drifts (a type missing from it composed to identity).
+fn any_xformable(prim: &Prim) -> Xformable {
+    Xformable::from_prim_unchecked(prim.clone())
 }
-
-impl Imageable for AnyXformable<'_> {}
-
-impl Xformable for AnyXformable<'_> {}
 
 /// Every op kind `UsdGeomXformOp` defines. openusd 0.7 composes any other
 /// kind as identity without a word; C++ USD rejects it. This list decides a
@@ -76,33 +62,33 @@ fn op_kind(entry: &str) -> Option<&str> {
 /// cast once. An unknown op kind contributes identity (one warning naming
 /// every such op); a stack openusd refuses — a `!resetXformStack!` after
 /// the first entry, a value it cannot read — is identity, with a warning.
-fn local_matrix(xf: &AnyXformable<'_>) -> GMat4 {
+fn local_matrix(xf: &Xformable) -> GMat4 {
     if let Ok(Some(order)) = xf.xform_op_order() {
         let unknown: Vec<&str> = order
             .iter()
             .filter(|e| e.as_str() != "!resetXformStack!")
             .filter(|e| !op_kind(e).is_some_and(|k| XFORM_OP_KINDS.contains(&k)))
-            .map(String::as_str)
+            .map(|e| e.as_str())
             .collect();
         if !unknown.is_empty() {
             warning!(
                 XformUnknownOp,
-                at = xf.0.path(),
+                at = xf.path(),
                 "{}: xformOpOrder lists {} — not a UsdGeomXformOp kind, read as identity",
-                xf.0.path(),
+                xf.path(),
                 unknown.join(", ")
             );
         }
     }
-    match xf.local_to_parent_transform(xform_time()) {
+    match xf.local_transformation(xform_time()) {
         Ok(m) => usd_mat_to_glam(m),
         Err(e) => {
             warning!(
                 XformUncomposable,
-                at = xf.0.path(),
+                at = xf.path(),
                 "{}: could not compose its xformOp stack ({e}) — its local transform is \
                  identity",
-                xf.0.path()
+                xf.path()
             );
             GMat4::IDENTITY
         }
@@ -118,7 +104,7 @@ pub(super) fn compose_with_parent(prim: &Prim, parent: GMat4) -> GMat4 {
     if prim.path().as_str() == "/" {
         return parent;
     }
-    let xf = AnyXformable(prim);
+    let xf = any_xformable(prim);
     let local = local_matrix(&xf);
     if xf.resets_xform_stack().unwrap_or(false) {
         local
@@ -130,9 +116,9 @@ pub(super) fn compose_with_parent(prim: &Prim, parent: GMat4) -> GMat4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::usd_import::stage_builder;
     use glam::Vec3;
     use openusd::sdf;
-    use openusd::usd::Stage;
 
     /// `/W/P` of a stage whose `P` authors `ops` under a parent `W`
     /// translated by `(0, 0, 7)`, with its world transform.
@@ -149,7 +135,7 @@ mod tests {
             ),
         )
         .expect("write stage");
-        let stage = Stage::builder()
+        let stage = stage_builder()
             .open(path.to_str().unwrap())
             .expect("stage opens");
         [
