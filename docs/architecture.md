@@ -115,8 +115,10 @@ crust-render::mcp::run                       stdio JSON-RPC (rmcp) on a one-thre
 The file on disk *is* the session: what is imported, rendered and left behind is the
 saved override layer, read by the unchanged `load_scene`, so the streaming import's
 masked stages see every edit with no special case. Nothing else is written but the
-final render's files and the `.tx` files `--auto-tx` creates. Design record:
-`openspec/specs/mcp-session/` (until it is archived, `openspec/changes/mcp-session/`).
+final render's files and the `.tx` files `--auto-tx` creates. Behaviour:
+`openspec/specs/mcp-session/spec.md`. Design: the archived changes
+`openspec/changes/archive/2026-10-09-mcp-session/design.md` and
+`2026-10-09-mcp-first-pixel/design.md` beside it (the first-image answer, `retune`).
 
 Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
 routine; a render mode is scheduling only, and tiles vs scanlines are

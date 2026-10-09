@@ -6,7 +6,8 @@ The command-line entry point (the `crust` binary of the `crust-render` crate, `m
 arguments, builds a `Scene` from USD or a procedural fallback, runs the renderer,
 and writes the output image (`crust render`), lists what a stage holds
 (`crust ls`), compares two EXRs (`crust diff`, the `image-comparison`
-capability), or diagnoses how to render it faster or cleaner (`crust diagnostic`,
+capability), serves an editing session to an MCP client (`crust mcp`, the
+`mcp-session` capability), or diagnoses how to render it faster or cleaner (`crust diagnostic`,
 the `diagnostics` capability). Each can also write a machine-readable JSON report. This is the only user-facing surface of the tool.
 ## Requirements
 ### Requirement: Subcommands
@@ -17,6 +18,8 @@ The CLI SHALL require a subcommand:
 - `ls`, which lists;
 - `check`, which imports a stage as a render would and reports on it without
   rendering (see the `scene-check` capability);
+- `mcp`, which serves a live editing and rendering session to an MCP client
+  over stdio (see the `mcp-session` capability);
 - `diff`, which compares two EXRs (see the `image-comparison` capability);
 - `diagnostic`, which measures and reports how to make the render faster
   or cleaner (see the `diagnostics` capability).
@@ -61,6 +64,12 @@ where it could take a subcommand's name or a positional as that directory.
 
 - **WHEN** the user runs `crust check -i scene.usda -o out.exr`
 - **THEN** the arguments are refused as a usage error and nothing is loaded
+
+#### Scenario: Starting the MCP server
+
+- **WHEN** an MCP client launches `crust mcp`
+- **THEN** the server waits for protocol messages on stdin and loads nothing until
+  a session is opened
 
 ### Requirement: Listing what a stage holds
 
