@@ -34,17 +34,10 @@ can find the rest. The CLI already speaks versioned JSON (`crust-stats/1`,
   warning records its import raised, just as it carries its import stats. The
   engine still writes nothing; hosts (the CLI, later Hydra) decide what to do with
   them.
-- **New subcommand `crust check`.** It imports a stage exactly as a render would,
-  takes the same scene-shaping flags as `diagnostic`, renders nothing and reports:
-  - the warnings;
-  - the camera, resolution and products a render would use;
-  - the scene counts.
-
-  The output is text on stdout by default. `--json PATH|-` writes `crust-check/1`.
-  `--deny <kind>[,<kind>…]` (or `--deny all`) makes the run exit 3 when any warning
-  of a denied kind was raised. That gives an agent or a CI job a stop condition for
-  "make this stage warning-free". The command exits 0 otherwise, 1 on an error and
-  2 on a usage error.
+- **The first consumer is a separate change.** `add-crust-check` adds `crust check`, which
+  reports these records as text or JSON with a `--deny` exit status. This change
+  makes warnings observable through the log prefix and through `Scene` for library
+  hosts.
 
 Out of scope, and planned as follow-ups:
 
@@ -65,9 +58,7 @@ Out of scope, and planned as follow-ups:
 
 ### Modified Capabilities
 
-- `cli`: the `Subcommands` requirement gains `check`. New requirements cover what
-  `crust check` reports, its text and `crust-check/1` JSON outputs, `--deny`, and
-  its exit codes.
+None. The `cli` changes for `crust check` belong to `add-crust-check`.
 
 ## Impact
 
@@ -83,12 +74,10 @@ Out of scope, and planned as follow-ups:
 - **crust-assets:** loaders called during the import record through the same macro
   (UDIM tile skips, stale `.tx` tiles, failed conversions). Loader failures the core
   already reports at the call site keep that single core-side code.
-- **crust-render:** the `check` subcommand and its text and JSON writers.
 - **Docs:**
   - a new `site/content/docs/reference/warnings.md` listing every code, its kind
     and what to do about it;
-  - `reference/command-line.md` for `check`;
-  - `openspec/specs/cli/design.md` § Logging and § Machine-readable reports;
+  - `openspec/specs/cli/design.md` § Logging;
   - a `docs/architecture.md` invariant: a new warning is a new code.
 - **Performance:** the warnings are import-only and bounded (one record per code,
   capped prim list), so render throughput is unaffected. No new dependencies.
