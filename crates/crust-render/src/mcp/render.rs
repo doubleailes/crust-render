@@ -101,7 +101,10 @@ impl Job {
         }
         let returned = self.signal.subscribe();
         let first_image = async {
-            while !*returned.borrow() && self.control.samples_reached() < FIRST_IMAGE_SPP {
+            // The maximum, not the pass's own count: a guided render starts
+            // each training pass over, and a poll between passes would miss
+            // the 4-spp image the previous one left.
+            while !*returned.borrow() && self.control.max_samples_reached() < FIRST_IMAGE_SPP {
                 tokio::time::sleep(FIRST_IMAGE_POLL).await;
             }
         };
