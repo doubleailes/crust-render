@@ -151,7 +151,7 @@ Measured, callgrind `-s 2` on the fixture, baseline → prototype:
 | walk rays (full render) | 45.52 M | 43.47 M | −4.5 % |
 
 Equal-sample noise against a 2048-spp reference of the fixture (`relmse`, the
-`exr_diff` metric):
+`crust diff` metric):
 
 | spp | baseline | prototype |
 |---|---|---|

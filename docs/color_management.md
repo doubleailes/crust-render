@@ -487,7 +487,7 @@ With the default view, `tone_map` is the *inverse* of the LDR-image decode
 above: the same curve in the forward direction (to within a matrix round trip
 through the config's reference spaces; no 8-bit code differs from
 `lin_rec709 → srgb_texture`). Comparing renders numerically should
-always use the EXR (`examples/exr_diff`), never the PNG, since the PNG has both
+always use the EXR (`crust diff`), never the PNG, since the PNG has both
 clamped and re-encoded.
 
 ### Scoring images outside the renderer (`scripts/material_fidelity`)

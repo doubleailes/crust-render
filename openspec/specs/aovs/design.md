@@ -911,7 +911,7 @@ Where the implementation departs from, or sharpens, the decisions above.
   (the `exr` crate writes parallel-compressed blocks in completion order).
   Task 3.5's "byte-identical" is checked as identical pixels plus an
   identical PNG; see `openspec/specs/image-output/design.md`.
-- **`exr_diff` compares every channel bitwise** (so equal infinities in a
+- **`crust diff` compares every channel bitwise** (so equal infinities in a
   depth pass match), and keeps its first output line's format for
   `check_images.sh`.
 

@@ -84,7 +84,7 @@
 
 ## 5. Unbiasedness and MIS checks (spec: `lighting`)
 
-- [ ] 5.1 "Converges to the power reference": render `usdlux` under `neural` at 16, 64 and 256 spp with `--indirect-clamp 0` against a 1024 spp `power` reference, using `exr_diff`:
+- [ ] 5.1 "Converges to the power reference": render `usdlux` under `neural` at 16, 64 and 256 spp with `--indirect-clamp 0` against a 1024 spp `power` reference, using `crust diff`:
   - Verify relMSE falls as roughly 1/N (record the three values in `docs/light_sampling.md`).
 - [ ] 5.2 "Emission is not double-counted": render `veach_mis` at 1024 spp under `neural` and `power`, `--indirect-clamp 0`:
   - Verify the image means agree within the noise (report both, and the per-seed spread over `-f 1..4`).

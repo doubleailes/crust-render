@@ -738,21 +738,8 @@ impl Renderer {
         let threshold = self.settings.variance_threshold as f64;
         let tolerance = self.settings.adaptive_neighbour_tolerance;
         let adaptive = cfg.adaptive && threshold > 0.0;
-        // The minimum grows with the budget: an authored minimum of 8 at
-        // 1024 spp takes at least 32. A floor, not a default, so that the
-        // unauthored 32 still keeps a 16 spp render (the goldens) from ever
-        // stopping early. Two at least, or there is no variance to test.
-        let min_spp = self
-            .settings
-            .min_samples_per_pixel
-            .max((cfg.spp as f64).sqrt().ceil() as u32)
-            .max(2);
-        // Checks happen every 4th sample from the minimum on, so the first
-        // one is at the smallest multiple of 4 that is at least `min_spp` —
-        // if the budget reaches that far at all. Checked: a minimum within 3
-        // of `u32::MAX` must saturate, not wrap to a check point of 0 that
-        // would let every pixel stop after 4 samples.
-        let first_check = min_spp.checked_next_multiple_of(4).unwrap_or(u32::MAX);
+        let (min_spp, first_check) =
+            adaptive_check_points(cfg.spp, self.settings.min_samples_per_pixel);
         let sweep_to = if adaptive {
             cfg.spp.min(first_check)
         } else {
@@ -1385,6 +1372,31 @@ impl PixelState {
 /// mid-batch stops at the batch's end, at most 25% past what it had taken.
 /// A pure function of its inputs, computed once per pass, so the round
 /// count — and the progress total — is known before the pass starts.
+/// The adaptive minimum and the first check point of a `spp` budget whose
+/// authored minimum is `authored_min`.
+///
+/// The minimum grows with the budget: an authored minimum of 8 at 1024 spp
+/// takes at least 32. A floor, not a default, so that the unauthored 32 still
+/// keeps a 16 spp render (the goldens) from ever stopping early. Two at
+/// least, or there is no variance to test. Checks happen every 4th sample
+/// from the minimum on, so the first one is at the smallest multiple of 4
+/// that is at least the minimum — if the budget reaches that far at all.
+/// Checked: a minimum within 3 of `u32::MAX` must saturate, not wrap to a
+/// check point of 0 that would let every pixel stop after 4 samples.
+pub(crate) fn adaptive_check_points(spp: u32, authored_min: u32) -> (u32, u32) {
+    let min_spp = authored_min.max((spp as f64).sqrt().ceil() as u32).max(2);
+    let first_check = min_spp.checked_next_multiple_of(4).unwrap_or(u32::MAX);
+    (min_spp, first_check)
+}
+
+/// Whether a render of `spp` samples, authored minimum `authored_min` and
+/// variance threshold `threshold` can stop a pixel early: the threshold is
+/// on and the budget passes the first check point, so [`batch_schedule`]
+/// has a round. What `crust diff`'s comparability reads off two stamps.
+pub(crate) fn samples_adaptively(spp: u32, authored_min: u32, threshold: f32) -> bool {
+    threshold > 0.0 && adaptive_check_points(spp, authored_min).1 < spp
+}
+
 fn batch_schedule(spp: u32, first_check: u32) -> Vec<u32> {
     let mut schedule = Vec::new();
     let mut taken = first_check;

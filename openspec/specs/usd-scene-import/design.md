@@ -720,7 +720,7 @@ Three API changes came with it, all in `scene/usd_import/`:
   leads, `glslfx` is the only namespaced one crust decodes, and an `ri` surface is a
   PxrDisneyBsdf that `has_shader_id` already caught upstream of the call. Verified
   output-preserving: all 15 checked-in sample scenes render **pixel-identical** to the 0.6
-  build at 16 spp (`exr_diff`, 0 differing pixels).
+  build at 16 spp (`crust diff`, 0 differing pixels).
 
 Earlier history worth knowing when reading old branches: 0.6.0 fixed two composition bugs
 that made the Moana island unreadable (written up under `docs/issues/`), and renamed 0.5's
@@ -899,6 +899,14 @@ resolution, which moves cage vertices only and warns once.
     C++ keeps only the ops after the last reset.
   - **Ops on a prim that is not `Xformable`** (an untyped prim, a `Scope`) still apply to
     it and its descendants; C++ ignores them.
+
+- **`bindMaterialAs` authored in `.usda` is ignored.** openusd 0.7's text parser stores
+  the metadatum as a `String`, and openusd-schemas' `compute_bound_material` only
+  recognises a `Token`, so a `strongerThanDescendants` binding read from a `.usda` loses to
+  a descendant's own binding: the render uses the descendant's material. `crust ls
+  material --json`'s `bound` reports what the render does, and
+  `material_records_follow_the_binding_resolution` (`tests/usd_listing.rs`) pins it; both
+  flip when openusd reads the token. Not yet reported upstream.
 
 - **Fixed in openusd 0.6.0, keep in mind when reading old branches.** Two composition
   bugs used to make the Moana island import as almost nothing, and both failed silently —

@@ -3423,6 +3423,26 @@ def Scope "Render"
     // A dangling RenderSettings.camera warns and falls back to a real camera.
     let fallback = x(load(Some("/W/Nope"), None).expect("falls back"));
     assert!(fallback == 0.0 || fallback == 10.0, "{fallback}");
+    // The scene records the camera it went through, after the fallback: the
+    // first one met, and the one the image was rendered from.
+    let scene = load(Some("/W/Nope"), None).expect("falls back");
+    let first = if x(load(Some("/W/Nope"), None).unwrap()) == 0.0 {
+        "/W/A"
+    } else {
+        "/W/B"
+    };
+    assert_eq!(scene.camera_path.as_deref(), Some(first));
+    assert_eq!(
+        load(Some("/W/B"), Some("/W/A"))
+            .unwrap()
+            .camera_path
+            .as_deref(),
+        Some("/W/A")
+    );
+    assert_eq!(
+        load(Some("/W/B"), None).unwrap().camera_path.as_deref(),
+        Some("/W/B")
+    );
 
     match load(None, Some("/W/Nope")) {
         Err(Error::CameraNotFound { path, available }) => {
@@ -3696,4 +3716,39 @@ fn loads_materialx_volume_usda() {
             .max_element()
             < 1e-6
     );
+}
+
+/// The scene records what it was rendered from: the time code as given,
+/// subframe included, beside the sampler seed (its integer part); and no
+/// camera path for the procedural camera of a stage without one.
+#[test]
+fn the_scene_records_its_time_code_and_the_procedural_camera() {
+    use crust_core::UsdImportOptions;
+    let dir = std::env::temp_dir().join("crust_scene_time_code");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("no_camera.usda");
+    std::fs::write(
+        &path,
+        "#usda 1.0\ndef Sphere \"S\"\n{\n    double radius = 1\n}\n",
+    )
+    .expect("write stage");
+    let load = |frame: Option<f64>| {
+        Scene::from_usd_with_options(
+            &path,
+            &crust_core::NoAssets,
+            &UsdImportOptions {
+                frame,
+                ..UsdImportOptions::default()
+            },
+        )
+        .expect("loads")
+    };
+    for (frame, seed) in [(10.5, 10), (10.25, 10), (-1.5, -2)] {
+        let scene = load(Some(frame));
+        assert_eq!(scene.time, Some(frame));
+        assert_eq!(scene.settings.frame(), seed, "{frame}");
+    }
+    let scene = load(None);
+    assert_eq!(scene.time, None);
+    assert_eq!(scene.camera_path, None, "the procedural camera has no prim");
 }

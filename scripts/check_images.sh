@@ -33,7 +33,10 @@ BIN=target/release/crust
 if [ ! -x "$BIN" ]; then
     cargo build --release -p crust-render
 fi
-cargo build --release -q -p crust-render --example exr_diff
+if ! "$BIN" diff --help >/dev/null 2>&1; then
+    echo "error: $BIN has no diff subcommand; rebuild it (cargo build --release -p crust-render)" >&2
+    exit 2
+fi
 
 scene_paths() {
     for f in samples/*.usda; do
@@ -70,11 +73,12 @@ while IFS=$'\t' read -r name path; do
         fail=1
         continue
     fi
-    diff="$(target/release/examples/exr_diff "$golden" "$WORK/$name.exr" 2>&1)"
-    # "640x360  differing pixels: 0/230400 (0.0000%)" -> the 0 before the slash
-    n="$(printf '%s\n' "$diff" \
-        | sed -n 's/.*differing pixels: \([0-9]*\)\/.*/\1/p')"
-    if [ "$n" = 0 ]; then
+    # `crust diff` exits 0 when identical, 1 when the images differ, 2 when
+    # one cannot be read; its comparability notes (stderr) are kept with the
+    # report, so a golden recorded under other settings says so.
+    status=0
+    diff="$("$BIN" diff "$golden" "$WORK/$name.exr" 2>&1)" || status=$?
+    if [ "$status" = 0 ]; then
         printf '%-22s identical\n' "$name"
     else
         printf '%-22s %s\n' "$name" "$(printf '%s\n' "$diff" | tr '\n' ' ')"

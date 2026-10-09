@@ -57,7 +57,7 @@ scripts/bench_scenes.sh                             # min-of-N Render seconds + 
 scripts/check_images.sh record <dir>                # golden EXRs at 16 spp
 scripts/check_images.sh check  <dir>                # re-render and diff; non-zero exit on any change
 scripts/bench_ab.sh -a <binA> -b <binB> [scenes...] # interleaved A/B of two binaries
-cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change? (+ relmse)
+cargo run --release -- diff a.exr b.exr             # did the image change? exit 0/1/2 (+ relmse, --json -)
 cargo test -p crust-mtlx --test osl_oracle          # MaterialX nodes vs MaterialX's own OSL implementation
 scripts/osl_oracle.py                               # regenerate those values (needs materialx + exact-math OSL)
 
@@ -91,8 +91,8 @@ Seven crates under `crates/` (ownership table in `docs/architecture.md`):
 deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-core`
 (the engine library: import, integrator, materials, lights, volumes, guiding, stats),
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
-`crust-render` (the CLI, binary `crust`; it drives a render or a diagnosis and writes their
-files — the images, the diagnostic's report — while the engine writes nothing: `main.rs`,
+`crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
+writes their files — the images, the reports — while the engine writes nothing: `main.rs`,
 `products.rs`, `logging.rs`) and `utils` (stateless math:
 warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
 `opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
