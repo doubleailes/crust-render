@@ -427,7 +427,7 @@ second walk); measured `ls material --json` against text `ls` at 1.03× on
 `diff` splits as a render does: crust-assets decodes (`read_exr_planes`, the old example's
 `load` with errors for panics), crust-core compares (`compare`, no I/O, so the diagnostic
 can call it on buffers), the CLI prints and maps the exit status. Its text report is the
-`exr_diff` example's, line for line — checked on eight fixture pairs (identical,
+old diff example's, line for line — checked on eight fixture pairs (identical,
 4 vs 16 spp both ways, a crop against the frame, AOV-only products, a beauty product
 against a single beauty) before the example was deleted.
 
