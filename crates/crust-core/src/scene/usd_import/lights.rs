@@ -37,11 +37,19 @@ struct LuxParams {
     pub(super) normalize: bool,
 }
 
-/// Reads the shared `LightAPI` inputs. Warns about the ones crust reads but
-/// cannot honour, since each makes the image differ from what was authored:
-/// `diffuse` / `specular` are per-lobe multipliers, and crust's light
-/// transport does not split a light's contribution by lobe.
-fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
+/// The `LightAPI` inputs as authored — before any colour space conversion,
+/// colour temperature or transform — with each unauthored or non-finite one
+/// at its schema fallback: what [`lux_params`] computes the emission from,
+/// and what `crust ls light --json` reports.
+pub(super) struct LightInputs {
+    pub(super) intensity: f32,
+    pub(super) exposure: f32,
+    pub(super) color: Vec3A,
+    pub(super) normalize: bool,
+}
+
+/// Reads [`LightInputs`], warning about a non-finite value.
+pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
     // A non-finite value would reach both MIS halves as NaN radiance, so it
     // falls back to the schema default like the shaping inputs do.
     let finite = |name: &str, v: Option<f32>, fallback: f32| match v {
@@ -67,6 +75,25 @@ fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
         }
         c => c.unwrap_or(Vec3A::ONE),
     };
+    LightInputs {
+        intensity,
+        exposure,
+        color,
+        normalize: attr_bool(&light.normalize_attr()).unwrap_or(false),
+    }
+}
+
+/// Reads the shared `LightAPI` inputs. Warns about the ones crust reads but
+/// cannot honour, since each makes the image differ from what was authored:
+/// `diffuse` / `specular` are per-lobe multipliers, and crust's light
+/// transport does not split a light's contribution by lobe.
+fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
+    let LightInputs {
+        intensity,
+        exposure,
+        color,
+        normalize,
+    } = light_inputs(prim, light);
     let color = in_working(&light.color_attr(), color, working);
     let gain = intensity * 2f32.powf(exposure);
     let mut emission = color * gain;
@@ -99,7 +126,7 @@ fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
 
     LuxParams {
         emission,
-        normalize: attr_bool(&light.normalize_attr()).unwrap_or(false),
+        normalize,
     }
 }
 

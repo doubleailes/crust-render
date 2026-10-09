@@ -38,7 +38,7 @@
                  CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
                      CRUST_PTEX_STREAM_MIPSPACE=file \
                      cargo run --release -- render -i samples/ptex_quads.usda -o b.exr
-                 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
+                 cargo run --release -- diff a.exr b.exr
              With CRUST_PTEX_MAX_LOG2 set so both backends hold the same
              resolution, those two images are bit-identical; see
              docs/ptex_streaming.md. CRUST_PTEX=0 drops both textures to their

@@ -26,7 +26,7 @@ differ from byte 391 on, with every pixel identical and the same file size:
 the `exr` crate compresses blocks in parallel and writes them in completion
 order (the offset table records where each landed). So the no-products guarantee
 is "same writer, same encoding, bit-identical pixels", checked with
-`examples/exr_diff`, and the PNG — encoded serially — *is* byte-identical. A
+`crust diff`, and the PNG — encoded serially — *is* byte-identical. A
 `cmp` of two EXRs proves nothing either way.
 
 ## The product writer
@@ -47,7 +47,7 @@ is "same writer, same encoding, bit-identical pixels", checked with
   Accumulation is always f32; the conversion happens at write.
 - **Header.** `software = crust-render <version>`; `colorInteropID =
   lin_rec709_scene`, crust's one rendering space; the product's
-  `driver:parameters:*` text values. `exr` refuses a standard attribute name
+  `driver:parameters:*` text values; the sampling stamp (below). `exr` refuses a standard attribute name
   as a custom one, so `comments`/`owner` go to their typed fields and any
   other standard name is refused with a `WARN` rather than failing the write.
   A forwarded `colorInteropID` is refused too: it describes the pixels, and
@@ -56,6 +56,36 @@ is "same writer, same encoding, bit-identical pixels", checked with
   `Buffer::get_rgb` does, applied once in `AovFilm::var_channels`.
 - **Paths.** `productName` as authored, relative to the working directory as
   husk and usdrecord resolve it; parent directories are created.
+
+## The sampling stamp
+
+Every EXR `crust render` writes carries `crust:*` attributes saying how it was sampled
+(`crust_core::stamp::SamplingStamp`): `crust:spp`, `crust:minSpp`, `crust:maxDepth`,
+`crust:lightSamples`, `crust:lightSamplesIndirect` as `int`; `crust:sppTaken` as `v2i`
+(fewest, most); `crust:indirectClamp` (`0` off), `crust:varianceThreshold`,
+`crust:pixelFilterRadius` as `float`; `crust:frame` as `double`; `crust:camera`,
+`crust:pixelFilter`, `crust:samplingStrategy`, `crust:lightSelection`, `crust:version` as
+`string`. The user page (`site/content/docs/usd/aovs.md`, "How the pixels were sampled")
+maps each to the flag and USD attribute it mirrors.
+
+- **Built once, after tracing**, from the settings the render ran with, its `RayStats`
+  and what the import recorded: `Scene::camera_path` (the camera after any fallback,
+  `None` for the procedural one) and `Scene::time` (the time code as given — the
+  settings only hold the floored sampler seed, so `-f 10.5` would otherwise stamp `10`).
+- **One function writes it** (`products::stamp`), called by both `write_beauty` and
+  `write_product`, so the two writers cannot drift; a test per writer reads it back.
+- **`crust:sppTaken`** comes from the adaptive counters, which only adaptive passes fill;
+  without one every pixel took `spp`.
+- **Typed, not text**, so Nuke and `exrheader` show numbers. Named `crust:` + the USD
+  attribute (`crust:indirectClamp`) rather than OpenEXR's `renderer/key`: one vocabulary
+  across USD, CLI and EXR. The working space is not repeated: `colorInteropID` has it.
+- **Crust's keys win.** The product writer refuses an authored `driver:parameters:crust:*`
+  with a `WARN` naming the product, as it refuses `colorInteropID`, and writes the stamp
+  after the authored attributes in any case.
+- **Pixels unchanged, headers not.** Every "byte-identical to before" promise in
+  `spec.md` is about pixels and windows; a header now differs by the stamp. No test
+  compared whole headers, and the goldens of `check_images.sh` are compared channel by
+  channel (`crust diff`), so old unstamped goldens still pass, reading `unknown`.
 
 ## `-o` with products
 

@@ -47,7 +47,7 @@
 
 - [ ] 7.1 Add `--stats` counters: fields, particles, dropped, particle and BVH memory, and mean / max splat crossings per ray, plus rays that reached the crossing bound, emitted on `STATS_TARGET`. Verify the "Stats on a capture" scenario on a fixture and document the lines in `site/content/docs/reference/command-line.md`
 - [ ] 7.2 Render the reference capture (1,256,332 particles, from a production-renderer tutorial; not committed) through a local wrapper `.usda` with the 180° flip and a camera. Record import time, memory, Mray/s and crossings per ray (`--stats`) in the new design record. Verify the numbers are reproducible across two runs within `bench_scenes.sh` noise
-- [ ] 7.3 If a production-renderer or `hdParticleField` reference EXR of the same view can be obtained, report relmse with `exr_diff` for both colour-space defaults and confirm or flip Decision 7. Otherwise record in the design record that the default is unconfirmed
+- [ ] 7.3 If a production-renderer or `hdParticleField` reference EXR of the same view can be obtained, report relmse with `crust diff` for both colour-space defaults and confirm or flip Decision 7. Otherwise record in the design record that the default is unconfirmed
 - [ ] 7.4 Write `openspec/specs/particle-fields/design.md`: the representation choice and rejected alternatives, the reference-capture measurements, the known differences from rasterised 3DGS, and the known gaps. List the gaps in the site's architecture/limitations page and verify `zola build` passes
 
 ## 8. Integration checks

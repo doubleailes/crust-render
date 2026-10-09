@@ -636,7 +636,7 @@ and this change does not remove it.
 
 - **WHEN** `samples/materialx_subsurface.usda` is rendered at 16 and at 32 samples
   per pixel and compared against a 2048-sample reference of the same scene with
-  `exr_diff`
+  `crust diff`
 - **THEN** the relative MSE at each sample count equals the walk's without roulette
   to three significant digits, and halves from 16 to 32 samples
 

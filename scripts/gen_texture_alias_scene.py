@@ -24,8 +24,8 @@ compare a 16 spp render against it with cones on and off:
     $B render -i /tmp/alias/alias.usda -o /tmp/alias/ref.exr   -s 1024 -l error
     $B render -i /tmp/alias/alias.usda -o /tmp/alias/mip.exr   -s 16   -l error
     CRUST_RAY_CONES=0 $B render -i /tmp/alias/alias.usda -o /tmp/alias/flat.exr -s 16 -l error
-    target/release/examples/exr_diff /tmp/alias/ref.exr /tmp/alias/mip.exr
-    target/release/examples/exr_diff /tmp/alias/ref.exr /tmp/alias/flat.exr
+    $B diff /tmp/alias/ref.exr /tmp/alias/mip.exr
+    $B diff /tmp/alias/ref.exr /tmp/alias/flat.exr
 
 Both references must be rendered with the *same* switch setting they are being
 compared under -- a filtered render converges to a different (and correct)
@@ -37,6 +37,7 @@ The scene and its texture are deliberately NOT checked in -- they are
 generated, and the checker is 4 MB.
 """
 
+import json
 import os
 import struct
 import subprocess
@@ -204,19 +205,24 @@ def render(scene, out, spp, env=None):
 
 
 def diff(a, b):
-    """The `rmse:` and `mean abs diff:` lines exr_diff prints, as floats."""
-    out = subprocess.run(
-        ["target/release/examples/exr_diff", a, b],
-        check=True,
+    """The beauty's RMSE and mean absolute difference of `b` against `a`.
+
+    From `crust diff --json -`'s `crust-diff/1` report. Its exit status is 0
+    for identical images and 1 for differing ones -- and this always compares
+    a low-spp render against a reference, so 1 is the expected answer, not a
+    failure; only 2 (an image that cannot be read) is.
+    """
+    run = subprocess.run(
+        ["target/release/crust", "diff", a, b, "--json", "-"],
         capture_output=True,
         text=True,
-    ).stdout
-    got = {}
-    for line in out.splitlines():
-        for key in ("rmse", "mean abs diff"):
-            if line.startswith(key + ":"):
-                got[key] = float(line.split(":", 1)[1])
-    return got
+    )
+    if run.returncode not in (0, 1):
+        raise RuntimeError(f"crust diff {a} {b} failed: {run.stderr.strip()}")
+    beauty = json.loads(run.stdout).get("beauty")
+    if beauty is None:
+        raise RuntimeError(f"crust diff {a} {b}: no R, G, B in both files")
+    return {"rmse": beauty["rmse"], "mean abs diff": beauty["mean_abs"]}
 
 
 def measure(outdir):

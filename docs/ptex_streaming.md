@@ -482,7 +482,7 @@ CRUST_PTEX_MAX_LOG2=5 cargo run --release -- render -i samples/ptex_quads.usda -
 CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
     CRUST_PTEX_STREAM_MIPSPACE=file \
     cargo run --release -- render -i samples/ptex_quads.usda -o b.exr
-cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
+cargo run --release -- diff a.exr b.exr
 
 # The configuration that streams under the *default* policy: no pyramid, so
 # no chain to be reduced in the wrong space. Exact, uncapped, and aliasing.

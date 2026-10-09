@@ -164,7 +164,7 @@ still pass, unchanged.
 
 - **Every image moves by ulps (D2).** Accept it once it is shown to be noise. Run
   `scripts/check_images.sh check` against goldens recorded before the change, at
-  `-s 16 --indirect-clamp 0`. For any scene that differs, check that `exr_diff` relmse
+  `-s 16 --indirect-clamp 0`. For any scene that differs, check that `crust diff` relmse
   falls as 1/√N across 16 / 64 / 256 spp instead of plateauing.
   `cornellbox_transforms_compose_correctly` must pass unchanged.
 - **Default value vs. time 0 (phase 1).** Without `-f`, the old composer read an op's
