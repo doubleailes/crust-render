@@ -4,9 +4,11 @@
 
 The importer SHALL compose a prim's local transform from its `xformOpOrder` with
 `UsdGeomXformable` semantics, in double precision, for every op kind
-`UsdGeomXformOp` defines, including `!invert!` and `:suffix` instances. A leading
-`!resetXformStack!` SHALL drop the inherited transform on any prim type. An op whose
-kind is not a `UsdGeomXformOp` kind SHALL contribute identity, with a warning.
+`UsdGeomXformOp` defines, including `!invert!` and `:suffix` instances, on any
+`Xformable` prim type. A `!resetXformStack!` SHALL drop the inherited transform and the
+ops listed before it. A prim that is not `Xformable` SHALL contribute no transform of
+its own. An op whose kind is not a `UsdGeomXformOp` kind SHALL contribute identity, with
+a warning.
 
 #### Scenario: Multi-op stack
 
@@ -38,18 +40,17 @@ kind is not a `UsdGeomXformOp` kind SHALL contribute identity, with a warning.
 - **THEN** that op contributes identity, the rest of the stack still composes, and a
   warning names the prim
 
-#### Scenario: Reset after other ops (known gap)
+#### Scenario: Reset after other ops
 
-- **WHEN** `!resetXformStack!` is listed after another op
-- **THEN** the prim's local transform is identity, with a warning, where C++ USD would
-  drop the ops before the reset and keep the ones after it. This gap closes when the
-  importer moves to the openusd release after 0.7.0
+- **WHEN** `xformOpOrder = ["xformOp:translate", "!resetXformStack!",
+  "xformOp:translate:after"]` with `translate:after = (0, 2, 0)`, under a translated
+  parent
+- **THEN** the prim's world transform is the translate `(0, 2, 0)` alone
 
-#### Scenario: Ops on a prim that is not Xformable (known gap)
+#### Scenario: Ops on a prim that is not Xformable
 
 - **WHEN** an untyped prim or a `Scope` authors `xformOp:*` and an `xformOpOrder`
-- **THEN** the ops apply to it and its descendants, where C++ USD ignores them on a
-  prim that is not `Xformable`. This gap closes with the same openusd bump
+- **THEN** its world transform is its parent's
 
 ### Requirement: Native instance nesting
 

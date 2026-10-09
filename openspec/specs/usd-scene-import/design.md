@@ -77,13 +77,14 @@ mean**; 16 spp image identical. `bench_ab.sh -p` times any `--stats` phase (defa
 ### Light links are decided after the last chunk
 
 `light_links.rs` reads `collection:lightLink` and `collection:shadowLink` through
-openusd's own `Collection::compute_membership_query`, so every `UsdCollectionAPI`
+openusd's own `CollectionAPI::compute_membership_query`, so every `UsdCollectionAPI`
 rule (nearest opinion, `includeRoot`, expansion rules, nested collections with
 cycles broken) is the reference's. Two traps:
 
-- **UsdLux's `includeRoot` fallback is true**, `UsdCollectionAPI`'s (and openusd's)
-  false. When it is not authored the pseudo-root is added to the query's rule map
-  (`link_query`), unless `/` already carries an opinion.
+- **UsdLux's `includeRoot` fallback is true**, `UsdCollectionAPI`'s false. openusd
+  resolves it from `LightAPI`'s schema (since the bump to `main`; crust added the
+  pseudo-root to the rule map itself before), so an unauthored `includeRoot` reaches the
+  query as true.
 - **Ordering.** A light can be traversed before the receivers it links, and when
   streaming they sit in different chunks whose stages are gone by the end, so
   nothing is decided at the light. The traversal records, per prim that emits
@@ -916,35 +917,29 @@ resolution, which moves cage vertices only and warns once.
 
 ## Known gaps: openusd bugs and workarounds
 
-- **Transforms are openusd's; two divergences from C++ USD remain until the bump.**
-  `openusd` 0.5.0 composed multi-op `xformOpOrder` stacks in the wrong order, so the
-  importer used to compose `xformOp`s itself (in `f32`, falling back to openusd for six
-  prim types and to identity for every other). That composer is gone: on 18 stacks
-  covering every op kind it decoded (translate, scale, every single-axis and three-axis
-  rotation, `orient`, `transform`, `!invert!`, pivot suffixes, a leading
-  `!resetXformStack!`, a time-sampled translate), openusd 0.7.0 matched C++ USD 26.8 on
-  every matrix entry. `xform.rs` now hands every prim to openusd's `Xformable` through one
-  type-independent view (`AnyXformable`), composing in `f64` and casting once, so
-  `translateX`-style ops and a leading reset work on every prim type. An op kind outside
-  the `UsdGeomXformOp` vocabulary still warns (openusd 0.7 reads it as identity silently;
-  that list decides the message only). Regression tests:
-  `cornellbox_transforms_compose_correctly`, the `xform.rs` unit tests and
-  `single_axis_ops_place_non_xform_prims` / `a_leading_reset_drops_the_parent_on_a_light` /
-  `a_pivot_stack_places_geometry_as_cpp_usd_does`. Remaining, both fixed on openusd main
-  and retired by the bump (`openspec/changes/retire-openusd-workarounds`, phase 2):
-  - **A `!resetXformStack!` after the first entry** makes 0.7 refuse the stack: the prim's
-    local transform is identity, with a warning, and its parent's is still inherited.
-    C++ keeps only the ops after the last reset.
-  - **Ops on a prim that is not `Xformable`** (an untyped prim, a `Scope`) still apply to
-    it and its descendants; C++ ignores them.
+- **Transforms are openusd's, with C++ USD's semantics.** `openusd` 0.5.0 composed
+  multi-op `xformOpOrder` stacks in the wrong order, so the importer used to compose
+  `xformOp`s itself (in `f32`, falling back to openusd for six prim types and to identity
+  for every other). That composer is gone: on 18 stacks covering every op kind it decoded
+  (translate, scale, every single-axis and three-axis rotation, `orient`, `transform`,
+  `!invert!`, pivot suffixes, a leading `!resetXformStack!`, a time-sampled translate),
+  openusd 0.7.0 matched C++ USD 26.8 on every matrix entry. `xform.rs` composes each prim
+  through openusd's `XformQuery` in `f64`, casting once, at the import's eval time (the
+  default value without `-f`). Since the bump to `main`, the two divergences 0.7 left are
+  closed: a `!resetXformStack!` after other ops keeps only the ops after it (0.7 refused
+  the stack), and ops on a prim that is not `Xformable` (an untyped prim, a `Scope`) are
+  ignored (0.7 applied them). An op kind outside the `UsdGeomXformOp` vocabulary still
+  warns (openusd reads it as identity silently; that list decides the message only).
+  Regression tests: `cornellbox_transforms_compose_correctly`, the `xform.rs` unit tests
+  and `single_axis_ops_place_non_xform_prims` / `a_leading_reset_drops_the_parent_on_a_light` /
+  `a_pivot_stack_places_geometry_as_cpp_usd_does`.
 
-- **`bindMaterialAs` authored in `.usda` is ignored.** openusd 0.7's text parser stores
-  the metadatum as a `String`, and openusd-schemas' `compute_bound_material` only
-  recognises a `Token`, so a `strongerThanDescendants` binding read from a `.usda` loses to
-  a descendant's own binding: the render uses the descendant's material. `crust ls
-  material --json`'s `bound` reports what the render does, and
-  `material_records_follow_the_binding_resolution` (`tests/usd_listing.rs`) pins it; both
-  flip when openusd reads the token. Not yet reported upstream.
+- **Fixed by the bump to `main`: `bindMaterialAs` authored in `.usda`.** openusd 0.7's
+  text parser stored the metadatum as a `String`, which `compute_bound_material` did not
+  recognise, so a `strongerThanDescendants` binding read from a `.usda` lost to a
+  descendant's own binding. It now wins, as in C++ USD; the render and `crust ls material
+  --json`'s `bound` both follow it, pinned by `material_records_follow_the_binding_resolution`
+  (`tests/usd_listing.rs`).
 
 - **Fixed in openusd 0.6.0, keep in mind when reading old branches.** Two composition
   bugs used to make the Moana island import as almost nothing, and both failed silently —

@@ -51,10 +51,3 @@ impl Drop for EvalTimeScope {
 pub(super) fn eval_time() -> Option<TimeCode> {
     EVAL_TIME.with(|t| t.get()).map(TimeCode::new)
 }
-
-/// The time openusd's own xformable composition is asked for. That API has
-/// no "default" arm and was always called at 0.0, so without a frame this
-/// keeps exactly that.
-pub(super) fn xform_time() -> TimeCode {
-    eval_time().unwrap_or(TimeCode::new(0.0))
-}

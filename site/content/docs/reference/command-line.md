@@ -196,7 +196,7 @@ subframe, and negative values are accepted (`-f -10`).
 The frame also seeds the sampler, so successive frames get different noise patterns. It
 replaces [`crust:frame`](@/docs/usd/render-settings.md#crust-frame) for that.
 
-Without `--frame`, attributes read their default (non-time-sampled) value. Transforms (`xformOp:*`) are the exception: they are read at time 0, so an op that authors both a default and time samples takes its sample at 0 (held from the first sample when that is later), not its default.
+Without `--frame`, attributes read their default (non-time-sampled) value, transforms (`xformOp:*`) included.
 
 A frame outside the stage's `startTimeCode`–`endTimeCode` range logs a warning but still
 renders: animated attributes hold their first or last time sample. `nan` and `inf` are

@@ -1,13 +1,13 @@
-//! Prim transforms: openusd's `UsdGeomXformable` composition, reached for any
-//! prim type, and the conversion to glam.
+//! Prim transforms: openusd's `UsdGeomXformable` composition, and the
+//! conversion to glam.
 
 use crate::warning;
 use glam::Mat4 as GMat4;
 use openusd::gf::Matrix4d;
 use openusd::usd::Prim;
-use openusd_schemas::geom::{Xformable, XformableExt, XformableSchema};
+use openusd_schemas::geom::{XformQuery, Xformable, XformableSchema};
 
-use super::time::xform_time;
+use super::time::eval_time;
 
 /// USD authors 4x4 matrices as row-vector row-major (translation in the
 /// last row, indices 12..15). glam::Mat4 is column-major with the
@@ -18,16 +18,8 @@ fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
     GMat4::from_cols_array(&m.0.map(|v| v as f32))
 }
 
-/// Any prim, viewed as `UsdGeomXformable` without asking its type
-/// (`Xformable::from_prim_unchecked`), so the stack composes on every prim
-/// type — the scope crust has always given `xformOp`s — instead of a list of
-/// types that drifts (a type missing from it composed to identity).
-fn any_xformable(prim: &Prim) -> Xformable {
-    Xformable::from_prim_unchecked(prim.clone())
-}
-
-/// Every op kind `UsdGeomXformOp` defines. openusd 0.7 composes any other
-/// kind as identity without a word; C++ USD rejects it. This list decides a
+/// Every op kind `UsdGeomXformOp` defines. openusd composes any other kind as
+/// identity without a word; C++ USD rejects it. This list decides a
 /// warning only, never a matrix.
 const XFORM_OP_KINDS: &[&str] = &[
     "translate",
@@ -58,29 +50,50 @@ fn op_kind(entry: &str) -> Option<&str> {
     name.strip_prefix("xformOp:")?.split(':').next()
 }
 
-/// Local-to-parent transform of `prim`, composed by openusd in `f64` and
-/// cast once. An unknown op kind contributes identity (one warning naming
-/// every such op); a stack openusd refuses — a `!resetXformStack!` after
-/// the first entry, a value it cannot read — is identity, with a warning.
-fn local_matrix(xf: &Xformable) -> GMat4 {
-    if let Ok(Some(order)) = xf.xform_op_order() {
-        let unknown: Vec<&str> = order
-            .iter()
-            .filter(|e| e.as_str() != "!resetXformStack!")
-            .filter(|e| !op_kind(e).is_some_and(|k| XFORM_OP_KINDS.contains(&k)))
-            .map(|e| e.as_str())
-            .collect();
-        if !unknown.is_empty() {
-            warning!(
-                XformUnknownOp,
-                at = xf.path(),
-                "{}: xformOpOrder lists {} — not a UsdGeomXformOp kind, read as identity",
-                xf.path(),
-                unknown.join(", ")
-            );
-        }
+/// Warns once, naming every `xformOpOrder` entry that is not a
+/// `UsdGeomXformOp` kind: openusd reads each as identity.
+fn warn_unknown_ops(xf: &Xformable) {
+    let Ok(Some(order)) = xf.xform_op_order() else {
+        return;
+    };
+    let unknown: Vec<&str> = order
+        .iter()
+        .filter(|e| e.as_str() != "!resetXformStack!")
+        .filter(|e| !op_kind(e).is_some_and(|k| XFORM_OP_KINDS.contains(&k)))
+        .map(|e| e.as_str())
+        .collect();
+    if !unknown.is_empty() {
+        warning!(
+            XformUnknownOp,
+            at = xf.path(),
+            "{}: xformOpOrder lists {} — not a UsdGeomXformOp kind, read as identity",
+            xf.path(),
+            unknown.join(", ")
+        );
     }
-    match xf.local_transformation(xform_time()) {
+}
+
+/// `prim`'s transform given its parent's: `parent · local`, or `local` alone
+/// when the prim's `xformOpOrder` lists `!resetXformStack!` — the one
+/// composition rule every walk (the traversal, the placement count, the
+/// prototype walk, a camera's ancestor chain) applies.
+///
+/// openusd composes the stack as C++ `UsdGeomXformable` does, in `f64`, cast
+/// once: a reset drops the ops listed before it, and a prim that is not
+/// `Xformable` (the pseudo-root, an untyped prim, a `Scope`) contributes
+/// nothing, whatever ops it authors. A stack openusd cannot compose (a
+/// singular `transform` to invert) keeps the parent, with a warning.
+pub(super) fn compose_with_parent(prim: &Prim, parent: GMat4) -> GMat4 {
+    let Some(xf) = Xformable::from_prim(prim.clone()).ok().flatten() else {
+        return parent;
+    };
+    warn_unknown_ops(&xf);
+    let query = XformQuery::new(&xf);
+    let composed = query.as_ref().map_err(|e| e.to_string()).and_then(|q| {
+        q.local_transformation(eval_time())
+            .map_err(|e| e.to_string())
+    });
+    let local = match composed {
         Ok(m) => usd_mat_to_glam(m),
         Err(e) => {
             warning!(
@@ -92,21 +105,8 @@ fn local_matrix(xf: &Xformable) -> GMat4 {
             );
             GMat4::IDENTITY
         }
-    }
-}
-
-/// `prim`'s transform given its parent's: `parent · local`, or `local` alone
-/// when the prim authors a leading `!resetXformStack!` — the one composition
-/// rule every walk (the traversal, the placement count, the prototype walk,
-/// a camera's ancestor chain) applies. The pseudo-root, where every walk
-/// starts, owns no properties and passes `parent` through.
-pub(super) fn compose_with_parent(prim: &Prim, parent: GMat4) -> GMat4 {
-    if prim.path().as_str() == "/" {
-        return parent;
-    }
-    let xf = any_xformable(prim);
-    let local = local_matrix(&xf);
-    if xf.resets_xform_stack().unwrap_or(false) {
+    };
+    if query.is_ok_and(|q| q.resets_xform_stack()) {
         local
     } else {
         parent * local
@@ -120,9 +120,14 @@ mod tests {
     use glam::Vec3;
     use openusd::sdf;
 
-    /// `/W/P` of a stage whose `P` authors `ops` under a parent `W`
+    /// `/W/P` of a stage whose `Xform` `P` authors `ops` under a parent `W`
     /// translated by `(0, 0, 7)`, with its world transform.
     fn world_of(name: &str, ops: &str) -> GMat4 {
+        world_of_type(name, "Xform", ops)
+    }
+
+    /// [`world_of`] with `P` of type `ty` (empty: an untyped `def`).
+    fn world_of_type(name: &str, ty: &str, ops: &str) -> GMat4 {
         let dir = std::env::temp_dir().join("crust_xform_tests");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join(format!("{name}.usda"));
@@ -131,7 +136,7 @@ mod tests {
             format!(
                 "#usda 1.0\ndef Xform \"W\"\n{{\n    double3 xformOp:translate = (0, 0, 7)\n    \
                  uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    \
-                 def Xform \"P\"\n    {{\n{ops}\n    }}\n}}\n"
+                 def {ty} \"P\"\n    {{\n{ops}\n    }}\n}}\n"
             ),
         )
         .expect("write stage");
@@ -163,16 +168,29 @@ mod tests {
         assert_near(m, GMat4::from_translation(Vec3::new(1.0, 2.0, 10.0)));
     }
 
-    /// openusd 0.7 refuses a reset after the first entry; the prim's local
-    /// transform is then identity and the parent's is still inherited.
+    /// A reset after the first entry keeps only the ops listed after it and
+    /// drops the parent, as C++ `GetOrderedXformOps` does. (openusd 0.7
+    /// refused such a stack: identity, with the parent kept.)
     #[test]
-    fn a_mid_stack_reset_is_identity_and_keeps_the_parent() {
+    fn a_mid_stack_reset_keeps_only_the_ops_after_it() {
         let m = world_of(
             "mid_stack_reset",
             r#"        double3 xformOp:translate = (1, 2, 3)
-        uniform token[] xformOpOrder = ["xformOp:translate", "!resetXformStack!"]"#,
+        double3 xformOp:translate:after = (0, 2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "!resetXformStack!", "xformOp:translate:after"]"#,
         );
-        assert_near(m, GMat4::from_translation(Vec3::new(0.0, 0.0, 7.0)));
+        assert_near(m, GMat4::from_translation(Vec3::new(0.0, 2.0, 0.0)));
+    }
+
+    /// A prim that is not `Xformable` contributes nothing, whatever ops it
+    /// authors, as in C++ USD: it passes its parent's transform through.
+    #[test]
+    fn ops_on_a_prim_that_is_not_xformable_are_ignored() {
+        let ops = r#"        double3 xformOp:translate = (1, 2, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]"#;
+        let parent = GMat4::from_translation(Vec3::new(0.0, 0.0, 7.0));
+        assert_near(world_of_type("scope_ops", "Scope", ops), parent);
+        assert_near(world_of_type("untyped_ops", "", ops), parent);
     }
 
     #[test]

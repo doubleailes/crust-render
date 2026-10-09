@@ -183,8 +183,20 @@ pub(super) fn resolve_adaptive_max_level(host: Option<u32>, authored: Option<i32
 
 /// `attr`'s value at [`eval_time`], or `None` when it is unauthored, blocked
 /// or unreadable.
+///
+/// openusd resolves an unauthored schema attribute to its schema fallback,
+/// and the importer's readers take `None` as "unauthored": a product inherits
+/// the settings' resolution, a camera's vertical aperture follows the image's
+/// aspect and its focus distance is crust's 10, not the schema's 0. So a
+/// value equal to the fallback is asked whether a layer authored it — only
+/// then, since a value that differs from the fallback was authored, and an
+/// attribute no schema declares (`crust:*`, primvars, shader inputs) has none.
 pub(super) fn value_at(attr: &Attribute) -> Option<sdf::Value> {
-    attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
+    let value = attr.get_at::<sdf::Value>(eval_time()).ok().flatten()?;
+    match attr.fallback_value() {
+        Ok(Some(fallback)) if fallback == value => attr.has_authored_value().ok()?.then_some(value),
+        _ => Some(value),
+    }
 }
 
 /// The value of `prim`'s attribute `name` at [`eval_time`] — [`value_at`] by
