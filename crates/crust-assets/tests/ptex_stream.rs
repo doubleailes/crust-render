@@ -1062,8 +1062,9 @@ fn cap_texels(path: &Path, face: u32, cap: i8) -> f32 {
 /// texture equals the preload bit for bit wherever the preload holds the
 /// texels: every face, at every footprint no finer than one texel of the
 /// face at the cap, for every cap from one texel up to the authored
-/// resolution, with and without the pyramid — across the `u8` one- and
-/// four-channel, `uint16` triangle and `float32` fixtures.
+/// resolution — across the `u8` one- and four-channel, `uint16` triangle and
+/// `float32` fixtures. (Without the pyramid the footprint is ignored; see
+/// `capped_streaming_without_mips_ignores_the_footprint`.)
 ///
 /// This is what lets streaming be on by default: a coarse lookup reads the
 /// preload's own levels — the file's face at the cap, through the preload's
@@ -1077,7 +1078,8 @@ fn capped_streaming_and_the_preload_agree_at_and_below_the_cap() {
     for &(name, authored) in FIXTURES {
         let path = fixture(name);
         for cap in 0..=authored {
-            for mip in [true, false] {
+            {
+                let mip = true;
                 let pre = PtexColor::open_with(&path, mip, cap).expect(name);
                 let stream = PtexStream::open_capped(
                     &path,
@@ -1216,6 +1218,111 @@ fn capped_streaming_resolves_detail_finer_than_the_cap() {
              the stream agreed where the stream should resolve more"
         );
     }
+}
+
+/// **Without a pyramid the footprint is ignored**, as it is for every other
+/// single-level texture: `CRUST_PTEX_MIP=0` reads the finest level held at
+/// every footprint — the uncapped authored face, exactly the `file` stream's
+/// level 0 — rather than switching to the cap level as a surface recedes. With
+/// an explicit cap the finest level *is* the preload's, at every footprint.
+#[test]
+fn capped_streaming_without_mips_ignores_the_footprint() {
+    use crust_core::ColorSpace;
+    const BUDGET: usize = 8 << 20;
+    for &(name, authored) in FIXTURES {
+        let path = fixture(name);
+        let cap = authored - 2;
+        let capped = PtexStream::open_capped(
+            &path,
+            ColorSpace::GAMMA22,
+            BUDGET,
+            micro_max(BUDGET),
+            None,
+            cap,
+            false,
+        )
+        .expect(name);
+        let file =
+            PtexStream::open_with(&path, BUDGET, micro_max(BUDGET), None, false).expect(name);
+        let pre = PtexColor::open_with(&path, false, cap).expect(name);
+        let explicit = PtexStream::open_capped(
+            &path,
+            ColorSpace::GAMMA22,
+            BUDGET,
+            micro_max(BUDGET),
+            Some(cap),
+            cap,
+            false,
+        )
+        .expect(name);
+        for face in 0..PtexTexture::num_faces(&pre) as u32 {
+            for &width in WIDTHS {
+                for &(u, v) in &grid() {
+                    let at = capped.eval(face, u, v, width);
+                    assert_eq!(
+                        bits(at),
+                        bits(capped.eval(face, u, v, 0.0)),
+                        "{name} face {face} at ({u}, {v}): width {width} changed the level"
+                    );
+                    assert_eq!(bits(at), bits(file.eval(face, u, v, width)), "{name}");
+                    assert_eq!(
+                        bits(explicit.eval(face, u, v, width)),
+                        bits(pre.eval(face, u, v, width)),
+                        "{name} face {face} at ({u}, {v}) width {width}, explicit cap"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            capped.stats().cache.derives,
+            0,
+            "{name}: no level to derive"
+        );
+    }
+}
+
+/// **The cap level is read as tiles, not as a derived block.** A derived
+/// block is a whole level of a face, so under a large explicit cap the cap
+/// level would be megabytes of `f32` — past a microcache slot and past a
+/// small reader share, re-decoded on every tap. Lookups at the cap level
+/// therefore derive nothing; only a coarser level does.
+#[test]
+fn the_cap_level_is_read_as_tiles_not_derived() {
+    use crust_core::ColorSpace;
+    // A 1 MiB share, the smallest a reader is given; the tiled fixture's cap
+    // level at 10 would be a 6 MiB `f32` block.
+    const BUDGET: usize = 1 << 20;
+    let path = fixture("quad_tiled");
+    let stream = PtexStream::open_capped(
+        &path,
+        ColorSpace::GAMMA22,
+        BUDGET,
+        micro_max(BUDGET),
+        Some(10),
+        10,
+        true,
+    )
+    .expect("stream");
+    let pre = PtexColor::open_with(&path, true, 10).expect("preload");
+    for &(u, v) in &grid() {
+        for face in 0..2 {
+            assert_eq!(
+                bits(stream.eval(face, u, v, 0.0)),
+                bits(pre.eval(face, u, v, 0.0))
+            );
+        }
+    }
+    let st = stream.stats().cache;
+    assert_eq!(st.derives, 0, "a lookup at the cap level derived a block");
+    assert_eq!(st.oversized, 0, "a block too large for the share was read");
+    // One footprint coarser than a cap texel does derive, and still agrees.
+    for &(u, v) in &grid() {
+        assert_eq!(
+            bits(stream.eval(0, u, v, 0.01)),
+            bits(pre.eval(0, u, v, 0.01))
+        );
+    }
+    assert!(stream.stats().cache.derives > 0);
 }
 
 /// The derived levels live in the reader's cache, inside its budget, and are

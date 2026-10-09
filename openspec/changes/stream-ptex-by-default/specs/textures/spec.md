@@ -37,7 +37,8 @@ SHALL be bit-identical to the preloaded texel.
 #### Scenario: Capped streaming matches the preload where both hold the texels
 
 - **WHEN** a mipmapped `.ptx` whose faces exceed the cap is evaluated streamed under
-  `capped` and preloaded, at footprints no finer than one cap texel
+  `capped` and preloaded, with the mip pyramid on, at footprints no finer than one cap
+  texel
 - **THEN** every evaluated value is bit-identical
 
 #### Scenario: Capped streaming resolves authored detail
@@ -46,6 +47,13 @@ SHALL be bit-identical to the preloaded texel.
   the cap
 - **THEN** the streamed texture reads a stored file level finer than the cap, where the
   preloaded texture reads its cap level
+
+#### Scenario: Without a pyramid the footprint is ignored
+
+- **WHEN** `CRUST_PTEX_MIP=0` is set and a streamed `capped` texture is evaluated at
+  different footprints
+- **THEN** every lookup reads the same level: the authored face, or the face at
+  `CRUST_PTEX_MAX_LOG2` when that is set
 
 #### Scenario: The linear policy still refuses
 

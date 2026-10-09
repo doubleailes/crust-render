@@ -67,14 +67,15 @@ are wrong, so it reads as a filtering bug rather than a colour one. **But the pr
 base is the file's level at the cap**: `PtexColor` fetches `get_data_at_res(min(authored,
 cap))`, so on a face authored above the cap its exact part is "the file at the cap, linear
 below it". The default, `capped`, streams exactly that: the file's levels finer than the
-cap, read as tiles; the cap level and everything coarser derived in the reader's cache
+cap and the cap level itself, read as tiles; everything coarser derived in the reader's cache
 (`ptex::DerivedLevels`) through `decode_face` and `reduce_level`, the two functions
 `PtexColor` builds its arena with. A footprint wider than one cap texel is routed through
 that derived chain with the preload's own level selection, so the result is bit-identical
 to the preload wherever the preload holds texels, and only a footprint inside one cap texel
 reads the file's finer levels. `linear` keeps the old refusal (a mipmapped `.ptx`
 preloads, named on the `backend` line), `=file` takes the file's whole chain (darker under
-minification by up to 0.147), and `CRUST_PTEX_MIP=0` has no chain at all. See
+minification by up to 0.147), and `CRUST_PTEX_MIP=0` has no chain at all (a lookup reads
+the finest level held at every footprint). See
 `docs/ptex_streaming.md`.
 
 ## UV textures

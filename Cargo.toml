@@ -49,7 +49,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "hdr
 # crate — a renamed dependency is addressed by its key, not by its lib target
 # — so the key is `ptex`, which is both the lib name and what every `use` in
 # the workspace already says.
-ptex = { package = "ptex-rust", git = "https://github.com/doubleailes/ptex-rs", rev = "aaa68eef8fd7f259136a9dd344b8c02684505364", features = ["cache"] }
+ptex = { package = "ptex-rust", git = "https://github.com/doubleailes/ptex-rs", rev = "690646e975fd5fe3a4b77aecf6bb948c9e9bc06b", features = ["cache"] }
 # Tiled, mip-mapped TIFF — the `.tx` textures a streaming cache reads a single
 # tile at a time. Named directly rather than reached through `image`, because
 # the tiled reader uses the chunk API (`read_chunk`, `seek_to_image`) that
