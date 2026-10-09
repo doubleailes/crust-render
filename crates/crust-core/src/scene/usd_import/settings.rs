@@ -4,7 +4,7 @@
 use crate::warning;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
-use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
+use openusd_schemas::render::{Settings as UsdRenderSettings, SettingsBaseSchema};
 use tracing::debug;
 
 use crate::color::Space;

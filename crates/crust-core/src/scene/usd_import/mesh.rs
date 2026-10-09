@@ -13,8 +13,8 @@ use openusd::gf::Vec3f;
 use openusd::sdf;
 use openusd::usd::Prim;
 use openusd_schemas::geom::{
-    FaceVaryingLinearInterpolation, InterpolateBoundary, Mesh as UsdMesh, PointBased,
-    SubdivisionScheme,
+    FaceVaryingLinearInterpolation, InterpolateBoundary, Mesh as UsdMesh, MeshSchema,
+    PointBasedSchema, SubdivisionScheme,
 };
 use rayon::prelude::*;
 use tracing::debug;
@@ -2136,7 +2136,7 @@ mod face_table_tests {
 #[cfg(test)]
 mod subdiv_policy_tests {
     use super::*;
-    use openusd::usd::Stage;
+    use crate::scene::usd_import::stage_builder;
 
     /// The retired per-prim `crust:subdivisionLevel` warns once per load,
     /// however many prims author it, and never picks the level.
@@ -2166,7 +2166,7 @@ mod subdiv_policy_tests {
             ),
         )
         .expect("write stage");
-        let stage = Stage::builder()
+        let stage = stage_builder()
             .open(path.to_str().unwrap())
             .expect("stage opens");
         let mut policy = SubdivPolicy::new(2);
@@ -2202,11 +2202,11 @@ mod subdiv_policy_tests {
     fn owner_charts_take_a_corner_of_their_own_vertex() {
         use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
         use crate::material::{Displacement, DisplacementValue};
-        use openusd::usd::Stage;
+        use crate::scene::usd_import::stage_builder;
 
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/subdivision.usda");
-        let stage = Stage::builder()
+        let stage = stage_builder()
             .open(path.to_str().unwrap())
             .expect("stage opens");
         let p = sdf::path("/World/CubeTextured").unwrap();
@@ -2289,6 +2289,7 @@ mod displacement_tests {
     use super::*;
     use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
     use crate::material::{DisplacementValue, OpenPBR};
+    use crate::scene::usd_import::stage_builder;
     use crate::{PtexRef, PtexTexture, Texture2D, TextureRef};
     use openusd::usd::Stage;
 
@@ -2342,7 +2343,7 @@ mod displacement_tests {
     ) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, SubdivPolicy) {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/subdivision.usda");
-        let stage = Stage::builder()
+        let stage = stage_builder()
             .open(path.to_str().unwrap())
             .expect("stage opens");
         let p = sdf::path(name).unwrap();
@@ -2508,7 +2509,7 @@ def Mesh "G"
             ),
         )
         .unwrap();
-        let stage = Stage::builder().open(path.to_str().unwrap()).unwrap();
+        let stage = stage_builder().open(path.to_str().unwrap()).unwrap();
         (stage, sdf::path("/G").unwrap())
     }
 
@@ -2609,7 +2610,7 @@ def Mesh "T"
 "#,
         )
         .unwrap();
-        let stage = Stage::builder().open(path.to_str().unwrap()).unwrap();
+        let stage = stage_builder().open(path.to_str().unwrap()).unwrap();
         let p = sdf::path("/T").unwrap();
         let prim = super::super::prim_at(&stage, p.clone());
         let mesh = UsdMesh::get(&stage, p).unwrap().unwrap();

@@ -2,7 +2,7 @@
 
 use glam::{Mat4 as GMat4, Vec3, Vec3A};
 use openusd::usd::{Prim, Stage};
-use openusd_schemas::geom::Camera as UsdCamera;
+use openusd_schemas::geom::{Camera as UsdCamera, CameraSchema};
 use tracing::debug;
 
 use crate::camera::Camera;

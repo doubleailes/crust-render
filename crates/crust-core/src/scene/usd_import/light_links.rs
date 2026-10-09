@@ -1,7 +1,7 @@
 //! `collection:lightLink` and `collection:shadowLink`: which receivers a
 //! light illuminates, and which occluders shadow it.
 //!
-//! Membership is openusd's own (`Collection::compute_membership_query`), so
+//! Membership is openusd's own (`CollectionAPI::compute_membership_query`), so
 //! every `UsdCollectionAPI` rule — nearest opinion wins, `includeRoot`,
 //! expansion rules, nested collections with cycles broken — is the
 //! reference's. What crust adds is *when* it is asked. A light can be
@@ -34,7 +34,7 @@ use crate::warning;
 use std::collections::HashMap;
 
 use openusd::sdf;
-use openusd::usd::{Collection, ExpansionRule, MembershipQuery, PathRule, Prim, Stage};
+use openusd::usd::{CollectionAPI, ExpansionRule, MembershipQuery, PathRule, Prim, Stage};
 use tracing::debug;
 
 use crate::light::{EVERY_CLASS, Light, LightLinks as RuntimeLinks, LightList};
@@ -82,19 +82,8 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
     if includes.is_empty() && excludes.is_empty() && include_root != Some(false) {
         return None;
     }
-    let collection = match Collection::new(prim.path().clone(), name) {
-        Ok(c) => c,
-        Err(e) => {
-            warning!(
-                LightLinkUnreadableCollection,
-                at = prim.path(),
-                "{}: collection:{name} unreadable ({e}) — read as the default",
-                prim.path()
-            );
-            return None;
-        }
-    };
-    let query = match collection.compute_membership_query(stage) {
+    let collection = CollectionAPI::from_prim_unchecked(prim.clone(), name);
+    let query = match collection.compute_membership_query() {
         Ok(q) => q,
         Err(e) => {
             warning!(
@@ -122,7 +111,12 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
     if include_root.is_some() {
         return Some(query);
     }
-    let rule = match collection.expansion_rule(stage).unwrap_or_default() {
+    let rule = match collection
+        .expansion_rule()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    {
         ExpansionRule::ExplicitOnly => return Some(query),
         ExpansionRule::ExpandPrims => PathRule::ExpandPrims,
         ExpansionRule::ExpandPrimsAndProperties => PathRule::ExpandPrimsAndProperties,
@@ -261,7 +255,7 @@ impl LightLinks {
             None => {
                 for name in ["lightLink", "shadowLink"] {
                     let missing = opinions(&on_chunk, name).includes.into_iter().find(|t| {
-                        openusd::usd::is_collection_api_path(t).is_some_and(|(owner, _)| {
+                        CollectionAPI::instance_at_path(t).is_some_and(|(owner, _)| {
                             !prim_at(chunk, owner).is_valid().unwrap_or(false)
                         })
                     });

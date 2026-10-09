@@ -88,11 +88,16 @@ impl Open {
         let before =
             std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
         snippet.author(&self.stage)?;
+        let root = self.stage.root_layer().identifier().to_owned();
         let saved = self
             .stage
-            .root_layer()
-            .save()
-            .map_err(|e| format!("cannot save {}: {e}", self.output.display()));
+            .layer_mut(&root)
+            .ok_or_else(|| format!("cannot save {}: the stage has no root layer", root))
+            .and_then(|mut layer| {
+                layer
+                    .save()
+                    .map_err(|e| format!("cannot save {}: {e}", self.output.display()))
+            });
         let imported = saved.and_then(|()| import(&self.output));
         match imported {
             Ok(scene) => {

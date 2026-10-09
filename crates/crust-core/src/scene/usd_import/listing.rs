@@ -17,10 +17,10 @@ use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Prim, Stage};
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Camera as UsdCamera, Mesh as UsdMesh, PointInstancer,
-    Sphere as UsdSphere,
+    PointInstancerSchema, Sphere as UsdSphere,
 };
 use openusd_schemas::lux::{
-    CylinderLight, DiskLight, DistantLight, DomeLight, Light as UsdLight, RectLight, SphereLight,
+    CylinderLight, DiskLight, DistantLight, DomeLight, LightAPI, RectLight, SphereLight,
 };
 use openusd_schemas::shade::Material as UsdMaterial;
 use tracing::debug;
@@ -31,7 +31,9 @@ use super::materials::{bound_material, surface_shader_id};
 use super::products::import_render_products;
 use super::settings::{CameraPick, import_render_settings, pick_camera, wanted_camera};
 use super::time::EvalTimeScope;
-use super::{Prune, WalkScope, open_stage, prim_at, prune_reason, release_stage, stream_roots};
+use super::{
+    Prune, WalkScope, open_stage, prim_at, prune_reason, release_stage, stage_builder, stream_roots,
+};
 use crate::scene::{CameraRecord, LightRecord, ListKind, ListRecord, MaterialRecord};
 use crate::tracer::RenderSettings;
 
@@ -152,7 +154,7 @@ fn utf8(path: &Path) -> Result<&str, crate::Error> {
 
 /// The payload-free index: as the import does, it decides the chunks.
 fn open_index(path: &Path, path_str: &str) -> Result<Stage, crate::Error> {
-    Stage::builder()
+    stage_builder()
         .load(InitialLoadSet::LoadNone)
         .open(path_str)
         .map_err(|e| crate::Error::UsdOpen {
@@ -209,18 +211,18 @@ fn record(
         }
         ListKind::Light => {
             let p = || prim.path().clone();
-            let (kind, inputs) = if let Ok(Some(l)) = SphereLight::get(stage, p()) {
-                read("sphere", prim, &l)
-            } else if let Ok(Some(l)) = RectLight::get(stage, p()) {
-                read("rect", prim, &l)
-            } else if let Ok(Some(l)) = DiskLight::get(stage, p()) {
-                read("disk", prim, &l)
-            } else if let Ok(Some(l)) = CylinderLight::get(stage, p()) {
-                read("cylinder", prim, &l)
-            } else if let Ok(Some(l)) = DistantLight::get(stage, p()) {
-                read("distant", prim, &l)
-            } else if let Ok(Some(l)) = DomeLight::get(stage, p()) {
-                read("dome", prim, &l)
+            let (kind, inputs) = if let Ok(Some(_)) = SphereLight::get(stage, p()) {
+                read("sphere", prim)
+            } else if let Ok(Some(_)) = RectLight::get(stage, p()) {
+                read("rect", prim)
+            } else if let Ok(Some(_)) = DiskLight::get(stage, p()) {
+                read("disk", prim)
+            } else if let Ok(Some(_)) = CylinderLight::get(stage, p()) {
+                read("cylinder", prim)
+            } else if let Ok(Some(_)) = DistantLight::get(stage, p()) {
+                read("distant", prim)
+            } else if let Ok(Some(_)) = DomeLight::get(stage, p()) {
+                read("dome", prim)
             } else {
                 return None;
             };
@@ -241,9 +243,12 @@ fn record(
     })
 }
 
-/// A light's type name and its inputs.
-fn read(kind: &'static str, prim: &Prim, light: &impl UsdLight) -> (&'static str, LightInputs) {
-    (kind, light_inputs(prim, light))
+/// A light's type name and its `LightAPI` inputs.
+fn read(kind: &'static str, prim: &Prim) -> (&'static str, LightInputs) {
+    (
+        kind,
+        light_inputs(prim, &LightAPI::from_prim_unchecked(prim.clone())),
+    )
 }
 
 /// The materials the import's binding resolution ([`bound_material`])

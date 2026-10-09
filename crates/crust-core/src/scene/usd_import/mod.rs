@@ -51,7 +51,7 @@ use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
 use openusd::sdf;
-use openusd::usd::{InitialLoadSet, Prim, Stage, StagePopulationMask};
+use openusd::usd::{InitialLoadSet, Prim, Stage, StageBuilder, StagePopulationMask};
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Camera as UsdCamera, Mesh as UsdMesh, PointInstancer,
     Sphere as UsdSphere,
@@ -549,11 +549,20 @@ fn release_stage(stage: Stage, keep: bool) {
     }
 }
 
+/// `Stage::builder()` carrying the typed schemas' registry. Every stage the
+/// import reads must open through this: a stage without it knows only the
+/// core `usd` family, so every typed `get` (`Mesh`, `SphereLight`,
+/// `Settings`, …) answers `None` and no schema fallback resolves — the scene
+/// would import as empty, without an error.
+pub(super) fn stage_builder() -> StageBuilder {
+    Stage::builder().schema_registry(openusd_schemas::schema_registry())
+}
+
 /// Opens the stage with payloads loaded, optionally masked to one subtree.
 fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<Stage, crate::Error> {
     let started = Instant::now();
     let masked = mask.as_ref().map(|p| p.to_string());
-    let mut builder = Stage::builder().load(InitialLoadSet::LoadAll);
+    let mut builder = stage_builder().load(InitialLoadSet::LoadAll);
     if let Some(p) = mask {
         // Fallible since openusd 0.7: a mask path must be an absolute prim
         // path. These come from `stream_roots`, which yields composed
@@ -815,7 +824,7 @@ pub(crate) fn load_scene(
     // the payloads *are* the cost — composing the whole Moana island
     // costs openusd 75.74 GiB, where this costs a fraction of that.
     let open_start = Instant::now();
-    let index = Stage::builder()
+    let index = stage_builder()
         .load(InitialLoadSet::LoadNone)
         .open(path_str)
         .map_err(|e| crate::Error::UsdOpen {

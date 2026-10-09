@@ -23,6 +23,7 @@ fn main() {
         std::process::exit(2);
     };
     let stage = match usd::Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
         .load(usd::InitialLoadSet::LoadAll)
         .open(stage_path)
     {

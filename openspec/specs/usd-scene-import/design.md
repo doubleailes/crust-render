@@ -697,7 +697,45 @@ same point.
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.
 
-**`openusd` is tracked at `0.7`**, and **the typed schemas are a second crate**:
+**`openusd` tracks its GitHub `main`**, through a `[patch.crates-io]` in the workspace
+`Cargo.toml` (the three manifests still ask for `0.7`; `Cargo.lock` pins the commit, and
+`cargo update -p openusd -p openusd-schemas` moves it). `main` carries the stage-open,
+traversal and shared-asset-bytes work of mxpv/openusd#106 — #142 measured the full Moana
+island at 22.3 s → 14.3 s and 5.32 → 3.58 GiB peak in openusd alone — which no release
+has shipped yet. Dropping the patch is the whole revert once one does. The memory-mapped
+`.usdc` reads that issue also reports are **not** on: they need openusd's `mmap` feature
+(`memmap2`, which is `unsafe`) and an opt-in on the resolver (`DefaultResolver::map_files`),
+and both manifests keep `default-features = false`.
+
+`main` regenerated `openusd-schemas` from OpenUSD 26.05's own schema definitions, which
+changed what the import calls:
+
+- **A stage must carry the schemas' registry.** A stage opened with a plain
+  `Stage::builder()` knows only the core `usd` family, so every typed `get` (`Mesh`,
+  `SphereLight`, `Settings`, …) answers `None` and no schema fallback resolves — the scene
+  imports as *empty*, with no error. Every stage the import opens goes through
+  `usd_import::stage_builder()`, which sets `openusd_schemas::schema_registry()`; a test
+  or probe that opens its own stage for typed reads sets it too.
+- **Accessors live on `<Class>Schema` traits** (`MeshSchema`, `PointBasedSchema`,
+  `CameraSchema`, `SphereLightSchema`, …), which a file must import to call them.
+- **The shared light inputs are the `LightAPI` view**: the old `lux::Light` trait is gone;
+  every concrete light reaches its inputs through `.light_api()` (from
+  `BoundableLightBaseSchema` / `NonboundableLightBaseSchema`), so `light_inputs` /
+  `lux_params` take a `&LightAPI`.
+- **`UsdRender` views drop the prefix**: `render::Settings` / `Product` / `Var`, with
+  `SettingsBaseSchema` for the shared camera and framing attributes.
+- **`Imageable` / `Xformable` are views, not traits.** `xform.rs` composes any prim's
+  stack through `Xformable::from_prim_unchecked` and `XformableExt::local_transformation`
+  (was `local_to_parent_transform`) instead of implementing the traits on a wrapper.
+- **Collections are the generated `CollectionAPI`** (`from_prim_unchecked(prim, name)`,
+  `compute_membership_query()` with no stage argument, `instance_at_path` for what
+  `is_collection_api_path` answered).
+- **The `UsdPreviewSurface` node tokens** moved to `shade::nodes::tokens` under their
+  schema names (`USD_UV_TEXTURE`, `FILE`, `SOURCE_COLOR_SPACE`, `VARNAME`, …).
+- **`Stage::root_layer()` is a shared borrow**; saving it goes through
+  `Stage::layer_mut(identifier)` (the `crust mcp` session's edit batch).
+
+Before `main`, **`openusd` was tracked at `0.7`**, where **the typed schemas became a second crate**:
 0.7 moved `UsdGeom` / `UsdLux` / `UsdShade` / `UsdRender` out of the core crate into
 [`openusd-schemas`](https://docs.rs/openusd-schemas), versioned in lockstep and carrying
 the `geom` / `lux` / `shade` / `render` feature flags the core crate used to. So

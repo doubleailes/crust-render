@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::render::{
-    RenderProduct, RenderSettings as UsdRenderSettings, RenderSettingsBase, RenderVar,
+    Product as RenderProduct, ProductSchema, Settings as UsdRenderSettings, SettingsBaseSchema,
+    SettingsSchema, Var as RenderVar,
 };
 use tracing::debug;
 
@@ -85,17 +86,17 @@ struct Base {
     instantaneous_shutter: bool,
 }
 
-fn read_resolution(view: &impl RenderSettingsBase) -> Option<(usize, usize)> {
+fn read_resolution(view: &impl SettingsBaseSchema) -> Option<(usize, usize)> {
     let v = value_at(&view.resolution_attr())?.try_as_vec_2i()?;
     (v.x > 0 && v.y > 0).then_some((v.x as usize, v.y as usize))
 }
 
-fn read_data_window(view: &impl RenderSettingsBase) -> Option<[f32; 4]> {
+fn read_data_window(view: &impl SettingsBaseSchema) -> Option<[f32; 4]> {
     let v = value_at(&view.data_window_ndc_attr())?.try_as_vec_4f()?;
     Some([v.x, v.y, v.z, v.w])
 }
 
-fn read_camera(view: &impl RenderSettingsBase) -> Option<sdf::Path> {
+fn read_camera(view: &impl SettingsBaseSchema) -> Option<sdf::Path> {
     view.camera_rel().targets().ok()?.into_iter().next()
 }
 
@@ -113,7 +114,7 @@ impl Base {
     }
 
     /// `view`'s authored opinions over `fallback`.
-    fn resolve(view: &impl RenderSettingsBase, fallback: &Base) -> Base {
+    fn resolve(view: &impl SettingsBaseSchema, fallback: &Base) -> Base {
         Base {
             camera: read_camera(view).or_else(|| fallback.camera.clone()),
             resolution: read_resolution(view).or(fallback.resolution),

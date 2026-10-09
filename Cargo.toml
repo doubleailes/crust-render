@@ -117,3 +117,14 @@ panic = "abort"
 [profile.bench]
 lto = "fat"
 codegen-units = 1
+
+# openusd tracks its GitHub `main` rather than the 0.7.0 release: main carries
+# the stage-open, traversal and shared-asset-bytes work from mxpv/openusd#106
+# (#142 and after) that no release has shipped yet. A patch rather than a
+# `git =` in each manifest, so the three crates that name openusd keep their
+# `0.7` requirement and dropping this section is the whole revert once a
+# release carries the work. Cargo.lock pins the commit; `cargo update -p
+# openusd -p openusd-schemas` moves it.
+[patch.crates-io]
+openusd = { git = "https://github.com/mxpv/openusd", branch = "main" }
+openusd-schemas = { git = "https://github.com/mxpv/openusd", branch = "main" }

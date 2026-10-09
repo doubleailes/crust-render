@@ -484,7 +484,10 @@ fn the_resolver_agrees_with_compute_render_spec() {
     let path = write_stage("agrees_with_spec", &text);
     let scene = Scene::from_usd(&path).expect("loads");
 
-    let stage = openusd::usd::Stage::open(path.to_str().unwrap()).expect("opens");
+    let stage = openusd::usd::Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open(path.to_str().unwrap())
+        .expect("opens");
     let spec = openusd_schemas::render::compute_render_spec(
         &stage,
         &openusd::sdf::path("/Render/settings").unwrap(),

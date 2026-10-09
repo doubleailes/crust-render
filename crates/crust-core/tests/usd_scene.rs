@@ -288,7 +288,9 @@ fn loads_smoke_usda() {
 /// back to a grey diffuse OpenPBR — which is what happened before this fix.
 #[test]
 fn openpbr_showcase_materials_all_decode() {
-    let stage = Stage::open(sample("openpbr_showcase.usda").to_str().unwrap())
+    let stage = Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open(sample("openpbr_showcase.usda").to_str().unwrap())
         .expect("open showcase stage");
 
     let mut prims: Vec<sdf::Path> = Vec::new();
