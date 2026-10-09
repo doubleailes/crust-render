@@ -69,7 +69,7 @@ streamed texture can reproduce exactly that.
   released and re-pinned by `rev` in the workspace `Cargo.toml`.
 - **`crates/crust-assets`:**
   - `ptex_stream.rs`: the `capped` level routing, the reducer adapter over
-    `reduce_half_linear` and the shared `axis_taps`, and a `chain_is_exact` that is
+    `decode_face` and `reduce_level` (shared with `PtexColor`), and a `chain_is_exact` that is
     true under `capped`;
   - `lib.rs`: admission and default;
   - the `--stats` Ptex block.
