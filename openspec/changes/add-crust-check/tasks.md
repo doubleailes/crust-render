@@ -31,7 +31,7 @@ Starts after `structured-warnings` task group 1 has landed (`Scene::warnings` ex
 
 ## 5. Integration
 
-- [ ] 5.1 Run `crust check --json -` on every `samples/*.usda`. Verify that each parses, that two runs give equal `warnings` and `findings`, and that the `findings` for each sample are the import-only subset of `crust diagnostic --budget 10s` on it. Then run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` clean.
+- [x] 5.1 Run `crust check --json -` on every `samples/*.usda`. Verify that each parses, that two runs give equal `warnings` and `findings`, and that the `findings` for each sample are the import-only subset of `crust diagnostic --budget 10s` on it. Then run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` clean.
 
 ## Workflow follow-up
 
