@@ -38,8 +38,9 @@ See proposal.md (Why). The current state that constrains the approach:
 
 - Render-time, environment and diagnostic-analysis warnings (logged only; see the
   spec's known gap).
-- Warnings in `crust-stats/1`, in the diagnostic report or in a render summary. All
-  three can read `Scene::warnings` later without touching the vocabulary.
+- Any report or subcommand. `crust check` is the separate change `add-crust-check`;
+  `crust-stats/1`, the diagnostic report and a render summary can read
+  `Scene::warnings` later without touching the vocabulary.
 - Changing the `AssetLoader` seam: `None` still means "fall back".
 - Rewording messages beyond the code prefix and dropping "(and possibly others)".
 
@@ -108,7 +109,7 @@ stands in for it. For example, "no surface shader → default grey" is `skipped`
 - `Each` logs every occurrence. This is the default and matches today.
 - `Once` logs the first occurrence, then only records. This replaces `cage_warned`,
   `legacy_warned` and `ptex_cage_warned`. The text says "(further occurrences are
-  counted by `crust check`)" instead of "(and possibly others)".
+  counted in the import's warnings)" instead of "(and possibly others)".
 
 `Once` is also bounded per thread when there is no scope (outside an import), using
 the same per-code flag kept in a thread-local, so the guarantee does not depend on
@@ -164,28 +165,7 @@ uncoded.
 crust-assets already depends on crust-core, so it uses the exported macros. No
 dependency is added in either direction.
 
-### D7. `crust check` reuses the render's load path
-
-`check` takes `SceneArgs` flattened, as `diagnostic` does, and calls the same
-`load_scene` function in `main.rs`, so "imports exactly as a render would" is true
-by construction. It reports:
-
-- `scene.camera_path`;
-- the resolution from `scene.settings`;
-- the products from `scene.aovs` (paths and output files as the render would name
-  them, without writing them);
-- `scene.stats`' scene counts, serialised with the same keys as the `scene` section
-  of `crust-stats/1`, so there is one vocabulary;
-- `scene.warnings`.
-
-The text and JSON writers live in `crust-render`. The `crust-check/1` builder sits
-beside the other report types in crust-core (`report.rs` provides the shared opening
-and null handling). The engine still writes no file.
-
-Exit 3 for "denied warnings present" follows `diagnostic`'s precedent: 3 means the
-report was written, but the condition asked about was not met.
-
-### D8. The log prefix is part of the macro, not the subscriber
+### D7. The log prefix is part of the macro, not the subscriber
 
 The macro writes `[code] ` into the formatted message, so every subscriber shows it:
 the CLI's, a host's, and `--log-file`. `logging.rs` is unchanged.

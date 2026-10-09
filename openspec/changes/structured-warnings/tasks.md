@@ -21,18 +21,13 @@
 - [ ] 3.5 Confirm that nothing import-time is left uncoded: grep `scene/usd_import/`, `scene.rs`, `color.rs` and crust-assets for bare `warn!` and verify that only environment / non-import sites remain, each listed in the PR description. Run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` clean.
 - [ ] 3.6 Verify that rendering is unchanged: `scripts/check_images.sh check` against goldens recorded before the change reports no difference, and a callgrind run of `samples/cornellbox.usda -s 2` shows no instruction-count change in the render phase.
 
-## 4. `crust check`
+## 4. Records and integration
 
-- [ ] 4.1 Add the `crust-check/1` report type beside the other reports (shared opening via `report.rs`, scene counts with `crust-stats/1`'s `scene` keys, `warnings` in the record shape). Verify with a unit test that asserts the key paths (in the style of the existing stats key-path test) and that a non-finite value becomes `null`.
-- [ ] 4.2 Add the `check` subcommand: flattened `SceneArgs` with `-i` required, reuse of `load_scene`, the text report on stdout, `--json PATH|-` (the log goes to stderr with `-`), `--deny <kinds>|all`, and exits 0/1/2/3 (D7). Verify with CLI tests: `check -i samples/cornellbox.usda` exits 0 and writes no image; `--json -` parses with `format = crust-check/1`; a stage with a skipped light and `--deny skipped` exits 3 with the report written; `--deny fatal`, `-o out.exr` and a missing `-i` exit 2; a missing file exits 1.
-- [ ] 4.3 Document `check` in `site/content/docs/reference/command-line.md` and its JSON in `openspec/specs/cli/design.md` § Machine-readable reports, and add a `check` line to the CLAUDE.md command block. Verify that `zola build` succeeds and that the documented commands run as written.
-
-## 5. Records and integration
-
-- [ ] 5.1 Update `openspec/specs/cli/design.md` § Logging (coded WARN lines, `Once` policy) and add the invariants to `docs/architecture.md` § Invariants: a new import warning is a new code in the table and on the reference page, and import warnings must be raised on the importing thread. Verify the links resolve in `zola build` and that the documents name the doc-sync test.
-- [ ] 5.2 End-to-end: run `crust check --json -` on `samples/*.usda` and verify each parses, that two runs give equal `warnings` arrays (determinism), and that every code appearing exists on the reference page.
+- [ ] 4.1 Update `openspec/specs/cli/design.md` § Logging (coded WARN lines, `Once` policy) and add the invariants to `docs/architecture.md` § Invariants: a new import warning is a new code in the table and on the reference page, and import warnings must be raised on the importing thread. Verify the links resolve in `zola build` and that the documents name the doc-sync test.
+- [ ] 4.2 End-to-end: import every `samples/*.usda` in a test and verify that two imports give equal `Scene::warnings` (determinism) and that every code raised exists on the reference page.
 
 ## Workflow follow-up
 
+- `add-crust-check` builds on this change and should land after it.
 - Follow-up changes: warnings in a `crust-render/1` render summary and in the diagnostic report; collecting render-time warnings; an optional `detail` object per record.
 - Archive the change after review, syncing `scene-warnings` and the `cli` delta into `openspec/specs/`.

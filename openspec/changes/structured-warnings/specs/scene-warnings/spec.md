@@ -59,7 +59,8 @@ carries warnings.
 #### Scenario: A new code
 
 - **WHEN** a release adds a code for a newly detected cause
-- **THEN** `crust-check/1` keeps its version and existing consumers still parse it
+- **THEN** every report that carries warnings keeps its version, and existing
+  consumers still parse it
 
 ### Requirement: One record per code, every occurrence counted
 
@@ -91,8 +92,8 @@ with the same flags twice SHALL produce identical records.
 
 #### Scenario: Re-importing
 
-- **WHEN** the same stage is checked twice with the same flags
-- **THEN** the two `warnings` arrays are equal, element by element
+- **WHEN** the same stage is imported twice with the same flags
+- **THEN** the two lists of records are equal, element by element
 
 ### Requirement: Log lines carry their code
 
