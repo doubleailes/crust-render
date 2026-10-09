@@ -56,6 +56,13 @@ impl Stamp {
             _ => None,
         }
     }
+
+    fn float(&self, name: &str) -> Option<f32> {
+        match self.get(name)? {
+            StampValue::Float(v) => Some(*v),
+            _ => None,
+        }
+    }
 }
 
 /// A decoded image: every named channel of every layer, by full name
@@ -484,15 +491,24 @@ const COMPARED: [&str; 11] = [
     "crust:lightSelection",
 ];
 
-/// Whether a stamp shows adaptive sampling at work: a budget above the
-/// minimum, or pixels that took different counts.
+/// Whether a stamp shows adaptive sampling at work: a render the tracer's
+/// own rule ([`crate::tracer::samples_adaptively`]) lets stop early — the
+/// threshold on, and the budget past the first check point — or pixels that
+/// took different counts.
 fn adaptive(s: &Stamp) -> bool {
-    let above_min = matches!(
-        (s.int("crust:spp"), s.int("crust:minSpp")),
-        (Some(spp), Some(min)) if spp > min
-    );
+    let could_stop = match (
+        s.int("crust:spp"),
+        s.int("crust:minSpp"),
+        s.float("crust:varianceThreshold"),
+    ) {
+        (Some(spp), Some(min), Some(threshold)) => {
+            let count = |v: i64| u32::try_from(v.max(0)).unwrap_or(u32::MAX);
+            crate::tracer::samples_adaptively(count(spp), count(min), threshold)
+        }
+        _ => false,
+    };
     let spread = matches!(s.get("crust:sppTaken"), Some(StampValue::Int2(lo, hi)) if lo != hi);
-    above_min || spread
+    could_stop || spread
 }
 
 /// The comparability verdict of the `image-comparison` spec, from the two
@@ -711,6 +727,7 @@ mod tests {
             ("crust:minSpp", Int(32)),
             ("crust:sppTaken", Int2(16, 16)),
             ("crust:indirectClamp", Float(0.0)),
+            ("crust:varianceThreshold", Float(0.05)),
             ("crust:pixelFilter", Text("gaussian".into())),
             ("crust:pixelFilterRadius", Float(1.5)),
             ("crust:version", Text("0.6.0".into())),
@@ -760,6 +777,27 @@ mod tests {
                 c.notes
             );
         }
+
+        // The tracer's own rule, not `spp > minSpp`: with the threshold off,
+        // a 1024 spp render takes its whole budget and nothing warns; at a
+        // budget equal to the first check point (32) there is no round
+        // after it either. A 1024 spp render with the threshold on can stop.
+        let fixed = |spp: i32, threshold: f32| {
+            let mut s = s16();
+            s.retain(|(n, _)| !matches!(*n, "crust:spp" | "crust:varianceThreshold"));
+            s.push(("crust:spp", Int(spp)));
+            s.push(("crust:varianceThreshold", Float(threshold)));
+            s.push(("crust:sppTaken", Int2(spp, spp)));
+            stamp(&s)
+        };
+        let off = fixed(1024, 0.0);
+        assert_eq!(comparability(&off, &off).status, ComparabilityStatus::Ok);
+        assert_eq!(
+            comparability(&fixed(32, 0.05), &fixed(32, 0.05)).status,
+            ComparabilityStatus::Ok
+        );
+        let on = fixed(1024, 0.05);
+        assert_eq!(comparability(&on, &on).status, ComparabilityStatus::Warn);
 
         let other_build = with(s16(), "crust:version", Text("0.7.0".into()));
         assert_eq!(

@@ -717,9 +717,11 @@ stamps and says whether the pixels can be compared at all:
 | `warn` | they show a condition that makes pixel differences unreliable, each named in a note |
 | `unknown` | a file has no stamp: another renderer wrote it, or an older crust |
 
-A note is written for adaptive sampling on either side (a budget above
-`crust:minSpp`, or pixels that took different counts: a one-ulp change then changes a
-pixel's sample budget and cascades, so compare at `-s 16`), for an
+A note is written for adaptive sampling on either side (a render that could stop
+pixels early — `crust:varianceThreshold` above 0 and a budget past the first check, at
+`crust:minSpp` or `√spp` rounded up to a multiple of 4 — or pixels that took different
+counts: a one-ulp change then changes a pixel's sample budget and cascades, so compare
+at `-s 16`), for an
 `--indirect-clamp` that differs (the clamp is biased, so the metrics include its
 bias), and for each other stamped value that differs: the frame, the camera, the sample
 count, the depth, the light samples, the threshold, the pixel filter and its radius, the

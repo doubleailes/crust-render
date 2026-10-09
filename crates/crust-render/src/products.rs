@@ -52,9 +52,16 @@ pub fn stamp(attributes: &mut LayerAttributes, stamp: &SamplingStamp) {
             StampValue::Double(v) => AttributeValue::F64(v),
             StampValue::Text(v) => match Text::new_or_none(&v) {
                 Some(t) => AttributeValue::Text(t),
-                // A camera path outside EXR's text (non-ASCII): left out
-                // rather than written wrong.
-                None => continue,
+                // A value EXR text cannot hold (a camera path outside
+                // Latin-1): left out rather than written wrong, and said, as
+                // `crust diff` can then no longer tell two of them apart.
+                None => {
+                    warn!(
+                        "{name} = {v:?} cannot be written as EXR text; left out of the \
+                         header, so crust diff cannot compare it"
+                    );
+                    continue;
+                }
             },
         };
         attributes.other.insert(Text::from(name), value);
@@ -489,30 +496,65 @@ mod tests {
         assert_eq!(r.sample_data.value_by_flat_index(0).to_f32(), 1.0);
     }
 
+    /// The log lines a test's code emits, captured.
+    #[derive(Clone, Default)]
+    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl io::Write for Log {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Log {
+        /// A log and a subscriber writing into it, for `with_default`.
+        fn capture() -> (Log, impl tracing::Subscriber) {
+            let log = Log::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            (log, subscriber)
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// A camera path EXR text cannot hold is left out of the header, said
+    /// with a warning naming it, and the rest of the stamp is written.
+    #[test]
+    fn a_stamp_value_exr_cannot_hold_is_left_out_with_a_warning() {
+        let (_, settings) = crust_core::get_settings();
+        let sampling = SamplingStamp::new(
+            &settings,
+            &crust_core::RayStats::default(),
+            Some("/cams/カメラ"),
+            None,
+        );
+        let mut attributes = LayerAttributes::default();
+        let (log, subscriber) = Log::capture();
+        tracing::subscriber::with_default(subscriber, || stamp(&mut attributes, &sampling));
+        assert!(!attributes.other.contains_key(&Text::from("crust:camera")));
+        assert!(attributes.other.contains_key(&Text::from("crust:spp")));
+        let log = log.text();
+        assert!(
+            log.contains("WARN") && log.contains("crust:camera"),
+            "{log}"
+        );
+    }
+
     /// A product may not author crust's own stamp: the written value is the
     /// render's, and the authored one is warned about, naming the product.
     #[test]
     fn an_authored_stamp_attribute_is_replaced_and_warned_about() {
-        use std::sync::{Arc, Mutex};
-        #[derive(Clone, Default)]
-        struct Log(Arc<Mutex<Vec<u8>>>);
-        impl io::Write for Log {
-            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let log = Log::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer({
-                let log = log.clone();
-                move || log.clone()
-            })
-            .with_ansi(false)
-            .finish();
+        let (log, subscriber) = Log::capture();
         let (w, h) = (2, 2);
         let beauty = Buffer::new(w, h);
         let film = crust_core::AovFilm::empty(w, h);
@@ -547,7 +589,7 @@ mod tests {
             other.get(&Text::from("crust:sppTaken")),
             Some(&AttributeValue::IntVec2(Vec2(16, 16)))
         );
-        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let log = log.text();
         assert!(
             log.contains("WARN") && log.contains("/Render/p") && log.contains("crust:spp"),
             "{log}"

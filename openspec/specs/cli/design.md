@@ -424,6 +424,11 @@ second walk); measured `ls material --json` against text `ls` at 1.03× on
 `PointInstancedMedCity.usd`, 0.93× on the Cornell box and 1.12× on `materialx_showcase`
 (min of 5). ALab, where the binding walk would matter, was not available to measure.
 
+Comparability's adaptive note reads the tracer's own rule (`tracer::samples_adaptively`,
+over the `adaptive_check_points` `render_pass` uses), not `spp > minSpp`: with the
+threshold at 0, or a budget that never passes the first check point, a render took a
+fixed budget, and the first version of the rule warned about it anyway.
+
 `diff` splits as a render does: crust-assets decodes (`read_exr_planes`, the old example's
 `load` with errors for panics), crust-core compares (`compare`, no I/O, so the diagnostic
 can call it on buffers), the CLI prints and maps the exit status. Its text report is the

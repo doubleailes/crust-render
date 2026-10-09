@@ -249,8 +249,9 @@ fn read(kind: &'static str, prim: &Prim, light: &impl UsdLight) -> (&'static str
 /// The materials the import's binding resolution ([`bound_material`])
 /// resolves the geometry prims it renders to — meshes, spheres and curves,
 /// walked as the import walks them: pruned subtrees left out, an instance's
-/// prototype walked once in its place, a `PointInstancer`'s prototypes
-/// entered (they render through it).
+/// prototype walked once in its place, a `PointInstancer`'s `prototypes`
+/// targets walked once each in prototype scope (they render through it, a
+/// `class` prototype included).
 fn bound_materials(stage: &Stage, out: &mut HashSet<String>) {
     let mut prototypes: HashSet<String> = HashSet::new();
     let mut stack: Vec<(Prim, WalkScope)> =
@@ -268,6 +269,17 @@ fn bound_materials(stage: &Stage, out: &mut HashSet<String>) {
             continue;
         }
         let p = || prim.path().clone();
+        // An instancer draws its `prototypes` targets wherever they are
+        // authored — often a `class` outside it — so they are walked as the
+        // import walks them, in prototype scope, where abstractness does not
+        // prune; each once.
+        if let Ok(Some(instancer)) = PointInstancer::get(stage, p()) {
+            for target in instancer.prototypes_rel().targets().unwrap_or_default() {
+                if prototypes.insert(target.to_string()) {
+                    stack.push((prim_at(stage, target), WalkScope::Prototype));
+                }
+            }
+        }
         let geometry = matches!(UsdMesh::get(stage, p()), Ok(Some(_)))
             || matches!(UsdSphere::get(stage, p()), Ok(Some(_)))
             || matches!(UsdBasisCurves::get(stage, p()), Ok(Some(_)));

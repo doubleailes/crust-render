@@ -332,3 +332,46 @@ def Xform "geo"
     assert_eq!(surface[0].as_deref(), Some("UsdPreviewSurface"));
     assert_eq!(surface[7], None, "a material without a shader");
 }
+
+/// A `PointInstancer` renders its `prototypes` targets wherever they are,
+/// a `class` outside it included: what is bound inside one is bound.
+#[test]
+fn a_class_prototype_of_an_instancer_binds_its_material() {
+    let path = stage(
+        "instancer_class.usda",
+        r#"#usda 1.0
+def Scope "mtl"
+{
+    def Material "Leaf" {}
+    def Material "Unused" {}
+}
+class Xform "Protos"
+{
+    def Mesh "LeafMesh" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </mtl/Leaf>
+    }
+}
+def PointInstancer "Scatter"
+{
+    rel prototypes = [</Protos/LeafMesh>]
+    int[] protoIndices = [0, 0]
+    point3f[] positions = [(0, 0, 0), (2, 0, 0)]
+}
+"#,
+    );
+    let bound: Vec<(String, bool)> = materials(&path)
+        .into_iter()
+        .map(|m| (m.path, m.bound))
+        .collect();
+    assert_eq!(
+        bound,
+        [
+            ("/mtl/Leaf".to_owned(), true),
+            ("/mtl/Unused".to_owned(), false)
+        ]
+    );
+}
