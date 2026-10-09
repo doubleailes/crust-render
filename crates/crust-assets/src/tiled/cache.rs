@@ -247,9 +247,50 @@ pub struct Tile {
     pub data: TileData,
     pub width: usize,
     pub height: usize,
+    /// Set when the shard map evicts this tile while a thread still holds it:
+    /// the count its bytes were added to, and which its drop takes them back
+    /// from. See [`Held`].
+    evicted: std::sync::OnceLock<Arc<Held>>,
+}
+
+/// Bytes of tiles the shard map has evicted that some thread still holds —
+/// in its microcache, or in hand during the lookup that read it: memory the
+/// map's `resident` no longer counts, but that is alive all the same. (A sweep
+/// can evict the very tile the inserting lookup is about to return.)
+///
+/// Counted at the eviction rather than reserved up front (as the Ptex
+/// stream's `micro_reserve` does). A thread's tiles are nearly always in the
+/// map too, so a reserve would take the worst case out of the budget for
+/// nothing: at 512 tiles a thread that is up to 890 MiB of a 1 GiB budget at
+/// 72 threads, while ALab, which evicts nothing, holds no byte beyond the map.
+/// Written on eviction and on a marked tile's final drop, both rare; a lookup
+/// never touches it.
+#[derive(Debug, Default)]
+struct Held {
+    now: AtomicU64,
+    peak: AtomicU64,
+}
+
+impl Drop for Tile {
+    fn drop(&mut self) {
+        if let Some(held) = self.evicted.get() {
+            let bytes = self.bytes();
+            let was = held.now.fetch_sub(bytes, Ordering::Relaxed);
+            debug_assert!(was >= bytes, "held bytes went below zero");
+        }
+    }
 }
 
 impl Tile {
+    fn new(data: TileData, width: usize, height: usize) -> Tile {
+        Tile {
+            data,
+            width,
+            height,
+            evicted: std::sync::OnceLock::new(),
+        }
+    }
+
     /// One texel of an **8-bit** tile, decoded through `to_linear`.
     ///
     /// `x` and `y` must already be inside the tile — the caller checks, because
@@ -358,6 +399,9 @@ pub struct CacheCounters {
     pub evictions: u64,
     pub bytes_read: u64,
     pub peak_bytes: u64,
+    /// The most bytes of evicted tiles that threads' microcaches kept alive
+    /// at once, beside `peak_bytes`: together they are what the budget bounds.
+    pub held_peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
     /// Readers opened over the render, and of those the ones on a file whose
@@ -532,6 +576,13 @@ pub struct TileCache {
     inject_open_error: std::sync::atomic::AtomicI32,
     resident: AtomicU64,
     budget: u64,
+    /// Evicted tiles still alive in some thread's microcache. The budget
+    /// bounds `resident + held`.
+    held: Arc<Held>,
+    /// The bytes of this cache's tiles one thread's microcache may retain:
+    /// half the budget, split across the threads, so that `held` cannot pass
+    /// half the budget even if every thread held only evicted tiles.
+    micro_share: u64,
     /// Held by whichever thread is currently making room. `try_lock`ed, never
     /// blocked on: a thread that finds a sweep in progress carries on and lets
     /// the other one do the work.
@@ -544,6 +595,7 @@ impl TileCache {
     /// readers open (`0`: no cap).
     pub fn new(budget_bytes: u64, max_open_files: usize) -> TileCache {
         static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let budget = budget_bytes.max(mib_to_bytes(1));
         TileCache {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
@@ -554,10 +606,23 @@ impl TileCache {
             #[cfg(test)]
             inject_open_error: std::sync::atomic::AtomicI32::new(0),
             resident: AtomicU64::new(0),
-            budget: budget_bytes.max(mib_to_bytes(1)),
+            budget,
+            held: Arc::default(),
+            // The thread count the Ptex stream sizes its slots by: what rayon
+            // defaults its pool to, an overestimate under a smaller
+            // `RAYON_NUM_THREADS`, which errs on the safe side.
+            micro_share: budget / 2 / crate::ptex_stream::micro_threads() as u64,
             sweeping: Mutex::new(0),
             stats: CacheStats::default(),
         }
+    }
+
+    /// The same cache with each thread's share set outright, so a test does
+    /// not depend on how many cores the machine has.
+    #[cfg(test)]
+    fn with_micro_share(mut self, bytes: u64) -> TileCache {
+        self.micro_share = bytes;
+        self
     }
 
     /// The tile cache budget `config` asks for (`CRUST_TEX_CACHE_MB`), in
@@ -568,6 +633,11 @@ impl TileCache {
 
     pub fn resident(&self) -> u64 {
         self.resident.load(Ordering::Relaxed)
+    }
+
+    /// Bytes of evicted tiles still alive in some thread's microcache.
+    pub fn held(&self) -> u64 {
+        self.held.now.load(Ordering::Relaxed)
     }
 
     /// Registers a file and returns the index a [`TileId`] names it by.
@@ -621,6 +691,7 @@ impl TileCache {
             evictions: s.evictions.load(Ordering::Relaxed),
             bytes_read: s.bytes_read.load(Ordering::Relaxed),
             peak_bytes: s.peak_bytes.load(Ordering::Relaxed),
+            held_peak_bytes: self.held.peak.load(Ordering::Relaxed),
             errors: s.errors.load(Ordering::Relaxed),
             budget_bytes: self.budget,
             opens: s.opens.load(Ordering::Relaxed),
@@ -815,11 +886,7 @@ impl TileCache {
             .file
             .level(id.level as usize)
             .tile_size(id.tile, slot.file.tile_edge());
-        let tile = Arc::new(Tile {
-            data,
-            width,
-            height,
-        });
+        let tile = Arc::new(Tile::new(data, width, height));
         // The accessors index without checking, so this is where the size is
         // established. A backend that returned the wrong shape would be a bug
         // in the backend, and one a test should catch rather than a render.
@@ -862,7 +929,7 @@ impl TileCache {
         self.stats.decoded.fetch_add(1, Ordering::Relaxed);
         if let Some(now) = resident {
             self.stats.peak_bytes.fetch_max(now, Ordering::Relaxed);
-            if now > self.budget {
+            if now + self.held() > self.budget {
                 self.make_room();
             }
         } else {
@@ -902,18 +969,32 @@ impl TileCache {
                 m.retain(|_, e| {
                     if e.used {
                         e.used = false;
-                        true
-                    } else {
-                        freed += e.tile.bytes();
-                        false
+                        return true;
                     }
+                    let bytes = e.tile.bytes();
+                    freed += bytes;
+                    // A thread still holds it, in its microcache or in hand:
+                    // the bytes stay alive past this eviction, so they move to
+                    // `held` until the last holder drops the tile
+                    // (`impl Drop for Tile`).
+                    // Under the shard lock no thread can take a new reference,
+                    // so a count of one means the map's is the last and the
+                    // tile dies right here, unmarked. Marked before the map
+                    // lets go, so its final drop always sees the mark.
+                    if Arc::strong_count(&e.tile) > 1
+                        && e.tile.evicted.set(self.held.clone()).is_ok()
+                    {
+                        let now = self.held.now.fetch_add(bytes, Ordering::Relaxed) + bytes;
+                        self.held.peak.fetch_max(now, Ordering::Relaxed);
+                    }
+                    false
                 });
                 if freed > 0 {
                     self.resident.fetch_sub(freed, Ordering::Relaxed);
                     self.stats.evictions.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            if self.resident.load(Ordering::Relaxed) <= self.budget {
+            if self.resident.load(Ordering::Relaxed) + self.held() <= self.budget {
                 return;
             }
         }
@@ -934,16 +1015,20 @@ fn lock<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     }
 }
 
-/// Sets in the per-thread microcache. A file's tiles all land in one set, so
-/// this is roughly how many textures a thread can interleave before they start
-/// evicting each other: an ALab material samples ~5 per shading point, and
-/// consecutive shading points on one thread are often different materials.
-/// Measured on ALab at 72 threads: 8 sets hit 81.2%, 16 sets 84.9% (the old
-/// two shared slots, 74.9%), for Texture 1.76 -> 1.57 us per `eval`.
-const MICRO_SETS: usize = 16;
+/// Sets in the per-thread microcache, and ways per set: 512 tiles a thread.
+///
+/// Capacity is what pays. Measured on ALab frame 1004 at 72 threads and
+/// 32 spp (`grow-texture-microcache`), lookups that missed the microcache
+/// for a shard fell from 152.0 M at 16 x 4 to 104.2 M at 64 x 4, 78.8 M at
+/// 64 x 4 indexed by the whole tile id, and 50.3 M here. Texture went 1.71 ->
+/// 1.28 us per `eval` and the render 14.6% faster; its 8 -> 72 thread
+/// slowdown is now the machine's own 1.6x, so the shard contention is gone.
+/// Earlier, 8 -> 16 sets had taken hits from 81.2% to 84.9%.
+const MICRO_SETS: usize = 64;
 /// Ways per set: a trilinear tap reads two levels, and a footprint straddling
 /// a tile edge doubles that.
-const MICRO_WAYS: usize = 4;
+const MICRO_WAYS: usize = 8;
+const _: () = assert!(MICRO_SETS.is_power_of_two());
 
 type MicroSet = Ways<(u32, TileId), Arc<Tile>, MICRO_WAYS>;
 /// The per-thread microcache: `MICRO_SETS` sets of `MICRO_WAYS` `(key, tile)`
@@ -952,35 +1037,75 @@ type MicroSet = Ways<(u32, TileId), Arc<Tile>, MICRO_WAYS>;
 type MicroSlots = [MicroSet; MICRO_SETS];
 
 thread_local! {
-    /// The most recently used tiles, per thread and per texture.
+    /// The most recently used tiles, per thread.
     ///
     /// The highest-leverage part of the whole cache and the cheapest: a
     /// bilinear tap reads one tile up to four times in a row and trilinear
     /// doubles that, so this absorbs most lookups before any lock is touched.
+    /// A miss is what costs: it locks a shard and clones the tile's `Arc`,
+    /// and the entry it pushes out drops one — shared lines every thread
+    /// reading that tile writes.
     ///
-    /// **Set-associative by file**, because it used to be two slots shared by
-    /// every texture — OIIO's number, and right for a scene with one texture
-    /// per shading point (98.6% hits on the alias plane). A production
-    /// material interleaves several: on ALab each `eval` found both slots
-    /// holding the *previous* texture's tiles and missed on its first tap at
-    /// each level, a 25% miss rate that sent a quarter of 3.3 G lookups to the
-    /// shard mutexes (`docs/alab_profile.md`). Hashing the file to a set keeps
-    /// each texture's recent tiles out of the others' way, and a lookup still
-    /// scans only `MICRO_WAYS` keys.
+    /// **A production material interleaves several textures.** The two slots
+    /// this started as (OIIO's number, right for one texture per shading
+    /// point: 98.6% hits on the alias plane) found the *previous* texture's
+    /// tiles on each `eval`, a 25% miss rate on ALab (`docs/alab_profile.md`).
+    /// What decides the rate is how many recent tiles a thread keeps across
+    /// materials, which is why this is 512 of them (see [`MICRO_SETS`]).
     ///
-    /// Tiles held here are outside the budget: at most `MICRO_SETS *
-    /// MICRO_WAYS` = 64 tiles a thread, 1.5 MiB of `half` 64x64 tiles, so
-    /// 108 MiB on 72 threads against the 1 GiB default (half that for `u8`).
+    /// **In the budget.** What a thread keeps of one cache is bounded by that
+    /// cache's `micro_share` ([`RETAINED`]), and an evicted tile a thread
+    /// still holds is counted in the cache's `held` until it is dropped.
     static MICRO: std::cell::RefCell<MicroSlots> =
         const { std::cell::RefCell::new([MicroSet::EMPTY; MICRO_SETS]) };
+
+    /// Bytes of tiles this thread's microcache holds, whichever cache they
+    /// came from. Read and written on the miss path only.
+    static RETAINED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The microcache set a key lives in. Files are interned with consecutive
-/// indices, so the low bits already spread a material's textures; the cache id
-/// is mixed in so two caches' file 0 do not share a set.
+/// The microcache set a key lives in: a one-multiply (Fibonacci) hash of the
+/// whole key, top bits.
+///
+/// **The whole tile id, not the file.** A file index kept each texture's tiles
+/// in one set, which a trilinear tap at a tile corner — up to eight tiles of
+/// one texture — overflows. Measured at 64 x 4, the file index sent 104.2 M
+/// lookups to the shards and this 78.8 M. Indexing by (file, level) instead
+/// matched this one's hits at 64 x 8 but scanned deeper: 2.5% more
+/// instructions on the alias scene against 1.4%. The cost of any tile-dependent
+/// index is the hash per tap, where the file index was hoisted out of the
+/// taps. On the alias scene, whose microcache already hits 99.9%, that is the
+/// whole 1.4% (`grow-texture-microcache`, a trade taken for ALab's 14.6%).
 #[inline]
 fn micro_set(key: &(u32, TileId)) -> usize {
-    (key.1.file as usize).wrapping_add((key.0 as usize).wrapping_mul(5)) % MICRO_SETS
+    let x = key.1.tile as u64
+        ^ ((key.1.file as u64) << 32)
+        ^ ((key.1.level as u64) << 24)
+        ^ ((key.0 as u64) << 56);
+    (x.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - MICRO_SETS.trailing_zeros())) as usize
+}
+
+/// Puts `tile` in front of its set, unless that would take this thread past
+/// `cache`'s share; the oldest way falls off the end (see `Ways`).
+///
+/// A tile left out was still used for the lookup that read it: only the next
+/// one pays a shard. With a share below one tile, which a small budget on many
+/// threads gives, the microcache keeps nothing and every lookup takes the
+/// shard path — slower, and still right.
+fn retain(cache: &TileCache, set: usize, key: (u32, TileId), tile: Arc<Tile>) {
+    let evicted = MICRO.with(|m| {
+        let mut slots = m.borrow_mut();
+        let out = slots[set].oldest_if_full().map_or(0, |t| t.bytes());
+        let now = RETAINED.get() - out + tile.bytes();
+        if now > cache.micro_share {
+            return None;
+        }
+        RETAINED.set(now);
+        slots[set].push(key, tile)
+    });
+    // After the borrow ends, as before: the last reference to a tile the map
+    // evicted gives its bytes back to `held` as it drops.
+    drop(evicted);
 }
 
 /// Reads `id` through the per-thread microcache and hands the tile to `f`.
@@ -1020,9 +1145,7 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
     // decode and must not run under a thread-local borrow.
     let tile = cache.get(id)?;
     let r = f.take()?(&tile);
-    // Newest in front; the oldest way falls off the end (see `Ways`).
-    let evicted = MICRO.with(|m| m.borrow_mut()[set].push(key, tile));
-    drop(evicted);
+    retain(cache, set, key, tile);
     Some(r)
 }
 
@@ -1032,7 +1155,10 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
 /// is about to drop, and a stale hit would answer from the wrong cache.
 #[cfg(test)]
 pub fn clear_microcache() {
-    MICRO.with(|m| *m.borrow_mut() = [MicroSet::EMPTY; MICRO_SETS]);
+    let old =
+        MICRO.with(|m| std::mem::replace(&mut *m.borrow_mut(), [MicroSet::EMPTY; MICRO_SETS]));
+    drop(old);
+    RETAINED.set(0);
 }
 
 #[cfg(test)]
@@ -1350,6 +1476,179 @@ mod tests {
             "every tap a microcache hit"
         );
         assert_eq!(now.hits, base.hits, "no lookup reached a shard");
+
+        clear_microcache();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A trilinear tap at a tile corner reads four tiles at each of two
+    /// levels, all of one texture. A file-indexed set of four ways could not
+    /// hold them; every one must be a microcache hit the second time.
+    #[test]
+    fn a_trilinear_corner_stays_in_the_microcache() {
+        clear_microcache();
+        let path = fixture("micro_corner", 512, 512);
+        let tf = TiledFile::open(&path).expect("open");
+        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let id = cache.intern(tf.clone()).expect("intern");
+        let corner = |level: u8| {
+            let across = tf.level(level as usize).across as u32;
+            [0, 1, across, across + 1].map(|tile| TileId {
+                file: id,
+                level,
+                tile,
+            })
+        };
+        let taps: Vec<TileId> = corner(0).into_iter().chain(corner(1)).collect();
+        for &t in &taps {
+            with_tile(&cache, t, |t| t.width).expect("tile");
+        }
+        let base = cache.counters();
+        for &t in &taps {
+            with_tile(&cache, t, |t| t.width).expect("tile");
+        }
+        let now = cache.counters();
+        assert_eq!(now.micro_hits - base.micro_hits, taps.len() as u64);
+        assert_eq!(now.hits, base.hits, "no tap reached a shard");
+
+        clear_microcache();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Floods `cache` with every level-0 tile of `file` through the shard map
+    /// alone, until `until` holds or four passes have run.
+    fn flood(cache: &TileCache, file: u32, tiles: u32, until: impl Fn(&TileCache) -> bool) {
+        for _ in 0..4 {
+            for tile in 0..tiles {
+                cache.get(TileId {
+                    file,
+                    level: 0,
+                    tile,
+                });
+            }
+            if until(cache) {
+                return;
+            }
+        }
+    }
+
+    /// What a full `u8` tile counts for in the budget.
+    fn full_u8_tile_bytes() -> u64 {
+        (TILE_EDGE * TILE_EDGE * 3) as u64 + std::mem::size_of::<Tile>() as u64 + 16
+    }
+
+    /// Evicted tiles no thread keeps are released as soon as the lookup that
+    /// read them lets go. The sweep can evict the very tile the inserting
+    /// lookup still has in hand, so the peak may reach that one tile, never
+    /// more on one thread.
+    #[test]
+    fn evicting_unheld_tiles_holds_nothing() {
+        clear_microcache();
+        let path = fixture("held_none", 1536, 1536);
+        let tf = TiledFile::open(&path).expect("open");
+        let cache = TileCache::new(1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let id = cache.intern(tf.clone()).expect("intern");
+        let l0 = tf.level(0);
+        flood(&cache, id, (l0.across * l0.down) as u32, |c| {
+            c.counters().evictions > 0
+        });
+        assert!(cache.counters().evictions > 0, "the flood must have swept");
+        assert_eq!(cache.held(), 0);
+        assert!(cache.counters().held_peak_bytes <= full_u8_tile_bytes());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A tile the map evicts while this thread's microcache holds it stays
+    /// counted, against its own cache only, until the microcache lets go.
+    #[test]
+    fn an_evicted_tile_a_thread_holds_counts_until_dropped() {
+        clear_microcache();
+        let path = fixture("held_one", 2048, 2048);
+        let tf = TiledFile::open(&path).expect("open");
+        // Large enough that one thread's share holds a tile on any core
+        // count, small enough that the flood below must evict.
+        let cache = TileCache::new(8 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let other = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let id = cache.intern(tf.clone()).expect("intern");
+        let other_id = other.intern(tf.clone()).expect("intern");
+        let held_tile = TileId {
+            file: id,
+            level: 1,
+            tile: 0,
+        };
+        let bytes = with_tile(&cache, held_tile, |t| t.bytes()).expect("tile");
+        // The other cache's tile is held too, and never evicted.
+        with_tile(
+            &other,
+            TileId {
+                file: other_id,
+                level: 1,
+                tile: 0,
+            },
+            |t| t.width,
+        )
+        .expect("tile");
+
+        let l0 = tf.level(0);
+        flood(&cache, id, (l0.across * l0.down) as u32, |c| c.held() > 0);
+        assert_eq!(cache.held(), bytes, "the held tile is counted once");
+        // Plus, at most, the tile the flood's own lookup had in hand.
+        let peak = cache.counters().held_peak_bytes;
+        assert!(
+            (bytes..=bytes + full_u8_tile_bytes()).contains(&peak),
+            "peak {peak}"
+        );
+        assert_eq!(other.held(), 0, "another cache's count is its own");
+
+        clear_microcache();
+        assert_eq!(cache.held(), 0, "dropping the last holder releases it");
+        assert_eq!(cache.counters().held_peak_bytes, peak, "the peak stays");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The share is half the budget split across the threads.
+    #[test]
+    fn a_threads_share_is_half_the_budget_split_across_threads() {
+        let budget = 64 * 1024 * 1024;
+        let cache = TileCache::new(budget, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let threads = crate::ptex_stream::micro_threads() as u64;
+        assert_eq!(cache.micro_share, budget / 2 / threads);
+    }
+
+    /// A share below one tile keeps nothing: every lookup takes the shard
+    /// path and still returns the right tile. Another cache's larger share
+    /// is not limited by it.
+    #[test]
+    fn a_share_below_one_tile_retains_nothing() {
+        clear_microcache();
+        let path = fixture("held_share", 256, 256);
+        let tf = TiledFile::open(&path).expect("open");
+        let small = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+            .with_micro_share(0);
+        let large = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let s = small.intern(tf.clone()).expect("intern");
+        let l = large.intern(tf.clone()).expect("intern");
+        let at = |file| TileId {
+            file,
+            level: 0,
+            tile: 1,
+        };
+        let mut dec = tf.reader().expect("reader");
+        let want = tf.read_tile(&mut dec, 0, 1).expect("direct");
+
+        for _ in 0..3 {
+            let got = with_tile(&small, at(s), |t| t.data.clone()).expect("tile");
+            assert_eq!(got, want);
+        }
+        let c = small.counters();
+        assert_eq!(c.micro_hits, 0, "nothing was retained");
+        assert_eq!(c.hits + c.misses, 3);
+        assert_eq!(RETAINED.get(), 0);
+
+        for _ in 0..3 {
+            with_tile(&large, at(l), |t| t.width).expect("tile");
+        }
+        assert_eq!(large.counters().micro_hits, 2, "the large share retains");
 
         clear_microcache();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

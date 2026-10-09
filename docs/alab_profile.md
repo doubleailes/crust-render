@@ -15,10 +15,11 @@ Measured 2026-10-05 at `4143c58` (0.5.0). The main findings:
   Ray tracing is next at 40%, so the frame is now close to the even split a
   healthy render shows.
 - **The render scales with threads, close to what the machine allows.** 72
-  threads render 5.16× faster than 8 (measured 2026-10-08 at equal spp),
-  against 1.25× in the first profile. This VM allows at most about 5.6× from 8
-  to 72 threads (see "Thread scaling"), so most of the gap to 9× is the
-  machine. Texture lookups still carry about 1.19× of contention of their own.
+  threads render 5.51× faster than 8 at equal spp, against 5.16× before
+  `grow-texture-microcache` and 1.25× in the first profile. This VM allows
+  at most about 5.6× from 8 to 72 threads (see "Thread scaling"), so most of
+  the gap to 9× is the machine. Texture lookups no longer carry contention of
+  their own; what is left is idle threads at the end of the pass.
 
 ## Setup
 
@@ -232,6 +233,29 @@ The profiled pair, at 32 spp:
   threads. That is about 11% of the 72-thread render's time. If texture should
   scale like Trace (1.45×) rather than like compute, the figure is 14%.
 
+### After `grow-texture-microcache` (2026-10-09)
+
+The per-thread texture microcache grew from 64 to 512 tiles a thread, chosen by
+measurement (textures design record, "Streaming"). Lookups reaching a shard fell
+from 152.0 M to 50.3 M (microcache hits 84.4% → 94.8%). The same profiled pair,
+at 32 spp:
+
+| section | 8 threads | 72 threads | slowdown | before |
+|---|---|---|---|---|
+| **Texture** | **770 ns** | **1.24 µs** | **1.61×** | 895 ns / 1.71 µs, 1.91× |
+| Trace | 3.89 µs | 5.71 µs | 1.47× | 1.45× |
+| Occlusion | 1.91 µs | 2.71 µs | 1.42× | 1.41× |
+| Render (profiled) | 37.80 s | 6.86 s | **5.51×** | 41.38 s / 8.02 s, 5.16× |
+
+- **Texture's slowdown is now the machine's own 1.6×.** The contention is gone.
+- **The 72-thread render is 15.9% faster** (`bench_ab.sh -n 3`, unprofiled,
+  min and mean alike: 7.28 / 7.34 s → 6.12 / 6.17 s), and the 8-thread one
+  8.7% (profiled).
+- **What is left of the 72-thread render's capacity is idle time.**
+  72 × 6.86 s is 494 s, against 469 s of thread time. Threads are busy 94.9%
+  of the wall, against 99.6% at 8. That idle 5.1% is the end of the pass, and
+  removing it would take 72 threads to about 5.7× over 8.
+
 ## Other findings
 
 - **Light and shadow links are read now.** The import splits the scene into 3
@@ -341,14 +365,12 @@ twinned light: the 20° sun cone or one of the two rect suns.
 1. **The import.** At 2:53 of a 3:20 frame, composition is now where a
    single frame's time goes. The render could halve again and the frame would
    be 6% faster.
-2. **Texture contention and the end of the pass.** 15.6% of lookups still
-   reach a shard, and a texture call is 1.91× slower at 72 threads than at 8,
-   against the machine's 1.6×. That excess is 6.7% of the 72-thread render's
-   thread capacity, and threads idling at the end of the pass are another
-   4.9%. Removing both would take 72 threads from 5.16× to about 5.8× over 8,
-   not to 9×, which this VM cannot reach ("Thread scaling"). Consecutive
-   shading points on one thread are often different materials, which no
-   per-thread cache absorbs.
+2. **The end of the pass.** Texture contention is gone
+   (`grow-texture-microcache`: a texture call's 8 → 72 slowdown is now the
+   machine's 1.61×). What is left of the 72-thread gap is threads idling while
+   the last tiles finish: 5.1% of capacity. Removing it would take 72 threads
+   from 5.51× to about 5.7× over 8, not to 9×, which this VM cannot reach
+   ("Thread scaling").
 3. **Traversal.** Trace is now a third of render thread time, at 5.9 µs per
    closest-hit query on this VM.
 4. **Light selection.** 82% of shadow rays are still occluded under power
