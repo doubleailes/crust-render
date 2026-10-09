@@ -88,11 +88,20 @@ render.
 - **Texture filtering is isotropic.** Mip levels are chosen from ray cones, but the filter
   has no direction. A texture seen at a grazing angle is blurred more than an anisotropic
   (EWA) filter would blur it.
-- **Streamed Ptex can't rebuild its mip levels in linear light.** A mip-mapped `.ptx` is
-  loaded fully unless
-  [`CRUST_PTEX_STREAM_MIPSPACE=file`](@/docs/reference/environment-variables.md#crust-ptex-stream-mipspace)
-  accepts the file's own, slightly darker, levels. Displacement Ptex is read raw, so its
-  stored levels are already correct and it streams.
+- **Streamed Ptex is in linear light only from the cap down.** A streamed `.ptx` rebuilds
+  its mip levels at and below the
+  [`CRUST_PTEX_MAX_LOG2`](@/docs/reference/environment-variables.md#crust-ptex-max-log2)
+  cap (32×32) in linear light, exactly as a loaded one does. Its levels above the cap are
+  the file's own, averaged in the file's encoding, because rebuilding them would mean
+  reading full-resolution faces. A loaded `.ptx` has no levels above the cap at all.
+- **Small and large Ptex files differ in detail.** A file under
+  [`CRUST_PTEX_STREAM_MIN_MB`](@/docs/reference/environment-variables.md#crust-ptex-stream-min-mb)
+  (8 MiB) is loaded, capped at 32×32 per face; a larger one streams and keeps the detail
+  above the cap. So two textures authored at the same resolution can show different
+  detail in a close-up.
+- **Each streamed Ptex file holds one open file for the render.** At the defaults this is
+  a few dozen files on the Moana Island. Streaming thousands, by lowering
+  `CRUST_PTEX_STREAM_MIN_MB` or raising the budget, can exceed the open-file limit.
 - **Colour-space conversions are a curve and a matrix.** Every texture space in the ACES
   configs is a transfer curve followed by a change of primaries, and Crust Render
   converts exactly those. A conversion of any other shape, such as one through a 3D LUT,

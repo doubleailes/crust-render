@@ -6,8 +6,8 @@ How Ptex works today (`crates/crust-assets/src/ptex_texture.rs`, `ptex_stream.rs
 - **The preload, `PtexColor`.** It opens a `PtexReader` and, per face, fetches
   `get_data_at_res(min(authored, cap))`, with a cap of `CRUST_PTEX_MAX_LOG2`, default
   5, i.e. 32×32. It decodes to linear `f32` RGB (gamma 2.2), then builds the mip chain
-  *below* that base in linear light with `reduce_half` / `reduce_half_linear` (shared
-  `axis_taps`). For a face authored above the cap, the base texels are therefore the
+  *below* that base in linear light with `reduce_quad` / `reduce_triangle` (by mesh
+  type). For a face authored above the cap, the base texels are therefore the
   **file's** reduced level, not a linear reduction of level 0.
 - **The stream, `PtexStream`.** A sampler over `ptex::SharedReader`, an LRU of decoded
   blocks under a byte budget split across streamed files. It reads one tile of one
@@ -76,25 +76,54 @@ clamps to `B`.
 trait DerivedLevels: Send + Sync {
     /// Produce derived level `k` of `faceid`, given its parent (level `k-1`, or the
     /// base block when `k` is the first derived level).
-    fn derive(&self, faceid: usize, k: u8, parent: &DerivedBlock) -> DerivedBlock;
-    fn base_res(&self, faceid: usize) -> Res;   // B for this face
+    fn base_res(&self, faceid: usize, res: Res) -> Res;  // B for an authored `res`
+    fn decode(&self, faceid: usize, res: Res, pixels: &[u8]) -> Vec<u8>;  // level 0
+    fn derive(&self, faceid: usize, k: u8, parent_res: Res, parent: &[u8]) -> Vec<u8>;
 }
-SharedReader::with_derived(Arc<dyn DerivedLevels>)
-SharedReader::get_derived(faceid, k) -> Result<DerivedBlock>
+SharedReader::with_derived(self, Arc<dyn DerivedLevels>) -> Result<Self>  // once per reader
+SharedReader::get_derived(faceid, k) -> Result<PixelData>
 ```
 
-- **Storage.** A `DerivedBlock` is host-typed bytes (crust stores linear `f32` RGB) in
+- **Storage.** A derived block is host-typed bytes (crust stores linear `f32` RGB) in
   the same LRU and byte budget as decoded tiles, keyed by `(faceid, k)`.
 - **The `base_res` level.** The reader produces it from `get_data_at_res(B)` through
   the host's decode, so the decode stays crust's 256-entry LUT and the `u8` path's
   bit-identity is unchanged.
+- **Only the requested level is cached.** A miss derives level `k` from the deepest
+  ancestor already resident (or from the base) and drops the levels in between. The
+  first implementation cached the whole chain on the way down; on the island that held
+  ~16 KiB of `f32` per face read only at a coarse level, and the 53 readers thrashed
+  (1.04 M evictions and 985 K derives for 586 K texel fetches), where `=file` keeps a
+  few texels per face. Values are unchanged: each level is still its parent's reduction.
+- **The cap level is read as tiles; only coarser levels are derived.** A derived block
+  is a whole level, so under a large explicit cap the cap level would be a
+  multi-megabyte `f32` block, re-decoded on every tap once it outgrows a microcache
+  slot or a reader's share (Qodo review). Tiles at the cap are already bit-identical
+  to the preload. Without a pyramid (`CRUST_PTEX_MIP=0`) the footprint is ignored and
+  every lookup reads `A` (or an explicit cap).
+- **The base read for a derivation is not cached either.** A stored base block, or the
+  reduction that builds a base the file does not store (most island faces are
+  non-square, so 64x8 capped at 32 is a 32x8 reduction of 64x8) together with its
+  source, is used if already resident and otherwise computed and dropped. With only the
+  first fix those blocks still held ~400 MiB of the island's 951 MiB budget.
 - **Eviction.** Derived blocks are evicted like any other block. Re-deriving is
   deterministic, so eviction cannot change a value.
 - **`cache_stats`** gains `derived_blocks`, `derived_bytes` and `derives`.
 
-The reducer is a closure over crust's existing `reduce_half_linear`, which is the
-point: the preloaded and streamed chains run *one* function, the way
-`reduce_half` ↔ `reduce_half_linear` already share `axis_taps`.
+The adapter (`CappedLevels`) decodes through `decode_face` and reduces through
+`reduce_level` over `reduce_quad` / `reduce_triangle`, and `PtexColor` now calls the
+same two functions, which is the point: the preloaded and streamed chains run *one*
+decode and *one* reduction, so they are equal by construction rather than by
+agreement.
+
+The finer-than-`B` levels are the `file` chain's (`A` halved on both axes, read as
+tiles) down to the step where the widest axis reaches `B`'s, and that last step is `B`
+itself. On a non-square face the halved level there has lost short-axis texels `B` keeps
+(1024x512 halves to 32x16 where `B` is 32x32); stepping the short axis more slowly would
+ask for levels the file does not store, which the reader reduces from level 0. Lookups
+are routed by the footprint *against `B`*: wider than one `B` texel goes through the
+derived chain with the preload's own level selection (`texels_across` = `B`'s), so
+`log2` sees the same argument on both sides and the blend weight is bit-identical.
 
 - **Alternative: a derived-level cache in crust-assets.** Rejected by the design record
   (a second cache, outside the budget, invisible to `--stats`).

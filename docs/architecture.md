@@ -241,7 +241,10 @@ other. The pairs:
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
   `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔
-  preloaded `u8` textures; tiles ↔ scanlines; a staged first sweep ↔ one
+  preloaded `u8` textures; streamed `capped` Ptex ↔ preloaded Ptex at and
+  below the cap, for every sample type (`capped_streaming_and_the_preload_*`:
+  both run `decode_face` and `reduce_level`, and a footprint is selected
+  against the cap level on both sides); tiles ↔ scanlines; a staged first sweep ↔ one
   unstaged sweep (`a_staged_sweep_renders_the_unstaged_one_bit_for_bit`: image, AOV
   planes, counters; the clamp counter sums per sample for the same reason); a region's
   pixels ↔ the same pixels of the full frame (with no neighbour hold). Each is pinned by
@@ -363,10 +366,10 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_PTEX` | on | `crust-assets/lib.rs` | `0`: decline every Ptex texture |
 | `CRUST_PTEX_MAX_LOG2` | 5 (preload) / uncapped (stream) | `crust-assets/ptex_texture.rs` | per-face resolution cap, log2 edge |
 | `CRUST_PTEX_MIP` | on | `crust-assets/ptex_texture.rs` | `0`: no per-face mip pyramid |
-| `CRUST_PTEX_STREAM` | off | `crust-assets/ptex_stream.rs` | `1`: page Ptex tiles through the reader's cache |
+| `CRUST_PTEX_STREAM` | on | `crust-assets/ptex_stream.rs` | `0`: preload every `.ptx` (the default before streaming was) |
 | `CRUST_PTEX_CACHE_MB` | 1024 | `crust-assets/ptex_stream.rs` | Ptex streaming budget, shared by all streamed files |
 | `CRUST_PTEX_STREAM_MIN_MB` | 8 | `crust-assets/ptex_stream.rs` | files smaller than this preload even when streaming |
-| `CRUST_PTEX_STREAM_MIPSPACE` | `linear` | `crust-assets/ptex_stream.rs` | `file`: accept the file's own mip chain (otherwise a mipmapped `.ptx` preloads) |
+| `CRUST_PTEX_STREAM_MIPSPACE` | `capped` | `crust-assets/ptex_stream.rs` | `capped`: file levels at and above the preload cap, the preloaded pyramid (derived in the reader's cache) below it; `linear`: preload a mipmapped `.ptx` (the default before `capped`); `file`: the file's own whole chain |
 
 `OCIO` is read by the same parser but is not a switch: it is OpenColorIO's
 standard variable naming the config, `Config::ocio`, and only the CLI obeys

@@ -141,9 +141,10 @@ without the other (full list: `docs/architecture.md` § Invariants):
   `scatter_with`), `escaped_emission` ↔ `escaped_split`. `C.*[LO]` is pinned bitwise to the
   beauty, and the zero-AOV render to its instruction count (`docs/architecture.md`).
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
-  JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines (a render
-  mode is scheduling only); the staged first sweep ↔ one unstaged sweep (so is staging);
-  `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).
+  JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; streamed `capped` Ptex ↔
+  preloaded Ptex at and below the cap (one `decode_face`, one `reduce_level`); tiles ↔
+  scanlines (a render mode is scheduling only); the staged first sweep ↔ one unstaged
+  sweep (so is staging); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).
 - Anything keyed on a prototype path is scoped by the stage epoch
   (`ImportCaches::epoch`): `/__Prototype_N` is renumbered per masked stage.
 - `Material::resolve` must return exactly what per-query shading would (pinned for every

@@ -35,7 +35,10 @@ cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam --profile 
   189 of its 213 mesh-bearing files, and at the default level 0 the cages stay
   unrefined, shaded with smooth cage normals. Refined levels are measured in
   "Adaptive subdivision" below.
-- **Ptex:** preloaded at the default 32×32 cap (`CRUST_PTEX_STREAM` is off).
+- **Ptex:** preloaded at the default 32×32 cap, which was the default when this
+  profile was taken. Since `stream-ptex-by-default` the 53 largest `.ptx` stream
+  under the `capped` chain, for the same image; see "Ptex streamed by default"
+  below for what that moves.
 - **Displacement:** read, which is the default since `add-mesh-displacement`.
   The island's `PxrDisplace` networks move 47 meshes, 151 169 cage vertices,
   in 41 ms (max |offset| 6.25). All 47 are displaced at cage resolution, and
@@ -700,11 +703,37 @@ CRUST_TRI_PACKETS=indexed CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file \
     --subdiv-level 1 -s 16 --stats
 ```
 
+## Ptex streamed by default (2026-10-09)
+
+Measured for `stream-ptex-by-default`: `shotCam`, 4 spp, `--indirect-clamp 0`, level 0,
+on the 93 GiB machine, under an RSS guard at 80 GiB. The same binary with
+`CRUST_PTEX_STREAM=0` (the old default, bit-identical to the parent commit) against
+the default, interleaved, three runs a side:
+
+| | `CRUST_PTEX_STREAM=0` | default (`capped`) | |
+|---|---|---|---|
+| Ptex | 3 632 preloaded | 53 streamed + 3 579 preloaded under 8 MiB | |
+| Ptex resident | 7.34 GiB | 0.60 GiB + 18.5 MiB streamed | **−6.7 GiB** |
+| `Traverse prims` | 2:59.1–3:02.7 | 2:53.2–2:59.0 | noise |
+| `Load assets` | 1:36.8–1:40.5 | 28.1–29.2 s | **−68 s** |
+| `Render` (min / mean) | 1.027 / 1.047 s | 1.285 / 1.315 s | +0.26 s |
+| peak RSS | 31.49–31.58 GiB | 23.92–24.14 GiB | **−7.5 GiB** |
+| total | 4:54.5–4:59.0 | 3:40.0–3:47.4 | **−72 s** |
+
+The image differs from the preload on 267 of 230 400 pixels (relMSE 1.4e-9): the detail
+above the 32×32 cap, where a footprint is finer than one cap texel. `CRUST_PTEX_STREAM_MIPSPACE=file`
+gives the same memory and differs on 27.6% of the frame, darker. `Render` pays +0.26 s at
+4 spp and +0.50 s at 16 spp (3.72 → 4.22 s min, two runs a side): the first coarse read
+of each face derives its levels from the cap.
+`docs/ptex_streaming.md` § The capped chain has the cache figures and the history of the
+derived-level cache.
+
 ## File descriptors under streamed Ptex (2026-10-07)
 
 Measured for `bound-texture-open-files`, under `ulimit -n 1024`, sampling
-`/proc/<pid>/fd` once a second. Preloaded Ptex (the default) closes every file after
-reading it: peak 4 descriptors. A streamed `.ptx` keeps one open for the render:
+`/proc/<pid>/fd` once a second. Preloaded Ptex (the default then) closes every file after
+reading it: peak 4 descriptors. A streamed `.ptx` keeps one open for the render. At
+today's defaults 53 stream, so the render holds about 57:
 
 | switches (all with `CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_STREAM_MIN_MB=0`) | streamed | peak fds | outcome |
 |---|---|---|---|

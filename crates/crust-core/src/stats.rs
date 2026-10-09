@@ -570,6 +570,15 @@ pub struct PtexCacheStats {
     pub micro_retained_bytes: u64,
     /// The allowance reserved for those slots. See `micro_retained_bytes`.
     pub micro_reserve_bytes: u64,
+    /// How many streamed textures read the `capped` chain (file levels above
+    /// the preload's cap, the preloaded pyramid at and below it).
+    pub capped: u32,
+    /// Derived levels of that chain resident in the readers' caches, and
+    /// their bytes — a part of `resident_bytes`, not an addition to it.
+    pub derived_blocks: u64,
+    pub derived_bytes: u64,
+    /// Derived levels produced, re-derives after eviction included.
+    pub derives: u64,
 }
 
 impl PtexCacheStats {
@@ -1044,6 +1053,16 @@ pub(crate) fn thousands(n: usize) -> String {
         out.push(c);
     }
     out
+}
+
+/// The Ptex `backend` line's name for the streamed textures: which chain they
+/// read, when every one of them reads the default `capped` one.
+fn streamed_label(p: &PtexCacheStats) -> &'static str {
+    if p.capped == p.streamed {
+        "streamed (capped chain)"
+    } else {
+        "streamed"
+    }
 }
 
 pub(crate) fn human_bytes(bytes: u64) -> String {
@@ -1635,7 +1654,7 @@ impl RenderStats {
                 // Nothing streamed and nothing considered: streaming is off.
                 "preloaded".to_string()
             } else if p.streamed == p.textures {
-                "streamed".to_string()
+                streamed_label(p).to_string()
             } else {
                 // A mixed report is the normal case on a production stage, not
                 // a warning — the island streams 39 of 3 618 and preloads the
@@ -1645,7 +1664,11 @@ impl RenderStats {
                 // as 3 579 errors.
                 let mut parts = Vec::new();
                 if p.streamed > 0 {
-                    parts.push(format!("{} streamed", thousands(p.streamed as usize)));
+                    parts.push(format!(
+                        "{} {}",
+                        thousands(p.streamed as usize),
+                        streamed_label(p)
+                    ));
                 }
                 if p.below_threshold > 0 {
                     parts.push(format!(
@@ -1662,7 +1685,7 @@ impl RenderStats {
                 if p.mip_space > 0 {
                     parts.push(format!(
                         "{} preloaded for a linear mip chain \
-                         (CRUST_PTEX_STREAM_MIPSPACE=file to stream them)",
+                         (CRUST_PTEX_STREAM_MIPSPACE=capped to stream them)",
                         thousands(p.mip_space as usize)
                     ));
                 }
@@ -1703,6 +1726,18 @@ impl RenderStats {
                     human_bytes(p.budget_bytes),
                     thousands(p.streamed as usize)
                 )?;
+                // Inside the figure above, not beside it: derived levels are
+                // blocks of the same caches, under the same budget.
+                if p.capped > 0 {
+                    writeln!(
+                        f,
+                        "  {:<28} {} blocks, {}, {} derives",
+                        "  derived levels",
+                        thousands(p.derived_blocks as usize),
+                        human_bytes(p.derived_bytes),
+                        thousands(p.derives as usize)
+                    )?;
+                }
                 // The slots are process-wide, not per texture, and they hold
                 // the half of residency the reader cannot count — decoded
                 // tiles outside its cache. So they get their own line against
@@ -2316,6 +2351,38 @@ mod tests {
         s
     }
 
+    /// The Ptex block names the `capped` chain on its `backend` line and
+    /// reports derived levels inside the streamed residency, and says nothing
+    /// about them when no texture read that chain.
+    #[test]
+    fn the_ptex_block_names_the_capped_chain_and_its_derived_levels() {
+        let mut s = fixture();
+        s.ptex = PtexCacheStats {
+            textures: 3,
+            streamed: 1,
+            below_threshold: 2,
+            capped: 1,
+            derived_blocks: 12,
+            derived_bytes: 3 << 20,
+            derives: 40,
+            resident_bytes: 8 << 20,
+            budget_bytes: 64 << 20,
+            ..Default::default()
+        };
+        let text = s.to_string();
+        assert!(
+            text.contains("1 streamed (capped chain), 2 preloaded under the size threshold"),
+            "{text}"
+        );
+        assert!(text.contains("derived levels"), "{text}");
+        assert!(text.contains("12 blocks, 3.00 MiB, 40 derives"), "{text}");
+
+        s.ptex.capped = 0;
+        let text = s.to_string();
+        assert!(text.contains("1 streamed, 2 preloaded"), "{text}");
+        assert!(!text.contains("derived levels"), "{text}");
+    }
+
     /// The `crust-stats/1` contract: the full key set. A field added to
     /// `RenderStats` or any of its parts changes this list, and the test
     /// fails until the new key's name has been reviewed (snake_case, its
@@ -2359,6 +2426,10 @@ mod tests {
             "ptex.budget_full",
             "ptex.cache_hits",
             "ptex.cache_misses",
+            "ptex.capped",
+            "ptex.derived_blocks",
+            "ptex.derived_bytes",
+            "ptex.derives",
             "ptex.evictions",
             "ptex.faces",
             "ptex.lookups",

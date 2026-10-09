@@ -26,15 +26,24 @@
 //! here is level selection, tile addressing, the colour decode and the
 //! per-thread microcache that keeps the common tap off the reader's mutex.
 //!
-//! Opt-in via `CRUST_PTEX_STREAM=1`; [`PtexColor`] stays the default and the
-//! correctness oracle. See `streamed_and_preloaded_agree_texel_for_texel` in
-//! `tests/ptex_stream.rs` for the invariant that pins the two together, and
-//! the docs on [`MipSpace`] for the one place they cannot agree — and what
-//! is refused rather than documented as a result.
+//! On by default for files large enough to be worth it (see
+//! [`DEFAULT_STREAM_MIN_MB`]); [`PtexColor`] stays the correctness oracle.
+//! See `streamed_and_preloaded_agree_texel_for_texel` in `tests/ptex_stream.rs`
+//! for the invariant that pins the two together.
+//!
+//! **The mip chain is where they could part company**, and [`MipSpace`] says
+//! how each policy answers that. The default, `capped`, makes the two agree
+//! wherever the preload holds texels at all: the preload's own base is the
+//! file's level at the cap, so the stream reads the file at and above the cap
+//! and *derives* the levels below it from the cap level, through the
+//! preload's own decode and reduction (`CappedLevels`), held in the reader's
+//! cache under its budget.
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
-use crate::ptex_texture::ptex_space;
+use crate::ptex_texture::{
+    LevelReduction, capped_res, decode_face, level_reduction, ptex_space, reduce_level,
+};
 use crate::read_channel;
 use crust_core::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
@@ -155,6 +164,11 @@ struct TileId {
     res: u16,
     tile: u32,
 }
+
+/// The [`TileId::tile`] of a derived block (`capped`), which is a whole level
+/// of a face rather than a tile of one. A level's resolution names it within
+/// the face, and no file tile index reaches this.
+const DERIVED: u32 = u32::MAX;
 
 /// The per-thread microcache's slots: the most recent `(key, tile)` pairs.
 ///
@@ -348,6 +362,10 @@ pub struct PtexStream {
     /// `CRUST_PTEX_MIP=0` pins every lookup to the base level, as it does for
     /// the preloading path.
     mip: bool,
+    /// Under [`MipSpace::Capped`], the preload's cap: the resolution the
+    /// derived chain starts at, and the boundary between file levels (finer)
+    /// and derived ones (at and coarser). `None` reads the file's chain.
+    capped: Option<i8>,
     /// Largest tile a microcache slot may retain — see [`micro_slot_max`].
     /// Anything above it is handed to the caller and dropped, which is what
     /// keeps thread-local retention inside the render's budget instead of
@@ -377,21 +395,71 @@ impl PtexStream {
         PtexStream::open_config_in(path, ColorSpace::GAMMA22, config)
     }
 
-    /// [`PtexStream::open_config`], decoding the stored samples as `space`.
+    /// [`PtexStream::open_config`], decoding the stored samples as `space`,
+    /// with the mip chain `CRUST_PTEX_STREAM_MIPSPACE` names.
     pub fn open_config_in(
         path: &Path,
         space: ColorSpace,
         config: &crust_core::Config,
     ) -> Result<Self, AssetError> {
         let total = budget_bytes(config);
-        PtexStream::open_in(
+        let tex = PtexStream::open_in(
             path,
             space,
             total,
             micro_slot_max(total),
             config.ptex_max_log2,
             config.ptex_mip,
-        )
+        )?;
+        match config.ptex_mip_space {
+            MipSpace::Capped => tex.capped_at(
+                path,
+                config
+                    .ptex_max_log2
+                    .unwrap_or(crate::ptex_texture::DEFAULT_MAX_LOG2),
+            ),
+            MipSpace::Linear | MipSpace::File => Ok(tex),
+        }
+    }
+
+    /// [`PtexStream::open_in`] under the `capped` chain, with `preload_max_log2`
+    /// the preload's cap: file levels above it, derived levels at and below.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_capped(
+        path: &Path,
+        space: ColorSpace,
+        budget_bytes: usize,
+        micro_max: usize,
+        cap: Option<i8>,
+        preload_max_log2: i8,
+        mip: bool,
+    ) -> Result<Self, AssetError> {
+        PtexStream::open_in(path, space, budget_bytes, micro_max, cap, mip)?
+            .capped_at(path, preload_max_log2)
+    }
+
+    /// Installs the `capped` chain: [`CappedLevels`] on the reader, so the
+    /// derived levels live in its cache and under its budget.
+    fn capped_at(mut self, path: &Path, preload_max_log2: i8) -> Result<Self, AssetError> {
+        let levels = CappedLevels {
+            max_log2: preload_max_log2,
+            triangle: self.triangle,
+            dt: self.dt,
+            n_chan: self.n_chan,
+            space: self.space,
+            reduce: level_reduction(self.triangle),
+        };
+        self.reader = self
+            .reader
+            .with_derived(std::sync::Arc::new(levels))
+            .map_err(AssetError::ptex(path))?;
+        self.capped = Some(preload_max_log2);
+        Ok(self)
+    }
+
+    /// Is this texture read under the `capped` chain?
+    pub fn is_capped(&self) -> bool {
+        self.capped.is_some()
     }
 
     /// [`PtexStream::open`] with the policy passed in rather than read from
@@ -457,6 +525,7 @@ impl PtexStream {
             conversion: Some(ptex_space(space).conversion()).filter(|c| !c.is_identity()),
             cap,
             mip,
+            capped: None,
             micro_max,
             reader,
             fallback: Vec3A::splat(0.5),
@@ -503,10 +572,17 @@ impl PtexStream {
     /// - The texture is read raw (a displacement map): the file's encoding
     ///   *is* the linear value, so its own reduction is the right one.
     ///
+    /// - The texture reads the `capped` chain, whose levels below the cap are
+    ///   the preload's own.
+    ///
     /// Anything else reads a level the file reduced in its own encoding, and
-    /// under the default policy is preloaded instead — see [`MipSpace`].
+    /// under `linear` is preloaded instead — see [`MipSpace`].
     pub fn chain_is_exact(&self) -> bool {
-        if !self.mip || matches!(self.space, ColorSpace::RAW | ColorSpace::AUTO) {
+        // The `capped` chain is the preload's below the cap by construction.
+        if self.capped.is_some()
+            || !self.mip
+            || matches!(self.space, ColorSpace::RAW | ColorSpace::AUTO)
+        {
             return true;
         }
         self.reader
@@ -536,12 +612,7 @@ impl PtexStream {
     pub fn preload_bytes(&self, max_log2: i8) -> usize {
         let mut floats = 0usize;
         for info in self.reader.face_infos() {
-            let res = if self.triangle {
-                let l = info.res.ulog2.min(info.res.vlog2).min(max_log2);
-                ptex::Res::new(l, l)
-            } else {
-                ptex::Res::new(info.res.ulog2.min(max_log2), info.res.vlog2.min(max_log2))
-            };
+            let res = capped_res(info.res, max_log2, self.triangle);
             let (mut w, mut h) = (res.u(), res.v());
             loop {
                 floats += w * h * 3;
@@ -570,14 +641,9 @@ impl PtexStream {
     /// clamping the pair would distort the aspect the file chose — while a
     /// triangle clamps both together.
     fn base_res(&self, res: ptex::Res) -> ptex::Res {
-        let Some(cap) = self.cap else {
-            return res;
-        };
-        if self.triangle {
-            let l = res.ulog2.min(res.vlog2).min(cap);
-            ptex::Res::new(l, l)
-        } else {
-            ptex::Res::new(res.ulog2.min(cap), res.vlog2.min(cap))
+        match self.cap {
+            Some(cap) => capped_res(res, cap, self.triangle),
+            None => res,
         }
     }
 
@@ -596,10 +662,50 @@ impl PtexStream {
             res: layout.res.val(),
             tile: tile as u32,
         };
-        self.with_tile(id, layout.res, |data| self.decode(data, idx))
+        let fetch = || self.reader.get_tile(face as usize, layout.res, tile).ok();
+        self.with_block(id, fetch, |data| self.decode(data, idx))
     }
 
-    /// Reads one tile through the per-thread microcache and hands it to `f`.
+    /// Bilinear lookup within derived level `k` (resolution `res`) of a face:
+    /// [`PtexColor::sample_level`] over the same linear `f32` texels, through
+    /// the microcache like a tile. A derived block is a whole level, so all
+    /// four taps read one block and the microcache is touched once.
+    fn sample_derived(
+        &self,
+        face: u32,
+        k: usize,
+        res: ptex::Res,
+        fu: f32,
+        fv: f32,
+    ) -> Option<Vec3A> {
+        let id = TileId {
+            tex: self.id,
+            face,
+            res: res.val(),
+            tile: DERIVED,
+        };
+        let (w, h) = (res.u(), res.v());
+        let t = Taps::new(fu * w as f32 - 0.5, fv * h as f32 - 0.5, w, h);
+        let fetch = || self.reader.get_derived(face as usize, k).ok();
+        self.with_block(id, fetch, |data| {
+            let at = |x: usize, y: usize| {
+                let i = (y * w + x) * 12;
+                let f = |o: usize| {
+                    let b = data.get(i + o..i + o + 4)?;
+                    Some(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                };
+                Some(Vec3A::new(f(0)?, f(4)?, f(8)?))
+            };
+            let top = at(t.x0, t.y0)?.lerp(at(t.x1, t.y0)?, t.fx);
+            let bot = at(t.x0, t.y1)?.lerp(at(t.x1, t.y1)?, t.fx);
+            Some(top.lerp(bot, t.fy))
+        })
+        .flatten()
+    }
+
+    /// Reads one block — a file tile, or a derived level — through the
+    /// per-thread microcache, `fetch`ing it from the reader on a miss, and
+    /// hands it to `f`.
     ///
     /// A closure rather than a returned handle, for the reason
     /// `tiled::cache::with_tile` documents and measured: one atomic refcount
@@ -611,7 +717,12 @@ impl PtexStream {
     /// anything else up through here. Every caller decodes one texel and
     /// returns.
     #[inline]
-    fn with_tile<R>(&self, id: TileId, res: ptex::Res, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    fn with_block<R>(
+        &self,
+        id: TileId,
+        fetch: impl FnOnce() -> Option<ptex::PixelData>,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Option<R> {
         // `FnOnce` can only be moved once and either path might call it, so
         // it is parked in an `Option` and taken by whichever path wins.
         let mut f = Some(f);
@@ -624,14 +735,11 @@ impl PtexStream {
             self.micro_hits.add(1);
             return Some(r);
         }
-        // Miss. The borrow above is released before this: `get_tile` takes
-        // the reader's mutex and may read and inflate, and must not run under
-        // a thread-local borrow.
+        // Miss. The borrow above is released before this: `fetch` takes the
+        // reader's mutex and may read, inflate or derive, and must not run
+        // under a thread-local borrow.
         self.reader_lookups.add(1);
-        let data = self
-            .reader
-            .get_tile(id.face as usize, res, id.tile as usize)
-            .ok()?;
+        let data = fetch()?;
         let r = f.take()?(&data);
         // **Retain only what fits a slot.** A block bigger than this is one
         // upstream itself declined to cache (`oversized`), and keeping it
@@ -753,12 +861,224 @@ impl MipSource for StreamFace<'_> {
     }
 }
 
+/// One face under the `capped` chain, at and below the preload's cap: `base`
+/// is the cap level, and the chain is [`PtexColor`]'s exactly — the same
+/// levels, the same texels, the same `texels_across`, so the shared
+/// [`trilinear`] selects and blends as it does there and the result is
+/// bit-identical.
+///
+/// **Level 0 is read as file tiles; only the coarser levels are derived
+/// blocks.** The cap level holds the file's own texels, which a tile read
+/// decodes bit-identically to the preload already (the invariant
+/// `streamed_and_preloaded_agree_texel_for_texel` pins), and a derived block
+/// is a whole level: at an explicit cap of 8 the cap level would be a 768 KiB
+/// `f32` block, past a microcache slot and possibly past a reader's share, so
+/// every tap would decode the whole face again.
+struct CappedFace<'a> {
+    tex: &'a PtexStream,
+    face: u32,
+    base: ptex::Res,
+    levels: usize,
+}
+
+impl MipSource for CappedFace<'_> {
+    type Texel = Vec3A;
+
+    #[inline(always)]
+    fn level_count(&self) -> usize {
+        self.levels
+    }
+
+    #[inline(always)]
+    fn texels_across(&self) -> f32 {
+        self.base.u().max(self.base.v()) as f32
+    }
+
+    #[inline(always)]
+    fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<Vec3A> {
+        if level == 0 {
+            return self.tex.sample_level(self.face, self.base, u, v);
+        }
+        let res = level_res(self.base, level as u8);
+        self.tex.sample_derived(self.face, level, res, u, v)
+    }
+
+    #[inline(always)]
+    fn blend(a: Vec3A, b: Vec3A, t: f32) -> Vec3A {
+        a.lerp(b, t)
+    }
+}
+
+/// One face under the `capped` chain, finer than the preload's cap: the
+/// file's own levels from the authored resolution `fine`, then the cap level
+/// `base`, which is this chain's last level and the [`CappedFace`]'s first.
+///
+/// Levels `0..steps` are the `file` chain's — `fine` halved on both axes,
+/// read as tiles — and level `steps` is `base`. The two agree on the widest
+/// axis there, which is what [`trilinear`]'s level selection counts. On a
+/// square face they are the same resolution; on a non-square one the halved
+/// level has already lost short-axis texels the cap level keeps (1024x512
+/// halves to 32x16 where the cap holds 32x32). Stepping the short axis more
+/// slowly instead would mean levels the file does not store, which the
+/// reader reduces from the full-resolution face — the read streaming exists
+/// to avoid.
+struct FinerFace<'a> {
+    tex: &'a PtexStream,
+    face: u32,
+    fine: ptex::Res,
+    base: ptex::Res,
+    /// Levels from `fine` to `base`: the widest axis's log2 difference.
+    steps: usize,
+    levels: usize,
+}
+
+impl MipSource for FinerFace<'_> {
+    type Texel = Vec3A;
+
+    #[inline(always)]
+    fn level_count(&self) -> usize {
+        self.levels
+    }
+
+    #[inline(always)]
+    fn texels_across(&self) -> f32 {
+        self.fine.u().max(self.fine.v()) as f32
+    }
+
+    #[inline(always)]
+    fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<Vec3A> {
+        if level >= self.steps {
+            // The cap level, read as tiles as [`CappedFace`] reads it.
+            self.tex.sample_level(self.face, self.base, u, v)
+        } else {
+            let res = level_res(self.fine, level as u8);
+            self.tex.sample_level(self.face, res, u, v)
+        }
+    }
+
+    #[inline(always)]
+    fn blend(a: Vec3A, b: Vec3A, t: f32) -> Vec3A {
+        a.lerp(b, t)
+    }
+}
+
+/// The `capped` chain's levels at and below the preload's cap, as the reader
+/// derives and caches them (`ptex::DerivedLevels`).
+///
+/// Level 0 is the file's face at the cap — [`capped_res`], the resolution
+/// [`PtexColor`] fetches — through [`decode_face`], the preload's own decode;
+/// each further level is [`reduce_level`] of its parent, the preload's own
+/// reduction. Interleaved linear `f32` RGB, little-endian, exactly the
+/// texels the preloaded arena holds for that face and level. Lookups ask for
+/// levels 1 and coarser only (level 0 is read as tiles, see [`CappedFace`]),
+/// so level 0 is produced as the parent of a derivation and not kept.
+struct CappedLevels {
+    max_log2: i8,
+    triangle: bool,
+    dt: ptex::DataType,
+    n_chan: usize,
+    space: ColorSpace,
+    reduce: LevelReduction,
+}
+
+impl ptex::DerivedLevels for CappedLevels {
+    fn base_res(&self, _faceid: usize, res: ptex::Res) -> ptex::Res {
+        capped_res(res, self.max_log2, self.triangle)
+    }
+
+    fn decode(&self, _faceid: usize, res: ptex::Res, pixels: &[u8]) -> Vec<u8> {
+        let mut texels = vec![0.0f32; res.size() * 3];
+        if pixels.len() >= res.size() * self.dt.size() * self.n_chan {
+            decode_face(pixels, &mut texels, self.dt, self.n_chan, self.space);
+        }
+        to_bytes(&texels)
+    }
+
+    fn derive(&self, _faceid: usize, _k: u8, parent_res: ptex::Res, parent: &[u8]) -> Vec<u8> {
+        let parent: Vec<f32> = parent
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let (sw, sh) = (parent_res.u(), parent_res.v());
+        if parent.len() != sw * sh * 3 {
+            return to_bytes(&vec![0.0; (sw / 2).max(1) * (sh / 2).max(1) * 3]);
+        }
+        to_bytes(&reduce_level(&parent, sw, sh, self.reduce))
+    }
+}
+
+fn to_bytes(texels: &[f32]) -> Vec<u8> {
+    texels.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
 /// One raw sample, scaled and put through `space`'s curve (see
 /// [`crate::ptex_texture::decode_ptex_slice`]): an entry of the `u8` table.
 /// The table is per channel, so it holds the curve alone; the change of
 /// primaries follows per texel, as it does for the preloaded backend.
 fn decode_sample(raw: f32, scale: f32, space: ColorSpace) -> f32 {
     ptex_space(space).decode_curve(raw * scale)
+}
+
+impl PtexStream {
+    /// A lookup under the `capped` chain. `fine` is the finest level served
+    /// (the authored face, or an explicit cap), `max_log2` the preload's cap.
+    ///
+    /// **Routed by the footprint against the cap level, not against `fine`**,
+    /// because that is what makes the coarse half bit-identical rather than
+    /// merely close: a footprint wider than one cap texel goes through
+    /// [`CappedFace`], whose level selection is the preload's to the bit
+    /// (selected against `fine`, `log2` would see a different argument and
+    /// could round the blend weight differently). Only a footprint inside one
+    /// cap texel — where the preload has nothing finer to give — reads the
+    /// file's finer levels through [`FinerFace`].
+    ///
+    /// **Without a pyramid (`CRUST_PTEX_MIP=0`) the footprint is ignored**,
+    /// as [`MipSource`] promises for a single level: every lookup reads
+    /// `fine`, the uncapped authored face unless a cap was set. Routing by
+    /// the footprint there would switch from the authored face to the cap
+    /// face as a surface recedes, a jump in detail with distance.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_capped(
+        &self,
+        face: u32,
+        authored: ptex::Res,
+        fine: ptex::Res,
+        max_log2: i8,
+        fu: f32,
+        fv: f32,
+        width: f32,
+    ) -> Vec3A {
+        if !self.mip {
+            return self
+                .sample_level(face, fine, fu, fv)
+                .unwrap_or(self.fallback);
+        }
+        let base = capped_res(authored, max_log2, self.triangle);
+        let coarse = CappedFace {
+            tex: self,
+            face,
+            base,
+            levels: level_count(base) as usize,
+        };
+        let wide = width.is_finite() && width > 0.0 && width * coarse.texels_across() > 1.0;
+        // `fine` is never coarser than `base`: an explicit cap is the
+        // preload's cap too, and without one `fine` is the authored face.
+        if fine == base || wide {
+            return trilinear(&coarse, fu, fv, width).unwrap_or(self.fallback);
+        }
+        let steps = (fine.ulog2.max(fine.vlog2) - base.ulog2.max(base.vlog2)) as usize;
+        let finer = FinerFace {
+            tex: self,
+            face,
+            fine,
+            base,
+            steps,
+            levels: steps + 1,
+        };
+        trilinear(&finer, fu, fv, width).unwrap_or(self.fallback)
+    }
 }
 
 impl PtexTexture for PtexStream {
@@ -779,6 +1099,10 @@ impl PtexTexture for PtexStream {
         } else {
             0.0
         };
+
+        if let Some(max_log2) = self.capped {
+            return self.eval_capped(face_id, info.res, base, max_log2, fu, fv, width);
+        }
 
         let levels = if self.mip { level_count(base) } else { 1 };
         // The shared trilinear filter, as the preloaded backend runs it; a

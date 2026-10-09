@@ -38,8 +38,7 @@ Typical uses:
 CRUST_TEX=0 CRUST_PTEX=0 crust render -i scene.usda -o untextured.exr
 
 # stream Ptex with a 2 GiB budget
-CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_CACHE_MB=2048 \
-    crust render -i island.usda --stats
+CRUST_PTEX_CACHE_MB=2048 crust render -i island.usda --stats
 ```
 
 On Windows PowerShell, set a variable with `$env:CRUST_TEX = "0"` before running
@@ -85,10 +84,10 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_PTEX`](#crust-ptex) | on | Ptex |
 | [`CRUST_PTEX_MAX_LOG2`](#crust-ptex-max-log2) | 5 preloaded / uncapped streamed | Ptex |
 | [`CRUST_PTEX_MIP`](#crust-ptex-mip) | on | Ptex |
-| [`CRUST_PTEX_STREAM`](#crust-ptex-stream) | **off** | Ptex |
+| [`CRUST_PTEX_STREAM`](#crust-ptex-stream) | on | Ptex |
 | [`CRUST_PTEX_CACHE_MB`](#crust-ptex-cache-mb) | 1024 | Ptex |
 | [`CRUST_PTEX_STREAM_MIN_MB`](#crust-ptex-stream-min-mb) | 8 | Ptex |
-| [`CRUST_PTEX_STREAM_MIPSPACE`](#crust-ptex-stream-mipspace) | `linear` | Ptex |
+| [`CRUST_PTEX_STREAM_MIPSPACE`](#crust-ptex-stream-mipspace) | `capped` | Ptex |
 | [`OCIO`](#ocio) | builtin ACES CG config | colour |
 | [`RAYON_NUM_THREADS`](#rayon-num-threads) | all cores | threads |
 
@@ -303,6 +302,11 @@ The highest Ptex face resolution read, as the log2 of the face edge: `5` is 32 t
 `10` is 1024. Faces authored at a higher resolution are read at this one. Unset, preloaded
 Ptex is capped at 5 and streamed Ptex isn't capped.
 
+The cap is also where a streamed texture's mip chain switches from the file's levels to the
+levels rebuilt in linear light (see
+[`CRUST_PTEX_STREAM_MIPSPACE`](#crust-ptex-stream-mipspace)). Set explicitly, it caps the
+streamed texture too, which then matches the preloaded one at every distance.
+
 ### CRUST_PTEX_MIP
 
 Boolean, default **on**.
@@ -311,17 +315,14 @@ Boolean, default **on**.
 
 ### CRUST_PTEX_STREAM
 
-Boolean, default **off**.
+Boolean, default **on**.
 
-`1` streams Ptex tiles through a cache instead of loading every file fully into memory.
-This is the only switch that is off by default.
+Large Ptex files stream their tiles through a cache instead of being loaded fully into
+memory. Files under [`CRUST_PTEX_STREAM_MIN_MB`](#crust-ptex-stream-min-mb) are still
+loaded fully, so a scene with only small `.ptx` files renders exactly as with streaming off.
 
-{% alert(icon="⚠️") %}
-On its own, `CRUST_PTEX_STREAM=1` usually changes nothing. With Ptex mip maps on (the
-default), a mip-mapped `.ptx` is only streamed if
-[`CRUST_PTEX_STREAM_MIPSPACE=file`](#crust-ptex-stream-mipspace) is also set. Otherwise it
-is loaded into memory. Set both to get the memory saving.
-{% end %}
+`0` loads every Ptex file fully into memory, capped at
+[`CRUST_PTEX_MAX_LOG2`](#crust-ptex-max-log2). This was the default before streaming was.
 
 ### CRUST_PTEX_CACHE_MB
 
@@ -337,27 +338,33 @@ A Ptex file that would take less than this many MiB in memory is loaded fully ev
 streaming is on: a texture smaller than the cache space it would take is cheaper to load.
 `0` streams every file.
 
+Each streamed file keeps one file open for the whole render. Lowering the threshold far
+enough to stream thousands of files can run past the process's open-file limit
+(`ulimit -n`, often 1024); see [Limitations](@/docs/architecture/limitations.md).
+
 ### CRUST_PTEX_STREAM_MIPSPACE
 
-Keyword, default **`linear`**.
+Keyword, default **`capped`**.
 
-Which mip levels a streamed `.ptx` may use.
+Which mip levels a streamed `.ptx` uses.
 
 | value | meaning |
 |-------|---------|
-| `linear` | Refuse the file's stored mip levels. A mip-mapped `.ptx` is loaded into memory instead, and its mip levels are rebuilt in linear light. Correct, but uses the most memory. |
-| `file` | Use the file's own stored mip levels and stream them. Uses much less memory, but minified textures come out slightly darker. |
+| `capped` | The file's own levels above the [`CRUST_PTEX_MAX_LOG2`](#crust-ptex-max-log2) cap (32×32 by default); at and below it, the levels the in-memory texture would use, rebuilt in linear light. Wherever the in-memory texture has texels, the streamed one returns exactly the same values, and close-ups also get the detail above the cap. |
+| `linear` | Don't stream a mip-mapped `.ptx`: load it into memory, where its mip levels are rebuilt in linear light. Uses the most memory. |
+| `file` | Use every level the file stores. Minified textures come out slightly darker. |
 
 Crust Render reads Ptex colour as display-encoded (gamma 2.2) and decodes it, while the
 mip levels stored in a `.ptx` were averaged in the file's own encoding. Averaging encoded
-values makes the coarser levels too dark. The full-resolution level is always correct, so
-the error only shows where a texture is seen from far away.
+values makes the coarser levels too dark. So the levels used when a texture is seen from
+far away have to be rebuilt after decoding. `capped` rebuilds them from the face at the
+cap, which is what a texture loaded into memory holds anyway. A level finer than the cap
+is still the file's, because rebuilding it would mean reading the full-resolution face.
 
-`file` is what production Ptex caches do. It cut the Moana Island's Ptex memory from
-7.34 GiB to 0.61 GiB, and its peak memory from 31.6 GiB to 23.9 GiB. Choosing it accepts that bias in exchange for the memory.
+`file` is what production Ptex caches do, and accepts the darker minified texture.
 
 ```bash
-CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file crust render -i island.usda
+CRUST_PTEX_STREAM_MIPSPACE=file crust render -i island.usda
 ```
 
 ## Other variables

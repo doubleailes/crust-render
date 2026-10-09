@@ -422,12 +422,14 @@ that has already had one removed.
 A `.ptx` carries no marker and needs none: crust binds Ptex colour as
 display-encoded and decodes it by 2.2, while the file's stored levels were
 reduced before that decode. The mismatch is therefore unconditional rather than
-a property of a particular file, and it is refused the same way — a texture
-whose lookups could reach one of those levels is not streamed at all, but
-preloaded, where the pyramid is rebuilt in linear light from the decoded base
-(`MipSpace::Linear`, the default). `CRUST_PTEX_STREAM_MIPSPACE=file` accepts the
-file's chain instead, at a measured 0.147 of darkening on the tiled fixture;
-`docs/ptex_streaming.md` prices that trade against the residency it buys.
+a property of a particular file. The default `capped` chain does not read those
+levels at all below the preload's per-face cap: it derives them, as the
+preloaded pyramid does, in linear light from the decoded face at the cap — the
+file's own level there, which the preload reads too. Above the cap a streamed
+texture reads the file's levels, which the preload does not hold at all.
+`CRUST_PTEX_STREAM_MIPSPACE=linear` refuses such a texture outright and
+preloads it; `=file` accepts the file's whole chain, at a measured 0.147 of
+darkening on the tiled fixture. `docs/ptex_streaming.md` has the details.
 
 So the space is written into the file — `crust:mipspace=` in
 `ImageDescription` for TIFF (following OIIO's own `oiio:SHA-1=` convention) and
