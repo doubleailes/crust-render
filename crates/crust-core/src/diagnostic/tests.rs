@@ -258,7 +258,9 @@ fn a_report_reads_back() {
 #[test]
 fn the_markdown_snapshot() {
     let md = fixture().to_markdown();
-    let expected = include_str!("snapshots/fixture.md");
+    // A Windows checkout with `core.autocrlf` has the file in CRLF; the
+    // rendering is LF everywhere, so only the committed side is normalised.
+    let expected = include_str!("snapshots/fixture.md").replace("\r\n", "\n");
     if md != expected {
         let out = std::env::temp_dir().join("crust-diagnostic-fixture.md");
         let _ = std::fs::write(&out, &md);
