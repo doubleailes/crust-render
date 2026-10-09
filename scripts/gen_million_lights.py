@@ -12,7 +12,8 @@ entry; see openspec/specs/lighting/spec.md, Known gaps):
                     N of them. ~150 bytes of text per light (~150 MB at 1M).
 
   --mode instanced  one PointInstancer placing a tiny emissive sphere N
-                    times. One shared prototype, cheap to import, but the
+                    times, picking one of HUE_BINS prototypes (one per hue
+                    band) by protoIndices. Cheap to import, but the
                     bulbs are emissive geometry, reached by BSDF bounces
                     only, so the floor lighting is far noisier. One RectLight
                     keeps the floor readable.
@@ -40,6 +41,8 @@ SPACING = 0.2      # grid step between bulbs
 INTENSITY = 0.035  # per bulb; with `normalize`, power = pi * intensity
 RADIUS = 0.03      # bulb radius
 SEED = 7
+HUE_BINS = 12      # --mode instanced: one prototype and material per hue band
+SATURATION = 0.65
 
 
 def bulbs(n):
@@ -52,9 +55,11 @@ def bulbs(n):
         x = -field / 2 + (c + 0.5 + rng.uniform(-0.35, 0.35)) * step
         z = -field / 2 + (r + 0.5 + rng.uniform(-0.35, 0.35)) * step
         y = rng.uniform(0.3, 1.5)
-        hue = rng.random()
-        col = colorsys.hsv_to_rgb(hue, 0.65, 1.0)
-        yield (x, y, z), col
+        yield (x, y, z), rng.random()
+
+
+def hsv(hue):
+    return colorsys.hsv_to_rgb(hue, SATURATION, 1.0)
 
 
 def header(f, n, mode):
@@ -87,15 +92,19 @@ def header(f, n, mode):
     if mode == 'instanced':
         # The same power per bulb as `--mode lights`: a normalized light's
         # radiance is its intensity over its area.
+        # Each hue band's material takes the colour at its centre, as
+        # `inputs:color` scales a light's emission in `--mode lights`.
         bulb_l = INTENSITY / (4 * math.pi * RADIUS * RADIUS)
-        f.write('        def Material "Bulb"\n        {\n'
-                '            token outputs:surface.connect = </World/Looks/Bulb/Shader.outputs:surface>\n'
-                '            def Shader "Shader"\n            {\n'
-                '                uniform token info:id = "UsdPreviewSurface"\n'
-                '                color3f inputs:diffuseColor = (0, 0, 0)\n'
-                f'                color3f inputs:emissiveColor = ({bulb_l:.3g}, {bulb_l * 0.85:.3g}, {bulb_l * 0.65:.3g})\n'
-                '                token outputs:surface\n'
-                '            }\n        }\n')
+        for k in range(HUE_BINS):
+            r, g, b = (bulb_l * c for c in hsv((k + 0.5) / HUE_BINS))
+            f.write(f'        def Material "Bulb{k}"\n        {{\n'
+                    f'            token outputs:surface.connect = </World/Looks/Bulb{k}/Shader.outputs:surface>\n'
+                    '            def Shader "Shader"\n            {\n'
+                    '                uniform token info:id = "UsdPreviewSurface"\n'
+                    '                color3f inputs:diffuseColor = (0, 0, 0)\n'
+                    f'                color3f inputs:emissiveColor = ({r:.4g}, {g:.4g}, {b:.4g})\n'
+                    '                token outputs:surface\n'
+                    '            }\n        }\n')
     f.write('    }\n\n')
     h = field * 0.6 + 5
     f.write('    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])\n    {\n'
@@ -113,7 +122,8 @@ def write_lights(f, n, visible):
     # this count. `normalize` makes `intensity` proportional to power, so the
     # bulb radius does not change the exposure.
     f.write('    def Xform "Lights"\n    {\n')
-    for i, ((x, y, z), (r, g, b)) in enumerate(bulbs(n)):
+    for i, ((x, y, z), hue) in enumerate(bulbs(n)):
+        r, g, b = hsv(hue)
         f.write(f'        def SphereLight "L{i}" {{\n'
                 f'            float inputs:radius = {RADIUS}\n'
                 '            bool inputs:normalize = 1\n'
@@ -134,17 +144,22 @@ def write_instanced(f, n, _visible):
             '        float xformOp:rotateX = -90\n'
             '        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]\n'
             '    }\n\n')
+    protos = ', '.join(f'</World/Bulbs/Proto/Bulb{k}>' for k in range(HUE_BINS))
     f.write('    def PointInstancer "Bulbs"\n    {\n'
-            '        rel prototypes = [</World/Bulbs/Proto/Bulb>]\n')
-    f.write(f'        int[] protoIndices = [{", ".join(["0"] * n)}]\n')
+            f'        rel prototypes = [{protos}]\n')
+    f.write('        int[] protoIndices = [')
+    f.write(', '.join(str(min(int(hue * HUE_BINS), HUE_BINS - 1)) for _, hue in bulbs(n)))
+    f.write(']\n')
     f.write('        point3f[] positions = [')
     f.write(', '.join(f'({x:.3f}, {y:.3f}, {z:.3f})' for (x, y, z), _ in bulbs(n)))
     f.write(']\n')
-    f.write('        def Scope "Proto"\n        {\n'
-            '            def Sphere "Bulb" (prepend apiSchemas = ["MaterialBindingAPI"])\n            {\n'
-            f'                double radius = {RADIUS}\n'
-            '                rel material:binding = </World/Looks/Bulb>\n'
-            '            }\n        }\n    }\n')
+    f.write('        def Scope "Proto"\n        {\n')
+    for k in range(HUE_BINS):
+        f.write(f'            def Sphere "Bulb{k}" (prepend apiSchemas = ["MaterialBindingAPI"])\n            {{\n'
+                f'                double radius = {RADIUS}\n'
+                f'                rel material:binding = </World/Looks/Bulb{k}>\n'
+                '            }\n')
+    f.write('        }\n    }\n')
 
 
 def main():
