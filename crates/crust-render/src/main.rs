@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 mod logging;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod products;
 
 use logging::{LoggerLevel, STATS_TARGET};
@@ -120,6 +122,14 @@ enum Command {
         #[arg(long, value_name = "PATH|-")]
         json: Option<std::path::PathBuf>,
     },
+    /// Serve a live editing and rendering session to an MCP client (Claude
+    /// Desktop) over stdin/stdout, until stdin closes.
+    ///
+    /// A session edits one USD stage through an override layer that
+    /// sublayers it, and renders it. stdout carries only the protocol; the
+    /// log goes to stderr. Nothing is loaded until the client opens a session.
+    #[cfg(feature = "mcp")]
+    Mcp,
 }
 
 #[derive(Args)]
@@ -688,13 +698,13 @@ fn beauty_output(output: Option<&str>) -> &str {
 }
 
 /// The scene to render: the USD stage `-i` names, imported under the CLI's
-/// options, or the procedural fallback without one. A failure is already
-/// logged; the error is the exit code.
+/// options, or the procedural fallback without one. The error is the message
+/// to log, or (in an MCP session) to answer with.
 fn load_scene(
     cli: &SceneArgs,
     working_space: Option<&String>,
     assets: &FileAssets,
-) -> std::result::Result<Scene, ExitCode> {
+) -> std::result::Result<Scene, String> {
     let scene = if let Some(t) = &cli.input {
         let input_path = std::path::Path::new(&t);
         debug!("Loading USD scene from {}", input_path.display());
@@ -710,10 +720,7 @@ fn load_scene(
         };
         match Scene::from_usd_with_options(input_path, assets, &options) {
             Ok(scene) => scene,
-            Err(e) => {
-                error!("Failed to load USD scene: {}", e);
-                return Err(ExitCode::FAILURE);
-            }
+            Err(e) => return Err(format!("Failed to load USD scene: {e}")),
         }
     } else {
         debug!("No -i/--input given: building the procedural fallback scene");
@@ -869,6 +876,9 @@ fn main() -> ExitCode {
         Command::Ls { .. } | Command::Diagnostic(_) | Command::Check(_) | Command::Diff { .. } => {
             (logging::Terminal::Stderr, None)
         }
+        // stdout is the protocol: a log line there would corrupt it.
+        #[cfg(feature = "mcp")]
+        Command::Mcp => (logging::Terminal::Stderr, None),
     };
     if let Err(e) = logging::init(cli.level, log_file, log_to) {
         eprintln!("error: {e}");
@@ -885,6 +895,8 @@ fn main() -> ExitCode {
         Command::Diagnostic(args) => diagnostic(args),
         Command::Check(args) => check(args),
         Command::Diff { a, b, json } => diff(a, b, json.as_deref()),
+        #[cfg(feature = "mcp")]
+        Command::Mcp => mcp::run(),
     }
 }
 
@@ -976,7 +988,7 @@ impl DenyKind {
 /// on stdout, or as `crust-check/1` JSON. 0 clean, 3 a denied warning was
 /// raised, 1 an error.
 fn check(args: &CheckArgs) -> ExitCode {
-    let Some(input) = &args.scene.input else {
+    if args.scene.input.is_none() {
         use clap::CommandFactory;
         Cli::command()
             .error(
@@ -984,28 +996,86 @@ fn check(args: &CheckArgs) -> ExitCode {
                 "crust check needs a stage: -i <INPUT>",
             )
             .exit();
-    };
+    }
     if let Some(ocio) = &crust_core::config().ocio
         && let Err(e) = crust_core::color::use_config(ocio)
     {
         error!("$OCIO: {e}");
         return ExitCode::FAILURE;
     }
-    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
-    let mut scene = match load_scene(&args.scene, None, &assets) {
-        Ok(scene) => scene,
-        Err(code) => return code,
+    let checked = match import_checked(args) {
+        Ok(checked) => checked,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
     };
+    checked.assets.release_texture_files();
+    let report = checked.report;
+
+    // The reports first, the status after: a report that cannot be written
+    // is an error even when a warning was denied. The JSON file before the
+    // text, so a failed write prints no report.
+    match args.json.as_deref() {
+        Some(path) => {
+            if let Err(e) = write_json(path, &report.to_json()) {
+                error!("--json {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+            if !is_stdout(path) {
+                print!("{}", report.to_text());
+                info!("Report written to {}", path.display());
+            }
+        }
+        None => print!("{}", report.to_text()),
+    }
+    if report.denied.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(DENIED)
+    }
+}
+
+/// A stage imported as `crust render` would import it, with what `crust
+/// check` reports on it: what `check` prints, and what an MCP session keeps
+/// to render from and to answer its `check` tool with.
+struct Checked {
+    /// The imported scene, its settings with the scene flags applied. Its
+    /// `aovs` and `warnings` are moved out, into `aovs` and the report.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        expect(dead_code, reason = "an MCP session renders it")
+    )]
+    scene: Scene,
+    /// The products a render would write, resolved and refused as `render`
+    /// resolves them (`select_products`); empty for the single beauty EXR.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        expect(dead_code, reason = "an MCP session renders them")
+    )]
+    aovs: AovRequest,
+    report: CheckReport,
+    /// The asset loader the scene was imported with, which owns its texture
+    /// caches: kept as long as the scene is rendered.
+    assets: FileAssets,
+}
+
+/// The body of `crust check`: import `args`' stage, choose its products and
+/// build the `crust-check/1` report. The error is the message to log.
+fn import_checked(args: &CheckArgs) -> std::result::Result<Checked, String> {
+    let input = args
+        .scene
+        .input
+        .as_ref()
+        .ok_or("crust check needs a stage: -i <INPUT>")?;
+    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let mut scene = load_scene(&args.scene, None, &assets)?;
     let import_peak = crust_core::peak_memory_bytes();
     let mut settings = apply_scene_overrides(&args.scene, scene.settings);
     if let Some(region) = args.scene.region {
-        settings = match settings.with_region(region) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("--region: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+        settings = settings
+            .with_region(region)
+            .map_err(|e| format!("--region: {e}"))?;
     }
     scene.settings = settings;
     let (w, h) = settings.get_dimensions();
@@ -1064,29 +1134,12 @@ fn check(args: &CheckArgs) -> ExitCode {
         denied: crust_core::check::denied(&warnings, &kinds),
         warnings,
     };
-    assets.release_texture_files();
-
-    // The reports first, the status after: a report that cannot be written
-    // is an error even when a warning was denied. The JSON file before the
-    // text, so a failed write prints no report.
-    match args.json.as_deref() {
-        Some(path) => {
-            if let Err(e) = write_json(path, &report.to_json()) {
-                error!("--json {}: {e}", path.display());
-                return ExitCode::FAILURE;
-            }
-            if !is_stdout(path) {
-                print!("{}", report.to_text());
-                info!("Report written to {}", path.display());
-            }
-        }
-        None => print!("{}", report.to_text()),
-    }
-    if report.denied.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(DENIED)
-    }
+    Ok(Checked {
+        scene,
+        aovs,
+        report,
+        assets,
+    })
 }
 
 /// `crust diagnostic`: import the stage once, diagnose it, print the
@@ -1122,7 +1175,10 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
     let import_start = Instant::now();
     let mut scene = match load_scene(&args.scene, None, &assets) {
         Ok(scene) => scene,
-        Err(code) => return code,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
     };
     let import = import_start.elapsed();
     let settings = apply_scene_overrides(&args.scene, scene.settings);
@@ -1384,6 +1440,63 @@ fn render(cli: &RenderArgs) -> ExitCode {
             warn!("Ctrl-C cannot be caught ({e}): it will end the render without writing anything");
         }
     }
+    let run = RenderRun {
+        control: &interrupt.control,
+        progress_bar: true,
+        rendering: &|| interrupt.enter(Interrupt::RENDERING),
+        rendered: &|| interrupt.leave_rendering(),
+        anchor: None,
+        beauty: None,
+    };
+    match render_and_write(cli, &run) {
+        Ok(written) if written.stopped || written.interrupted => ExitCode::from(INTERRUPTED),
+        Ok(_) => ExitCode::SUCCESS,
+        Err(code) => code,
+    }
+}
+
+/// What a render-and-write runs under besides its arguments: how its caller
+/// watches and stops it, and where its files go. `crust render` and an MCP
+/// session's final render differ only here (design D8 of `mcp-session`).
+struct RenderRun<'a> {
+    /// The render's control: cancelling it stops the render, whose outputs
+    /// are then written; its snapshots feed `--checkpoint`.
+    control: &'a RenderControl,
+    /// Draw a progress bar on the terminal.
+    progress_bar: bool,
+    /// Called just before the render starts tracing (and before its banner).
+    rendering: &'a dyn Fn(),
+    /// Called once the render has returned: whether the caller was asked to
+    /// stop while it rendered (`crust render`'s Ctrl-C), even if that
+    /// cancelled nothing.
+    rendered: &'a dyn Fn() -> bool,
+    /// The directory relative product paths resolve against, instead of the
+    /// working directory.
+    anchor: Option<&'a Path>,
+    /// Where the beauty goes on a stage without RenderProducts when `-o` is
+    /// not given, instead of `output.exr`.
+    beauty: Option<&'a str>,
+}
+
+/// What a render-and-write did.
+struct Written {
+    /// Every file written, the EXRs and the PNG preview, in order.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        expect(dead_code, reason = "render_final lists them")
+    )]
+    files: Vec<PathBuf>,
+    /// The render was cancelled: the files hold what it traced.
+    interrupted: bool,
+    /// The caller was asked to stop while it rendered ([`RenderRun::rendered`]).
+    stopped: bool,
+}
+
+/// The body of `crust render`, which an MCP session's `render_final` runs
+/// too: import the stage, choose the products, render, write each product's
+/// EXR (or the beauty's) and the PNG preview, and report the statistics. A
+/// failure is already logged; the error is the exit code.
+fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Written, ExitCode> {
     let output = cli.output.clone();
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
@@ -1399,21 +1512,24 @@ fn render(cli: &RenderArgs) -> ExitCode {
         debug!("OCIO config {config} (from {from})");
         if let Err(e) = crust_core::color::use_config(config) {
             error!("{from}: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     }
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
     let scene = match load_scene(cli, cli.working_space.as_ref(), &assets) {
         Ok(scene) => scene,
-        Err(code) => return code,
+        Err(e) => {
+            error!("{e}");
+            return Err(ExitCode::FAILURE);
+        }
     };
     debug!("Scene built in {:?}", load_start.elapsed());
     let output_color = match OutputColor::new(scene.working_space, &cli.display, &cli.view) {
         Ok(c) => c,
         Err(e) => {
             error!("{e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
     // One line however many textures were converted — the per-file lines are
@@ -1429,6 +1545,17 @@ fn render(cli: &RenderArgs) -> ExitCode {
     // first one's path; with none, the single beauty EXR at `-o`.
     let mut aovs = scene.aovs;
     select_products(&mut aovs, output.as_deref());
+    if let Some(dir) = run.anchor {
+        for product in &mut aovs.products {
+            if Path::new(&product.name).is_relative() {
+                product.name = dir.join(&product.name).to_string_lossy().into_owned();
+            }
+        }
+    }
+    let beauty_path = match (output.as_deref(), run.beauty) {
+        (None, Some(beauty)) => beauty,
+        (output, _) => beauty_output(output),
+    };
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;
@@ -1451,7 +1578,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
             }
             Err(e) => {
                 error!("--region: {e}");
-                return ExitCode::FAILURE;
+                return Err(ExitCode::FAILURE);
             }
         };
     }
@@ -1483,7 +1610,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
     let (img_width, img_height) = settings.get_dimensions();
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
     // Before the banner, so a Ctrl-C after it always finds the render to stop.
-    interrupt.enter(Interrupt::RENDERING);
+    (run.rendering)();
     info!(
         "Rendering {}x{}{} at {} spp, max depth {} ({} order){}{}",
         img_width,
@@ -1510,7 +1637,11 @@ fn render(cli: &RenderArgs) -> ExitCode {
     );
     // Progress bar over the engine's (completed, total) callback — the
     // total (rows vs. tiles) is only known once the pass starts.
-    let bar = ProgressBar::new(0);
+    let bar = if run.progress_bar {
+        ProgressBar::new(0)
+    } else {
+        ProgressBar::hidden()
+    };
     bar.set_style(
         indicatif::ProgressStyle::default_bar()
             .template(
@@ -1528,7 +1659,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
     // `--checkpoint`'s preview: where the final PNG goes, if anywhere.
     let checkpoint = cli.checkpoint.and_then(|every| {
         let path = match aovs.products.first() {
-            None => preview_png(beauty_output(output.as_deref())),
+            None => preview_png(beauty_path),
             Some(first) if first.beauty().is_some() => preview_png(&first.name),
             Some(first) => {
                 warn!(
@@ -1540,7 +1671,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
         };
         Some((every, path))
     });
-    let control = &interrupt.control;
+    let control = run.control;
     let request = (!aovs.products.is_empty()).then_some(&aovs);
     let finished = AtomicBool::new(false);
     let rendered = std::thread::scope(|s| {
@@ -1557,7 +1688,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
     // is writing it. A Ctrl-C accepted while rendering ends the run with
     // `INTERRUPTED` whether or not it cut the render short; the outputs say
     // they are partial only when it did.
-    let stopped = interrupt.leave_rendering();
+    let stopped = (run.rendered)();
     let interrupted = rendered.outcome == RenderOutcome::Cancelled;
     let (buffer, film, ray_stats) = (rendered.buffer, rendered.film, rendered.rays);
     if interrupted {
@@ -1604,6 +1735,7 @@ fn render(cli: &RenderArgs) -> ExitCode {
     let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time)
         .for_outcome(rendered.outcome, &ray_stats);
     let output_start = Instant::now();
+    let mut files = Vec::new();
     if let Some(film) = &film {
         // One EXR per product, then the PNG from the first one's beauty.
         let mut written = Vec::new();
@@ -1621,10 +1753,11 @@ fn render(cli: &RenderArgs) -> ExitCode {
                 Ok(channels) => {
                     debug!("{}: {}", path.display(), channels.join(" "));
                     written.push(format!("{} ({} channels)", path.display(), channels.len()));
+                    files.push(path.to_path_buf());
                 }
                 Err(e) => {
                     error!("Error writing {}: {e}", product.prim_path);
-                    return ExitCode::FAILURE;
+                    return Err(ExitCode::FAILURE);
                 }
             }
         }
@@ -1636,20 +1769,17 @@ fn render(cli: &RenderArgs) -> ExitCode {
                 Ok(_) => info!("Image written to: {:?}", png_path),
                 Err(e) => {
                     error!("Error writing PNG: {}", e);
-                    return ExitCode::FAILURE;
+                    return Err(ExitCode::FAILURE);
                 }
             }
+            files.push(png_path);
         } else {
             debug!("{} has no beauty var; no PNG preview", first.prim_path);
         }
-    } else if let Err(code) = write_beauty(
-        &buffer,
-        beauty_output(output.as_deref()),
-        &output_color,
-        &sampling,
-        interrupted,
-    ) {
-        return code;
+    } else {
+        write_beauty(&buffer, beauty_path, &output_color, &sampling, interrupted)?;
+        files.push(PathBuf::from(beauty_path));
+        files.push(preview_png(beauty_path));
     }
     let output_elapsed = output_start.elapsed();
     stats.record("Write output", 0, output_elapsed);
@@ -1686,17 +1816,17 @@ fn render(cli: &RenderArgs) -> ExitCode {
                 "--stats-json {}: {e} (the images are written)",
                 path.display()
             );
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
         if !is_stdout(path) {
             debug!("Statistics written to {}", path.display());
         }
     }
-    if stopped || interrupted {
-        ExitCode::from(INTERRUPTED)
-    } else {
-        ExitCode::SUCCESS
-    }
+    Ok(Written {
+        files,
+        interrupted,
+        stopped,
+    })
 }
 
 #[cfg(test)]

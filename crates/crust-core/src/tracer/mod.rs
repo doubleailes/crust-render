@@ -1136,6 +1136,13 @@ impl Renderer {
                         report(&mut done.lock().unwrap_or_else(|e| e.into_inner()), added);
                     }
                 });
+            // Every pixel has `target` samples now, unless a cancel cut the
+            // stage short.
+            if let Some(control) = control
+                && !interrupted.load(Ordering::Relaxed)
+            {
+                control.reach(target);
+            }
         }
 
         // The frozen buffers the decisions read: every pixel's index and

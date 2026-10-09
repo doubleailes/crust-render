@@ -1,0 +1,53 @@
+{
+  "manifest_version": "0.3",
+  "name": "crust-render",
+  "display_name": "Crust Render",
+  "version": "0.6.0",
+  "description": "Look-dev and lighting by conversation: keep a USD stage open, edit it through an override layer, and render it with crust, a physically based path tracer.",
+  "long_description": "A session works on one USD stage through an override layer that sublayers it. Every edit is an opinion saved in that layer, and what is rendered is always the saved layer, imported as `crust render <layer>` imports it. The layer and its final render are the session's result: any USD tool opens the layer. Nothing else is written. See https://doubleailes.github.io/crust-render/docs/help/claude-desktop/",
+  "author": {
+    "name": "Philippe Llerena",
+    "url": "https://github.com/doubleailes/crust-render"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/doubleailes/crust-render"
+  },
+  "homepage": "https://doubleailes.github.io/crust-render/",
+  "documentation": "https://doubleailes.github.io/crust-render/docs/help/claude-desktop/",
+  "license": "MIT",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/crust",
+    "mcp_config": {
+      "command": "${__dirname}/server/crust",
+      "args": ["mcp"],
+      "env": {},
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/crust.exe"
+        }
+      }
+    }
+  },
+  "tools": [
+    { "name": "open_session", "description": "Open a USD stage through an override layer, or resume one." },
+    { "name": "query", "description": "What the stage composes at a prim or an attribute, and which layer says so." },
+    { "name": "check", "description": "The crust check report of the session's layer." },
+    { "name": "set_attribute", "description": "Author an attribute value in the override layer." },
+    { "name": "set_variant", "description": "Author a variant selection." },
+    { "name": "set_active", "description": "Activate or deactivate a prim." },
+    { "name": "bind_material", "description": "Bind a material to a prim." },
+    { "name": "author_usda", "description": "Merge a USDA snippet into the override layer as one edit." },
+    { "name": "undo", "description": "Restore the layer as it was before the last edit." },
+    { "name": "render", "description": "Start a progressive render and return within a time budget with the image so far." },
+    { "name": "snapshot", "description": "A render's latest image and progress." },
+    { "name": "cancel", "description": "Stop a render, keeping what it traced." },
+    { "name": "probe", "description": "A pixel's beauty and AOV values." },
+    { "name": "diff", "description": "Compare two renders as crust diff compares two images." },
+    { "name": "render_final", "description": "Render the layer as crust render would, and list the files written." }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32"]
+  }
+}

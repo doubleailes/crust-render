@@ -2,7 +2,7 @@
 //! stop it ([`RenderControl`]), and how the render ended ([`RenderOutcome`]).
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::buffer::Buffer;
 
@@ -43,6 +43,9 @@ pub struct RenderControl {
     /// Whether the render publishes into this control at all.
     snapshots: bool,
     generation: AtomicU64,
+    /// The samples every pixel of the pass in progress has taken: the last
+    /// completed stage of its first sweep.
+    reached: AtomicU32,
     /// The latest published beauty, region-sized; `None` before the first
     /// publish. Workers publish under the lock, readers clone under it.
     display: Mutex<Option<Buffer>>,
@@ -61,6 +64,7 @@ impl RenderControl {
             cancel: AtomicBool::new(false),
             snapshots: true,
             generation: AtomicU64::new(0),
+            reached: AtomicU32::new(0),
             display: Mutex::new(None),
         }
     }
@@ -97,6 +101,20 @@ impl RenderControl {
     /// How many times the render has published: 0 before the first.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    /// The samples every pixel of the pass in progress has taken, as its
+    /// first sweep completes each stage (1, 2, 4, … spp): 0 before the
+    /// first stage completes. The adaptive rounds after the sweep leave it
+    /// where the sweep did, since pixels then take different counts; a
+    /// guided render's training passes and final pass each start it over.
+    pub fn samples_reached(&self) -> u32 {
+        self.reached.load(Ordering::Relaxed)
+    }
+
+    /// Records that every pixel of the pass has taken `spp` samples.
+    pub(crate) fn reach(&self, spp: u32) {
+        self.reached.store(spp, Ordering::Relaxed);
     }
 
     /// A copy of the latest published beauty, with the generation it

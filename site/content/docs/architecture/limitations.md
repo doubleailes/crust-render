@@ -168,3 +168,15 @@ render.
   [Diagnosing a render](@/docs/help/diagnosing-a-render.md#limitations) for the rest.
 - **Guiding is suggested as an attribute.** `crust render` has no guiding flag, so a
   guiding suggestion is authored on the stage (`crust:pathGuiding`).
+
+## MCP sessions
+
+- **Every edit imports the whole stage again**, and a session holds the stage it authors
+  beside the scene it renders, about twice a render's import memory: Moana-scale stages
+  are out of reach. See [Look-dev with Claude Desktop](@/docs/help/claude-desktop.md#limits).
+- **Unauthored schema attributes have no type in a session.** Neither openusd 0.7 nor
+  openusd-schemas 0.7 ships schema data, and the session registers none, so
+  `set_attribute` on an attribute nothing authors yet (a light's `inputs:exposure`) needs
+  its `type`, and `query` cannot show its fallback. openusd-schemas' unreleased `main`
+  ships the data; the fix comes with crust's move to the release that includes it.
+- **`probe` names no prim or material**: there is no table from a hit to its prim yet.

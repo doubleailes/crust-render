@@ -34,7 +34,7 @@ progress bar SHALL be drawn.
 `open_session` SHALL take an input stage and an output path. When `output` does not
 exist, it SHALL write a USD layer there whose only composition arc is a sublayer on
 the input, open the stage on that layer, and import it. It SHALL refuse an `output`
-that is one of the input's own layers.
+that is one of the input's own layers, and one that is not a `.usda` text layer.
 
 #### Scenario: A new session
 
@@ -47,6 +47,12 @@ that is one of the input's own layers.
 
 - **WHEN** `output` names the input itself or a layer it composes
 - **THEN** the call fails and no file is written
+
+#### Scenario: Output is not a text layer
+
+- **WHEN** `output` is `shot_lookdev.usdc`
+- **THEN** the call fails, saying the layer must be a `.usda`, and no file is
+  written
 
 ### Requirement: Resuming a session
 

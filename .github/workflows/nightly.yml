@@ -261,6 +261,9 @@ jobs:
           target/${{ matrix.target }}/release/crust render \
             -i samples/cornellbox.usda -o "$RUNNER_TEMP/smoke.exr" -s 1
           test -s "$RUNNER_TEMP/smoke.exr"
+          # And the MCP server the Desktop bundle launches answers `initialize`.
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+            | target/${{ matrix.target }}/release/crust mcp | grep -q '"serverInfo"'
       - name: Package
         run: |
           name=crust-nightly-${{ matrix.target }}
@@ -282,11 +285,32 @@ jobs:
           esac
           rm -r "$name"
           # One checksum file per archive; nightly-publish merges them.
-          if command -v sha256sum > /dev/null; then
-            sha256sum "$archive" > "$archive.sha256"
-          else
-            shasum -a 256 "$archive" > "$archive.sha256"
-          fi
+          checksum() {
+            if command -v sha256sum > /dev/null; then
+              sha256sum "$1" > "$1.sha256"
+            else
+              shasum -a 256 "$1" > "$1.sha256"
+            fi
+          }
+          checksum "$archive"
+          # The Claude Desktop extension, for the platforms Desktop runs on:
+          # an MCP Bundle (a zip) of packaging/mcpb/manifest.json and this
+          # target's binary, which Desktop launches as `crust mcp`.
+          case "${{ matrix.target }}" in
+            *linux*) ;;
+            *)
+              mkdir -p mcpb/server
+              cp ../packaging/mcpb/manifest.json mcpb/
+              cp "../target/${{ matrix.target }}/release/$bin" mcpb/server/
+              bundle=crust-nightly-${{ matrix.target }}.mcpb
+              case "${{ matrix.target }}" in
+                *windows*) (cd mcpb && 7z a -tzip "../$bundle" manifest.json server > /dev/null) ;;
+                *) (cd mcpb && zip -qr "../$bundle" manifest.json server) ;;
+              esac
+              rm -r mcpb
+              checksum "$bundle"
+              ;;
+          esac
       # Which compiler built it, so nightly-publish can check it is the one
       # the `latest` legs passed on (a new nightly may land in between).
       - name: Record the toolchain
@@ -351,6 +375,19 @@ jobs:
               exit 1; }
             cat "$a.sha256" >> SHA256SUMS
             echo "$a" >> "$RUNNER_TEMP/assets.txt"
+            # The Claude Desktop bundle, built beside every archive but Linux's.
+            case "$t" in
+              *linux*) ;;
+              *)
+                b=crust-nightly-$t.mcpb
+                test -s "$b" || {
+                  echo "::error::no Claude Desktop bundle $b; not publishing"; exit 1; }
+                sha256sum -c "$b.sha256" || {
+                  echo "::error::$b does not match its checksum; not publishing"; exit 1; }
+                cat "$b.sha256" >> SHA256SUMS
+                echo "$b" >> "$RUNNER_TEMP/assets.txt"
+                ;;
+            esac
           done
           echo SHA256SUMS >> "$RUNNER_TEMP/assets.txt"
       - name: Publish

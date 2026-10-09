@@ -19,8 +19,22 @@ traversal-stats = ["crust-core/traversal-stats"]
 bvh8 = ["crust-core/bvh8"]
 # MaterialX shading programs compiled to machine code (see crust-core's `jit`
 # feature). `--no-default-features` builds the interpreter-only renderer.
-default = ["jit"]
+default = ["jit", "mcp"]
 jit = ["crust-core/jit"]
+# `crust mcp`: a Model Context Protocol server over stdio for an agent's
+# live session (the `mcp-session` capability). It brings in the MCP SDK and
+# an async runtime, which carry only the protocol: the session itself runs
+# on its own thread and the renders on rayon. `--no-default-features`
+# builds the CLI without either.
+mcp = [
+    "dep:rmcp",
+    "dep:tokio",
+    "dep:openusd",
+    "dep:serde",
+    "dep:schemars",
+    "dep:serde_json",
+    "dep:base64",
+]
 
 [dependencies]
 crust-core = { path = "../crust-core" }
@@ -36,6 +50,22 @@ exr.workspace = true
 # the partial outputs are written. Its `unsafe` is in installing the signal
 # handler, never on the render path; this crate stays `forbid(unsafe_code)`.
 ctrlc = "3.4"
+# `mcp`: the official Rust MCP SDK, server side over stdin/stdout only (no
+# HTTP transport, no auth), and the current-thread tokio runtime it runs on.
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io"], optional = true }
+tokio = { version = "1.52", default-features = false, features = ["rt", "macros", "io-std", "sync", "time"], optional = true }
+# `mcp`: the session authors its override layer through openusd, the same
+# crate (and version) crust-core imports with.
+# With `serde`, so a queried value reaches the client as the JSON of its
+# `sdf::Value`.
+openusd = { version = "0.7", default-features = false, features = ["serde"], optional = true }
+# `mcp`: the tools' parameters and results. `schemars` is the version rmcp
+# derives its input schemas with.
+serde = { version = "1.0", features = ["derive"], optional = true }
+schemars = { version = "1.2", optional = true }
+serde_json = { version = "1.0.151", optional = true }
+# `mcp`: a render's PNG goes to the client as base64 image content.
+base64 = { version = "0.22", optional = true }
 
 # The probe examples read a stage directly (`ptex_verify`, `proto_probe`,
 # `rel_probe`, ...) and read `.ptx` headers and faces through the raw reader

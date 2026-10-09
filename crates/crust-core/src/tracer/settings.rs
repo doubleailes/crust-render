@@ -138,7 +138,7 @@ impl SamplingStrategy {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderSettings {
     pub(super) samples_per_pixel: u32,
     pub(super) max_depth: u32,
