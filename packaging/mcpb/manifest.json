@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "crust-render",
   "display_name": "Crust Render",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Look-dev and lighting by conversation: keep a USD stage open, edit it through an override layer, and render it with crust, a physically based path tracer.",
   "long_description": "A session works on one USD stage through an override layer that sublayers it. Every edit is an opinion saved in that layer, and what is rendered is always the saved layer, imported as `crust render <layer>` imports it. The layer and its final render are the session's result: any USD tool opens the layer. Nothing else is written. See https://doubleailes.github.io/crust-render/docs/help/claude-desktop/",
   "author": {
