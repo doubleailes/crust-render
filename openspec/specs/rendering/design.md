@@ -465,7 +465,7 @@ that cost 0.7% of mean spp). The schedule is a pure function of `(spp,
 first_check)`, computed once, so the round count and the progress total are
 known up front. With a fixed batch of 4 the check points sat exactly where the
 per-pixel loop had them, and `t < 0` was proved bit-identical to the pre-change
-binary (cornellbox 64 spp, minimum 32: `exr_diff` all zeros, 102,171 pixels
+binary (cornellbox 64 spp, minimum 32: `crust diff` all zeros, 102,171 pixels
 stopped early on both); the growing batch retires that comparison, which had
 served its purpose. What stays pinned: the same sample indices whatever the
 schedule, "exactly the samples the pixel would take alone" under `t < 0`, and
@@ -548,7 +548,7 @@ alignment), plus 5 B of index/active buffers, per pixel. At 3840×2160 the rende
 phase's peak RSS went from 442 MB to 755 MB (cornellbox, 8 spp) — about +500 MB,
 as the design's estimate predicted. If it ever matters, `sum` as an unaligned
 `[f32; 3]` and dropping `samples_end` outside training passes bring it to 48 B.
-Checked and holding elsewhere: tiles ↔ scanlines are `exr_diff`-identical on
+Checked and holding elsewhere: tiles ↔ scanlines are `crust diff`-identical on
 cornellbox at 128 spp with `t = 1`, and on `cornellbox_guided.usda` (training
 passes non-adaptive, the final pass adaptive under the guiding field); Mitchell,
 the one filter with negative weights, renders rectlight with a finite error and

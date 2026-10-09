@@ -16,6 +16,8 @@ pub mod aov;
 mod buffer;
 mod camera;
 pub mod color;
+/// `crust diff`'s comparison of two decoded images.
+pub mod compare;
 pub mod config;
 pub mod diagnostic;
 mod environment;
@@ -35,8 +37,12 @@ mod pdf;
 /// the render, after Guerilla Render's "Render Profile".
 pub mod profile;
 mod ray;
+/// The envelope and value rules every JSON report shares.
+pub mod report;
 mod rt_world;
 mod scene;
+/// What every EXR records about how it was sampled.
+pub mod stamp;
 /// MaterialX surfaces — `MtlxMaterial`, which evaluates a document's closure
 /// tree (`closure`), and the importer's `load`. The document reader itself is the `crust-mtlx`
 /// crate, re-exported below as [`mtlx`].
@@ -98,7 +104,10 @@ pub use ray::{
 };
 pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
 pub use scene::Scene;
-pub use scene::{AssetLoader, ListKind, NoAssets, UsdImportOptions};
+pub use scene::{
+    AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
+    MaterialRecord, NoAssets, UsdImportOptions,
+};
 #[cfg(feature = "traversal-stats")]
 pub use stats::traversal_report;
 pub use stats::{

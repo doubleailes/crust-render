@@ -534,8 +534,19 @@ impl AffineShape {
     /// perimeter), which are close but not what the spec asks for.
     pub(super) fn integrate_area(&self) -> f32 {
         let local = self.unit.local_area();
+        // Under a placement that scales the curved axes uniformly (any
+        // similarity, for the sphere) the area scale is the same at every
+        // normal, so the grid below would only re-add one value 131k times —
+        // at a million translated sphere lights, that grid was the import.
+        let uniform = match self.unit {
+            UnitShape::Disk => true,
+            UnitShape::Sphere => self.scales_uniformly(&[0, 1, 2]),
+            UnitShape::Cylinder => self.scales_uniformly(&[1, 2]),
+        };
         let mean = match self.unit {
             UnitShape::Disk => self.area_scale(-Vec3A::Z) as f64,
+            UnitShape::Sphere if uniform => self.area_scale(Vec3A::Z) as f64,
+            UnitShape::Cylinder if uniform => self.area_scale(Vec3A::Y) as f64,
             UnitShape::Cylinder => {
                 const N: usize = 4096;
                 (0..N)
@@ -563,6 +574,23 @@ impl AffineShape {
             }
         };
         (local as f64 * mean) as f32
+    }
+
+    /// Whether the placement's columns are mutually perpendicular and those
+    /// in `axes` equally long, exactly up to a few ulps — then
+    /// [`AffineShape::area_scale`] is constant over normals spanned by `axes`.
+    fn scales_uniformly(&self, axes: &[usize]) -> bool {
+        const TOL: f32 = 4.0 * f32::EPSILON;
+        let m = self.light_to_world.matrix3;
+        let cols = [m.x_axis, m.y_axis, m.z_axis];
+        let len = cols.map(|c| c.length());
+        let s = len[axes[0]];
+        let perpendicular =
+            |a: usize, b: usize| cols[a].dot(cols[b]).abs() <= TOL * len[a] * len[b];
+        axes.iter().all(|&a| (len[a] - s).abs() <= TOL * s)
+            && perpendicular(0, 1)
+            && perpendicular(0, 2)
+            && perpendicular(1, 2)
     }
 }
 

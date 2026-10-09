@@ -194,7 +194,7 @@ central argument of the Arvo (1995) and Ureña (2013) papers.
 
 ### 3.6 Baseline, measured
 
-Protocol as in §8: 1024 spp reference, 16 spp test, `exr_diff` relMSE, same
+Protocol as in §8: 1024 spp reference, 16 spp test, `crust diff` relMSE, same
 binary. These are the numbers from **before** any change in §9. §3.7 has what
 the first one did.
 
@@ -720,7 +720,7 @@ none of the rest: power, distance and orientation cannot see a wall.
 samples at 16 spp with **0 differing pixels** against the previous commit.
 
 **Measured, noise.** relMSE at 16 spp against a 1024 spp `power` reference,
-`--indirect-clamp 0`. "Trimmed" discards the worst 0.1% of pixels (`exr_diff`
+`--indirect-clamp 0`. "Trimmed" discards the worst 0.1% of pixels (`crust diff`
 now prints both), because on scenes with fireflies one pixel can decide the
 mean. Scenes marked (4) average four seeds (`-f 1..4`); `domelight`'s full relMSE
 varies 9× between seeds under power alone.
@@ -1263,7 +1263,7 @@ checking is *how much* noise, and proof that nothing *but* noise moved. On top o
    exactly 16 samples (below `minSamplesPerPixel`), so the comparison is
    equal-sample.
 3. **Metric.**
-   `exr_diff ref.exr test.exr` prints `relmse:`, the mean of
+   `crust diff ref.exr test.exr` prints `relmse:`, the mean of
    `(test − ref)² / (ref² + 0.01)`, the literature's standard. Use it, not
    `rmse`, which on `veach_mis` is dominated by the camera-visible light
    spheres. It also prints `relmse (trimmed 0.1%)`, the same with the worst

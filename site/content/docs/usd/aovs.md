@@ -102,7 +102,8 @@ what it authors itself, as `UsdRenderComputeSpec` does.
 Text attributes authored as `driver:parameters:*` on a product are copied into its EXR
 header: `driver:parameters:artist` as `artist`, and `driver:parameters:OpenEXR:<key>` as
 `<key>`. A forwarded `colorInteropID` is refused with a warning: crust sets it to the space
-it rendered in.
+it rendered in. So is any `driver:parameters:crust:*` attribute: the `crust:` names are
+the [sampling stamp](#how-the-pixels-were-sampled) crust writes itself.
 
 ## Vars
 
@@ -596,6 +597,39 @@ In any working space other than linear Rec.709, the header also carries the spac
 `chromaticities`, so any EXR reader knows the primaries. (An EXR without `chromaticities`
 is Rec.709 by the format's definition.) The single beauty EXR written without products
 carries the same two attributes in a non-Rec.709 working space, and none in `lin_rec709`.
+
+### How the pixels were sampled
+
+Every EXR `crust render` writes, each product and the single beauty alike, records how
+its pixels were sampled and what they were rendered from, as typed header attributes.
+Each is named `crust:` plus the render-setting attribute that sets it, so the same name
+appears on the stage, in the EXR and in the [command line](@/docs/reference/command-line.md)
+it mirrors:
+
+| attribute | EXR type | value | set by |
+|-----------|----------|-------|--------|
+| `crust:spp` | `int` | samples per pixel | [`-s`](@/docs/reference/command-line.md#samples), `crust:samplesPerPixel` |
+| `crust:minSpp` | `int` | the adaptive minimum | `crust:minSamplesPerPixel` |
+| `crust:sppTaken` | `v2i` | the fewest and most samples any pixel took | — |
+| `crust:varianceThreshold` | `float` | the adaptive threshold | `crust:varianceThreshold` |
+| `crust:indirectClamp` | `float` | the firefly clamp, `0` when off | [`--indirect-clamp`](@/docs/reference/command-line.md#indirect-clamp), `crust:indirectClamp` |
+| `crust:maxDepth` | `int` | the path depth cap | `crust:maxDepth` |
+| `crust:lightSamples` | `int` | light samples at the first vertex | [`--light-samples`](@/docs/reference/command-line.md#light-samples), `crust:lightSamples` |
+| `crust:lightSamplesIndirect` | `int` | light samples at later vertices | [`--light-samples-indirect`](@/docs/reference/command-line.md#light-samples-indirect), `crust:lightSamplesIndirect` |
+| `crust:samplingStrategy` | `string` | `power`, `balance`, `light` or `bsdf` | [`--strategy`](@/docs/reference/command-line.md#strategy), `crust:samplingStrategy` |
+| `crust:lightSelection` | `string` | `power`, `uniform` or `learned` | [`--light-selection`](@/docs/reference/command-line.md#light-selection), `crust:lightSelection` |
+| `crust:pixelFilter` | `string` | the filter's name | [`--filter`](@/docs/reference/command-line.md#filter), `crust:pixelFilter` |
+| `crust:pixelFilterRadius` | `float` | its radius in pixels | [`--filter-radius`](@/docs/reference/command-line.md#filter-radius), `crust:pixelFilterRadius` |
+| `crust:frame` | `double` | the time code evaluated, a subframe included (not the sampler seed); absent without one | [`-f`](@/docs/reference/command-line.md#frame) |
+| `crust:camera` | `string` | the camera rendered through, after any fallback; absent for the procedural camera | [`--camera`](@/docs/reference/command-line.md#camera), `rel camera` |
+| `crust:version` | `string` | the crust version | — |
+
+The working space is not repeated: `colorInteropID` already records it. The stamp
+changes no pixel, and costs nothing during the render: it is written once, with the
+file. [`crust diff`](@/docs/reference/command-line.md#diff) reads it to warn when two
+images cannot be compared pixel for pixel.
+
+### Crops
 
 A render of part of the frame, through
 [`dataWindowNDC`](@/docs/usd/render-settings.md#datawindowndc) or
