@@ -8,10 +8,12 @@
 //! (the CLI) resolves the products and decides `denied`; the engine writes
 //! nothing.
 
+use std::fmt::Write as _;
+
 use serde::Serialize;
 
-use crate::diagnostic::report::{Finding, SceneInfo, Setting};
-use crate::{Phase, SceneCounters, Warning, WarningCode};
+use crate::diagnostic::report::{Action, Finding, SceneInfo, Setting};
+use crate::{Phase, SceneCounters, Warning, WarningCode, WarningKind};
 
 /// The `crust-check/1` report's `format`.
 pub const FORMAT: &str = "crust-check/1";
@@ -50,6 +52,182 @@ impl CheckReport {
     pub fn to_json(&self) -> String {
         crate::report::Report::new(FORMAT, self).to_json()
     }
+
+    /// The text report, in the spec's order: the render described, effective
+    /// settings, import costs and counts, findings, warnings, then one
+    /// closing line of totals.
+    pub fn to_text(&self) -> String {
+        to_text(self)
+    }
+}
+
+/// The codes of the records whose kind is in `kinds`, in record order — what
+/// `--deny` matched.
+pub fn denied(warnings: &[Warning], kinds: &[WarningKind]) -> Vec<WarningCode> {
+    warnings
+        .iter()
+        .filter(|w| kinds.contains(&w.kind))
+        .map(|w| w.code)
+        .collect()
+}
+
+fn to_text(r: &CheckReport) -> String {
+    let mut o = String::new();
+    let s = &r.scene;
+    let _ = writeln!(o, "crust check: {}", s.path);
+    let _ = writeln!(o);
+    let _ = writeln!(o, "Render");
+    let frame = s
+        .frame
+        .map_or_else(|| "default values".into(), |f| f.to_string());
+    let _ = writeln!(o, "  frame       {frame}");
+    let camera = s.camera.as_deref().unwrap_or("procedural default");
+    let _ = writeln!(o, "  camera      {camera}");
+    let [w, h] = s.resolution;
+    let _ = writeln!(o, "  resolution  {w}x{h}");
+    let region = s.region.map_or_else(
+        || "full frame".into(),
+        |[x0, y0, x1, y1]| format!("{x0},{y0},{x1},{y1}"),
+    );
+    let _ = writeln!(o, "  region      {region}");
+    for p in &r.products {
+        let from = p
+            .prim
+            .as_deref()
+            .map_or(String::new(), |p| format!(" ({p})"));
+        let _ = writeln!(
+            o,
+            "  writes      {}{from}: {}",
+            p.file,
+            p.channels.join(" ")
+        );
+    }
+    let _ = writeln!(o);
+
+    let _ = writeln!(o, "Effective settings");
+    let width = r
+        .effective_settings
+        .iter()
+        .map(|s| s.name.len())
+        .max()
+        .unwrap_or(0);
+    for e in &r.effective_settings {
+        let by: Vec<&str> = [e.flag.as_deref(), e.usd_attribute.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let _ = writeln!(o, "  {:width$}  {}  ({})", e.name, e.value, by.join(", "));
+    }
+    let _ = writeln!(o);
+
+    let _ = writeln!(o, "Import");
+    for p in &r.import {
+        let indent = "  ".repeat(1 + p.depth as usize);
+        let peak = p
+            .peak_end
+            .map_or_else(String::new, |b| format!(", peak {}", mib(b)));
+        let _ = writeln!(
+            o,
+            "{indent}{}: {:.2} s{peak}",
+            p.name,
+            p.duration.as_secs_f64()
+        );
+    }
+    let c = &r.counts;
+    let _ = writeln!(
+        o,
+        "  {} geometries, {} light(s), {} volume region(s)",
+        c.geometries, c.lights, c.volumes
+    );
+    let _ = writeln!(o);
+
+    let _ = writeln!(o, "Findings");
+    if r.findings.is_empty() {
+        let _ = writeln!(o, "  no findings");
+    }
+    for f in &r.findings {
+        let action = match &f.action {
+            Action::Set {
+                flag,
+                usd_attribute,
+                value,
+            } => {
+                let by: Vec<&str> = [flag.as_deref(), usd_attribute.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                format!("set {} = {value}", by.join(" / "))
+            }
+            Action::None { none } => format!("none — {none}"),
+        };
+        let _ = writeln!(
+            o,
+            "  {} ({}): {}. Action: {action}.",
+            f.id,
+            f.kind.name(),
+            f.summary
+        );
+    }
+    let _ = writeln!(o);
+
+    let _ = writeln!(o, "Warnings");
+    if r.warnings.is_empty() {
+        let _ = writeln!(o, "  no warnings");
+    }
+    for w in &r.warnings {
+        // `prims` keeps distinct prims, so a count above its length can be
+        // repeats on the listed ones: only a full list may have turned one
+        // away.
+        let more = if w.prims.len() == crate::warnings::MAX_PRIMS {
+            ", …"
+        } else {
+            ""
+        };
+        let prims = if w.prims.is_empty() {
+            String::new()
+        } else {
+            format!(": {}{more}", w.prims.join(", "))
+        };
+        let _ = writeln!(o, "  {} {} ×{}{prims}", w.kind, w.code, w.count);
+    }
+    if !r.denied.is_empty() {
+        let codes: Vec<&str> = r.denied.iter().map(|c| c.as_str()).collect();
+        let _ = writeln!(o, "  denied: {}", codes.join(", "));
+    }
+    let _ = writeln!(o);
+    let _ = writeln!(o, "{}", totals(r));
+    o
+}
+
+/// The closing line: the findings, and the warnings by kind.
+fn totals(r: &CheckReport) -> String {
+    let findings = match r.findings.len() {
+        0 => "no findings".to_owned(),
+        1 => "1 finding".to_owned(),
+        n => format!("{n} findings"),
+    };
+    if r.warnings.is_empty() {
+        return format!("{findings} and no warnings");
+    }
+    let by_kind: Vec<String> = WarningKind::ALL
+        .iter()
+        .map(|&k| {
+            let n: u64 = r
+                .warnings
+                .iter()
+                .filter(|w| w.kind == k)
+                .map(|w| w.count)
+                .sum();
+            format!("{n} {k}")
+        })
+        .collect();
+    let total: u64 = r.warnings.iter().map(|w| w.count).sum();
+    let warnings = if total == 1 { "warning" } else { "warnings" };
+    format!("{findings}; {total} {warnings} ({})", by_kind.join(", "))
+}
+
+fn mib(bytes: u64) -> String {
+    format!("{:.0} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 #[cfg(test)]
@@ -203,5 +381,29 @@ mod tests {
         assert!(value["findings"][0]["evidence"]["textures"].is_null());
         assert!(value["scene"]["region"].is_null());
         assert!(value["scene"]["frame"].is_null());
+    }
+
+    /// `…` follows a warning's prims only when the list is full: a count
+    /// above its length can be repeats on the prims listed.
+    #[test]
+    fn an_ellipsis_only_after_a_full_prim_list() {
+        let line = |prims: Vec<String>| {
+            let mut r = report();
+            r.warnings[0].count = 40;
+            r.warnings[0].prims = prims;
+            let text = r.to_text();
+            text.lines()
+                .find(|l| l.contains(r.warnings[0].code.as_str()))
+                .expect("the warning's line")
+                .to_owned()
+        };
+        let complete = line(vec!["/a".into(), "/b".into()]);
+        assert!(complete.ends_with(": /a, /b"), "{complete}");
+        let full = line(
+            (0..crate::warnings::MAX_PRIMS)
+                .map(|i| format!("/p{i}"))
+                .collect(),
+        );
+        assert!(full.ends_with(", …"), "{full}");
     }
 }

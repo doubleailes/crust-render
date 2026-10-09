@@ -473,12 +473,19 @@ two cannot disagree on an import-only finding
 `select_products` (which applies `refuse_shared_paths`) and `product_channels`, and the
 default beauty path through `beauty_output`, which `render` calls too.
 
-**Known gap: products refused by the CLI are not warning records.** A product with no
+Products the CLI refuses are warning records like the import's. A product with no
 `productName`, no writable var, or a path another product already claims is dropped by
-`select_products` / `refuse_shared_paths` with a plain `warn!` on stderr: that happens
-in the CLI, after the import's `WarningScope` has closed, so it is absent from
-`products` but has no code and no record, and `--deny` cannot see it. Coding it needs a
-CLI-side scope.
+`select_products` / `refuse_shared_paths` with `product.no_name`,
+`product.no_writable_vars` or `product.shared_path`. That happens after the import's
+`WarningScope` has closed, so `check` selects under a scope of its own and appends its
+records to the import's, where `--deny` sees them
+(`products_the_render_would_refuse_are_denied`). `render` raises the same coded lines
+and collects nothing.
+
+The text report and `denied` live in `crust_core::check` beside the report type
+(`CheckReport::to_text`), as the diagnostic's Markdown lives in
+`crust_core::diagnostic`; `main.rs` keeps the orchestration. With `--json PATH` the
+file is written before the text is printed, so a failed write prints no report.
 
 Comparability's adaptive note reads the tracer's own rule (`tracer::samples_adaptively`,
 over the `adaptive_check_points` `render_pass` uses), not `spp > minSpp`: with the

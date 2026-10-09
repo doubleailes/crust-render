@@ -91,8 +91,9 @@ and writes either text or JSON. The JSON is written through the existing
 `write_json` and `is_stdout` helpers, so `--json -` moves the log to stderr as for
 `ls`, `diff` and `--stats-json`.
 
-The text writer is a small function in `main.rs`, as `ls`'s text output is today.
-If it grows past about 100 lines it moves to `crust-render/src/check.rs`.
+The text writer is `CheckReport::to_text` in `crust_core::check`, beside the report
+type, as the diagnostic's Markdown is `crust_core::diagnostic`'s: `crust-render` keeps
+its three files, and `main.rs` only orchestrates.
 
 ### D5. `--deny` is a typed list, evaluated after the report is built
 
@@ -111,11 +112,11 @@ subcommands, documented in `reference/command-line.md`.
 
 ## Risks / Trade-offs
 
-- [Products dropped by `refuse_shared_paths` warn from the CLI, outside the import's
-  warning scope, so they never become records] → the product is absent from
-  `products` and the WARN line is on stderr. This is noted as a known gap in the
-  `scene-check` design record. Coding it is a follow-up once CLI-side warnings have
-  a scope.
+- [Products dropped by `select_products` / `refuse_shared_paths` are refused in the
+  CLI, after the import's warning scope has closed] → they are coded
+  (`product.no_name`, `product.no_writable_vars`, `product.shared_path`), and `check`
+  selects products under its own scope and appends those records to the import's, so
+  `--deny` sees them.
 - [A check costs a full import: minutes on Moana or ALab] → still far cheaper than
   a render. The import phases in the report make the cost visible. The faster
   import is a measured follow-up (Non-Goals).

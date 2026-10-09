@@ -287,7 +287,7 @@ fn peak_memory(f: &Facts) -> Option<Finding> {
         "peak_memory",
         FindingKind::Memory,
         format!(
-            "memory peaked at {:.0}% of the machine's",
+            "memory peaked at {:.0}% of the machine's memory",
             100.0 * peak as f64 / total as f64
         ),
         Evidence::new()

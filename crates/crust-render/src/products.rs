@@ -150,7 +150,9 @@ pub fn refuse_shared_paths(products: &mut Vec<AovProduct>) {
     products.retain(|p| {
         let path: std::path::PathBuf = Path::new(&p.name).components().collect();
         if let Some((_, first)) = seen.iter().find(|(q, _)| *q == path) {
-            warn!(
+            crust_core::warning!(
+                ProductSharedPath,
+                at = p.prim_path,
                 "{} writes {}, as {first} already does; nothing written for it",
                 p.prim_path,
                 path.display()

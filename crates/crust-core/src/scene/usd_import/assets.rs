@@ -5,7 +5,7 @@
 //! crust-core decodes nothing itself.
 
 use crate::record_warning;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,25 @@ pub(super) fn timed_asset<V>(asset_time: &mut Duration, load: impl FnOnce() -> V
     let started = Instant::now();
     let loaded = load();
     *asset_time += started.elapsed();
+    loaded
+}
+
+/// Runs one host load, noting `path` in `failed` when it comes back `None`
+/// with a cause the host explained ([`cause_warning!`](crate::cause_warning))
+/// — a file it could not read. A `None` without one is the host declining on
+/// purpose (`CRUST_TEX=0`, an asset it does not decode, which it reports
+/// itself): the reference renders its fallback, but it is not an unreadable
+/// file.
+pub(super) fn explained<V>(
+    failed: &mut HashSet<PathBuf>,
+    path: &Path,
+    load: impl FnOnce() -> Option<V>,
+) -> Option<V> {
+    let causes = crate::warnings::causes_raised();
+    let loaded = load();
+    if loaded.is_none() && crate::warnings::causes_raised() != causes {
+        failed.insert(path.to_owned());
+    }
     loaded
 }
 
@@ -55,9 +74,10 @@ pub(super) fn cached_asset<K: Eq + Hash, V: Clone>(
 /// `sourceColorSpace` through [`crate::ColorSpace::from_usd`] — since the two
 /// disagree on what an absent attribute means.
 ///
-/// `prim` is the material referencing the texture. Every reference that
-/// comes back `None`, a cache hit included, counts one `texture.unreadable`
-/// on it; the host explained the cause once, when the file failed.
+/// `prim` is the material referencing the texture. Every reference to a file
+/// the host failed to read ([`explained`]), a cache hit included, counts one
+/// `texture.unreadable` on it; the host explained the cause once, when the
+/// file failed.
 pub(super) fn load_uv_texture(
     path: &Path,
     space: crate::ColorSpace,
@@ -71,7 +91,9 @@ pub(super) fn load_uv_texture(
         &mut caches.asset_time,
         key,
         |_| {
-            let loaded = assets.load_texture(path, space);
+            let loaded = explained(&mut caches.failed_assets, path, || {
+                assets.load_texture(path, space)
+            });
             if loaded.is_none() {
                 debug!(
                     "Texture {} ({space:?}) not loadable by the host",
@@ -81,7 +103,7 @@ pub(super) fn load_uv_texture(
             loaded
         },
     );
-    if loaded.is_none() {
+    if loaded.is_none() && caches.failed_assets.contains(path) {
         unreadable(prim, path);
     }
     loaded
@@ -117,9 +139,13 @@ pub(super) fn load_ptex(
         &mut caches.materials.ptex,
         &mut caches.asset_time,
         key,
-        |_| assets.load_ptex(path, space),
+        |_| {
+            explained(&mut caches.failed_assets, path, || {
+                assets.load_ptex(path, space)
+            })
+        },
     );
-    if loaded.is_none() {
+    if loaded.is_none() && caches.failed_assets.contains(path) {
         unreadable(prim, path);
     }
     loaded
