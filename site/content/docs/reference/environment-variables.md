@@ -253,6 +253,18 @@ Integer ≥ 1, default **1024**.
 The memory budget, in MiB, of the tile cache for streamed `.tx` textures. `0` is refused
 (the default is used).
 
+The budget covers the tiles each render thread keeps for itself as well as the shared
+cache:
+- **Each thread keeps at most half the budget divided by the thread count** (up to 512
+  tiles). With a small budget on many threads that can be less than one tile. The
+  threads then keep nothing, and every lookup goes to the shared cache: slower, with the
+  same image.
+- **A tile the shared cache evicts while a thread still holds it keeps counting** until
+  the thread lets go. `--stats` reports the most such bytes at once as
+  `peak held after eviction`, beside `peak resident / budget`.
+
+A scene whose tiles fit in the budget never evicts, so this line reads `0 B`.
+
 ### CRUST_TEX_MAX_OPEN_FILES
 
 Integer ≥ 0, default **256**.

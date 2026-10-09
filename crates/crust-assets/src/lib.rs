@@ -638,6 +638,7 @@ impl FileAssets {
             evictions: c.evictions,
             bytes_read: c.bytes_read,
             peak_bytes: c.peak_bytes,
+            held_peak_bytes: c.held_peak_bytes,
             errors: c.errors,
             budget_bytes: c.budget_bytes,
             opens: c.opens,

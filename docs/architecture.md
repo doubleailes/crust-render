@@ -307,7 +307,7 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_TEX_MAX` | 1024 | `crust-assets/uv_texture/` | preloaded tile edge cap, pixels |
 | `CRUST_TEX_MIP` | on | `crust-assets/uv_texture/` | `0`: no mip pyramid on UV textures |
 | `CRUST_TEX_STREAM` | on | `crust-assets/lib.rs` | `0`: preload even when a `.tx` exists |
-| `CRUST_TEX_CACHE_MB` | 1024 | `crust-assets/tiled/cache.rs` | `.tx` tile cache budget |
+| `CRUST_TEX_CACHE_MB` | 1024 | `crust-assets/tiled/cache.rs` | `.tx` tile cache budget: the shards plus evicted tiles threads still hold; each thread keeps at most half of it over the thread count |
 | `CRUST_TEX_MAX_OPEN_FILES` | 256 | `crust-assets/tiled/cache.rs` | idle `.tx` files kept open (peak: cap + threads); `0`: never close one |
 | `CRUST_PTEX` | on | `crust-assets/lib.rs` | `0`: decline every Ptex texture |
 | `CRUST_PTEX_MAX_LOG2` | 5 (preload) / uncapped (stream) | `crust-assets/ptex_texture.rs` | per-face resolution cap, log2 edge |

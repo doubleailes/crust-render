@@ -289,19 +289,75 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
       `AtomicU64` bumped on each of 3.3 G lookups was one line bouncing between
       72 cores, and alone it was most of the cost. Ptex's `PtexStream` counters
       take the same type for the same reason (not measured there).
-    - **The microcache is set-associative by file**: 16 sets x 4 ways, where it
-      used to be 2 slots shared by every texture. That was OIIO's number, and
+    - **The microcache became set-associative by file**: 16 sets x 4 ways, where
+      it used to be 2 slots shared by every texture. That was OIIO's number, and
       right for one texture per shading point. An ALab material interleaves ~5,
       so each `eval` found the previous texture's tiles and missed at both
-      levels. That was a 25% miss rate, every miss a shard lock.
+      levels. That was a 25% miss rate, every miss a shard lock. (It is now
+      64 x 8 by tile id; see the next item.)
     Result (`bench_ab.sh`, min / mean): ALab at 32 spp, Render
     **45.1 / 47.1 s -> 6.34 / 6.63 s (-85.9%)**. Texture went 23.4 -> 1.57 us
     per `eval`, and microcache hits 74.9% -> 84.9%. The single-texture alias
     scene went **0.743 -> 0.081 s (-89%)**: its microcache already hit 98.6%,
     so the shared counter alone was ~90% of that render. `materialx_basic`
-    (preloaded) and cornellbox are unchanged, and images are bit-identical. The cost is up to 64 tiles per thread held outside the
-    budget, 108 MiB at 72 threads for `half` tiles. A shard hit also sets `used`
-    only when it is clear, so a hot tile is not rewritten on every hit.
+    (preloaded) and cornellbox are unchanged, and images are bit-identical. That
+    shape held up to 64 tiles a thread outside the budget; the next step brought
+    them inside. A shard hit also sets `used` only when it is clear, so a hot
+    tile is not rewritten on every hit.
+  - **The microcache grew to 512 tiles a thread, chosen by measurement, and came
+    inside the budget** (`grow-texture-microcache`, 2026-10-09).
+    - **What the first fix left.** 15.6% of ALab's lookups still reached a shard,
+      about one per `eval`. Each such miss writes lines that every thread
+      reading the tile shares: the shard lock, the tile's `Arc` clone, and the
+      drop of the entry it pushes out. Texture was 1.91x slower at 72 threads
+      than at 8, against the 1.6x this VM costs any thread
+      (`docs/alab_profile.md` § Thread scaling).
+    - **Which misses.** A spike measured shard hits on ALab frame 1004 (72
+      threads, 32 spp):
+
+      | shape | shard hits |
+      |---|---|
+      | 16 x 4 by file | 152.0 M |
+      | 16 x 4 by tile id | 138.6 M |
+      | 16 x 8 by file | 117.0 M |
+      | 64 x 4 by file | 104.2 M |
+      | 16 x 4 plus a 192-tile second level that moves tiles rather than cloning them | 87.5 M |
+      | 64 x 4 by tile id | 78.8 M |
+      | **64 x 8 by tile id** | **50.3 M** |
+
+      Capacity pays most. Textures sharing a set cost more than one texture's
+      corner taps. At equal capacity, the tile-id index beats both the file
+      index and the second level. Indexing by (file, level) matched the tile
+      id's hits at 64 x 8, but scanned deeper and cost more.
+    - **Result** (`bench_ab.sh -n 3`, min / mean):
+      - ALab Render 7.28 / 7.34 s → 6.12 / 6.17 s, **−15.9%**.
+      - Texture 895 → 770 ns per `eval` at 8 threads, and 1.71 → 1.24 µs at 72.
+        Its 8 → 72 slowdown is the machine's own 1.61x, so no contention is
+        left.
+      - 72 threads render 5.51x faster than 8, against 5.16x.
+      - Every sample scene is bit-identical (`check_images.sh`).
+    - **The cost, taken deliberately.** A set index that depends on the tile is
+      hashed per tap, where the file index was computed once per lookup. On the
+      alias scene, whose microcache already hit 99.9%, that is +1.34%
+      instructions (callgrind, one thread) and +2.3% / +2.1% render time
+      (`bench_ab.sh -n 16`, 256 spp). The time includes cache effects that
+      instructions do not show: the per-thread array is 12 KiB, where it was
+      1.5 KiB. `Ways::get` must stay `#[inline(always)]`: at eight ways LLVM
+      left it out of line, costing 40.8 M more instructions.
+    - **Inside the budget.**
+      - Each thread keeps at most `budget / 2 / threads` bytes of a cache's
+        tiles. That is checked on the miss path, so a hit reads nothing new.
+      - An evicted tile that a thread still holds, in its microcache or in hand
+        during the lookup that read it, counts in `held` until its last
+        reference drops. The sweep keeps `resident + held` within the budget.
+      - It is counted at eviction rather than reserved like the Ptex stream's
+        `micro_reserve`. ALab holds nothing beyond the map, and a reserve would
+        have taken up to 890 MiB of its 1 GiB for nothing.
+      - `--stats` reports it as `peak held after eviction`.
+
+      At 1 GiB on 72 threads, a thread's share is 7.1 MiB: about 590 `u8` tiles,
+      or 290 `half` ones. On a `half`-tile scene the full 512 need a larger
+      budget.
   - **The second backing must cost the first one nothing, and twice it did
     not.** `bench_ab` against the pre-EXR binary on the 8-UDIM alias scene said
     **+21%** on an 8-bit streamed render — a path that gains nothing from HDR
@@ -730,6 +786,16 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   with `Too many open files` (WARN, constant base colour), then the USD stage itself
   failed to open and the render aborted. The fix belongs upstream in `ptex-rs`, beside
   its cache (close idle files, reopen on a miss), not in a second cache here.
+
+- **The streamed Ptex microcache has the contention the `.tx` one shed.** It keeps four
+  slots a thread, and a miss takes the reader's single `Mutex` and clones a block's
+  `Arc` — shared writes on every miss, behind one lock rather than 64 shards. The `.tx`
+  cache measured what that costs at 72 threads on this VM: Texture was 1.91x slower
+  than at 8 threads, against the machine's 1.6x, until its microcache grew from 64 to 512
+  tiles a thread (`grow-texture-microcache`, "Streaming" above). Nothing has measured
+  the Ptex path at 72 threads, because the Moana island preloads its Ptex today.
+  `stream-ptex-by-default` changes that, and the same treatment (more slots, counted in
+  the budget when evicted) is the follow-up.
 
 ## Known gaps: HDR texture range
 

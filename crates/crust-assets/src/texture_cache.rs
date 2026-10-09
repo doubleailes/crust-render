@@ -28,7 +28,10 @@ impl<K: PartialEq, V, const N: usize> Ways<K, V, N> {
     pub(crate) const EMPTY: Self = Ways([const { None }; N]);
 
     /// The value held for `key`, if any.
-    #[inline]
+    ///
+    /// Forced inline: at eight ways LLVM left it out of line, a call per texel
+    /// fetch that was 40.8 M instructions of a 2.04 G alias-scene render.
+    #[inline(always)]
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
         let idx = self
             .0
@@ -46,6 +49,12 @@ impl<K: PartialEq, V, const N: usize> Ways<K, V, N> {
         self.0.rotate_right(1);
         self.0[0] = Some((key, value));
         evicted
+    }
+
+    /// The value the next [`Ways::push`] would hand back, if the set is full.
+    #[inline]
+    pub(crate) fn oldest_if_full(&self) -> Option<&V> {
+        self.0[N - 1].as_ref().map(|(_, v)| v)
     }
 
     /// The values held, newest first.

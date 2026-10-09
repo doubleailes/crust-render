@@ -570,6 +570,10 @@ pub struct TextureCacheStats {
     pub evictions: u64,
     pub bytes_read: u64,
     pub peak_bytes: u64,
+    /// The most bytes of evicted tiles that threads kept alive at once —
+    /// memory `peak_bytes` no longer counts. The budget bounds the two
+    /// together.
+    pub held_peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
     /// `.tx` readers opened, and of those the ones on a file whose reader
@@ -1484,6 +1488,14 @@ impl RenderStats {
                 "peak resident / budget",
                 human_bytes(t.peak_bytes),
                 human_bytes(t.budget_bytes)
+            )?;
+            // Evicted tiles a thread still held: alive, in the budget, and
+            // not in `peak resident`. Non-zero only when the map evicted.
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "peak held after eviction",
+                human_bytes(t.held_peak_bytes)
             )?;
             writeln!(
                 f,
