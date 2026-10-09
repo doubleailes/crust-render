@@ -35,7 +35,7 @@
       - the pivot stack from `ops.usda` matches C++ USD's matrix
         (`0 2 0 0 / -2 0 0 0 / 0 0 2 0 / 5 2 0 1`).
 - [ ] 2.4 Run `scripts/check_images.sh check <dir>`. For every scene that differs,
-      record `exr_diff` relmse at 16 / 64 / 256 spp. Done when every difference falls
+      record `crust diff` relmse at 16 / 64 / 256 spp. Done when every difference falls
       as 1/√N, or is traced to a stack that composed wrongly before (from 1.2's
       counts).
       *Open (`notes.md`): trimmed relmse ≤ 2e-12 and flat, but untrimmed relmse plateaus on

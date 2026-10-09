@@ -153,7 +153,7 @@ crop reports its reference's own estimated MRSE.
 the pixels in the top 0.1% (at least one) of *either* side's `var / ref²` — the
 same set, so the pair compares the same pixels. On a firefly-heavy crop the
 MRSE is decided by the few pixels a firefly happened to land on: the lottery
-`exr_diff`'s trimmed 0.1% relMSE already answers on ALab. The untrimmed MRSEs
+`crust diff`'s trimmed 0.1% relMSE already answers on ALab. The untrimmed MRSEs
 and ΔEff are reported beside. Trimming withholds, never creates: `better` also
 needs the untrimmed median ΔEff above 1, `worse` below 1.
 

@@ -28,7 +28,7 @@
       cargo run --release -- render -i samples/materialx_emissive.usda -o ldr.exr
       CRUST_TEX_STREAM=1 cargo run --release -- render \\
           -i samples/materialx_emissive.usda -o hdr.exr
-      cargo run --release -p crust-render --example exr_diff -- ldr.exr hdr.exr
+      cargo run --release -- diff ldr.exr hdr.exr
 
     Note the emitters are NOT light-list entries — a MaterialX surface has no
     `AreaLight` — so they are found by BSDF/bounce sampling only, exactly as

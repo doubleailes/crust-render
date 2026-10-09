@@ -24,7 +24,7 @@ pub const BIAS_Z: f64 = 4.0;
 /// values differ most, where fireflies land.
 pub const SHIFT_TRIM: f64 = 0.01;
 
-/// The share of pixels a trimmed MRSE leaves out: `exr_diff`'s 0.1%.
+/// The share of pixels a trimmed MRSE leaves out: `crust diff`'s 0.1%.
 pub const MRSE_TRIM: f64 = 0.001;
 
 /// `E_T / E_B` for one interleaved pair, `E = 1/(time · MRSE)`:

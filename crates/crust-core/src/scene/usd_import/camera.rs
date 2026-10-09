@@ -26,6 +26,7 @@ struct CameraFrame {
     /// vertical aperture defaults to the horizontal one over the image's
     /// aspect ratio.
     focal_length: f32,
+    horiz_aperture: f32,
     vert_aperture: f32,
     /// The image size the aperture default and the field of view assume.
     width: f32,
@@ -46,6 +47,7 @@ impl CameraFrame {
             forward: world.transform_vector3(Vec3::NEG_Z).normalize(),
             up: world.transform_vector3(Vec3::Y).normalize(),
             focal_length,
+            horiz_aperture,
             vert_aperture,
             width,
             height,
@@ -62,6 +64,38 @@ impl CameraFrame {
     }
 }
 
+/// A camera's lens as the render reads it, unauthored values at the render's
+/// fallbacks — what [`build_camera`] builds from, and what `crust ls camera
+/// --json` reports.
+pub(super) struct CameraLens {
+    pub(super) focal_length: f32,
+    /// Horizontal, vertical; the vertical defaults to the horizontal over
+    /// the image's aspect ratio.
+    pub(super) aperture: [f32; 2],
+    /// `0` is a pinhole.
+    pub(super) f_stop: f32,
+    pub(super) focus_distance: f32,
+}
+
+/// The lens of the camera at `prim`, read as [`build_camera`] reads it.
+pub(super) fn camera_lens(
+    stage: &Stage,
+    prim: &Prim,
+    settings: &RenderSettings,
+) -> Option<CameraLens> {
+    let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
+    Some(lens(&cam, &CameraFrame::read(&cam, stage, prim, settings)))
+}
+
+fn lens(cam: &UsdCamera, frame: &CameraFrame) -> CameraLens {
+    CameraLens {
+        focal_length: frame.focal_length,
+        aperture: [frame.horiz_aperture, frame.vert_aperture],
+        f_stop: attr_f32(&cam.f_stop_attr()).unwrap_or(0.0),
+        focus_distance: attr_f32(&cam.focus_distance_attr()).unwrap_or(10.0),
+    }
+}
+
 pub(super) fn build_camera(
     stage: &Stage,
     prim: &Prim,
@@ -69,8 +103,11 @@ pub(super) fn build_camera(
 ) -> Option<Camera> {
     let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
     let frame = CameraFrame::read(&cam, stage, prim, settings);
-    let f_stop = attr_f32(&cam.f_stop_attr()).unwrap_or(0.0);
-    let focus_distance = attr_f32(&cam.focus_distance_attr()).unwrap_or(10.0);
+    let CameraLens {
+        f_stop,
+        focus_distance,
+        ..
+    } = lens(&cam, &frame);
 
     let vfov_deg = 2.0 * frame.tan_half_vfov().atan().to_degrees();
     let aperture = if f_stop > 0.0 {

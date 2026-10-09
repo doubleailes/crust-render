@@ -134,7 +134,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
-| reporting | `stats.rs` (`--stats`), `profile.rs` (`--profile`), `error.rs` |
+| reporting | `stats.rs` (`--stats`, and `--stats-json`'s `crust-stats/1`), `profile.rs` (`--profile`), `report.rs` (the JSON reports' envelope and value rules), `stamp.rs` (the `crust:*` sampling stamp every EXR carries), `compare.rs` (`crust diff`: identity, metrics, comparability, over decoded planes), `error.rs` |
 | diagnostic | `diagnostic/` — `mod.rs` (`run`: calibration, baseline, crops, tiers 1–3, suggestions), `report.rs` (`Report`, the `crust-diagnostic/1` JSON), `markdown.rs`, `noise.rs` (the light path rows, light groups, tier-1 ordering rules, the brightest pixels' share), `crops.rs`, `schedule.rs` (budget, trial spp and the later tiers' reserves), `trials.rs` (the picture check, trimmed MRSE, the noise floor, ΔEff and at the target, verdicts, the per-crop reference), `checks.rs` (findings, picture ones included), `compare.rs` (`--baseline` deltas). It renders through `Renderer::render_measured` (`tracer/mod.rs`: `Instruments` → `Measured`), the only caller of the per-tile timer and the clamp counter |
 
 ## Invariants that span modules
@@ -168,6 +168,12 @@ other. The pairs:
   `collect_crossings`). Change one side alone and NEE counts a light another
   hides while the bounce stops at the nearer one: biased MIS. The crossing's
   weight is `bounce_emission_weight_at`, its `L` event `Route::cross`.
+- **The render camera ↔ `ls`'s `is_render_camera`.** Which camera a render goes
+  through (`settings::wanted_camera`, then `pick_camera`'s fallback to the first
+  camera the import's walk meets) is decided by the same two functions for the
+  import and the listing, and the listing walks cameras a second time in the
+  import's order to find that first one. Change the import's walk order and
+  `the_render_camera_is_the_one_the_import_uses` (`tests/usd_listing.rs`) fails.
 - **Light radiance.** `Emissive::radiance_toward` is the one answer to "what
   does this light emit toward here", read by `AreaLight::sample_li` and by
   `Material::emitted_at`.
