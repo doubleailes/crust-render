@@ -1,5 +1,6 @@
 //! `UsdPreviewSurface` (+ `UsdUVTexture`) → [`OpenPBR`] / [`crate::PreviewSurface`].
 
+use crate::warning;
 use std::sync::Arc;
 
 use glam::Vec3A;
@@ -9,7 +10,7 @@ use openusd_schemas::shade;
 use openusd_schemas::shade::{
     Connectable, ProducerFilter, ReadPreviewSurface, Shader, ShadingAttribute,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::color::Space;
 use crate::material::{Displacement, DisplacementValue, Material, OpenPBR};
@@ -120,7 +121,9 @@ pub(super) fn preview_surface_material(
     // One chart per mesh: a network whose readers name two primvars shades
     // every texture from the first.
     if varnames.len() > 1 {
-        warn!(
+        warning!(
+            PreviewMultiplePrimvars,
+            at = mat_path,
             "UsdPreviewSurface at {mat_path}: textures read primvars {varnames:?}; crust \
              carries one chart per mesh and reads '{}' for all of them",
             varnames[0]
@@ -197,7 +200,9 @@ fn preview_uv_input(
         ShadingAttribute::Input(_) => None,
     };
     let Some(output) = output else {
-        warn!(
+        warning!(
+            PreviewUnsupportedConnection,
+            at = mat_path,
             "UsdPreviewSurface at {mat_path}: {name} connects to {}, not a UsdUVTexture \
              r/g/b/a/rgb output — using its constant",
             source.path()
@@ -207,7 +212,9 @@ fn preview_uv_input(
     if matches!(output, TexOutput::A) {
         // The host samplers return opaque RGB, so the alpha channel reads 1.0
         // whatever the file holds — an approximation worth saying out loud.
-        warn!(
+        warning!(
+            PreviewTextureAlpha,
+            at = mat_path,
             "UsdPreviewSurface at {mat_path}: {name} reads texture alpha ({}), which crust              does not decode — it reads 1.0 before scale/bias",
             source.path()
         );
@@ -234,7 +241,9 @@ fn preview_uv_input(
         .and_then(|p| p.into_iter().next())
         .and_then(|a| asset_path(a.attribute(), caches.stage_path));
     let Some(file) = file else {
-        warn!(
+        warning!(
+            PreviewTextureWithoutFile,
+            at = tex.path(),
             "UsdUVTexture {}: no inputs:file — {name} keeps its constant",
             tex.path()
         );
@@ -288,7 +297,9 @@ fn preview_uv_input(
                 varname = value(&reader.input(tk::PVR_VARNAME))
                     .and_then(|v| v.as_str().map(str::to_owned));
             }
-            _ => warn!(
+            _ => warning!(
+                PreviewUnreadSt,
+                at = tex.path(),
                 "UsdUVTexture {}: st is driven by {id:?}, which is not read — using the \
                  mesh chart unchanged",
                 tex.path()
@@ -310,7 +321,7 @@ fn preview_uv_input(
         .or_else(|| value_at(surface_input.attribute()).and_then(decode_float4))
         .or_else(|| preview_surface_default(name))
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-    let loaded = load_uv_texture(&file, space, caches).map(crate::TextureRef);
+    let loaded = load_uv_texture(&file, space, mat_path, caches).map(crate::TextureRef);
     if loaded.is_none() {
         // DEBUG: the host has already reported *why* at its own level (a
         // missing file is an ERROR there), and `CRUST_TEX=0` declines every

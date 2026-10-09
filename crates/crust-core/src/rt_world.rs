@@ -7,10 +7,10 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
+use crate::warning;
 use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, RayMask, SceneBuilder};
 use glam::{Affine3A, Vec3A};
 use std::sync::Arc;
-use tracing::warn;
 
 /// How one triangle sits inside the polygon it was cut from.
 ///
@@ -850,7 +850,8 @@ impl WorldBuilder {
         let unresolved = self.unresolved.len();
         if unresolved > 0 {
             let one = unresolved == 1;
-            warn!(
+            warning!(
+                XformMotionVectorUnsupported,
                 "{unresolved} geometr{} move{} other than by a translation (a rotating or \
                  scaling end transform, nested motion, or an id shared with a forwarding \
                  instance); motion blurred, but the motionvector AOV reports zero for {}",

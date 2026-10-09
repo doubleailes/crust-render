@@ -1,5 +1,6 @@
 //! UsdLux lights → [`LightList`] entries (and their emissive scene geometry).
 
+use crate::{record_warning, warning};
 use std::sync::Arc;
 
 use crust_rt::Geometry;
@@ -9,7 +10,7 @@ use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
     RectLight, ShapingAPI, SphereLight,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::color::Space;
 use crate::light::{
@@ -54,7 +55,9 @@ pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
     // falls back to the schema default like the shaping inputs do.
     let finite = |name: &str, v: Option<f32>, fallback: f32| match v {
         Some(x) if !x.is_finite() => {
-            warn!(
+            warning!(
+                LightNonFiniteInput,
+                at = prim.path(),
                 "{}: inputs:{name} = {x} is not finite — using its fallback {fallback}",
                 prim.path()
             );
@@ -66,7 +69,9 @@ pub(super) fn light_inputs(prim: &Prim, light: &impl UsdLight) -> LightInputs {
     let exposure = finite("exposure", attr_f32(&light.exposure_attr()), 0.0);
     let color = match attr_vec3(&light.color_attr()) {
         Some(c) if !c.is_finite() => {
-            warn!(
+            warning!(
+                LightNonFiniteInput,
+                at = prim.path(),
                 "{}: inputs:color = {:?} is not finite — using its fallback (1, 1, 1)",
                 prim.path(),
                 c.to_array()
@@ -116,7 +121,9 @@ fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
         if let Some(v) = attr_f32(&attr)
             && v != 1.0
         {
-            warn!(
+            warning!(
+                LightUnsupportedMultiplier,
+                at = prim.path(),
                 "{}: inputs:{name} = {v} is a per-lobe multiplier crust does not \
                  support — ignored (the light contributes at 1.0)",
                 prim.path()
@@ -155,7 +162,9 @@ fn lux_shaping(
     // refused and replaced by the input's fallback, with a warning.
     let finite = |name: &str, v: Option<f32>| match v {
         Some(x) if !x.is_finite() => {
-            warn!(
+            warning!(
+                LightNonFiniteInput,
+                at = prim.path(),
                 "{}: {name} = {x} is not finite — using its fallback",
                 prim.path()
             );
@@ -174,7 +183,9 @@ fn lux_shaping(
     // emission rather than leaving it neutral, exactly as in hdEmbree.
     shaping.focus_tint = match custom_color(prim, "inputs:shaping:focusTint", caches.working) {
         Some(c) if !c.is_finite() => {
-            warn!(
+            warning!(
+                LightNonFiniteInput,
+                at = prim.path(),
                 "{}: inputs:shaping:focusTint = {c} is not finite — using its fallback",
                 prim.path()
             );
@@ -203,17 +214,23 @@ fn lux_shaping(
     );
     if let Some(path) = ies_file {
         let assets = caches.assets;
-        let profile = cached_asset(&mut caches.ies, &mut caches.asset_time, path, |path| {
-            let loaded = assets.load_ies(path);
-            if loaded.is_none() {
-                warn!(
-                    "{}: could not load IES profile {} — the light renders without it",
-                    prim.path(),
-                    path.display()
-                );
-            }
-            loaded
-        });
+        let profile = cached_asset(
+            &mut caches.ies,
+            &mut caches.asset_time,
+            path.clone(),
+            |path| assets.load_ies(path),
+        );
+        // Every light referencing a profile the host could not load counts,
+        // a cache hit included; the host logged the cause once per file.
+        if profile.is_none() {
+            record_warning!(
+                IesUnreadable,
+                at = prim.path(),
+                "{}: could not load IES profile {} — the light renders without it",
+                prim.path(),
+                path.display()
+            );
+        }
         shaping.ies = profile.map(|profile| IesShaping {
             profile,
             angle_scale: finite(
@@ -295,7 +312,9 @@ fn emit_round_light(
     // surface no ray can hit. Refuse it here, once, for both.
     let valid = |x: f32| x.is_finite() && x > 0.0;
     if !valid(radius) || (unit == UnitShape::Cylinder && !valid(length)) {
-        warn!(
+        warning!(
+            LightDegenerateShape,
+            at = prim.path(),
             "{}: {:?} light radius {radius}{} must be finite and positive — skipped",
             prim.path(),
             unit,
@@ -314,7 +333,9 @@ fn emit_round_light(
     };
     let l2w = Affine3A::from_mat4(world_xf * GMat4::from_scale(local));
     let Some(affine) = AffineShape::new(unit, l2w) else {
-        warn!(
+        warning!(
+            LightDegenerateShape,
+            at = prim.path(),
             "{}: light transform collapses its shape (zero size or scale) — skipped",
             prim.path()
         );
@@ -507,30 +528,36 @@ fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crat
     let path = asset_path(&file, caches.stage_path)?;
     let space = texture_color_space(&file, caches.working);
     let assets = caches.assets;
-    cached_asset(
+    let loaded = cached_asset(
         &mut caches.light_textures,
         &mut caches.asset_time,
-        (path, space),
+        (path.clone(), space),
         |(path, space)| {
             let loaded = assets.load_light_texture(path, *space);
-            match &loaded {
-                Some(t) => debug!(
+            if let Some(t) = &loaded {
+                debug!(
                     "RectLight {}: texture {} ({}x{})",
                     prim.path(),
                     path.display(),
                     t.width(),
                     t.height()
-                ),
-                None => warn!(
-                    "RectLight at {}: could not load inputs:texture:file {} — the light \
-                     emits its uniform colour",
-                    prim.path(),
-                    path.display()
-                ),
+                );
             }
             loaded
         },
-    )
+    );
+    // Counted per light, a cache hit included; the host logged the cause.
+    if loaded.is_none() {
+        record_warning!(
+            LightMapUnreadable,
+            at = prim.path(),
+            "RectLight at {}: could not load inputs:texture:file {} — the light emits its \
+             uniform colour",
+            prim.path(),
+            path.display()
+        );
+    }
+    loaded
 }
 
 /// `UsdLuxRectLight`: a `width × height` rectangle (1 × 1) in the local XY
@@ -547,7 +574,9 @@ pub(super) fn emit_rect_light(
     let width = attr_f32(&light.width_attr()).unwrap_or(1.0);
     let height = attr_f32(&light.height_attr()).unwrap_or(1.0);
     if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-        warn!(
+        warning!(
+            LightDegenerateShape,
+            at = prim.path(),
             "RectLight at {}: width {width} × height {height} must be finite and \
              positive — skipped",
             prim.path()
@@ -669,7 +698,11 @@ pub(super) fn emit_distant_light(
 ) {
     let direction = world_xf.transform_vector3(Vec3::NEG_Z);
     if direction.length_squared() < 1e-12 {
-        warn!("DistantLight has a degenerate orientation — skipped");
+        warning!(
+            LightDegenerateShape,
+            at = prim.path(),
+            "DistantLight has a degenerate orientation — skipped"
+        );
         return;
     }
     let angle = attr_f32(&light.angle_attr()).unwrap_or(0.53).max(0.0);
@@ -745,7 +778,9 @@ pub(super) fn emit_dome_light(
                 let space = texture_color_space(&light.texture_file_attr(), working);
                 let loaded = timed_asset(asset_time, || assets.load_environment(&texture, space));
                 if loaded.is_none() {
-                    warn!(
+                    record_warning!(
+                        LightMapUnreadable,
+                        at = prim.path(),
                         "DomeLight at {}: could not load {} — falling back to \
                          the uniform colour",
                         prim.path(),
@@ -755,7 +790,9 @@ pub(super) fn emit_dome_light(
                 loaded.map(Arc::new)
             }
             Some(other) => {
-                warn!(
+                warning!(
+                    LightUnsupportedTextureFormat,
+                    at = prim.path(),
                     "DomeLight at {}: texture:format \"{other}\" is not supported \
                      (only latlong) — falling back to the uniform colour",
                     prim.path()

@@ -73,6 +73,32 @@ pub struct Facts {
     pub reach: Vec<(String, f64, f64)>,
 }
 
+impl Facts {
+    /// The facts a scene's import alone establishes, every baseline fact
+    /// `None` — what `crust check` reports from, and what the diagnostic
+    /// builds its own facts on. `textures_without_tx` is the host's count of
+    /// UV textures preloaded for want of a `.tx`; `import_peak` the peak
+    /// resident size the import reached.
+    pub fn from_import(
+        scene: &crate::Scene,
+        auto_tx: bool,
+        textures_without_tx: u64,
+        import_peak: Option<u64>,
+    ) -> Facts {
+        Facts {
+            lights: scene.lights.count(),
+            light_selection: scene.settings.light_selection(),
+            auto_tx,
+            textures_without_tx,
+            guiding: scene.settings.guiding(),
+            peak_mem_bytes: import_peak,
+            machine_mem_bytes: crate::machine_memory_bytes(),
+            strategy: scene.settings.sampling_strategy(),
+            ..Facts::default()
+        }
+    }
+}
+
 type Check = fn(&Facts) -> Option<Finding>;
 
 /// Every check, in report order.
@@ -261,7 +287,7 @@ fn peak_memory(f: &Facts) -> Option<Finding> {
         "peak_memory",
         FindingKind::Memory,
         format!(
-            "the render peaked at {:.0}% of the machine's memory",
+            "memory peaked at {:.0}% of the machine's",
             100.0 * peak as f64 / total as f64
         ),
         Evidence::new()
@@ -291,7 +317,7 @@ fn visualization_strategy(f: &Facts) -> Option<Finding> {
         FindingKind::Correctness,
         format!(
             "the sampling strategy is {}, a visualization mode: it does not converge to the \
-             same image as MIS on every scene, and every trial is measured against it",
+             same image as MIS on every scene",
             f.strategy
         ),
         Evidence::new(),

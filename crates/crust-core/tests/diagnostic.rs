@@ -123,3 +123,56 @@ fn a_budget_the_baseline_exhausts_lists_every_later_measurement() {
     }
     assert!(r.picture_changing.light_sampling_reach.is_none());
 }
+
+/// The findings `crust check` reports come from the import alone: on a stage
+/// with nine uniformly picked lights and preloaded textures, exactly
+/// `textures_without_tx` and `many_lights_uniform` — and each with the id,
+/// kind, evidence and action the diagnostic gives once its baseline facts
+/// are added to the same import facts.
+#[test]
+fn import_only_findings_match_the_diagnostics() {
+    use diagnostic::checks::{self, Facts};
+    let lights: String = (0..9)
+        .map(|i| {
+            format!(
+                "    def SphereLight \"l{i}\"\n    {{\n        double3 xformOp:translate = ({i}, 3, 0)\n        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }}\n"
+            )
+        })
+        .collect();
+    let text = format!(
+        "#usda 1.0\ndef Xform \"World\"\n{{\n    def Camera \"cam\"\n    {{\n    }}\n{lights}}}\ndef Scope \"Render\"\n{{\n    def RenderSettings \"settings\"\n    {{\n        token crust:lightSelection = \"uniform\"\n    }}\n}}\n"
+    );
+    let dir = std::env::temp_dir().join("crust_diagnostic_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("nine_uniform_lights.usda");
+    std::fs::write(&path, text).unwrap();
+    let scene = Scene::from_usd(&path).expect("loads");
+    assert_eq!(scene.lights.count(), 9);
+
+    let import = Facts::from_import(&scene, false, 3, None);
+    let found = checks::run(&import);
+    let ids: Vec<&str> = found.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(ids, ["textures_without_tx", "many_lights_uniform"]);
+
+    // The diagnostic's facts: the same import facts, plus a quiet baseline.
+    let diagnosed = checks::run(&Facts {
+        texture_lookups: Some((100, 100)),
+        ptex_lookups: Some((0, 0)),
+        unlit_emission: Some(0.0),
+        indirect_dominant: Some(false),
+        spp: 16,
+        ..import.clone()
+    });
+    for f in &found {
+        let d = diagnosed
+            .iter()
+            .find(|d| d.id == f.id)
+            .unwrap_or_else(|| panic!("the diagnostic has no {}", f.id));
+        assert_eq!(
+            serde_json::to_value(f).unwrap(),
+            serde_json::to_value(d).unwrap(),
+            "{}",
+            f.id
+        );
+    }
+}

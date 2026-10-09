@@ -15,6 +15,8 @@ mod aabb;
 pub mod aov;
 mod buffer;
 mod camera;
+/// The `crust-check/1` report `crust check` writes.
+pub mod check;
 pub mod color;
 /// `crust diff`'s comparison of two decoded images.
 pub mod compare;
@@ -52,6 +54,8 @@ mod subsurface;
 mod texture;
 mod tracer;
 mod volume;
+/// Coded import warnings: the vocabulary, the collector and the macros.
+pub mod warnings;
 mod world;
 
 /// The path tracer's QMC sampler: OpenQMC's Owen-scrambled Sobol, consumed
@@ -123,4 +127,5 @@ pub use tracer::{
 };
 pub use utils::Luma;
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
+pub use warnings::{LogPolicy, Warning, WarningCode, WarningKind, WarningScope};
 pub use world::{get_settings, simple_scene};

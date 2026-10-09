@@ -1,5 +1,6 @@
 //! Analytic and curve geometry: `UsdGeomSphere` and `UsdGeomBasisCurves`.
 
+use crate::warning;
 use std::sync::Arc;
 
 use crust_rt::{CubicCurveSegment, CurveSegment, Geometry, SceneBuilder as RtSceneBuilder};
@@ -8,7 +9,7 @@ use openusd::usd::Prim;
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Curves as UsdCurves, PointBased, Sphere as UsdSphere,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::material::Material;
 use crate::rt_world::WorldBuilder;
@@ -197,7 +198,9 @@ pub(super) fn curve_segments(
         "bspline" => (&BSPLINE_M, 1),
         "catmullRom" => (&CATMULL_ROM_M, 1),
         other => {
-            warn!(
+            warning!(
+                CurvesUnsupportedBasis,
+                at = prim.path(),
                 "BasisCurves at {}: basis \"{}\" is not supported (bezier | bspline | catmullRom) — skipped",
                 prim.path(),
                 other
@@ -226,7 +229,9 @@ pub(super) fn curve_segments(
     for (curve_idx, &cnt) in counts.iter().enumerate() {
         let cnt = cnt as usize;
         if offset + cnt > pts.len() {
-            warn!(
+            warning!(
+                CurvesInvalidCounts,
+                at = prim.path(),
                 "BasisCurves at {}: curveVertexCounts overruns points — remaining curves skipped",
                 prim.path()
             );
@@ -302,7 +307,9 @@ pub(super) fn emit_curves(
         return;
     };
     if world_xf.determinant().abs() < 1e-12 {
-        warn!(
+        warning!(
+            CurvesNonInvertibleTransform,
+            at = prim.path(),
             "BasisCurves at {} has a non-invertible transform — skipped",
             prim.path()
         );

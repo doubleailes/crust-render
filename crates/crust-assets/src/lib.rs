@@ -75,9 +75,10 @@ use crust_core::{
     AssetLoader, ColorSpace, EnvironmentMap, IesProfile, LightTexture, PtexTexture,
     ResolvedColorSpace, Texture2D,
 };
+use crust_core::{cause_warning, warning};
 use std::path::Path;
 use std::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// The tables a resolved colour space's curve is applied through.
 ///
@@ -436,7 +437,8 @@ impl FileAssets {
                 }
                 return false;
             }
-            warn!(
+            warning!(
+                TextureTxStale,
                 "{}: {} .tx tile(s) older than their source, used anyway — rerun with \
                  --auto-tx to reconvert",
                 path.display(),
@@ -450,10 +452,13 @@ impl FileAssets {
             .map_or(4, |n| n.get())
             .min(stale.len());
         let chunk = stale.len().div_ceil(workers.max(1));
-        let failed = std::sync::atomic::AtomicUsize::new(0);
+        // Failures are reported after the workers join, on this thread: a
+        // coded warning raised on a worker would be logged but not recorded
+        // in the import's warnings.
+        let failures = std::sync::Mutex::new(Vec::new());
         std::thread::scope(|scope| {
             for part in stale.chunks(chunk.max(1)) {
-                let failed = &failed;
+                let failures = &failures;
                 scope.spawn(move || {
                     for src in part {
                         match tiled::make_tx_atomic(src, space, tiled::TxFormat::FromSampleType) {
@@ -465,15 +470,24 @@ impl FileAssets {
                                 m.space
                             ),
                             Err(e) => {
-                                warn!("--auto-tx: could not convert {}: {e}", src.display());
-                                failed.fetch_add(1, Relaxed);
+                                failures
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .push(format!(
+                                        "--auto-tx: could not convert {}: {e}",
+                                        src.display()
+                                    ))
                             }
                         }
                     }
                 });
             }
         });
-        let failed = failed.into_inner();
+        let failures = failures.into_inner().unwrap_or_else(|e| e.into_inner());
+        for failure in &failures {
+            warning!(TextureTxConvertFailed, "{failure}");
+        }
+        let failed = failures.len();
         self.tx_converted.fetch_add(stale.len() - failed, Relaxed);
         self.tx_failed.fetch_add(failed, Relaxed);
         self.tx_nanos
@@ -740,7 +754,7 @@ impl AssetLoader for FileAssets {
                 Some(map)
             }
             Err(e) => {
-                warn!("{e} — the dome renders without its map");
+                cause_warning!(LightMapUnreadable, "{e} — the dome renders without its map");
                 None
             }
         }
@@ -791,7 +805,7 @@ impl AssetLoader for FileAssets {
             Err(e) => {
                 // The one place a texture failure becomes the seam's `None`,
                 // so the one place it is logged.
-                warn!("{e} — the input reads its fallback");
+                cause_warning!(TextureUnreadable, "{e} — the input reads its fallback");
                 return None;
             }
         };
@@ -840,7 +854,7 @@ impl AssetLoader for FileAssets {
                 Some(std::sync::Arc::new(t))
             }
             Err(e) => {
-                warn!("{e} — the light renders untextured");
+                cause_warning!(LightMapUnreadable, "{e} — the light renders untextured");
                 None
             }
         }
@@ -854,7 +868,11 @@ impl AssetLoader for FileAssets {
                 path.display(),
                 p.power()
             ),
-            None => error!("Could not load IES profile {}", path.display()),
+            None => cause_warning!(
+                IesUnreadable,
+                "Could not load IES profile {}",
+                path.display()
+            ),
         }
         loaded.map(std::sync::Arc::new)
     }
@@ -970,7 +988,10 @@ impl AssetLoader for FileAssets {
                 }
                 Err(e) => {
                     why = PreloadReason::StreamFailed;
-                    warn!("{e} — could not stream it, preloading instead");
+                    warning!(
+                        TextureStreamFallback,
+                        "{e} — could not stream it, preloading instead"
+                    );
                 }
             }
         }
@@ -994,7 +1015,10 @@ impl AssetLoader for FileAssets {
                 Some(std::sync::Arc::new(tex))
             }
             Err(e) => {
-                warn!("{e} — the surface uses its constant base colour");
+                cause_warning!(
+                    TextureUnreadable,
+                    "{e} — the surface uses its constant base colour"
+                );
                 None
             }
         }

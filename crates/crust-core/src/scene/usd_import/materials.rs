@@ -2,6 +2,7 @@
 //! per-stage material cache, and the decoders for `crust:openpbr`,
 //! `PxrDisneyBsdf` and MaterialX references.
 
+use crate::warning;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,7 +14,7 @@ use openusd_schemas::shade::{
     Connectable, Material as UsdMaterial, MaterialBindingAPI, ProducerFilter, Shader,
     TerminalSource,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::color::Space;
 use crate::material::{DispRemap, Displacement, DisplacementValue, Material, OpenPBR};
@@ -323,7 +324,9 @@ fn pxr_displacement(
             .ok()
             .is_some_and(|p| !p.is_empty());
         if connected {
-            warn!(
+            warning!(
+                DisplacementVectorIgnored,
+                at = mat_path,
                 "Material {mat_path}: PxrDisplace.{vector} is vector displacement, which \
                  crust does not apply — ignored"
             );
@@ -357,7 +360,9 @@ fn pxr_displacement(
         source = upstream_shader(stage, &source, "dispScalar")?;
     }
     let refuse = |what: &Shader| {
-        warn!(
+        warning!(
+            DisplacementUnevaluated,
+            at = mat_path,
             "Material {mat_path}: PxrDisplace.dispScalar is driven by {} ({:?}), which \
              crust does not evaluate — the surface is not displaced",
             what.path(),
@@ -402,6 +407,7 @@ fn pxr_displacement(
         maps.push(crate::PtexRef(load_ptex(
             &file,
             crate::ColorSpace::RAW,
+            mat_path,
             caches,
         )?));
     }
@@ -469,7 +475,7 @@ fn resolve_material_uncached(
     macro_rules! try_mtlx {
         () => {
             if let Some((file, node)) = mtlx_reference(stage, mat_path)
-                && let Some(m) = load_mtlx_material(&file, &node, caches)
+                && let Some(m) = load_mtlx_material(&file, &node, mat_path, caches)
             {
                 debug!(
                     "Material {mat_path} resolved through the MaterialX reference {}</{node}>",
@@ -484,7 +490,9 @@ fn resolve_material_uncached(
         Ok(Some(m)) => m,
         _ => {
             try_mtlx!();
-            warn!(
+            warning!(
+                MaterialFallbackDefault,
+                at = mat_path,
                 "Material at {} not resolvable — using default grey OpenPBR",
                 mat_path
             );
@@ -527,7 +535,9 @@ fn resolve_material_uncached(
             && let Some(other) =
                 terminal_shader(mat.compute_surface_source(SURFACE_RENDER_CONTEXTS))
         {
-            warn!(
+            warning!(
+                MaterialVolumeIgnored,
+                at = mat_path,
                 "Material {mat_path}: the volume terminal is MaterialX but the surface ({}) \
                  is not — the volume is ignored",
                 shader_info_id(&other).unwrap_or_default()
@@ -556,7 +566,9 @@ fn resolve_material_uncached(
         // composed (a wrapper layer `over`s it, so the prim exists) but
         // its shader network lives in the unreadable `.mtlx`.
         try_mtlx!();
-        warn!(
+        warning!(
+            MaterialFallbackDefault,
+            at = mat_path,
             "Material {} has no surface shader — using default grey OpenPBR",
             mat_path
         );
@@ -579,14 +591,19 @@ fn resolve_material_uncached(
                 .unwrap_or_else(default_material)
         }
         Some(other) => {
-            warn!(
+            warning!(
+                MaterialFallbackDefault,
+                at = mat_path,
                 "Unrecognized shader id '{}' at {} — using default grey OpenPBR",
-                other, mat_path
+                other,
+                mat_path
             );
             default_material()
         }
         None => {
-            warn!(
+            warning!(
+                MaterialFallbackDefault,
+                at = mat_path,
                 "Shader at {} has no info:id — using default grey OpenPBR",
                 mat_path
             );
@@ -640,7 +657,9 @@ fn inline_mtlx_material(
         volume.map(|s| &**s),
     );
     if !net.reported.is_empty() {
-        warn!(
+        warning!(
+            MtlxIncomplete,
+            at = mat_path,
             "Material {mat_path}: MaterialX network not fully translated — {}",
             net.reported.join("; ")
         );
@@ -651,12 +670,18 @@ fn inline_mtlx_material(
         return None;
     }
     let label = mat_path.as_str().to_string();
-    compile_mtlx(&label, std::path::Path::new("/"), caches, |host, luma| {
-        crate::materialx::from_compiled(
-            crust_mtlx::compile_terminals(&net.doc, surface, volume, host),
-            luma,
-        )
-    })
+    compile_mtlx(
+        &label,
+        mat_path,
+        std::path::Path::new("/"),
+        caches,
+        |host, luma| {
+            crate::materialx::from_compiled(
+                crust_mtlx::compile_terminals(&net.doc, surface, volume, host),
+                luma,
+            )
+        },
+    )
 }
 
 fn default_material() -> Arc<dyn Material> {
@@ -863,11 +888,12 @@ fn mtlx_reference(stage: &Stage, mat_path: &sdf::Path) -> Option<(std::path::Pat
 fn load_mtlx_material(
     file: &std::path::Path,
     node: &str,
+    mat_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn Material>> {
     let dir = file.parent().unwrap_or(std::path::Path::new("."));
     let label = file.display().to_string();
-    compile_mtlx(&label, dir, caches, |host, luma| {
+    compile_mtlx(&label, mat_path, dir, caches, |host, luma| {
         crate::materialx::load_in(file, (!node.is_empty()).then_some(node), host, luma)
     })
 }
@@ -876,9 +902,11 @@ fn load_mtlx_material(
 /// texture loader resolves `image` files against `dir` and whose colour
 /// conversion targets the working space, with the working space's luminance
 /// weights, and reports what the compiler could not represent. `label` names the material in the log: the
-/// `.mtlx` file, or the USD material of an inline network.
+/// `.mtlx` file, or the USD material of an inline network. `mat_path` is the
+/// USD material it resolves, which its warnings are recorded on.
 fn compile_mtlx(
     label: &str,
+    mat_path: &sdf::Path,
     dir: &std::path::Path,
     caches: &mut ImportCaches<'_>,
     compile: impl FnOnce(
@@ -895,6 +923,7 @@ fn compile_mtlx(
         load_uv_texture(
             &dir.join(asset),
             crate::ColorSpace::from_mtlx(space, working),
+            mat_path,
             &mut c,
         )
         .map(crate::TextureRef)
@@ -925,14 +954,18 @@ fn compile_mtlx(
     match loaded {
         Ok(l) => {
             if !l.unsupported.is_empty() {
-                warn!(
+                warning!(
+                    MtlxIncomplete,
+                    at = mat_path,
                     "MaterialX {label}: no operator for node type(s) {} — those inputs \
                      fall back to their defaults",
                     l.unsupported.join(", ")
                 );
             }
             if !l.reported.is_empty() {
-                warn!(
+                warning!(
+                    MtlxIncomplete,
+                    at = mat_path,
                     "MaterialX {label}: not represented — {}",
                     l.reported.join("; ")
                 );
@@ -951,7 +984,11 @@ fn compile_mtlx(
             Some(l.material)
         }
         Err(e) => {
-            warn!("MaterialX {label} not usable ({e}) — falling back");
+            warning!(
+                MtlxUnusable,
+                at = mat_path,
+                "MaterialX {label} not usable ({e}) — falling back"
+            );
             None
         }
     }
@@ -972,7 +1009,7 @@ pub(super) fn material_ptex(
     let path = asset_path(&prim.attribute("inputs:surfaceMap"), caches.stage_path)?;
 
     let space = crate::ColorSpace::new(Space::G22_REC709, caches.working);
-    load_ptex(&path, space, caches).map(crate::PtexRef)
+    load_ptex(&path, space, mat_path, caches).map(crate::PtexRef)
 }
 
 /// Decode a `crust:openpbr` shader into the OpenPBR material. Every input

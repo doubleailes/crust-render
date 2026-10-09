@@ -43,10 +43,10 @@
 //!
 //! See `docs/color_management.md` for which input is decoded from which space.
 
+use crate::warning;
 use glam::{Mat3A, Vec3A};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use tracing::warn;
 
 /// The config used when the host installs none: the builtin ACES CG config,
 /// named by its full version rather than `ocio://cg-config-latest`, so an
@@ -432,7 +432,8 @@ pub fn luma(working: Space) -> utils::Luma {
     match to_xyz(working) {
         Some(m) => utils::Luma(m.row(1)),
         None => {
-            warn!(
+            warning!(
+                ColorNoLuminance,
                 "no RGB -> XYZ matrix for `{}` in the OCIO config; weighing colours by Rec.709 \
                  luminance",
                 working.name()
@@ -649,7 +650,8 @@ pub fn conversion(src: Space, dst: Space) -> Arc<Conversion> {
         return c.clone();
     }
     let built = build(src, dst).unwrap_or_else(|why| {
-        warn!(
+        warning!(
+            ColorNoConversion,
             "colour space `{}` -> `{}` is not converted ({why}); values are used as stored",
             src.name(),
             dst.name()
@@ -781,7 +783,8 @@ impl ColorSpace {
         match Space::named(name) {
             Some(space) => ColorSpace::new(space, working),
             None => {
-                warn!(
+                warning!(
+                    ColorUnknownSpace,
                     "MaterialX colorspace `{name}` is not defined by the OCIO config; read as \
                      stored"
                 );

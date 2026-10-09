@@ -46,6 +46,7 @@ cargo run --release -- render -i scene.usda --profile                  # + per-s
 cargo run --release -- render -i scene.usda -l debug --log-file logs   # tee the log to a timestamped file
 cargo run --release -- render --help                                   # every render flag
 cargo run --release -- ls camera -i scene.usda                         # cameras (or light, material), one path per line
+cargo run --release -- check -i scene.usda --json -                    # what a render would use + the import's warnings (crust-check/1)
 cargo run --release -- diagnostic -i scene.usda --budget 2m > r.md     # which settings make it faster/cleaner (+ crust-diagnostic.json)
 
 cargo test                                          # integration tests load samples/*.usda
@@ -148,8 +149,11 @@ without the other (full list: `docs/architecture.md` § Invariants):
 **Logging.** The level is decided by whether the line scales with the scene, not by how
 interesting it is. `INFO` is bounded per render (a default render prints four lines);
 anything whose count grows with the input (per prim, material, texture, chunk, pass) is
-`DEBUG`; `WARN` means something authored was refused, approximated or skipped. Nothing is
-logged per ray, pixel or sample. `--stats` output is an event on `STATS_TARGET`, which
+`DEBUG`; `WARN` means something authored was refused, approximated or skipped. An
+import-time WARN goes through `crust_core::warning!` with a `WarningCode` (one per cause,
+listed in `site/content/docs/reference/warnings.md`, kept in step by a test), raised on the
+importing thread so it lands on `Scene::warnings`. Nothing is logged per ray, pixel or
+sample. `--stats` output is an event on `STATS_TARGET`, which
 `-l` cannot silence. Details: `openspec/specs/cli/design.md` § Logging.
 
 **Environment switches** exist to A/B an optimization against the behaviour it replaced.

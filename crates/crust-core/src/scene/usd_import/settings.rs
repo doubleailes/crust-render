@@ -1,10 +1,11 @@
 //! `UsdRenderSettings` and the `crust:*` render attributes → [`RenderSettings`], and
 //! which camera the render was told to use.
 
+use crate::warning;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::color::Space;
 use crate::filter::PixelFilter;
@@ -165,7 +166,11 @@ pub(super) fn render_settings_color_space(stage: &Stage) -> Space {
     match custom_token(&prim_at(stage, path.clone()), "renderingColorSpace") {
         Some(name) if !name.is_empty() => {
             crate::color::working_space(&name).unwrap_or_else(|why| {
-                warn!("{path}: renderingColorSpace refused ({why}); rendering in lin_rec709");
+                warning!(
+                    ColorWorkingSpaceRefused,
+                    at = path,
+                    "{path}: renderingColorSpace refused ({why}); rendering in lin_rec709"
+                );
                 Space::LIN_REC709
             })
         }
@@ -206,7 +211,11 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let min_spp = match custom_i32(&prim, "crust:minSamplesPerPixel") {
         Some(n) if n < 0 => {
             let fallback = d.min_samples_per_pixel();
-            warn!("crust:minSamplesPerPixel = {n} is negative — using {fallback}");
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
+                "crust:minSamplesPerPixel = {n} is negative — using {fallback}"
+            );
             fallback
         }
         Some(n) => n as u32,
@@ -226,7 +235,11 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let strategy = match custom_token(&prim, "crust:samplingStrategy") {
         None => SamplingStrategy::PowerMis,
         Some(name) => name.parse().unwrap_or_else(|e| {
-            warn!("crust:samplingStrategy: {e} — using power MIS");
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
+                "crust:samplingStrategy: {e} — using power MIS"
+            );
             SamplingStrategy::PowerMis
         }),
     };
@@ -235,7 +248,11 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let light_selection = match custom_token(&prim, "crust:lightSelection") {
         None => LightSelection::Power,
         Some(name) => name.parse().unwrap_or_else(|e| {
-            warn!("crust:lightSelection: {e} — picking lights by power");
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
+                "crust:lightSelection: {e} — picking lights by power"
+            );
             LightSelection::Power
         }),
     };
@@ -246,7 +263,11 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let mut filter = match custom_token(&prim, "crust:pixelFilter") {
         None => PixelFilter::default(),
         Some(name) => name.parse().unwrap_or_else(|e| {
-            warn!("crust:pixelFilter: {e} — using the triangle filter");
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
+                "crust:pixelFilter: {e} — using the triangle filter"
+            );
             PixelFilter::default()
         }),
     };
@@ -265,7 +286,9 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let neighbour_tolerance = match custom_f32(&prim, "crust:adaptiveNeighbourTolerance") {
         Some(t) if t.is_finite() => t,
         Some(t) => {
-            warn!(
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
                 "crust:adaptiveNeighbourTolerance = {t} is not finite — using {}",
                 crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE
             );
@@ -326,12 +349,20 @@ fn light_sample_count(prim: &Prim, name: &str) -> u32 {
     use crate::tracer::{DEFAULT_LIGHT_SAMPLES, MAX_LIGHT_SAMPLES};
     match custom_i32(prim, name) {
         Some(n) if n >= 1 && n as u32 > MAX_LIGHT_SAMPLES => {
-            warn!("{name} = {n} is above {MAX_LIGHT_SAMPLES} — taking {MAX_LIGHT_SAMPLES}");
+            warning!(
+                SettingsLightSamplesClamped,
+                at = prim.path(),
+                "{name} = {n} is above {MAX_LIGHT_SAMPLES} — taking {MAX_LIGHT_SAMPLES}"
+            );
             MAX_LIGHT_SAMPLES
         }
         Some(n) if n >= 1 => n as u32,
         Some(n) => {
-            warn!("{name} = {n} is below 1 — taking {DEFAULT_LIGHT_SAMPLES}");
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
+                "{name} = {n} is below 1 — taking {DEFAULT_LIGHT_SAMPLES}"
+            );
             DEFAULT_LIGHT_SAMPLES
         }
         None => DEFAULT_LIGHT_SAMPLES,
@@ -350,7 +381,8 @@ pub(super) fn check_time_range(stage: &Stage, time: f64) {
     }
     let (start, end) = (stage.start_time_code(), stage.end_time_code());
     if time < start || time > end {
-        warn!(
+        warning!(
+            TimeOutsideRange,
             "Frame {time} is outside the stage's time range [{start}, {end}]; \
              animated attributes hold their nearest time sample"
         );

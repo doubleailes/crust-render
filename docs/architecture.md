@@ -211,6 +211,16 @@ other. The pairs:
   kernel's shared vertices and a 4-byte cell at the hit; the tests that pin
   them against the tables they replaced must keep passing if either formula
   moves.
+- **Import warnings.** A new import-time warning is a new `WarningCode` in
+  `crust-core/src/warnings.rs` *and* a row in
+  `site/content/docs/reference/warnings.md`, kind included —
+  `the_reference_page_lists_every_code` fails until the two agree. It must be
+  raised on the importing thread: the collector is a thread-local entered by
+  `load_scene` (like `EvalTimeScope`), so a warning raised from a rayon task
+  during the import would be logged but not recorded. A debug build panics
+  when that happens (`recording_from_a_rayon_worker_during_an_import_panics`);
+  work done on other threads (the `--auto-tx` conversions) collects its
+  failures and raises them after joining.
 - **Import cache keys.** Anything keyed on a prototype path is scoped by the
   stage epoch (`ImportCaches::epoch`), because `/__Prototype_N` is renumbered
   per masked stage.

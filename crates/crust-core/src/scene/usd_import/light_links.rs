@@ -30,11 +30,12 @@
 //! backdrop (the Moana island's `sky_dome_cam_llc`), an area light keeps only
 //! its camera-visible geometry.
 
+use crate::warning;
 use std::collections::HashMap;
 
 use openusd::sdf;
 use openusd::usd::{Collection, ExpansionRule, MembershipQuery, PathRule, Prim, Stage};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::light::{EVERY_CLASS, Light, LightLinks as RuntimeLinks, LightList};
 use crate::ray::{MASK_CAMERA, MASK_SHADOW, RayMask};
@@ -69,7 +70,9 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
         ..
     } = opinions(prim, name);
     if expression {
-        warn!(
+        warning!(
+            LightLinkMembershipExpression,
+            at = prim.path(),
             "{}: collection:{name} authors membershipExpression, which crust does not \
              read — the collection is read as the default (every prim)",
             prim.path()
@@ -82,7 +85,9 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
     let collection = match Collection::new(prim.path().clone(), name) {
         Ok(c) => c,
         Err(e) => {
-            warn!(
+            warning!(
+                LightLinkUnreadableCollection,
+                at = prim.path(),
                 "{}: collection:{name} unreadable ({e}) — read as the default",
                 prim.path()
             );
@@ -92,7 +97,9 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
     let query = match collection.compute_membership_query(stage) {
         Ok(q) => q,
         Err(e) => {
-            warn!(
+            warning!(
+                LightLinkUnreadableCollection,
+                at = prim.path(),
                 "{}: collection:{name} unreadable ({e}) — read as the default",
                 prim.path()
             );
@@ -101,7 +108,9 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
     };
     for t in includes.iter().chain(&excludes) {
         if inside_instance(stage, t) {
-            warn!(
+            warning!(
+                LightLinkTargetInInstance,
+                at = prim.path(),
                 "{}: collection:{name} targets {t}, inside an instance — membership is \
                  judged on the instance, so the target cannot be told apart from its \
                  siblings",
@@ -257,7 +266,9 @@ impl LightLinks {
                         })
                     });
                     if let Some(t) = missing {
-                        warn!(
+                        warning!(
+                            LightLinkNestedNotComposed,
+                            at = path,
                             "{path}: collection:{name} is authored in a payload and includes \
                              {t}, which this chunk of the streamed import does not compose — \
                              that nested collection contributes nothing"
@@ -357,7 +368,8 @@ impl LightLinks {
                     .map(|(_, p)| p.light.as_ref().expect("filtered")),
             );
             if classes.len() >= EVERY_CLASS as usize {
-                warn!(
+                warning!(
+                    LightLinkTooManyClasses,
                     "{} light-link classes exceed crust's {}; light links are ignored",
                     classes.len(),
                     EVERY_CLASS
@@ -552,7 +564,8 @@ fn encode_shadows(
         region.mask = encode(region.mask, class_of[id as usize] as usize, &mut authored);
     }
     if authored {
-        warn!(
+        warning!(
+            LightLinkRayMaskRewritten,
             "crust:rayMask bits 3-31 are rewritten by shadow linking, which encodes \
              occluder classes in them"
         );
@@ -570,7 +583,9 @@ fn encode_shadows(
         }
         let in_overflow = overflow.iter().filter(|&&c| classes[c].get(bit)).count();
         if in_overflow != 0 && in_overflow != overflow.len() {
-            warn!(
+            warning!(
+                LightLinkShadowLinkUnencodable,
+                at = p.path,
                 "{}: collection:shadowLink cannot be encoded ({} occluder classes share \
                  crust's overflow bit and it includes only some) — shadowed by every \
                  occluder",

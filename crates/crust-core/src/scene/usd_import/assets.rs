@@ -4,7 +4,9 @@
 //! [`AssetLoader`](crate::scene::AssetLoader) ([`cached_asset`]).
 //! crust-core decodes nothing itself.
 
+use crate::record_warning;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,14 +54,19 @@ pub(super) fn cached_asset<K: Eq + Hash, V: Clone>(
 /// `colorspace` through [`crate::ColorSpace::from_mtlx`], UsdUVTexture's
 /// `sourceColorSpace` through [`crate::ColorSpace::from_usd`] — since the two
 /// disagree on what an absent attribute means.
+///
+/// `prim` is the material referencing the texture. Every reference that
+/// comes back `None`, a cache hit included, counts one `texture.unreadable`
+/// on it; the host explained the cause once, when the file failed.
 pub(super) fn load_uv_texture(
     path: &Path,
     space: crate::ColorSpace,
+    prim: &dyn Display,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn crate::Texture2D>> {
     let key = (path.to_string_lossy().into_owned(), space);
     let assets = caches.assets;
-    cached_asset(
+    let loaded = cached_asset(
         &mut caches.materials.textures,
         &mut caches.asset_time,
         key,
@@ -73,7 +80,21 @@ pub(super) fn load_uv_texture(
             }
             loaded
         },
-    )
+    );
+    if loaded.is_none() {
+        unreadable(prim, path);
+    }
+    loaded
+}
+
+/// Counts one reference to a texture the host could not load.
+fn unreadable(prim: &dyn Display, path: &Path) {
+    record_warning!(
+        TextureUnreadable,
+        at = prim,
+        "{prim}: texture {} could not be loaded — the input reads its fallback",
+        path.display()
+    );
 }
 
 /// Opens a Ptex file through the host, once per `(resolved path, space)`.
@@ -83,20 +104,25 @@ pub(super) fn load_uv_texture(
 /// texture is opened once however many materials or chunks reference it.
 /// The space is in the key because the decode happens at open: a file read
 /// both as colour and as displacement is two textures, which is correct and
-/// rare.
+/// rare. `prim` is counted as [`load_uv_texture`] counts it.
 pub(super) fn load_ptex(
     path: &Path,
     space: crate::ColorSpace,
+    prim: &dyn Display,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn crate::PtexTexture>> {
     let key = (path.to_string_lossy().into_owned(), space);
     let assets = caches.assets;
-    cached_asset(
+    let loaded = cached_asset(
         &mut caches.materials.ptex,
         &mut caches.asset_time,
         key,
         |_| assets.load_ptex(path, space),
-    )
+    );
+    if loaded.is_none() {
+        unreadable(prim, path);
+    }
+    loaded
 }
 
 /// An `asset`-valued attribute as a filesystem path — the one rule every

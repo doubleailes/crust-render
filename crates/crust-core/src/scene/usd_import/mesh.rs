@@ -2,6 +2,7 @@
 //! instance-vs-bake decision, triangulation and the per-triangle side tables
 //! (Ptex faces, UVs, texture density).
 
+use crate::warning;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use openusd_schemas::geom::{
     SubdivisionScheme,
 };
 use rayon::prelude::*;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::material::{Displacement, Material};
 use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
@@ -157,8 +158,6 @@ pub(super) struct MeshArena {
     pub(super) subdiv: SubdivPolicy,
     /// What displacement did, for `--stats`.
     pub(super) displaced: crate::stats::DisplacementCounters,
-    /// Whether the one-per-load "displaced at cage resolution" warning fired.
-    cage_warned: bool,
     /// Distinct meshes whose offsets exceeded their authored bound — one
     /// warning each.
     pub(super) bound_exceeded: u64,
@@ -197,13 +196,6 @@ pub(super) struct SubdivPolicy {
     /// exactly as before subdivision surfaces were read at all — so, unlike
     /// level 0, not even smooth cage normals. The honest "off" side of the A/B.
     enabled: bool,
-    /// Whether the retired per-prim `crust:subdivisionLevel` has been warned
-    /// about: once per load, since a per-prim warning would scale with the
-    /// scene.
-    legacy_warned: bool,
-    /// Whether a Ptex-displaced `none` mesh kept on its cage has been warned
-    /// about, once per load for the same reason.
-    ptex_cage_warned: bool,
 }
 
 impl SubdivPolicy {
@@ -219,8 +211,6 @@ impl SubdivPolicy {
             rate_bins: Vec::new(),
             quality: [[0; subdiv::QUALITY_BINS]; 2],
             enabled: crate::config().subdiv,
-            legacy_warned: false,
-            ptex_cage_warned: false,
         }
     }
 
@@ -334,7 +324,6 @@ impl MeshArena {
             by_key: HashMap::new(),
             subdiv,
             displaced: Default::default(),
-            cage_warned: false,
             bound_exceeded: 0,
         }
     }
@@ -444,12 +433,13 @@ impl MeshArena {
         c.max_offset = c.max_offset.max(out.max_abs);
         if !src.refined {
             c.at_cage += 1;
-            if !self.cage_warned && !d.is_constant() {
-                self.cage_warned = true;
-                warn!(
-                    "Mesh at {} (and possibly others) is displaced at its cage resolution, \
-                     so only cage vertices move — raise --subdiv-level or set \
-                     --subdiv-edge-length to dice it finer",
+            if !d.is_constant() {
+                warning!(
+                    MeshDisplacedAtCage,
+                    at = prim.path(),
+                    "Mesh at {} is displaced at its cage resolution, so only cage vertices \
+                     move — raise --subdiv-level or set --subdiv-edge-length to dice it finer \
+                     (further occurrences are counted in the import's warnings)",
                     prim.path()
                 );
             }
@@ -459,7 +449,9 @@ impl MeshArena {
             && out.max_abs > bound
         {
             self.bound_exceeded += 1;
-            warn!(
+            warning!(
+                MeshDisplacementExceedsBound,
+                at = prim.path(),
                 "Mesh at {}: displacement reaches {} but its crust:displacementBound is {} — \
                  applied unclamped; adaptive dicing may under-dice what it pushes into view",
                 prim.path(),
@@ -601,12 +593,16 @@ pub(super) fn emit_mesh(
     // Non-invertible placements (a zero scale axis) cannot be instanced —
     // bake the degenerate transform into world-space triangles as before.
     if world_xf.determinant().abs() < 1e-12 {
-        warn!(
+        warning!(
+            MeshNonInvertibleTransform,
+            at = prim.path(),
             "Mesh at {} has a non-invertible transform — baking instead of instancing",
             prim.path()
         );
         if motion.is_some() {
-            warn!(
+            warning!(
+                MeshMotionIgnored,
+                at = prim.path(),
                 "Mesh at {}: crust:motion:translate is ignored on baked (non-invertible) geometry",
                 prim.path()
             );
@@ -1031,13 +1027,14 @@ pub(super) fn mesh_source(
         refined: false,
     };
 
-    if !policy.legacy_warned && custom_i32(prim, "crust:subdivisionLevel").is_some() {
-        policy.legacy_warned = true;
-        warn!(
-            "Mesh at {} (and possibly others): the per-prim crust:subdivisionLevel \
-             is no longer read — a mesh is subdivided when it authors \
-             subdivisionScheme, to the level set by crust:subdivisionLevel on the \
-             RenderSettings prim or --subdiv-level",
+    if custom_i32(prim, "crust:subdivisionLevel").is_some() {
+        warning!(
+            SubdivLegacyLevel,
+            at = prim.path(),
+            "Mesh at {}: the per-prim crust:subdivisionLevel is no longer read — a mesh \
+             is subdivided when it authors subdivisionScheme, to the level set by \
+             crust:subdivisionLevel on the RenderSettings prim or --subdiv-level (further \
+             occurrences are counted in the import's warnings)",
             prim.path()
         );
     }
@@ -1080,7 +1077,9 @@ pub(super) fn mesh_source(
     // cage face ids — a plausible, wrong texture. Keep the cage instead.
     let loop_ptex = usd_scheme == SubdivisionScheme::Loop && want_faces;
     if loop_ptex && level > 0 {
-        warn!(
+        warning!(
+            SubdivLoopPtex,
+            at = prim.path(),
             "Mesh at {}: subdivisionScheme = loop with a per-face (Ptex) texture \
              cannot keep its face ids through refinement — rendering the smooth \
              base cage",
@@ -1099,7 +1098,9 @@ pub(super) fn mesh_source(
         SubdivisionScheme::Bilinear => subdiv::SubdivScheme::Bilinear,
         SubdivisionScheme::Loop => {
             if counts.iter().any(|&c| c != 3) {
-                warn!(
+                warning!(
+                    SubdivLoopNeedsTriangles,
+                    at = prim.path(),
                     "Mesh at {}: subdivisionScheme = loop needs an all-triangle \
                      mesh — rendering the base cage",
                     prim.path()
@@ -1147,7 +1148,9 @@ pub(super) fn mesh_source(
                 return Some(MeshSource::tessellated(t, base_face_count));
             }
             Err(e) => {
-                warn!(
+                warning!(
+                    SubdivFailed,
+                    at = prim.path(),
                     "Mesh at {}: per-face tessellation failed ({e}) — rendering the base cage",
                     prim.path()
                 );
@@ -1166,7 +1169,9 @@ pub(super) fn mesh_source(
             Some(MeshSource::subdivided(refined, base_face_count))
         }
         Err(e) => {
-            warn!(
+            warning!(
+                SubdivFailed,
+                at = prim.path(),
                 "Mesh at {}: subdivision failed ({e}) — rendering the base cage",
                 prim.path()
             );
@@ -1227,15 +1232,15 @@ fn effective_scheme(
         return scheme;
     }
     if d.needs_ptex() && counts.iter().any(|&c| c != 4) {
-        if !policy.ptex_cage_warned {
-            policy.ptex_cage_warned = true;
-            warn!(
-                "Mesh at {} (and possibly others): subdivisionScheme = none with a Ptex \
-                 displacement and non-quad faces is displaced at its cage — refining it \
-                 would leave the children of its triangles with no Ptex face",
-                prim.path()
-            );
-        }
+        warning!(
+            MeshPtexDisplacedAtCage,
+            at = prim.path(),
+            "Mesh at {}: subdivisionScheme = none with a Ptex displacement and non-quad \
+             faces is displaced at its cage — refining it would leave the children of its \
+             triangles with no Ptex face (further occurrences are counted in the import's \
+             warnings)",
+            prim.path()
+        );
         scheme
     } else {
         SubdivisionScheme::Bilinear
@@ -1316,7 +1321,9 @@ fn refinable_chart<'a>(
     if channel.is_well_formed(n_entries) {
         Some(channel)
     } else {
-        warn!(
+        warning!(
+            MeshInvalidUvs,
+            at = prim.path(),
             "Mesh at {}: texture coordinates do not index cleanly into their \
              values — the subdivided surface renders without them",
             prim.path()
@@ -1571,7 +1578,9 @@ fn check_face_count(prim: &Prim, n_base_faces: usize, material: &dyn Material) {
         return;
     };
     if tex.num_faces() != n_base_faces {
-        warn!(
+        warning!(
+            MeshPtexFaceMismatch,
+            at = prim.path(),
             "Mesh at {} has {} faces but its per-face texture has {} — \
              the texture does not match this geometry, so shading will be wrong",
             prim.path(),
@@ -2161,7 +2170,8 @@ mod subdiv_policy_tests {
             .open(path.to_str().unwrap())
             .expect("stage opens");
         let mut policy = SubdivPolicy::new(2);
-        for (n, name) in ["/W/A", "/W/B"].into_iter().enumerate() {
+        let scope = crate::WarningScope::enter();
+        for name in ["/W/A", "/W/B"] {
             let p = sdf::path(name).unwrap();
             let prim = super::super::prim_at(&stage, p.clone());
             let mesh = UsdMesh::get(&stage, p).unwrap().expect("a mesh");
@@ -2175,9 +2185,13 @@ mod subdiv_policy_tests {
             .unwrap();
             // The fallback scheme at the policy's level 2, not the prim's.
             assert_eq!(src.counts.len(), 16, "{name}: refined at the load's level");
-            // Set by the first prim, so the second finds the warning spent.
-            assert!(policy.legacy_warned, "after prim {n}");
         }
+        // Logged once, counted for both.
+        let warnings = scope.finish();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, crate::WarningCode::SubdivLegacyLevel);
+        assert_eq!(warnings[0].count, 2);
+        assert_eq!(warnings[0].prims, ["/W/A", "/W/B"]);
     }
 
     /// Every vertex's owner chart value is the value one of its own corners
@@ -2601,6 +2615,7 @@ def Mesh "T"
         let mesh = UsdMesh::get(&stage, p).unwrap().unwrap();
         let d = ptex_displacement();
         let mut arena = MeshArena::new(SubdivPolicy::new(2));
+        let scope = crate::WarningScope::enter();
         let src = mesh_source(
             &prim,
             &mesh,
@@ -2615,7 +2630,11 @@ def Mesh "T"
         )
         .unwrap();
         assert!(!src.refined, "kept on its cage");
-        assert!(arena.subdiv.ptex_cage_warned);
+        let warnings = scope.finish();
+        assert_eq!(
+            warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
+            [crate::WarningCode::MeshPtexDisplacedAtCage]
+        );
         let charts = owner_charts(&src, src.points.len(), &d);
         assert!(
             charts.iter().all(|c| c.ptex.is_some()),
