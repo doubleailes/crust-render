@@ -166,7 +166,6 @@ impl PtexColor {
             return Err(AssetError::unusable(path, "Ptex file has no channels"));
         }
         let dt = tx.data_type();
-        let scale = dt.one_value_inv();
         // Which reduction the pyramid is built with, decided once for the
         // file rather than guessed per face. A triangle texture packs *two*
         // triangles into its square of texels — the upright one and its
@@ -174,11 +173,7 @@ impl PtexColor {
         // mixes texels from both, and every level above 0 comes out wrong in
         // a way that still looks like plausible texture. See `reduce_triangle`.
         let triangle = tx.mesh_type() == ptex::MeshType::Triangle;
-        let reduce: LevelReduction = if triangle {
-            reduce_triangle
-        } else {
-            reduce_quad
-        };
+        let reduce = level_reduction(triangle);
 
         let n_faces = tx.num_faces();
         let mut faces = Vec::with_capacity(n_faces);
@@ -186,18 +181,7 @@ impl PtexColor {
 
         for faceid in 0..n_faces {
             let info = *tx.face_info(faceid).map_err(AssetError::ptex(path))?;
-            // Clamp each axis independently: Ptex faces are frequently
-            // non-square (64x16 is common) and clamping the pair together
-            // would distort the aspect the file chose. A *triangle* face is
-            // square by construction and the format defines only symmetric
-            // reductions for one (`ptex-rs` refuses an anisotropic request
-            // outright), so there the pair clamps together.
-            let res = if triangle {
-                let l = info.res.ulog2.min(info.res.vlog2).min(max_log2);
-                ptex::Res::new(l, l)
-            } else {
-                ptex::Res::new(info.res.ulog2.min(max_log2), info.res.vlog2.min(max_log2))
-            };
+            let res = capped_res(info.res, max_log2, triangle);
             let (w, h) = (res.u(), res.v());
             let offset = texels.len() as u32;
             let levels = if mip { level_count(w, h) } else { 1 };
@@ -217,20 +201,8 @@ impl PtexColor {
                 continue;
             };
 
-            let px = dt.size() * n_chan;
-            let out = &mut texels[offset as usize..];
-            for i in 0..(w * h) {
-                let src = &raw[i * px..];
-                for ch in 0..3 {
-                    // A single-channel (displacement-style) file feeds channel
-                    // 0 to all three, so it reads as greyscale rather than red.
-                    let c = if ch < n_chan { ch } else { 0 };
-                    out[i * 3 + ch] = read_channel(&src[c * dt.size()..], dt) * scale;
-                }
-            }
-            // Done once here rather than per lookup, a face at a time; see
-            // `decode_ptex_slice` for why colour is decoded by 2.2.
-            decode_ptex_slice(&mut out[..w * h * 3], space);
+            let out = &mut texels[offset as usize..offset as usize + w * h * 3];
+            decode_face(&raw, out, dt, n_chan, space);
             // Reduce in memory from the level just decoded, rather than
             // asking the reader for each coarser resolution. The reader takes
             // `&mut self` per read and caches no pixels, so every extra level
@@ -369,13 +341,90 @@ impl PtexTexture for PtexColor {
     }
 }
 
+/// A face authored at `res`, clamped to the `max_log2` cap the way the
+/// preloaded backend fetches it.
+///
+/// Each axis clamps independently for a quad: Ptex faces are frequently
+/// non-square (64x16 is common) and clamping the pair together would distort
+/// the aspect the file chose. A *triangle* face is square by construction and
+/// the format defines only symmetric reductions for one (`ptex-rs` refuses an
+/// anisotropic request outright), so there the pair clamps together. One
+/// function for every caller — the preload, the stream's explicit cap, its
+/// `capped` chain and the admission price — so they cannot disagree on which
+/// resolution "the cap" names.
+pub(crate) fn capped_res(res: ptex::Res, max_log2: i8, triangle: bool) -> ptex::Res {
+    if triangle {
+        let l = res.ulog2.min(res.vlog2).min(max_log2);
+        ptex::Res::new(l, l)
+    } else {
+        ptex::Res::new(res.ulog2.min(max_log2), res.vlog2.min(max_log2))
+    }
+}
+
+/// One face's raw samples (`dt`, `n_chan` interleaved) decoded into `out`,
+/// interleaved linear RGB: scaled to `[0, 1]`, then through `space`'s curve.
+///
+/// **The one decode both preloaded and derived levels go through.** The
+/// streamed `capped` chain (`ptex_stream`) builds its levels below the cap
+/// from exactly what this returns, so a preloaded face and a derived one are
+/// equal because they are the same call, not two that happen to agree.
+pub(crate) fn decode_face(
+    raw: &[u8],
+    out: &mut [f32],
+    dt: ptex::DataType,
+    n_chan: usize,
+    space: ColorSpace,
+) {
+    let scale = dt.one_value_inv();
+    let px = dt.size() * n_chan;
+    for (i, texel) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+        let src = &raw[i * px..];
+        for (ch, value) in texel.iter_mut().enumerate() {
+            // A single-channel (displacement-style) file feeds channel 0 to
+            // all three, so it reads as greyscale rather than red.
+            let c = if ch < n_chan { ch } else { 0 };
+            *value = read_channel(&src[c * dt.size()..], dt) * scale;
+        }
+    }
+    // Done once per face rather than per lookup; see `decode_ptex_slice` for
+    // why colour is decoded by 2.2.
+    decode_ptex_slice(out, space);
+}
+
+/// The reduction a file's pyramid is built with, by mesh type.
+pub(crate) fn level_reduction(triangle: bool) -> LevelReduction {
+    if triangle {
+        reduce_triangle
+    } else {
+        reduce_quad
+    }
+}
+
+/// One coarser level of a `sw`x`sh` face of interleaved linear RGB, built by
+/// `reduce` exactly as the preloaded pyramid builds it: the parent and the
+/// child laid out contiguously in one arena, as in [`PtexColor::texels`].
+pub(crate) fn reduce_level(
+    parent: &[f32],
+    sw: usize,
+    sh: usize,
+    reduce: LevelReduction,
+) -> Vec<f32> {
+    let (dw, dh) = ((sw / 2).max(1), (sh / 2).max(1));
+    let mut arena = Vec::with_capacity(parent.len() + dw * dh * 3);
+    arena.extend_from_slice(parent);
+    arena.resize(parent.len() + dw * dh * 3, 0.0);
+    reduce(&mut arena, 0, sw, sh, parent.len(), dw, dh);
+    arena.drain(..parent.len());
+    arena
+}
+
 /// How one coarser mip level is built from the level above it.
 ///
 /// `(texels, src_off, sw, sh, dst_off, dw, dh)`; source and destination are
 /// disjoint ranges of the same arena, and both levels are interleaved linear
 /// RGB. Which of the two implementations a file gets is decided by its mesh
 /// type at open, never per face.
-type LevelReduction = fn(&mut [f32], usize, usize, usize, usize, usize, usize);
+pub(crate) type LevelReduction = fn(&mut [f32], usize, usize, usize, usize, usize, usize);
 
 /// One coarser level of a **quad** face: the 2x2 box average, in linear light.
 ///

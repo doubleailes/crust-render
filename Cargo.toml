@@ -29,11 +29,14 @@ exr = "1.74.2"
 # image >= 0.25.10 (which depends on tiff 0.11), so it unifies with the
 # `.tx` reader's `tiff` below instead of adding a second copy.
 image = { version = "0.25.10", default-features = false, features = ["png", "hdr", "jpeg", "tiff"] }
-# Pure-Rust Ptex reader (package `ptex-rust`, lib name `ptex`), from
-# crates.io. 0.3.1 is the floor because it is the first release on lru 0.18.2,
-# clear of RUSTSEC-2026-0002 and RUSTSEC-2026-0253; the committed Cargo.lock
-# pins the exact version. Hoisted so the decoder crate and the probe examples
-# that read `.ptx` directly can never disagree on the version.
+# Pure-Rust Ptex reader (package `ptex-rust`, lib name `ptex`), from the
+# doubleailes fork, pinned by `rev` until 0.4.0 is released to crates.io.
+# 0.4.0 adds `DerivedLevels` (`SharedReader::get_derived`), which the streamed
+# `capped` mip chain stores its linear-light levels below the preload cap
+# through, in the reader's own cache and budget. It keeps 0.3.1's lru 0.18.2,
+# clear of RUSTSEC-2026-0002 and RUSTSEC-2026-0253. Hoisted so the decoder
+# crate and the probe examples that read `.ptx` directly can never disagree on
+# the version.
 #
 # The `cache` feature is the one this bump was for: it brings `SharedReader`,
 # a `&self` reader over a byte-budgeted cache of decoded pixels, which is the
@@ -46,7 +49,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "hdr
 # crate — a renamed dependency is addressed by its key, not by its lib target
 # — so the key is `ptex`, which is both the lib name and what every `use` in
 # the workspace already says.
-ptex = { package = "ptex-rust", version = "0.3.1", features = ["cache"] }
+ptex = { package = "ptex-rust", git = "https://github.com/doubleailes/ptex-rs", rev = "aaa68eef8fd7f259136a9dd344b8c02684505364", features = ["cache"] }
 # Tiled, mip-mapped TIFF — the `.tx` textures a streaming cache reads a single
 # tile at a time. Named directly rather than reached through `image`, because
 # the tiled reader uses the chunk API (`read_chunk`, `seek_to_image`) that
