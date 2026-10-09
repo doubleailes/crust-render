@@ -108,7 +108,7 @@ crust-render::mcp::run                       stdio JSON-RPC (rmcp) on a one-thre
      ├─ open_session: write <output>.usda    `subLayers = [@<input>@]`, nothing else
      │   ├─ authoring Stage on <output>      payloads unloaded; loaded where a query reaches
      │   └─ import_checked(<output>)         as `crust check -i <output>`: the report is kept,
-     │                                        the scene becomes one Renderer, reconfigured per render
+     │                                        the scene becomes one Renderer, retuned per render
      └─ every edit batch: author into <output>, Layer::save, re-import the saved file
 ```
 
@@ -186,6 +186,10 @@ other. The pairs:
   is read per pass. A setting cached at construction must be rebuilt there too,
   or the diagnostic's trials measure the wrong renderer —
   `reconfigure_renders_what_new_renders` pins every varied setting bitwise.
+  `Renderer::retune` (an MCP session's renders) is `reconfigure` keeping the
+  light selection when its inputs — the strategy, the resolution, the frame —
+  are unchanged: a new input to the `learned` pre-pass belongs in its key, or a
+  session renders with a stale selection (`retune_renders_what_new_renders`).
 - **The clamp and its counter.** The clamp counter (`PathContext::measure_clamp`)
   returns the *unclamped* radiance through a copy of the ordinary expression
   inside the clamp's own branch, and only in the `PROFILE` instantiation. Change

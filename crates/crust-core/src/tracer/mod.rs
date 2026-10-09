@@ -284,8 +284,33 @@ impl Renderer {
     /// every way of assembling a scene — USD, the procedural fallback, a
     /// test — gets the selection its settings ask for.
     pub fn reconfigure(&mut self, settings: RenderSettings) -> std::time::Duration {
-        let started = std::time::Instant::now();
         self.settings = settings;
+        self.select_lights()
+    }
+
+    /// [`reconfigure`](Self::reconfigure), keeping the light selection when
+    /// what it is built from is unchanged: the strategy, the resolution and
+    /// the frame (the `learned` pre-pass is a deterministic function of
+    /// those and the scene). A session that only changes the samples or the
+    /// region then pays no second pre-pass, and renders bit-identically to a
+    /// rebuild. `reconfigure` itself always rebuilds, because `crust
+    /// diagnostic` reports that setup as each trial's cost.
+    pub fn retune(&mut self, settings: RenderSettings) -> std::time::Duration {
+        let builds_from = |s: &RenderSettings| (s.light_selection(), s.width, s.height, s.frame);
+        let keep = builds_from(&self.settings) == builds_from(&settings);
+        self.settings = settings;
+        if keep {
+            std::time::Duration::ZERO
+        } else {
+            self.select_lights()
+        }
+    }
+
+    /// Builds the light selection the settings ask for (training the
+    /// `learned` one), returning how long it took.
+    fn select_lights(&mut self) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        let settings = self.settings;
         self.lights.select_by(settings.light_selection());
         if settings.light_selection() == LightSelection::Learned {
             match crate::light_cache::train(

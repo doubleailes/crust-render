@@ -982,12 +982,62 @@ fn a_region_renders_alone_and_a_render_completes() {
 }
 
 #[test]
+fn a_render_answers_at_its_first_image() {
+    let (mut client, _input, _output) = cornellbox_session("first_image", &[]);
+    // A render that cannot finish within its budget answers at 4 spp, long
+    // before the budget.
+    let asked = std::time::Instant::now();
+    let first = client
+        .call(
+            "render",
+            json!({ "region": [0, 0, 160, 90], "spp": 100000, "budget_s": 120 }),
+        )
+        .expect("started");
+    let waited = asked.elapsed().as_secs_f64();
+    assert!(waited < 60.0, "answered after {waited} s: {first:#}");
+    assert_eq!(first["done"], false, "{first:#}");
+    assert!(first["spp_reached"].as_u64() >= Some(4), "{first:#}");
+    answer_image(&client);
+
+    // `snapshot` with a budget waits for the finished image, without
+    // restarting the render.
+    let early = client
+        .call(
+            "render",
+            json!({ "region": [8, 16, 72, 48], "spp": 16, "budget_s": 600 }),
+        )
+        .expect("started");
+    let id = early["render_id"].as_u64().unwrap();
+    assert!(
+        early["done"] == true || early["spp_reached"].as_u64() >= Some(4),
+        "{early:#}"
+    );
+    let finished = client
+        .call("snapshot", json!({ "render_id": id, "budget_s": 600 }))
+        .expect("waited");
+    assert_eq!(finished["render_id"], id, "{finished:#}");
+    assert_eq!(finished["status"], "done", "{finished:#}");
+    assert_eq!(finished["spp_reached"]["min"], 16, "{finished:#}");
+    answer_image(&client);
+
+    let e = client
+        .call("snapshot", json!({ "render_id": id, "budget_s": -1 }))
+        .expect_err("a negative budget");
+    assert!(e.contains("budget_s"), "{e}");
+    let e = client
+        .call("render", json!({ "wait": "forever" }))
+        .expect_err("an unknown wait");
+    assert!(e.contains("`image` or `done`"), "{e}");
+    client.finish();
+}
+
+#[test]
 fn probe_reads_the_pixel_the_cli_writes() {
     let (mut client, _input, output) = cornellbox_session("probe", &[]);
     let done = client
         .call(
             "render",
-            json!({ "region": [256, 96, 352, 192], "spp": 16, "budget_s": 600 }),
+            json!({ "region": [256, 96, 352, 192], "spp": 16, "budget_s": 600, "wait": "done" }),
         )
         .expect("rendered");
     assert_eq!(done["status"], "done", "{done:#}");
@@ -1075,7 +1125,7 @@ fn diff_compares_renders_and_refuses_mismatches() {
         let r = client
             .call(
                 "render",
-                json!({ "region": region, "spp": spp, "budget_s": 600 }),
+                json!({ "region": region, "spp": spp, "budget_s": 600, "wait": "done" }),
             )
             .expect("rendered");
         assert_eq!(r["status"], "done", "{r:#}");
@@ -1303,7 +1353,7 @@ fn the_documented_look_dev_session_runs() {
     let first = client
         .call(
             "render",
-            json!({ "region": [160, 90, 480, 270], "spp": 16, "budget_s": 600 }),
+            json!({ "region": [160, 90, 480, 270], "spp": 16, "budget_s": 600, "wait": "done" }),
         )
         .expect("render");
     assert_eq!(first["status"], "done", "{first:#}");
@@ -1335,7 +1385,7 @@ over "scene" {
     let second = client
         .call(
             "render",
-            json!({ "region": [160, 90, 480, 270], "spp": 16, "budget_s": 600 }),
+            json!({ "region": [160, 90, 480, 270], "spp": 16, "budget_s": 600, "wait": "done" }),
         )
         .expect("render");
     let diff = client
