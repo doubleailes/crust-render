@@ -684,8 +684,6 @@ and the rendered one cannot be checked against different bytes.
   uncached (`oversized`) and derived again on the next lookup. The cap level
   itself is read as tiles, so this costs only footprints a level or two
   coarser than a large cap.
-- **`ptex-rs` 0.4.0 is pinned by `rev`** to the fork's `derived-levels` branch
-  until it is released to crates.io.
 - **Ptex has no per-texture colour space.** Both backends decode `half` and
   `float` samples at full range, but both apply the display decode `powf(2.2)`
   to every `.ptx`, so a linear HDR `.ptx` is mis-decoded; the island's files

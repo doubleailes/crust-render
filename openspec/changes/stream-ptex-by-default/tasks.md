@@ -19,9 +19,9 @@
       accounting including derived bytes, no read finer than `base_res`, and
       concurrent `get_derived` from many threads.
 - [x] 2.5 Tag the fork, and re-pin `ptex` by `rev` in the workspace `Cargo.toml`
-      (keeping the `cache` feature). Branch `derived-levels` pushed and pinned by
-      `rev`; **not tagged**, because a tag push runs the fork's crates.io release.
-      Tag and publish 0.4.0 from main later, then re-pin by version.
+      (keeping the `cache` feature). Pinned by `rev` while under review (a tag push
+      runs the fork's crates.io release), then by version once 0.4.0 was tagged on
+      the fork's main and published: `ptex-rust = "0.4.0"` from crates.io.
 
 ## 3. crust-assets: the capped chain
 
