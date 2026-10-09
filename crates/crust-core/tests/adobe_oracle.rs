@@ -35,6 +35,11 @@ const GRID: usize = 32;
 /// [`Errors::worst`] for what is measured).
 const TOLERANCE: f32 = 2e-3;
 
+/// The largest error a fuzz case may have when no deviation applies: the
+/// fuzz is Adobe's lobe transcribed, so it matches to float precision, not
+/// merely within [`TOLERANCE`] (`docs/openpbr_reference_alignment.md` § Fuzz).
+const FUZZ_TOLERANCE: f32 = 1e-4;
+
 struct Case<'a> {
     id: &'a str,
     inputs: Vec<(&'a str, &'a str)>,
@@ -244,19 +249,30 @@ struct Errors {
 }
 
 impl Errors {
+    /// A non-finite value on either side is an infinite error: `f32::max`
+    /// and `max_element` would otherwise drop a NaN and let it pass.
     fn of(case: &Case, got: &Shaded) -> Errors {
+        let finite = |g: Vec3A, w: Vec3A| g.is_finite() && w.is_finite();
         let rel = |g: Vec3A, w: Vec3A, floor: f32| {
-            ((g - w).abs() / w.abs().max(Vec3A::splat(floor))).max_element()
+            if finite(g, w) {
+                ((g - w).abs() / w.abs().max(Vec3A::splat(floor))).max_element()
+            } else {
+                f32::INFINITY
+            }
         };
+        let values = got
+            .values
+            .iter()
+            .zip(&case.values)
+            .map(|(&g, &w)| rel(g, w, 0.05));
         Errors {
-            albedo: (got.albedo - case.albedo).abs().max_element(),
+            albedo: if finite(got.albedo, case.albedo) {
+                (got.albedo - case.albedo).abs().max_element()
+            } else {
+                f32::INFINITY
+            },
             emission: rel(got.emission, case.emission, 1.0),
-            value: got
-                .values
-                .iter()
-                .zip(&case.values)
-                .map(|(&g, &w)| rel(g, w, 0.05))
-                .fold(0.0, f32::max),
+            value: values.fold(0.0, f32::max),
         }
     }
 
@@ -434,6 +450,19 @@ fn report_deviations() {
     }
 }
 
+/// The number before `word` on the fixture header line that holds it.
+fn declared(word: &str) -> usize {
+    let line = FIXTURE
+        .lines()
+        .find(|l| l.starts_with('#') && l.contains(word))
+        .unwrap_or_else(|| panic!("the fixture header states its {word}"));
+    let head = &line[..line.find(word).expect("found above")];
+    head.split_whitespace()
+        .last()
+        .and_then(|n| n.trim_start_matches('#').parse().ok())
+        .unwrap_or_else(|| panic!("no number before {word:?} in {line:?}"))
+}
+
 /// The fixture header's `N cases`.
 fn declared_cases() -> usize {
     let line = FIXTURE
@@ -447,16 +476,92 @@ fn declared_cases() -> usize {
         .unwrap_or_else(|| panic!("no case count in {line:?}"))
 }
 
-/// Every case the generator wrote is in the fixture, with an answer for each
-/// light, so a fixture that lost rows cannot pass by checking less.
+/// Every case the generator wrote is in the fixture, with every light it
+/// drew and an answer for each, so a fixture that lost rows or directions
+/// cannot pass by checking less.
 #[test]
 fn the_fixture_is_complete() {
     let cases = cases();
     assert_eq!(cases.len(), declared_cases());
+    let lights = declared("light directions each");
+    assert!(lights > 0);
     for case in &cases {
-        assert_eq!(case.values.len(), case.lights.len(), "{}", case.id);
-        assert!(!case.lights.is_empty(), "{}", case.id);
+        assert_eq!(case.lights.len(), lights, "{}: light directions", case.id);
+        assert_eq!(case.values.len(), lights, "{}: answers", case.id);
     }
+}
+
+/// A NaN or infinity on either side fails the comparison: it is an infinite
+/// error, never one that `f32::max` quietly drops.
+#[test]
+fn a_non_finite_value_is_an_error() {
+    let case = &cases()[0];
+    let exact = Shaded {
+        emission: case.emission,
+        albedo: case.albedo,
+        values: case.values.clone(),
+    };
+    assert_eq!(Errors::of(case, &exact).worst(), 0.0);
+    for bad in [f32::NAN, f32::INFINITY] {
+        let mut values = case.values.clone();
+        values[3] = Vec3A::new(0.1, bad, 0.1);
+        let one_light = Shaded {
+            values,
+            ..exact_copy(&exact)
+        };
+        assert_eq!(
+            Errors::of(case, &one_light).worst(),
+            f32::INFINITY,
+            "{bad} light"
+        );
+        let albedo = Shaded {
+            albedo: Vec3A::splat(bad),
+            ..exact_copy(&exact)
+        };
+        assert_eq!(
+            Errors::of(case, &albedo).worst(),
+            f32::INFINITY,
+            "{bad} albedo"
+        );
+        let emission = Shaded {
+            emission: Vec3A::splat(bad),
+            ..exact_copy(&exact)
+        };
+        assert_eq!(
+            Errors::of(case, &emission).worst(),
+            f32::INFINITY,
+            "{bad} emission"
+        );
+    }
+}
+
+fn exact_copy(s: &Shaded) -> Shaded {
+    Shaded {
+        emission: s.emission,
+        albedo: s.albedo,
+        values: s.values.clone(),
+    }
+}
+
+/// The fuzz is Adobe's lobe transcribed, so a fuzz case no deviation applies
+/// to matches within [`FUZZ_TOLERANCE`], not just the general [`TOLERANCE`]:
+/// a drift the general bound would allow fails here.
+#[test]
+fn fuzz_cases_match_to_float_precision() {
+    let mut checked = 0;
+    for case in cases().iter().filter(|c| c.id.starts_with("fuzz-")) {
+        if DEVIATIONS.iter().any(|d| (d.applies)(case)) {
+            continue;
+        }
+        let worst = Errors::of(case, &shade(case)).worst();
+        assert!(
+            worst <= FUZZ_TOLERANCE,
+            "{}: worst error {worst:e} > {FUZZ_TOLERANCE:e}",
+            case.id
+        );
+        checked += 1;
+    }
+    assert!(checked >= 30, "only {checked} fuzz cases checked");
 }
 
 /// The cases a set of deviations leaves unexcused: each with its error, the

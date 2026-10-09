@@ -576,7 +576,8 @@ pub(super) fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bo
         if !transmission_is_continuous(m) {
             return Vec3A::ZERO;
         }
-        return eval_transmission(m, v_local, l_local, entering).0;
+        // Beneath the fuzz like every other layer (exactly 1.0 without one).
+        return eval_transmission(m, v_local, l_local, entering).0 * base_atten(m, v_local.z);
     }
     let h_local = (v_local + l_local).normalize();
 
@@ -701,7 +702,7 @@ pub(super) fn eval_split(
         if transmission_is_continuous(m) {
             out.push(
                 Lobe::Transmission.event(m),
-                eval_transmission(m, v_local, l_local, entering).0,
+                eval_transmission(m, v_local, l_local, entering).0 * base_atten(m, v_local.z),
             );
         }
         return;
