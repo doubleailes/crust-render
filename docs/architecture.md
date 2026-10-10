@@ -45,7 +45,7 @@ graph TD
 | `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
-| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown) | image, texture and IES decoding; UI |
+| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown) | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
 | `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's report; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance` / `Luma`, `align_to_normal` | everything |
@@ -86,7 +86,7 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
  │   │    its estimates into the control after each, and checks its cancel flag per pixel
  │   └─ per tile → per pixel → per sample: advance_pixel → trace_path
  │         forward walk: intersect, resolve material (ShadingPoint), NEE, scatter
- │         backward gather: MIS-weighted radiance, guiding training samples
+ │         backward gather: MIS-weighted radiance
  │         AOV instantiation only: the first hit → the unit's AOV planes
  └─ write EXR (linear) + PNG (tone-mapped) — crust-render only
        no products: write_rgb_file at -o; products: one scanline EXR each (main.rs, products.rs)
@@ -120,7 +120,7 @@ final render's files and the `.tx` files `--auto-tx` creates. Behaviour:
 `openspec/changes/archive/2026-10-09-mcp-session/design.md` and
 `2026-10-09-mcp-first-pixel/design.md` beside it (the first-image answer, `retune`).
 
-Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
+Adaptive sampling wraps the per-pixel
 routine; a render mode is scheduling only, and tiles vs scanlines are
 bit-identical by construction. So is the staged first sweep (every unit to 1, 2,
 4, … spp, frame-wide, then the first check point): it exists so a host watching
@@ -150,7 +150,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | `Material` | `crust-core/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
 | `Light`, `LightShape` | `crust-core/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
 | `ProgressCallback` | `crust-core/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
-| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage, `max_samples_reached` the most any pass has reached (a new pass, such as a guided render's next training pass, resets the first, not the second); a cancelled render returns what it traced and `Cancelled` |
+| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage; a cancelled render returns what it traced and `Cancelled` |
 | `mcp::session::Session` | `crust-render/src/mcp/session.rs` | the tools in `mcp/mod.rs` | commands are closures run one at a time on the session thread, in the order sent; nothing the thread owns (the `Stage`) ever leaves it |
 | `RenderStats`, `profile::Section` | `crust-core/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
 
@@ -162,11 +162,10 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
 | AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
-| integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule), `path.rs` (`trace_path`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `filter.rs` (pixel filter importance sampling), `buffer.rs` |
+| integrator | `tracer/` — `mod.rs` (`Renderer`: the pass, tiles, adaptive rounds), `path.rs` (`trace_path`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `filter.rs` (pixel filter importance sampling), `buffer.rs` |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
-| guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
 | reporting | `stats.rs` (`--stats`, and `--stats-json`'s `crust-stats/1`), `profile.rs` (`--profile`), `report.rs` (the JSON reports' envelope and value rules), `stamp.rs` (the `crust:*` sampling stamp every EXR carries), `compare.rs` (`crust diff`: identity, metrics, comparability, over decoded planes), `error.rs` |
 | diagnostic | `diagnostic/` — `mod.rs` (`run`: calibration, baseline, crops, tiers 1–3, suggestions), `report.rs` (`Report`, the `crust-diagnostic/1` JSON), `markdown.rs`, `noise.rs` (the light path rows, light groups, tier-1 ordering rules, the brightest pixels' share), `crops.rs`, `schedule.rs` (budget, trial spp and the later tiers' reserves), `trials.rs` (the picture check, trimmed MRSE, the noise floor, ΔEff and at the target, verdicts, the per-crop reference), `checks.rs` (findings, picture ones included), `compare.rs` (`--baseline` deltas). It renders through `Renderer::render_measured` (`tracer/mod.rs`: `Instruments` → `Measured`), the only caller of the per-tile timer and the clamp counter |
@@ -200,7 +199,7 @@ other. The pairs:
 - **MIS weights.** Every NEE weight has a bounce-side twin
   (`bounce_emission_weight`, `escaped_emission`), and both go through
   `SamplingStrategy` and `LightList::density` / the `*_at` lookups. Surface
-  NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`, guided mixture pdf ↔ NEE.
+  NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`.
   `LightList::density` takes the vertex's light sample count (`crust:lightSamples`
   / `crust:lightSamplesIndirect`): NEE both weights with and divides by
   `count · density` (the division is the average over the samples — do not
@@ -296,10 +295,9 @@ other. The pairs:
   and the `AOV = false` instantiations are the code the beauty-only render
   always ran — pinned by callgrind's instruction count on cornellbox, not by a
   test. A filtered AOV uses exactly the beauty's per-sample weight `wx·wy` and
-  its `weight_sum` (with the same `/ taken` fallback in `AovFilm::store`), and
-  a guided render's AOVs blend with the beauty's own pass weights
-  (`blend_weights`); change either side alone and an AOV stops matching the
-  image it was rendered with. AOV planes are per pixel, in the pixel's own
+  its `weight_sum` (with the same `/ taken` fallback in `AovFilm::store`);
+  change either side alone and an AOV stops matching the image it was rendered
+  with. AOV planes are per pixel, in the pixel's own
   sample order, so tiles ↔ scanlines stays bit-identical for every channel.
 - **Light path expressions route the beauty, not a copy of it.** The AOV
   gather (`tracer/route.rs`) re-evaluates the beauty's backward recurrence
@@ -396,7 +394,7 @@ documentation (`site/content/docs/reference/environment-variables.md`), and make
 | MaterialX node semantics against the reference implementation | `crust-mtlx/tests/osl_oracle.rs` (committed OSL values; `scripts/osl_oracle.py` regenerates them) |
 | native OpenPBR against Adobe's `openpbr-bsdf` | `crust-core/tests/adobe_oracle.rs` (committed reference values, one named deviation per known gap; `scripts/adobe_oracle.py` regenerates them) |
 | USD import against the checked-in samples | `crust-core/tests/usd_scene.rs`; inline stages in `usd_inline.rs` |
-| lights, materials, volumes, guiding, stats, profile | the matching file in `crust-core/tests/` |
+| lights, materials, volumes, stats, profile | the matching file in `crust-core/tests/` |
 | decoders, `.tx` streaming, Ptex streaming | `crust-assets/tests/` |
 | "did the image change?" | `scripts/check_images.sh record|check` (16 spp, see `CLAUDE.md` § Measuring a change) |
 | "is it faster?" | `scripts/bench_ab.sh` (interleaved A/B), callgrind for sub-5% changes |

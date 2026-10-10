@@ -95,13 +95,12 @@ pub enum Section {
     SurfaceLighting,
     /// Next-event estimation at a volume scatter vertex.
     VolumeLighting,
-    /// Choosing the continuation: BSDF or guide sampling, and roulette.
+    /// Choosing the continuation: BSDF sampling, and roulette.
     Bounce,
     /// A subsurface random walk, entry to exit record: its free flights,
     /// owner-only ray casts and channel MIS.
     Subsurface,
-    /// The backward gather folding a path's vertices into its radiance
-    /// (and emitting guiding training samples).
+    /// The backward gather folding a path's vertices into its radiance.
     Contributions,
 }
 
@@ -608,7 +607,7 @@ impl RenderProfile {
         )?;
         // Utilisation: how much of threads x wall the sections account for.
         // Well under 100% means workers idled — load imbalance at the end of
-        // a pass, or time outside `MainLoop` (the guiding field's rebuilds).
+        // a pass, or time outside `MainLoop`.
         let thread_time = self.thread_time();
         if let Some(wall) = render_wall.filter(|w| !w.is_zero()) {
             let capacity = wall.as_secs_f64() * self.threads as f64;

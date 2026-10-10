@@ -18,7 +18,7 @@ pub struct ScatterSample {
     pub pdf: f32,
     /// True when the direction came from a delta lobe (e.g. transmission,
     /// TIR fallback). A delta sample's contribution must never be mixed with
-    /// a continuous density — no guide-mixture pdf, no light-MIS weight; it
+    /// a continuous density — no mixture pdf, no light-MIS weight; it
     /// carries its bounce-hit emission at full weight.
     pub delta: bool,
     /// Angular width the sampled lobe adds to the path's texture-filtering
@@ -27,9 +27,8 @@ pub struct ScatterSample {
     ///
     /// Deliberately reported by the material rather than derived from `pdf`:
     /// by the time the tracer sees a sample, `pdf` may have been replaced by
-    /// the guide/BSDF mixture density, so a near-mirror under a trained
-    /// guiding field would report a broad density and blur its own
-    /// reflection. It also goes to zero at grazing angles for a cosine lobe,
+    /// a mixture density, which for a near-mirror would be broad and blur
+    /// its own reflection. It also goes to zero at grazing angles for a cosine lobe,
     /// which says nothing about how wide that lobe is. `0.0` keeps the
     /// arriving cone as it was, which is what a delta lobe wants.
     pub spread: f32,
@@ -78,7 +77,7 @@ pub trait Material: Send + Sync {
 
     /// Evaluates the *continuous* part of the BSDF toward a given
     /// world-space unit direction `wi`, without sampling. This is what MIS
-    /// against an external sampling strategy (light sampling, path guiding)
+    /// against an external sampling strategy (light sampling)
     /// needs and `scatter_importance` cannot provide, since the latter picks
     /// its own direction. Delta lobes (transmission) are excluded by
     /// definition: they cover a measure-zero set of directions, are never
@@ -117,7 +116,7 @@ pub trait Material: Send + Sync {
     /// hit's emission toward `cos_theta_o`.
     ///
     /// The integrator calls this once per path vertex and routes every query
-    /// at that vertex — emission, the scatter, NEE's `eval`, guiding's `eval`
+    /// at that vertex — emission, the scatter, NEE's `eval`
     /// and `make_ray` — through the result ([`ShadingPoint`]), so a textured
     /// material runs its network once per vertex instead of once per query.
     /// It is the OSL / pbrt-v4 split between running a shader and using the
@@ -153,10 +152,10 @@ pub trait Material: Send + Sync {
         None
     }
 
-    /// Builds the continuation ray for an externally chosen direction `wi`
-    /// (e.g. drawn from the guiding field). Materials that tag rays with an
-    /// interior medium on transmission must do the same here, so a guided
-    /// direction crosses the interface exactly like a BSDF-sampled one.
+    /// Builds the continuation ray for an externally chosen direction `wi`.
+    /// Materials that tag rays with an interior medium on transmission must
+    /// do the same here, so such a direction crosses the interface exactly
+    /// like a BSDF-sampled one.
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
         Ray::new(rec.p, wi)
     }

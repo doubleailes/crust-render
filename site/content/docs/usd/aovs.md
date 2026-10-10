@@ -440,8 +440,7 @@ alone, at the first surface; `albedo` is unchanged.
 The `variance` source says *where* the image is noisy. `crust:aov:variance` on a light
 path expression says *which light* makes the noise: direct or indirect, diffuse or
 glossy, caustics, one light group or another. That decides which setting helps: light
-sampling settings help noisy direct light, path guiding helps indirect light and
-caustics.
+sampling settings help noisy direct light, and `crust:lightSamplesIndirect` helps indirect light.
 
 ```usda
 def RenderVar "gi_variance"
@@ -649,10 +648,7 @@ product, from the samples it traced, and each EXR says so with one more header a
 
 An EXR of a render that completed has no `crust:renderStatus` at all, so its header is
 exactly what it was before renders could be interrupted. In an interrupted EXR,
-`crust:sppTaken` says how far the render got: the fewest and most samples a pixel took (of
-a guided render, in its final pass; a guided render whose image holds no final pass —
-stopped in training, or before the final pass gave every pixel two samples — records
-`(0, 0)` there). A pixel that took no sample is black, and each of its AOVs holds the
+`crust:sppTaken` says how far the render got: the fewest and most samples a pixel took. A pixel that took no sample is black, and each of its AOVs holds the
 var's clear value.
 
 ### Crops
@@ -672,8 +668,7 @@ product's region.
   [`--scanline`](@/docs/reference/command-line.md#scanline).
 - A render whose products ask for nothing beyond a 3-channel beauty does no AOV work at
   all.
-- AOVs see exactly the samples the beauty took, adaptive sampling and path guiding
-  included. A guided render blends its passes' AOVs with the same weights as its beauty.
+- AOVs see exactly the samples the beauty took, adaptive sampling included.
 
 ## Not supported
 

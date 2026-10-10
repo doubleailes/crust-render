@@ -3,7 +3,7 @@ title = "A physically-based path tracer for USD"
 
 # The homepage contents
 [extra]
-lead = '<b>Crust Render</b> is a path tracer written in safe Rust. It renders <b>USD</b> scenes (<code>.usda</code>, <code>.usdc</code>, <code>.usdz</code>) with an OpenPBR übershader, MaterialX look-dev graphs, UsdLux lights, volumes and path guiding.'
+lead = '<b>Crust Render</b> is a path tracer written in safe Rust. It renders <b>USD</b> scenes (<code>.usda</code>, <code>.usdc</code>, <code>.usdz</code>) with an OpenPBR übershader, MaterialX look-dev graphs, UsdLux lights and volumes.'
 url = "/docs/getting-started/introduction/"
 url_button = "Get started"
 repo_version = "GitHub v0.7.0"

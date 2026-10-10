@@ -9,7 +9,7 @@ sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Sampling, light transport, filtering, path guiding and subdivision, set on the stage’s <code>RenderSettings</code> prim.'
+lead = 'Sampling, light transport, filtering and subdivision, set on the stage’s <code>RenderSettings</code> prim.'
 toc = true
 top = false
 +++
@@ -45,10 +45,6 @@ def Scope "Render"
         # reconstruction
         token crust:pixelFilter = "gaussian"
         float crust:pixelFilterRadius = 2
-
-        # path guiding
-        bool crust:pathGuiding = true
-        int crust:guidingTrainIterations = 8
 
         # geometry
         int crust:subdivisionLevel = 2
@@ -301,42 +297,6 @@ instead of the same one. It doesn't choose which time is rendered.
 
 [`--frame`](@/docs/reference/command-line.md#frame) chooses the time and replaces this
 seed with the frame number.
-
-## Path guiding
-
-Path guiding learns where light comes from during a few training passes. It then sends
-part of the bounce rays in those directions. It helps scenes where most light arrives
-along a few indirect paths, such as a room lit through a door. It is off by default.
-
-### crust:pathGuiding
-
-`bool`, default **false**.
-
-Turns path guiding on.
-
-### crust:guidingTrainIterations
-
-`int`, default **4**, minimum 1.
-
-The number of training passes before the final render.
-
-### crust:guidingProb
-
-`float`, default **0.5**.
-
-The probability, at each bounce, of sampling the learned guide instead of the BSDF.
-
-```usda
-def RenderSettings "settings"
-{
-    bool crust:pathGuiding = true
-    int crust:guidingTrainIterations = 8
-    float crust:guidingProb = 0.5
-}
-```
-
-`samples/cornellbox_guided.usda` is an example. Set `crust:pathGuiding = false` there to
-compare with plain BSDF sampling at the same sample count.
 
 ## Geometry
 

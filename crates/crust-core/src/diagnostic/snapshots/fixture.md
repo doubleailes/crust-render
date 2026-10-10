@@ -21,7 +21,6 @@
 | setting | value | flag | USD attribute |
 |---|---|---|---|
 | light_selection | power | --light-selection | crust:lightSelection |
-| path_guiding | false | – | crust:pathGuiding |
 
 ## Run
 

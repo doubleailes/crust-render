@@ -26,7 +26,7 @@ consumed as ordinary dependencies:
   (the renderer's, aliased `crust_core::PathSampler`), `LatticeSampler`, `PmjSampler`, and
   their blue-noise variants `SobolBnSampler`/`LatticeBnSampler`/`PmjBnSampler` (optimised
   tables bundled as LE binary blobs in `src/data/`). Depended on by `crust-core`
-  (materials, `guiding/`, `volume.rs`, `tracer/path.rs`) for every stochastic draw. Idiomatic
+  (materials, `volume.rs`, `tracer/path.rs`) for every stochastic draw. Idiomatic
   divergences from the C++: the caller-allocated `void*` cache (a GPU concern) becomes a
   lazy process-global, keeping every `Sampler<T>` a small `Copy + Send` value.
   **Performance, as of 0.2.4:** Sobol draws were 16–24% of a render here (callgrind,
@@ -68,22 +68,21 @@ consumed as ordinary dependencies:
      −14%, ptex_quads −13.5%) and within noise of the tiles (−1.7%, −0.7%, −9.2%).
      The tiled path still gathers its tiles serially: its copy is one pixel store
      each, far below what timing can see.
-   The two are **bit-identical**, guided renders included: the per-pixel work is the
-   same, and the tiled path hands a pass's guiding training samples and its variance
-   sum (both order-dependent in floating point) on in scanline order. Keep it that way —
-   a render mode must be scheduling only.
+   The two are **bit-identical**: the per-pixel work is the same, and the tiled path
+   gathers its units in scanline order. Keep it that way — a render mode must be
+   scheduling only.
    Pixel reconstruction (`filter.rs`, `crust:pixelFilter` / `--filter`) is **filter
    importance sampling**, not splatting: each pixel warps its jitter through the
    filter's distribution and weights radiance by `f/p`, keeping every per-pixel
-   mechanism (adaptive early-stop, QMC domains, pass blending) intact. The default
+   mechanism (adaptive early-stop, QMC domains) intact. The default
    is triangle at radius 1.0; box at radius 0.5 reproduces the historical in-pixel
    jitter bit-identically (`--filter box` when comparing against pre-filter
    renders). Mitchell is the only kind with negative weights.
 3. **`trace_path()`** (`tracer/path.rs`, public wrapper `ray_color()`) is the integrator — an
    **iterative** path tracer in two passes: a forward walk that traces one segment per
    bounce and records a `VertexRec` per vertex, then a backward gather that folds the
-   records into the radiance estimate and emits guiding training samples (which need
-   the radiance from the rest of the path — the reason for the backward pass). Features:
+   records into the radiance estimate (which needs the radiance from the rest of the
+   path — the reason for the backward pass). Features:
    - **MIS** combining direct light sampling and BRDF sampling. The heuristic is
      selectable via `SamplingStrategy` (`crust:samplingStrategy` attr / `--strategy`
      flag): `power` (β=2 power heuristic — the default and historical behavior),
@@ -352,36 +351,14 @@ consumed as ordinary dependencies:
      elsewhere — the restart epsilon.
    - A sky-gradient background when nothing is hit (attenuated by, and adding the
      emission of, any volumes the escaping segment crossed).
-4. **Path guiding** (opt-in via `crust:pathGuiding`, `guiding/` module): a pure-Rust
-   Practical Path Guiding SD-tree (`GuidingField`). `render_guided()` runs training
-   passes at 2, 2, 4, 8, … spp (geometric, floored at 2 so every pass can estimate
-   its own variance), splats `(position, direction, luminance·cos²)` samples
-   into the field between passes, then renders the final pass with one-sample MIS
-   between the frozen field and the BSDF (mixture pdf; secondary bounces only —
-   primary vertices sit far below the field's spatial resolution). All passes
-   (training + final) are blended into the output weighted by inverse variance, so
-   the training budget is not discarded. Delta/transmissive
-   materials (`Material::eval` → `None`) and untrained regions fall back to pure BSDF
-   sampling. The NEE weight competes against the same mixture pdf — keep the two sides
-   consistent or emission gets double-counted. The quadtree descent draws a fresh pair
-   per level from the `K_GUIDE` domain's `rng()`; it used to hash the guide seed into a
-   hand-rolled PCG32 outside `openqmc`. Switching streams changed `cornellbox_guided`'s
-   noise only: against the old stream, relmse 3.1e-2 / 2.1e-2 / 7.6e-3 at 16 / 64 /
-   256 spp (`--indirect-clamp 0`), no plateau, and both stand exactly as far from an
-   unguided 256-spp reference.
-   The training passes double as a **guiding efficiency estimate** (Li et al. 2026,
-   "Path Guiding in Disney's Zootopia 2"): efficiency `E = 1/(wall-clock cost × MRSE)`,
-   comparing the first pass (field untrained → effectively unguided) against the last
-   training pass (field most trained). MRSE normalizes each pass's per-pixel variance
-   by one *shared* reference image (the blend of all training passes) — never by the
-   pass's own noisy mean, which would correlate numerator and denominator and break
-   the 1/spp scaling the comparison relies on. If `ΔEff < 1`, the final pass renders
-   unguided (training passes still blend in; every pass is unbiased either way).
+4. **A render is one pass.** `Renderer::render_impl` runs one final pass
+   (`render_pass`) and applies the camera's exposure; there is no multi-pass mode (path
+   guiding was one, see "Removed: path guiding").
 5. **Adaptive sampling**: pixels stop early once they hold the effective minimum
    (`crust:minSamplesPerPixel`, floored at `⌈√spp⌉`), have seen some light, their
    relative standard error is below `crust:varianceThreshold` (0 disables), and no
    still-sampling cross neighbour is more than `crust:adaptiveNeighbourTolerance`
-   less converged. Applies to main/final passes, never to guiding training passes.
+   less converged.
    See "Adaptive sampling" below for the rounds and the traps.
 6. The CLI writes the linear EXR to the `-o` path and a tone-mapped sRGB PNG next to it
    (same path, `.png` extension) — e.g. `-o renders/foo.exr` produces `renders/foo.exr`
@@ -485,7 +462,7 @@ without a callback the counter just adds. A unit reports only while the render r
 a cancelled render's progress stays where it stopped. The steps follow *scheduled*
 samples: a round reports its share for a unit whose pixels have all stopped (it is
 instant), so an adaptive render's bar runs ahead in late rounds and the ETA corrects
-itself; and a guided render's training passes report nothing.
+itself.
 
 **Staged first sweep.** The first sweep does not take a pixel to the first check
 point in one advance: it runs in stages of 1, 2, 4, … spp up to it (`sweep_stages`),
@@ -577,10 +554,9 @@ The full-frame state is the other cost: `PixelState` is 64 B (`Vec3A`
 alignment), plus 5 B of index/active buffers, per pixel. At 3840×2160 the render
 phase's peak RSS went from 442 MB to 755 MB (cornellbox, 8 spp) — about +500 MB,
 as the design's estimate predicted. If it ever matters, `sum` as an unaligned
-`[f32; 3]` and dropping `samples_end` outside training passes bring it to 48 B.
+`[f32; 3]` brings it to 52 B.
 Checked and holding elsewhere: tiles ↔ scanlines are `crust diff`-identical on
-cornellbox at 128 spp with `t = 1`, and on `cornellbox_guided.usda` (training
-passes non-adaptive, the final pass adaptive under the guiding field); Mitchell,
+cornellbox at 128 spp with `t = 1`; Mitchell,
 the one filter with negative weights, renders rectlight with a finite error and
 the same black half as the triangle filter, which is what the `lum_sq` gate is
 for.
@@ -609,7 +585,7 @@ renders (`add-diagnostic-command`) are only meaningful on that condition:
   in a full render; over the full frame the generators emit exactly the old units
   (pinned by `a_full_frame_region_yields_the_frame_tiles_and_rows`).
 - **Everything per pixel is region-sized** — `Buffer`, `AovFilm`, the variance map,
-  the convergence-index and active planes, the guiding reference luminance — and is
+  the convergence-index and active planes — and is
   indexed through the one `PixelRect::index`, so an offset region cannot be read with
   the frame's stride.
 - **Two coordinate spaces.** The region is stored in image space (top-left origin, as
@@ -628,9 +604,6 @@ Two exceptions, by design:
   *absent* (`held_by_neighbour` checks the region's bounds, as it checked the frame's):
   a border pixel that a still-sampling outside neighbour would have held stops earlier
   than in the full frame.
-- **Path guiding** trains on the region's paths only; the field, and therefore a guided
-  crop, differs from a guided full render. A guided render is not bit-identical across
-  schedules anyway, and a field trained on the region is arguably the better one for it.
 
 A full-frame region is the old render: same units, same planes, same order. Verified
 with `scripts/check_images.sh check` against goldens of the parent commit and with the
@@ -644,7 +617,7 @@ layout above). The integrator (`tracer/path.rs`) threads the sampler *by value* 
 sample (with an extra `new_domain(tile)` so images wider/taller than 256 stay decorrelated,
 since OpenQMC's pixel decorrelation tiles at 256), draws the camera dims from a `K_CAMERA`
 domain, and hands the root to `trace_path`. Each path vertex derives `path.new_domain(depth)`
-and each sampling event a further keyed sub-domain (`K_NEE`, `K_BSDF`, `K_GUIDE`, `K_PHASE`,
+and each sampling event a further keyed sub-domain (`K_NEE`, `K_BSDF`, `K_PHASE`,
 …, keys defined atop `tracer/path.rs`); materials draw one 4D block from the `SobolSampler` domain
 they are handed. With several light samples at a vertex (`crust:lightSamples` /
 `crust:lightSamplesIndirect`), the first sample draws its pick, point and shadow ray
@@ -654,7 +627,7 @@ hand to `(i + u) / N`
 (`stratified_pick`), since the pick is a monotone CDF inversion and the point
 dimensions must stay independent of the slice (lighting's design record, "Several
 light samples per vertex"). Unbounded/incidental draws — Russian roulette, volume delta-tracking,
-carried-medium free flight, the guide's quadtree descent — use `draw_rnd` or a `pcg::Rng` seeded from a domain
+carried-medium free flight — use `draw_rnd` or a `pcg::Rng` seeded from a domain
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
 randomness use `openqmc::pcg::Rng`.
 
@@ -668,13 +641,11 @@ so the API is honest before any Hydra or FFI code depends on it.
 - **Staged first sweep (D1).** See § Adaptive sampling: stages of 1, 2, 4, … spp, the
   convergence test only after the last (at the `taken` an unstaged sweep tests at — a
   `finish_round` at `taken = 2` could set `converged`, which no stop rule reads before
-  the first round, but keeping it out avoids the question). Always on for final passes:
+  the first round, but keeping it out avoids the question). Always on:
   one code path, so the bitwise test (`a_staged_sweep_renders_the_unstaged_one_bit_for_bit`:
-  adaptive, adaptive off, AOVs plane by plane, guided; tiles and scanlines) exercises
+  adaptive, adaptive off, AOVs plane by plane; tiles and scanlines) exercises
   what users run. `Instruments::unstaged` exists for that test alone — not a switch,
-  since there is nothing to A/B. Training passes stay unstaged: each pixel's
-  `SampleData` must sit contiguously in its unit's buffer for the scanline-order replay
-  the SD-tree needs. One quantity was not keyed on the sample index: the clamp counter
+  since there is nothing to A/B. One quantity was not keyed on the sample index: the clamp counter
   summed a pixel's removals per `advance_pixel` call and then added that sum, so
   splitting an advance re-associated the f32 sum. It now sums per sample, which makes it
   independent of every schedule (stages and rounds alike); the diagnostic's clamp
@@ -686,7 +657,7 @@ so the API is honest before any Hydra or FFI code depends on it.
   image and generation agree. Not round-boundary snapshots: a late round of a 1024 spp
   render is ~200 spp a pixel over the whole frame, and the viewer would freeze for it.
   A reader clones the buffer under the lock (O(pixels), fine at checkpoint rates). The
-  last snapshot of an unguided render that completed is the returned image, bit for bit
+  last snapshot of a render that completed is the returned image, bit for bit
   (`the_last_snapshot_is_the_returned_image`).
 - **One caller-owned control (D3).** `RenderControl::new()` / `without_snapshots()`,
   `cancel`, `is_cancelled`, `generation`, `snapshot`; `Renderer::render_with_control(tiled,
@@ -715,43 +686,16 @@ so the API is honest before any Hydra or FFI code depends on it.
   `taken == 0` instead of `0 / 0`, and `AovFilm::store` leaves every plane at its clear
   value. Unreachable in a completed render (every pixel takes at least one sample), so
   nothing there moves.
-- **Guided renders (D6).** Every pass publishes (training ones included), so the
-  display shows the pass in progress over the previous one. On cancel no further pass
-  starts and the field is never consulted again (an interrupted training pass's samples
-  never reach `field.update`). The render blends the completed passes, plus the
-  interrupted one when every pixel in it took `≥ 2` samples — fewer has no variance
-  estimate and would skew the pass weight — or returns the interrupted pass alone when
-  none completed. The blends (`blend_passes`, `AovFilm::blend`) run unchanged.
-  `a_guided_render_cancelled_in_its_final_pass_blends_what_it_can_weigh` cancels from the
-  progress callback (deterministic: only the final pass reports) after the 4 spp stage
-  and within or after the 1 spp stage; the latter two give the same training blend, bit
-  for bit.
 
 ## Known gaps: progressive output and cancellation
 
 - **Progressive AOVs.** Only the beauty is published while the render runs; the AOVs
   are gathered once, when it returns (cancelled or not).
-- **The guided preview gets noisier when the final pass starts.** Its 1 spp stage
-  overwrites the last training pass's units with a noisier estimate, until the final
-  pass catches up. Accepted for now.
 - **Not everything can be cancelled.** The import, `Renderer::new` / `reconfigure`
   and the `learned` light selection's pre-pass never read the flag. The CLI exits at
   once (status 130) on a Ctrl-C there; a library caller waits for them.
-- **An interrupted guided render's `crust:sppTaken`** describes its final pass alone —
-  the adaptive counters cover nothing else — and is `(0, 0)` when the image holds no
-  final pass: stopped in training, or before the final pass gave every pixel two samples
-  (the pass is left out of the blend, and `RayStats::forget_adaptive` drops its counters
-  with it, so neither the stamp nor the CLI's warning describes a pass that is not in the
-  image; `SamplingStamp::for_outcome` stamps `(0, 0)` rather than `new`'s
-  no-counters fallback, the budget). The image's training samples are not counted there.
-  `crust:renderStatus = "interrupted"` says the frame is partial either way.
-- **A completed guided render at 1 spp has the same mismatch, before this change too.**
-  Its final pass has no variance estimate, so the blend gives it no weight and the image
-  is the training passes', yet its counters (and `crust:sppTaken = (1, 1)`) describe it.
-  Only the cancelled case clears them.
 - **Progress counts scheduled samples, capped at 64 steps a unit** (§ Adaptive sampling,
-  "Rounds"): adaptive renders run ahead in late rounds, and guided training passes are
-  silent.
+  "Rounds"): adaptive renders run ahead in late rounds.
 - **The per-stage call cost** (§ Adaptive sampling, "Staged first sweep"): +1.6% of
   cornellbox's instructions at 2 spp, +0.3% at 32, for nobody watching. Paid by every
   final pass, with or without a control.
@@ -759,35 +703,48 @@ so the API is honest before any Hydra or FFI code depends on it.
   checkpoint rates (at 4K, ~100 MB/s at 1 Hz); a 60 Hz viewport will want the double
   buffer D2 leaves room for, without an API change.
 
-## Known gaps: path guiding
+## Removed: path guiding
 
-- **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
-  (no chromatic distributions). Thick transmission — dispersive or not — is a
-  continuous Walter et al. 2007 microfacet BTDF — sampled via VNDF + Snell, evaluable
-  over the full sphere, and part of the NEE/guide mixtures (guide-chosen directions
-  cross the interface via `Material::make_ray`, which tags the interior medium).
-  Dispersion is continuous per-channel: each RGB channel refracts with its own
-  Cauchy/Abbe-derived IOR (`cauchy_ior`, anchored at the Fraunhofer d line), sampling
-  picks one channel's IOR uniformly, and evaluation runs three per-channel
-  BTDF evaluations whose sampling pdfs average into the channel-mixture density. Only
-  thin-walled transmission remains a delta lobe (`ScatterSample::delta`), excluded
-  from continuous mixtures — carrying window-model energy (`(1−R)/(1+R)`
-  transmittance, boosted `2R/(1+R)` reflection, view-dependent tint) — which the
-  integrator takes over as a pass-through (above), so the guide never sees it. The guide-vs-BSDF selection probability is fixed (no learned α), and
-  spatial lookups are not parallax-compensated.
-- **Guided renders of ALab are darker than unguided ones.** `crust diagnostic`'s
-  picture check flagged it (`diagnostics` design record, "Calibration"), and a direct
-  test confirmed it: a 272×272 crop of frame 1004 at 64 spp, clamp and adaptive
-  sampling off, 40 seeds each, read 0.4294 ± 0.0055 guided against 0.4611 ± 0.0046
-  unguided — 6.9% darker, z −4.4 on the standard error across seeds. Not yet
-  diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)). Two
-  suspects: the pass blend, whose weights are each pass's *estimated* mean variance,
-  so a pass that caught a firefly is down-weighted along with the firefly's energy (a
-  known bias of weights estimated from the data they weigh, largest where fireflies
-  carry the image, as on ALab) — 8 of 9 guided renders darkened with an *unguided*
-  final pass, and one gave a 2-spp training pass 69% of the weight; and the guide
-  mixture ↔ NEE pair. The Cornell box and `veach_mis` show no such shift (|z| < 2 at
-  64–128 spp).
+Path guiding (Practical Path Guiding's SD-tree, `guiding/`, ~870 lines) and the
+multi-pass `render_guided` mode it needed are gone. The last commit that carries them is
+`1bb877b`; `git show 1bb877b:crates/crust-core/src/guiding/` is the implementation.
+
+**Why.** Too much machinery for what the project is: the integrator hooks (a
+`GuidingContext` through `trace_path`, a guide/BSDF mixture in the scatter step and its
+twin in the NEE weight, training samples on every path record), the pass blend, and the
+cancellation, snapshot, statistics, diagnostic and MCP contracts that only a second
+pass needed. It guided surfaces only, trained on luminance only, and mixed with a fixed
+probability. Learned light selection, now the default, took the direct-light share of
+what it helped with.
+
+**What was learned, for a future attempt.**
+
+- *Gate it on efficiency, not on faith.* The training passes doubled as an efficiency
+  estimate (Li et al. 2026, "Path Guiding in Disney's Zootopia 2"): `E = 1/(cost ×
+  MRSE)` of the first (untrained, so effectively unguided) pass against the last
+  training pass, with each pass's per-pixel variance normalised by **one shared
+  reference image** (the blend of the passes), never by the pass's own noisy mean,
+  which correlates numerator and denominator and breaks the 1/spp scaling. `ΔEff < 1`
+  switched the final pass back to unguided. Wall-clock cost made the decision
+  non-repeatable. `crust diagnostic` still uses the shared-reference MRSE
+  (`tracer::mean_relative_error`) for its own comparisons.
+- *Inverse-variance pass blending is biased where fireflies carry the image.* A pass's
+  weight was its *estimated* mean variance, so a pass that caught a firefly was
+  down-weighted along with the firefly's energy. A guided ALab crop (frame 1004,
+  272×272, 64 spp, clamp and adaptive off, 40 seeds) read 6.9% darker than unguided
+  (0.4294 ± 0.0055 against 0.4611 ± 0.0046, z −4.4), undiagnosed
+  ([#244](https://github.com/doubleailes/crust-render/issues/244), closed as moot).
+  The blend is the first suspect, the guide mixture ↔ NEE pair the second.
+- *Guide only secondary bounces, and not fibre vertices that mix a transmitting leaf*
+  (a guided direction carries both shares on one ray). Primary vertices vary per
+  pixel far below the field's spatial resolution.
+- *Draw the quadtree descent from a keyed domain's `rng()`*, not a hand-rolled PCG
+  outside `openqmc`.
+
+Unaffected by the removal: an unguided render is bit-identical to what it was (pinned by
+the `check_images.sh` goldens), the subsurface walk's Dwivedi sampling, and learned light
+selection. A stage that authors `crust:pathGuiding`, `crust:guidingTrainIterations` or
+`crust:guidingProb` imports with one `settings.path_guiding_removed` warning.
 
 ## Known gaps: volume regions
 
@@ -797,9 +754,7 @@ so the API is honest before any Hydra or FFI code depends on it.
   boundaries above.)
   (`openusd-schemas` 0.7 does ship a `vol` feature — `Volume` plus `OpenVDBAsset` /
   `Field3DAsset` views — so this is now an unwritten importer rather than a missing
-  dependency; it was the latter through openusd 0.6.) No volume path guiding (volume vertices push
-  `train: None`; volume-heavy scenes train the surface field on noisier estimates —
-  slower convergence, not bias). One global majorant per region — no coarse max-grid, so
+  dependency; it was the latter through openusd 0.6.) One global majorant per region — no coarse max-grid, so
   a high `densityScale` over a large box tracks slowly. Emissive volumes are not
   light-list entries: fire is found only by phase/BSDF-sampled paths (firefly risk near
   bright emission), never by NEE. Carried-medium scatter vertices run no NEE unless the

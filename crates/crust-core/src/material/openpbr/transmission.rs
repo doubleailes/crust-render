@@ -111,7 +111,7 @@ pub(super) fn sample_transmission_thin(
 // Rough refraction — Walter et al. 2007, "Microfacet Models for Refraction
 // through Rough Surfaces". Thick transmission — dispersive or not — is a
 // proper continuous BTDF lobe: sampleable, evaluable, and therefore visible
-// to NEE and the guiding mixture. Dispersion is continuous per-channel:
+// to NEE. Dispersion is continuous per-channel:
 // each RGB channel refracts with its own IOR, sampling picks one channel's
 // IOR uniformly, and evaluation runs three per-channel BTDF evaluations
 // whose sampling pdfs average into the channel-mixture density. Only

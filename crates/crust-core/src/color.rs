@@ -417,7 +417,7 @@ pub fn from_xyz(xyz: Vec3A, working: Space) -> Option<Vec3A> {
 /// so a colour's luminance is the same light whatever space holds it.
 ///
 /// Every heuristic that weighs a colour by one number uses them — light and
-/// lobe selection, environment importance, guiding, adaptive sampling, the
+/// lobe selection, environment importance, adaptive sampling, the
 /// `variance` AOV — so in ACEScg they weigh AP1 colours by AP1's luminance
 /// rather than Rec.709's. `lin_rec709` keeps `utils::Luma::REC709`, the
 /// config's own luma coefficients, which the matrix's row equals to four

@@ -124,7 +124,6 @@ crust render -i scene.usda -l debug --log-file logs
 | `openpbr_showcase.usda` | `crust:openpbr` materials: metal, plastic, glass, coat, … |
 | `materialx_showcase.usda` | MaterialX look-dev graphs |
 | `veach_mis.usda` | the Veach multiple importance sampling test (try `--strategy light` and `--strategy bsdf`) |
-| `cornellbox_guided.usda` | path guiding through `crust:pathGuiding` |
 | `smoke.usda`, `fog.usda` | `crust:volume:*` volume regions |
 | `motionblur.usda` | `crust:motion:translate` and `crust:rayMask` |
 | `light_visibility.usda` | `crust:light:cameraVisible` |

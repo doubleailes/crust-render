@@ -82,7 +82,6 @@ struct Opts {
     wall: bool,
     /// Where the wall (the near side of a radius-100 sphere) is centred.
     wall_center: Vec3A,
-    guiding: bool,
     filter: PixelFilter,
     /// A tinted thin-walled window over the left of the frame, between the
     /// camera and the key light on one side and the scene on the other.
@@ -117,7 +116,6 @@ impl Default for Opts {
             dome: true,
             wall: true,
             wall_center: Vec3A::new(-104.0, 0.0, -105.0),
-            guiding: false,
             filter: PixelFilter::default(),
             window: false,
             light_samples: (1, 1),
@@ -254,7 +252,6 @@ fn scene(o: &Opts) -> Renderer {
         .with_adaptive_sampling(o.spp, 0.0)
         .with_indirect_clamp(o.clamp)
         .with_sampling_strategy(o.strategy)
-        .with_guiding(o.guiding, 1, 0.5)
         .with_pixel_filter(o.filter)
         .with_light_samples(o.light_samples.0, o.light_samples.1);
     if o.linked {
@@ -302,29 +299,26 @@ fn mean(plane: &[f32]) -> f64 {
 #[test]
 fn the_full_path_expression_is_the_beauty_bitwise() {
     for case in [
-        (0.0, false, false, false, (1, 1)),
-        (10.0, false, false, false, (1, 1)),
-        (0.5, false, false, false, (1, 1)),
-        (0.0, true, false, false, (1, 1)),
-        (0.0, false, true, false, (1, 1)),
-        (10.0, false, true, false, (1, 1)),
+        (0.0, false, false, (1, 1)),
+        (10.0, false, false, (1, 1)),
+        (0.5, false, false, (1, 1)),
+        (0.0, true, false, (1, 1)),
+        (10.0, true, false, (1, 1)),
         // Bounces that cross hidden lights, through the window too.
-        (0.0, false, false, true, (1, 1)),
-        (0.5, false, false, true, (1, 1)),
-        (0.0, true, false, true, (1, 1)),
-        (10.0, false, true, true, (1, 1)),
+        (0.0, false, true, (1, 1)),
+        (0.5, false, true, (1, 1)),
+        (10.0, true, true, (1, 1)),
         // Several light samples per vertex: one `L` event per sample.
-        (0.0, false, false, false, (4, 2)),
-        (10.0, false, true, true, (4, 4)),
-        (0.0, true, false, true, (2, 3)),
+        (0.0, false, false, (4, 2)),
+        (10.0, true, true, (4, 4)),
+        (0.0, false, true, (2, 3)),
     ]
     .into_iter()
     .flat_map(|case| [(case, false), (case, true)])
     {
-        let ((clamp, guiding, window, hidden, light_samples), linked) = case;
+        let ((clamp, window, hidden, light_samples), linked) = case;
         let o = Opts {
             clamp,
-            guiding,
             window,
             hidden,
             light_samples,
@@ -337,7 +331,7 @@ fn the_full_path_expression_is_the_beauty_bitwise() {
         let channel = film.var_channels(&beauty, &all);
         assert!(
             bits(&channel) == bits(&beauty_planes(&film, &beauty)),
-            "clamp {clamp}, guiding {guiding}, window {window}, hidden {hidden}, \
+            "clamp {clamp}, window {window}, hidden {hidden}, \
              light samples {light_samples:?}, linked {linked}"
         );
         // Asking for expressions changes nothing in the beauty.
@@ -931,19 +925,17 @@ fn variance_of(expr: &str) -> AovVar {
 }
 
 /// The full path's variance is the beauty's `variance`, bit for bit: one
-/// estimator over the same per-sample luminance — through the clamp, the
-/// guided passes' blend, hidden lights and several light samples.
+/// estimator over the same per-sample luminance — through the clamp,
+/// hidden lights and several light samples.
 #[test]
 fn the_full_path_variance_is_the_variance_aov_bitwise() {
-    for (clamp, guiding, hidden, light_samples) in [
-        (0.0, false, false, (1, 1)),
-        (10.0, false, true, (1, 1)),
-        (0.0, true, false, (1, 1)),
-        (0.5, false, false, (4, 2)),
+    for (clamp, hidden, light_samples) in [
+        (0.0, false, (1, 1)),
+        (10.0, true, (1, 1)),
+        (0.5, false, (4, 2)),
     ] {
         let o = Opts {
             clamp,
-            guiding,
             hidden,
             light_samples,
             ..Opts::default()
@@ -958,7 +950,7 @@ fn the_full_path_variance_is_the_variance_aov_bitwise() {
         assert_eq!(a.len(), 1);
         assert!(
             bits(&a) == bits(&b),
-            "clamp {clamp}, guiding {guiding}, hidden {hidden}, light samples {light_samples:?}"
+            "clamp {clamp}, hidden {hidden}, light samples {light_samples:?}"
         );
         assert!(a[0].iter().any(|&v| v > 0.0));
     }
@@ -991,11 +983,8 @@ fn the_cornell_box_full_path_variance_is_the_variance_aov_bitwise() {
 /// value, nor the beauty, nor any other expression.
 #[test]
 fn a_variance_var_disturbs_no_other_channel() {
-    for guiding in [false, true] {
-        let o = Opts {
-            guiding,
-            ..Opts::default()
-        };
+    {
+        let o = Opts::default();
         let gi = lpe("C<RD>.+[LO]");
         let direct = lpe("C<RD>[LO]");
         let rawv = raw_lpe("C<RD>[LO]");
@@ -1018,7 +1007,7 @@ fn a_variance_var_disturbs_no_other_channel() {
         for v in [&gi, &direct, &rawv] {
             assert!(
                 bits(&f0.var_channels(&b0, v)) == bits(&f1.var_channels(&b1, v)),
-                "guiding {guiding}: {}",
+                "{}",
                 v.name
             );
         }

@@ -366,8 +366,7 @@ through the strand itself is already part of the model, so a strand never shadow
 own transmitted light. It still shadows everything else, other strands included. If the
 hair node is mixed with a BSDF that transmits, such as a refracting `dielectric_bsdf` or
 a `translucent_bsdf`, only the hair's share of the light passes through the strand. The
-other BSDF's light meets the far side of the tube, as it would without the hair. Path
-guiding is off where such a mix is hit.
+other BSDF's light meets the far side of the tube, as it would without the hair.
 
 Author grooms in centimetres (`metersPerUnit = 0.01`, the USD default). Crust Render
 starts every ray 0.001 units away from the surface it leaves; in a groom authored in

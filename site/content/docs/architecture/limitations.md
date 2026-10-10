@@ -131,18 +131,6 @@ render.
   - Seen in a mirror or through clear glass, a shadow-linked light casts the shadows of
     every occluder, including the ones its `collection:shadowLink` leaves out.
 
-## Path guiding
-
-- **Not repeatable bit for bit.** A guided render decides whether its last pass is
-  guided from an efficiency measured in wall-clock time, so two guided renders of the
-  same stage can differ when that estimate sits near 1.
-- **Surfaces only.** Volumes and phase functions aren't guided.
-- **Luminance only.** The guide is trained on luminance, not per colour channel.
-- **Darker where fireflies carry the image.** On ALab, a guided render of a crop came
-  out 6.9% darker than an unguided one over 40 seeds — a bias, not noise, and not yet
-  diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)).
-  `crust diagnostic` reports guiding as `biased` there, and never suggests it. Scenes without strong fireflies (the Cornell box, `veach_mis`) show no shift.
-
 ## Watching and stopping a render
 
 - **Only the beauty is previewed.** [`--checkpoint`](@/docs/reference/command-line.md#checkpoint)
@@ -151,23 +139,14 @@ render.
 - **Loading can't be stopped and kept.** A Ctrl-C while the stage loads (or while the
   `learned` light selection trains, before the render starts) quits at once and writes
   nothing.
-- **A guided preview gets noisier when the last pass starts.** Its first samples replace
-  the last training pass's image, tile by tile, until it catches up.
-- **An interrupted guided render's `crust:sppTaken`** counts its last pass's samples only,
-  and is `(0, 0)` when its image holds no last pass: stopped during training, or before
-  the last pass gave every pixel two samples (that pass is then left out). The training
-  samples the image does hold are not counted there. `crust:renderStatus` says the frame
-  is partial.
 - **The progress bar counts scheduled samples.** In an adaptive render it runs ahead once
-  most pixels have stopped, and a guided render's training passes don't move it.
+  most pixels have stopped.
 
 ## Diagnostic
 
 - **Crops stand in for the frame.** `crust diagnostic` compares settings on up to three
   crops; its full-frame numbers are estimates. See
   [Diagnosing a render](@/docs/help/diagnosing-a-render.md#limitations) for the rest.
-- **Guiding is suggested as an attribute.** `crust render` has no guiding flag, so a
-  guiding suggestion is authored on the stage (`crust:pathGuiding`).
 
 ## MCP sessions
 

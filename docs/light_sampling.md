@@ -741,7 +741,7 @@ varies 9× between seeds under power alone.
 On ALab, occluded shadow rays fall from 94.2% to 33.4% (direct) and from 96.1%
 to 55.1% (full). The full image gains less because most of ALab's light is
 indirect: sun and sky through the windows, reached by bounce paths, which light
-selection cannot help. That is guiding's problem (§9.3's guided training passes).
+selection cannot help. That is not light selection's problem to solve.
 
 `light_visibility` first read as 2.15× *worse*. It authors
 `minSamplesPerPixel = 4` with a variance threshold, so at `-s 16` its pixels
@@ -1120,10 +1120,10 @@ for most of the room, they keep aiming there.
   SIGGRAPH Asia 2024. Both make tree importance BSDF-aware: glossy lobes, which
   Conty & Kulla's diffuse proxy misses.
 
-**For crust.** The guided renderer already runs training passes and owns a
-spatial structure (`guiding/`'s SD-tree). A per-leaf table of learned light
-weights, fed by the same training passes, is the natural route to
-visibility-aware selection. It is also what Hyperion's cache points amount to.
+**For crust.** A per-leaf table of learned light weights, fed by a training
+pass, is the natural route to visibility-aware selection (crust once had a
+guided renderer whose SD-tree could have held it; that was removed). It is also
+what Hyperion's cache points amount to.
 
 The MIS constraint is the usual one: the learned pmf must be frozen for the final
 pass, and looked up identically on the bounce side.
@@ -1199,7 +1199,7 @@ where the noise is.
   negative, from estimated second moments. A learning system, not a drop-in.
 - **Variance-aware MIS.** Grittmann, Georgiev, Slusallek & Křivánek, SIGGRAPH
   Asia 2019. Scales the balance heuristic by per-technique variance estimates.
-  Crust's adaptive sampler and guiding passes already estimate per-pixel
+  Crust's adaptive sampler already estimates per-pixel
   variance.
 - **MIS compensation** (Karlík et al. 2019, §5.3). The one with a clear, cheap
   production use.

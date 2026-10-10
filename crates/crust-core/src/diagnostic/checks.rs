@@ -55,7 +55,6 @@ pub struct Facts {
     /// Mean luminance of emission from emitters outside the light list
     /// (`C.*O`) in the baseline.
     pub unlit_emission: Option<f64>,
-    pub guiding: bool,
     /// Whether any indirect, glossy or volume row dominates the noise.
     pub indirect_dominant: Option<bool>,
     pub peak_mem_bytes: Option<u64>,
@@ -90,7 +89,6 @@ impl Facts {
             light_selection: scene.settings.light_selection(),
             auto_tx,
             textures_without_tx,
-            guiding: scene.settings.guiding(),
             peak_mem_bytes: import_peak,
             machine_mem_bytes: crate::machine_memory_bytes(),
             strategy: scene.settings.sampling_strategy(),
@@ -108,7 +106,6 @@ pub const CHECKS: &[Check] = &[
     ptex_cache_hit_rate,
     unlit_emitters,
     many_lights_uniform,
-    guiding_without_indirect,
     peak_memory,
     visualization_strategy,
     clamp_bias,
@@ -253,27 +250,6 @@ fn many_lights_uniform(f: &Facts) -> Option<Finding> {
             flag: Some("--light-selection".into()),
             usd_attribute: Some("crust:lightSelection".into()),
             value: "power".into(),
-        },
-    )
-}
-
-/// Guiding is authored on, but no indirect row dominates the noise: its
-/// training passes are likely spent for nothing.
-fn guiding_without_indirect(f: &Facts) -> Option<Finding> {
-    if !f.guiding || f.indirect_dominant? {
-        return None;
-    }
-    finding(
-        "guiding_without_indirect",
-        FindingKind::Time,
-        "path guiding is on, but direct light dominates the noise: its training passes guide \
-         paths that carry little of it"
-            .into(),
-        Evidence::new().with("guiding", 1.0),
-        Action::Set {
-            flag: None,
-            usd_attribute: Some("crust:pathGuiding".into()),
-            value: "false".into(),
         },
     )
 }
@@ -518,31 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn guiding_on_direct_noise_suggests_turning_it_off() {
-        let f = Facts {
-            guiding: true,
-            indirect_dominant: Some(false),
-            ..Facts::default()
-        };
-        assert_eq!(ids(&f), ["guiding_without_indirect"]);
-        assert!(
-            ids(&Facts {
-                indirect_dominant: Some(true),
-                ..f.clone()
-            })
-            .is_empty()
-        );
-        // Unknown before the baseline: no finding yet.
-        assert!(
-            ids(&Facts {
-                indirect_dominant: None,
-                ..f
-            })
-            .is_empty()
-        );
-    }
-
-    #[test]
     fn peak_memory_near_the_machine_is_a_memory_finding() {
         let gib = 1u64 << 30;
         let f = Facts {
@@ -678,11 +629,7 @@ mod tests {
     #[test]
     fn actions_name_only_real_settings() {
         let flags = ["--auto-tx", "--light-selection", "--strategy"];
-        let attributes = [
-            "crust:lightSelection",
-            "crust:pathGuiding",
-            "crust:samplingStrategy",
-        ];
+        let attributes = ["crust:lightSelection", "crust:samplingStrategy"];
         let all = Facts {
             lights: 20,
             light_selection: LightSelection::Uniform,
@@ -690,7 +637,6 @@ mod tests {
             texture_lookups: Some((10, 1)),
             ptex_lookups: Some((10, 1)),
             unlit_emission: Some(1.0),
-            guiding: true,
             indirect_dominant: Some(false),
             peak_mem_bytes: Some(10),
             machine_mem_bytes: Some(10),

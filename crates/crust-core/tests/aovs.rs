@@ -64,12 +64,12 @@ fn every_source() -> Vec<AovVar> {
 /// A grey ball at the origin in front of a far wall (a huge sphere whose
 /// near side sits at z = −5), lit by a uniform dome; the camera at z = 5
 /// looks down −Z with a frame wide enough to see past the wall's edge.
-fn scene(spp: u32, variance: f32, guiding: bool, wall: bool) -> Renderer {
-    scene_exposed(spp, variance, guiding, wall, 1.0)
+fn scene(spp: u32, variance: f32, wall: bool) -> Renderer {
+    scene_exposed(spp, variance, wall, 1.0)
 }
 
 /// [`scene`] through a camera whose exposure scale is `exposure`.
-fn scene_exposed(spp: u32, variance: f32, guiding: bool, wall: bool, exposure: f32) -> Renderer {
+fn scene_exposed(spp: u32, variance: f32, wall: bool, exposure: f32) -> Renderer {
     let mut world = WorldBuilder::new();
     world.attach(
         Geometry::Sphere {
@@ -98,15 +98,11 @@ fn scene_exposed(spp: u32, variance: f32, guiding: bool, wall: bool, exposure: f
         0.0,
         5.0,
     );
-    // One training iteration: with two or more, whether the final pass is
-    // guided depends on their wall-clock efficiency (`ΔEff`), and a render
-    // is not repeatable at all — let alone comparable with another one.
     let settings = RenderSettings::default()
         .with_resolution(W, H)
         .with_samples_per_pixel(spp)
         .with_max_depth(4)
         .with_adaptive_sampling(spp.min(8), variance)
-        .with_guiding(guiding, 1, 0.5)
         .with_exposure_scale(exposure);
     Renderer::new(camera, world.commit(), lights, settings)
 }
@@ -134,26 +130,15 @@ fn channel_bits(film: &AovFilm, beauty: &Buffer, vars: &[AovVar]) -> Vec<Vec<u32
 }
 
 #[test]
-fn guided_renders_repeat() {
-    let r = scene(16, 0.0, true, true);
-    let a = r.render_with_stats(true, &|_, _| {}).0;
-    let b = r.render_with_stats(true, &|_, _| {}).0;
-    assert!(bits(&a) == bits(&b));
-}
-
-#[test]
 fn the_beauty_is_bit_identical_with_and_without_aovs() {
-    // Adaptive on (variance 0.05) and off, guided and not: AOVs observe the
-    // samples whatever decides how many there are.
-    for (variance, guiding) in [(0.0, false), (0.05, false), (0.0, true)] {
-        let r = scene(16, variance, guiding, true);
+    // Adaptive on (variance 0.05) and off: AOVs observe the samples
+    // whatever decides how many there are.
+    for variance in [0.0, 0.05] {
+        let r = scene(16, variance, true);
         let (plain, _) = r.render_with_stats(true, &|_, _| {});
         let req = request(every_source());
         let (with_aovs, _) = render(&r, true, &req);
-        assert!(
-            bits(&plain) == bits(&with_aovs),
-            "variance {variance}, guiding {guiding}"
-        );
+        assert!(bits(&plain) == bits(&with_aovs), "variance {variance}");
     }
 }
 
@@ -161,7 +146,7 @@ fn the_beauty_is_bit_identical_with_and_without_aovs() {
 /// there, for every source: the one-pixel reader and the planes cannot drift.
 #[test]
 fn var_pixel_is_var_channels_at_every_pixel() {
-    let r = scene(4, 0.0, false, true);
+    let r = scene(4, 0.0, true);
     let vars = every_source();
     let req = request(vars.clone());
     let (beauty, film) = render(&r, true, &req);
@@ -185,25 +170,22 @@ fn var_pixel_is_var_channels_at_every_pixel() {
 
 #[test]
 fn every_channel_is_bit_identical_across_tiles_and_scanlines() {
-    for guiding in [false, true] {
+    {
         // 16 spp, as every image comparison here (CLAUDE.md, "Measuring a
         // change"), with adaptive sampling on: `spp.min(8)` is the minimum.
-        let r = scene(16, 0.05, guiding, true);
+        let r = scene(16, 0.05, true);
         let vars = every_source();
         let req = request(vars.clone());
         let (tb, tf) = render(&r, true, &req);
         let (sb, sf) = render(&r, false, &req);
         assert!(bits(&tb) == bits(&sb));
-        assert!(
-            channel_bits(&tf, &tb, &vars) == channel_bits(&sf, &sb, &vars),
-            "guiding {guiding}"
-        );
+        assert!(channel_bits(&tf, &tb, &vars) == channel_bits(&sf, &sb, &vars));
     }
 }
 
 #[test]
 fn closest_depth_is_never_blended_across_an_edge() {
-    let r = scene(16, 0.0, false, true);
+    let r = scene(16, 0.0, true);
     let vars = vec![var("depth", AovSource::Depth), {
         let mut v = var("depth_filtered", AovSource::Depth);
         v.accumulation = Accumulation::Filtered;
@@ -235,7 +217,7 @@ fn closest_depth_is_never_blended_across_an_edge() {
 
 #[test]
 fn the_world_normal_of_a_sphere_spans_minus_one_to_one() {
-    let r = scene(8, 0.0, false, false);
+    let r = scene(8, 0.0, false);
     let vars = vec![var("N", AovSource::Normal), var("Neye", AovSource::Neye)];
     let (beauty, film) = render(&r, true, &request(vars.clone()));
     let n = film.var_channels(&beauty, &vars[0]);
@@ -258,7 +240,7 @@ fn the_world_normal_of_a_sphere_spans_minus_one_to_one() {
 
 #[test]
 fn alpha_is_zero_where_only_the_dome_is_seen() {
-    let r = scene(8, 0.0, false, false);
+    let r = scene(8, 0.0, false);
     let mut beauty_var = var("beauty", AovSource::Color);
     beauty_var.components = 4;
     let vars = vec![beauty_var, var("alpha", AovSource::Alpha)];
@@ -277,7 +259,7 @@ fn alpha_is_zero_where_only_the_dome_is_seen() {
 
 #[test]
 fn sample_count_is_the_budget_with_adaptive_sampling_off() {
-    let r = scene(8, 0.0, false, true);
+    let r = scene(8, 0.0, true);
     let vars = vec![
         var("sampleCount", AovSource::SampleCount),
         var("variance", AovSource::Variance),
@@ -292,7 +274,7 @@ fn sample_count_is_the_budget_with_adaptive_sampling_off() {
 
 #[test]
 fn world_and_camera_positions_agree_with_the_distances() {
-    let r = scene(8, 0.0, false, true);
+    let r = scene(8, 0.0, true);
     let vars = vec![
         var("P", AovSource::P),
         var("Peye", AovSource::Peye),
@@ -318,7 +300,7 @@ fn world_and_camera_positions_agree_with_the_distances() {
 
 #[test]
 fn a_beauty_only_request_returns_an_empty_film() {
-    let r = scene(16, 0.0, false, false);
+    let r = scene(16, 0.0, false);
     let req = request(vec![var("beauty", AovSource::Color)]);
     assert!(!req.needs_film());
     let (b, film) = render(&r, true, &req);
@@ -431,8 +413,8 @@ fn exposure_scales_radiance_only() {
     vars.push(lpe("C.*[LO]"));
     vars.push(lpe_variance("C.*[LO]"));
     let req = request(vars.clone());
-    let (base_buf, base) = render(&scene_exposed(16, 0.0, false, true, 1.0), true, &req);
-    let (lit_buf, lit) = render(&scene_exposed(16, 0.0, false, true, 2.0), true, &req);
+    let (base_buf, base) = render(&scene_exposed(16, 0.0, true, 1.0), true, &req);
+    let (lit_buf, lit) = render(&scene_exposed(16, 0.0, true, 2.0), true, &req);
     for v in &vars {
         let (a, b) = (
             base.var_channels(&base_buf, v),
@@ -465,7 +447,7 @@ fn exposure_scales_radiance_only() {
 fn exposure_does_not_change_the_samples_taken() {
     let req = request(vec![var("sampleCount", AovSource::SampleCount)]);
     let count = |exposure: f32| {
-        let (buffer, film) = render(&scene_exposed(32, 0.05, false, true, exposure), true, &req);
+        let (buffer, film) = render(&scene_exposed(32, 0.05, true, exposure), true, &req);
         film.var_channels(&buffer, &req.products[0].vars[0])
     };
     assert_eq!(count(1.0), count(8.0));

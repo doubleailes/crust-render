@@ -12,11 +12,9 @@ use crate::filter::PixelFilter;
 use crate::light::LightSelection;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 
-use super::attrs::{custom_bool, custom_f32, custom_i32, custom_token, value_at};
+use super::attrs::{custom_bool, custom_f32, custom_i32, custom_token, prim_value, value_at};
 use super::prim_at;
 
-const DEFAULT_GUIDING_TRAIN_ITERATIONS: u32 = 4;
-const DEFAULT_GUIDING_PROB: f32 = 0.5;
 /// Hydra's default for `domeLightCameraVisibility`: the camera sees domes.
 const DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY: bool = true;
 /// Hydra's default for `enableExposureCompensation`: the camera's exposure
@@ -242,12 +240,23 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let variance = custom_f32(&prim, "crust:varianceThreshold").unwrap_or(d.variance_threshold());
     let frame = custom_i32(&prim, "crust:frame").map_or(d.frame(), |n| n as isize);
 
-    // Path guiding (opt-in).
-    let guiding = custom_bool(&prim, "crust:pathGuiding").unwrap_or(false);
-    let guiding_iters = custom_i32(&prim, "crust:guidingTrainIterations")
-        .unwrap_or(DEFAULT_GUIDING_TRAIN_ITERATIONS as i32)
-        .max(1) as u32;
-    let guiding_prob = custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
+    // Path guiding was removed; an authored setting is reported, never read.
+    let removed: Vec<&str> = [
+        "crust:pathGuiding",
+        "crust:guidingTrainIterations",
+        "crust:guidingProb",
+    ]
+    .into_iter()
+    .filter(|name| prim_value(&prim, name).is_some())
+    .collect();
+    if !removed.is_empty() {
+        warning!(
+            SettingsPathGuidingRemoved,
+            at = prim.path(),
+            "{} authored, but path guiding was removed — rendering unguided",
+            removed.join(", ")
+        );
+    }
 
     // MIS strategy: `power` (default) | `balance` | `light` | `bsdf`.
     let strategy = match custom_token(&prim, "crust:samplingStrategy") {
@@ -329,17 +338,12 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
          {variance}, neighbour tolerance {neighbour_tolerance}), max depth {max_depth}, \
          frame {frame}, strategy {strategy:?}, \
          light selection {light_selection:?}, light samples {light_samples} camera / \
-         {light_samples_indirect} indirect, filter {} radius {}, indirect clamp {}, guiding {}",
+         {light_samples_indirect} indirect, filter {} radius {}, indirect clamp {}",
         prim.path(),
         filter.name(),
         filter.radius(),
         if indirect_clamp > 0.0 {
             indirect_clamp.to_string()
-        } else {
-            "off".to_string()
-        },
-        if guiding {
-            format!("on ({guiding_iters} training iterations, guide probability {guiding_prob})")
         } else {
             "off".to_string()
         }
@@ -349,7 +353,6 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         .with_adaptive_sampling(min_spp, variance)
         .with_frame(frame)
         .with_samples_per_pixel(spp)
-        .with_guiding(guiding, guiding_iters, guiding_prob)
         .with_sampling_strategy(strategy)
         .with_light_selection(light_selection)
         .with_pixel_filter(filter)

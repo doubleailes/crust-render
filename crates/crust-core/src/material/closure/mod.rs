@@ -13,7 +13,7 @@
 //!
 //! [`ResolvedClosure::resolve`] walks the tree once per vertex and keeps that
 //! weighted list inline — no allocation, no second walk. Every BSDF query at
-//! the vertex (the scatter, NEE's and guiding's `eval`) then sums a handful of
+//! the vertex (the scatter and NEE's `eval`) then sums a handful of
 //! leaves, each with its own roughness, Fresnel, normal and tangent. Nothing
 //! is pooled: that is the difference from the reduction this replaced, which
 //! averaged every leaf onto one OpenPBR parameter set.
@@ -1071,8 +1071,7 @@ impl ResolvedClosure {
 
     /// [`crate::Material::make_ray`].
     pub fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
-        // A guided direction carries the whole value: a mixed fibre vertex
-        // is not guided (the tracer turns the guide off there), so this is
+        // An externally chosen direction carries the whole value, so this is
         // all-fibre or no fibre.
         self.ray(rec, wi, self.hair)
     }

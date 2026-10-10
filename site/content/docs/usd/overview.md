@@ -119,9 +119,6 @@ the `crust:` attribute wins:
 | [`crust:pixelFilter`](@/docs/usd/render-settings.md#crust-pixelfilter) | `token` | RenderSettings | `triangle` |
 | [`crust:pixelFilterRadius`](@/docs/usd/render-settings.md#crust-pixelfilterradius) | `float` | RenderSettings | per filter |
 | [`crust:frame`](@/docs/usd/render-settings.md#crust-frame) | `int` | RenderSettings | 0 |
-| [`crust:pathGuiding`](@/docs/usd/render-settings.md#crust-pathguiding) | `bool` | RenderSettings | false |
-| [`crust:guidingTrainIterations`](@/docs/usd/render-settings.md#crust-guidingtrainiterations) | `int` | RenderSettings | 4 |
-| [`crust:guidingProb`](@/docs/usd/render-settings.md#crust-guidingprob) | `float` | RenderSettings | 0.5 |
 | [`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel) | `int` | RenderSettings | 0 |
 | [`crust:domeLightCameraVisibility`](@/docs/usd/render-settings.md#crust-domelightcameravisibility) | `bool` | RenderSettings | true |
 | [`crust:enableExposureCompensation`](@/docs/usd/render-settings.md#crust-enableexposurecompensation) | `bool` | RenderSettings | true |

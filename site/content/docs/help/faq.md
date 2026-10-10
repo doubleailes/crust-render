@@ -47,8 +47,6 @@ dome and distant light at once.
   so that adaptive sampling stops pixels later.
 - Many lights, most of them hidden? Try
   [`--light-selection learned`](@/docs/reference/command-line.md#light-selection).
-- Mostly indirect light, for example a room lit through a door? Try
-  [path guiding](@/docs/usd/render-settings.md#path-guiding).
 
 ## My render has bright speckles (fireflies)
 

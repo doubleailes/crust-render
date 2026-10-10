@@ -13,8 +13,8 @@ opt out explicitly, and the optional `crust-jit` MaterialX compiler, whose four 
 blocks call the machine code it generates). It loads scenes directly from **USD** — including production-scale assets
 such as Disney Animation's [Moana Island](#moana-benchmark) dataset — and implements its own
 watertight ray/triangle kernel, SBVH acceleration structure, OpenPBR übershader, MaterialX
-graph reader, volumetric integrator and Practical Path Guiding, with no dependency on Embree,
-OpenPGL, or any existing renderer core. It is an independent, single-author project rather
+graph reader and volumetric integrator, with no dependency on Embree
+or any existing renderer core. It is an independent, single-author project rather
 than a production renderer: the architecture and formulas are informed by PBRT, *Ray Tracing
 in One Weekend*, Autodesk Standard Surface / OpenPBR and the published Embree/OpenPGL papers,
 but every kernel, material model and importer here is a from-scratch implementation, and the
@@ -56,8 +56,6 @@ feature-by-feature comparison against Embree's intersection kernels, and
   mesh it is bound to, as in NVIDIA's Typhoon
 - 🧠 **Importance Sampling**
   - Supports BRDF- and light-based sampling
-- 🧭 **Path Guiding** (opt-in)
-  - Pure-Rust Practical Path Guiding (SD-tree), one-sample MIS with the BSDF
 - ⚡ **Adaptive Sampling**
   - Pixels stop early once their relative standard error drops below
     `crust:varianceThreshold` (after `crust:minSamplesPerPixel` samples,
@@ -290,9 +288,6 @@ def RenderSettings "settings" {
     float crust:varianceThreshold = 0.05
     float crust:adaptiveNeighbourTolerance = 1.0  # index units; negative = per-pixel stop
     int crust:frame = 0
-    bool crust:pathGuiding = false
-    int crust:guidingTrainIterations = 8
-    float crust:guidingProb = 0.5
     token crust:samplingStrategy = "power"   # power | balance | light | bsdf
     token crust:pixelFilter = "triangle"     # box | triangle | gaussian | blackman | mitchell
     float crust:pixelFilterRadius = 1.0      # pixels from the pixel center
@@ -300,7 +295,7 @@ def RenderSettings "settings" {
 ```
 
 Missing attrs fall back to sensible defaults (128 spp, 32 depth, 640×360,
-guiding off, triangle filter at radius 1).
+triangle filter at radius 1).
 
 The pixel filter reconstructs the image from the samples: `triangle` (the
 default), `gaussian` and `blackman` trade a little sharpness for smoother
@@ -313,45 +308,6 @@ from before filtering existed. Each filter has its own default radius
 importance sampling — sample positions are drawn from the filter's own
 distribution — so it costs nothing per sample and adaptive sampling keeps
 working per pixel.
-
-### 🧭 Path guiding
-
-An opt-in, pure-Rust implementation of *Practical Path Guiding* (Müller et
-al. 2017) — the SD-tree algorithm family that Intel's
-[OpenPGL](https://github.com/OpenPathGuidingLibrary/openpgl) generalizes,
-reimplemented natively so the renderer stays dependency-light and 100% safe
-Rust. The renderer learns a spatio-directional distribution of incident
-radiance (a binary spatial tree over the scene whose leaves hold adaptive
-directional quadtrees) over progressive training passes with geometrically
-growing budgets (1, 2, 4, … spp), then renders the final image by one-sample
-MIS: each secondary bounce draws its direction from the learned distribution
-with probability `crust:guidingProb` and from the BSDF otherwise, dividing by
-the mixture pdf.
-
-Enable it per scene with `bool crust:pathGuiding = true` on the
-RenderSettings prim. `crust:guidingTrainIterations` controls how many
-training passes run before the final pass (their total cost is
-`2^iterations − 1` spp — not wasted: every pass is blended into the final
-image weighted by inverse variance, so the training budget contributes at
-equal total spp). Guiding pays off on scenes where light is hard to
-find by chance — the bundled `samples/cornellbox_guided.usda` hides its only
-light behind a shroud so all transport is multi-bounce, and guiding cuts MSE
-against a converged reference by ~20% at equal final spp:
-
-```bash
-cargo run --release -- render -i samples/cornellbox_guided.usda
-```
-
-Every continuous lobe is guided — including refraction: thick glass uses a
-real Walter et al. 2007 microfacet BTDF with a proper VNDF-based pdf, so
-the guiding field can learn and sample directions straight through it.
-Dispersion is continuous too — each RGB channel refracts with its own IOR
-(one channel's IOR sampled uniformly, three per-channel BTDF evaluations
-with a channel-averaged mixture pdf), so dispersive glass joins the NEE and
-guiding mixtures instead of being a hero-wavelength delta lobe. Only
-thin-walled transmission (a genuinely singular lobe) and volume scattering
-are excluded; untrained regions fall back to plain BSDF sampling, so the
-estimator stays unbiased everywhere.
 
 ### 🎯 Multiple importance sampling
 
@@ -538,8 +494,6 @@ Documented gaps rather than silent ones — see the "Known gaps" sections of eac
   `crust:openpbr` subsurface is still a tinted diffuse. crust's native
   `crust:openpbr` and MaterialX's `open_pbr_surface` still differ (see
   `openspec/specs/materials/design.md` § Known gaps: MaterialX).
-- **Path guiding covers surfaces only** — no volume/phase-function guiding, and it
-  trains on luminance rather than a chromatic distribution.
 - Some USD inputs are read and warned about rather than mapped: `subsurface*` /
   `specularTint` on `PxrDisneyBsdf`, `inputs:diffuse` / `inputs:specular` on lights, and
   `UsdTransform2d` on preview-surface textures. `PortalLight`, mesh lights and light

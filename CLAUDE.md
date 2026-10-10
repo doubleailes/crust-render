@@ -23,7 +23,7 @@ opened with — `usd_import::stage_builder()`). Do not add loaders for any other
 | topic | design record (`openspec/specs/…/design.md`) | also |
 |-------|-----------------------------------------------|------|
 | CLI, command cookbook (every probe / A/B recipe), logging, `--stats` / `--profile`, env switches | `cli` | `docs/architecture.md` § Environment switches |
-| integrator, MIS, Russian roulette, media, volumes, guiding, adaptive sampling, pixel filters, openqmc | `rendering` | `docs/light_sampling.md` |
+| integrator, MIS, Russian roulette, media, volumes, adaptive sampling, pixel filters, openqmc | `rendering` | `docs/light_sampling.md` |
 | `crust-rt`: SBVH → BVH4, watertight `Tri4` packets, instancing, SIMD | `intersection-kernel` | `docs/simd.md`, `docs/embree_comparison.md` |
 | `Material` / `resolve` / `ShadingPoint`, OpenPBR, MaterialX (`crust-mtlx`, `crust-jit`), `UsdPreviewSurface` | `materials` | `docs/openpbr_reference_alignment.md`, `docs/shading_performance.md`, `docs/material_fidelity.md` |
 | lights, light selection (`power` / `uniform` / `learned`), UsdLux units, shaping, IES | `lighting` | `docs/light_sampling.md` |
@@ -95,7 +95,7 @@ verifies shading **in numbers, not by eye**.
 Seven crates under `crates/` (ownership table in `docs/architecture.md`):
 `crust-rt` (intersection kernel, no crust deps), `crust-mtlx` (MaterialX reader, no crust
 deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-core`
-(the engine library: import, integrator, materials, lights, volumes, guiding, stats),
+(the engine library: import, integrator, materials, lights, volumes, stats),
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
 `crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
 writes their files — the images, the reports — while the engine writes nothing: `main.rs`,
@@ -129,7 +129,7 @@ without the other (full list: `docs/architecture.md` § Invariants):
 
 - Every NEE weight has a bounce-side twin (`bounce_emission_weight`, `escaped_emission`),
   both routed through `SamplingStrategy` and `LightList::density` / the `*_at` lookups —
-  surface NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`, guide mixture ↔ NEE.
+  surface NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`.
   Emission at a bounce-arrival vertex is owned by the previous vertex's record.
 - `Emissive::radiance_toward` is the one answer to "what does this light emit toward
   here", for `AreaLight::sample_li` and `Material::emitted_at` alike. A material that
@@ -224,6 +224,6 @@ Documented rather than silent: each capability's `design.md` ends with its "Know
 sections (geometry and SIMD limits in `intersection-kernel`; MaterialX reduction limits in
 `materials`; residency, filtering and UV limits in `textures`; unsupported UsdLux features
 and light-sampling noise in `lighting`; instancing, openusd workarounds and ALab gaps in
-`usd-scene-import`; guiding and volume limits in `rendering`). Specs in
+`usd-scene-import`; volume limits in `rendering`). Specs in
 `openspec/specs/*/spec.md` describe current behaviour; propose behavioural changes through
 `openspec/changes/`.
