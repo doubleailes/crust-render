@@ -18,7 +18,7 @@ mod aabb;
 pub mod aov;
 mod buffer;
 mod camera;
-/// The `crust-check/1` report `crust check` writes.
+/// The `crust-check/2` report `crust check` writes.
 pub mod check;
 pub mod color;
 /// `crust diff`'s comparison of two decoded images.

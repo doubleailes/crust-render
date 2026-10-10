@@ -462,7 +462,7 @@ impl Server {
         )
     }
 
-    /// The `crust-check/1` report of the session's current import: what
+    /// The `crust-check/2` report of the session's current import: what
     /// `crust check -i <output> --json -` reports on the saved layer — the
     /// render it describes, its effective settings, the import's costs and
     /// counts, the findings that need no render, and every warning.

@@ -1,6 +1,6 @@
 //! The session's scene: the saved override layer imported exactly as `crust
 //! render <output>` imports it (design D1), kept as a renderer that every
-//! session render retunes, beside the `crust-check/1` report of that
+//! session render retunes, beside the `crust-check/2` report of that
 //! same import.
 
 use crate::{CheckArgs, Checked, Cli, Command};
