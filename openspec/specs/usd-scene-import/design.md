@@ -61,7 +61,9 @@ installed here). Before the fixes below, `Traverse prims` was 3:24:
   would let a prototype of several large meshes hold all their transients at once.
 - **~22% was dropping the composed stage** — openusd's index cache is millions of
   small allocations, 45 s of `free` before the render could start.
-  `UsdImportOptions::skip_stage_teardown` (off by default, on in the CLI) leaves a
+  `UsdImportOptions::skip_stage_teardown` (off by default, on in the CLI's one-shot
+  commands, off in the `crust mcp` session, which imports once per edit batch and would
+  otherwise keep every one of those stages) leaves a
   **single-stage** import's stage allocated instead (`release_stage`). A streamed
   import drops every chunk, the last included: streaming exists for its memory bound,
   and its peak often comes after the traversal (the top-level BVH commit on the
@@ -729,8 +731,10 @@ and its `SAFETY` comment is the argument, in short:
   one `crust ls` listing; the final stage a render leaves allocated
   (`skip_stage_teardown`) is never read again;
 - the `crust mcp` session's authoring stage lives as long as the session, which is why
-  it opens through its own plain builder and never maps (its imports, through
-  `stage_builder()`, still do);
+  it opens through its own plain builder and never maps. Its imports, through
+  `stage_builder()`, still do, so they free their stages, and an undo or a refused edit
+  puts the layer back by renaming a new file over it (`replace_file`), never by
+  rewriting the one an import mapped;
 - within an import the promise is the user's, stated on the user page: rewriting a USD
   file in place mid-import can fault the process; a rename over it (how openusd's
   `Layer::save`, and most DCCs, save) leaves the mapped bytes intact.
@@ -779,9 +783,13 @@ changed what the import calls:
   `lux_params` take a `&LightAPI`.
 - **`UsdRender` views drop the prefix**: `render::Settings` / `Product` / `Var`, with
   `SettingsBaseSchema` for the shared camera and framing attributes.
-- **`Imageable` / `Xformable` are views, not traits.** `xform.rs` composes any prim's
-  stack through `Xformable::from_prim_unchecked` and `XformableExt::local_transformation`
-  (was `local_to_parent_transform`) instead of implementing the traits on a wrapper.
+- **`Imageable` / `Xformable` are views, not traits.** `xform.rs` views a prim through
+  the type-checked `Xformable::from_prim` and composes its stack with
+  `XformQuery::new(..).local_transformation(eval_time())` and `resets_xform_stack()`
+  (was `local_to_parent_transform` on a wrapper implementing the traits). The check is
+  against the schema registry: a prim that is not `Xformable` (an untyped prim, a
+  `Scope`, a type the registry does not know) passes its parent's transform through,
+  the last with an `xform.unknown_type` warning when it authors ops.
 - **Collections are the generated `CollectionAPI`** (`from_prim_unchecked(prim, name)`,
   `compute_membership_query()` with no stage argument, `instance_at_path` for what
   `is_collection_api_path` answered).
@@ -984,7 +992,8 @@ resolution, which moves cage vertices only and warns once.
   the stack), and ops on a prim that is not `Xformable` (an untyped prim, a `Scope`) are
   ignored (0.7 applied them). The registry decides `Xformable`, so crust-core compiles
   every family that defines an `Xformable` type (#261): a prim typed from a family left
-  out would read as not `Xformable` and lose its ops. `main` also normalises an `orient` quaternion before
+  out, or from a plugin or studio schema, reads as not `Xformable` and loses its ops,
+  with an `xform.unknown_type` warning. `main` also normalises an `orient` quaternion before
   building its matrix, which 0.7 did not; on a `quatf` authored about 1e-8 off unit
   length the two differ by ~1e-8 per entry, one f32 ulp after the cast. C++ USD normalises
   too, by another route (`GfRotation::SetQuat`: `acos` of the real part, unit axis), and

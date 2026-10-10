@@ -700,10 +700,17 @@ fn beauty_output(output: Option<&str>) -> &str {
 /// The scene to render: the USD stage `-i` names, imported under the CLI's
 /// options, or the procedural fallback without one. The error is the message
 /// to log, or (in an MCP session) to answer with.
+///
+/// `keep_stage` leaves the final composed stage allocated
+/// (`UsdImportOptions::skip_stage_teardown`): right for a command that imports
+/// once and exits, where freeing it is pure delay (45 s on ALab); wrong for the
+/// MCP session, which imports once per edit batch and would keep every one of
+/// those stages, and the files they map, for as long as it runs.
 fn load_scene(
     cli: &SceneArgs,
     working_space: Option<&String>,
     assets: &FileAssets,
+    keep_stage: bool,
 ) -> std::result::Result<Scene, String> {
     let scene = if let Some(t) = &cli.input {
         let input_path = std::path::Path::new(&t);
@@ -713,9 +720,7 @@ fn load_scene(
             camera: cli.camera.clone(),
             subdivision_level: cli.subdiv_level,
             subdivision_edge_length: cli.subdiv_edge_length,
-            // The process renders once and exits, so freeing the composed
-            // stage is pure delay before the render (45 s on ALab).
-            skip_stage_teardown: true,
+            skip_stage_teardown: keep_stage,
             working_space: working_space.cloned(),
         };
         match Scene::from_usd_with_options(input_path, assets, &options) {
@@ -1003,7 +1008,7 @@ fn check(args: &CheckArgs) -> ExitCode {
         error!("$OCIO: {e}");
         return ExitCode::FAILURE;
     }
-    let checked = match import_checked(args) {
+    let checked = match import_checked(args, true) {
         Ok(checked) => checked,
         Err(e) => {
             error!("{e}");
@@ -1062,14 +1067,15 @@ struct Checked {
 
 /// The body of `crust check`: import `args`' stage, choose its products and
 /// build the `crust-check/1` report. The error is the message to log.
-fn import_checked(args: &CheckArgs) -> std::result::Result<Checked, String> {
+/// `keep_stage` is [`load_scene`]'s.
+fn import_checked(args: &CheckArgs, keep_stage: bool) -> std::result::Result<Checked, String> {
     let input = args
         .scene
         .input
         .as_ref()
         .ok_or("crust check needs a stage: -i <INPUT>")?;
     let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
-    let mut scene = load_scene(&args.scene, None, &assets)?;
+    let mut scene = load_scene(&args.scene, None, &assets, keep_stage)?;
     let import_peak = crust_core::peak_memory_bytes();
     let mut settings = apply_scene_overrides(&args.scene, scene.settings);
     if let Some(region) = args.scene.region {
@@ -1173,7 +1179,7 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
     }
     let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
     let import_start = Instant::now();
-    let mut scene = match load_scene(&args.scene, None, &assets) {
+    let mut scene = match load_scene(&args.scene, None, &assets, true) {
         Ok(scene) => scene,
         Err(e) => {
             error!("{e}");
@@ -1517,7 +1523,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     }
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
-    let scene = match load_scene(cli, cli.working_space.as_ref(), &assets) {
+    let scene = match load_scene(cli, cli.working_space.as_ref(), &assets, true) {
         Ok(scene) => scene,
         Err(e) => {
             error!("{e}");

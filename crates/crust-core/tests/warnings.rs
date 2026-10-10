@@ -212,6 +212,33 @@ fn transform_curves_and_volume_warnings() {
     assert_eq!(op.prims, ["/World/odd"]);
 }
 
+/// A prim of a type the registry does not know drops its ops with a warning;
+/// a `Scope` drops them silently, as C++ USD does by definition.
+#[test]
+fn an_unknown_prim_type_drops_its_ops() {
+    let scene = load(
+        "unknown_type",
+        r#"    def StudioRig "rig"
+    {
+        double3 xformOp:translate = (5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Sphere "ball"
+        {
+        }
+    }
+    def Scope "group"
+    {
+        double3 xformOp:translate = (5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+"#,
+        "",
+    );
+    let unknown = record(&scene, WarningCode::XformUnknownType);
+    assert_eq!(unknown.prims, ["/World/rig"]);
+    assert_eq!(unknown.kind, WarningKind::Skipped);
+}
+
 #[test]
 fn a_point_instancer_without_prototypes() {
     let scene = load(
