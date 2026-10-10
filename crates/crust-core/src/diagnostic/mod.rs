@@ -1189,7 +1189,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     // measured them; the baseline's own without one.
     let projected_setup = best
         .and_then(|t| runs.iter().find(|r| r.id == t.id))
-        .map_or(p1_setup, |r| full_frame_setup(r));
+        .map_or(p1_setup, full_frame_setup);
     let mut adaptive = Vec::new();
     // Every measurement the budget cannot fit is listed, whatever tier 1
     // left of it (D10).
