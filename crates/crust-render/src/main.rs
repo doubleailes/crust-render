@@ -161,7 +161,7 @@ struct DiagnosticArgs {
 struct CheckArgs {
     #[command(flatten)]
     scene: SceneArgs,
-    /// Also write the report as JSON (format `crust-check/1`) to PATH; with
+    /// Also write the report as JSON (format `crust-check/2`) to PATH; with
     /// `-`, the JSON goes to stdout instead of the text report.
     #[arg(long, value_name = "PATH|-")]
     json: Option<std::path::PathBuf>,
@@ -990,7 +990,7 @@ impl DenyKind {
 /// `crust check`: import a stage as `crust render` would, render nothing,
 /// and report what the render would use, what the import refused,
 /// approximated or skipped, and which settings are worth changing — as text
-/// on stdout, or as `crust-check/1` JSON. 0 clean, 3 a denied warning was
+/// on stdout, or as `crust-check/2` JSON. 0 clean, 3 a denied warning was
 /// raised, 1 an error.
 fn check(args: &CheckArgs) -> ExitCode {
     if args.scene.input.is_none() {
@@ -1066,7 +1066,7 @@ struct Checked {
 }
 
 /// The body of `crust check`: import `args`' stage, choose its products and
-/// build the `crust-check/1` report. The error is the message to log.
+/// build the `crust-check/2` report. The error is the message to log.
 /// `keep_stage` is [`load_scene`]'s.
 fn import_checked(args: &CheckArgs, keep_stage: bool) -> std::result::Result<Checked, String> {
     let input = args

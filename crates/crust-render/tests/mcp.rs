@@ -425,8 +425,8 @@ fn check_is_the_clis_report_on_the_saved_layer() {
         "{}",
         String::from_utf8_lossy(&cli.stderr)
     );
-    let mut cli: Value = serde_json::from_slice(&cli.stdout).expect("crust-check/1");
-    assert_eq!(session["format"], "crust-check/1");
+    let mut cli: Value = serde_json::from_slice(&cli.stdout).expect("crust-check/2");
+    assert_eq!(session["format"], "crust-check/2");
     // Everything but the import's per-phase timings.
     for report in [&mut session, &mut cli] {
         report.as_object_mut().unwrap().remove("import");

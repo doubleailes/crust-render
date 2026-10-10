@@ -751,7 +751,7 @@ values and defaults: [`-i`](#input) (required), [`-f`](#frame), [`--camera`](#ca
 
 | flag | value | default | what it does |
 |------|-------|---------|--------------|
-| `--json` | path or `-` | off | Also write the report as JSON, format `crust-check/1`. With `-`, the JSON replaces the text report on stdout. |
+| `--json` | path or `-` | off | Also write the report as JSON, format `crust-check/2`. With `-`, the JSON replaces the text report on stdout. |
 | `--deny` | kinds | off | Exit `3` when the import raises a warning of one of these kinds: `refused`, `approximated`, `skipped`, or `all`, comma-separated. The reports are still written, and name the matching codes (`denied`). Findings never deny. |
 
 ```bash

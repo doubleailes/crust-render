@@ -48,7 +48,7 @@ cargo run --release -- render -i scene.usda --profile                  # + per-s
 cargo run --release -- render -i scene.usda -l debug --log-file logs   # tee the log to a timestamped file
 cargo run --release -- render --help                                   # every render flag
 cargo run --release -- ls camera -i scene.usda                         # cameras (or light, material), one path per line
-cargo run --release -- check -i scene.usda --json -                    # what a render would use + the import's warnings (crust-check/1)
+cargo run --release -- check -i scene.usda --json -                    # what a render would use + the import's warnings (crust-check/2)
 cargo run --release -- diagnostic -i scene.usda --budget 2m > r.md     # which settings make it faster/cleaner (+ crust-diagnostic.json)
 cargo run --release -- mcp                                             # MCP server on stdio for Claude Desktop (feature `mcp`)
 
