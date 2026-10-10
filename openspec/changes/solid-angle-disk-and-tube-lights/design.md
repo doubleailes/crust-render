@@ -170,23 +170,155 @@ spherical ellipse. Guillén, Ureña, King, Fajardo, Georgiev, López-Moreno and 
 give area-preserving maps from the unit square onto it. Their solid angle and CDFs
 are elliptic integrals.
 
-This is written from the paper's abstract and from memory. The network was blocked
-when this was drafted, so task 2.1 transcribes the formulas from the paper before
-any code. In outline:
+Transcribed from the arXiv preprint (1805.09048), which is the same text as CGF
+36(4) pp. 179–187. Equation numbers are the paper's.
 
-- **Frame.** From the shading point, build the cone's frame: its axis, and the
-  semi-axis angles `α ≥ β` of the spherical ellipse. These follow from the disk's
-  centre, normal and radius in closed form.
-- **Solid angle.** A complete elliptic integral of the third kind in `α` and `β`.
-- **Sampling, polar map.** The azimuth comes from inverting the CDF of an incomplete
-  elliptic integral of the third kind (Newton, safeguarded by bisection). The
-  radial coordinate follows in closed form. The paper's other map trades this for a
-  different inversion. Pick by the paper's own cost and stratification figures, and
-  record why.
-- **Elliptic integrals.** Carlson's symmetric forms `R_F` and `R_J` (duplication
-  algorithm, ~60 lines, f64), in `light/ellipse.rs`. They are tested against
-  reference values from an independent source (mpmath or Boost, generated
-  offline like the OSL and Adobe oracles).
+**The spherical ellipse (§3, eqs. 3–5).** The disk has centre `c`, normal `n̂` and
+radius `r`, and the shading point is `o`. The paper builds a frame
+`ℛ_d = (x̂_d, ŷ_d, ẑ_d)` with `ẑ_d = −n̂`. It takes the disk's boundary coordinates
+`y₀` and `y₁` along `ŷ_d`, and projects them onto the unit sphere to get
+`(y′₀, z′₀)` and `(y′₁, z′₁)`.
+
+- The ellipse centre is `ẑ_e = normalize(0, y′_h, z′_h)`, with `y′_h` and `z′_h`
+  the averages of those coordinates. It is not the projection of `c`.
+- Reprojecting `ẑ_e` onto the disk gives a chord `x₀x₁` parallel to `x̂_d`. Its
+  endpoints project to `x′₀` and `x′₁`.
+- The semi-axes, semi-arcs and tangent-ellipse semi-axes are:
+  ```
+  a  = x′₁,          b  = ½ √((y′₁ − y′₀)² + (z′₁ − z′₀)²)
+  α  = asin a,       β  = asin b
+  a_t = tan α,       b_t = tan β
+  ```
+- The ellipse frame is `ℛ_e`, with `x̂_e ≡ x̂_d` (the `a` axis) and
+  `ŷ_e = ẑ_e × x̂_e`.
+
+**Trap, eq. 3.** As printed, `ŷ_d = ẑ_d × (c − o)/‖c − o‖` and
+`x̂_d = ŷ_d × ẑ_d`. That makes `c − o ⊥ ŷ_d`, so `c` lies in the `x̂_d ẑ_d` plane.
+But the text then puts the ellipse centre at `x = 0` and measures the
+semi-major axis `a` along `x̂_d`.
+
+Both cannot hold. The ellipse is symmetric about the plane through `o`, `c` and
+`n̂`. Its foreshortened axis lies in that plane, so the `a` axis is the one
+perpendicular to it, `∝ n̂ × (c − o)`. That is what eq. 3 calls `ŷ_d`.
+
+So either eq. 3's `x̂` and `ŷ` are swapped, or the figure's labels are. Build the
+frame from the symmetry argument, not from eq. 3 as printed:
+
+- `x̂_d ∝ n̂ × (c − o)`;
+- `ŷ_d` is the in-plane direction from `o`'s foot toward `c`;
+- `ẑ_d = −n̂`.
+
+Pin it with a test: brute-force solid angle against eq. 19's, off axis.
+
+**Other degenerate and boundary cases:**
+
+- **On the axis** (`c − o ∥ n̂`), `n̂ × (c − o)` vanishes. The ellipse is a circle,
+  `a = b`, so any perpendicular frame works.
+- **`a ≥ b`** is assumed by `m ∈ [0, 1)` in eq. 20. It holds for a disk seen from
+  a moderate distance, but has not been shown near the disk plane, where both arcs
+  approach `π/2`. A property test over a dense `(height, offset)` grid checks it,
+  and the code swaps the axes if it ever fails.
+
+**The radial map (§3.3, eqs. 16–22), chosen.** Per quadrant, `φ_r ∈ [0, π/2]`.
+The planar ellipse radius and the altitude are:
+
+```
+r(φ)  = a b / √(a² sin² φ + b² cos² φ)         (18)
+h_r(φ) = √(1 − r(φ)²)                          (17)
+```
+
+The fractional quadrant area, and its parameters, are:
+
+```
+Ω_r(φ) = φ − [b (1 − a²) / (a √(1 − b²))] · Π(n; φ_t | m)        (19)
+φ_t = atan((a_t / b_t) tan φ)                                    (20)
+n   = (a² − b²) / (a² (1 − b²))
+m   = (a² − b²) / (1 − b²)
+```
+
+The total solid angle is `Ω_D = 4 Ω_r(π/2)` (`φ_t = π/2`, a complete `Π`).
+
+Sampling:
+
+1. Solve `Ω_r(φ) = ε₁ Ω_r(π/2)` for `φ` (eq. 21).
+2. Set `h = (1 − ε₂) h_r(φ) + ε₂` (eq. 22).
+3. The direction in `ℛ_e` is `q = (√(1 − h²) cos φ, √(1 − h²) sin φ, h)`. That is
+   eq. 15 with `x̂` and `ẑ` swapped. `φ` is measured from the `a` axis, as in
+   eq. 18.
+4. Mirror `q`'s `x` and `y` to reach the other three quadrants. Spend part of
+   `ε₁` choosing the quadrant, alternating the direction so the map stays
+   continuous across quadrant edges (as eq. 23 does).
+5. Intersect the ray `o + t q` with the disk's plane to get the point.
+
+The density is `1 / Ω_D` everywhere on the ellipse.
+
+**Newton's derivative is free.** `dΩ_r/dφ = 1 − h_r(φ)` (eq. 16), in closed form.
+So each Newton step costs one `Π`. The paper reports 1–4 iterations. Use a
+bisection safeguard (`Ω_r` is monotone on `[0, π/2]`) and start from the circular
+case's answer, `φ = ε₁ π/2`.
+
+**A free correctness check: the circle.** At `a = b`, `n = m = 0` and
+`Π(0; φ | 0) = φ`, so eq. 19 reduces to `Ω_r = φ (1 − cos α)`. That is the cone's
+`2π (1 − cos α)` over four quadrants, so the on-axis disk must agree with
+`SubtendedCone` to rounding.
+
+**Why the radial map, not the parallel one (§3.2, eqs. 6–15).** The parallel map
+needs `F` and `Π` per Newton step (eq. 11). It also visibly distorts stratification
+(converging lines, Figure 1c). The paper prefers radial for both reasons, and so do
+we.
+
+**The low-distortion radial variant (eq. 23)** pre-warps `(ε₁, ε₂)` through
+Shirley–Chiu's concentric map, then an inverse polar map, before the radial map.
+That removes the polar map's convergence at the ellipse centre. It costs a few
+flops and no elliptic integral. Task 2.4 measures it against the plain radial map
+under `openqmc` points, and keeps whichever has the lower 16 spp error on the sweep.
+There is no switch value for it: it is a quality choice inside `ellipse`, settled
+by the test.
+
+**Not the tabulation (§4.1).** For speed, the paper replaces the Newton inversion
+with a 1024² table over `(β/α, φ_r)` of spherical triangles. Samples that land
+outside the ellipse are rejected for unbiasedness, but Arnold gives them zero
+weight, which the paper notes underestimates the light. Both options break a crust
+rule:
+
+- rejection breaks `openqmc` stratification;
+- zero weight is a bias.
+
+The table would also add 4 MiB. Crust takes the exact Newton inversion and pays
+for it.
+
+**Cost.** The paper measures the Newton version at up to 10× area sampling's cost
+in simple scenes, amortised away in production scenes (its Figure 9, Arnold).
+Arnold also switches to area sampling for far lights, which is what the
+solid-angle band below does. D7's equal-time measurement decides whether that
+cost pays in crust.
+
+**Elliptic integrals.** These are Carlson's symmetric forms, as the paper itself
+recommends (§4.2, [Car95]):
+
+```
+Π(n; φ | m) = s R_F(c², 1 − m s², 1) + (n/3) s³ R_J(c², 1 − m s², 1, 1 − n s²)
+s = sin φ_t,  c = cos φ_t
+```
+
+This is the convention `Π = ∫₀^φ dθ / ((1 − n sin² θ) √(1 − m sin² θ))`. The circle
+check above and the brute-force solid angle pin the sign of `n` against the
+paper's.
+
+`R_F` and `R_J` use the duplication algorithm, in f64, in `light/ellipse.rs`. They
+are tested against reference values from an independent source (mpmath),
+generated offline like the OSL and Adobe oracles.
+
+`n < 1` always holds, so `1 − n s² > 0`. But as `b → 0` (an edge-on disk),
+`n → 1` and `Π` grows while its prefactor `b` shrinks. Below `b < 1e-4 · a` the
+strategy answers `None`, and the light is area-sampled. That is no worse than
+today: area sampling of a nearly edge-on disk is what crust does now.
+
+**Two-sidedness.** The paper's Figure 7 uses a two-sided disk, and its frame works
+from either side, because `ẑ_d = −n̂` only fixes a handedness. Crust's imported
+disks are one-sided, so the strategy is still built only in front, as below. A
+two-sided disk seen from behind keeps area sampling, which is correct, just not
+improved.
 
 **Local, then mapped.** The map runs on the unit disk seen from `f`, in local space.
 The world density is the local one times the solid-angle Jacobian of the direction
@@ -218,8 +350,11 @@ the exact map wastes none, and it only works where the square stays a rectangle
 (no shear). It is kept as the fallback if task 5 shows Guillén's per-sample cost
 eating its gain.
 
-*Alternative considered: Gamito 2016's disk sampler.* It is rejection-based, for
-the same reason as D3.
+*Alternative considered: Gamito 2016's disk sampler.* It samples the circumscribed
+spherical rectangle and rejects samples outside the disk. Guillén et al. report
+that it needs a progressive low-discrepancy generator for its candidates and
+cannot use a fixed-size point set. Its error is higher than the radial map's on
+surfaces (their Figures 6 and 7). It is rejected for the same reason as D3.
 
 ### D6. `SolidAngleSampler` may refuse a point
 
@@ -290,7 +425,9 @@ the band moves, and the result goes in the design record either way.
 
 ## Open Questions
 
-1. Which of Guillén's two maps: settle in task 2.1 from the paper's measurements.
+1. ~~Which of Guillén's two maps~~: settled in task 2.1. It is the radial map, with
+   exact Newton inversion and no tabulation (D5). Plain versus low-distortion
+   radial is left to task 2.4's measurement.
 2. Should the tube also get a solid-angle band (area sampling for a tube that is
    tiny on screen)? D1 is cheap and its back-facing win does not shrink with
    distance, so the answer is probably no. The sweep in task 5 answers it.
