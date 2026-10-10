@@ -109,8 +109,8 @@ re-exports the public surface.
 **Code shape**
 
 - Safe Rust everywhere: crates are `forbid(unsafe_code)` except `crust-core` (`deny`, one
-  test-only `GlobalAlloc` and the import's memory-mapped USD reads, `mapping_resolver` in
-  `usd_import/mod.rs`) and `crust-jit` (`deny`, five audited blocks). Adding `unsafe`,
+  test-only `GlobalAlloc` and, behind the `mmap` feature, the import's memory-mapped USD
+  reads, `mapping_resolver` in `usd_import/mod.rs`) and `crust-jit` (`deny`, five audited blocks). Adding `unsafe`,
   or a dependency that carries it on the hot path, is a project decision, not a local one.
 - **crust-core decodes no assets.** Every image, Ptex or IES byte crosses `AssetLoader`
   into `crust-assets`; a loader returning `None` means "fall back", never an error.

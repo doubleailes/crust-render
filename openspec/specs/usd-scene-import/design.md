@@ -707,8 +707,9 @@ has shipped yet. Dropping the patch is the whole revert once one does.
 
 **The import reads USD files through memory mappings** (`CRUST_USD_MMAP`, on), the other
 gain that issue reports (~30% on Moana, and a −19% to −42% heap peak, measured upstream).
-crust-core enables openusd's `mmap` feature (`memmap2`) and `stage_builder()` hands every
-import stage a `DefaultResolver::map_files()` resolver; a layer then holds no copy of its
+crust-core's `mmap` feature (off in the library, on in the renderer's defaults, like
+`jit`) enables openusd's and compiles the opt-in: `stage_builder()` hands every import
+stage a `DefaultResolver::map_files()` resolver; a layer then holds no copy of its
 file, and a `.usdc` decodes its values from the mapped pages on demand. `map_files` is an
 `unsafe fn`: its caller promises no mapped file is modified while anything read from it
 is alive. `mapping_resolver` (`usd_import/mod.rs`) is the crate's one non-test `unsafe`,
@@ -737,7 +738,11 @@ the one `.usdc`, `PointInstancedMedCity.usd`, parses in 0.003 / 0.004 s against
 parsed into owned data either way. ALab and Moana, where upstream measured its gains,
 are still to measure here. The `mcp` feature's own `openusd`
 dependency unifies with crust-core's, so the feature is compiled into the session too;
-only the opt-in decides whether anything maps.
+only the opt-in decides whether anything maps. `--no-default-features` builds a renderer
+with no opt-in compiled, which never maps. It does not drop `memmap2` yet: openusd-schemas
+names openusd with its default features (`openusd.workspace = true`, no
+`default-features = false`), which include `mmap`, so the dependency is compiled into any
+build that reads typed schemas; worth fixing upstream.
 
 `main` regenerated `openusd-schemas` from OpenUSD 26.05's own schema definitions, which
 changed what the import calls:

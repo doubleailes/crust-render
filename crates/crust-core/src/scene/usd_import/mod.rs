@@ -50,6 +50,7 @@ use crate::stats::{MemorySample, RenderStats, SceneCounters, SubdivisionCounters
 use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
+#[cfg(feature = "mmap")]
 use openusd::ar::DefaultResolver;
 use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Prim, Stage, StageBuilder, StagePopulationMask};
@@ -551,18 +552,19 @@ fn release_stage(stage: Stage, keep: bool) {
 }
 
 /// `Stage::builder()` carrying the typed schemas' registry, and reading files
-/// through memory mappings unless `CRUST_USD_MMAP=0`. Every stage the import
+/// through memory mappings when the `mmap` feature is built in, unless
+/// `CRUST_USD_MMAP=0`. Every stage the import
 /// reads must open through this: a stage without the registry knows only the
 /// core `usd` family, so every typed `get` (`Mesh`, `SphereLight`,
 /// `Settings`, …) answers `None` and no schema fallback resolves — the scene
 /// would import as empty, without an error.
 pub(super) fn stage_builder() -> StageBuilder {
     let builder = Stage::builder().schema_registry(openusd_schemas::schema_registry());
+    #[cfg(feature = "mmap")]
     if crate::config().usd_mmap {
-        builder.resolver(mapping_resolver())
-    } else {
-        builder
+        return builder.resolver(mapping_resolver());
     }
+    builder
 }
 
 /// openusd's filesystem resolver, serving every file from a read-only memory
@@ -570,6 +572,7 @@ pub(super) fn stage_builder() -> StageBuilder {
 /// touches are loaded.
 // The crate's one `unsafe` outside a test: `map_files` is an `unsafe fn` so
 // that its caller states the promise below; it does nothing unsafe itself.
+#[cfg(feature = "mmap")]
 #[allow(unsafe_code)]
 fn mapping_resolver() -> DefaultResolver {
     // SAFETY: `map_files` asks that no mapped file be modified while anything
@@ -1275,7 +1278,7 @@ impl<'a> ImportCaches<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mmap"))]
 mod tests {
     use super::*;
     use openusd::usd::PrimPredicate;

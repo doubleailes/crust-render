@@ -119,7 +119,8 @@ underneath a mapping can crash the import. Saving by writing a new file and rena
 over the old one, which is how USD applications usually save, is safe. Once the import
 has finished, the files can be changed freely.
 
-`0` reads each file into memory, as before.
+`0` reads each file into memory, as before. A renderer built without its default `mmap`
+feature (`cargo build --no-default-features`) always does, whatever this says.
 
 ### CRUST_MESH_BAKE
 
