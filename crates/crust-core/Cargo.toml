@@ -38,12 +38,14 @@ glam.workspace = true
 tracing.workspace = true
 openusd = { version = "0.7", default-features = false }
 # The typed schema views (UsdGeom / UsdLux / UsdShade / UsdRender) left the
-# core crate in openusd 0.7 and ship separately, versioned in lockstep. UsdSkel
-# and UsdVol are compiled in for their types alone: the import composes a
-# prim's xformOps only when the schema registry knows it is Xformable, and a
-# SkelRoot or a Volume from a family left out is unknown, so its transform
-# would be dropped.
-openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render", "skel", "vol"] }
+# core crate in openusd 0.7 and ship separately, versioned in lockstep. UsdSkel,
+# UsdVol, UsdProc and UsdMedia are compiled in for their types alone: the import
+# composes a prim's xformOps only when the schema registry knows it is
+# Xformable, and a SkelRoot, Volume, GenerativeProcedural or SpatialAudio from a
+# family left out is unknown, so its transform would be dropped. With them,
+# every Xformable type C++ USD defines is known (the remaining families,
+# UsdPhysics, UsdUI and UsdSemantics, define none).
+openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render", "skel", "vol", "proc", "media"] }
 # Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
 # Catmull-Clark subdivision at USD import: zero dependencies,
 # `forbid(unsafe_code)`. Pinned to a release tag; the committed `Cargo.lock`
