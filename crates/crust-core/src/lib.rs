@@ -1,12 +1,15 @@
 //! The engine as a library: renderer, integrator, materials, lights,
 //! volumes, path guiding and USD import.
 //!
-//! `deny(unsafe_code)` rather than `forbid`, for exactly one reason: the
+//! `deny(unsafe_code)` rather than `forbid`, for exactly two reasons: the
 //! subdivision allocation probe in `scene/subdiv.rs` installs a counting
-//! `GlobalAlloc`, and implementing that trait is inherently unsafe. `deny`
-//! lets that one test module opt out explicitly and visibly; `forbid` could
-//! not be overridden at all, and dropping the lint entirely would leave the
-//! claim unchecked everywhere else. `crust-jit` is the only other crate that
+//! `GlobalAlloc`, and implementing that trait is inherently unsafe; and the
+//! USD import opts into openusd's memory-mapped file reads
+//! (`usd_import::stage_builder`), whose opt-in is an `unsafe fn` because the
+//! caller promises no mapped file changes while it is read. `deny` lets each
+//! opt out explicitly and visibly; `forbid` could not be overridden at all,
+//! and dropping the lint entirely would leave the claim unchecked everywhere
+//! else. `crust-jit` is the only other crate that
 //! is `deny` rather than `forbid` (it calls generated code); every other
 //! crate in the workspace is `forbid`.
 #![deny(unsafe_code)]

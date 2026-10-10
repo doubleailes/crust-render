@@ -703,10 +703,34 @@ feature flag.
 `cargo update -p openusd -p openusd-schemas` moves it). `main` carries the stage-open,
 traversal and shared-asset-bytes work of mxpv/openusd#106 — #142 measured the full Moana
 island at 22.3 s → 14.3 s and 5.32 → 3.58 GiB peak in openusd alone — which no release
-has shipped yet. Dropping the patch is the whole revert once one does. The memory-mapped
-`.usdc` reads that issue also reports are **not** on: they need openusd's `mmap` feature
-(`memmap2`, which is `unsafe`) and an opt-in on the resolver (`DefaultResolver::map_files`),
-and both manifests keep `default-features = false`.
+has shipped yet. Dropping the patch is the whole revert once one does.
+
+**The import reads USD files through memory mappings** (`CRUST_USD_MMAP`, on), the other
+gain that issue reports (~30% on Moana, and a −19% to −42% heap peak, measured upstream).
+crust-core enables openusd's `mmap` feature (`memmap2`) and `stage_builder()` hands every
+import stage a `DefaultResolver::map_files()` resolver; a layer then holds no copy of its
+file, and a `.usdc` decodes its values from the mapped pages on demand. `map_files` is an
+`unsafe fn`: its caller promises no mapped file is modified while anything read from it
+is alive. `mapping_resolver` (`usd_import/mod.rs`) is the crate's one non-test `unsafe`,
+and its `SAFETY` comment is the argument, in short:
+
+- only the stage holds views of a mapping — every value read is an owned `sdf::Value`,
+  and crust takes no asset bytes from openusd (textures, Ptex and IES go through
+  `AssetLoader`) — so the promise lasts exactly as long as a stage;
+- every stage `stage_builder()` opens lives for one import (one chunk, when streaming) or
+  one `crust ls` listing; the final stage a render leaves allocated
+  (`skip_stage_teardown`) is never read again;
+- the `crust mcp` session's authoring stage lives as long as the session, which is why
+  it opens through its own plain builder and never maps (its imports, through
+  `stage_builder()`, still do);
+- within an import the promise is the user's, stated on the user page: rewriting a USD
+  file in place mid-import can fault the process; a rename over it (how openusd's
+  `Layer::save`, and most DCCs, save) leaves the mapped bytes intact.
+
+`a_mapped_usdc_reads_as_a_copied_one` pins that a mapped `.usdc` reads every authored
+value and time sample exactly as a copied one does. The `mcp` feature's own `openusd`
+dependency unifies with crust-core's, so the feature is compiled into the session too;
+only the opt-in decides whether anything maps.
 
 `main` regenerated `openusd-schemas` from OpenUSD 26.05's own schema definitions, which
 changed what the import calls:

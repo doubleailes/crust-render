@@ -28,7 +28,11 @@ crust-rt = { path = "../crust-rt" }
 rayon = "1.10.0"
 glam.workspace = true
 tracing.workspace = true
-openusd = { version = "0.7", default-features = false }
+# `mmap`: the import's stages read file assets through a read-only memory
+# mapping (`usd_import::stage_builder`, `CRUST_USD_MMAP`) instead of copying
+# each layer's bytes. It brings `memmap2`, whose mapping is `unsafe`; the
+# import's one opt-in states the promise it makes.
+openusd = { version = "0.7", default-features = false, features = ["mmap"] }
 # The typed schema views (UsdGeom / UsdLux / UsdShade / UsdRender) left the
 # core crate in openusd 0.7 and ship separately, versioned in lockstep.
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }

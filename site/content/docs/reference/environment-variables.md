@@ -65,6 +65,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | variable | default | area |
 |----------|---------|------|
 | [`CRUST_STREAM_IMPORT`](#crust-stream-import) | on | USD import |
+| [`CRUST_USD_MMAP`](#crust-usd-mmap) | on | USD import |
 | [`CRUST_MESH_BAKE`](#crust-mesh-bake) | on | USD import |
 | [`CRUST_SUBDIV`](#crust-subdiv) | on | USD import |
 | [`CRUST_DISPLACE`](#crust-displace) | on | USD import |
@@ -103,6 +104,22 @@ composed USD is in memory at once. On the Moana Island this cut peak memory from
 to 44 GiB, with the same image. Small scenes are always imported through one stage.
 
 `0` imports the whole scene through one stage.
+
+### CRUST_USD_MMAP
+
+Boolean, default **on**.
+
+On, the import reads each USD file through a read-only memory mapping instead of copying
+it into memory first. A binary `.usdc` (or a `.usdz` package) then decodes its values
+straight from the mapped file, and only the parts of the file the import touches are
+loaded. The scene is the same either way.
+
+While a scene is importing, don't rewrite its USD files in place: a file that changes
+underneath a mapping can crash the import. Saving by writing a new file and renaming it
+over the old one, which is how USD applications usually save, is safe. Once the import
+has finished, the files can be changed freely.
+
+`0` reads each file into memory, as before.
 
 ### CRUST_MESH_BAKE
 

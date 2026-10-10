@@ -150,6 +150,9 @@ pub struct Config {
     /// `CRUST_STREAM_IMPORT`: import one masked stage per subtree (`false`:
     /// one stage for the whole scene).
     pub stream_import: bool,
+    /// `CRUST_USD_MMAP`: the import reads USD files through a read-only
+    /// memory mapping (`false`: read each file into memory, as before).
+    pub usd_mmap: bool,
     /// `CRUST_MESH_BAKE`: bake single-placement meshes into world space
     /// (`false`: instance every mesh; bit-identical).
     pub mesh_bake: bool,
@@ -249,6 +252,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             stream_import: true,
+            usd_mmap: true,
             mesh_bake: true,
             subdiv: true,
             displace: true,
@@ -291,6 +295,7 @@ impl Config {
         let flag = |name, default| env_flag(&lookup, name, default);
         Config {
             stream_import: flag("CRUST_STREAM_IMPORT", d.stream_import),
+            usd_mmap: flag("CRUST_USD_MMAP", d.usd_mmap),
             mesh_bake: flag("CRUST_MESH_BAKE", d.mesh_bake),
             subdiv: flag("CRUST_SUBDIV", d.subdiv),
             displace: flag("CRUST_DISPLACE", d.displace),
