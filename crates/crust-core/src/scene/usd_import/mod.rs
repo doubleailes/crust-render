@@ -50,6 +50,7 @@ use crate::stats::{MemorySample, RenderStats, SceneCounters, SubdivisionCounters
 use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
+use openusd::ar::DefaultResolver;
 use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Prim, Stage, StageBuilder, StagePopulationMask};
 use openusd_schemas::geom::{
@@ -549,13 +550,42 @@ fn release_stage(stage: Stage, keep: bool) {
     }
 }
 
-/// `Stage::builder()` carrying the typed schemas' registry. Every stage the
-/// import reads must open through this: a stage without it knows only the
+/// `Stage::builder()` carrying the typed schemas' registry, and reading files
+/// through memory mappings unless `CRUST_USD_MMAP=0`. Every stage the import
+/// reads must open through this: a stage without the registry knows only the
 /// core `usd` family, so every typed `get` (`Mesh`, `SphereLight`,
 /// `Settings`, …) answers `None` and no schema fallback resolves — the scene
 /// would import as empty, without an error.
 pub(super) fn stage_builder() -> StageBuilder {
-    Stage::builder().schema_registry(openusd_schemas::schema_registry())
+    let builder = Stage::builder().schema_registry(openusd_schemas::schema_registry());
+    if crate::config().usd_mmap {
+        builder.resolver(mapping_resolver())
+    } else {
+        builder
+    }
+}
+
+/// openusd's filesystem resolver, serving every file from a read-only memory
+/// mapping: a layer holds no copy of its file, and only the pages a read
+/// touches are loaded.
+// The crate's one `unsafe` outside a test: `map_files` is an `unsafe fn` so
+// that its caller states the promise below; it does nothing unsafe itself.
+#[allow(unsafe_code)]
+fn mapping_resolver() -> DefaultResolver {
+    // SAFETY: `map_files` asks that no mapped file be modified while anything
+    // read from it is alive — a layer, a package index, an asset view. Here
+    // that is only the stage: the import copies every value out (`sdf::Value`
+    // owns its data) and takes no asset bytes from openusd, so nothing read
+    // from a mapping outlives the stage that read it, and every stage this
+    // builder opens lives for one import, or one `crust ls` listing. The final
+    // stage a render leaves allocated (`skip_stage_teardown`) is never read
+    // again. Within that window the promise is the user's, as it is for any
+    // file a program has open: a USD file rewritten in place *during* the
+    // import can fault the process. Writers that replace a file by renaming
+    // over it (openusd's own `Layer::save`) leave the mapped bytes intact.
+    // The `crust mcp` session, whose authoring stage lives as long as the
+    // session, opens it with its own plain builder and never maps.
+    unsafe { DefaultResolver::new().map_files() }
 }
 
 /// Opens the stage with payloads loaded, optionally masked to one subtree.
@@ -1242,5 +1272,68 @@ impl<'a> ImportCaches<'a> {
             working,
             luma: crate::color::luma(working),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openusd::usd::PrimPredicate;
+
+    /// An attribute's name, default value and time samples.
+    type Read = (String, Option<sdf::Value>, Option<sdf::TimeSampleMap>);
+
+    /// Every prim of `stage`, with each authored attribute read.
+    fn contents(stage: &Stage) -> Vec<(String, Vec<Read>)> {
+        let mut paths = Vec::new();
+        stage
+            .traverse(PrimPredicate::DEFAULT_PROXIES, |p| paths.push(p.clone()))
+            .expect("traverses");
+        paths
+            .into_iter()
+            .map(|path| {
+                let prim = prim_at(stage, path.clone());
+                let attrs = prim
+                    .authored_attributes()
+                    .expect("lists attributes")
+                    .iter()
+                    .map(|a| {
+                        let value = a.get::<sdf::Value>().expect("reads");
+                        (
+                            a.name().to_string(),
+                            value,
+                            a.time_samples().expect("reads"),
+                        )
+                    })
+                    .collect();
+                (path.to_string(), attrs)
+            })
+            .collect()
+    }
+
+    /// A stage read through memory mappings (`CRUST_USD_MMAP`) holds exactly
+    /// what one read into memory does — on a `.usdc`, whose values decode
+    /// from the layer's bytes on demand, so from the mapping itself.
+    #[test]
+    fn a_mapped_usdc_reads_as_a_copied_one() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/PointInstancedMedCity.usd"
+        );
+        let registry = openusd_schemas::schema_registry;
+        let mapped = Stage::builder()
+            .schema_registry(registry())
+            .resolver(mapping_resolver())
+            .open(path)
+            .expect("opens mapped");
+        let copied = Stage::builder()
+            .schema_registry(registry())
+            .open(path)
+            .expect("opens copied");
+        let mapped = contents(&mapped);
+        let read = |(_, v, t): &&Read| v.is_some() || t.is_some();
+        let n = mapped.iter().flat_map(|(_, a)| a).filter(read).count();
+        assert!(n > 50, "the sample reads {n} values");
+        assert!(mapped == contents(&copied));
     }
 }

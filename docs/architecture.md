@@ -353,6 +353,7 @@ probe that needs another setting builds a `Config` and passes it
 | variable | default | owner | effect |
 |----------|---------|-------|--------|
 | `CRUST_STREAM_IMPORT` | on | `usd_import/mod.rs` | `0`: import under one stage instead of one masked stage per subtree |
+| `CRUST_USD_MMAP` | on | `usd_import/mod.rs` (`stage_builder`) | `0`: read each USD file into memory instead of serving it from a read-only memory mapping (bit-identical; the mapping is openusd's `mmap` feature, opted into by the crate's one non-test `unsafe`) |
 | `CRUST_MESH_BAKE` | on | `usd_import/mesh.rs` | `0`: instance every mesh instead of baking single placements (not bit-identical: an instanced mesh is intersected in local space, so ~0.2% of cornellbox's pixels differ in the last ulp at 16 spp, relmse 4e-18) |
 | `CRUST_SUBDIV` | on | `usd_import/attrs.rs` | `0`: render every mesh as its faceted cage (unlike `--subdiv-level 0`, no smooth cage normals) |
 | `CRUST_DISPLACE` | on | `usd_import/materials.rs` | `0`: no material yields a displacement — every mesh imports undisplaced, a `none` mesh as its faceted cage (bit-identical to the stage with its displacement inputs removed) |
