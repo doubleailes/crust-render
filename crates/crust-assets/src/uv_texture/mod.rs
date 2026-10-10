@@ -46,6 +46,15 @@
 //! over [`Texel`] rather than matched per texel. The streaming path measured
 //! what a per-texel match costs (`openspec/specs/textures/design.md`, "the
 //! second backing must cost the first one nothing").
+//!
+//! **Alpha, when the file has one that cuts something.** A tile whose image
+//! carries an authored alpha that is not opaque everywhere is held as RGBA,
+//! four samples a texel; every other tile stays RGB, so a texture with no
+//! alpha holds and reads exactly what it did before alpha was carried, and
+//! reads 1.0 there as `UsdUVTexture` specifies. Alpha is coverage: never
+//! colour-managed, `a / 255` from a byte. Whether to read a fourth sample is
+//! decided once per lookup, in the same `match` that picks the storage, and
+//! then per tile only for a texture that has any alpha at all.
 
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -67,9 +76,9 @@ use tile::{Texel, Tile};
 use udim::TileToken;
 pub(crate) use udim::udim_number;
 
-use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
+use crate::mip_filter::{MipSource, Taps, lerp_rgba, lerp_rgba_alpha, trilinear};
 
-pub(crate) use mip::{reduce_half, reduce_half_linear};
+pub(crate) use mip::{channels, reduce_half, reduce_half_linear};
 pub(crate) use udim::existing_tiles;
 
 /// The decoded tiles, in whichever sample type the file warranted.
@@ -106,6 +115,9 @@ pub struct UvTexture {
     /// image wraps instead, which is MaterialX's default `periodic` address
     /// mode.
     tiled: bool,
+    /// Whether any tile holds alpha ([`Tile::alpha`]). Settles which sampler a
+    /// lookup runs, with the storage: one with no alpha never asks a tile.
+    alpha: bool,
 }
 
 /// Largest tile edge kept, unless `CRUST_TEX_MAX` says otherwise.
@@ -234,6 +246,7 @@ impl UvTexture {
             }
         }
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
+        let alpha = tiles.iter().any(|t| t.alpha);
         Ok(UvTexture {
             storage: Storage::U8(tiles),
             to_linear,
@@ -242,6 +255,7 @@ impl UvTexture {
             width,
             height,
             tiled: token.is_some(),
+            alpha,
         })
     }
 
@@ -312,6 +326,7 @@ impl UvTexture {
             }
         }
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
+        let alpha = tiles.iter().any(|t| t.alpha);
         Ok(UvTexture {
             storage: Storage::F32(tiles),
             to_linear: ResolvedColorSpace::RAW.to_linear_table(),
@@ -320,6 +335,7 @@ impl UvTexture {
             width,
             height,
             tiled: token.is_some(),
+            alpha,
         })
     }
 
@@ -366,6 +382,12 @@ impl UvTexture {
         self.space
     }
 
+    /// Whether any tile holds an alpha channel, which a lookup returns as its
+    /// fourth component. `false` reads 1.0 there.
+    pub fn has_alpha(&self) -> bool {
+        self.alpha
+    }
+
     /// Size of the first tile, representative of the set.
     pub fn tile_size(&self) -> (usize, usize) {
         (self.width, self.height)
@@ -374,20 +396,29 @@ impl UvTexture {
     /// Trilinear lookup inside one tile, at coordinates already reduced to
     /// `[0, 1)` and over a footprint `width` wide *in tile units* — the
     /// shared [`trilinear`] over this tile's pyramid.
+    ///
+    /// `ALPHA` is the tile's own [`Tile::alpha`]: whether its texels are four
+    /// samples, the fourth read as the lookup's alpha.
     #[inline(always)]
-    fn sample_tile<T: Texel>(&self, t: &Tile<T>, u: f32, v: f32, width: f32) -> [f32; 4] {
-        let source = TileSource { tex: self, tile: t };
+    fn sample_tile<T: Texel, const ALPHA: bool>(
+        &self,
+        t: &Tile<T>,
+        u: f32,
+        v: f32,
+        width: f32,
+    ) -> [f32; 4] {
+        let source = TileSource::<T, ALPHA> { tex: self, tile: t };
         trilinear(&source, u, v, width).expect("a preloaded tile always answers")
     }
 }
 
-/// One preloaded tile as a [`MipSource`].
-struct TileSource<'a, T> {
+/// One preloaded tile as a [`MipSource`], RGBA when `ALPHA`.
+struct TileSource<'a, T, const ALPHA: bool> {
     tex: &'a UvTexture,
     tile: &'a Tile<T>,
 }
 
-impl<T: Texel> MipSource for TileSource<'_, T> {
+impl<T: Texel, const ALPHA: bool> MipSource for TileSource<'_, T, ALPHA> {
     type Texel = [f32; 4];
 
     #[inline(always)]
@@ -420,6 +451,19 @@ impl<T: Texel> MipSource for TileSource<'_, T> {
             t.width,
             t.height,
         );
+        if ALPHA {
+            let texel = |xi: usize, yi: usize| {
+                let o = (yi * t.width + xi) * 4;
+                let [r, g, b] = T::linear(&t.pixels, o, &self.tex.to_linear);
+                [r, g, b, T::alpha(&t.pixels, o + 3)]
+            };
+            return Some(taps.blend_rgba(
+                texel(taps.x0, taps.y0),
+                texel(taps.x1, taps.y0),
+                texel(taps.x0, taps.y1),
+                texel(taps.x1, taps.y1),
+            ));
+        }
         let texel = |xi: usize, yi: usize| {
             let o = (yi * t.width + xi) * 3;
             T::linear(&t.pixels, o, &self.tex.to_linear)
@@ -434,15 +478,28 @@ impl<T: Texel> MipSource for TileSource<'_, T> {
 
     #[inline(always)]
     fn blend(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-        lerp_rgba(a, b, t)
+        if ALPHA {
+            lerp_rgba_alpha(a, b, t)
+        } else {
+            lerp_rgba(a, b, t)
+        }
     }
 }
 
 impl UvTexture {
     /// [`Texture2D::eval`] over one storage's tiles, monomorphised per
     /// sample type so the storage is matched once per lookup, not per texel.
+    ///
+    /// `ANY_ALPHA` is [`UvTexture::alpha`]. Without it every tile is RGB and
+    /// none is asked; with it the tile found says which sampler reads it.
     #[inline(always)]
-    fn eval_tiles<T: Texel>(&self, tiles: &[Tile<T>], u: f32, v: f32, width: f32) -> [f32; 4] {
+    fn eval_tiles<T: Texel, const ANY_ALPHA: bool>(
+        &self,
+        tiles: &[Tile<T>],
+        u: f32,
+        v: f32,
+        width: f32,
+    ) -> [f32; 4] {
         if self.tiled {
             let (tu, tv) = (u.floor(), v.floor());
             // Outside the 10x10 tile grid there is no tile by definition;
@@ -453,13 +510,30 @@ impl UvTexture {
             }
             let number = udim_number(tu as u32, tv as u32);
             match tiles.iter().find(|t| t.number == number) {
-                Some(t) => self.sample_tile(t, u - tu, v - tv, width),
+                Some(t) => self.sample_one::<T, ANY_ALPHA>(t, u - tu, v - tv, width),
                 None => [0.0, 0.0, 0.0, 1.0],
             }
         } else {
             // MaterialX's default address mode is `periodic`.
             let wrap = |x: f32| x - x.floor();
-            self.sample_tile(&tiles[0], wrap(u), wrap(v), width)
+            self.sample_one::<T, ANY_ALPHA>(&tiles[0], wrap(u), wrap(v), width)
+        }
+    }
+
+    /// [`UvTexture::sample_tile`] with the tile's alpha settled: compiled out
+    /// for a texture with none.
+    #[inline(always)]
+    fn sample_one<T: Texel, const ANY_ALPHA: bool>(
+        &self,
+        t: &Tile<T>,
+        u: f32,
+        v: f32,
+        width: f32,
+    ) -> [f32; 4] {
+        if ANY_ALPHA && t.alpha {
+            self.sample_tile::<T, true>(t, u, v, width)
+        } else {
+            self.sample_tile::<T, false>(t, u, v, width)
         }
     }
 }
@@ -473,14 +547,13 @@ impl Texture2D for UvTexture {
         // A non-finite width is the caller's bug; point-sample rather than
         // propagate a NaN into a level index.
         let width = if width.is_finite() { width } else { 0.0 };
-        match &self.storage {
-            Storage::U8(tiles) => {
-                crate::to_working(self.gamut.as_ref(), self.eval_tiles(tiles, u, v, width))
-            }
-            Storage::F32(tiles) => {
-                crate::to_working(self.gamut.as_ref(), self.eval_tiles(tiles, u, v, width))
-            }
-        }
+        let rgba = match (&self.storage, self.alpha) {
+            (Storage::U8(tiles), false) => self.eval_tiles::<u8, false>(tiles, u, v, width),
+            (Storage::U8(tiles), true) => self.eval_tiles::<u8, true>(tiles, u, v, width),
+            (Storage::F32(tiles), false) => self.eval_tiles::<f32, false>(tiles, u, v, width),
+            (Storage::F32(tiles), true) => self.eval_tiles::<f32, true>(tiles, u, v, width),
+        };
+        crate::to_working(self.gamut.as_ref(), rgba)
     }
 }
 

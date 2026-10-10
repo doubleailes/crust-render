@@ -108,9 +108,11 @@ the finest level held at every footprint). See
     noise, not an error. The OpenPBR playground's `walls_*`,
     `drapedfabric_*` and `OJfoam_Normal` are written that way, and the walls
     rendered as multicoloured speckle. `image_file` rewrites the tag to
-    unassociated alpha before decoding, which is exact because every caller
-    drops alpha. Only a TIFF is read into memory to be patched; other formats
-    stream from the file. A canary test
+    unassociated alpha before decoding, and says it did (`decode_with_alpha`), so
+    the sample that was only declared alpha to be decoded is never read as
+    coverage: an unspecified extra sample is not alpha, and the texture reads 1.0.
+    Only a TIFF is read into memory to be patched; other formats stream from the
+    file. A canary test
     (`the_tiff_crate_still_needs_the_workaround`) fails once an upgrade fixes
     the crate. `Cargo.lock` is committed, so it fails in the change that bumps
     `tiff`, never on a fresh clone.
@@ -191,6 +193,59 @@ the finest level held at every footprint). See
     written by an older build still carries old-filter odd levels; they are
     gitignored artefacts `maketx` regenerates, so this is a note rather than a
     migration.
+
+  - **Alpha is decoded, as the fourth channel, only where it cuts** (issue #267,
+    `decode-texture-alpha`). `Texture2D::eval` always returned RGBA, but both
+    samplers wrote an opaque alpha (the decode went through `to_rgb8`, the `.tx`
+    readers kept three channels, and `Taps::blend_rgb` / `lerp_rgba` set `a = 1`),
+    so a `UsdPreviewSurface` cutout wired to `outputs:a` — every foliage card a DCC
+    exports — read 1.0 everywhere and rendered as a solid rectangle. JungleRuins'
+    canopy raised 298 `preview.texture_alpha` warnings. The rules now:
+    - **A tile is RGBA only when its file's alpha is authored and not opaque
+      everywhere** (`drop_opaque_alpha`, one pass at load). Most RGBA PNGs a DCC
+      writes never use their alpha; holding a fourth channel that reads 1.0 would
+      cost a third more memory and change no lookup, since a texture without alpha
+      reads 1.0 too (as `UsdUVTexture` specifies). So every texture without a
+      cutting alpha holds exactly the bytes it did. Per **tile**: a UDIM set's
+      tiles are separate files, and only some may cut (`Tile::alpha`,
+      `Chart::alpha`).
+    - **Alpha is coverage, never colour-managed.** A byte reads `a / 255`
+      (`ALPHA_U8`, which is `raw`'s table); a float as stored. The colour space's
+      curve and primaries apply to RGB alone (`decode_rgb_of_rgba` around the
+      decode), as a GPU's `SRGB8_ALPHA8` leaves alpha linear. Mip levels average
+      alpha through `ALPHA_U8` / `ALPHA_STEPS` in `reduce_half`, independently of
+      the colour, which is **not premultiplied** for the average — the colour
+      channels' arithmetic is the RGB path's, so their bits are unchanged
+      (`the_two_reducers_agree_on_alpha` pins both halves).
+    - **The dispatch is the storage's.** `UvTexture::eval` already matched the
+      storage once per lookup, and the alpha flag joins that match
+      (`(Storage, alpha)`); `StreamingTexture::eval` keeps its `linear` test and
+      sends a texture with alpha, through one test, to an out-of-line
+      `eval_alpha`. So a texture with no alpha runs the RGB sampler it always
+      ran and never asks a tile. Only a texture with some alpha asks the tile (or
+      chart) it lands in which monomorphisation reads it
+      (`sample_one::<_, ANY_ALPHA>`).
+    - **Sources.** `image` reports an authored alpha (`decode_with_alpha`; the
+      TIFF rewrite above is the one exception). An EXR's alpha is the channel
+      whose base name is `A`, matched as R, G and B are (`rgba.A` included), by
+      both the preload reader (`try_read_exr_texels`) and the streaming one
+      (`resolve_alpha`). A `.tx` TIFF has alpha when its first `ExtraSamples`
+      entry is associated (1) or unassociated (2) alpha, after one grey or three
+      RGB samples (`alpha_sample`).
+    - **What it costs a texture without alpha** (callgrind, one thread, `-s 2`,
+      against the base binary, 2026-10-10). Preloaded, `UvTexture::eval` is
+      137,515,376 instructions on `materialx_basic` before and after;
+      `usdpreview_textured`, whose albedo is an `f32` EXR, +0.18%. Streamed,
+      `texel::<false>` is unchanged to the instruction on both, and
+      `StreamingTexture::eval` is +0.82% / +0.39%: about 2.7 instructions a lookup
+      on `materialx_basic`'s 393,651, the one `alpha` test. Two shapes were worse
+      and are worth not repeating. A four-arm `match (linear, alpha)` with every
+      sampler inlined cost 5.9 instructions a lookup, so the alpha samplers sit
+      behind that test out of line (`eval_alpha`, `#[inline(never)]`). And a
+      `reduce_half` that read its stride at run time cost the RGB pyramid build a
+      third more instructions at load (2.12 M → 2.83 M); a `const N` restores it
+      (2.16 M). Whole renders: +0.005% to +0.047%. Every sample scene is
+      bit-identical (`check_images.sh`, recorded with the base binary).
 
 ## Streaming textures
 
@@ -432,6 +487,15 @@ the finest level held at every footprint). See
     and at exactly 1.0 preloaded (`to_rgb8()` clips it), while below 1.0 the
     two agree to within the 8 bits the preload path keeps — so the divergence
     is the range and not a different lookup.
+    It holds for **alpha** too: a `.tx` converted from an RGBA source streams the
+    preloaded alpha bit for bit at every level, clipped edge tiles and odd levels
+    included (`streamed_alpha_agrees_bit_for_bit_with_preloaded`). The TIFF
+    backing writes it as a fourth sample declared unassociated alpha
+    (`ExtraSamples = 2`, `write_tx_rgba`), the EXR backing as an `A` channel
+    (`write_tx_exr_rgba`, agreeing to `half` precision), and `make_tx` keeps it
+    exactly when the preload does, so a source whose alpha is opaque converts to
+    the RGB `.tx` it always did. A UDIM set may mix the two
+    (`a_udim_set_streams_alpha_per_chart`).
   - **Conversion is explicit, or opt-in automatic.** `examples/maketx` converts by
     hand, and `--auto-tx` converts on first use (Arnold's `autotx`). Both run one
     conversion, `crust_assets::tiled::make_tx`. Automatic conversion stays behind a flag
@@ -795,8 +859,8 @@ the finest level held at every footprint). See
   single-flight on a miss so two workers can decode the same tile at once (counted as
   "concurrent double fills", bounded by the thread count), and the cache is per-process
   rather than shared between renders. The EXR backing reads RGB (or a replicated single
-  channel) and ignores alpha, refuses ripmaps, multi-layer and deep files, and requires
-  square tiles; the TIFF writer still emits 8-bit RGB only, so an HDR conversion is an
+  channel) and `A`, refuses ripmaps, multi-layer and deep files, and requires
+  square tiles; the TIFF writer emits 8-bit RGB or RGBA only, so an HDR conversion is an
   EXR conversion.
 
 - **Streamed Ptex holds one file descriptor per `.ptx` for the whole render.**
@@ -889,8 +953,7 @@ the finest level held at every footprint). See
 - **UV texture caveats.** Normal maps need a tangent, which prototype parts
   placed through an instancer's group and motion-blurred instances still lack
   (above). On the
-  `UsdPreviewSurface` side: texture **alpha** is not carried (both samplers return
-  opaque RGB, so `outputs:a` reads 1.0 before `scale`/`bias`), `UsdTransform2d` is
+  `UsdPreviewSurface` side: `UsdTransform2d` is
   not evaluated, `occlusion`/`specularColor` are not read (`displacement` is, at import —
   see the `usd-scene-import` design record § Displacement), and a
   texture's `fallback` default when unauthored is the surface input's constant, then
@@ -909,3 +972,17 @@ the finest level held at every footprint). See
   texel, against the full mis-weighted one the mip chain had — and unlike that
   one it is a *resize* averaged in the file's own encoding, so fixing it would
   move every render of a texture above the cap. Worth doing, not urgent.
+- **Alpha caveats.** Texture alpha is read (above); what it is not:
+  - **The colour is not premultiplied for filtering.** Levels and bilinear taps
+    blend each channel alone, so a transparent texel's colour bleeds into a
+    coarse level's edge. A cutout reads only the alpha, so it does not notice;
+    a colour read across a soft edge does. Premultiplying would move the colour
+    of every RGBA texture's mip chain, and nothing has asked for it.
+  - **Associated alpha is read with its colour as stored.** OIIO's `maketx`
+    writes TIFF `.tx` with associated alpha (`ExtraSamples = 1`) by default, and
+    EXR's convention is premultiplied. Crust reads the alpha and leaves the
+    colour premultiplied; a cutout is right, the colour at a soft edge is darker
+    than an unassociated source's. Crust's own `.tx` writes unassociated alpha.
+  - **Ptex alpha is not carried**: `PtexTexture::eval` returns RGB, and nothing
+    reads a Ptex alpha. A TIFF whose extra sample is unspecified
+    (`ExtraSamples = 0`) has no alpha, by definition.

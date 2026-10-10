@@ -113,13 +113,14 @@ fn main() {
     let mut failed = 0usize;
     for src in &jobs {
         match convert(src, space, format) {
-            Ok((dst, kind, bytes_in, bytes_out)) => {
+            Ok((dst, kind, alpha, bytes_in, bytes_out)) => {
                 total_in += bytes_in;
                 total_out += bytes_out;
                 println!(
-                    "{} -> {} [{kind}]  ({:.2} MiB -> {:.2} MiB)",
+                    "{} -> {} [{kind}{}]  ({:.2} MiB -> {:.2} MiB)",
                     src.display(),
                     dst.display(),
+                    if alpha { ", alpha" } else { "" },
                     bytes_in as f64 / (1024.0 * 1024.0),
                     bytes_out as f64 / (1024.0 * 1024.0),
                 );
@@ -152,7 +153,7 @@ fn convert(
     src: &Path,
     space: ColorSpace,
     format: TxFormat,
-) -> Result<(PathBuf, &'static str, u64, u64), String> {
+) -> Result<(PathBuf, &'static str, bool, u64, u64), String> {
     let made = crust_assets::make_tx_atomic(src, space, format).map_err(|e| e.to_string())?;
     if made.clipped {
         eprintln!(
@@ -161,5 +162,11 @@ fn convert(
             src.display()
         );
     }
-    Ok((made.dst, made.kind, made.bytes_in, made.bytes_out))
+    Ok((
+        made.dst,
+        made.kind,
+        made.alpha,
+        made.bytes_in,
+        made.bytes_out,
+    ))
 }

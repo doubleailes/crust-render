@@ -72,6 +72,39 @@ A universal `outputs:surface` with a decodable shader, such as a `UsdPreviewSurf
 still used first. The `mtlx` terminal is read when the material has nothing else Crust
 Render can decode, so a stage that rendered through its preview surface renders the same.
 
+## UsdPreviewSurface opacity
+
+`inputs:opacity` means one of two things, chosen by `inputs:opacityThreshold`:
+
+- **Translucency**, when `opacityThreshold` is 0 (the default). An `opacity` below 1
+  makes the surface refract, as glass at `inputs:ior`.
+- **A cutout**, when `opacityThreshold` is above 0. A point is kept where `opacity` is at
+  or above the threshold and cut away otherwise. Nothing refracts.
+
+A cutout's `opacity` is usually a texture's alpha, as DCCs export leaves and grass cards:
+
+```usda
+def Shader "Surface"
+{
+    uniform token info:id = "UsdPreviewSurface"
+    color3f inputs:diffuseColor.connect = </World/Looks/Leaf/Tex.outputs:rgb>
+    float inputs:opacity.connect = </World/Looks/Leaf/Tex.outputs:a>
+    float inputs:opacityThreshold = 0.5
+    token outputs:surface
+}
+def Shader "Tex"
+{
+    uniform token info:id = "UsdUVTexture"
+    asset inputs:file = @leaf.png@
+    float3 outputs:rgb
+    float outputs:a
+}
+```
+
+`outputs:a` reads the file's alpha channel: a PNG's or TIFF's alpha, or an EXR's `A`
+channel. A file without alpha reads 1.0, so the surface is kept everywhere. Alpha is
+never colour-decoded: `sourceColorSpace` applies to `rgb` only.
+
 ## Volume materials
 
 A material's `volume` terminal (`outputs:mtlx:volume`, or `outputs:volume`) describes the
@@ -523,3 +556,8 @@ the source image is loaded instead.
 
 A `.tx` with no `crust:mipspace` tag, for example one written by OpenImageIO's `maketx`,
 is accepted as it is.
+
+A `.tx` keeps its source's alpha channel when the alpha cuts something, so a streamed
+cutout reads the same mask as the source image. An alpha that is opaque everywhere is
+left out. OpenImageIO's `maketx` stores the colour of an image with alpha premultiplied;
+Crust Render reads that colour as it is stored.

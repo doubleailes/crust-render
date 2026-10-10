@@ -135,7 +135,8 @@ fn thread_stripe() -> usize {
 /// The file is an interned index, not a path: a key is compared and hashed on
 /// every lookup, and comparing strings there would cost more than the decode it
 /// is trying to avoid. Unlike OIIO's `TileID` there is no channel range —
-/// crust always wants RGB, so the generality would be a wider key for nothing.
+/// crust always wants every channel it keeps (RGB, and alpha when the file
+/// has one), so the generality would be a wider key for nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TileId {
     pub file: u32,
@@ -155,14 +156,16 @@ pub struct TileId {
 /// it is read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TileKind {
-    /// Three `u8` a texel, in the file's own encoding; the sampler decodes
-    /// through its colour-space table.
+    /// Three `u8` a texel (four with alpha), in the file's own encoding; the
+    /// sampler decodes the colour through its colour-space table.
     U8,
-    /// Three little-endian `f16` a texel, already **linear**; no decode.
+    /// Three little-endian `f16` a texel (four with alpha), already
+    /// **linear**; no decode.
     Half,
 }
 
-/// A tile's texels: interleaved RGB, as bytes, plus how to read them.
+/// A tile's texels: interleaved RGB, or RGBA when its file carries alpha, as
+/// bytes, plus how to read them.
 ///
 /// The split is by the source's *sample type*, not its container — 8- and
 /// 16-bit TIFF samples are `U8`, float samples from either backing are `Half`.
@@ -175,20 +178,24 @@ pub enum TileKind {
 pub struct TileData {
     pub bytes: Vec<u8>,
     pub kind: TileKind,
+    /// Whether a texel is four components, RGBA, rather than three. Like the
+    /// kind, a property of the file, which the sampler already knows.
+    pub alpha: bool,
 }
 
 impl TileData {
-    /// An 8-bit payload, as decoded.
-    pub fn u8(bytes: Vec<u8>) -> TileData {
+    /// An 8-bit payload, as decoded: RGB, or RGBA when `alpha`.
+    pub fn u8(bytes: Vec<u8>, alpha: bool) -> TileData {
         TileData {
             bytes,
             kind: TileKind::U8,
+            alpha,
         }
     }
 
     /// A `half` payload from samples already in memory. The EXR reader builds
     /// its bytes directly and does not come through here.
-    pub fn half(samples: &[f16]) -> TileData {
+    pub fn half(samples: &[f16], alpha: bool) -> TileData {
         let mut bytes = Vec::with_capacity(samples.len() * 2);
         for s in samples {
             bytes.extend_from_slice(&s.to_bits().to_le_bytes());
@@ -196,23 +203,30 @@ impl TileData {
         TileData {
             bytes,
             kind: TileKind::Half,
+            alpha,
         }
     }
 
     /// A `half` payload whose bytes were assembled by the caller.
-    pub fn half_bytes(bytes: Vec<u8>) -> TileData {
+    pub fn half_bytes(bytes: Vec<u8>, alpha: bool) -> TileData {
         TileData {
             bytes,
             kind: TileKind::Half,
+            alpha,
         }
     }
 
-    /// Components (not bytes) — three per texel either way.
+    /// Components (not bytes) — three per texel, four with alpha.
     pub fn len(&self) -> usize {
         match self.kind {
             TileKind::U8 => self.bytes.len(),
             TileKind::Half => self.bytes.len() / 2,
         }
+    }
+
+    /// Components a texel: 3, or 4 with alpha.
+    pub fn channels(&self) -> usize {
+        crate::uv_texture::channels(self.alpha)
     }
 }
 
@@ -325,14 +339,39 @@ impl Tile {
         [at(o), at(o + 2), at(o + 4)]
     }
 
+    /// [`Tile::rgb_u8`] for a tile that carries alpha: four bytes a texel, the
+    /// colour decoded through `to_linear` and the alpha as coverage,
+    /// [`crate::ALPHA_U8`] — the preloaded sampler's decode of both.
+    #[inline]
+    pub fn rgba_u8(&self, x: usize, y: usize, to_linear: &[f32; 256]) -> [f32; 4] {
+        let o = (y * self.width + x) * 4;
+        let v = &self.data.bytes;
+        [
+            to_linear[v[o] as usize],
+            to_linear[v[o + 1] as usize],
+            to_linear[v[o + 2] as usize],
+            crate::ALPHA_U8[v[o + 3] as usize],
+        ]
+    }
+
+    /// [`Tile::rgb_half`] for a tile that carries alpha: four `half`s a texel,
+    /// none decoded.
+    #[inline]
+    pub fn rgba_half(&self, x: usize, y: usize) -> [f32; 4] {
+        let o = (y * self.width + x) * 8;
+        let v = &self.data.bytes;
+        let at = |k: usize| f16::from_bits(u16::from_le_bytes([v[k], v[k + 1]])).to_f32();
+        [at(o), at(o + 2), at(o + 4), at(o + 6)]
+    }
+
     /// Whether the payload really is `width · height` texels — the invariant
-    /// the two accessors above rely on instead of checking per texel.
+    /// the accessors above rely on instead of checking per texel.
     ///
     /// Asserted where tiles are made rather than where they are read: a backend
     /// returns a tile clipped to its level, so this is a statement about the
     /// readers, and it is worth failing a test over rather than a texel.
     pub fn well_formed(&self) -> bool {
-        self.data.len() == self.width * self.height * 3
+        self.data.len() == self.width * self.height * self.data.channels()
     }
 
     fn bytes(&self) -> u64 {

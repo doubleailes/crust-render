@@ -332,8 +332,6 @@ warning_codes! {
         "A UsdPreviewSurface's textures read several primvars; the first is read for all.";
     PreviewUnsupportedConnection => "preview.unsupported_connection", Skipped, Each,
         "A UsdPreviewSurface input connects to something other than a UsdUVTexture output; its constant is used.";
-    PreviewTextureAlpha => "preview.texture_alpha", Approximated, Each,
-        "A UsdPreviewSurface input reads texture alpha, which reads 1.0.";
     PreviewTextureWithoutFile => "preview.texture_without_file", Skipped, Each,
         "A UsdUVTexture has no inputs:file; the input keeps its constant.";
     PreviewUnreadSt => "preview.unread_st", Approximated, Each,

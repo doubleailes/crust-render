@@ -104,6 +104,13 @@ pub(super) fn weighted(row: &Tap, col: &Tap, total: f32, at: impl Fn(usize, usiz
 /// texel's own footprint, in linear light, re-encoded to `u8` in the file's
 /// own space. On an even axis that footprint is exactly 2x2.
 ///
+/// `alpha` says the texels are RGBA rather than RGB. The alpha channel
+/// averages as the coverage it is — `a / 255`, re-encoded through
+/// [`crate::ALPHA_STEPS`] — and, like each colour channel, independently of
+/// the others: the colour is not premultiplied for the average. The colour
+/// channels' arithmetic is the same either way, so an RGB chain is
+/// bit-identical to what it was before alpha was carried.
+///
 /// Shared by the in-memory pyramid ([`Tile::build_pyramid`](super::tile::Tile::build_pyramid)) and the `.tx`
 /// writer ([`crate::tiled::write_tx`]) **on purpose**. A streamed render and a
 /// preloaded one are supposed to agree texel for texel, and the only way to be
@@ -138,21 +145,47 @@ pub(crate) fn reduce_half(
     src: &[u8],
     sw: usize,
     sh: usize,
+    alpha: bool,
     to_linear: &[f32; 256],
     steps: &[f32; 255],
 ) -> (Vec<u8>, usize, usize) {
+    if alpha {
+        reduce_half_n::<4>(src, sw, sh, to_linear, steps)
+    } else {
+        reduce_half_n::<3>(src, sw, sh, to_linear, steps)
+    }
+}
+
+/// [`reduce_half`] at `N` samples a texel. A constant, so the RGB reduction
+/// compiles to what it was before alpha existed: a stride read at run time
+/// cost it a third more instructions (callgrind, `materialx_basic`'s load).
+fn reduce_half_n<const N: usize>(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    to_linear: &[f32; 256],
+    steps: &[f32; 255],
+) -> (Vec<u8>, usize, usize) {
+    let n = N;
     let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
     let (cols, xsum) = axis_taps(sw, w);
     let (rows, ysum) = axis_taps(sh, h);
     // One divisor for the whole level: the taps tile each axis exactly, so
     // every destination texel carries the same total weight.
     let total = ysum * xsum;
-    let mut pixels = vec![0u8; w * h * 3];
+    let mut pixels = vec![0u8; w * h * n];
     for (y, row) in rows.iter().enumerate() {
         for (x, col) in cols.iter().enumerate() {
-            let o = (y * w + x) * 3;
-            for k in 0..3 {
-                let at = |xi: usize, yi: usize| to_linear[src[(yi * sw + xi) * 3 + k] as usize];
+            let o = (y * w + x) * n;
+            for k in 0..n {
+                // Alpha is coverage, never encoded: it averages through its
+                // own tables while the colour goes through the space's.
+                let (to_linear, steps) = if k < 3 {
+                    (to_linear, steps)
+                } else {
+                    (&crate::ALPHA_U8, &crate::ALPHA_STEPS)
+                };
+                let at = |xi: usize, yi: usize| to_linear[src[(yi * sw + xi) * n + k] as usize];
                 let mean = weighted(row, col, total, at);
                 pixels[o + k] = crate::quantize(steps, mean);
             }
@@ -162,8 +195,8 @@ pub(crate) fn reduce_half(
 }
 
 /// The same reduction for data that is **already linear**: the same
-/// area-weighted box average of `f32` RGB, with no decode and no re-encode
-/// because there is no encoding.
+/// area-weighted box average of `f32` RGB (RGBA when `alpha`), with no decode
+/// and no re-encode because there is no encoding.
 ///
 /// Deliberately written next to [`reduce_half`] rather than generalised over
 /// the sample type. The two have to agree on everything *except* the transfer
@@ -178,20 +211,46 @@ pub(crate) fn reduce_half(
 /// Axes halve by `div_ceil`, never `>> 1`, for the reason [`reduce_half`]
 /// records: the samplers map `x = u * width - 0.5`, so flooring an odd axis
 /// drops its last half-texel and that level's domain slips against level 0's.
-pub(crate) fn reduce_half_linear(src: &[f32], sw: usize, sh: usize) -> (Vec<f32>, usize, usize) {
+pub(crate) fn reduce_half_linear(
+    src: &[f32],
+    sw: usize,
+    sh: usize,
+    alpha: bool,
+) -> (Vec<f32>, usize, usize) {
+    if alpha {
+        reduce_half_linear_n::<4>(src, sw, sh)
+    } else {
+        reduce_half_linear_n::<3>(src, sw, sh)
+    }
+}
+
+/// [`reduce_half_linear`] at `N` samples a texel, for the reason
+/// [`reduce_half_n`] gives.
+fn reduce_half_linear_n<const N: usize>(
+    src: &[f32],
+    sw: usize,
+    sh: usize,
+) -> (Vec<f32>, usize, usize) {
+    let n = N;
     let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
     let (cols, xsum) = axis_taps(sw, w);
     let (rows, ysum) = axis_taps(sh, h);
     let total = ysum * xsum;
-    let mut pixels = vec![0.0f32; w * h * 3];
+    let mut pixels = vec![0.0f32; w * h * n];
     for (y, row) in rows.iter().enumerate() {
         for (x, col) in cols.iter().enumerate() {
-            let o = (y * w + x) * 3;
-            for k in 0..3 {
-                let at = |xi: usize, yi: usize| src[(yi * sw + xi) * 3 + k];
+            let o = (y * w + x) * n;
+            for k in 0..n {
+                let at = |xi: usize, yi: usize| src[(yi * sw + xi) * n + k];
                 pixels[o + k] = weighted(row, col, total, at);
             }
         }
     }
     (pixels, w, h)
+}
+
+/// Samples a texel: RGBA when the image carries alpha, RGB otherwise.
+#[inline]
+pub(crate) fn channels(alpha: bool) -> usize {
+    if alpha { 4 } else { 3 }
 }

@@ -209,16 +209,6 @@ fn preview_uv_input(
         );
         return None;
     };
-    if matches!(output, TexOutput::A) {
-        // The host samplers return opaque RGB, so the alpha channel reads 1.0
-        // whatever the file holds — an approximation worth saying out loud.
-        warning!(
-            PreviewTextureAlpha,
-            at = mat_path,
-            "UsdPreviewSurface at {mat_path}: {name} reads texture alpha ({}), which crust              does not decode — it reads 1.0 before scale/bias",
-            source.path()
-        );
-    }
     let tex = Shader::get(stage, source.path().prim_path())
         .ok()
         .flatten()?;

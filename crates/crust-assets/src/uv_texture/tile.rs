@@ -3,8 +3,8 @@
 
 use super::mip::{reduce_half, reduce_half_linear};
 
-/// One resolution of one tile: row-major RGB, three samples a texel —
-/// display-encoded bytes (`u8`) or linear floats (`f32`).
+/// One resolution of one tile: row-major RGB, or RGBA when the tile carries
+/// alpha — display-encoded bytes (`u8`) or linear floats (`f32`).
 pub(super) struct Level<T> {
     pub(super) pixels: Vec<T>,
     pub(super) width: usize,
@@ -17,6 +17,10 @@ pub(super) struct Level<T> {
 /// `f32` arm is the identity, because an `f32` tile is linear by construction.
 pub(super) trait Texel: Copy {
     fn linear(pixels: &[Self], o: usize, to_linear: &[f32; 256]) -> [f32; 3];
+
+    /// The alpha stored at `o`, as coverage: `a / 255` for a byte, never
+    /// through the colour space's curve, and the value itself for a float.
+    fn alpha(pixels: &[Self], o: usize) -> f32;
 }
 
 impl Texel for u8 {
@@ -28,12 +32,22 @@ impl Texel for u8 {
             to_linear[pixels[o + 2] as usize],
         ]
     }
+
+    #[inline(always)]
+    fn alpha(pixels: &[u8], o: usize) -> f32 {
+        crate::ALPHA_U8[pixels[o] as usize]
+    }
 }
 
 impl Texel for f32 {
     #[inline(always)]
     fn linear(pixels: &[f32], o: usize, _: &[f32; 256]) -> [f32; 3] {
         [pixels[o], pixels[o + 1], pixels[o + 2]]
+    }
+
+    #[inline(always)]
+    fn alpha(pixels: &[f32], o: usize) -> f32 {
+        pixels[o]
     }
 }
 
@@ -47,14 +61,25 @@ impl Texel for f32 {
 pub(super) struct Tile<T> {
     /// UDIM number, `1001 + u + 10·v`.
     pub(super) number: u32,
+    /// Whether every level holds four samples a texel, RGBA, rather than
+    /// three. Per tile, because a UDIM set's tiles are separate files and only
+    /// some of them may cut anything (see [`crate::drop_opaque_alpha`]).
+    pub(super) alpha: bool,
     pub(super) levels: Vec<Level<T>>,
 }
 
 impl<T> Tile<T> {
     /// The tile as authored, with no coarser levels.
-    pub(super) fn unmipped(number: u32, pixels: Vec<T>, width: usize, height: usize) -> Tile<T> {
+    pub(super) fn unmipped(
+        number: u32,
+        pixels: Vec<T>,
+        width: usize,
+        height: usize,
+        alpha: bool,
+    ) -> Tile<T> {
         Tile {
             number,
+            alpha,
             levels: vec![Level {
                 pixels,
                 width,
@@ -75,7 +100,8 @@ impl Tile<f32> {
             if src.width <= 1 && src.height <= 1 {
                 break;
             }
-            let (pixels, width, height) = reduce_half_linear(&src.pixels, src.width, src.height);
+            let (pixels, width, height) =
+                reduce_half_linear(&src.pixels, src.width, src.height, self.alpha);
             self.levels.push(Level {
                 pixels,
                 width,
@@ -111,8 +137,14 @@ impl Tile<u8> {
             if src.width <= 1 && src.height <= 1 {
                 break;
             }
-            let (pixels, width, height) =
-                reduce_half(&src.pixels, src.width, src.height, to_linear, steps);
+            let (pixels, width, height) = reduce_half(
+                &src.pixels,
+                src.width,
+                src.height,
+                self.alpha,
+                to_linear,
+                steps,
+            );
             self.levels.push(Level {
                 pixels,
                 width,

@@ -48,18 +48,30 @@ pub struct MadeTx {
     pub bytes_out: u64,
     /// The source holds values above 1.0 that a TIFF backing clipped.
     pub clipped: bool,
+    /// The `.tx` carries the source's alpha: it had one, and it cut
+    /// something (an alpha opaque everywhere is not written).
+    pub alpha: bool,
 }
 
 /// The source as it was authored: 8-bit samples in its own encoding, or
-/// floats that are already light.
+/// floats that are already light — RGB, or RGBA when [`decode`] says so.
 enum Source {
     Bytes(Vec<u8>),
     Floats(Vec<f32>),
 }
 
-/// Decodes `src`, reporting its pixel format as `(eight_bit, channels)` — what
-/// [`ColorSpace::resolve_auto`] asks about.
-fn decode(src: &Path) -> Result<(Source, usize, usize, (bool, u8)), AssetError> {
+/// A decoded source: its texels, size, whether they carry alpha, and its
+/// pixel format as `(eight_bit, channels)`.
+type Decoded = (Source, usize, usize, bool, (bool, u8));
+
+/// Decodes `src`, reporting whether its texels carry alpha and its pixel
+/// format as `(eight_bit, channels)` — what [`ColorSpace::resolve_auto`] asks
+/// about.
+///
+/// Alpha is kept exactly when the preloaded texture keeps it — authored, and
+/// not opaque everywhere (see [`crate::drop_opaque_alpha`]) — so a `.tx` and
+/// its source read the same alpha.
+fn decode(src: &Path) -> Result<Decoded, AssetError> {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
@@ -69,10 +81,10 @@ fn decode(src: &Path) -> Result<(Source, usize, usize, (bool, u8)), AssetError> 
     // `exr` feature, and it is the one reader that handles single-channel and
     // layer-prefixed channels.
     if ext == "exr" {
-        let (pixels, w, h) = crate::environment::try_read_exr_rgb(src)?;
-        return Ok((Source::Floats(pixels), w, h, (false, 3)));
+        let (pixels, w, h, alpha) = crate::environment::try_read_exr_texels(src)?;
+        return Ok((Source::Floats(pixels), w, h, alpha, (false, 3)));
     }
-    let img = crate::image_file::decode(src)?;
+    let (img, authored_alpha) = crate::image_file::decode_with_alpha(src)?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     let color = img.color();
     let format = (
@@ -84,10 +96,23 @@ fn decode(src: &Path) -> Result<(Source, usize, usize, (bool, u8)), AssetError> 
     // path narrows it.
     let float =
         ext == "hdr" || matches!(color, image::ColorType::Rgb32F | image::ColorType::Rgba32F);
-    if float {
-        Ok((Source::Floats(img.to_rgb32f().into_raw()), w, h, (false, 3)))
-    } else {
-        Ok((Source::Bytes(img.to_rgb8().into_raw()), w, h, format))
+    match (float, authored_alpha) {
+        (true, false) => Ok((
+            Source::Floats(img.to_rgb32f().into_raw()),
+            w,
+            h,
+            false,
+            (false, 3),
+        )),
+        (true, true) => {
+            let (v, alpha) = crate::drop_opaque_alpha(img.to_rgba32f().into_raw(), 1.0);
+            Ok((Source::Floats(v), w, h, alpha, (false, 3)))
+        }
+        (false, false) => Ok((Source::Bytes(img.to_rgb8().into_raw()), w, h, false, format)),
+        (false, true) => {
+            let (v, alpha) = crate::drop_opaque_alpha(img.to_rgba8().into_raw(), u8::MAX);
+            Ok((Source::Bytes(v), w, h, alpha, format))
+        }
     }
 }
 
@@ -109,15 +134,18 @@ pub fn make_tx(
              (CRUST_PTEX_STREAM) — it is never converted to .tx",
         ));
     }
-    let (source, w, h, (eight_bit, channels)) = decode(src)?;
+    let (source, w, h, alpha, (eight_bit, channels)) = decode(src)?;
     if w == 0 || h == 0 {
         return Err(AssetError::unusable(src, "zero-sized image"));
     }
     let space = space.resolve_auto(eight_bit, channels);
+    let n = crate::uv_texture::channels(alpha);
 
+    // The colour's range, not the alpha's: coverage above 1 is not light a
+    // TIFF backing would clip.
     let hdr = match &source {
         Source::Bytes(_) => false,
-        Source::Floats(v) => v.iter().any(|&s| s > 1.0),
+        Source::Floats(v) => v.chunks_exact(n).any(|t| t[..3].iter().any(|&s| s > 1.0)),
     };
     let exr = match format {
         TxFormat::Tiff => false,
@@ -135,9 +163,15 @@ pub fn make_tx(
         };
         // The curve only: the samples stay on their own primaries, like a
         // TIFF-backed `.tx`'s, and a lookup applies the change of primaries
-        // into whichever working space the file is bound in.
-        space.decode_curve_slice(&mut linear);
-        super::write_tx_exr(dst, &linear, w, h, space).map_err(AssetError::io(dst))?;
+        // into whichever working space the file is bound in. Never on alpha.
+        if alpha {
+            crate::decode_rgb_of_rgba(&mut linear, |rgb| space.decode_curve_slice(rgb));
+            super::write_tx_exr_rgba(dst, &linear, w, h, space)
+        } else {
+            space.decode_curve_slice(&mut linear);
+            super::write_tx_exr(dst, &linear, w, h, space)
+        }
+        .map_err(AssetError::io(dst))?;
         "half, exr"
     } else {
         let bytes: Vec<u8> = match source {
@@ -148,7 +182,12 @@ pub fn make_tx(
                 .map(|&s| (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
                 .collect(),
         };
-        super::write_tx(dst, &bytes, w, h, space).map_err(AssetError::io(dst))?;
+        if alpha {
+            super::write_tx_rgba(dst, &bytes, w, h, space)
+        } else {
+            super::write_tx(dst, &bytes, w, h, space)
+        }
+        .map_err(AssetError::io(dst))?;
         "8-bit, tiff"
     };
 
@@ -159,6 +198,7 @@ pub fn make_tx(
         bytes_in: std::fs::metadata(src).map(|m| m.len()).unwrap_or(0),
         bytes_out: std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0),
         clipped: !exr && hdr,
+        alpha,
     })
 }
 

@@ -24,7 +24,7 @@
 //! anyway.
 
 use crate::TransferCurve;
-use crate::uv_texture::reduce_half;
+use crate::uv_texture::{channels, reduce_half};
 use crust_core::ResolvedColorSpace;
 use std::io::{self, Write};
 use std::path::Path;
@@ -38,7 +38,8 @@ use tiff::tags::Tag;
 pub const TILE_EDGE: usize = 64;
 
 /// Writes `src` (row-major RGB, 8 bits a channel) as a tiled, mip-mapped
-/// `.tx`, returning each level's `(width, height)` in order.
+/// `.tx`, returning each level's `(width, height)` in order. [`write_tx_rgba`]
+/// writes one that carries alpha.
 ///
 /// `space` is the colour space the *file* is in, and it is needed even though
 /// no pixel changes space here: the mip chain is reduced in linear light, so
@@ -57,17 +58,47 @@ pub fn write_tx(
     height: usize,
     space: ResolvedColorSpace,
 ) -> io::Result<Vec<(usize, usize)>> {
+    write_tiff(path, src, width, height, false, space)
+}
+
+/// [`write_tx`] for row-major RGBA: the alpha is written as a fourth sample,
+/// declared unassociated (`ExtraSamples = 2`), so the colour is stored as given
+/// rather than premultiplied. Its levels average the alpha as coverage, never
+/// through `space`'s curve — the preloaded pyramid's reduction exactly.
+pub fn write_tx_rgba(
+    path: &Path,
+    src: &[u8],
+    width: usize,
+    height: usize,
+    space: ResolvedColorSpace,
+) -> io::Result<Vec<(usize, usize)>> {
+    write_tiff(path, src, width, height, true, space)
+}
+
+/// [`write_tx`] and [`write_tx_rgba`]: RGB, or RGBA when `alpha`.
+fn write_tiff(
+    path: &Path,
+    src: &[u8],
+    width: usize,
+    height: usize,
+    alpha: bool,
+    space: ResolvedColorSpace,
+) -> io::Result<Vec<(usize, usize)>> {
     if width == 0 || height == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "refusing to write a zero-sized texture",
         ));
     }
-    let want = width * height * 3;
+    let want = width * height * channels(alpha);
     if src.len() < want {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("expected {want} bytes of RGB, got {}", src.len()),
+            format!(
+                "expected {want} bytes of {}, got {}",
+                if alpha { "RGBA" } else { "RGB" },
+                src.len()
+            ),
         ));
     }
 
@@ -85,7 +116,7 @@ pub fn write_tx(
     } {
         let (pixels, w, h) = {
             let (p, w, h) = levels.last().expect("level 0 always exists");
-            reduce_half(p, *w, *h, &to_linear, &steps)
+            reduce_half(p, *w, *h, alpha, &to_linear, &steps)
         };
         levels.push((pixels, w, h));
     }
@@ -95,7 +126,7 @@ pub fn write_tx(
         .map_err(|e| io::Error::other(format!("tiff header: {e}")))?;
 
     for (n, (pixels, w, h)) in levels.iter().enumerate() {
-        write_level(&mut enc, pixels, *w, *h, n, space)?;
+        write_level(&mut enc, pixels, *w, *h, n, alpha, space)?;
     }
 
     Ok(levels.iter().map(|(_, w, h)| (*w, *h)).collect())
@@ -125,8 +156,10 @@ fn write_level<W: Write + io::Seek>(
     w: usize,
     h: usize,
     level: usize,
+    alpha: bool,
     space: ResolvedColorSpace,
 ) -> io::Result<()> {
+    let n = channels(alpha);
     let across = w.div_ceil(TILE_EDGE);
     let down = h.div_ceil(TILE_EDGE);
 
@@ -138,7 +171,7 @@ fn write_level<W: Write + io::Seek>(
     let mut counts = Vec::with_capacity(across * down);
     // One scratch tile reused across the level: every tile is full-size by
     // TIFF6, so the allocation never changes shape.
-    let mut tile = vec![0u8; TILE_EDGE * TILE_EDGE * 3];
+    let mut tile = vec![0u8; TILE_EDGE * TILE_EDGE * n];
 
     for ty in 0..down {
         for tx in 0..across {
@@ -154,9 +187,9 @@ fn write_level<W: Write + io::Seek>(
                     break;
                 }
                 let copy = TILE_EDGE.min(w - tx * TILE_EDGE);
-                let s = (sy * w + tx * TILE_EDGE) * 3;
-                let d = ly * TILE_EDGE * 3;
-                tile[d..d + copy * 3].copy_from_slice(&pixels[s..s + copy * 3]);
+                let s = (sy * w + tx * TILE_EDGE) * n;
+                let d = ly * TILE_EDGE * n;
+                tile[d..d + copy * n].copy_from_slice(&pixels[s..s + copy * n]);
             }
 
             let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
@@ -195,17 +228,24 @@ fn write_level<W: Write + io::Seek>(
     tag(Tag::TileByteCounts, &counts)?;
     // BitsPerSample is per-channel and defaults to 1 (bilevel) when absent —
     // always written, never inferred.
-    dir.write_tag(Tag::BitsPerSample, &[8u16, 8, 8][..])
+    dir.write_tag(Tag::BitsPerSample, &[8u16; 4][..n])
         .map_err(|e| io::Error::other(format!("tiff BitsPerSample: {e}")))?;
-    dir.write_tag(Tag::SamplesPerPixel, 3u16)
+    dir.write_tag(Tag::SamplesPerPixel, n as u16)
         .map_err(|e| io::Error::other(format!("tiff SamplesPerPixel: {e}")))?;
+    if alpha {
+        // Unassociated alpha: the colour is stored as given, not
+        // premultiplied, which is what the sampler reads it as. An extra
+        // sample left unspecified (0) would not be alpha to any reader.
+        dir.write_tag(Tag::ExtraSamples, 2u16)
+            .map_err(|e| io::Error::other(format!("tiff ExtraSamples: {e}")))?;
+    }
     dir.write_tag(Tag::PhotometricInterpretation, 2u16) // RGB
         .map_err(|e| io::Error::other(format!("tiff Photometric: {e}")))?;
     dir.write_tag(Tag::Compression, 8u16) // Adobe Deflate
         .map_err(|e| io::Error::other(format!("tiff Compression: {e}")))?;
     dir.write_tag(Tag::PlanarConfiguration, 1u16) // chunky
         .map_err(|e| io::Error::other(format!("tiff PlanarConfiguration: {e}")))?;
-    dir.write_tag(Tag::SampleFormat, &[1u16, 1, 1][..]) // unsigned integer
+    dir.write_tag(Tag::SampleFormat, &[1u16; 4][..n]) // unsigned integer
         .map_err(|e| io::Error::other(format!("tiff SampleFormat: {e}")))?;
     if level > 0 {
         // Bit 0 = "reduced-resolution version of another image". `tiff`

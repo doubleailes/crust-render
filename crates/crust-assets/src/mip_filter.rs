@@ -122,6 +122,25 @@ impl Taps {
         out[3] = 1.0;
         out
     }
+
+    /// [`Taps::blend_rgb`] for four RGBA taps, alpha blended as a fourth
+    /// channel by the same arithmetic — a texture that carries alpha.
+    #[inline(always)]
+    pub(crate) fn blend_rgba(
+        &self,
+        a: [f32; 4],
+        b: [f32; 4],
+        c: [f32; 4],
+        d: [f32; 4],
+    ) -> [f32; 4] {
+        let mut out = [0.0f32; 4];
+        for k in 0..4 {
+            let top = a[k] + (b[k] - a[k]) * self.fx;
+            let bot = c[k] + (d[k] - c[k]) * self.fx;
+            out[k] = top + (bot - top) * self.fy;
+        }
+        out
+    }
 }
 
 /// `a` toward `b` by `t` per RGB channel, alpha opaque: the level blend of the
@@ -133,5 +152,16 @@ pub(crate) fn lerp_rgba(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
         out[k] = a[k] + (b[k] - a[k]) * t;
     }
     out[3] = 1.0;
+    out
+}
+
+/// [`lerp_rgba`] with alpha blended too: the level blend of a UV texture that
+/// carries alpha.
+#[inline(always)]
+pub(crate) fn lerp_rgba_alpha(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let mut out = [0.0f32; 4];
+    for k in 0..4 {
+        out[k] = a[k] + (b[k] - a[k]) * t;
+    }
     out
 }

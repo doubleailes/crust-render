@@ -35,6 +35,9 @@ pub struct TiffFile {
     /// Read once from `SampleFormat` rather than inferred per tile, because the
     /// load report wants it before any tile has been touched.
     float: bool,
+    /// Which sample of a texel holds alpha — 1 after a grey sample, 3 after
+    /// RGB — or `None` for a file without one. See [`alpha_sample`].
+    alpha_at: Option<usize>,
 }
 
 impl TiffFile {
@@ -83,6 +86,8 @@ impl TiffFile {
             .flatten()
             .and_then(|v| v.into_u16_vec().ok())
             .is_some_and(|v| v.first() == Some(&3));
+
+        let alpha_at = alpha_sample(&mut dec);
 
         let (tw, th) = dec.chunk_dimensions();
         if tw == 0 || th == 0 || tw != th {
@@ -133,6 +138,7 @@ impl TiffFile {
             tile_edge,
             mip_space,
             float,
+            alpha_at,
         })
     }
 
@@ -143,9 +149,9 @@ impl TiffFile {
     /// **not** `tile_edge²·3`. Edge tiles are stored padded and come back cut,
     /// so the row stride is the tile's own width.
     ///
-    /// Greyscale and RGBA sources are normalised to RGB here rather than in the
-    /// sampler: the alternative is a per-texel branch on a hot path for a fact
-    /// that is fixed at open time.
+    /// Greyscale and wider sources are normalised to RGB — RGBA when the file
+    /// carries alpha — here rather than in the sampler: the alternative is a
+    /// per-texel branch on a hot path for a fact that is fixed at open time.
     fn read_one(&self, dec: &mut TiffReader, level: usize, index: u32) -> io::Result<TileData> {
         let level = level.min(self.levels.len() - 1);
         dec.seek_to_image(level)
@@ -156,8 +162,11 @@ impl TiffFile {
 
         let (tw, th) = self.levels[level].tile_size(index, self.tile_edge);
         let texels = tw * th;
+        let (alpha_at, alpha) = (self.alpha_at, self.alpha_at.is_some());
         match raw {
-            DecodingResult::U8(v) => Ok(TileData::u8(to_rgb(&v, texels, index)?)),
+            DecodingResult::U8(v) => {
+                Ok(TileData::u8(to_texels(&v, texels, index, alpha_at)?, alpha))
+            }
             // 16-bit integer samples are narrowed to 8, matching what the
             // preload path does with them: the renderer converts `u8` through a
             // 256-entry table, and widening the payload to keep two more bits
@@ -167,12 +176,21 @@ impl TiffFile {
             // `TileData` has a second variant.
             DecodingResult::U16(v) => {
                 let narrowed: Vec<u8> = v.iter().map(|&s| (s >> 8) as u8).collect();
-                Ok(TileData::u8(to_rgb(&narrowed, texels, index)?))
+                Ok(TileData::u8(
+                    to_texels(&narrowed, texels, index, alpha_at)?,
+                    alpha,
+                ))
             }
-            DecodingResult::F16(v) => Ok(TileData::half(&to_rgb(&v, texels, index)?)),
+            DecodingResult::F16(v) => Ok(TileData::half(
+                &to_texels(&v, texels, index, alpha_at)?,
+                alpha,
+            )),
             DecodingResult::F32(v) => {
                 let halved: Vec<f16> = v.iter().map(|&s| f16::from_f32(s)).collect();
-                Ok(TileData::half(&to_rgb(&halved, texels, index)?))
+                Ok(TileData::half(
+                    &to_texels(&halved, texels, index, alpha_at)?,
+                    alpha,
+                ))
             }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -203,6 +221,10 @@ impl Backend for TiffFile {
         self.float
     }
 
+    fn alpha(&self) -> bool {
+        self.alpha_at.is_some()
+    }
+
     fn reader(&self) -> io::Result<TileReader> {
         Ok(TileReader::Tiff(Box::new(open_decoder(&self.path)?)))
     }
@@ -221,11 +243,12 @@ impl Backend for TiffFile {
     }
 }
 
-/// Normalises an interleaved tile to exactly three components a texel.
+/// Normalises an interleaved tile to exactly three components a texel, for a
+/// file without alpha.
 ///
-/// Greyscale replicates and anything wider (RGBA, RGB + extra samples) keeps
-/// its first three channels, which is the convention the preload path already
-/// follows.
+/// Greyscale replicates and anything wider (RGB + extra samples that are not
+/// alpha) keeps its first three channels, which is the convention the preload
+/// path already follows. A file with alpha goes through [`to_texels`].
 fn to_rgb<T: Copy + Default>(src: &[T], texels: usize, index: u32) -> io::Result<Vec<T>> {
     if src.len() == texels * 3 {
         return Ok(src.to_vec());
@@ -255,6 +278,65 @@ fn to_rgb<T: Copy + Default>(src: &[T], texels: usize, index: u32) -> io::Result
     Ok(out)
 }
 
+/// Normalises an interleaved tile to RGB, or to RGBA when `alpha_at` names
+/// the sample holding the file's alpha: the colour as [`to_rgb`] reads it (a
+/// grey sample replicated, else the first three), the alpha after it.
+fn to_texels<T: Copy + Default>(
+    src: &[T],
+    texels: usize,
+    index: u32,
+    alpha_at: Option<usize>,
+) -> io::Result<Vec<T>> {
+    let Some(a) = alpha_at else {
+        return to_rgb(src, texels, index);
+    };
+    let channels = src.len().checked_div(texels.max(1)).unwrap_or(0);
+    if !matches!(a, 1 | 3) || a >= channels || src.len() < texels * channels {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("tile {index} has {channels} channel(s), its alpha at {a}"),
+        ));
+    }
+    let mut out = vec![T::default(); texels * 4];
+    for (texel, s) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.chunks_exact(channels))
+    {
+        *texel = if a == 1 {
+            [s[0], s[0], s[0], s[1]]
+        } else {
+            [s[0], s[1], s[2], s[3]]
+        };
+    }
+    Ok(out)
+}
+
+/// Where a TIFF's alpha is: the first extra sample, when `ExtraSamples` names
+/// it alpha — associated (1) or unassociated (2) — right after the colour's
+/// one (grey) or three (RGB) samples. `None` for anything else, including an
+/// unspecified extra sample (0), which is not coverage.
+///
+/// Associated alpha is read as alpha with the colour as stored: an OIIO
+/// `maketx` file premultiplies by default, and its colour is not divided back
+/// out (see the textures design record).
+fn alpha_sample(dec: &mut TiffReader) -> Option<usize> {
+    let u16s = |dec: &mut TiffReader, tag: Tag| {
+        dec.find_tag(tag)
+            .ok()
+            .flatten()
+            .and_then(|v| v.into_u16_vec().ok())
+    };
+    let extra = u16s(dec, Tag::ExtraSamples)?;
+    if !matches!(extra.first(), Some(1 | 2)) {
+        return None;
+    }
+    let samples = usize::from(*u16s(dec, Tag::SamplesPerPixel)?.first()?);
+    let colour = samples.checked_sub(extra.len())?;
+    matches!(colour, 1 | 3).then_some(colour)
+}
+
 fn open_decoder(path: &Path) -> io::Result<TiffReader> {
     let file = File::open(path)?;
     Decoder::new(BufReader::new(file))
@@ -282,7 +364,7 @@ mod tests {
         // RGB passes straight through.
         let rgb = [9u8, 8, 7, 6, 5, 4];
         assert_eq!(to_rgb(&rgb, 2, 0).expect("rgb"), rgb.to_vec());
-        // RGBA drops alpha, as the preload path does.
+        // A fourth sample that is not alpha is dropped.
         assert_eq!(
             to_rgb(&[1u8, 2, 3, 255, 4, 5, 6, 0], 2, 0).expect("rgba"),
             vec![1, 2, 3, 4, 5, 6]
@@ -295,5 +377,36 @@ mod tests {
         );
         // Two channels is not something to guess at.
         assert!(to_rgb(&[1u8, 2, 3, 4], 2, 0).is_err());
+    }
+
+    /// With an alpha, the colour normalises by the same rules and the alpha
+    /// lands fourth — after a replicated grey as after RGB — and a sample
+    /// beyond it is dropped.
+    #[test]
+    fn alpha_normalisation_puts_the_alpha_after_the_colour() {
+        assert_eq!(
+            to_texels(&[1u8, 2, 3, 4, 5, 6, 7, 8], 2, 0, Some(3)).expect("rgba"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+        assert_eq!(
+            to_texels(&[9u8, 200, 10, 0], 2, 0, Some(1)).expect("grey + alpha"),
+            vec![9, 9, 9, 200, 10, 10, 10, 0]
+        );
+        assert_eq!(
+            to_texels(&[1u8, 2, 3, 4, 99], 1, 0, Some(3)).expect("rgba + extra"),
+            vec![1, 2, 3, 4]
+        );
+        let h = |v: f32| f16::from_f32(v);
+        assert_eq!(
+            to_texels(&[h(4.0), h(0.25)], 1, 0, Some(1)).expect("half grey + alpha"),
+            vec![h(4.0), h(4.0), h(4.0), h(0.25)]
+        );
+        // No alpha: exactly the RGB rules.
+        assert_eq!(
+            to_texels(&[1u8, 2, 3, 4], 1, 0, None).expect("rgb"),
+            vec![1, 2, 3]
+        );
+        // An alpha the tile does not reach is refused, not read past.
+        assert!(to_texels(&[1u8, 2, 3], 1, 0, Some(3)).is_err());
     }
 }
