@@ -364,6 +364,8 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_SHADER_JIT` | on | `material/materialx.rs` | `0`: interpret MaterialX programs instead of JIT (bit-identical) |
 | `CRUST_RAY_CONES` | on | `tracer/path.rs` | `0`: zero every texture footprint (finest mip always) |
 | `CRUST_LINK_TWIN` | on | `usd_import/light_links.rs` → `tracer/path.rs` | `0`: every shadow-linked light is sampled by NEE alone at continuous vertices (no bounce-side link twin, no MIS), the renderer before the twin. Unlinked scenes are bit-identical either way |
+| `CRUST_TUBE_SAMPLING` | `equiangular` | `light/shape.rs` (`AffineShape`) | How a one-sided `CylinderLight` is sampled from outside it. `area`: uniform in local area, the sampler before this switch (bit-identical to it); `arc`: the azimuth over the arc of wall facing the point only, the axial position uniform; `equiangular`: that arc, and the axial position equiangular along the sampled wall line. Scenes without a tube are bit-identical either way |
+| `CRUST_DISK_SAMPLING` | `area` | `light/shape.rs` (`AffineShape`), `light/ellipse.rs` | How a `DiskLight` is sampled from in front of it. `area`: uniform in local area (the default, and the sampler before this switch); `ellipse`: uniform over the spherical ellipse it subtends (Guillén et al. 2017), within a solid-angle band. Off by default: it loses at equal time on glossy receivers and small disks (`openspec/specs/lighting/design.md`, "Disk and tube lights") |
 | `CRUST_TEX` | on | `crust-assets/lib.rs` | `0`: decline every UV texture (surfaces use constants) |
 | `CRUST_TEX_MAX` | 1024 | `crust-assets/uv_texture/` | preloaded tile edge cap, pixels |
 | `CRUST_TEX_MIP` | on | `crust-assets/uv_texture/` | `0`: no mip pyramid on UV textures |

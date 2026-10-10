@@ -78,7 +78,10 @@ pub use aov::{
 };
 pub use buffer::Buffer;
 pub use camera::Camera;
-pub use config::{Config, DEFAULT_TEX_MAX_OPEN_FILES, PtexMipSpace, TriPackets, config};
+pub use config::{
+    Config, DEFAULT_TEX_MAX_OPEN_FILES, DiskSampling, PtexMipSpace, TriPackets, TubeSampling,
+    config,
+};
 
 /// What every kernel scene commits with — the `CRUST_TRI_PACKETS` switch,
 /// read once.

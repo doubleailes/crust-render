@@ -5,15 +5,16 @@
 Rect, sphere, disk and cylinder lights SHALL be one-sided `AreaLight`s whose
 geometry is also attached to the world. Sphere lights SHALL sample the cone
 they subtend and rect lights the spherical rectangle they subtend where that
-density is well conditioned. Disk lights SHALL sample the spherical ellipse they
+density is well conditioned. Disk lights SHALL sample by area by default; with
+`CRUST_DISK_SAMPLING = ellipse` they SHALL sample the spherical ellipse they
 subtend from a shading point strictly in front of their emitting side, where that
 solid angle is well conditioned, and by area otherwise. Cylinder lights with a
 one-sided emitter SHALL sample, from a shading point outside the tube, only the
-part of their wall that faces it. They SHALL draw the axial position along the
-sampled wall line by a density that follows its inverse-square falloff. They
-SHALL sample by area from inside the tube or with a two-sided emitter.
-`CRUST_DISK_SAMPLING = area` and `CRUST_TUBE_SAMPLING = area` SHALL restore area
-sampling for the respective shape. A non-uniform scale SHALL be honoured through an
+part of their wall that faces it. By default (`CRUST_TUBE_SAMPLING = equiangular`)
+they SHALL draw the axial position along the sampled wall line by a density that
+follows its inverse-square falloff. They SHALL sample by area from inside the tube
+or with a two-sided emitter. `CRUST_DISK_SAMPLING = area` and
+`CRUST_TUBE_SAMPLING = area` SHALL restore area sampling for the respective shape. A non-uniform scale SHALL be honoured through an
 affine shape, by every strategy. A light's source geometry SHALL be invisible to
 camera rays by default. An authored `crust:rayMask` SHALL decide its visibility
 outright. Otherwise `crust:light:cameraVisible` SHALL decide it, and otherwise
@@ -54,7 +55,8 @@ outright. Otherwise `crust:light:cameraVisible` SHALL decide it, and otherwise
 
 #### Scenario: A disk seen from behind
 
-- **WHEN** a disk light is sampled from a point behind its emitting side
+- **WHEN** a disk light is sampled, under `CRUST_DISK_SAMPLING = ellipse`, from a
+  point behind its emitting side
 - **THEN** it is sampled by area, as before this requirement
 
 #### Scenario: Area sampling restored

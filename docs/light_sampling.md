@@ -23,7 +23,9 @@ What crust's direct lighting does today, per path vertex:
 2. sample a point on it **uniformly by area**. Sphere lights are the exception
    since §9.2 (d): they now sample their visible cone. They used to sample the
    whole sphere, including the half that faces away. Rect lights are the
-   second since §9.2 (e): they sample the spherical rectangle they subtend;
+   second since §9.2 (e): they sample the spherical rectangle they subtend.
+   Tube lights are the third since §9.2 (o): they sample the arc of wall that
+   faces the point, equiangularly along it. Disks stay area-sampled by default;
 3. trace **one** shadow ray. It used to be traced *before* the BSDF or the
    emission was evaluated, so rays whose contribution was already known to be
    zero were traced anyway. Since §9.1 (c) it is traced last, and only when
@@ -51,6 +53,7 @@ has the detail and §8 the measurement protocol.
 | 8 | **MIS compensation** for the dome map (Karlík et al. 2019, as in pbrt-v4) | per-light pdf | ~20 lines | large on sun + sky HDRIs | noise only |
 | 9 | **Per-vertex RIS**: M candidates, one shadow ray (Talbot et al. 2005) | selection | ~150 lines | large on glossy surfaces under several lights | noise only |
 | 10 | A **light BVH** with orientation cones (Conty Estevez & Kulla 2018; pbrt-v4, Cycles) | selection | ~600 lines | decisive for 10²+ lights, marginal below | noise only |
+| 2b | ✅ **Done for the tube.** Visible-arc, equiangular sampling for `CylinderLight`; Guillén et al. 2017's spherical ellipse for `DiskLight`, opt-in | per-light pdf | ~600 lines | tube: **measured 1.3–20× at equal time** on a sweep, 1.82× on `usdlux`; disk: 7.6× on a large disk over a matte floor, but a loss on every glossy one (§3.13) | noise only |
 | 11 | Cone-clipped sampling for shaped lights; image-importance sampling for textured rect lights; equiangular sampling in volumes | per-light pdf | moderate each | large in their niche | noise only |
 
 "Noise only" means the change alters the estimator but not its expectation. The
@@ -122,7 +125,7 @@ textured card, dome), and the dome gets 1/7 of it however dim it is.
 |---|---|---|
 | `SphereLight` (similarity transform) | **Fixed (§9.2 d):** `SphereShape` now samples the visible cone. It used to sample uniformly over the **whole** sphere. | What area sampling lost: everything outside the visible cap, at least half of all samples. More when close, because the visible cap is `(1 − r/d)/2` of the area. Back-facing samples are occluded by the sphere itself, so each one was a traced shadow ray that returned zero. |
 | `RectLight` | **Fixed (§9.2 e):** `RectShape` samples the spherical rectangle it subtends. It used to sample uniformly in `(u, v)`. | What area sampling lost: for a panel large or near relative to its distance, `cos θ_l / r²` varies by orders of magnitude across it. A few near samples dominate, and the QMC stratification is spent on the wrong measure. Sheared parallelograms and tiny lights still area-sample. |
-| `DiskLight`, `CylinderLight` | `AffineShape`: uniform in local area | Same as the rect. The tube also samples its far side. |
+| `DiskLight`, `CylinderLight` | **Tube fixed (§3.13):** a one-sided tube samples the arc of wall facing the point, equiangularly along it (`CRUST_TUBE_SAMPLING`). The disk still samples uniformly in local area by default; its spherical ellipse (`CRUST_DISK_SAMPLING=ellipse`) is opt-in. | What area sampling lost on the tube: the far half of its wall, every sample there zero radiance, and the `1/r²` along a long tube. On the disk, the variance of `cos θ_l / r²` up close, which the ellipse removes on diffuse receivers but not at equal time on glossy ones. |
 | Squashed sphere (non-uniform scale) | **Fixed (§9.2 d):** `AffineShape` samples the unit sphere's visible cone in local space. It used to sample uniform in local area. | The same as the round sphere's. |
 | Shaped rect/disk (`ShapingAPI`, IES) | uniform by area, shaping applied as a factor | Every sample the cone rejects. A 30° spot wastes most of them. |
 | Textured `RectLight` | uniform by area | A card with a small bright region is sampled like a flat one. |
@@ -320,8 +323,9 @@ follow-up change.
     solid angle and a tilted receiver's irradiance both through the cone and by
     plain area quadrature over the facing side. Dropping one power of `|Mω|`
     fails it.
-  - Disks and tubes still take the area path, pinned by
-    `affine_shapes_without_a_cone_fall_back_to_area_sampling`.
+  - Disks and tubes took the area path then, pinned by
+    `affine_shapes_without_a_cone_fall_back_to_area_sampling` with their own switches at
+    `area`. §3.13 gives them strategies of their own.
 
 ### 3.8 Picking lights by power (§9.3 j)
 
@@ -772,6 +776,60 @@ to every render, is why `learned` is opt-in rather than the default.
 
 ---
 
+### 3.13 Visible-arc tubes and spherical-ellipse disks (§9.2 o)
+
+**What changed.**
+- A one-sided `CylinderLight` seen from outside samples only the arc of wall that faces
+  the shading point, `|φ − φ₀| < acos(1/ρ)` in local space (exact under any affine
+  placement), and draws the axial position equiangularly in world arc length along the
+  sampled wall line, which follows its `1/r²`. `CRUST_TUBE_SAMPLING=equiangular`, the
+  default; `arc` keeps the arc with a uniform axial position; `area` is the old sampler.
+- A `DiskLight` can sample the spherical ellipse it subtends (Guillén et al. 2017, the
+  low-distortion radial map with an exact Newton inversion on Carlson's integrals) with
+  `CRUST_DISK_SAMPLING=ellipse`, in front of it and within `[0.1, 6.22]` sr. It is off
+  by default.
+- `SolidAngleSampler::sample` / `pdf` may refuse a point (the tube's silhouette), and
+  `AreaLight` treats a strategy that exists from a point as final on both MIS sides.
+- The design and its traps are in `openspec/specs/lighting/design.md`, "Disk and tube
+  lights".
+
+**Measured.** A scratch sweep (not checked in): one light 1 unit above a diffuse or a
+glossy floor, 16 spp, `--indirect-clamp 0`, relMSE against a 1024 spp area-sampled
+reference (mean of four frames); equal time is relMSE × Render seconds.
+
+| case | `arc` | `equiangular` | case | `ellipse` |
+|---|---|---|---|---|
+| tube 0.3 × r 0.01, diffuse | 6.3× | 7.4× | disk r 0.1, diffuse | 0.30× |
+| tube 0.3 × r 0.01, glossy | 2.9× | 2.4× | disk r 0.1, glossy | 0.62× |
+| tube 0.3 × r 0.3, diffuse | 8.8× | 10.1× | disk r 0.3, diffuse | 1.08× |
+| tube 0.3 × r 0.3, glossy | 1.9× | 1.5× | disk r 0.3, glossy | 0.32× |
+| tube 1 × r 0.01, diffuse | 6.8× | 14.2× | disk r 1, diffuse | **7.55×** |
+| tube 1 × r 0.01, glossy | 3.4× | 3.3× | disk r 1, glossy | 0.57× |
+| tube 1 × r 0.3, diffuse | 5.0× | 12.4× | disk r 3, diffuse | 0.62× |
+| tube 1 × r 0.3, glossy | 1.7× | 1.9× | disk r 3, glossy | 0.30× |
+| tube 3 × r 0.01, diffuse | 4.6× | **20.1×** | `usdlux` (disk) | 0.67× |
+| tube 3 × r 0.01, glossy | 5.2× | 10.5× | | |
+| tube 3 × r 0.3, diffuse | 3.2× | 13.3× | | |
+| tube 3 × r 0.3, glossy | 1.2× | 1.3× | | |
+| `usdlux` (tube) | 1.18× | 1.82× | | |
+
+(Efficiency at equal time against `area`; tube rows are length × radius over distance,
+disk rows radius over height. The first disk rows are with the rect's `1e-4` sr floor;
+the ellipse's own floor is now 0.1 sr, which hands the radius-0.1 disk back to area
+sampling.)
+
+- **The tube wins everywhere**, most on long tubes near a matte surface, where the
+  `1/r²` along the wall varies most; least on a glossy receiver, whose lobe the density
+  does not follow. So `equiangular` is the default.
+- **The disk does not**: it loses on every glossy floor, in relMSE alone on two of
+  them, as the spherical rectangle does (§3.9), and costs 2–4× per frame (about four
+  elliptic integrals per sample). So it is opt-in.
+- **Proof that the tube's change is noise, not bias**: light-only, BSDF-only and power
+  MIS agree under every switch value, and the light-only difference from area sampling
+  falls about 4× from 64 to 1024 samples (`crust-core/tests/round_lights.rs`); every
+  sample without a tube or disk light is bit-identical at 16 spp, and `usdlux` at 16,
+  64 and 256 spp falls toward the reference without a floor.
+
 ## 4. The anatomy of the direct-lighting estimator
 
 One NEE sample at a shading point *x* estimates
@@ -901,11 +959,14 @@ of directions.
   *Area-Preserving Parameterizations for Spherical Ellipses*, CGF 36(4) (EGSR
   2017), treats the disk: a disk projects to a spherical ellipse.
 - Both need iterative inversion. Neither pbrt-v4 nor Cycles bothers: both still
-  area-sample disks and cylinders. So rank these after everything else.
+  area-sample disks and cylinders.
 - For a thin tube, Peters, *BRDF Importance Sampling for Linear Lights*, CGF
   40(8) (HPG 2021), sampling the axis segment, is often the better fit.
-- A cheap interim step for the tube is to sample only the half facing the shading
-  point.
+- **Done in crust (§3.13).** The tube samples the arc that faces the shading point
+  exactly (not a half), equiangularly along the wall line; the disk has Guillén's
+  radial map as an opt-in, since it loses at equal time on glossy receivers. Gamito's
+  exact cylinder sampler remains the step for a thick tube up close, whose cosines
+  the equiangular density ignores.
 
 **Shaped and IES lights: clip the domain.**
 - Emission restricted to a cone of half-angle `θ_s` about the light's −Z can only
@@ -1343,8 +1404,7 @@ estimator unbiased.
   - no cone at all, on both hooks, when its pdf would overflow f32.
 - `AffineShape` spheres (non-uniform scale) sample the unit sphere's cone in local
   space, with the direction map's Jacobian `|Mω|³ / |det M|` on the pdf (§3.7).
-  Disks and tubes remain area-sampled. §5.2 lists what would replace that:
-  Gamito 2016, Guillén et al. 2017, or Peters' line lights.
+  Disks and tubes were area-sampled; (o) below replaced that.
 
 **(e) Spherical rectangles. ✅ Done; measured in §3.9. The bilinear cosine
 warp is not.**
@@ -1362,6 +1422,9 @@ warp is not.**
   `|n · ω|`) needs the receiver's normal, which `LightShape` and `Light` are
   not given: `sample_li` and `pdf_at_point` take the shading point alone. It is
   the next step here, and an API change on both MIS sides.
+
+**(o) Disks and tubes. ✅ Done for the tube (visible arc, equiangular along the
+wall, the default); the disk's spherical ellipse is opt-in. Measured in §3.13.**
 
 **(f) Dome MIS compensation**, with a per-vertex fallback to the full pdf where
 BSDF sampling cannot reach the direction.
@@ -1439,7 +1502,7 @@ marked, and not guessed.
 | **V-Ray** | "Adaptive Lights": learned from the light cache; light-tree fallback | — | — |
 | **Iray** | a light hierarchy over per-triangle flux (Keller et al., arXiv 2017) | — | details not verified |
 | **Manuka** | not verified | — | — |
-| **crust** | power, defensive (infinite lights fixed, ½ even); uniform as the A/B | sphere: visible cone; everything else uniform area | power MIS; piecewise-constant dome |
+| **crust** | power, defensive (infinite lights fixed, ½ even); uniform as the A/B | sphere: visible cone; rect: spherical rectangle; tube: visible arc, equiangular along the wall; disk: area (spherical ellipse opt-in) | power MIS; piecewise-constant dome |
 
 ---
 
