@@ -128,15 +128,29 @@ the mask leaves visible to shadow rays SHALL occlude them.
 
 ### Requirement: Infinite lights
 
-`UsdLuxDistantLight` SHALL become a finite-cone distant light and
-`UsdLuxDomeLight` an environment light. A dome's lat-long map SHALL be
-importance-sampled by luminance × sin θ, and SHALL be oriented as the UsdLux
-`DomeLight` schema specifies (the OpenEXR lat-long convention), in the light's
-own frame before its prim transform: the top row is +Y, the image centre
-(u = ½) faces +Z, u = ¼ faces +X, u = ¾ faces −X and the left and right edges
-meet at −Z. The renderer SHALL have no built-in
-sky: an escaping ray that no infinite light answers SHALL collect black,
-including in a stage with no infinite light at all.
+`UsdLuxDistantLight` SHALL become a finite-cone distant light, and
+`UsdLuxDomeLight` and `UsdLuxDomeLight_1` an environment light. A
+`DomeLight_1` SHALL read every input a `DomeLight` reads, with the same
+meaning, and SHALL be listed and counted as a light wherever a `DomeLight` is.
+A dome's lat-long map SHALL be importance-sampled by luminance × sin θ, and
+SHALL be oriented as the UsdLux schema specifies (the OpenEXR lat-long
+convention), in the dome's own frame before its prim transform: the top row is
++Y, the image centre (u = ½) faces +Z, u = ¼ faces +X, u = ¾ faces −X and the
+left and right edges meet at −Z.
+
+A `DomeLight_1` SHALL first turn that frame onto its pole axis. When its
+`poleAxis` is `Z`, or is `scene` (the schema's fallback) on a stage whose root
+layer authors `upAxis = "Z"`, the frame SHALL be rotated +90° about X before
+the prim transform: the top row faces +Z, the image centre faces −Y, u = ¼
+faces +X and u = ¾ faces −X. When its `poleAxis` is `Y`, or `scene` on a stage
+whose `upAxis` is `Y` or unauthored, the frame SHALL be left as it is. The
+rotation SHALL orient the dome alone, never its namespace children. A
+`DomeLight` SHALL keep its +Y pole whatever the stage's up axis, including when
+it authors a `poleAxis` attribute, which its schema does not declare.
+
+The renderer SHALL have no built-in sky: an escaping ray that no infinite light
+answers SHALL collect black, including in a stage with no infinite light at
+all.
 
 Each infinite light SHALL be either visible or invisible to camera rays, and
 visible by default. Camera visibility SHALL be read from
@@ -164,9 +178,15 @@ any other ray.
 - **WHEN** a stage contains a `DomeLight`
 - **THEN** escaping rays read the dome's radiance
 
+#### Scenario: A DomeLight_1 is a dome light
+
+- **WHEN** a stage's only light is a `DomeLight_1` with a uniform colour
+- **THEN** escaping rays read that colour, `crust check` counts one light, and
+  `crust ls light` lists the prim
+
 #### Scenario: Nothing at infinity
 
-- **WHEN** a stage has no `DomeLight` or `DistantLight`
+- **WHEN** a stage has no `DomeLight`, `DomeLight_1` or `DistantLight`
 - **THEN** every escaping ray collects black
 
 #### Scenario: A camera-invisible HDRI
@@ -205,6 +225,43 @@ any other ray.
   (+1, 0, −1) and (−1, 0, −1)
 - **THEN** they collect green, blue, red and white respectively (u = ⅜, ⅝, ⅛
   and ⅞)
+
+#### Scenario: A DomeLight_1 on a Z-up stage turns its pole onto +Z
+
+- **WHEN** an untransformed `DomeLight_1` with `poleAxis` unauthored (so
+  `scene`) carries the same four-band texture on a stage authoring
+  `upAxis = "Z"`, and escaping rays leave horizontally along (+1, −1, 0),
+  (−1, −1, 0), (+1, +1, 0) and (−1, +1, 0)
+- **THEN** they collect green, blue, red and white respectively, and a ray
+  leaving along +Z collects the texture's top row
+
+#### Scenario: poleAxis Z turns the pole on a Y-up stage too
+
+- **WHEN** an untransformed `DomeLight_1` authoring `poleAxis = "Z"` carries the
+  four-band texture on a stage authoring `upAxis = "Y"`
+- **THEN** rays along (+1, −1, 0), (−1, −1, 0), (+1, +1, 0) and (−1, +1, 0)
+  collect green, blue, red and white, as on a Z-up stage
+
+#### Scenario: A DomeLight_1 whose pole is already +Y is unchanged
+
+- **WHEN** an untransformed `DomeLight_1` carries the four-band texture with
+  `poleAxis = "Y"` on a Z-up stage, or with `poleAxis` unauthored on a stage
+  authoring `upAxis = "Y"` or no `upAxis`
+- **THEN** it renders exactly as a `DomeLight` with the same inputs does
+
+#### Scenario: A DomeLight ignores an authored poleAxis
+
+- **WHEN** a `DomeLight` authors `poleAxis = "scene"` on a stage authoring
+  `upAxis = "Z"`
+- **THEN** its top row still faces +Y and rays along (+1, 0, +1), (−1, 0, +1),
+  (+1, 0, −1) and (−1, 0, −1) collect green, blue, red and white
+
+#### Scenario: The pole rotation composes with the prim's transform
+
+- **WHEN** a `DomeLight_1` on a Z-up stage also authors a rotation of 90° about
+  Z on its prim
+- **THEN** the prim's rotation applies after the pole rotation: the image
+  centre faces +X instead of −Y, and the top row still faces +Z
 
 ### Requirement: Light selection
 
