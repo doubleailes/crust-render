@@ -86,7 +86,7 @@ use attrs::{
     custom_token, prim_value, resolve_adaptive_max_level, resolve_subdiv_edge_length,
     resolve_subdiv_level,
 };
-use camera::{build_camera, screen_projection};
+use camera::{RenderCamera, build_camera, screen_projection};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
 use light_links::LightLinks;
 use lights::{
@@ -99,7 +99,7 @@ use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use products::import_render_products;
 use settings::{
     CameraChoice, CameraPick, check_time_range, dome_light_camera_visibility,
-    import_render_settings, pick_camera, render_settings_color_space,
+    enable_exposure_compensation, import_render_settings, pick_camera, render_settings_color_space,
     render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
@@ -230,14 +230,14 @@ struct ImportCtx<'a> {
     lights: LightList,
     volumes: Vec<VolumeRegion>,
     /// The camera built to render through, and its prim.
-    camera: Option<(Camera, sdf::Path)>,
+    camera: Option<(RenderCamera, sdf::Path)>,
     /// The camera to render through, when one was named; see
     /// [`CameraChoice`]. `None` takes the first camera met.
     wanted_camera: Option<CameraChoice>,
     /// The first camera met, kept while a named one is still being looked
     /// for: it is the fallback when a `RenderSettings.camera` target turns
     /// out not to exist.
-    first_camera: Option<(Camera, sdf::Path)>,
+    first_camera: Option<(RenderCamera, sdf::Path)>,
     /// Every camera prim met, for the error that names the alternatives when
     /// a requested camera is missing. A path per camera, and a stage has a
     /// handful of them.
@@ -747,8 +747,9 @@ fn traverse_stage(
 /// stage's `RenderSettings.camera` names one that is not there — the first
 /// camera met, else the procedural fallback's. A camera the host asked for by
 /// path and the stage does not have is an error naming the alternatives.
-/// Returned with the prim it was built from, `None` for the procedural one.
-fn resolve_camera(ctx: &mut ImportCtx) -> Result<(Camera, Option<String>), crate::Error> {
+/// Returned with the prim it was built from, `None` for the procedural one,
+/// whose exposure scale is 1.
+fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>), crate::Error> {
     // `camera` is the wanted one when it was met, else (nothing named) the
     // first; `first_camera` is the first, kept only while a named one was
     // still being looked for.
@@ -759,7 +760,7 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(Camera, Option<String>), crate
     );
     let wanted_met = wanted.is_some() && built.is_some();
     let any_met = built.is_some() || first.is_some();
-    let with_path = |(c, path): (Camera, sdf::Path)| (c, Some(path.to_string()));
+    let with_path = |(c, path): (RenderCamera, sdf::Path)| (c, Some(path.to_string()));
     Ok(match pick_camera(wanted.as_ref(), wanted_met, any_met) {
         CameraPick::Missing(p) => {
             return Err(crate::Error::CameraNotFound {
@@ -788,7 +789,13 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(Camera, Option<String>), crate
                 CameraMissing,
                 "USD stage has no UsdGeomCamera — falling back to world::get_settings camera"
             );
-            (crate::world::get_settings().0, None)
+            (
+                RenderCamera {
+                    camera: crate::world::get_settings().0,
+                    exposure_scale: 1.0,
+                },
+                None,
+            )
         }
     })
 }
@@ -893,6 +900,7 @@ pub(crate) fn load_scene(
     }
     settings = settings.with_motion_blur(products.motion_blur);
     let domes_seen_by_camera = dome_light_camera_visibility(&index);
+    let exposure_compensation = enable_exposure_compensation(&index);
     // The working colour space, before any colour is read: every texture
     // request and authored colour is converted into it.
     let working = host_working.unwrap_or_else(|| render_settings_color_space(&index));
@@ -1000,7 +1008,20 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
-    let (camera, camera_path) = resolve_camera(&mut ctx)?;
+    let (
+        RenderCamera {
+            camera,
+            exposure_scale,
+        },
+        camera_path,
+    ) = resolve_camera(&mut ctx)?;
+    // `enableExposureCompensation = false` renders at 1, as Hydra does.
+    let settings = if exposure_compensation {
+        settings.with_exposure_scale(exposure_scale)
+    } else {
+        debug!("enableExposureCompensation = false: the camera's exposure is not applied");
+        settings
+    };
 
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen

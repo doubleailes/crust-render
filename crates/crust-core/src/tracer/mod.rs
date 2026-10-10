@@ -163,6 +163,20 @@ pub(crate) struct Measured {
     pub(crate) outcome: RenderOutcome,
 }
 
+impl Measured {
+    /// Multiplies the result by the render camera's exposure `scale`: the
+    /// beauty and the radiance planes by `scale`, the variances (the AOV
+    /// film's and the per-pixel `var_map`) by its square.
+    fn apply_exposure(&mut self, scale: f32) {
+        self.buffer.scale(scale);
+        if let Some(film) = &mut self.film {
+            film.apply_exposure(scale);
+        }
+        let square = f64::from(scale) * f64::from(scale);
+        self.var_map.iter_mut().for_each(|v| *v *= square);
+    }
+}
+
 /// Image-quality statistics of one render pass.
 /// A pass's guiding training samples, where the workers left them: one
 /// buffer per work unit (tile or row), and the order to read them in.
@@ -501,10 +515,20 @@ impl Renderer {
         instruments: Instruments,
         control: Option<&RenderControl>,
     ) -> Measured {
-        if self.settings.guiding {
-            return self.render_guided(tiled, progress, layout, instruments, control);
+        let mut m = if self.settings.guiding {
+            self.render_guided(tiled, progress, layout, instruments, control)
+        } else {
+            self.render_unguided(tiled, progress, layout, instruments, control)
+        };
+        // The camera's exposure multiplies the resolved image, after every
+        // pass (and a guided render's blend): the samples, the clamp and the
+        // stopping rule all worked in scene radiance. Scale 1, every camera
+        // without an exposure, is skipped, so its image is the bits it was.
+        let scale = self.settings.exposure_scale;
+        if scale != 1.0 {
+            m.apply_exposure(scale);
         }
-        self.render_unguided(tiled, progress, layout, instruments, control)
+        m
     }
 
     /// One final pass, as everything but a guided render is.
@@ -1091,10 +1115,14 @@ impl Renderer {
         // stage or round in which it traced anything — unless the control
         // takes no snapshots.
         let display = control.filter(|c| c.takes_snapshots());
+        // A snapshot shows the image as it will be written: exposed.
+        let exposure = self.settings.exposure_scale;
         let publish = |unit: &Unit| {
             if let Some(control) = display {
                 control.publish(w, h, rect, |display| {
-                    unit.for_each_pixel_ref(|i, j, st| display.set_pixel(i, j, st.estimate().0));
+                    unit.for_each_pixel_ref(|i, j, st| {
+                        display.set_pixel(i, j, st.estimate().0 * exposure)
+                    });
                 });
             }
         };

@@ -65,6 +65,11 @@ fn every_source() -> Vec<AovVar> {
 /// near side sits at z = −5), lit by a uniform dome; the camera at z = 5
 /// looks down −Z with a frame wide enough to see past the wall's edge.
 fn scene(spp: u32, variance: f32, guiding: bool, wall: bool) -> Renderer {
+    scene_exposed(spp, variance, guiding, wall, 1.0)
+}
+
+/// [`scene`] through a camera whose exposure scale is `exposure`.
+fn scene_exposed(spp: u32, variance: f32, guiding: bool, wall: bool, exposure: f32) -> Renderer {
     let mut world = WorldBuilder::new();
     world.attach(
         Geometry::Sphere {
@@ -101,7 +106,8 @@ fn scene(spp: u32, variance: f32, guiding: bool, wall: bool) -> Renderer {
         .with_samples_per_pixel(spp)
         .with_max_depth(4)
         .with_adaptive_sampling(spp.min(8), variance)
-        .with_guiding(guiding, 1, 0.5);
+        .with_guiding(guiding, 1, 0.5)
+        .with_exposure_scale(exposure);
     Renderer::new(camera, world.commit(), lights, settings)
 }
 
@@ -394,4 +400,73 @@ fn a_thin_window_is_the_first_hit_whether_passed_or_met() {
     // And the ball behind it is seen through it.
     let centre = (H / 2) * W + W / 2;
     assert!(beauty.get_pixel(W / 2, H / 2).x > 0.0, "{centre}");
+}
+
+/// A light path expression var over `expr`, and its `crust:aov:variance` twin.
+fn lpe(expr: &str) -> AovVar {
+    AovVar {
+        expression: Some(expr.to_owned()),
+        components: 3,
+        accumulation: Accumulation::Filtered,
+        ..var(expr, AovSource::Lpe)
+    }
+}
+
+fn lpe_variance(expr: &str) -> AovVar {
+    AovVar {
+        name: format!("{expr} variance"),
+        components: 1,
+        variance: true,
+        ..lpe(expr)
+    }
+}
+
+/// One stop of camera exposure doubles every radiance channel exactly (the
+/// beauty's colour, a light path expression), quadruples every variance (the
+/// `variance` source and an expression's variance), and leaves everything that
+/// is not light alone — the beauty's alpha included.
+#[test]
+fn exposure_scales_radiance_only() {
+    let mut vars = every_source();
+    vars.push(lpe("C.*[LO]"));
+    vars.push(lpe_variance("C.*[LO]"));
+    let req = request(vars.clone());
+    let (base_buf, base) = render(&scene_exposed(16, 0.0, false, true, 1.0), true, &req);
+    let (lit_buf, lit) = render(&scene_exposed(16, 0.0, false, true, 2.0), true, &req);
+    for v in &vars {
+        let (a, b) = (
+            base.var_channels(&base_buf, v),
+            lit.var_channels(&lit_buf, v),
+        );
+        for (c, (a, b)) in a.iter().zip(&b).enumerate() {
+            let power = if v.variance {
+                2
+            } else if v.source == AovSource::Color && c == 3 {
+                0
+            } else {
+                v.source.exposure_power()
+            };
+            let factor = 2.0_f32.powi(power);
+            for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                assert_eq!(
+                    (x * factor).to_bits(),
+                    y.to_bits(),
+                    "{} channel {c} pixel {i}: {x} × {factor} != {y}",
+                    v.name
+                );
+            }
+        }
+    }
+}
+
+/// The exposure multiplies the resolved image only: an adaptive render takes
+/// the same samples in every pixel at any exposure.
+#[test]
+fn exposure_does_not_change_the_samples_taken() {
+    let req = request(vec![var("sampleCount", AovSource::SampleCount)]);
+    let count = |exposure: f32| {
+        let (buffer, film) = render(&scene_exposed(32, 0.05, false, true, exposure), true, &req);
+        film.var_channels(&buffer, &req.products[0].vars[0])
+    };
+    assert_eq!(count(1.0), count(8.0));
 }

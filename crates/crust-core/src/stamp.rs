@@ -53,6 +53,9 @@ pub struct SamplingStamp {
     pub variance_threshold: f32,
     /// `0` when the clamp is off.
     pub indirect_clamp: f32,
+    /// The render camera's linear exposure scale the radiance channels were
+    /// multiplied by; `1` when none applied.
+    pub exposure_scale: f32,
     pub max_depth: u32,
     pub light_samples: u32,
     pub light_samples_indirect: u32,
@@ -94,6 +97,7 @@ impl SamplingStamp {
             },
             variance_threshold: settings.variance_threshold(),
             indirect_clamp: settings.indirect_clamp().unwrap_or(0.0),
+            exposure_scale: settings.exposure_scale(),
             max_depth: settings.max_depth(),
             light_samples: settings.light_samples(),
             light_samples_indirect: settings.light_samples_indirect(),
@@ -127,6 +131,7 @@ impl SamplingStamp {
             ),
             ("crust:varianceThreshold", Float(self.variance_threshold)),
             ("crust:indirectClamp", Float(self.indirect_clamp)),
+            ("crust:exposureScale", Float(self.exposure_scale)),
             ("crust:maxDepth", int(self.max_depth)),
             ("crust:lightSamples", int(self.light_samples)),
             (
@@ -223,6 +228,36 @@ mod tests {
         };
         let s = SamplingStamp::new(&settings(), &rays, None, None);
         assert_eq!(s.spp_taken, (32, 256));
+    }
+
+    /// The camera's exposure scale is recorded right after the clamp: the
+    /// default render's 1, an exposed one's own.
+    #[test]
+    fn the_exposure_scale_is_recorded() {
+        let at = |scale: f32| {
+            let s = SamplingStamp::new(
+                &settings().with_exposure_scale(scale),
+                &RayStats::default(),
+                None,
+                None,
+            );
+            s.attributes()
+        };
+        let attrs = at(1.0);
+        let names: Vec<&str> = attrs.iter().map(|(n, _)| *n).collect();
+        let clamp = names.iter().position(|n| *n == "crust:indirectClamp");
+        assert_eq!(
+            names.iter().position(|n| *n == "crust:exposureScale"),
+            clamp.map(|i| i + 1)
+        );
+        assert_eq!(
+            get(&attrs, "crust:exposureScale"),
+            Some(&StampValue::Float(1.0))
+        );
+        assert_eq!(
+            get(&at(4.0), "crust:exposureScale"),
+            Some(&StampValue::Float(4.0))
+        );
     }
 
     #[test]

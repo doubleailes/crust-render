@@ -549,6 +549,18 @@ pub fn comparability(a: &Stamp, b: &Stamp) -> Comparability {
             show(cb)
         ));
     }
+    // A file written before the scale was recorded was written at 1.
+    let exposure = |s: &Stamp| match s.get("crust:exposureScale") {
+        Some(StampValue::Float(v)) => *v,
+        _ => 1.0,
+    };
+    let (ea, eb) = (exposure(a), exposure(b));
+    if ea != eb {
+        notes.push(format!(
+            "crust:exposureScale differs ({ea} vs {eb}): every radiance channel differs by \
+             their ratio; render both through the same camera exposure"
+        ));
+    }
     for name in COMPARED {
         let (va, vb) = (a.get(name), b.get(name));
         if va != vb {
@@ -777,6 +789,23 @@ mod tests {
                 c.notes
             );
         }
+
+        // A different camera exposure warns; a stamp written before the
+        // scale was recorded reads 1 and compares with one that records 1.
+        let one_stop = with(s16(), "crust:exposureScale", Float(2.0));
+        let c = comparability(&with(s16(), "crust:exposureScale", Float(1.0)), &one_stop);
+        assert_eq!(c.status, ComparabilityStatus::Warn);
+        assert!(
+            c.notes.iter().any(|n| n.contains("exposureScale")),
+            "{:?}",
+            c.notes
+        );
+        let older = comparability(&base, &with(s16(), "crust:exposureScale", Float(1.0)));
+        assert!(
+            !older.notes.iter().any(|n| n.contains("exposureScale")),
+            "{:?}",
+            older.notes
+        );
 
         // The tracer's own rule, not `spp > minSpp`: with the threshold off,
         // a 1024 spp render takes its whole budget and nothing warns; at a

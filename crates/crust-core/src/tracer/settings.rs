@@ -187,6 +187,10 @@ pub struct RenderSettings {
     // Off, every ray is traced at shutter open and moving geometry renders
     // sharp at its authored position; its motion stays in the scene.
     pub(super) motion_blur: bool,
+    // The render camera's linear exposure scale (see `with_exposure_scale`;
+    // the camera's `exposure` attributes). Finite and positive; 1 leaves the
+    // film untouched.
+    pub(super) exposure_scale: f32,
 }
 /// The settings a stage that authors none renders with: 640×360 at 128 spp,
 /// paths up to 32 vertices, adaptive sampling stopping no earlier than 32
@@ -215,6 +219,7 @@ impl Default for RenderSettings {
             light_samples: DEFAULT_LIGHT_SAMPLES,
             light_samples_indirect: DEFAULT_LIGHT_SAMPLES,
             motion_blur: true,
+            exposure_scale: 1.0,
         }
     }
 }
@@ -384,6 +389,25 @@ impl RenderSettings {
     /// is off.
     pub fn indirect_clamp(&self) -> Option<f32> {
         self.indirect_clamp
+    }
+
+    /// Sets the render camera's linear exposure scale, by which the resolved
+    /// film's radiance is multiplied (USD's
+    /// `UsdGeomCamera::ComputeLinearExposureScale`). A scale that is not
+    /// finite or not positive keeps 1, the scale that changes nothing.
+    pub fn with_exposure_scale(mut self, scale: f32) -> Self {
+        self.exposure_scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        self
+    }
+
+    /// The render camera's linear exposure scale: finite and positive, 1 when
+    /// no exposure applies.
+    pub fn exposure_scale(&self) -> f32 {
+        self.exposure_scale
     }
 
     /// How much less converged a still-sampling cross neighbour (up, down,

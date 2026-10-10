@@ -1689,6 +1689,9 @@ pub fn effective_settings(s: &RenderSettings, flags: &SceneFlags) -> Vec<Setting
             Some("--indirect-clamp"),
             Some("crust:indirectClamp"),
         ),
+        // From the render camera's exposure attributes: no flag, and no
+        // `crust:*` attribute changes it.
+        row("exposure_scale", s.exposure_scale().to_string(), None, None),
         row(
             "pixel_filter",
             s.pixel_filter().name().into(),

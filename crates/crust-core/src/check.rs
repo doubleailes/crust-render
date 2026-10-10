@@ -116,7 +116,13 @@ fn to_text(r: &CheckReport) -> String {
             .into_iter()
             .flatten()
             .collect();
-        let _ = writeln!(o, "  {:width$}  {}  ({})", e.name, e.value, by.join(", "));
+        // A setting nothing on the command line or the stage's `crust:*`
+        // attributes changes (the camera's exposure scale) names no source.
+        if by.is_empty() {
+            let _ = writeln!(o, "  {:width$}  {}", e.name, e.value);
+        } else {
+            let _ = writeln!(o, "  {:width$}  {}  ({})", e.name, e.value, by.join(", "));
+        }
     }
     let _ = writeln!(o);
 

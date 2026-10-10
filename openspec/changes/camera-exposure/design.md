@@ -18,6 +18,13 @@ See `proposal.md` for why. What shapes the approach:
 - **The film's `ChannelKind::Color` is not "radiance".** Albedo and the diffuse
   filter are colour-managed colour channels but reflectances, which an exposure must
   not touch.
+- **Typhoon (hdEmbree, OpenUSD `typhoon/main` `70c45e8`) does the same thing.** It takes
+  `HdCamera::GetLinearExposureScale()`, multiplies the Color AOV's RGB (not alpha) as
+  each sample is written (`renderer/aov/aovOutput.cpp`), and feeds its adaptive
+  sampling the unexposed colour (`renderer/renderer.cpp`), so the samples do not
+  depend on the exposure. It has no light path expression or variance AOVs. It gates
+  the whole thing behind the Hydra render setting `enableExposureCompensation`,
+  default on.
 - **USD's formula is single precision.** C++ computes
   `(time × iso × powf(2, exposure) × responsivity) / (100 × fStop × fStop)` in
   `float`.
@@ -90,12 +97,19 @@ procedural fallback scene keeps the default of 1. A non-finite or non-positive r
 raises `camera.invalid_exposure` (`Refused`, logged each time; there is one render
 camera) and stores 1.
 
-**D6. Recording and comparing.**
+**D6. `enableExposureCompensation`, as Hydra reads it.** The import reads the render
+setting off the `RenderSettings` prim. `crust:enableExposureCompensation` wins over
+the bare Hydra name, exactly as `domeLightCameraVisibility` is read. Default `true`;
+`false` stores 1. Typhoon multiplies per sample before accumulating and crust after
+resolving. Accumulation is linear, so the two give the same image, and crust's
+resolve-time placement also covers the LPE and variance planes Typhoon does not have.
+
+**D7. Recording and comparing.**
 
 - `SamplingStamp` gains `exposure_scale`, written as `crust:exposureScale` (float)
   after `crust:indirectClamp`.
-- `crust check` lists `exposure_scale` with flag `null` and attribute `exposure`, the
-  authoring entry point.
+- `crust check` lists `exposure_scale` with flag and attribute `null`. It comes from
+  the camera's exposure attributes, and no `crust:*` attribute or flag sets it.
 - `compare::comparability` adds a `warn` note when both stamps carry the key and the
   values differ. A missing key reads 1, so files written before this change compare
   as before.

@@ -88,6 +88,12 @@ impl Buffer {
         }
     }
 
+    /// Multiplies every pixel the buffer holds by `factor` (the render
+    /// camera's exposure scale).
+    pub(crate) fn scale(&mut self, factor: f32) {
+        self.data.iter_mut().for_each(|c| *c *= factor);
+    }
+
     /// Retrieves the color of a specific pixel in the buffer.
     ///
     /// # Parameters

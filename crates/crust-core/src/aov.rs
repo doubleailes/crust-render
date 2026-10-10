@@ -227,6 +227,29 @@ impl AovSource {
         }
     }
 
+    /// The power of the render camera's exposure scale this source's values
+    /// are multiplied by: 1 for radiance (the beauty and light path
+    /// expressions), 2 for the variance of a luminance mean, 0 for everything
+    /// that is not light — geometry, reflectances, counts.
+    pub fn exposure_power(self) -> i32 {
+        match self {
+            AovSource::Color | AovSource::Lpe => 1,
+            AovSource::Variance => 2,
+            AovSource::Alpha
+            | AovSource::Depth
+            | AovSource::Distance
+            | AovSource::P
+            | AovSource::Peye
+            | AovSource::Normal
+            | AovSource::Neye
+            | AovSource::St
+            | AovSource::SampleCount
+            | AovSource::Albedo
+            | AovSource::DiffuseFilter
+            | AovSource::MotionVector => 0,
+        }
+    }
+
     pub fn channel_kind(self) -> ChannelKind {
         match self {
             AovSource::Color | AovSource::Lpe | AovSource::Albedo | AovSource::DiffuseFilter => {
@@ -459,6 +482,17 @@ pub(crate) struct SlotKey {
 impl SlotKey {
     pub(crate) fn clear(&self) -> f32 {
         f32::from_bits(self.clear_bits)
+    }
+
+    /// The power of the exposure scale this slot's values take: an
+    /// expression's variance slot holds the variance of a luminance mean (2),
+    /// every other slot its source's.
+    fn exposure_power(&self) -> i32 {
+        if self.variance {
+            2
+        } else {
+            self.source.exposure_power()
+        }
     }
 
     /// Components per pixel in the film: one for a variance slot, else the
@@ -1268,6 +1302,25 @@ impl AovFilm {
 }
 
 impl AovFilm {
+    /// Multiplies every plane by the power of `scale` its slot takes
+    /// ([`AovSource::exposure_power`]): radiance by `scale`, variances by
+    /// its square, the rest not at all. Every value a channel is read from is
+    /// linear in a slot's `values`, so scaling them scales the channel and
+    /// leaves the filter weights and hit counts alone.
+    pub(crate) fn apply_exposure(&mut self, scale: f32) {
+        for slot in &mut self.slots {
+            let power = slot.key.exposure_power();
+            if power > 0 {
+                let factor = scale.powi(power);
+                slot.planes.values.iter_mut().for_each(|v| *v *= factor);
+            }
+        }
+        if let Some(variance) = &mut self.variance {
+            let factor = scale.powi(AovSource::Variance.exposure_power());
+            variance.iter_mut().for_each(|v| *v *= factor);
+        }
+    }
+
     /// The film of a render that asks for no AOV: no planes at all.
     pub fn empty(width: usize, height: usize) -> Self {
         AovFilm::new(&AovLayout::default(), PixelRect::full(width, height))

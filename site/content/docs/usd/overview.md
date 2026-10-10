@@ -101,6 +101,7 @@ the `crust:` attribute wins:
 | Crust attribute | also read |
 |-----------------|-----------|
 | `crust:domeLightCameraVisibility` | `domeLightCameraVisibility` (Hydra) |
+| `crust:enableExposureCompensation` | `enableExposureCompensation` (Hydra) |
 | `crust:light:cameraVisible` | `primvars:ri:attributes:visibility:camera` (RenderMan) |
 
 ## All attributes
@@ -123,6 +124,7 @@ the `crust:` attribute wins:
 | [`crust:guidingProb`](@/docs/usd/render-settings.md#crust-guidingprob) | `float` | RenderSettings | 0.5 |
 | [`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel) | `int` | RenderSettings | 0 |
 | [`crust:domeLightCameraVisibility`](@/docs/usd/render-settings.md#crust-domelightcameravisibility) | `bool` | RenderSettings | true |
+| [`crust:enableExposureCompensation`](@/docs/usd/render-settings.md#crust-enableexposurecompensation) | `bool` | RenderSettings | true |
 | [`crust:rayMask`](@/docs/usd/geometry.md#crust-raymask) | `int` | geometry, lights | 7 (geometry) |
 | [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) | `float3` | Mesh, Sphere | none |
 | [`crust:light:cameraVisible`](@/docs/usd/lights.md#crust-light-cameravisible) | `bool` | lights | false (true for domes) |

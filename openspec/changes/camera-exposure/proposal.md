@@ -19,6 +19,10 @@ Intel's New Sponza sets 2 to 4.5 stops on every one of its six cameras.
   exposure changes brightness and nothing else.
 - A scale that is not finite or not positive is refused with a coded warning and
   reads 1.
+- A stage can turn the exposure off with the Hydra render setting
+  `enableExposureCompensation = false` on its `RenderSettings` prim (or
+  `crust:enableExposureCompensation`), as Typhoon (hdEmbree) and other Hydra
+  renderers honour it.
 - EXRs record the scale (`crust:exposureScale`), `crust check` reports it among
   the effective settings, and `crust diff` warns when two files differ in it.
 - A camera with no exposure authored renders bit-identical to today.
