@@ -114,6 +114,34 @@ shape.
 *Alternative:* keep the code listed but never raised. The `scene-warnings`
 spec forbids a reference that lists a code crust cannot raise.
 
+### D7. A tile whose alpha is opaque is cached as RGB (review)
+
+A file *declares* alpha; an OIIO `.tx` of an RGBA image that never cuts declares
+it all the same, and its tiles cost the cache a third more bytes than the RGB
+they read as. Knowing a whole file is opaque would mean reading every tile at
+open, so `TiledFile::read_tile` decides per tile at page-in
+(`TileData::without_opaque_alpha`), and the alpha sampler asks each tile it
+reads. A tile without alpha reads 1.0, which is what an opaque byte or `half`
+decodes to, so streamed ↔ preloaded bit-identity holds. The RGB sampler never
+asks.
+
+### D8. A `.tx` written before alpha is stale (review)
+
+A crust `.tx` converted from an RGBA source before this change holds RGB and is
+newer than its source, so `--auto-tx` would never reconvert it and its cutout
+would read opaque, with no warning now that `preview.texture_alpha` is gone.
+Every crust `.tx` now records `crust:txversion=2` beside `crust:mipspace`, and
+`tx_staleness` calls a crust `.tx` without it stale (`PredatesAlpha`) when its
+source's header declares alpha: two header reads, no pixel. `--auto-tx`
+reconverts it; without the flag it is refused and the texture preloads with
+`texture.stream_fallback`, as a wrong-mip-space `.tx` is, because it would render
+the cutout opaque rather than merely old. A declared alpha that is opaque
+everywhere is reconverted once, needlessly but harmlessly. An OIIO `.tx` (no
+`crust:mipspace`) is never judged by it.
+
+*Alternative:* compare the source's alpha content with the `.tx`. That decodes
+the source, which is what a `.tx` exists to avoid.
+
 ## Risks / Trade-offs
 
 - **A MaterialX `color4` / `vector4` image now reads real alpha.** That is
@@ -125,10 +153,13 @@ spec forbids a reference that lists a code crust cannot raise.
 
 ## Measurements
 
-Callgrind, one thread, `-s 2`, against the base binary. Streamed scenes are a
-copy of the sample with `--auto-tx`'s RGB `.tx` beside each texture.
+Instruction counts — callgrind, one thread, `-s 2`, against the base binary —
+not timings. Every delta is below a tenth of a percent of a render, far under
+the ~15% run-to-run spread wall clock shows on this machine, so an interleaved
+`bench_ab.sh` run could not resolve it (CLAUDE.md, "Measuring a change"). Streamed
+scenes are a copy of the sample with `--auto-tx`'s RGB `.tx` beside each texture.
 
-| scene | backing | whole render | `eval` (self) | |
+| scene | backing | whole-render instructions | `eval` instructions (self) | |
 | --- | --- | --- | --- | --- |
 | `materialx_basic` | preloaded | +0.005% | 137,515,376, unchanged | `reduce_half` 2.12 M → 2.16 M |
 | `materialx_basic` | streamed | +0.047% | +0.82% (2.7 instr a lookup) | `texel::<false>` unchanged |

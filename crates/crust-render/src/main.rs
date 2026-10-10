@@ -276,8 +276,9 @@ struct SceneArgs {
     #[arg(long, value_parser = parse_clamp)]
     indirect_clamp: Option<f32>,
     /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
-    /// (same path, extension `.tx`) on first use, when the `.tx` is missing or
-    /// older than its source. A `.tx` beside a texture is always streamed when
+    /// (same path, extension `.tx`) on first use, when the `.tx` is missing,
+    /// older than its source, or written by an older crust without the alpha
+    /// its source has. A `.tx` beside a texture is always streamed when
     /// present; this only creates the missing ones.
     #[arg(long, default_value_t = false)]
     auto_tx: bool,

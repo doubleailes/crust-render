@@ -64,7 +64,9 @@ A UV texture with a `.tx` beside it SHALL stream through a bounded tile cache
 textures within the preload cap, streamed and preloaded renders SHALL be
 bit-identical, alpha included: a `.tx` converted from a source with alpha SHALL
 carry it. A `.tx` whose recorded colour space differs from the binding SHALL be
-refused and the texture preloaded.
+refused and the texture preloaded. A `.tx` an older crust wrote without alpha
+(no `crust:txversion`), beside a source that declares alpha, SHALL be
+reconverted under `--auto-tx`, and otherwise refused and the texture preloaded.
 
 #### Scenario: A stray .tx
 
@@ -76,6 +78,14 @@ refused and the texture preloaded.
 - **WHEN** an 8-bit RGBA texture is converted with `--auto-tx` and sampled
   streamed and preloaded at any footprint
 - **THEN** the two lookups return the same four values, bit for bit
+
+#### Scenario: A .tx converted before alpha
+
+- **WHEN** an RGBA texture's `.tx` was written by a crust that dropped alpha, and
+  is newer than the texture
+- **THEN** without `--auto-tx` the texture is preloaded and its alpha read, with a
+  warning naming the fix, and with `--auto-tx` the `.tx` is reconverted and
+  streams the alpha
 
 ### Requirement: Ptex
 

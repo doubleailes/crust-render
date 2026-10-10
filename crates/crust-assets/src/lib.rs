@@ -248,8 +248,9 @@ pub struct FileAssets {
     /// `load_texture`: it decides the backend of every texture in the render,
     /// and reading the environment per call would let it change mid-import.
     streaming: bool,
-    /// `--auto-tx`: convert a texture whose `.tx` is missing or older than
-    /// its source before looking for it. See [`FileAssets::with_auto_tx`].
+    /// `--auto-tx`: convert a texture whose `.tx` is stale
+    /// ([`tiled::tx_staleness`]) before looking for it. See
+    /// [`FileAssets::with_auto_tx`].
     auto_tx: bool,
     /// Conversions `--auto-tx` performed and failed, and the time they took,
     /// for the one summary line the CLI prints (see [`FileAssets::tx_report`]).
@@ -435,9 +436,11 @@ impl FileAssets {
     }
 
     /// Converts textures on first use: before a UV texture is opened, every
-    /// tile whose `.tx` sibling is missing or older than its source is
-    /// converted beside it (`foo.1001.exr` → `foo.1001.tx`), the way Arnold's
-    /// `autotx` does. The next render finds them current and converts nothing.
+    /// tile whose `.tx` sibling is missing, older than its source, or written
+    /// by an older crust without the alpha its source has
+    /// ([`tiled::tx_staleness`]) is converted beside it
+    /// (`foo.1001.exr` → `foo.1001.tx`), the way Arnold's `autotx` does. The
+    /// next render finds them current and converts nothing.
     ///
     /// The conversion is [`tiled::make_tx_atomic`] with
     /// [`tiled::TxFormat::FromSampleType`]: float sources keep `half` tiles,
@@ -474,7 +477,11 @@ impl FileAssets {
     /// converted UDIM set would stream with black holes where the missing
     /// tiles are. Such a set preloads instead. Without `--auto-tx` a `.tx`
     /// older than its source is still used — it is what was converted — but
-    /// warned about, since the image then shows the old texture.
+    /// warned about, since the image then shows the old texture. A `.tx` an
+    /// older crust wrote without the alpha its source declares
+    /// ([`tiled::TxStaleness::PredatesAlpha`]) is not: its cutouts would be
+    /// opaque, which is no texture anybody converted, so the set preloads,
+    /// with a warning, as a `.tx` with the wrong mip space does.
     fn prepare_tx(&self, path: &Path, space: ColorSpace) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         let is_tx = path
@@ -488,19 +495,18 @@ impl FileAssets {
         if sources.is_empty() {
             return false;
         }
-        let stale: Vec<_> = sources
+        let staleness: Vec<_> = sources
             .iter()
-            .filter(|s| tiled::tx_is_stale(s, &tiled::tx_sibling(s)))
-            .cloned()
+            .filter_map(|s| tiled::tx_staleness(s, &tiled::tx_sibling(s)).map(|why| (s, why)))
             .collect();
+        let stale: Vec<_> = staleness.iter().map(|(s, _)| (*s).clone()).collect();
         if stale.is_empty() {
             return true;
         }
         if !self.auto_tx {
-            let missing = stale
-                .iter()
-                .filter(|s| !tiled::tx_sibling(s).exists())
-                .count();
+            let count =
+                |want: tiled::TxStaleness| staleness.iter().filter(|(_, why)| *why == want).count();
+            let missing = count(tiled::TxStaleness::Missing);
             if missing > 0 {
                 if missing < sources.len() {
                     debug!(
@@ -510,6 +516,17 @@ impl FileAssets {
                         sources.len()
                     );
                 }
+                return false;
+            }
+            let predates_alpha = count(tiled::TxStaleness::PredatesAlpha);
+            if predates_alpha > 0 {
+                warning!(
+                    TextureStreamFallback,
+                    "{}: {predates_alpha} .tx tile(s) written by an older crust without \
+                     the alpha their source has — preloading the texture instead; rerun \
+                     with --auto-tx to reconvert",
+                    path.display()
+                );
                 return false;
             }
             warning!(

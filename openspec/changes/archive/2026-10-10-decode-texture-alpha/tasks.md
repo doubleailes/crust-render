@@ -43,3 +43,14 @@
 - [x] 3.4 The CI set: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast`.
+
+## 4. Review follow-ups (Qodo)
+
+- [x] 4.1 A tile whose alpha is opaque throughout is cached as RGB (D7).
+      Verify: `a_tile_whose_alpha_is_opaque_is_cached_as_rgb`,
+      `a_cutout_with_opaque_tiles_agrees_bit_for_bit_with_preloaded`.
+- [x] 4.2 `crust:txversion=2` on every crust `.tx`; a versionless crust `.tx`
+      beside a source declaring alpha is stale (D8). Verify:
+      `a_tx_written_before_alpha_is_stale_for_a_source_that_has_one`,
+      `a_tx_from_before_alpha_is_refused_or_reconverted`.
+- [x] 4.3 Measurements labelled as instruction counts.

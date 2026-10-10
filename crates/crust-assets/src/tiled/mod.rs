@@ -46,9 +46,11 @@ mod stream;
 mod write;
 
 pub use cache::{StripedCounter, TileCache, TileData};
-pub(crate) use exr_read::exr_mip_space;
+pub(crate) use exr_read::{exr_declares_alpha, exr_mip_space};
 pub use exr_write::{write_tx_exr, write_tx_exr_rgba};
-pub use make::{MadeTx, TxFormat, is_ptex, make_tx, make_tx_atomic, tx_is_stale, tx_sibling};
+pub use make::{
+    MadeTx, TxFormat, TxStaleness, is_ptex, make_tx, make_tx_atomic, tx_sibling, tx_staleness,
+};
 pub use stream::StreamingTexture;
 pub(crate) use write::space_name;
 pub use write::{TILE_EDGE, write_tx, write_tx_rgba};
@@ -58,6 +60,57 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
+
+/// The version of crust's `.tx` conversion, recorded in every `.tx` crust
+/// writes beside `crust:mipspace` (`crust:txversion=2`), so a file an older
+/// conversion wrote can be told apart from a current one.
+///
+/// - **1** (no `crust:txversion`): before texture alpha was carried. A source
+///   with alpha was converted to RGB, so its cutout reads opaque.
+/// - **2**: a source's alpha is written when it cuts (`decode-texture-alpha`).
+///
+/// Only a crust-written file — one with a `crust:mipspace` marker — has a
+/// version; an OIIO `maketx` file is whatever OIIO made of its source.
+pub(crate) const TX_VERSION: u32 = 2;
+
+/// The key [`TX_VERSION`] is recorded under, in `ImageDescription` (TIFF) or
+/// as a header attribute (EXR).
+pub(crate) const TX_VERSION_KEY: &str = "crust:txversion";
+
+/// The conversion version a crust-written `.tx` records ([`TX_VERSION`]),
+/// read from its header alone: `Some(1)` for a crust file that predates the
+/// marker, `None` for a file crust did not write (no `crust:mipspace`) or
+/// cannot read.
+pub(crate) fn crust_tx_version(path: &Path) -> Option<u32> {
+    let mut magic = [0u8; 4];
+    BufReader::new(File::open(path).ok()?)
+        .read_exact(&mut magic)
+        .ok()?;
+    let (mip_space, version) = match magic {
+        [b'I', b'I', 42, 0] | [b'M', b'M', 0, 42] => {
+            let mut dec =
+                tiff::decoder::Decoder::new(BufReader::new(File::open(path).ok()?)).ok()?;
+            let description = dec
+                .get_tag_ascii_string(tiff::tags::Tag::ImageDescription)
+                .ok()?;
+            let field = |key: &str| {
+                description
+                    .split_whitespace()
+                    .find_map(|f| f.strip_prefix(key)?.strip_prefix('=').map(str::to_owned))
+            };
+            (field("crust:mipspace"), field(TX_VERSION_KEY))
+        }
+        [0x76, 0x2f, 0x31, 0x01] => {
+            let mut found =
+                exr_read::exr_text_attributes(path, &[exr_read::MIP_SPACE_KEY, TX_VERSION_KEY]);
+            let version = found.pop().flatten();
+            (found.pop().flatten(), version)
+        }
+        _ => return None,
+    };
+    mip_space?;
+    Some(version.and_then(|v| v.parse().ok()).unwrap_or(1))
+}
 
 /// One mip level's geometry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,8 +322,17 @@ impl TiledFile {
     /// (`* 4` with alpha) — **not** `tile_edge²·3`. Edge tiles are stored
     /// padded (TIFF) or already clipped (EXR) and come back cut either way, so
     /// the row stride is the tile's own width.
+    ///
+    /// A tile whose alpha is opaque at every texel comes back RGB
+    /// ([`TileData::without_opaque_alpha`]), so the cache does not hold a
+    /// fourth channel that reads 1.0: a file only declares alpha, and an OIIO
+    /// `.tx` of an image whose alpha never cuts declares it all the same.
+    /// Whether a file's alpha is opaque throughout cannot be known at open
+    /// without reading every tile, so it is decided tile by tile here.
     pub fn read_tile(&self, r: &mut TileReader, level: usize, index: u32) -> io::Result<TileData> {
-        self.inner.read_tile(r, level, index)
+        self.inner
+            .read_tile(r, level, index)
+            .map(TileData::without_opaque_alpha)
     }
 }
 

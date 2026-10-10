@@ -331,19 +331,42 @@ pub(crate) const MIP_SPACE_KEY: &str = "crust:mipspace";
 /// streaming path does (see `resolve_auto_space`). `None` when the file has
 /// no marker or its header cannot be read; the pixel read then reports why.
 pub(crate) fn exr_mip_space(path: &Path) -> Option<String> {
-    let mut file = BufReader::new(File::open(path).ok()?);
-    let meta = MetaData::read_from_buffered(&mut file, false).ok()?;
-    let header = meta.headers.first()?;
-    header
-        .own_attributes
-        .other
-        .iter()
-        .chain(header.shared_attributes.other.iter())
-        .find(|(k, _)| *k == MIP_SPACE_KEY)
-        .and_then(|(_, v)| match v {
-            AttributeValue::Text(t) => Some(t.to_string()),
-            _ => None,
+    exr_text_attributes(path, &[MIP_SPACE_KEY]).pop().flatten()
+}
+
+/// The text attributes `keys` name, read from an EXR's header alone, in the
+/// order asked — each `None` when absent, and all of them when the header
+/// cannot be read.
+pub(crate) fn exr_text_attributes(path: &Path, keys: &[&str]) -> Vec<Option<String>> {
+    let header = File::open(path).ok().and_then(|f| {
+        let meta = MetaData::read_from_buffered(&mut BufReader::new(f), false).ok()?;
+        meta.headers.into_iter().next()
+    });
+    keys.iter()
+        .map(|key| {
+            let header = header.as_ref()?;
+            header
+                .own_attributes
+                .other
+                .iter()
+                .chain(header.shared_attributes.other.iter())
+                .find(|(k, _)| *k == *key)
+                .and_then(|(_, v)| match v {
+                    AttributeValue::Text(t) => Some(t.to_string()),
+                    _ => None,
+                })
         })
+        .collect()
+}
+
+/// Whether an EXR's header lists a channel whose base name is `A` — the one
+/// [`resolve_alpha`] and the preload reader read as alpha. Header only.
+pub(crate) fn exr_declares_alpha(path: &Path) -> bool {
+    File::open(path)
+        .ok()
+        .and_then(|f| MetaData::read_from_buffered(&mut BufReader::new(f), false).ok())
+        .and_then(|meta| meta.headers.into_iter().next())
+        .is_some_and(|h| resolve_alpha(&h).is_some())
 }
 
 /// Which entries of the channel list carry R, G and B.
