@@ -658,8 +658,11 @@ same point.
   resolves the camera. The import then sets `RenderSettings::exposure_scale` unless the
   `RenderSettings` prim says `enableExposureCompensation = false` (or
   `crust:enableExposureCompensation`, which wins, read as `domeLightCameraVisibility`
-  is), as Hydra renderers and Typhoon (hdEmbree) honour it. A scale that is not finite
-  or not positive is `camera.invalid_exposure` and stores 1. The scale reaches the
+  is), as Hydra renderers and Typhoon (hdEmbree) honour it. The scale is checked once,
+  for the camera rendered through and only when its exposure applies: a fallback
+  candidate the traversal built and dropped, or an exposure turned off, raises nothing
+  (`only_the_render_camera_is_checked`). One that is not finite or not positive is
+  `camera.invalid_exposure` and stores 1. The scale reaches the
   image only after the film is resolved; the `aovs` design record says which outputs
   take it.
 - **`disableMotionBlur` / `instantaneousShutter`** (`RenderSettingsBase`, the second the

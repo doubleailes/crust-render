@@ -124,3 +124,60 @@ fn the_crust_alias_wins() {
     .expect("import");
     assert_eq!(scene.settings.exposure_scale(), 4.0);
 }
+
+/// The scale is checked for the camera rendered through, once: a camera whose
+/// exposure cannot apply, built as the fallback while the named one is still to
+/// come, raises no warning when the named camera is the one used. Both orders,
+/// so that whichever order the traversal meets cameras in, one of them builds
+/// the broken camera first.
+#[test]
+fn only_the_render_camera_is_checked() {
+    let dir = std::env::temp_dir().join("crust_camera_exposure_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let broken = "def Camera \"broken\"\n{\n    float exposure:fStop = 0\n}\n\n";
+    let shot = "def Camera \"shot\"\n{\n    float exposure = 2\n}\n\n";
+    for (name, cameras) in [
+        ("broken_first", [broken, shot]),
+        ("shot_first", [shot, broken]),
+    ] {
+        let path = dir.join(format!("two_cameras_{name}.usda"));
+        let text = format!(
+            "#usda 1.0\n(\n    renderSettingsPrimPath = \"/Render/settings\"\n)\n\n{}{}\
+             def Scope \"Render\"\n{{\n    def RenderSettings \"settings\"\n    {{\n        \
+             rel camera = </shot>\n    }}\n}}\n",
+            cameras[0], cameras[1]
+        );
+        std::fs::write(&path, text).expect("write stage");
+        let scene = Scene::from_usd(&path).expect("import");
+        assert_eq!(scene.settings.exposure_scale(), 4.0, "{name}");
+        assert!(
+            !scene
+                .warnings
+                .iter()
+                .any(|w| w.code == WarningCode::CameraInvalidExposure),
+            "{name}: {:#?}",
+            scene.warnings
+        );
+    }
+}
+
+/// An exposure turned off is not checked: nothing to warn about.
+#[test]
+fn a_disabled_exposure_is_not_checked() {
+    let render = render_settings("        bool enableExposureCompensation = false");
+    let scene = Scene::from_usd(&stage(
+        "disabled_broken",
+        "    float exposure:fStop = 0",
+        &render,
+    ))
+    .expect("import");
+    assert_eq!(scene.settings.exposure_scale(), 1.0);
+    assert!(
+        !scene
+            .warnings
+            .iter()
+            .any(|w| w.code == WarningCode::CameraInvalidExposure),
+        "{:#?}",
+        scene.warnings
+    );
+}

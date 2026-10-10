@@ -1015,11 +1015,23 @@ pub(crate) fn load_scene(
         },
         camera_path,
     ) = resolve_camera(&mut ctx)?;
-    // `enableExposureCompensation = false` renders at 1, as Hydra does.
-    let settings = if exposure_compensation {
+    // `enableExposureCompensation = false` renders at 1, as Hydra does. The
+    // scale is checked here, once, for the camera rendered through: a
+    // candidate the traversal built and dropped, or an exposure turned off,
+    // warns about nothing.
+    let settings = if !exposure_compensation {
+        debug!("enableExposureCompensation = false: the camera's exposure is not applied");
+        settings
+    } else if exposure_scale.is_finite() && exposure_scale > 0.0 {
         settings.with_exposure_scale(exposure_scale)
     } else {
-        debug!("enableExposureCompensation = false: the camera's exposure is not applied");
+        let camera = camera_path.as_deref().unwrap_or("the render camera");
+        warning!(
+            CameraInvalidExposure,
+            at = camera,
+            "{camera}: the exposure attributes give a scale of {exposure_scale} — the image is \
+             not scaled"
+        );
         settings
     };
 

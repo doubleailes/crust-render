@@ -15,6 +15,11 @@ use crate::pdf::PdfSolidAngle;
 /// unbiased estimator.
 pub const DEFAULT_INDIRECT_CLAMP: f32 = 10.0;
 
+/// The camera exposure scale a render gets when the camera authors no
+/// exposure, or one that cannot apply — see
+/// [`RenderSettings::with_exposure_scale`]. 1 leaves the film as resolved.
+const DEFAULT_EXPOSURE_SCALE: f32 = 1.0;
+
 /// The light samples per vertex a render takes unless the stage
 /// (`crust:lightSamples` / `crust:lightSamplesIndirect`) or the host
 /// (`--light-samples` / `--light-samples-indirect`) says otherwise — see
@@ -219,7 +224,7 @@ impl Default for RenderSettings {
             light_samples: DEFAULT_LIGHT_SAMPLES,
             light_samples_indirect: DEFAULT_LIGHT_SAMPLES,
             motion_blur: true,
-            exposure_scale: 1.0,
+            exposure_scale: DEFAULT_EXPOSURE_SCALE,
         }
     }
 }
@@ -399,7 +404,7 @@ impl RenderSettings {
         self.exposure_scale = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
-            1.0
+            DEFAULT_EXPOSURE_SCALE
         };
         self
     }

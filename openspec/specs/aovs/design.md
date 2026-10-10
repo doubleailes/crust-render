@@ -1200,7 +1200,9 @@ estimate it writes. `AovSource::exposure_power` says what each source takes: 1 f
 the rest. It is an exhaustive match, so a new source has to choose. A slot with the
 `crust:aov:variance` modifier takes 2 whatever its source (`SlotKey::exposure_power`),
 and so does the diagnostics' `var_map`, which `crust diagnostic` divides by the
-luminance squared. `ChannelKind::Color` is not the test, because albedo and the
+luminance squared. The clamp counter's removed luminance takes the scale, so the
+diagnostic's clamp share (removed over the beauty) is the same at any exposure
+(`the_clamp_counter_scales_with_the_exposure`). `ChannelKind::Color` is not the test, because albedo and the
 diffuse filter are colour channels but reflectances.
 
 Applying it after the resolve leaves the integrator, the indirect clamp, adaptive
