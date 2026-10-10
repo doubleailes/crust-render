@@ -64,6 +64,19 @@ fn open_stage(path: &Path) -> Result<Stage, String> {
         .map_err(|e| format!("cannot open {}: {e}", path.display()))
 }
 
+/// Replaces the file at `path` with `bytes` by writing a sibling and renaming
+/// it over `path`, as openusd's `Layer::save` does. A reader that still maps
+/// the old file keeps the bytes it mapped: the rename gives `path` a new file,
+/// where writing in place would change the mapped one under it.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let staged = path.with_file_name(format!(".{name}.crust-restore"));
+    std::fs::write(&staged, bytes)?;
+    std::fs::rename(&staged, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+    })
+}
+
 /// The sublayers `stage`'s root layer authors, as written.
 fn authored_sublayers(stage: &Stage) -> Vec<String> {
     let root = stage.root_layer();
@@ -224,8 +237,7 @@ impl Open {
 
     /// Writes `bytes` as the layer and reopens the authoring stage on it.
     fn restore(&mut self, bytes: &[u8]) -> Result<(), String> {
-        std::fs::write(&self.output, bytes)
-            .map_err(|e| format!("{}: {e}", self.output.display()))?;
+        replace_file(&self.output, bytes).map_err(|e| format!("{}: {e}", self.output.display()))?;
         self.stage = open_stage(&self.output)?;
         Ok(())
     }
@@ -554,6 +566,40 @@ impl Session {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// `replace_file` gives the path a new file rather than rewriting the one
+    /// there, so an import that still maps the old layer keeps the bytes it
+    /// mapped; the staging sibling does not survive.
+    #[cfg(unix)]
+    #[test]
+    fn restore_replaces_the_layer_file() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join("crust_mcp_replace_file");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let layer = dir.join("scene.usda");
+        let old: &[u8] = b"#usda 1.0\n";
+        std::fs::write(&layer, old).expect("write the layer");
+        let before = std::fs::metadata(&layer).expect("stat").ino();
+        let held = std::fs::File::open(&layer).expect("open the old layer");
+
+        replace_file(&layer, b"#usda 1.0\n# restored\n").expect("replace");
+
+        assert_eq!(
+            std::fs::read(&layer).expect("read"),
+            b"#usda 1.0\n# restored\n"
+        );
+        assert_ne!(std::fs::metadata(&layer).expect("stat").ino(), before);
+        assert_eq!(
+            held.metadata().expect("stat the held file").len(),
+            old.len() as u64
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".crust-restore"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
 
     thread_local! {
         /// How many commands this thread has run: on the session thread, the

@@ -4,6 +4,7 @@
 use crate::warning;
 use glam::Mat4 as GMat4;
 use openusd::gf::Matrix4d;
+use openusd::tf::Token;
 use openusd::usd::Prim;
 use openusd_schemas::geom::{XformQuery, Xformable, XformableSchema};
 
@@ -73,6 +74,37 @@ fn warn_unknown_ops(xf: &Xformable) {
     }
 }
 
+/// Warns when a prim whose type the schema registry does not know (a plugin or
+/// studio schema) authors an `xformOpOrder`: it reads as not `Xformable`, so
+/// its ops and the placement of everything under it are dropped, as in C++
+/// USD without that plugin. An untyped prim and a known type that is not
+/// `Xformable` (a `Scope`, a `Material`) stay silent: C++ ignores their ops by
+/// definition.
+fn warn_unknown_type(prim: &Prim) {
+    let Ok(Some(ty)) = prim.type_name() else {
+        return;
+    };
+    if ty.as_str().is_empty() || openusd_schemas::schema_registry().is_concrete_type(&ty) {
+        return;
+    }
+    let authors_ops = prim
+        .attribute("xformOpOrder")
+        .get::<Vec<Token>>()
+        .ok()
+        .flatten()
+        .is_some_and(|order| !order.is_empty());
+    if authors_ops {
+        warning!(
+            XformUnknownType,
+            at = prim.path(),
+            "{}: its type {ty} is not one the schema registry knows, so it is not Xformable and \
+             its xformOps are ignored (further occurrences are counted in the import's \
+             warnings)",
+            prim.path()
+        );
+    }
+}
+
 /// `prim`'s transform given its parent's: `parent · local`, or `local` alone
 /// when the prim's `xformOpOrder` lists `!resetXformStack!` — the one
 /// composition rule every walk (the traversal, the placement count, the
@@ -85,6 +117,7 @@ fn warn_unknown_ops(xf: &Xformable) {
 /// singular `transform` to invert) keeps the parent, with a warning.
 pub(super) fn compose_with_parent(prim: &Prim, parent: GMat4) -> GMat4 {
     let Some(xf) = Xformable::from_prim(prim.clone()).ok().flatten() else {
+        warn_unknown_type(prim);
         return parent;
     };
     warn_unknown_ops(&xf);

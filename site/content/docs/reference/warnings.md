@@ -119,6 +119,7 @@ plain text and are not counted.
 |------|------|---------|------------|
 | `xform.unknown_op` | approximated | xformOpOrder lists an op that is not a UsdGeomXformOp kind; it reads as identity. | Use the UsdGeomXformOp kinds only. |
 | `xform.uncomposable` | refused | An xformOp stack could not be composed; the local transform is identity. | Fix the xformOp stack; the message gives the reason. |
+| `xform.unknown_type` | skipped | A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored. | Author the transform on an `Xform` above the prim, or use a stock USD type; a plugin or studio schema is not known to Crust Render. |
 | `xform.motion_vector_unsupported` | approximated | Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero. | Expect a zero motion vector on rotating or scaling geometry. |
 
 ## Meshes, subdivision and displacement

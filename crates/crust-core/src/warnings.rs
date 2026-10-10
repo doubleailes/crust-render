@@ -220,6 +220,8 @@ warning_codes! {
         "xformOpOrder lists an op that is not a UsdGeomXformOp kind; it reads as identity.";
     XformUncomposable => "xform.uncomposable", Refused, Each,
         "An xformOp stack could not be composed; the local transform is identity.";
+    XformUnknownType => "xform.unknown_type", Skipped, Once,
+        "A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored.";
     XformMotionVectorUnsupported => "xform.motion_vector_unsupported", Approximated, Each,
         "Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero.";
 

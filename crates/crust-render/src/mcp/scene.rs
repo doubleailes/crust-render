@@ -66,12 +66,14 @@ fn check_args(layer: &Path) -> Result<CheckArgs, String> {
 pub fn import(layer: &Path) -> Result<Imported, String> {
     let args = check_args(layer)?;
     let started = Instant::now();
+    // The session imports once per edit batch and lives on: each stage is
+    // freed, and with it any mapping of the layer it read.
     let Checked {
         scene,
         aovs,
         report,
         assets,
-    } = crate::import_checked(&args)?;
+    } = crate::import_checked(&args, false)?;
     let settings = scene.settings;
     let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings)
         .with_volumes(scene.volumes);
