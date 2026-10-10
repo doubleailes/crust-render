@@ -728,7 +728,14 @@ and its `SAFETY` comment is the argument, in short:
   `Layer::save`, and most DCCs, save) leaves the mapped bytes intact.
 
 `a_mapped_usdc_reads_as_a_copied_one` pins that a mapped `.usdc` reads every authored
-value and time sample exactly as a copied one does. The `mcp` feature's own `openusd`
+value and time sample exactly as a copied one does, and all 38 samples render
+bit-identical with the switch on and off (16 spp, `--indirect-clamp 0`). Measured on the
+checked-in samples (`bench_ab.sh -n 21 -x "-s 1"`, `CRUST_USD_MMAP=0` as A, min / mean):
+the one `.usdc`, `PointInstancedMedCity.usd`, parses in 0.003 / 0.004 s against
+0.005 / 0.007 s and traverses in half the time, with a 2.5 MiB lower parse peak; the
+`.usda` scenes (cornellbox, hair) are unchanged within noise, since a text layer is
+parsed into owned data either way. ALab and Moana, where upstream measured its gains,
+are still to measure here. The `mcp` feature's own `openusd`
 dependency unifies with crust-core's, so the feature is compiled into the session too;
 only the opt-in decides whether anything maps.
 
