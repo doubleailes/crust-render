@@ -765,10 +765,12 @@ changed what the import calls:
   `usd_import::stage_builder()`, which sets `openusd_schemas::schema_registry()`; a test
   or probe that opens its own stage for typed reads sets it too. The registry holds only
   the families crust-core compiles, and it is also what decides whether a prim is
-  `Xformable`: crust-core compiles `skel` and `vol` for that alone, so a `SkelRoot`,
-  `Skeleton`, `Volume` or field prim keeps its transform though neither family is
-  imported. They cost the import 3.2 M instructions (+2.0% of `load_scene` on
-  cornellbox), 0.6 MiB and 20 KB of binary.
+  `Xformable`: crust-core compiles `skel`, `vol`, `proc` and `media` for that alone, so
+  a `SkelRoot`, `Skeleton`, `Volume`, field, particle-field, `GenerativeProcedural` or
+  `SpatialAudio` prim keeps its transform though none of those families is imported.
+  With them the registry knows every `Xformable` type C++ USD defines (UsdPhysics, UsdUI
+  and UsdSemantics define none). The four cost the import 3.5 M instructions (+2.2% of
+  `load_scene` on cornellbox, callgrind), 0.6 MiB of peak RSS and 27 KB of binary.
 - **Accessors live on `<Class>Schema` traits** (`MeshSchema`, `PointBasedSchema`,
   `CameraSchema`, `SphereLightSchema`, …), which a file must import to call them.
 - **The shared light inputs are the `LightAPI` view**: the old `lux::Light` trait is gone;
@@ -980,10 +982,9 @@ resolution, which moves cage vertices only and warns once.
   default value without `-f`). Since the bump to `main`, the two divergences 0.7 left are
   closed: a `!resetXformStack!` after other ops keeps only the ops after it (0.7 refused
   the stack), and ops on a prim that is not `Xformable` (an untyped prim, a `Scope`) are
-  ignored (0.7 applied them). The registry decides `Xformable`, so a prim typed from a
-  family crust-core does not compile (UsdPhysics, UsdProc, UsdMedia) reads as not
-  `Xformable` and loses its ops too, where C++ composes them (#261; UsdSkel and UsdVol
-  are compiled in for this). `main` also normalises an `orient` quaternion before
+  ignored (0.7 applied them). The registry decides `Xformable`, so crust-core compiles
+  every family that defines an `Xformable` type (#261): a prim typed from a family left
+  out would read as not `Xformable` and lose its ops. `main` also normalises an `orient` quaternion before
   building its matrix, which 0.7 did not; on a `quatf` authored about 1e-8 off unit
   length the two differ by ~1e-8 per entry, one f32 ulp after the cast. C++ USD normalises
   too, by another route (`GfRotation::SetQuat`: `acos` of the real part, unit axis), and
@@ -993,7 +994,7 @@ resolution, which moves cage vertices only and warns once.
   `UsdGeomXformOp` vocabulary still warns (openusd reads it as identity silently; that
   list decides the message only).
   Regression tests: `cornellbox_transforms_compose_correctly`, the `xform.rs` unit tests
-  (`skel_and_vol_prims_compose_their_ops` among them) and `single_axis_ops_place_non_xform_prims` / `a_leading_reset_drops_the_parent_on_a_light` /
+  (`xformable_prims_of_every_family_compose_their_ops` among them) and `single_axis_ops_place_non_xform_prims` / `a_leading_reset_drops_the_parent_on_a_light` /
   `a_pivot_stack_places_geometry_as_cpp_usd_does`.
 
 - **Fixed by the bump to `main`: `bindMaterialAs` authored in `.usda`.** openusd 0.7's
