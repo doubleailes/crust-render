@@ -157,6 +157,75 @@ pub(crate) fn quantize(steps: &[f32; 255], linear: f32) -> u8 {
     steps.partition_point(|&s| s <= linear) as u8
 }
 
+/// An 8-bit alpha as the coverage it stores: `a / 255`.
+///
+/// Alpha is never colour-managed. A colour space's curve and primaries apply
+/// to RGB alone, so an sRGB texture's alpha is not sRGB-decoded — as a GPU's
+/// `SRGB8_ALPHA8` format leaves it linear. One table, shared by the preloaded
+/// sampler, the streamed one and the mip reduction, so their alphas are the
+/// same bits. It is [`TransferCurve::to_linear_table`] of `raw`.
+pub(crate) const ALPHA_U8: [f32; 256] = {
+    let mut table = [0.0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = i as f32 / 255.0;
+        i += 1;
+    }
+    table
+};
+
+/// [`TransferCurve::code_steps`] for alpha: the boundaries `(k + 0.5) / 255`
+/// [`quantize`] re-encodes an averaged alpha through.
+pub(crate) const ALPHA_STEPS: [f32; 255] = {
+    let mut steps = [0.0f32; 255];
+    let mut k = 0;
+    while k < 255 {
+        steps[k] = (k as f32 + 0.5) / 255.0;
+        k += 1;
+    }
+    steps
+};
+
+/// Interleaved RGBA as RGB when its alpha is `opaque` at every texel, and
+/// whether an alpha was kept.
+///
+/// An image saved with an alpha channel it never uses — most RGBA PNGs a DCC
+/// exports — is stored as the RGB it is: a fourth channel that reads 1.0
+/// everywhere costs a third more memory and changes no lookup, since a texture
+/// without alpha reads 1.0 too. Only an alpha that cuts something is kept.
+pub(crate) fn drop_opaque_alpha<T: Copy + PartialEq>(rgba: Vec<T>, opaque: T) -> (Vec<T>, bool) {
+    let (texels, _) = rgba.as_chunks::<4>();
+    if texels.iter().any(|t| t[3] != opaque) {
+        return (rgba, true);
+    }
+    (
+        texels.iter().flat_map(|t| [t[0], t[1], t[2]]).collect(),
+        false,
+    )
+}
+
+/// Applies `decode` — a colour space's curve, or curve and primaries — to the
+/// RGB of interleaved RGBA, leaving alpha as it is. The RGB values pass
+/// through `decode` in the same order and grouping as an RGB image's would,
+/// so the colour of an RGBA texel is decoded exactly as an RGB one.
+pub(crate) fn decode_rgb_of_rgba(rgba: &mut [f32], decode: impl FnOnce(&mut [f32])) {
+    let mut rgb: Vec<f32> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0], t[1], t[2]])
+        .collect();
+    decode(&mut rgb);
+    for (texel, c) in rgba
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(rgb.as_chunks::<3>().0)
+    {
+        texel[..3].copy_from_slice(c);
+    }
+}
+
 /// The host side of `crust_core::AssetLoader`, reading from the filesystem.
 ///
 /// The engine asks for pixels, this decodes them: OpenEXR through `exr`,
@@ -728,14 +797,15 @@ impl FileAssets {
             };
             let (w, h) = tex.size();
             debug!(
-                "Streaming texture {} ({} chart(s), {}x{} level 0, {} level(s), {} tiles, {:?}) \
-                 in {:?}",
+                "Streaming texture {} ({} chart(s), {}x{} level 0, {} level(s), {} {} tiles, \
+                 {:?}) in {:?}",
                 candidate.display(),
                 tex.chart_count(),
                 w,
                 h,
                 tex.level_count(),
                 if tex.is_linear() { "half" } else { "8-bit" },
+                if tex.has_alpha() { "RGBA" } else { "RGB" },
                 tex.color_space(),
                 started.elapsed()
             );
@@ -830,12 +900,13 @@ impl AssetLoader for FileAssets {
         // UsdUVTexture's `auto` the two differ, and the resolved one is what
         // answers "why is this map darker than expected".
         debug!(
-            "Loaded texture {} ({} tile(s), {}x{} each, {}, {:.1} MiB resident, {:?}) in {:?}",
+            "Loaded texture {} ({} tile(s), {}x{} each, {} {}, {:.1} MiB resident, {:?}) in {:?}",
             path.display(),
             loaded.tile_count(),
             loaded.tile_size().0,
             loaded.tile_size().1,
             if loaded.is_float() { "f32" } else { "8-bit" },
+            if loaded.has_alpha() { "RGBA" } else { "RGB" },
             loaded.bytes() as f64 / (1024.0 * 1024.0),
             loaded.color_space(),
             started.elapsed()

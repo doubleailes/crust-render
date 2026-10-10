@@ -18,13 +18,24 @@ use crate::error::AssetError;
 /// streams from the file, so a large PNG or HDR does not hold its encoded
 /// bytes alongside the decoded image.
 pub(crate) fn decode(path: &Path) -> Result<image::DynamicImage, AssetError> {
+    decode_with_alpha(path).map(|(image, _)| image)
+}
+
+/// [`decode`], and whether the image's alpha channel is authored alpha.
+///
+/// `false` for an image with no alpha, and for a TIFF whose extra sample was
+/// `ExtraSamples = 0`: it decodes as RGBA only because
+/// [`declare_unspecified_extra_sample_as_alpha`] said so, and an unspecified
+/// sample is not coverage, so a texture reads 1.0 there as it would without it.
+pub(crate) fn decode_with_alpha(path: &Path) -> Result<(image::DynamicImage, bool), AssetError> {
     let mut magic = [0u8; 4];
     let n = std::fs::File::open(path)
         .and_then(|mut f| f.read(&mut magic))
         .map_err(AssetError::io(path))?;
+    let mut unspecified = false;
     let decoded = if tiff_byte_order(&magic[..n]).is_some() {
         let mut bytes = std::fs::read(path).map_err(AssetError::io(path))?;
-        declare_unspecified_extra_sample_as_alpha(&mut bytes);
+        unspecified = declare_unspecified_extra_sample_as_alpha(&mut bytes);
         let mut reader =
             image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Tiff);
         reader.no_limits();
@@ -37,7 +48,9 @@ pub(crate) fn decode(path: &Path) -> Result<image::DynamicImage, AssetError> {
         reader.no_limits();
         reader.decode()
     };
-    decoded.map_err(AssetError::image(path))
+    let image = decoded.map_err(AssetError::image(path))?;
+    let alpha = image.color().has_alpha() && !unspecified;
+    Ok((image, alpha))
 }
 
 /// `Some(little_endian)` for a classic TIFF header, `None` for anything else.
@@ -58,18 +71,18 @@ fn tiff_byte_order(bytes: &[u8]) -> Option<bool> {
 /// the LZW + horizontal predictor combination Substance exports, at least).
 /// The OpenPBR playground's `walls_*.tif` are written this way and rendered as
 /// multicoloured speckle. Declared as alpha, the same bytes take the crate's
-/// RGBA path, which decodes them correctly, and every caller here drops alpha
-/// (`to_rgb8` / `to_rgb32f`), so the extra sample is ignored either way — which
-/// is what "unspecified" means.
+/// RGBA path, which decodes them correctly. Returns whether it rewrote the
+/// tag, so [`decode_with_alpha`] can report that alpha as not authored: the
+/// extra sample is ignored either way, which is what "unspecified" means.
 ///
 /// Only the first IFD of a classic (non-Big) TIFF is patched: that is the one
 /// `image` decodes. The value must be inline (a count of 1 or 2 shorts fits in
 /// the entry), which it always is for the one-extra-sample case this is for.
-fn declare_unspecified_extra_sample_as_alpha(bytes: &mut [u8]) {
+fn declare_unspecified_extra_sample_as_alpha(bytes: &mut [u8]) -> bool {
     const EXTRA_SAMPLES: u16 = 338;
     const SHORT: u16 = 3;
     let Some(le) = tiff_byte_order(bytes) else {
-        return;
+        return false;
     };
     let u16_at = |b: &[u8], o: usize| -> Option<u16> {
         let v: [u8; 2] = b.get(o..o + 2)?.try_into().ok()?;
@@ -88,10 +101,10 @@ fn declare_unspecified_extra_sample_as_alpha(bytes: &mut [u8]) {
         })
     };
     let Some(ifd) = u32_at(bytes, 4).map(|o| o as usize) else {
-        return;
+        return false;
     };
     let Some(entries) = u16_at(bytes, ifd) else {
-        return;
+        return false;
     };
     for e in 0..usize::from(entries) {
         let entry = ifd + 2 + e * 12;
@@ -107,9 +120,11 @@ fn declare_unspecified_extra_sample_as_alpha(bytes: &mut [u8]) {
                 2u16.to_be_bytes()
             };
             bytes[entry + 8..entry + 10].copy_from_slice(&alpha);
+            return true;
         }
-        return;
+        return false;
     }
+    false
 }
 
 #[cfg(test)]
@@ -177,7 +192,7 @@ mod tests {
     #[test]
     fn an_unspecified_extra_sample_decodes_as_the_rgb_it_carries() {
         let mut bytes = rgbx_tiff(&PIXELS, 0);
-        declare_unspecified_extra_sample_as_alpha(&mut bytes);
+        assert!(declare_unspecified_extra_sample_as_alpha(&mut bytes));
         assert_eq!(rgb8(&bytes), RGB);
     }
 
@@ -225,11 +240,40 @@ mod tests {
         assert!(decode(Path::new("does/not/exist.tif")).is_err());
     }
 
+    /// Alpha is reported authored for an image that has one — and not for
+    /// the TIFF whose fourth sample was declared alpha only to decode it.
+    #[test]
+    fn only_an_authored_alpha_is_reported() {
+        let unspecified = TempFile::new("rgbx_alpha.tif", &rgbx_tiff(&PIXELS, 0));
+        let (img, alpha) = decode_with_alpha(&unspecified.0).unwrap();
+        assert!(img.color().has_alpha() && !alpha, "{:?}", img.color());
+
+        let declared = TempFile::new("rgba_alpha.tif", &rgbx_tiff(&PIXELS, 2));
+        assert!(decode_with_alpha(&declared.0).unwrap().1);
+
+        let encode = |img: image::DynamicImage| {
+            let mut png = Vec::new();
+            img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+                .unwrap();
+            png
+        };
+        let rgba = TempFile::new(
+            "rgba.png",
+            &encode(image::RgbaImage::from_pixel(2, 1, image::Rgba([1, 2, 3, 0])).into()),
+        );
+        assert!(decode_with_alpha(&rgba.0).unwrap().1);
+        let rgb = TempFile::new(
+            "rgb_noalpha.png",
+            &encode(image::RgbImage::from_pixel(2, 1, image::Rgb([1, 2, 3])).into()),
+        );
+        assert!(!decode_with_alpha(&rgb.0).unwrap().1);
+    }
+
     #[test]
     fn declared_alpha_and_other_files_are_left_alone() {
         let mut bytes = rgbx_tiff(&PIXELS, 1);
         let before = bytes.clone();
-        declare_unspecified_extra_sample_as_alpha(&mut bytes);
+        assert!(!declare_unspecified_extra_sample_as_alpha(&mut bytes));
         assert_eq!(bytes, before, "associated alpha is not rewritten");
         assert_eq!(rgb8(&bytes), RGB);
 

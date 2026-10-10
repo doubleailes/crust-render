@@ -374,6 +374,7 @@ working primaries, so there is no matrix.
 | `.hdr` / `.exr` `RectLight` `texture:file` | same | none (pass-through) | ✅ correct — kept as authored, never narrowed to 8 bits |
 | Streamed `.tx`, TIFF backing (`u8` tiles) | `crust-assets/src/tiled/cache.rs` (`Tile::rgb`) | the tagged curve, per lookup | ✅ same table as the preload path, by construction |
 | Streamed `.tx`, EXR backing (`half` tiles) | — | none (the curve was applied once at conversion; the primaries are the source's, converted per lookup) | ✅ correct — the file stores linear samples and records which space they came from |
+| A UV texture's **alpha** (PNG/TIFF alpha, EXR `A`, a `.tx`'s fourth sample) | `crust-assets/src/uv_texture/` (`Texel::alpha`), `tiled/cache.rs` (`Tile::rgba_u8`) | **none, whatever the tag** — `a / 255` for a byte (`ALPHA_U8`), the value for a float | ✅ correct — alpha is coverage, not colour; a GPU's `SRGB8_ALPHA8` leaves it linear too |
 
 The `is_hdr` flag in `decode_image_pixels` exists because `image`'s `to_rgb32f`
 rescales integer formats into `0..1` *without* removing their transfer curve,
@@ -398,6 +399,7 @@ plausible-looking bug rather than an obvious one.
 | **Ptex mip levels (preloaded)** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since the base is decoded to linear `f32` at load and reduced from there. |
 | **Ptex mip levels (`.ptx` on disk)** | the file's writer, read back by `ptex_stream.rs` | the file's own encoding | Not crust's choice — the levels were reduced before crust ever saw the file, and crust decodes Ptex by 2.2 afterwards. So it is the mismatch the row below refuses, and streaming such a texture is declined by default (`CRUST_PTEX_STREAM_MIPSPACE`). |
 | **`.tx` mip levels (TIFF backing)** | `crust-assets/src/tiled/write.rs` | **linear**, re-encoded | The same `reduce_half` as the in-memory pyramid — literally the same function, so a streamed render and a preloaded one cannot drift apart. |
+| **Alpha, in any of the above** | `reduce_half` / `reduce_half_linear`, `decode_tile` | coverage (`a / 255`), on its own | Alpha has no encoding, so its linear average and its encoded one are the same; it is averaged apart from the colour, which is not premultiplied. |
 | **`.tx` mip levels (EXR backing)** | `crust-assets/src/tiled/exr_write.rs` | **linear**, not re-encoded | The samples are already light: a float file has no transfer curve, so the decode happened once at conversion and the reduction is a plain average (`reduce_half_linear`, written next to `reduce_half` so the two cannot drift on anything but the curve). |
 
 There are therefore **three** decode points, not two, and which one applies is

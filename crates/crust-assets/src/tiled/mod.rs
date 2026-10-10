@@ -47,11 +47,11 @@ mod write;
 
 pub use cache::{StripedCounter, TileCache, TileData};
 pub(crate) use exr_read::exr_mip_space;
-pub use exr_write::write_tx_exr;
+pub use exr_write::{write_tx_exr, write_tx_exr_rgba};
 pub use make::{MadeTx, TxFormat, is_ptex, make_tx, make_tx_atomic, tx_is_stale, tx_sibling};
 pub use stream::StreamingTexture;
 pub(crate) use write::space_name;
-pub use write::{TILE_EDGE, write_tx};
+pub use write::{TILE_EDGE, write_tx, write_tx_rgba};
 
 use std::fmt::Debug;
 use std::fs::File;
@@ -122,6 +122,8 @@ pub(crate) trait Backend: Debug + Send + Sync {
     fn mip_space(&self) -> Option<&str>;
     /// Whether this backing's texels arrive already linear.
     fn linear(&self) -> bool;
+    /// Whether its texels carry alpha, so a tile is RGBA rather than RGB.
+    fn alpha(&self) -> bool;
     fn reader(&self) -> io::Result<TileReader>;
     fn read_tile(&self, r: &mut TileReader, level: usize, index: u32) -> io::Result<TileData>;
 }
@@ -147,6 +149,7 @@ pub struct TiledFile {
     tile_edge: usize,
     mip_space: Option<Arc<str>>,
     linear: bool,
+    alpha: bool,
     path: Arc<Path>,
 }
 
@@ -184,6 +187,7 @@ impl TiledFile {
             tile_edge: inner.tile_edge(),
             mip_space: inner.mip_space().map(Arc::from),
             linear: inner.linear(),
+            alpha: inner.alpha(),
             path: Arc::from(inner.path()),
             inner,
         })
@@ -247,6 +251,12 @@ impl TiledFile {
         self.linear
     }
 
+    /// Whether this file's texels carry alpha: four components a texel, the
+    /// fourth read as a lookup's alpha. Fixed at open, like the payload kind.
+    pub fn has_alpha(&self) -> bool {
+        self.alpha
+    }
+
     /// A fresh cursor onto this file. The cache keeps a small pool of these;
     /// they are not shareable, so one per concurrent miss is the floor.
     pub fn reader(&self) -> io::Result<TileReader> {
@@ -255,10 +265,10 @@ impl TiledFile {
 
     /// Decodes one tile, clipped to the level's bounds.
     ///
-    /// The returned payload holds `tile_size(index).0 * .1 * 3` components —
-    /// **not** `tile_edge²·3`. Edge tiles are stored padded (TIFF) or already
-    /// clipped (EXR) and come back cut either way, so the row stride is the
-    /// tile's own width.
+    /// The returned payload holds `tile_size(index).0 * .1 * 3` components
+    /// (`* 4` with alpha) — **not** `tile_edge²·3`. Edge tiles are stored
+    /// padded (TIFF) or already clipped (EXR) and come back cut either way, so
+    /// the row stride is the tile's own width.
     pub fn read_tile(&self, r: &mut TileReader, level: usize, index: u32) -> io::Result<TileData> {
         self.inner.read_tile(r, level, index)
     }
@@ -611,6 +621,113 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An RGBA `.tx` round-trips with its alpha: declared unassociated
+    /// alpha (`ExtraSamples = 2`), so `tiff` and any other reader see RGBA,
+    /// and every tile comes back four bytes a texel, exactly as written.
+    #[test]
+    fn an_rgba_tx_round_trips_with_its_alpha() {
+        let dir = std::env::temp_dir().join("crust_tx_rgba");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("rgba.tx");
+        let (w, h) = (100usize, 70usize);
+        let src: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [
+                    (x * 7 % 251) as u8,
+                    (y * 13 % 251) as u8,
+                    9,
+                    ((x + y) % 256) as u8,
+                ]
+            })
+            .collect();
+        let levels =
+            write_tx_rgba(&path, &src, w, h, crust_core::ResolvedColorSpace::SRGB).expect("write");
+
+        let mut dec =
+            tiff::decoder::Decoder::new(BufReader::new(std::fs::File::open(&path).expect("open")))
+                .expect("decode");
+        assert_eq!(dec.colortype().expect("colour"), tiff::ColorType::RGBA(8));
+
+        let tf = TiledFile::open(&path).expect("open");
+        assert!(tf.has_alpha() && !tf.is_linear());
+        let mut r = tf.reader().expect("reader");
+        let l0 = tf.level(0);
+        let mut rebuilt = vec![0u8; w * h * 4];
+        for idx in 0..(l0.across * l0.down) as u32 {
+            let (tw, th) = l0.tile_size(idx, TILE_EDGE);
+            let tile = tf.read_tile(&mut r, 0, idx).expect("tile");
+            assert!(tile.alpha);
+            let tile = tile.expect_u8();
+            assert_eq!(tile.len(), tw * th * 4);
+            let (tx, ty) = (idx as usize % l0.across, idx as usize / l0.across);
+            for ly in 0..th {
+                for lx in 0..tw {
+                    let d = ((ty * TILE_EDGE + ly) * w + tx * TILE_EDGE + lx) * 4;
+                    rebuilt[d..d + 4].copy_from_slice(&tile[(ly * tw + lx) * 4..][..4]);
+                }
+            }
+        }
+        assert_eq!(rebuilt, src, "level 0 did not reconstruct");
+        for n in 1..levels.len() {
+            let li = tf.level(n);
+            let tile = tf.read_tile(&mut r, n, 0).expect("tile");
+            let (tw, th) = li.tile_size(0, TILE_EDGE);
+            assert_eq!(tile.len(), tw * th * 4, "level {n}");
+        }
+
+        // The same file with its extra sample declared unspecified is not
+        // alpha: it reads as the RGB it carries.
+        let mut bytes = std::fs::read(&path).expect("read");
+        assert!(unspecify_first_extra_sample(&mut bytes));
+        let unspecified = dir.join("unspecified.tx");
+        std::fs::write(&unspecified, bytes).expect("write");
+        let tf = TiledFile::open(&unspecified).expect("open");
+        assert!(!tf.has_alpha());
+        let mut r = tf.reader().expect("reader");
+        let tile = tf.read_tile(&mut r, 0, 0).expect("tile");
+        assert_eq!(
+            &tile.expect_u8()[..6],
+            &[src[0], src[1], src[2], src[4], src[5], src[6]]
+        );
+
+        // An RGBA EXR backing carries an `A` channel, read fourth.
+        let exr = dir.join("rgba_exr.tx");
+        let floats: Vec<f32> = src.iter().map(|&b| b as f32 / 255.0).collect();
+        write_tx_exr_rgba(&exr, &floats, w, h, crust_core::ResolvedColorSpace::RAW)
+            .expect("write exr");
+        let tf = TiledFile::open(&exr).expect("open");
+        assert!(tf.has_alpha() && tf.is_linear());
+        let mut r = tf.reader().expect("reader");
+        let tile = tf.read_tile(&mut r, 0, 0).expect("tile").expect_half();
+        let (tw, th) = tf.level(0).tile_size(0, TILE_EDGE);
+        assert_eq!(tile.len(), tw * th * 4);
+        for k in 0..4 {
+            assert_eq!(
+                tile[4 + k],
+                half::f16::from_f32(floats[4 + k]),
+                "channel {k}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rewrites IFD0's `ExtraSamples` from alpha to unspecified (0), in place.
+    fn unspecify_first_extra_sample(bytes: &mut [u8]) -> bool {
+        let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+        let ifd = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        for e in 0..usize::from(u16_at(bytes, ifd)) {
+            let entry = ifd + 2 + e * 12;
+            if u16_at(bytes, entry) == 338 {
+                bytes[entry + 8..entry + 10].copy_from_slice(&0u16.to_le_bytes());
+                return true;
+            }
+        }
+        false
     }
 
     /// A file that is not tiled, or is planar, must decline at open.

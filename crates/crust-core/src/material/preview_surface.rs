@@ -18,7 +18,10 @@
 //! - **`UsdUVTexture`**: `file` (UDIM sets included, addressed by the host),
 //!   `sourceColorSpace` (resolved at load, see [`crate::ColorSpace::from_usd`]),
 //!   `wrapS`/`wrapT`, `scale`, `bias`, `fallback`, and the `r`/`g`/`b`/`a`/`rgb`
-//!   output the surface connects to.
+//!   output the surface connects to. `a` is the file's alpha, as the host
+//!   decodes it, and 1.0 for a file without one, as the node set specifies —
+//!   so a cutout wired to a texture's alpha, the way DCCs export foliage
+//!   cards, cuts.
 //! - **`UsdPrimvarReader_float2`**: crust reads one chart (`primvars:st` and
 //!   its fallbacks), so a reader naming any other primvar is warned about by
 //!   the importer and shaded from that chart.
@@ -36,10 +39,8 @@
 //! (`scene/displace.rs`), through [`UvInput::sample_at`], rather than shading
 //! a hit.
 //!
-//! What it does not: `UsdTransform2d` (warned about, identity chart),
-//! `occlusion` (no counterpart in the integrator), and a
-//! texture's alpha (the host samplers return opaque RGB, so `outputs:a` reads
-//! 1.0 before `scale`/`bias`).
+//! What it does not: `UsdTransform2d` (warned about, identity chart) and
+//! `occlusion` (no counterpart in the integrator).
 
 use crate::hittable::HitRecord;
 use crate::material::pattern::PatternMaterial;

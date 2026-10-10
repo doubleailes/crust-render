@@ -57,6 +57,8 @@ pub struct ExrFile {
     /// EXR stores channels in alphabetical order (so an RGB file arrives as
     /// B, G, R) and re-deriving that per texel would be absurd.
     rgb: [usize; 3],
+    /// Which entry is alpha, when the file has one (see [`resolve_alpha`]).
+    alpha: Option<usize>,
 }
 
 impl ExrFile {
@@ -117,6 +119,7 @@ impl ExrFile {
             return Err(invalid("a data window offset from the origin"));
         }
         let rgb = resolve_rgb(header)?;
+        let alpha = resolve_alpha(header);
 
         let levels: Vec<LevelInfo> = mip_map_levels(tiles.rounding_mode, header.layer_size)
             .map(|(_, size)| LevelInfo {
@@ -180,6 +183,7 @@ impl ExrFile {
             offsets,
             chunk_of,
             rgb,
+            alpha,
         })
     }
 
@@ -214,18 +218,26 @@ impl ExrFile {
         let origin = block.index.pixel_position;
 
         let header = &self.meta.headers[0];
+        // Three samples a texel, four with alpha, each two bytes.
+        let stride = crate::uv_texture::channels(self.alpha.is_some()) * 2;
         // Built as bytes rather than as `f16`s and converted afterwards: the
         // cache stores a tile as bytes, so assembling them here saves a copy of
         // every tile that is paged in.
-        let mut out = vec![0u8; tw * th * 6];
+        let mut out = vec![0u8; tw * th * stride];
         for line in block.lines(&header.channels) {
             // Which output slots this channel feeds. Usually exactly one — but
-            // none at all for a channel this texture does not use (an alpha, a
-            // data pass, a depth), which a block yields alongside the rest and
+            // none at all for a channel this texture does not use (a data
+            // pass, a depth), which a block yields alongside the rest and
             // which is skipped here rather than converted and thrown away; and
             // all three for a single-channel file, which is how a mask bound as
-            // a colour comes back grey instead of red.
-            let slots = self.rgb.map(|c| c == line.location.channel);
+            // a colour comes back grey instead of red. The fourth is alpha's.
+            let channel = line.location.channel;
+            let slots = [
+                self.rgb[0] == channel,
+                self.rgb[1] == channel,
+                self.rgb[2] == channel,
+                self.alpha == Some(channel),
+            ];
             if !slots.iter().any(|&b| b) {
                 continue;
             }
@@ -255,7 +267,7 @@ impl ExrFile {
                     }
                 };
                 let bits = v.to_bits().to_le_bytes();
-                let o = (row * tw + start + i) * 6;
+                let o = (row * tw + start + i) * stride;
                 for (k, &wanted) in slots.iter().enumerate() {
                     if wanted {
                         out[o + k * 2..o + k * 2 + 2].copy_from_slice(&bits);
@@ -263,7 +275,7 @@ impl ExrFile {
                 }
             }
         }
-        Ok(TileData::half_bytes(out))
+        Ok(TileData::half_bytes(out, self.alpha.is_some()))
     }
 }
 
@@ -286,6 +298,10 @@ impl Backend for ExrFile {
 
     fn linear(&self) -> bool {
         true
+    }
+
+    fn alpha(&self) -> bool {
+        self.alpha.is_some()
     }
 
     fn reader(&self) -> io::Result<TileReader> {
@@ -364,6 +380,20 @@ fn resolve_rgb(header: &Header) -> io::Result<[usize; 3]> {
             }
         },
     }
+}
+
+/// Which entry of the channel list carries alpha: the one whose base name is
+/// `A`, matched as [`resolve_rgb`] matches R, G and B — OIIO writes `rgba.A`
+/// beside `rgba.R`. The preload reader (`crate::environment::
+/// try_read_exr_texels`) finds the same channel, so the two paths read one
+/// alpha. `None` for a file without one, which reads 1.0.
+fn resolve_alpha(header: &Header) -> Option<usize> {
+    header.channels.list.iter().position(|c| {
+        let name = c.name.to_string();
+        name.rsplit('.')
+            .next()
+            .is_some_and(|base| base.eq_ignore_ascii_case("A"))
+    })
 }
 
 /// Reads the chunk offset table, finding its start by the identity it has to

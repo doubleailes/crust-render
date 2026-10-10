@@ -157,7 +157,7 @@
     is unchanged. `preview_uv_input` resolves the whole node through
     `value_producing_attributes`, so interface-connected inputs work: `file` (layer-anchored,
     `<UDIM>` intact), `sourceColorSpace`, `wrapS`/`wrapT`, `scale`/`bias`, `fallback`,
-    and which output (`r`/`g`/`b`/`a`/`rgb`) is connected. Four details:
+    and which output (`r`/`g`/`b`/`a`/`rgb`) is connected. Five details:
     - **`sourceColorSpace` defaults to `auto`, not raw**, which is the opposite of
       MaterialX's default and why `ColorSpace::from_usd` is separate from
       `from_mtlx`. `ColorSpace::Auto` crosses the seam unresolved, and the host settles it
@@ -178,6 +178,14 @@
       set's convention and not a hard-coded `*2-1`, then rotated by
       `crust_mtlx::perturb_normal`, the half of MaterialX's `normalmap` split out for
       this. It is under the same no-flip guard.
+    - **`a` is the file's alpha**, decoded by the host as coverage (never through the
+      colour space; see the `textures` design record § UV textures), and 1.0 for a file
+      without one, as the node set specifies. So the cutout above has a real mask when
+      `opacity` reads a texture's `a` under `opacityThreshold > 0`, which is how every DCC
+      exports a foliage card. Until issue #267 the host samplers returned an opaque alpha,
+      the cards rendered solid, and the import warned `preview.texture_alpha` (retired
+      with it; `crust-check` went to `/2`). The same alpha reaches a MaterialX `image`
+      node of type `color4` / `vector4` as its fourth channel.
     `UsdPrimvarReader_float2` naming a primvar other than `st` (or the `mesh_uvs`
     fallbacks) warns and shades from the one chart crust reads. `UsdTransform2d` warns,
     and the identity chart is used. Textured emission answers through `emitted_at` only,

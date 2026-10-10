@@ -21,7 +21,7 @@
 //! evaluation preserves.
 
 use super::write::space_name;
-use crate::uv_texture::reduce_half_linear;
+use crate::uv_texture::{channels, reduce_half_linear};
 use crust_core::ResolvedColorSpace;
 use exr::math::RoundingMode;
 use exr::prelude::{
@@ -46,17 +46,46 @@ pub fn write_tx_exr(
     height: usize,
     space: ResolvedColorSpace,
 ) -> io::Result<Vec<(usize, usize)>> {
+    write_exr(path, src, width, height, false, space)
+}
+
+/// [`write_tx_exr`] for row-major RGBA, the alpha written as an `A` channel
+/// beside the colour and reduced with it, as the coverage it is.
+pub fn write_tx_exr_rgba(
+    path: &Path,
+    src: &[f32],
+    width: usize,
+    height: usize,
+    space: ResolvedColorSpace,
+) -> io::Result<Vec<(usize, usize)>> {
+    write_exr(path, src, width, height, true, space)
+}
+
+/// [`write_tx_exr`] and [`write_tx_exr_rgba`]: RGB, or RGBA when `alpha`.
+fn write_exr(
+    path: &Path,
+    src: &[f32],
+    width: usize,
+    height: usize,
+    alpha: bool,
+    space: ResolvedColorSpace,
+) -> io::Result<Vec<(usize, usize)>> {
     if width == 0 || height == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "refusing to write a zero-sized texture",
         ));
     }
-    let want = width * height * 3;
+    let n = channels(alpha);
+    let want = width * height * n;
     if src.len() < want {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("expected {want} floats of RGB, got {}", src.len()),
+            format!(
+                "expected {want} floats of {}, got {}",
+                if alpha { "RGBA" } else { "RGB" },
+                src.len()
+            ),
         ));
     }
 
@@ -71,23 +100,23 @@ pub fn write_tx_exr(
     } {
         let (pixels, w, h) = {
             let (p, w, h) = levels.last().expect("level 0 always exists");
-            reduce_half_linear(p, *w, *h)
+            reduce_half_linear(p, *w, *h, alpha)
         };
         levels.push((pixels, w, h));
     }
 
     // EXR is planar per channel, so the interleaved source is split once here
     // rather than per tile at write time.
-    let mut planes: [LevelMaps<FlatSamples>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut planes: [LevelMaps<FlatSamples>; 4] = Default::default();
     for (pixels, w, h) in &levels {
-        for (k, plane) in planes.iter_mut().enumerate() {
+        for (k, plane) in planes.iter_mut().take(n).enumerate() {
             let samples: Vec<f16> = (0..w * h)
-                .map(|i| f16::from_f32(pixels[i * 3 + k]))
+                .map(|i| f16::from_f32(pixels[i * n + k]))
                 .collect();
             plane.push(FlatSamples::F16(samples));
         }
     }
-    let [r, g, b] = planes;
+    let [r, g, b, a] = planes;
     let mip = |level_data: LevelMaps<FlatSamples>| Levels::Mip {
         // `div_ceil`, which is what `reduce_half_linear` does and what the
         // reader will recompute the level sizes with. `ROUND_DOWN` — the more
@@ -98,15 +127,15 @@ pub fn write_tx_exr(
     };
     // Sorted, because EXR stores channels alphabetically and the reader finds
     // them by name — an unsorted list is a malformed file, not a reordered one.
-    let channels = AnyChannels::sort(
-        [
-            AnyChannel::new("R", mip(r)),
-            AnyChannel::new("G", mip(g)),
-            AnyChannel::new("B", mip(b)),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let mut list = vec![
+        AnyChannel::new("R", mip(r)),
+        AnyChannel::new("G", mip(g)),
+        AnyChannel::new("B", mip(b)),
+    ];
+    if alpha {
+        list.push(AnyChannel::new("A", mip(a)));
+    }
+    let channels = AnyChannels::sort(list.into_iter().collect());
 
     let mut attributes = LayerAttributes::default();
     let put = |attributes: &mut LayerAttributes, key: &str, value: &str| {

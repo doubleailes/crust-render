@@ -13,11 +13,15 @@
 //! What genuinely differs is the *ceiling*: preloading caps level 0 to keep it
 //! resident, and streaming does not, so above the cap the streamed image is the
 //! sharper and more correct one. That is the feature, not a discrepancy.
+//!
+//! Alpha follows the preload's rule too: a chart whose file carries alpha
+//! reads it as the lookup's fourth component, through the same decode
+//! ([`crate::ALPHA_U8`]) and the same blends, and every other chart reads 1.0.
 
 use super::cache::{TileCache, TileId, with_tile};
 use super::{LevelInfo, TiledFile};
 use crate::TransferCurve;
-use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
+use crate::mip_filter::{MipSource, Taps, lerp_rgba, lerp_rgba_alpha, trilinear};
 use crate::uv_texture::udim_number;
 use crust_core::{ColorSpace, ResolvedColorSpace, Texture2D};
 use std::path::Path;
@@ -30,6 +34,8 @@ struct Chart {
     number: u32,
     file: TiledFile,
     id: u32,
+    /// The file's own [`TiledFile::has_alpha`]: whether its tiles are RGBA.
+    alpha: bool,
 }
 
 /// A UV texture whose texels live on disk.
@@ -52,6 +58,9 @@ pub struct StreamingTexture {
     /// *file*, read once at open, which is what lets the texel fetch pick its
     /// decode from a loop-invariant field instead of from every tile.
     linear: bool,
+    /// Whether any chart carries alpha. Settles which sampler a lookup runs,
+    /// with `linear`: a texture with none never asks a chart.
+    alpha: bool,
     /// The space the texels decode under, resolved against the file.
     space: ResolvedColorSpace,
     /// The change of primaries into the working space, applied once per
@@ -66,10 +75,10 @@ pub struct StreamingTexture {
 ///
 /// A recorded `crust:mipspace` marker wins: it names the space the file was
 /// converted under, which is the decision `auto` would have made about the
-/// *source* — the `.tx` itself is always 8-bit RGB or half, so its own format
-/// no longer says whether the source was a greyscale mask. Without a marker
-/// (an OIIO `maketx` file) the format decides, by the same rule the preload
-/// path applies: half is linear, 8-bit RGB is sRGB.
+/// *source* — the `.tx` itself is always 8-bit RGB(A) or half, so its own
+/// format no longer says whether the source was a greyscale mask. Without a
+/// marker (an OIIO `maketx` file) the format decides, by the same rule the
+/// preload path applies: half is linear, 8-bit RGB or RGBA is sRGB.
 fn resolve_auto_space(f: &TiledFile, working: crust_core::color::Space) -> ResolvedColorSpace {
     let named = f
         .mip_space()
@@ -129,6 +138,7 @@ impl StreamingTexture {
                     if let Some(id) = cache.intern(f.clone()) {
                         charts.push(Chart {
                             number,
+                            alpha: f.has_alpha(),
                             file: f,
                             id,
                         });
@@ -144,11 +154,13 @@ impl StreamingTexture {
         // Settled by the first chart, which is also the first file opened.
         let space = settle(&charts[0].file);
         let linear = charts[0].file.is_linear();
+        let alpha = charts.iter().any(|c| c.alpha);
         Some(StreamingTexture {
             charts,
             cache,
             to_linear: space.to_linear_table(),
             linear,
+            alpha,
             gamut: space.gamut(),
             space,
             tiled,
@@ -183,6 +195,12 @@ impl StreamingTexture {
     /// The colour space the texels decode under.
     pub fn color_space(&self) -> ResolvedColorSpace {
         self.space
+    }
+
+    /// Whether any chart carries alpha, which a lookup returns as its fourth
+    /// component. `false` reads 1.0 there.
+    pub fn has_alpha(&self) -> bool {
+        self.alpha
     }
 
     /// One texel of one level, through the cache.
@@ -242,30 +260,82 @@ impl StreamingTexture {
         .unwrap_or(miss)
     }
 
+    /// [`StreamingTexture::texel`] for a chart that carries alpha: the same
+    /// fetch, four components out. Kept apart rather than folded in so the
+    /// RGB fetch stays the closure it was (see `texel`).
+    #[inline]
+    fn texel_rgba<const HALF: bool>(
+        &self,
+        chart: &Chart,
+        level: usize,
+        li: &LevelInfo,
+        x: usize,
+        y: usize,
+    ) -> [f32; 4] {
+        let edge = chart.file.tile_edge();
+        let (index, lx, ly) = li.locate(x, y, edge);
+        let id = TileId {
+            file: chart.id,
+            level: level as u8,
+            tile: index,
+        };
+        with_tile(&self.cache, id, |tile| {
+            if lx >= tile.width || ly >= tile.height {
+                return self.fallback;
+            }
+            if HALF {
+                tile.rgba_half(lx, ly)
+            } else {
+                tile.rgba_u8(lx, ly, &self.to_linear)
+            }
+        })
+        .unwrap_or(self.fallback)
+    }
+
     /// Trilinear lookup, level chosen from the footprint: the shared
     /// [`trilinear`] over this chart's levels, the same function the preloaded
     /// `UvTexture` runs, so the two select levels by one piece of code rather
     /// than by two kept in step.
+    ///
+    /// `ALPHA` is the chart's own alpha: whether its tiles are RGBA.
     #[inline(always)]
-    fn sample_chart<const HALF: bool>(
+    fn sample_chart<const HALF: bool, const ALPHA: bool>(
         &self,
         chart: &Chart,
         u: f32,
         v: f32,
         width: f32,
     ) -> [f32; 4] {
-        let source = ChartSource::<HALF> { tex: self, chart };
+        let source = ChartSource::<HALF, ALPHA> { tex: self, chart };
         trilinear(&source, u, v, width).expect("a streamed chart always answers")
+    }
+
+    /// [`StreamingTexture::sample_chart`] with the chart's alpha settled:
+    /// compiled out for a texture with none (`ANY_ALPHA` false).
+    #[inline(always)]
+    fn sample_one<const HALF: bool, const ANY_ALPHA: bool>(
+        &self,
+        chart: &Chart,
+        u: f32,
+        v: f32,
+        width: f32,
+    ) -> [f32; 4] {
+        if ANY_ALPHA && chart.alpha {
+            self.sample_chart::<HALF, true>(chart, u, v, width)
+        } else {
+            self.sample_chart::<HALF, false>(chart, u, v, width)
+        }
     }
 }
 
-/// One streamed chart as a [`MipSource`], its payload fixed by `HALF`.
-struct ChartSource<'a, const HALF: bool> {
+/// One streamed chart as a [`MipSource`], its payload fixed by `HALF` and its
+/// texel width by `ALPHA`.
+struct ChartSource<'a, const HALF: bool, const ALPHA: bool> {
     tex: &'a StreamingTexture,
     chart: &'a Chart,
 }
 
-impl<const HALF: bool> MipSource for ChartSource<'_, HALF> {
+impl<const HALF: bool, const ALPHA: bool> MipSource for ChartSource<'_, HALF, ALPHA> {
     type Texel = [f32; 4];
 
     #[inline(always)]
@@ -292,6 +362,13 @@ impl<const HALF: bool> MipSource for ChartSource<'_, HALF> {
         let li = chart.file.level(level);
         let (w, h) = (li.width, li.height);
         let taps = Taps::new(u * w as f32 - 0.5, (1.0 - v) * h as f32 - 0.5, w, h);
+        if ALPHA {
+            let a = tex.texel_rgba::<HALF>(chart, level, &li, taps.x0, taps.y0);
+            let b = tex.texel_rgba::<HALF>(chart, level, &li, taps.x1, taps.y0);
+            let c = tex.texel_rgba::<HALF>(chart, level, &li, taps.x0, taps.y1);
+            let d = tex.texel_rgba::<HALF>(chart, level, &li, taps.x1, taps.y1);
+            return Some(taps.blend_rgba(a, b, c, d));
+        }
         let a = tex.texel::<HALF>(chart, level, &li, taps.x0, taps.y0);
         let b = tex.texel::<HALF>(chart, level, &li, taps.x1, taps.y0);
         let c = tex.texel::<HALF>(chart, level, &li, taps.x0, taps.y1);
@@ -301,27 +378,52 @@ impl<const HALF: bool> MipSource for ChartSource<'_, HALF> {
 
     #[inline(always)]
     fn blend(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-        lerp_rgba(a, b, t)
+        if ALPHA {
+            lerp_rgba_alpha(a, b, t)
+        } else {
+            lerp_rgba(a, b, t)
+        }
     }
 }
 
 impl Texture2D for StreamingTexture {
     /// The one place the payload is dispatched on: once per lookup rather than
     /// once per texel, and into a sampler monomorphised for that payload. See
-    /// [`StreamingTexture::texel`] for what the alternatives cost.
+    /// [`StreamingTexture::texel`] for what the alternatives cost. A texture
+    /// with alpha leaves through one test into [`StreamingTexture::eval_alpha`].
     fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
         let _p = crust_core::profile::scope(crust_core::profile::Section::Texture);
-        let rgba = if self.linear {
-            self.eval_as::<true>(u, v, width)
+        let rgba = if self.alpha {
+            self.eval_alpha(u, v, width)
+        } else if self.linear {
+            self.eval_as::<true, false>(u, v, width)
         } else {
-            self.eval_as::<false>(u, v, width)
+            self.eval_as::<false, false>(u, v, width)
         };
         crate::to_working(self.gamut.as_ref(), rgba)
     }
 }
 
 impl StreamingTexture {
-    fn eval_as<const HALF: bool>(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
+    /// [`Texture2D::eval`]'s samplers for a texture with alpha, kept out of
+    /// line. Inlined beside the RGB ones they cost a texture without alpha
+    /// ~6 instructions a lookup (callgrind, `materialx_basic` streamed), where
+    /// out of line it pays the one test that sends it here.
+    #[inline(never)]
+    fn eval_alpha(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
+        if self.linear {
+            self.eval_as::<true, true>(u, v, width)
+        } else {
+            self.eval_as::<false, true>(u, v, width)
+        }
+    }
+
+    fn eval_as<const HALF: bool, const ANY_ALPHA: bool>(
+        &self,
+        u: f32,
+        v: f32,
+        width: f32,
+    ) -> [f32; 4] {
         if !u.is_finite() || !v.is_finite() {
             return [0.0, 0.0, 0.0, 1.0];
         }
@@ -333,12 +435,12 @@ impl StreamingTexture {
             }
             let number = udim_number(tu as u32, tv as u32);
             match self.charts.iter().find(|c| c.number == number) {
-                Some(c) => self.sample_chart::<HALF>(c, u - tu, v - tv, width),
+                Some(c) => self.sample_one::<HALF, ANY_ALPHA>(c, u - tu, v - tv, width),
                 None => [0.0, 0.0, 0.0, 1.0],
             }
         } else {
             let wrap = |x: f32| x - x.floor();
-            self.sample_chart::<HALF>(&self.charts[0], wrap(u), wrap(v), width)
+            self.sample_one::<HALF, ANY_ALPHA>(&self.charts[0], wrap(u), wrap(v), width)
         }
     }
 }
@@ -736,6 +838,171 @@ mod tests {
         assert!(!tf.mip_space_matches("raw"));
 
         let _ = std::fs::remove_dir_all(png.parent().unwrap());
+    }
+
+    /// An RGBA PNG whose colour is a noisy checker and whose alpha is a
+    /// diagonal cut with a soft band, so both the colour and every level of
+    /// the alpha disagree under a filtering bug.
+    fn rgba_png(dir: &std::path::Path, name: &str, w: usize, h: usize) -> std::path::PathBuf {
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                let c = if (x / 3 + y / 3) % 2 == 0 { 230 } else { 20 };
+                let a = ((x + y) * 255 / (w + h)).min(255) as u8;
+                let a = if a < 100 { 0 } else { a };
+                [c, (x * 11 % 251) as u8, (y * 17 % 251) as u8, a]
+            })
+            .collect();
+        let png = dir.join(name);
+        image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+            .expect("image")
+            .save(&png)
+            .expect("write png");
+        png
+    }
+
+    /// **The invariant, with alpha.** A `.tx` converted from an RGBA source
+    /// — what `--auto-tx` and `maketx` write — streams exactly what the
+    /// source preloads, alpha included, at every level: the same decode
+    /// (`ALPHA_U8`), the same reduction, the same blends. Odd sizes, so the
+    /// clipped edge tiles and the area-weighted odd levels are covered.
+    #[test]
+    fn streamed_alpha_agrees_bit_for_bit_with_preloaded() {
+        let dir = std::env::temp_dir().join("crust_stream_alpha");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for (w, h) in [(256usize, 192usize), (150, 100)] {
+            let png = rgba_png(&dir, &format!("leaf_{w}.png"), w, h);
+            let tx = dir.join(format!("leaf_{w}.tx"));
+            let made = crate::tiled::make_tx(
+                &png,
+                &tx,
+                crust_core::ColorSpace::AUTO,
+                crate::tiled::TxFormat::Tiff,
+            )
+            .expect("convert");
+            assert!(made.alpha, "an RGBA source keeps its alpha");
+            let space = crust_core::ColorSpace::SRGB;
+            let pre = UvTexture::open_with(&png, space, true).expect("preload");
+            let cache = Arc::new(TileCache::new(
+                64 * 1024 * 1024,
+                crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+            ));
+            let stream = StreamingTexture::open(&tx, space, cache).expect("stream");
+            assert!(stream.has_alpha() && pre.has_alpha());
+            assert_eq!(stream.level_count(), pre.level_count());
+            for &width in &[0.0f32, 0.001, 0.004, 0.02, 0.09, 0.3, 0.7, 2.0, 9.0] {
+                for i in 0..23 {
+                    for j in 0..17 {
+                        let (u, v) = (i as f32 / 22.0, j as f32 / 16.0);
+                        assert_eq!(
+                            stream.eval(u, v, width),
+                            pre.eval(u, v, width),
+                            "{w}x{h} at ({u}, {v}) width {width}"
+                        );
+                    }
+                }
+                for k in 0..40 {
+                    let t = k as f32 / 39.0;
+                    for &(u, v) in &[(t, 0.999), (0.999, t)] {
+                        assert_eq!(stream.eval(u, v, width), pre.eval(u, v, width));
+                    }
+                }
+            }
+            // Not vacuous: the alpha really varies across the image.
+            assert_eq!(pre.eval(0.01, 0.99, 0.0)[3], 0.0);
+            assert!(pre.eval(0.99, 0.01, 0.0)[3] > 0.95);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The EXR backing carries the alpha as an `A` channel: a `half` of
+    /// `a / 255`, so it agrees with the preloaded byte to `half` precision,
+    /// and is never put through the colour space's curve.
+    #[test]
+    fn an_exr_backing_streams_the_alpha_too() {
+        let dir = std::env::temp_dir().join("crust_stream_alpha_exr");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let png = rgba_png(&dir, "leaf.png", 64, 64);
+        let tx = dir.join("leaf.tx");
+        let made = crate::tiled::make_tx(
+            &png,
+            &tx,
+            crust_core::ColorSpace::SRGB,
+            crate::tiled::TxFormat::Exr,
+        )
+        .expect("convert");
+        assert_eq!(made.kind, "half, exr");
+        assert!(made.alpha);
+        let space = crust_core::ColorSpace::SRGB;
+        let pre = UvTexture::open_with(&png, space, true).expect("preload");
+        let cache = Arc::new(TileCache::new(
+            8 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
+        let stream = StreamingTexture::open(&tx, space, cache).expect("stream");
+        assert!(stream.is_linear() && stream.has_alpha());
+        for (x, y) in [(1usize, 62usize), (40, 40), (63, 0), (20, 30)] {
+            let (u, v) = ((x as f32 + 0.5) / 64.0, 1.0 - (y as f32 + 0.5) / 64.0);
+            let (s, p) = (stream.eval(u, v, 0.0), pre.eval(u, v, 0.0));
+            for k in 0..4 {
+                assert!(
+                    (s[k] - p[k]).abs() <= 1e-3,
+                    "texel ({x}, {y}) channel {k}: streamed {s:?} against preloaded {p:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A UDIM set converted tile by tile, where one tile's alpha cuts and
+    /// another's is opaque: the opaque one is written RGB, so the charts
+    /// differ, and the streamed set still agrees with the preloaded one.
+    #[test]
+    fn a_udim_set_streams_alpha_per_chart() {
+        let dir = std::env::temp_dir().join("crust_stream_alpha_udim");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cut = rgba_png(&dir, "t.1002.png", 64, 64);
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 100, 50, 255]))
+            .save(dir.join("t.1001.png"))
+            .expect("png");
+        let mut kept = Vec::new();
+        for src in [dir.join("t.1001.png"), cut] {
+            let made = crate::tiled::make_tx_atomic(
+                &src,
+                crust_core::ColorSpace::RAW,
+                crate::tiled::TxFormat::FromSampleType,
+            )
+            .expect("convert");
+            kept.push(made.alpha);
+        }
+        assert_eq!(kept, [false, true], "an opaque alpha is not written");
+        let set = dir.join("t.<UDIM>.png");
+        let pre = UvTexture::open_with(&set, crust_core::ColorSpace::RAW, true).expect("preload");
+        let cache = Arc::new(TileCache::new(
+            8 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
+        let stream =
+            StreamingTexture::open(&dir.join("t.<UDIM>.tx"), crust_core::ColorSpace::RAW, cache)
+                .expect("stream");
+        assert_eq!(stream.chart_count(), 2);
+        for &width in &[0.0f32, 0.05, 0.5] {
+            for i in 0..20 {
+                let u = i as f32 / 10.0 + 0.01;
+                for &v in &[0.1f32, 0.5, 0.9] {
+                    assert_eq!(
+                        stream.eval(u, v, width),
+                        pre.eval(u, v, width),
+                        "({u}, {v})"
+                    );
+                }
+            }
+        }
+        assert_eq!(stream.eval(0.5, 0.5, 0.0)[3], 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An unopenable file declines rather than producing a black texture, so

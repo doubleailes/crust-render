@@ -208,6 +208,7 @@ fn reduce_row(values: &[u8]) -> Vec<u8> {
         &grey(values),
         values.len(),
         1,
+        false,
         &table,
         &ResolvedColorSpace::RAW.code_steps(),
     );
@@ -274,7 +275,14 @@ fn an_even_axis_reduces_exactly_as_it_did() {
     let src: Vec<u8> = (0..sw * sh * 3).map(|i| (i * 7 % 251) as u8).collect();
     let table = ResolvedColorSpace::SRGB.to_linear_table();
     let encode = |l: f32| encode(ResolvedColorSpace::SRGB, l);
-    let (got, w, h) = reduce_half(&src, sw, sh, &table, &ResolvedColorSpace::SRGB.code_steps());
+    let (got, w, h) = reduce_half(
+        &src,
+        sw,
+        sh,
+        false,
+        &table,
+        &ResolvedColorSpace::SRGB.code_steps(),
+    );
     assert_eq!((w, h), (4, 3));
     for y in 0..h {
         for x in 0..w {
@@ -309,10 +317,11 @@ fn the_two_reducers_agree_on_an_odd_level() {
         &bytes,
         sw,
         sh,
+        false,
         &ResolvedColorSpace::RAW.to_linear_table(),
         &ResolvedColorSpace::RAW.code_steps(),
     );
-    let (from_f32, lw, lh) = reduce_half_linear(&floats, sw, sh);
+    let (from_f32, lw, lh) = reduce_half_linear(&floats, sw, sh, false);
     assert_eq!((w, h), (lw, lh), "the two disagree on level size");
     for (i, (&b, &f)) in from_u8.iter().zip(from_f32.iter()).enumerate() {
         let quantised = (f * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
@@ -578,5 +587,276 @@ fn quantize_is_the_rounded_encode() {
         assert_eq!(crate::quantize(&steps, -1.0), 0);
         assert_eq!(crate::quantize(&steps, f32::NAN), 0);
         assert_eq!(crate::quantize(&steps, 2.0), 255);
+    }
+}
+
+/// An RGBA image whose colour is a noisy checker (so a wrong level or a
+/// half-texel shift shows) and whose alpha is `alpha(x, y)`.
+fn rgba_png(path: &Path, w: usize, h: usize, alpha: impl Fn(usize, usize) -> u8) -> Vec<u8> {
+    std::fs::create_dir_all(path.parent().unwrap()).expect("temp dir");
+    let rgba: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            let c = if (x / 3 + y / 3) % 2 == 0 { 230 } else { 20 };
+            [c, (x * 11 % 251) as u8, (y * 17 % 251) as u8, alpha(x, y)]
+        })
+        .collect();
+    image::RgbaImage::from_raw(w as u32, h as u32, rgba.clone())
+        .expect("image")
+        .save(path)
+        .expect("write png");
+    rgba
+}
+
+/// The same image's colour alone, as an RGB PNG.
+fn rgb_png_of(path: &Path, w: usize, h: usize, rgba: &[u8]) {
+    let rgb: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0], t[1], t[2]])
+        .collect();
+    image::RgbImage::from_raw(w as u32, h as u32, rgb)
+        .expect("image")
+        .save(path)
+        .expect("write png");
+}
+
+/// The footprints that select every level, the magnification short-circuit
+/// included.
+const WIDTHS: [f32; 8] = [0.0, 0.004, 0.02, 0.09, 0.3, 0.7, 2.0, 9.0];
+
+/// **What the issue asked for.** A PNG's alpha is the lookup's fourth
+/// component, at every texel and level; its colour is exactly what the same
+/// image without alpha reads.
+///
+/// The cutout path in the importer already thresholds `outputs:a`; it read
+/// 1.0 everywhere because the decode went through `to_rgb8` and the
+/// bilinear blend wrote an opaque alpha.
+#[test]
+fn an_rgba_png_reads_its_alpha_and_its_colour_is_unchanged() {
+    let dir = scratch("rgba");
+    let (w, h) = (64usize, 48usize);
+    // Transparent on the left half, opaque on the right, as a leaf card.
+    let rgba = rgba_png(
+        &dir.join("leaf.png"),
+        w,
+        h,
+        |x, _| {
+            if x < w / 2 { 0 } else { 255 }
+        },
+    );
+    rgb_png_of(&dir.join("leaf_rgb.png"), w, h, &rgba);
+
+    for space in [ColorSpace::SRGB, ColorSpace::RAW] {
+        let tex = UvTexture::open_with(&dir.join("leaf.png"), space, true).expect("rgba");
+        let rgb = UvTexture::open_with(&dir.join("leaf_rgb.png"), space, true).expect("rgb");
+        assert!(tex.has_alpha() && !rgb.has_alpha());
+        assert_eq!(tex.level_count(), rgb.level_count());
+        // Point-sampled at texel centres: exactly the stored alpha.
+        for (x, want) in [(3usize, 0.0), (w / 2 - 1, 0.0), (w / 2, 1.0), (w - 2, 1.0)] {
+            let (u, v) = ((x as f32 + 0.5) / w as f32, 0.5 + 0.5 / h as f32);
+            assert_eq!(tex.eval(u, v, 0.0)[3], want, "texel {x}");
+        }
+        for width in WIDTHS {
+            for i in 0..23 {
+                for j in 0..17 {
+                    let (u, v) = (i as f32 / 22.0, j as f32 / 16.0);
+                    let (a, b) = (tex.eval(u, v, width), rgb.eval(u, v, width));
+                    assert_eq!(a[..3], b[..3], "colour at ({u}, {v}) width {width}");
+                    assert!((0.0..=1.0).contains(&a[3]), "{a:?}");
+                    assert_eq!(b[3], 1.0);
+                }
+            }
+        }
+        // A coarse level straddles the edge: the alpha is the average
+        // coverage there, not a thresholded or opaque one.
+        let edge = tex.eval(0.5, 0.5, 0.3)[3];
+        assert!(
+            edge > 0.05 && edge < 0.95,
+            "coarse alpha at the edge: {edge}"
+        );
+    }
+}
+
+/// Alpha is coverage. An sRGB colour space decodes the colour and leaves the
+/// alpha a plain `a / 255`, at level 0 and through the pyramid alike.
+#[test]
+fn alpha_is_not_colour_managed() {
+    let dir = scratch("alpha_linear");
+    // A flat alpha of 128 under a checker colour.
+    rgba_png(&dir.join("half.png"), 16, 16, |_, _| 128);
+    let tex = UvTexture::open_with(&dir.join("half.png"), ColorSpace::SRGB, true).expect("loads");
+    assert!(tex.has_alpha());
+    for width in WIDTHS {
+        assert_eq!(tex.eval(0.3, 0.6, width)[3], 128.0 / 255.0, "width {width}");
+    }
+    // And the colour space did decode the colour, so the test is not vacuous.
+    assert_eq!(tex.color_space(), ResolvedColorSpace::SRGB);
+}
+
+/// An alpha that is opaque at every texel is not stored: the texture holds
+/// and reads what the same image without alpha does, and reads 1.0.
+#[test]
+fn an_opaque_alpha_is_not_stored() {
+    let dir = scratch("opaque_alpha");
+    let rgba = rgba_png(&dir.join("o.png"), 32, 32, |_, _| 255);
+    rgb_png_of(&dir.join("o_rgb.png"), 32, 32, &rgba);
+    let tex = UvTexture::open_with(&dir.join("o.png"), ColorSpace::SRGB, true).expect("rgba");
+    let rgb = UvTexture::open_with(&dir.join("o_rgb.png"), ColorSpace::SRGB, true).expect("rgb");
+    assert!(!tex.has_alpha());
+    assert_eq!(tex.bytes(), rgb.bytes(), "no fourth channel held");
+    assert_eq!(tex.eval(0.4, 0.4, 0.05), rgb.eval(0.4, 0.4, 0.05));
+}
+
+/// Under the `CRUST_TEX_MAX` resize the alpha box-averages with the colour,
+/// so a capped cutout keeps its edge where the source had it.
+#[test]
+fn the_resolution_cap_averages_alpha_with_the_colour() {
+    let dir = scratch("alpha_capped");
+    let (w, h) = (64usize, 64usize);
+    let rgba = rgba_png(
+        &dir.join("c.png"),
+        w,
+        h,
+        |x, _| if x < 24 { 0 } else { 255 },
+    );
+    rgb_png_of(&dir.join("c_rgb.png"), w, h, &rgba);
+    let cap = std::num::NonZeroUsize::new(16).unwrap();
+    let tex = UvTexture::open_capped(&dir.join("c.png"), ColorSpace::RAW, false, cap).unwrap();
+    let rgb = UvTexture::open_capped(&dir.join("c_rgb.png"), ColorSpace::RAW, false, cap).unwrap();
+    assert_eq!(tex.tile_size(), (16, 16));
+    // Factor 4: capped texel 5 covers source columns 20..24, all cut; 6
+    // covers 24..28, all kept.
+    let at = |x: usize| (x as f32 + 0.5) / 16.0;
+    assert_eq!(tex.eval(at(5), 0.5, 0.0)[3], 0.0);
+    assert_eq!(tex.eval(at(6), 0.5, 0.0)[3], 1.0);
+    assert_eq!(
+        tex.eval(at(9), 0.3, 0.0)[..3],
+        rgb.eval(at(9), 0.3, 0.0)[..3]
+    );
+}
+
+/// A UDIM set where only one tile cuts anything: that tile carries alpha,
+/// the others stay RGB and read 1.0, and nothing is expanded to match.
+#[test]
+fn a_udim_set_carries_alpha_per_tile() {
+    let dir = scratch("udim_alpha");
+    rgba_png(&dir.join("t.1001.png"), 8, 8, |_, _| 255);
+    rgba_png(&dir.join("t.1002.png"), 8, 8, |_, _| 51);
+    let tex = UvTexture::open(&dir.join("t.<UDIM>.png"), ColorSpace::RAW).expect("loads");
+    assert!(tex.has_alpha());
+    assert_eq!(tex.eval(0.5, 0.5, 0.0)[3], 1.0);
+    assert_eq!(tex.eval(1.5, 0.5, 0.0)[3], 51.0 / 255.0);
+    let Storage::U8(tiles) = &tex.storage else {
+        panic!("a PNG set is bytes");
+    };
+    assert_eq!(
+        tiles.iter().map(|t| t.alpha).collect::<Vec<_>>(),
+        [false, true]
+    );
+}
+
+/// An EXR's `A` channel is its alpha, found by base name like the colour,
+/// and an explicit colour space decodes the colour but never the alpha.
+#[test]
+fn an_exr_reads_its_a_channel_and_does_not_decode_it() {
+    let dir = scratch("exr_alpha");
+    let p = dir.join("cut.exr");
+    write_exr_channels(
+        &p,
+        2,
+        1,
+        &[
+            ("rgba.R", vec![0.5, 0.5]),
+            ("rgba.G", vec![0.25, 0.25]),
+            ("rgba.B", vec![2.0, 2.0]),
+            ("rgba.A", vec![0.0, 0.5]),
+        ],
+    );
+    let raw = UvTexture::open_with(&p, ColorSpace::RAW, false).expect("loads");
+    assert!(raw.has_alpha() && raw.is_float());
+    assert_eq!(raw.eval(0.25, 0.5, 0.0), [0.5, 0.25, 2.0, 0.0]);
+    assert_eq!(raw.eval(0.75, 0.5, 0.0), [0.5, 0.25, 2.0, 0.5]);
+
+    let srgb = UvTexture::open_with(&p, ColorSpace::SRGB, false).expect("loads");
+    let px = srgb.eval(0.75, 0.5, 0.0);
+    assert_eq!(px[3], 0.5, "alpha is not decoded");
+    assert!(
+        (px[0] - ResolvedColorSpace::SRGB.decode_curve(0.5)).abs() < 1e-6,
+        "the colour is: {px:?}"
+    );
+
+    // An `A` of 1.0 everywhere cuts nothing and is not held.
+    let q = dir.join("opaque.exr");
+    write_exr_channels(
+        &q,
+        2,
+        1,
+        &[
+            ("R", vec![0.5, 0.5]),
+            ("G", vec![0.5, 0.5]),
+            ("B", vec![0.5, 0.5]),
+            ("A", vec![1.0, 1.0]),
+        ],
+    );
+    assert!(!UvTexture::open(&q, ColorSpace::RAW).unwrap().has_alpha());
+}
+
+/// The two reducers agree on alpha as they do on colour, odd axes included:
+/// an 8-bit alpha's level is the float one's, quantised.
+#[test]
+fn the_two_reducers_agree_on_alpha() {
+    let (sw, sh) = (7usize, 5usize);
+    let bytes: Vec<u8> = (0..sw * sh * 4).map(|i| (i * 13 % 251) as u8).collect();
+    let floats: Vec<f32> = bytes.iter().map(|&b| b as f32 / 255.0).collect();
+    let raw = ResolvedColorSpace::RAW;
+    let (from_u8, w, h) = reduce_half(
+        &bytes,
+        sw,
+        sh,
+        true,
+        &raw.to_linear_table(),
+        &raw.code_steps(),
+    );
+    let (from_f32, lw, lh) = reduce_half_linear(&floats, sw, sh, true);
+    assert_eq!((w, h, from_u8.len()), (lw, lh, w * h * 4));
+    for (i, (&b, &f)) in from_u8.iter().zip(from_f32.iter()).enumerate() {
+        let quantised = (f * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+        assert_eq!(b, quantised, "component {i}");
+    }
+    // And the colour of an RGBA reduction is the RGB reduction's.
+    let rgb: Vec<u8> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0], t[1], t[2]])
+        .collect();
+    let srgb = ResolvedColorSpace::SRGB;
+    let steps = srgb.code_steps();
+    let table = srgb.to_linear_table();
+    let (with_alpha, ..) = reduce_half(&bytes, sw, sh, true, &table, &steps);
+    let (without, ..) = reduce_half(&rgb, sw, sh, false, &table, &steps);
+    let colour: Vec<u8> = with_alpha
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0], t[1], t[2]])
+        .collect();
+    assert_eq!(colour, without);
+}
+
+/// The alpha tables are `raw`'s, so an 8-bit alpha decodes and re-encodes
+/// exactly as a raw channel does.
+#[test]
+fn the_alpha_tables_are_raws() {
+    let raw = ResolvedColorSpace::RAW;
+    assert_eq!(crate::ALPHA_U8, raw.to_linear_table());
+    assert_eq!(crate::ALPHA_STEPS, raw.code_steps());
+    for b in 0..=255u8 {
+        assert_eq!(
+            crate::quantize(&crate::ALPHA_STEPS, crate::ALPHA_U8[b as usize]),
+            b
+        );
     }
 }

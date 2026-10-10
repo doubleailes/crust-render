@@ -199,7 +199,6 @@ plain text and are not counted.
 | `mtlx.unusable` | skipped | A MaterialX document or network cannot be used; the material falls back. | Fix the MaterialX document; the message gives the reason. |
 | `preview.multiple_primvars` | approximated | A UsdPreviewSurface's textures read several primvars; the first is read for all. | Read one primvar for every texture of a material. |
 | `preview.unsupported_connection` | skipped | A UsdPreviewSurface input connects to something other than a UsdUVTexture output; its constant is used. | Connect the input to a `UsdUVTexture` output. |
-| `preview.texture_alpha` | approximated | A UsdPreviewSurface input reads texture alpha, which reads 1.0. | Use a colour channel instead of alpha. |
 | `preview.texture_without_file` | skipped | A UsdUVTexture has no inputs:file; the input keeps its constant. | Author `inputs:file`. |
 | `preview.unread_st` | approximated | A UsdUVTexture's st is driven by a shader crust does not read; the mesh chart is used unchanged. | Drive `st` with a `UsdPrimvarReader_float2`. |
 

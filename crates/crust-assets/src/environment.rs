@@ -132,6 +132,29 @@ pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
 pub(crate) fn try_read_exr_rgb(
     path: &Path,
 ) -> std::result::Result<(Vec<f32>, usize, usize), AssetError> {
+    read_exr_channels(path, false).map(|(pixels, w, h, _)| (pixels, w, h))
+}
+
+/// An EXR as a UV texture reads it: [`try_read_exr_rgb`]'s RGB, plus the
+/// alpha when the file has one — interleaved RGBA then, and `true` last.
+///
+/// The alpha is the channel whose base name is `A`, matched as `R`, `G` and
+/// `B` are, so a layer-prefixed `rgba.A` is found too; the streaming reader's
+/// `resolve_rgb` finds the same one. An alpha that is 1.0 at every texel cuts
+/// nothing and is dropped (see [`crate::drop_opaque_alpha`]).
+pub(crate) fn try_read_exr_texels(
+    path: &Path,
+) -> std::result::Result<(Vec<f32>, usize, usize, bool), AssetError> {
+    read_exr_channels(path, true)
+}
+
+/// The one EXR channel reader behind [`try_read_exr_rgb`] and
+/// [`try_read_exr_texels`]: RGB, and its alpha when `with_alpha` asks and the
+/// file has one.
+fn read_exr_channels(
+    path: &Path,
+    with_alpha: bool,
+) -> std::result::Result<(Vec<f32>, usize, usize, bool), AssetError> {
     let image = read_first_flat_layer_from_file(path).map_err(AssetError::exr(path))?;
     let layer = &image.layer_data;
     let (w, h) = (layer.size.width(), layer.size.height());
@@ -170,8 +193,10 @@ pub(crate) fn try_read_exr_rgb(
             ),
         ));
     }
-    let mut pixels = vec![0.0f32; w * h * 3];
-    for (k, channel) in rgb.iter().enumerate() {
+    let alpha = if with_alpha { find("A") } else { None };
+    let n = if alpha.is_some() { 4 } else { 3 };
+    let mut pixels = vec![0.0f32; w * h * n];
+    for (k, channel) in rgb.iter().chain([&alpha]).enumerate() {
         let Some(i) = channel else { continue };
         for (t, v) in channels[*i]
             .sample_data
@@ -179,10 +204,14 @@ pub(crate) fn try_read_exr_rgb(
             .enumerate()
             .take(w * h)
         {
-            pixels[t * 3 + k] = v;
+            pixels[t * n + k] = v;
         }
     }
-    Ok((pixels, w, h))
+    if alpha.is_none() {
+        return Ok((pixels, w, h, false));
+    }
+    let (pixels, alpha) = crate::drop_opaque_alpha(pixels, 1.0);
+    Ok((pixels, w, h, alpha))
 }
 
 pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
