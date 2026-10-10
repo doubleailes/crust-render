@@ -5,13 +5,14 @@
 - [x] 1.1 Build `main`'s release binary (`bin_before`), then run
       `scripts/check_images.sh record <dir>` with it, using `--indirect-clamp 0`.
       Done when every checked-in sample has a 16 spp golden EXR in `<dir>`.
-- [ ] 1.2 With `bin_before`, render each sample, ALab (`-f 1004`) and the island at
+- [x] 1.2 With `bin_before`, render each sample, ALab (`-f 1004`) and the island at
       `-s 1 -l debug`, and count the `Nested native instance … skipped` and
       `could not decode the xformOp stack` warnings per scene. Done when the counts are
       written in the change's working notes. They attribute every image diff in groups
       2 and 3 to a source.
-      *Samples done (`notes.md`): no skip warning anywhere. ALab and the island are not
-      available in the session container: still to count.*
+      *Done (`notes.md`): no skip warning anywhere, samples, ALab or island; the one
+      xformOp-stack warning is `PointInstancedMedCity`'s camera. ALab and the island
+      emit neither.*
 
 ## 2. Transforms composed by openusd (phase 1, D1–D4)
 
@@ -41,13 +42,14 @@
       *Open (`notes.md`): trimmed relmse ≤ 2e-12 and flat, but untrimmed relmse plateaus on
       `materialx_cutout`. That reads as D2's deterministic ulp placement change, not
       noise, so the criterion as written is not met. It needs a decision.*
-- [ ] 2.5 A/B the import: `scripts/bench_ab.sh -n 2 -p "Parse USD stage"` with
+- [x] 2.5 A/B the import: `scripts/bench_ab.sh -n 2 -p "Parse USD stage"` with
       `bin_before` against the new binary, on `samples/cornellbox.usda` and ALab
       (`-x "-f 1004 --camera … -s 1"`). Done when min and mean are recorded and neither
       regresses beyond noise. If it does, read `xformOpOrder` once in the adapter
       (design, Risks) and re-run.
-      *Cornell and PointInstancedMedCity done (`notes.md`): no regression, −0.1% import
-      instructions. ALab still to measure.*
+      *Done (`notes.md`): no regression on cornellbox, PointInstancedMedCity (−0.1%
+      import instructions) or ALab (`Parse USD stage` 148.7 / 150.4 → 146.0 / 149.6 s,
+      within the spread, against `ef14d26`).*
 - [x] 2.6 Update the docs:
       - `openspec/specs/usd-scene-import/design.md` § "Known gaps: openusd bugs and
         workarounds": replace the xformOp entry with the verification (openusd 0.7.0 vs
