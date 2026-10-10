@@ -20,6 +20,14 @@ bvh8 = ["crust-rt/bvh8"]
 # the renderer, so the engine library carries no JIT unless a host asks;
 # `CRUST_SHADER_JIT=0` turns it off at run time.
 jit = ["dep:crust-jit"]
+# Read the import's USD files through read-only memory mappings:
+# `usd_import::stage_builder` opts in through the crate's one non-test
+# `unsafe`, which this feature alone compiles. Off here and on in the
+# renderer, like `jit`; `CRUST_USD_MMAP=0` turns it off at run time.
+# (openusd's own `mmap`, and with it `memmap2`, is compiled in either way for
+# now: openusd-schemas names openusd with its default features, which include
+# it. Without this feature nothing calls it.)
+mmap = ["openusd/mmap"]
 
 [dependencies]
 utils = { path = "../utils" }
@@ -28,11 +36,7 @@ crust-rt = { path = "../crust-rt" }
 rayon = "1.10.0"
 glam.workspace = true
 tracing.workspace = true
-# `mmap`: the import's stages read file assets through a read-only memory
-# mapping (`usd_import::stage_builder`, `CRUST_USD_MMAP`) instead of copying
-# each layer's bytes. It brings `memmap2`, whose mapping is `unsafe`; the
-# import's one opt-in states the promise it makes.
-openusd = { version = "0.7", default-features = false, features = ["mmap"] }
+openusd = { version = "0.7", default-features = false }
 # The typed schema views (UsdGeom / UsdLux / UsdShade / UsdRender) left the
 # core crate in openusd 0.7 and ship separately, versioned in lockstep.
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }

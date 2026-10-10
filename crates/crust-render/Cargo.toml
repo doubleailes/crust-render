@@ -19,8 +19,13 @@ traversal-stats = ["crust-core/traversal-stats"]
 bvh8 = ["crust-core/bvh8"]
 # MaterialX shading programs compiled to machine code (see crust-core's `jit`
 # feature). `--no-default-features` builds the interpreter-only renderer.
-default = ["jit", "mcp"]
+default = ["jit", "mcp", "mmap"]
 jit = ["crust-core/jit"]
+# The import reads USD files through read-only memory mappings (see
+# crust-core's `mmap` feature). `--no-default-features` builds a renderer
+# that never maps a file and copies each one into memory, with no `unsafe`
+# opt-in compiled.
+mmap = ["crust-core/mmap"]
 # `crust mcp`: a Model Context Protocol server over stdio for an agent's
 # live session (the `mcp-session` capability). It brings in the MCP SDK and
 # an async runtime, which carry only the protocol: the session itself runs
