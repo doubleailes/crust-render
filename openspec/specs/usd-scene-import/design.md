@@ -703,7 +703,14 @@ feature flag.
 `cargo update -p openusd -p openusd-schemas` moves it). `main` carries the stage-open,
 traversal and shared-asset-bytes work of mxpv/openusd#106 — #142 measured the full Moana
 island at 22.3 s → 14.3 s and 5.32 → 3.58 GiB peak in openusd alone — which no release
-has shipped yet. Dropping the patch is the whole revert once one does.
+has shipped yet. Dropping the patch is the whole revert once one does. In crust, against
+0.7.0 (`ef14d26`), with the mapping below on (`bench_ab.sh`, `-s 1`, min / mean, the
+72-vCPU VM): ALab (`-f 1004`, four runs a side) parses in 120.5 / 122.8 s against
+142.0 / 146.6 s (−15%) and peaks at 15.5 GiB against 28.5 GiB (−46%); the Moana island
+(four a side) parses in 192.8 / 197.8 s against 204.1 / 212.7 s (−6% / −7%) at the same
+23.7–23.9 GiB peak. The island's peak is crust's own data: its import composes one masked
+stage per chunk and drops it, so no stage is resident at the peak, and the faster openusd
+only shortens `Traverse prims` (159.4 / 167.8 → 149.5 / 151.6 s).
 
 **The import reads USD files through memory mappings** (`CRUST_USD_MMAP`, on), the other
 gain that issue reports (~30% on Moana, and a −19% to −42% heap peak, measured upstream).
@@ -735,8 +742,12 @@ checked-in samples (`bench_ab.sh -n 21 -x "-s 1"`, `CRUST_USD_MMAP=0` as A, min 
 the one `.usdc`, `PointInstancedMedCity.usd`, parses in 0.003 / 0.004 s against
 0.005 / 0.007 s and traverses in half the time, with a 2.5 MiB lower parse peak; the
 `.usda` scenes (cornellbox, hair) are unchanged within noise, since a text layer is
-parsed into owned data either way. ALab and Moana, where upstream measured its gains,
-are still to measure here. The `mcp` feature's own `openusd`
+parsed into owned data either way. On ALab (`-f 1004`, three runs a side) the mapping
+alone parses in 122.6 / 124.4 s against 126.1 / 127.8 s (−3%) and lowers the peak from
+19.0 to 15.5 GiB (−18%). On the Moana island (four a side) it is within noise, 191.7 /
+196.4 s against 191.7 / 200.7 s (the two interleaved pairs disagreed in sign), at the same
+23.7–23.9 GiB peak, for the reason above. Both scenes render bit-identical with the
+switch on and off. The `mcp` feature's own `openusd`
 dependency unifies with crust-core's, so the feature is compiled into the session too;
 only the opt-in decides whether anything maps. `--no-default-features` builds a renderer
 with no opt-in compiled, which never maps. It does not drop `memmap2` yet: openusd-schemas
@@ -964,8 +975,15 @@ resolution, which moves cage vertices only and warns once.
   default value without `-f`). Since the bump to `main`, the two divergences 0.7 left are
   closed: a `!resetXformStack!` after other ops keeps only the ops after it (0.7 refused
   the stack), and ops on a prim that is not `Xformable` (an untyped prim, a `Scope`) are
-  ignored (0.7 applied them). An op kind outside the `UsdGeomXformOp` vocabulary still
-  warns (openusd reads it as identity silently; that list decides the message only).
+  ignored (0.7 applied them). `main` also normalises an `orient` quaternion before
+  building its matrix, which 0.7 did not; on a `quatf` authored about 1e-8 off unit
+  length the two differ by ~1e-8 per entry, one f32 ulp after the cast. C++ USD normalises
+  too, by another route (`GfRotation::SetQuat`: `acos` of the real part, unit axis), and
+  neither matches it bit-for-bit there. On ALab this moves the stoat (eight prims under
+  `/root/stoat`, including `body_M_hrc`, `outfit_M_hrc` and `backpack_M_hrc`) by an ulp,
+  the one image change of the bump on ALab and the island. An op kind outside the
+  `UsdGeomXformOp` vocabulary still warns (openusd reads it as identity silently; that
+  list decides the message only).
   Regression tests: `cornellbox_transforms_compose_correctly`, the `xform.rs` unit tests
   and `single_axis_ops_place_non_xform_prims` / `a_leading_reset_drops_the_parent_on_a_light` /
   `a_pivot_stack_places_geometry_as_cpp_usd_does`.
