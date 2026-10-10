@@ -957,6 +957,238 @@ fn infinite_lights_add_no_geometry() {
 }
 
 // ---------------------------------------------------------------------------
+// Dome orientation: DomeLight_1 and poleAxis
+// ---------------------------------------------------------------------------
+
+const RED: Vec3A = Vec3A::new(1.0, 0.0, 0.0);
+const GREEN: Vec3A = Vec3A::new(0.0, 1.0, 0.0);
+const BLUE: Vec3A = Vec3A::new(0.0, 0.0, 1.0);
+const WHITE: Vec3A = Vec3A::ONE;
+const TOP: Vec3A = Vec3A::new(0.5, 0.25, 0.125);
+
+/// Serves every dome texture as a 4 × 4 lat-long map: the top row `TOP`, the
+/// three below it four quarter-width bands, red, green, blue and white from
+/// left to right. Lookups are nearest-texel, so a horizontal ray reads a band
+/// whichever side of the equator rounding puts it, and a ray up the dome's
+/// pole reads `TOP`.
+struct FourBands;
+
+impl crust_core::AssetLoader for FourBands {
+    fn load_environment(
+        &self,
+        _: &std::path::Path,
+        _: crust_core::ColorSpace,
+    ) -> Option<crust_core::EnvironmentMap> {
+        let bands = [RED, GREEN, BLUE, WHITE];
+        let mut pixels = vec![TOP; 4];
+        for _ in 1..4 {
+            pixels.extend(bands);
+        }
+        crust_core::EnvironmentMap::new(4, 4, pixels)
+    }
+}
+
+/// Loads `body` under `/World` on a stage whose root layer authors `up_axis`
+/// (`None`: no `upAxis` at all), serving dome textures as [`FourBands`].
+fn load_banded(name: &str, up_axis: Option<&str>, body: &str) -> Scene {
+    let up = up_axis.map_or(String::new(), |a| format!("    upAxis = \"{a}\"\n"));
+    let path = write_stage(
+        name,
+        &format!(
+            "#usda 1.0\n(\n    defaultPrim = \"World\"\n{up})\n\ndef Xform \"World\"\n{{\n{body}\n}}\n"
+        ),
+    );
+    Scene::from_usd_with_assets(&path, &FourBands).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// The radiance the stage's only light sends back along an escaping
+/// world-space direction.
+fn dome_radiance(scene: &Scene, direction: Vec3A) -> Vec3A {
+    assert_eq!(scene.lights.count(), 1, "one dome");
+    scene.lights.lights()[0]
+        .escaped(Vec3A::ZERO, direction.normalize())
+        .expect("a dome answers every escaping ray")
+        .0
+}
+
+/// The four horizontal directions of the Y-pole scenario, which read the
+/// bands at u = ⅜, ⅝, ⅛ and ⅞.
+const Y_POLE_RAYS: [Vec3A; 4] = [
+    Vec3A::new(1.0, 0.0, 1.0),
+    Vec3A::new(-1.0, 0.0, 1.0),
+    Vec3A::new(1.0, 0.0, -1.0),
+    Vec3A::new(-1.0, 0.0, -1.0),
+];
+
+/// The same four, once the dome's frame is turned +90° about X (local +Y →
+/// +Z, local +Z → −Y).
+const Z_POLE_RAYS: [Vec3A; 4] = [
+    Vec3A::new(1.0, -1.0, 0.0),
+    Vec3A::new(-1.0, -1.0, 0.0),
+    Vec3A::new(1.0, 1.0, 0.0),
+    Vec3A::new(-1.0, 1.0, 0.0),
+];
+
+fn assert_bands(scene: &Scene, rays: [Vec3A; 4]) {
+    let seen = rays.map(|d| dome_radiance(scene, d));
+    assert_eq!(seen, [GREEN, BLUE, RED, WHITE], "along {rays:?}");
+}
+
+const BANDED_DOME: &str = r#"
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky.exr@
+    }"#;
+
+#[test]
+fn a_banded_dome_is_oriented_as_usdlux_specifies() {
+    let scene = load_banded("banded_dome", Some("Y"), BANDED_DOME);
+    assert_bands(&scene, Y_POLE_RAYS);
+    assert_eq!(dome_radiance(&scene, Vec3A::Y), TOP);
+}
+
+#[test]
+fn a_dome_light_1_is_a_dome_light() {
+    let scene = load(
+        "dome_light_1",
+        r#"
+    def DomeLight_1 "Sky"
+    {
+        color3f inputs:color = (0.2, 0.3, 0.4)
+    }"#,
+    );
+    assert_eq!(scene.lights.count(), 1);
+    assert!(dome_radiance(&scene, Vec3A::X).abs_diff_eq(Vec3A::new(0.2, 0.3, 0.4), 1e-6));
+}
+
+#[test]
+fn a_dome_light_1_on_a_z_up_stage_turns_its_pole_onto_plus_z() {
+    let scene = load_banded(
+        "dome_light_1_z_up",
+        Some("Z"),
+        r#"
+    def DomeLight_1 "Sky"
+    {
+        asset inputs:texture:file = @sky.exr@
+    }"#,
+    );
+    assert_bands(&scene, Z_POLE_RAYS);
+    assert_eq!(dome_radiance(&scene, Vec3A::Z), TOP);
+}
+
+#[test]
+fn pole_axis_z_turns_the_pole_on_a_y_up_stage_too() {
+    let scene = load_banded(
+        "dome_light_1_pole_z",
+        Some("Y"),
+        r#"
+    def DomeLight_1 "Sky"
+    {
+        asset inputs:texture:file = @sky.exr@
+        uniform token poleAxis = "Z"
+    }"#,
+    );
+    assert_bands(&scene, Z_POLE_RAYS);
+    assert_eq!(dome_radiance(&scene, Vec3A::Z), TOP);
+}
+
+#[test]
+fn a_dome_light_1_whose_pole_is_already_plus_y_is_unchanged() {
+    let reference = load_banded("dome_light_0_reference", Some("Y"), BANDED_DOME);
+    let cases = [
+        (
+            "dome_light_1_pole_y",
+            Some("Z"),
+            "uniform token poleAxis = \"Y\"",
+        ),
+        ("dome_light_1_scene_y_up", Some("Y"), ""),
+        ("dome_light_1_scene_no_up", None, ""),
+    ];
+    for (name, up, pole) in cases {
+        let scene = load_banded(
+            name,
+            up,
+            &format!(
+                "    def DomeLight_1 \"Sky\"\n    {{\n        asset inputs:texture:file = @sky.exr@\n        {pole}\n    }}"
+            ),
+        );
+        for d in Y_POLE_RAYS
+            .iter()
+            .chain(&Z_POLE_RAYS)
+            .chain(&[Vec3A::Y, Vec3A::Z])
+        {
+            assert_eq!(
+                dome_radiance(&scene, *d).to_array().map(f32::to_bits),
+                dome_radiance(&reference, *d).to_array().map(f32::to_bits),
+                "{name} along {d:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_dome_light_ignores_an_authored_pole_axis() {
+    let scene = load_banded(
+        "dome_light_0_pole_scene_z_up",
+        Some("Z"),
+        r#"
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky.exr@
+        uniform token poleAxis = "scene"
+    }"#,
+    );
+    assert_bands(&scene, Y_POLE_RAYS);
+    assert_eq!(dome_radiance(&scene, Vec3A::Y), TOP);
+}
+
+#[test]
+fn the_pole_rotation_composes_with_the_prims_transform() {
+    let scene = load_banded(
+        "dome_light_1_rotated",
+        Some("Z"),
+        r#"
+    def DomeLight_1 "Sky"
+    {
+        asset inputs:texture:file = @sky.exr@
+        float xformOp:rotateZ = 90
+        uniform token[] xformOpOrder = ["xformOp:rotateZ"]
+    }"#,
+    );
+    // The pole puts the image centre (green | blue seam) on −Y; the prim's
+    // quarter turn about Z then carries −Y to +X. The bands either side of
+    // the seam sit at ±45° from it, still on the horizon.
+    assert_eq!(dome_radiance(&scene, Vec3A::new(1.0, 1.0, 0.0)), GREEN);
+    assert_eq!(dome_radiance(&scene, Vec3A::new(1.0, -1.0, 0.0)), BLUE);
+    assert_eq!(dome_radiance(&scene, Vec3A::Z), TOP);
+}
+
+/// Linking, camera visibility and backdrops hang off the prim, not the dome
+/// schema: a `DomeLight_1` linked to nothing is a backdrop like a
+/// `DomeLight` is.
+#[test]
+fn a_dome_light_1_linked_to_nothing_becomes_a_backdrop() {
+    let scene = load(
+        "backdrop_dome_light_1",
+        r#"
+    def DomeLight_1 "Hdri"
+    {
+        prepend rel collection:lightLink:excludes = </World/Backdrop>
+    }
+    def DomeLight_1 "Backdrop"
+    {
+        prepend rel collection:lightLink:excludes = </World>
+    }
+    def Sphere "Ball"
+    {
+    }"#,
+    );
+    assert_eq!(scene.lights.count(), 1, "only the HDRI illuminates");
+    assert_eq!(scene.lights.backdrops().len(), 1);
+    assert!(scene.lights.escapes_to_backdrop(MASK_CAMERA));
+}
+
+// ---------------------------------------------------------------------------
 // UsdLux: every light type, normalize, colour temperature, shaping
 // ---------------------------------------------------------------------------
 

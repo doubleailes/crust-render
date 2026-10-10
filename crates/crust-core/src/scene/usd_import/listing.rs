@@ -20,7 +20,8 @@ use openusd_schemas::geom::{
     PointInstancerSchema, Sphere as UsdSphere,
 };
 use openusd_schemas::lux::{
-    CylinderLight, DiskLight, DistantLight, DomeLight, LightAPI, RectLight, SphereLight,
+    CylinderLight, DiskLight, DistantLight, DomeLight, DomeLight_1, LightAPI, RectLight,
+    SphereLight,
 };
 use openusd_schemas::shade::Material as UsdMaterial;
 use tracing::debug;
@@ -223,6 +224,8 @@ fn record(
                 read("distant", prim)
             } else if let Ok(Some(_)) = DomeLight::get(stage, p()) {
                 read("dome", prim)
+            } else if let Ok(Some(_)) = DomeLight_1::get(stage, p()) {
+                read("dome", prim)
             } else {
                 return None;
             };
@@ -424,6 +427,7 @@ fn is_kind(stage: &Stage, prim: &Prim, kind: ListKind) -> bool {
                 || matches!(CylinderLight::get(stage, path()), Ok(Some(_)))
                 || matches!(DistantLight::get(stage, path()), Ok(Some(_)))
                 || matches!(DomeLight::get(stage, path()), Ok(Some(_)))
+                || matches!(DomeLight_1::get(stage, path()), Ok(Some(_)))
         }
         ListKind::Material => matches!(UsdMaterial::get(stage, path()), Ok(Some(_))),
     }

@@ -419,6 +419,32 @@ paths, for direct-light variance falling about as 1/N.
   is importance-sampled by luminance × sinθ — the Jacobian matters, without it polar
   texels are over-sampled — which is what keeps a small bright sun in an HDRI from
   becoming a firefly farm.
+  - **`UsdLuxDomeLight_1` is the same dome, turned onto its `poleAxis`.** It derives from
+    `NonboundableLightBase`, not `DomeLight`, so `DomeLight::get` (an `is_a` on the
+    registry) never matches it: until `honour-dome-pole-axis` crust skipped it without a
+    word, and a stage lit only by one rendered black with `crust check` reporting 0
+    lights. Both schemas now feed one `emit_dome_light` through `DomeInputs`, each view
+    reading its own texture attributes. The pole is a `Mat3A` folded in as
+    `R_world · R_pole`: the identity, or +90° about X (+Y → +Z, +Z → −Y) when `poleAxis`
+    is `Z`, or `scene` (the fallback) on a stage whose root layer's `upAxis` is `Z`. That
+    is OpenUSD's `_GetDomeOffset` (`usdImaging/domeLight_1Adapter.cpp`,
+    `GfRotation(GfVec3d(1, 0, 0), 90.0)`). Because it turns the dome's own frame, the
+    schema's "not inherited by namespace children" holds by construction, and radiance,
+    sampling and pdf see the one rotated frame. It costs nothing per ray. Pinned in
+    numbers by the four-band tests in `usd_inline.rs` (`a_dome_light_1_on_a_z_up_stage_…`
+    and its siblings). On JungleRuins retyped as `DomeLight_1`, the render is
+    bit-identical to the stock dome hand-rotated by the same matrix.
+    - **Strict on `DomeLight`.** A `DomeLight` keeps +Y even when it authors `poleAxis`,
+      which its schema does not declare; OpenUSD's adapter reads it only through
+      `UsdLuxDomeLight_1`. *Trap:* JungleRuins (`def DomeLight` + `poleAxis = "scene"` on
+      a Z-up stage) looks like a crust bug, a sideways sky with no sun, but it is the
+      asset's error: OpenUSD's own imaging ignores that `poleAxis` too.
+    - **Deliberately not Typhoon.** hdEmbree imports `DomeLight_1` but never applies the
+      pole: its light reads only `SampleTransform` (`delegate/light.cpp`), and none of
+      hdEmbree's 222 sources mention `domeOffset`, `poleAxis` or `upAxis`, although its
+      copy of `domeLight_1Adapter.cpp` is Pixar's verbatim (OpenUSD `typhoon/main`
+      70c45e8). On a `DomeLight_1` whose pole resolves to +Z, crust follows the schema;
+      everywhere else the two agree.
   - **crust-core decodes nothing.** `inputs:texture:file` is resolved against the USD
     layer's directory and handed to the host through the `AssetLoader` trait
     (`Scene::from_usd_with_assets`); `Scene::from_usd` passes `NoAssets`, which warns and
@@ -724,7 +750,8 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   reference's is. A tube light samples non-uniformly in world area (correct, not
   optimal); a squashed sphere samples its visible cone. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
-  than `latlong` are refused rather than mapped wrongly; and light-list picking by
+  than `latlong` are refused rather than mapped wrongly (so a `DomeLight_1`'s pole only
+  matters for a lat-long map); and light-list picking by
   power is blind to position, orientation and visibility, so a far light gets as many
   shadow rays as an equally powerful near one, and a dome or sun only its uniform share
   however much it lights (a light BVH, `docs/light_sampling.md` §6.3, is the fix). Neither infinite light
