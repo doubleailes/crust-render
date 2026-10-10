@@ -20,25 +20,39 @@
 
 ## 2. Disk: the spherical ellipse (D5)
 
-- [ ] 2.1 Read Guillén et al. 2017 and transcribe into `design.md` D5:
-      - the cone frame;
-      - `α` and `β`;
-      - the solid angle;
-      - both maps' CDFs and inversions;
-      - the paper's cost and stratification figures.
-      Pick the map and record why. Settles Open Question 1.
-- [ ] 2.2 `light/ellipse.rs`: Carlson's `R_F` and `R_J` in f64. Add a script
-      generating reference values offline (mpmath or Boost, in the style of
-      `scripts/osl_oracle.py`) and a test pinning them to a relative 1e-12 across
-      the parameter range the map uses, including `α ≈ β` and `β → 0`.
-- [ ] 2.3 `SphericalEllipse::new(f)` for the unit disk seen from a local point. It
-      returns `None` unless `f.z < 0` and the solid angle is in `[1e-4, 6.22]` sr.
-      Done when its solid angle matches a brute-force integral to 1e-4 relative,
-      over a grid of positions including near edge-on and on axis.
-- [ ] 2.4 Sampling and density. Done when:
-      - a histogram test (sample counts against the pdf over a grid of solid-angle
-        bins) passes for a centred, an off-axis and a near-edge-on view;
-      - every sample lies on the unit disk.
+- [x] 2.1 Read Guillén et al. 2017 and transcribe into `design.md` D5. Chose the
+      radial map with exact Newton inversion and no tabulation. Recorded the
+      eq. 3 axis-label trap, the `a ≥ b` assumption, the edge-on guard and the
+      circle check. Settles Open Question 1.
+- [ ] 2.2 `light/ellipse.rs`: Carlson's `R_F` and `R_J` in f64, and `Π(n; φ | m)`
+      from them (D5's formula). Add `scripts/ellipse_oracle.py` (mpmath, in the
+      style of `scripts/osl_oracle.py`) and a test pinning both to a relative
+      1e-12 across the `(n, m, φ)` range eq. 20 produces, including `n = m = 0`,
+      `n → 1` and `φ = π/2`.
+- [ ] 2.3 `SphericalEllipse::new(f)` for the unit disk seen from a local point.
+      Build the frame from the symmetry plane, not eq. 3 as printed (D5, "Trap").
+      Handle the on-axis frame. It returns `None` unless:
+      - `f.z < 0`;
+      - `b ≥ 1e-4 · a`;
+      - `Ω_D ∈ [1e-4, 6.22]` sr.
+      Done when:
+      - `Ω_D = 4 Ω_r(π/2)` matches a brute-force integral to 1e-6 relative over a
+        `(height, offset)` grid that includes near edge-on, near the plane and on
+        axis;
+      - on axis, it equals `SubtendedCone`'s `2π(1 − cos α)` to f64 rounding;
+      - a property test confirms `a ≥ b` over the grid, or the swap is
+        implemented and tested.
+- [ ] 2.4 Radial sampling (eqs. 21–22, Newton with `dΩ_r/dφ = 1 − h_r` and a
+      bisection safeguard, quadrant selection from `ε₁`). Also implement the
+      low-distortion pre-warp (eq. 23). Done when:
+      - the histogram test (sample counts against `1/Ω_D` over solid-angle bins)
+        passes for a centred, an off-axis and a near-edge-on view;
+      - every sample lies on the unit disk;
+      - Newton converges in at most 6 iterations over the grid, with the
+        iteration count logged in a test;
+      - the plain and low-distortion variants have been compared by 16 spp relMSE
+        on two sweep scenes under `openqmc`, the better one kept, and the other
+        deleted.
 - [ ] 2.5 `Strategy::Ellipse` in `shape.rs`: sample in local space, return the point
       through `light_to_world`, and map the density with `world_solid_angle_pdf`.
       Gate it on `Config::disk_sampling`. Done when a sheared, non-uniformly scaled
