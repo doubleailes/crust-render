@@ -58,6 +58,13 @@ impl Emissive {
         self
     }
 
+    /// Whether this emits only toward the geometry's front (outward) side —
+    /// every UsdLux light ([`Emissive::light`]), not an emissive surface
+    /// ([`Emissive::new`]).
+    pub fn is_one_sided(&self) -> bool {
+        self.one_sided
+    }
+
     /// Whether emission is the same everywhere and in every direction — the
     /// case `emitted_at` answers without evaluating anything.
     fn is_uniform(&self) -> bool {

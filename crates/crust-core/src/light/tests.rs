@@ -646,3 +646,406 @@ fn similarity_placed_shapes_have_closed_form_area() {
         "{area} vs {exact}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Disk and tube solid-angle strategies (`CRUST_DISK_SAMPLING`,
+// `CRUST_TUBE_SAMPLING`)
+// ---------------------------------------------------------------------------
+
+use crate::config::{DiskSampling, TubeSampling};
+
+/// A disk or tube light under `placement`, sampled as told, with a one-sided
+/// (`Emissive::light`) or two-sided (`Emissive::new`) emitter.
+fn round_light(
+    unit: UnitShape,
+    placement: Affine3A,
+    tube: TubeSampling,
+    disk: DiskSampling,
+    one_sided: bool,
+) -> AreaLight {
+    let material = if one_sided {
+        Emissive::light(Vec3A::ONE, None)
+    } else {
+        Emissive::new(Vec3A::ONE)
+    };
+    let shape = AffineShape::new(unit, placement)
+        .unwrap()
+        .with_sampling(tube, disk);
+    AreaLight::new(shape, Arc::new(material), 0)
+}
+
+fn affine(light: &AreaLight) -> &AffineShape {
+    match &light.shape {
+        AreaShape::Affine(s) => s,
+        _ => unreachable!("an affine light"),
+    }
+}
+
+/// A 1 × 0.01 tube (length × radius), rotated off the world axes.
+fn thin_tube() -> Affine3A {
+    Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(1.0, 0.01, 0.01),
+        glam::Quat::from_euler(glam::EulerRot::XYZ, 0.4, 0.9, -0.2),
+        glam::Vec3::new(0.3, 1.0, -0.5),
+    )
+}
+
+/// A tube as thick as it is long.
+fn thick_tube() -> Affine3A {
+    Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(1.0, 0.5, 0.5),
+        glam::Quat::from_rotation_z(0.3),
+        glam::Vec3::ZERO,
+    )
+}
+
+/// A sheared tube with an elliptical cross-section.
+fn sheared_tube() -> Affine3A {
+    Affine3A::from_mat3_translation(
+        glam::Mat3::from_cols(
+            glam::Vec3::new(1.5, 0.2, 0.0),
+            glam::Vec3::new(0.1, 0.3, 0.05),
+            glam::Vec3::new(0.0, -0.1, 0.2),
+        ),
+        glam::Vec3::new(-0.2, 0.4, 0.1),
+    )
+}
+
+/// A sheared, non-uniformly scaled disk.
+fn sheared_disk() -> Affine3A {
+    Affine3A::from_mat3_translation(
+        glam::Mat3::from_cols(
+            glam::Vec3::new(0.9, 0.1, 0.0),
+            glam::Vec3::new(0.3, 0.5, 0.1),
+            glam::Vec3::new(0.1, -0.2, 0.7),
+        ),
+        glam::Vec3::new(0.2, -0.1, 0.3),
+    )
+}
+
+/// `local` placed by `m`.
+fn at(m: Affine3A, local: Vec3A) -> Vec3A {
+    m.transform_point3a(local)
+}
+
+/// A strategy's samples against its own claimed density. The expected
+/// share of each bin is `∫ pdf_Ω cos θ_l / r² dA` over the bin, by
+/// quadrature over the shape's area sampler (a fine grid of its points,
+/// each weighted by the area it stands for); the shares must sum to one —
+/// the density is normalised — and the samples, a stratified grid of
+/// `(u, v)`, must fill the bins in the same shares.
+fn check_density(name: &str, light: &AreaLight, from: Vec3A, bin: impl Fn(Vec3A) -> usize) {
+    const A: usize = 1024;
+    const K: usize = 256;
+    const BINS: usize = 32;
+    let shape = affine(light);
+    let sampler = shape
+        .solid_angle_sampler(from)
+        .unwrap_or_else(|| panic!("{name}: no strategy from {from}"));
+    let mut expected = [0.0f64; BINS];
+    for i in 0..A {
+        for j in 0..A {
+            let p = shape.sample_point((i as f32 + 0.5) / A as f32, (j as f32 + 0.5) / A as f32);
+            let Some(pdf) = sampler.pdf(p) else {
+                continue;
+            };
+            let to = from - p;
+            let r2 = to.length_squared();
+            let cos = shape.normal_at(p).dot(to / r2.sqrt()).abs();
+            expected[bin(p)] += pdf.get() as f64 * (cos * shape.inv_pdf_area(p).get() / r2) as f64;
+        }
+    }
+    for e in &mut expected {
+        *e /= (A * A) as f64;
+    }
+    let total: f64 = expected.iter().sum();
+    assert!(
+        (total - 1.0).abs() < 5e-3,
+        "{name}: the density integrates to {total}"
+    );
+
+    let mut counts = [0usize; BINS];
+    let mut refused = 0;
+    for i in 0..K {
+        for j in 0..K {
+            let (u, v) = ((i as f32 + 0.5) / K as f32, (j as f32 + 0.5) / K as f32);
+            match sampler.sample(u, v) {
+                Some((p, pdf)) => {
+                    // Both MIS halves answer the same number, bit for bit.
+                    assert_eq!(sampler.pdf(p), Some(pdf), "{name}");
+                    counts[bin(p)] += 1;
+                }
+                None => refused += 1,
+            }
+        }
+    }
+    assert!(refused <= 2, "{name}: {refused} samples refused");
+    for b in 0..BINS {
+        let got = counts[b] as f64 / (K * K) as f64;
+        assert!(
+            (got - expected[b]).abs() < 4e-3 + 0.02 * expected[b],
+            "{name}: bin {b}: {got} sampled vs {} expected",
+            expected[b]
+        );
+    }
+}
+
+/// Tube bins: eight azimuths across the arc that faces `from`, by four
+/// axial slabs.
+fn tube_bins(m: Affine3A, from: Vec3A) -> impl Fn(Vec3A) -> usize {
+    let inv = m.inverse();
+    let f = inv.transform_point3a(from);
+    let phi0 = f.z.atan2(f.y);
+    let half = (1.0 / (f.y * f.y + f.z * f.z).sqrt()).acos();
+    move |p| {
+        let l = inv.transform_point3a(p);
+        let d = (l.z.atan2(l.y) - phi0 + 3.0 * PI).rem_euclid(2.0 * PI) - PI;
+        let a = (((d / half + 1.0) * 0.5 * 8.0) as isize).clamp(0, 7) as usize;
+        let x = (((l.x + 0.5) * 4.0) as isize).clamp(0, 3) as usize;
+        a * 4 + x
+    }
+}
+
+use std::f32::consts::PI;
+
+#[test]
+fn tube_samples_follow_their_density() {
+    let cases = [
+        // Thin: 0.3 from its axis, opposite its middle and off one end.
+        ("thin, beside", thin_tube(), Vec3A::new(0.1, 30.0, 10.0)),
+        (
+            "thin, off the end",
+            thin_tube(),
+            Vec3A::new(0.8, 20.0, -15.0),
+        ),
+        // Thick, up close: 0.6 from an axis of radius 0.5.
+        ("thick, close", thick_tube(), Vec3A::new(0.2, 0.0, 1.2)),
+        ("sheared", sheared_tube(), Vec3A::new(-0.3, 2.0, 1.5)),
+    ];
+    for (name, m, f) in cases {
+        let from = at(m, f);
+        for tube in [TubeSampling::Arc, TubeSampling::Equiangular] {
+            let light = round_light(UnitShape::Cylinder, m, tube, DiskSampling::Area, true);
+            check_density(
+                &format!("{name} ({tube})"),
+                &light,
+                from,
+                tube_bins(m, from),
+            );
+        }
+    }
+}
+
+/// From a thousand points outside the tube, every light sample lands on the
+/// part of the wall that faces the point and carries its radiance.
+#[test]
+fn tube_samples_face_the_shading_point() {
+    let mut rng = openqmc::pcg::Rng::new(29);
+    for m in [thin_tube(), thick_tube(), sheared_tube()] {
+        for tube in [TubeSampling::Arc, TubeSampling::Equiangular] {
+            let light = round_light(UnitShape::Cylinder, m, tube, DiskSampling::Area, true);
+            let shape = affine(&light);
+            let mut points = 0;
+            while points < 1000 {
+                let mut r = || 8.0 * rng.next_f32() - 4.0;
+                let local = Vec3A::new(r() * 0.5, r(), r());
+                if local.y * local.y + local.z * local.z <= 1.0 {
+                    continue;
+                }
+                points += 1;
+                let from = at(m, local);
+                assert!(shape.solid_angle_sampler(from).is_some());
+                for _ in 0..4 {
+                    let (u, v) = (rng.next_f32(), rng.next_f32());
+                    let Some(s) = light.sample_li(from, u, v) else {
+                        continue;
+                    };
+                    let p = from + s.direction * s.distance;
+                    let facing = shape.normal_at(p).dot(-s.direction);
+                    assert!(facing > -1e-4, "{tube}: a back-facing sample, cos {facing}");
+                    assert_ne!(s.radiance, Vec3A::ZERO, "{tube}: a dark sample");
+                }
+            }
+        }
+    }
+}
+
+/// The disk's spherical ellipse, placed by a shear and a non-uniform scale,
+/// samples its own world density, and every sample lies on the disk.
+#[test]
+fn sheared_disk_samples_follow_their_density() {
+    let m = sheared_disk();
+    let inv = m.inverse();
+    let light = round_light(
+        UnitShape::Disk,
+        m,
+        TubeSampling::Area,
+        DiskSampling::Ellipse,
+        true,
+    );
+    for f in [
+        Vec3A::new(0.0, 0.0, -1.0),
+        Vec3A::new(1.5, -0.8, -0.6),
+        Vec3A::new(0.2, 0.3, -0.15),
+    ] {
+        let from = at(m, f);
+        let bins = |p: Vec3A| {
+            let l = inv.transform_point3a(p);
+            let r = (((l.x * l.x + l.y * l.y) * 4.0) as usize).min(3);
+            let a = ((l.y.atan2(l.x) + PI) / (2.0 * PI) * 8.0) as usize;
+            a.min(7) * 4 + r
+        };
+        check_density(&format!("disk from {f}"), &light, from, bins);
+        let shape = affine(&light);
+        let sampler = shape.solid_angle_sampler(from).unwrap();
+        let mut rng = openqmc::pcg::Rng::new(5);
+        for _ in 0..2000 {
+            let (p, _) = sampler.sample(rng.next_f32(), rng.next_f32()).unwrap();
+            let l = inv.transform_point3a(p);
+            assert!(
+                l.z.abs() < 1e-5 && l.x * l.x + l.y * l.y <= 1.0 + 1e-5,
+                "{l}"
+            );
+        }
+    }
+}
+
+/// Where a strategy does not apply the light is area-sampled, exactly as
+/// with the switch at `area`: a disk seen from behind or edge-on, a tube seen
+/// from inside, and any two-sided tube.
+#[test]
+fn round_lights_fall_back_to_area_sampling_bit_for_bit() {
+    let mut rng = openqmc::pcg::Rng::new(41);
+    // With both switches at `area`, no disk or tube has a strategy from
+    // anywhere — in front, behind, beside, inside — so `AreaLight` takes the
+    // area path these lights always took, unchanged (the goldens pin the
+    // whole render).
+    for (unit, m) in [
+        (UnitShape::Disk, sheared_disk()),
+        (UnitShape::Cylinder, sheared_tube()),
+        (UnitShape::Cylinder, thin_tube()),
+    ] {
+        let plain = round_light(unit, m, TubeSampling::Area, DiskSampling::Area, true);
+        for _ in 0..500 {
+            let mut r = || 6.0 * rng.next_f32() - 3.0;
+            let from = at(m, Vec3A::new(r(), r(), r()));
+            assert!(affine(&plain).solid_angle_sampler(from).is_none());
+        }
+    }
+    let same = |a: &AreaLight, b: &AreaLight, from: Vec3A, rng: &mut openqmc::pcg::Rng| {
+        assert!(affine(a).solid_angle_sampler(from).is_none(), "from {from}");
+        for _ in 0..64 {
+            let (u, v) = (rng.next_f32(), rng.next_f32());
+            let (sa, sb) = (a.sample_li(from, u, v), b.sample_li(from, u, v));
+            assert_eq!(sa.map(|s| s.pdf), sb.map(|s| s.pdf));
+            assert_eq!(sa.map(|s| s.direction), sb.map(|s| s.direction));
+            assert_eq!(sa.map(|s| s.radiance), sb.map(|s| s.radiance));
+            if let Some(s) = sa {
+                let p = from + s.direction * s.distance;
+                assert_eq!(a.pdf_at_point(from, p), b.pdf_at_point(from, p));
+            }
+        }
+    };
+    let area = |unit, m, one_sided| {
+        round_light(unit, m, TubeSampling::Area, DiskSampling::Area, one_sided)
+    };
+
+    let m = sheared_disk();
+    let disk = round_light(
+        UnitShape::Disk,
+        m,
+        TubeSampling::Area,
+        DiskSampling::Ellipse,
+        true,
+    );
+    let plain = area(UnitShape::Disk, m, true);
+    for f in [Vec3A::new(0.2, 0.1, 0.8), Vec3A::new(3.0, 0.0, 0.0)] {
+        same(&disk, &plain, at(m, f), &mut rng);
+    }
+
+    for tube in [TubeSampling::Arc, TubeSampling::Equiangular] {
+        let m = sheared_tube();
+        let inside = round_light(UnitShape::Cylinder, m, tube, DiskSampling::Area, true);
+        same(
+            &inside,
+            &area(UnitShape::Cylinder, m, true),
+            at(m, Vec3A::new(0.1, 0.3, -0.4)),
+            &mut rng,
+        );
+        // Two-sided, from beyond an open end on the axis, where its inner wall
+        // shows: the outer arc would never sample it.
+        let two = round_light(UnitShape::Cylinder, m, tube, DiskSampling::Area, false);
+        let plain = area(UnitShape::Cylinder, m, false);
+        for f in [Vec3A::new(1.5, 0.0, 0.0), Vec3A::new(0.0, 3.0, 1.0)] {
+            same(&two, &plain, at(m, f), &mut rng);
+        }
+    }
+}
+
+/// A two-sided tube seen through its open end: its light-only estimate of
+/// the solid angle it fills — inner wall included — agrees with a
+/// direction-sampled one.
+#[test]
+fn a_two_sided_tube_through_its_open_end_is_estimated_without_bias() {
+    let m = sheared_tube();
+    let from = at(m, Vec3A::new(1.2, 0.0, 0.0));
+    let light = round_light(
+        UnitShape::Cylinder,
+        m,
+        TubeSampling::Equiangular,
+        DiskSampling::Area,
+        false,
+    );
+    // Light-only: E[1 / pdf] over samples that reach the light unoccluded
+    // by the tube itself.
+    const K: usize = 512;
+    let mut nee = 0.0f64;
+    for i in 0..K {
+        for j in 0..K {
+            let (u, v) = ((i as f32 + 0.5) / K as f32, (j as f32 + 0.5) / K as f32);
+            let Some(s) = light.sample_li(from, u, v) else {
+                continue;
+            };
+            let first = light
+                .shape
+                .hits(from, s.direction)
+                .first()
+                .unwrap_or(f32::INFINITY);
+            if first >= s.distance * (1.0 - 1e-4) && s.radiance != Vec3A::ZERO {
+                nee += 1.0 / s.pdf.get() as f64;
+            }
+        }
+    }
+    nee /= (K * K) as f64;
+    // Direction-only: the fraction of uniform directions that meet it.
+    const D: usize = 2048;
+    let mut hit = 0usize;
+    for i in 0..D {
+        for j in 0..D {
+            let z = 1.0 - 2.0 * (i as f32 + 0.5) / D as f32;
+            let phi = 2.0 * PI * (j as f32 + 0.5) / D as f32;
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let dir = Vec3A::new(r * phi.cos(), r * phi.sin(), z);
+            hit += usize::from(light.shape.hits(from, dir).first().is_some());
+        }
+    }
+    let bsdf = 4.0 * std::f64::consts::PI * hit as f64 / (D * D) as f64;
+    assert!(
+        (nee - bsdf).abs() < 0.01 * bsdf,
+        "light-only {nee} vs direction-sampled {bsdf} sr"
+    );
+}
+
+/// The disk and tube strategies keep the sampler no larger than the rect's
+/// already made it. A sampler sized by a 200-byte ellipse cost every sphere
+/// and rect light sample a copy of it: +14% instructions in `sample_li` on
+/// `veach_mis`, which has neither a disk nor a tube.
+#[test]
+fn round_strategies_do_not_grow_the_sampler() {
+    let rect = std::mem::size_of::<super::rect::SphericalRect>() + 2 * std::mem::size_of::<usize>();
+    let sampler = std::mem::size_of::<SolidAngleSampler<'_>>();
+    assert!(
+        sampler <= rect,
+        "SolidAngleSampler is {sampler} bytes, the rect strategy {rect}"
+    );
+}

@@ -9,9 +9,7 @@ use crate::material::Emissive;
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
 use super::rect::RectShape;
-use super::shape::{
-    AffineShape, LightShape, ShapeHits, SolidAngleSampler, SolidAngleSampling, SphereShape,
-};
+use super::shape::{AffineShape, LightShape, ShapeHits, SolidAngleSampler, SphereShape};
 use super::{FoundAlong, Light, LightSample};
 
 /// The emitting surface of an [`AreaLight`]: one of the crate's
@@ -111,9 +109,15 @@ pub struct AreaLight {
 }
 
 impl AreaLight {
+    /// The light, with its shape told whether the emitter is one-sided —
+    /// which a tube's visible-arc strategy needs (`AffineShape`).
     pub fn new(shape: impl Into<AreaShape>, material: Arc<Emissive>, geom_id: u32) -> Self {
+        let mut shape = shape.into();
+        if let AreaShape::Affine(affine) = &mut shape {
+            affine.set_front_only(material.is_one_sided());
+        }
         Self {
-            shape: shape.into(),
+            shape,
             material,
             geom_id,
         }
@@ -121,18 +125,20 @@ impl AreaLight {
 
     /// Solid-angle pdf, as seen from `from`, of the strategy
     /// [`Light::sample_li`] used to reach `light_point`: the shape's own
-    /// solid-angle density where it has one, otherwise that of sampling
-    /// uniformly by area, `dist² / (cos(θ_light) · area)`, where θ_light is the
-    /// angle between the light's surface normal at `light_point` and the
-    /// direction back toward the shaded point.
+    /// solid-angle density where it has a strategy from `from`, otherwise
+    /// that of sampling uniformly by area, `dist² / (cos(θ_light) · area)`,
+    /// where θ_light is the angle between the light's surface normal at
+    /// `light_point` and the direction back toward the shaded point.
     ///
-    /// `None` where the area density is infinite (an edge-on point, see
-    /// [`AreaLight::pdf_toward`]): `sample_li` refuses such a sample, so NEE
-    /// never delivers that point and the bounce side must keep its emission
-    /// whole.
+    /// `None` where that density is infinite (an edge-on point, see
+    /// [`AreaLight::pdf_toward`], or a point the shape's strategy refuses):
+    /// `sample_li` refuses such a sample, so NEE never delivers that point
+    /// and the bounce side must keep its emission whole. A strategy's `None`
+    /// is final — falling through to the area density would weigh a bounce
+    /// hit against samples NEE never draws.
     pub(super) fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> Option<PdfSolidAngle> {
-        if let Some(pdf) = self.shape.solid_angle_pdf(from, light_point) {
-            return Some(pdf);
+        if let Some(sampler) = self.shape.solid_angle_sampler(from) {
+            return sampler.pdf(light_point);
         }
         let direction = light_point - from;
         let dir_to_light = direction.normalize();
@@ -203,7 +209,12 @@ impl Light for AreaLight {
         // The shape's solid-angle strategy where it has one from here, area
         // sampling otherwise. `pdf_at_point` makes the same choice through
         // `solid_angle_pdf`, which is what keeps the two MIS sides one strategy.
-        let solid_angle = self.shape.sample_solid_angle(from, u, v);
+        // A point the strategy refuses is refused here too, never re-drawn
+        // by area: which strategy applies is decided by `from` alone.
+        let solid_angle = match self.shape.solid_angle_sampler(from) {
+            Some(sampler) => Some(sampler.sample(u, v)?),
+            None => None,
+        };
         let light_point = solid_angle.map_or_else(|| self.shape.sample_point(u, v), |(p, _)| p);
         let to_light = light_point - from;
         let distance = to_light.length();

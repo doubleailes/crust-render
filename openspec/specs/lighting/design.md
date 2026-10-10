@@ -67,8 +67,9 @@
   placement — exact, because an affine map preserves which points of a convex surface
   face a given point — with the direction map's solid-angle Jacobian
   `|Mω|³ / |det M|` on the pdf (`world_solid_angle_pdf`), so its density varies over
-  the cap and both MIS sides evaluate it at the point. `AffineShape` disks and tubes are
-  still area-sampled.
+  the cap and both MIS sides evaluate it at the point. `AffineShape` tubes sample the
+  arc of wall that faces the point, and disks optionally their spherical ellipse: see
+  "Disk and tube lights" below.
   **`RectShape` samples the spherical rectangle it subtends** (Ureña, Fajardo & King
   2013, as pbrt-v4's `SampleSphericalRectangle`): uniform in solid angle, pdf `1/Ω`,
   and the point is returned through the rectangle's own `(s, t)` so it lies on the
@@ -176,6 +177,106 @@
 
   Emissive geometry with no light-list entry is handled: the bounce keeps its emission
   at full weight.
+
+## Disk and tube lights
+
+`DiskLight` and `CylinderLight` are `AffineShape`s: a unit disk in local XY emitting
+along −Z, and a unit-radius, unit-length open tube along local X, placed by the light's
+transform composed with its radius and length (`(r, r, 1)` and `(length, r, r)`), so a
+real tube's local space is almost never metric. Both used to be sampled uniformly in
+local area. Each now has a solid-angle strategy behind its own switch, whose `area`
+value is the old sampler bit for bit (pinned by the goldens and
+`round_lights_fall_back_to_area_sampling_bit_for_bit`).
+
+**Tubes: the visible arc, equiangular along the wall (`CRUST_TUBE_SAMPLING`, default
+`equiangular`).**
+- From `f = world_to_light(from)` outside the tube (`ρ = |(f.y, f.z)| > 1`), a wall
+  point at azimuth `φ` faces `f` exactly when `|φ − φ₀| < w = acos(1/ρ)`,
+  `φ₀ = atan2(f.z, f.y)`, whatever `x`. An affine map preserves which points of a convex
+  surface face a point (the squashed sphere's argument), so the local arc is the world
+  visible arc under any placement, sheared and elliptical tubes included. Area sampling
+  spent about half its samples on the far side, every one of them zero radiance from a
+  one-sided emitter.
+- `φ` is uniform over the arc (`1/2w` per radian). Given `φ`, the wall points form a
+  straight world segment, so the axial position is drawn **equiangularly in world arc
+  length** along it — `s = s₀ + H tan θ`, `θ` uniform between the ends' angles, `H` the
+  point's distance from that line — which follows its `1/r²` on a tube scaled
+  `(length, r, r)` where a local-`x` draw would not. In solid angle the `r²` cancels:
+  `pdf = L H / ((θ_b − θ_a) · 2w · area_scale(n) · |cos θ_l|)`. `arc` is the same arc
+  with `x` uniform, kept so each half of the gain stays measurable.
+- **Only for a one-sided emitter** (`AffineShape::front_only`, set by `AreaLight::new`
+  from `Emissive::is_one_sided`): a two-sided tube seen through an open end shows its
+  inner wall, which the outer arc never reaches. From inside the tube, or on its wall,
+  it keeps area sampling. Every imported tube is one-sided.
+- **The strategy may refuse a point.** Its density is infinite at the silhouette and
+  zero outside the arc, so `SolidAngleSampler::sample` and `pdf` return `Option`, and
+  `AreaLight` treats a strategy that exists from `from` as final on both MIS sides: a
+  refused sample is refused, never re-drawn by area, and `solid_angle_pdf` returns the
+  strategy's `None` rather than falling through to the area density, which would weigh
+  a bounce hit against samples NEE never draws. `sample` reports the density `pdf`
+  computes for the placed point, so both halves agree bit for bit.
+- **Measured** (16 spp, `--indirect-clamp 0`, relMSE against 1024 spp area-sampled
+  references, mean of four frames; equal time = relMSE × Render seconds, min of four):
+  on a tube 1 unit above a diffuse or a glossy (metal, roughness 0.25) floor,
+  length/distance 0.3, 1, 3 and radius/distance 0.01, 0.3, `equiangular` had the lower
+  relMSE on all 12 and won at equal time on all 12, **1.3–20×** (the long thin tube over
+  diffuse most, the long thick one over glossy least); `arc` won 1.2–8.8×, ahead of
+  `equiangular` at equal time on three glossy cases only. The tiny sweep frames (40 ms)
+  time too noisily to price a sample; on `usdlux` the Render phase is 3.6% longer, for
+  1.89× lower relMSE: 1.82× at equal time. With `--light-samples 4` the arc is
+  stratified across the four draws by `openqmc` with no help: at 4 spp × 4 samples
+  `equiangular` is 13.6× below `area`, against 17.5× at 16 × 1. No solid-angle band:
+  the back-facing half it skips does not shrink with distance (the smallest tube still
+  won 7.4×).
+
+**Disks: the spherical ellipse (`CRUST_DISK_SAMPLING`, default `area`).**
+- A disk seen from a point subtends a spherical ellipse, sampled uniformly by Guillén
+  et al. 2017's radial map (`light/ellipse.rs`) in local space and mapped out with the
+  direction map's Jacobian, as the squashed sphere is; the point comes back through the
+  unit disk, so it lies where a bounce ray hits it. Strictly in front of the emitting
+  side, `b ≥ 1e-4 a`, and `Ω ∈ [0.1, 6.22]` sr; area sampling otherwise.
+- **The map, from the paper, with three corrections.** (a) Eq. 3 as printed puts the
+  disk's centre in the plane of `x̂_d` and then measures the major axis along it; the
+  major axis is the one perpendicular to the plane through the point, the centre and
+  the normal, and the frame is built from that symmetry (pinned by brute-force solid
+  angle off axis, and `a ≥ b` over a dense grid). (b) Eq. 19's `φ − k Π` cancels for a
+  small eccentric ellipse, and `Π` from `(n, φ, m)` is ill-conditioned as `n → 1`:
+  `1 − n = b² cos² α / (a² cos² β)` and `1 − m = cos² α / cos² β` are formed in closed
+  form, without which the solid angle was off by 3e-4 on a grazing disk. (c) Newton runs
+  in eq. 20's `ψ = φ_t`, `Π`'s own argument, in which `Ω_r` is nearly linear for any
+  small ellipse; in `φ` an eccentric ellipse took up to 10 iterations where `Ω_r` is
+  flat (slope `b²` near `π/2`), in `ψ` at most 6 (2.7 on average over the grid), with a
+  bisection safeguard and a residual tolerance at `Ω_r`'s own rounding (8 ε).
+  `R_F` and `R_J` are Carlson's duplication algorithm, pinned to mpmath at 1e-12
+  (`scripts/ellipse_oracle.py`, 4e-14 worst); the circle reduces to the cone exactly.
+- **The low-distortion variant (eq. 23)**, Shirley–Chiu's concentric map pre-warping
+  `(u, v)`, had the lower 16 spp relMSE than the plain radial map on 7 of the 8 sweep
+  disks and on `usdlux`, so it is the only map.
+- **The sampler stays small.** `SolidAngleSampler` holds only `Ω_r(π/2)` for a disk
+  (the one elliptic integral the strategy decides with); the frame is rebuilt where a
+  sample is drawn. The strategies' bodies are out of line and answer in registers — a
+  point, then an `Option<PdfSolidAngle>`. Each other arrangement cost `veach_mis`, which
+  has neither shape, 2–14% of `sample_li`'s instructions (callgrind): inlined bodies;
+  a 200-byte ellipse in the sampler, copied for every sphere sample; a borrowed
+  sampler, kept in memory; an `Option<(Vec3A, _)>` returned from the out-of-line call,
+  which merged every arm's answer in memory. Pinned by
+  `round_strategies_do_not_grow_the_sampler`. As built: `sample_li` −0.8%, `Bvh::hit`
+  unchanged, `pdf_at_point` +0.36M of 7.78G.
+- **Why it is off.** On disks 1 unit above the same floors, radius/height 0.1, 0.3, 1,
+  3, it won at equal time only at radius 1 over the diffuse floor (**7.6×**: 28× lower
+  relMSE) and tied at 0.3 (1.08×); at radius 3 over it, 2.3× lower relMSE was not worth
+  its cost (0.62×). It lost on every glossy floor (0.30–0.62×), and on the 0.1 and 0.3
+  glossy ones in relMSE alone, as the spherical rectangle does
+  (`docs/light_sampling.md` §3.9: area sampling's `r²/cos θ_l` density follows some
+  highlights). It costs 2–4× per frame: about 5,000 instructions per sample, 37% of a
+  disk-lit render in `EllipseMap::omega_r` (about four `Π` per sample: the strategy's
+  `Ω`, then Newton). On radius 0.1 (~0.03 sr) it lost in relMSE too (1.8×: it
+  stratifies worse than the area map), which is what moved the band's floor from the
+  rect's `1e-4` to 0.1 sr. `usdlux`: same relMSE, +50% time. D5's circumscribed-square
+  alternative was not built: it is uniform in solid angle too, plus 21% zero samples,
+  so it cannot win the glossy cases either.
+- Measured on a sweep under the scratchpad (not checked in); ALab was not available.
+  Numbers in `openspec/changes/archive/*-solid-angle-disk-and-tube-lights/notes.md`.
 
 ## Several light samples per vertex
 
@@ -689,8 +790,9 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   per sample, §3.7 there),
   and rect lights their spherical rectangle (1.4–1.5× lower relMSE on near panels and
   fog, but 4–9% *higher* on the glossy `materialx_basic`/`usdpreview_textured` tiles, at
-  ~110 ns more per NEE sample, §3.9 there), but disk/tube lights still sample by area
-  rather than solid angle. (NEE runs its three tests
+  ~110 ns more per NEE sample, §3.9 there); tube lights sample their visible arc,
+  equiangularly along the wall (1.3–20× at equal time, "Disk and tube lights" above);
+  disk lights still sample by area by default. (NEE runs its three tests
   cheapest first: the light's radiance, then the BSDF `eval`, then the shadow
   ray — for every material now, since `eval` goes through the vertex's
   `ShadingPoint` and reads no texture. Textured materials used to trace the ray
@@ -700,6 +802,16 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   domain, §3.11 there.)
   Measure changes with
   `crust diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
+- **The tube's density is cosine-blind.** It follows the `1/r²` along the wall but
+  neither cosine, so a thick tube within a few radii of a receiver is still noisier
+  than it need be. Gamito 2016 samples a finite-radius cylinder exactly in solid angle,
+  by rejection, which would break `openqmc`'s stratification; a non-rejecting version
+  is the pointer.
+- **The disk's ellipse is opt-in and expensive.** It loses at equal time on glossy
+  receivers and small disks, and costs ~5,000 instructions per sample, most of them in
+  Carlson's `R_J` (`EllipseMap::omega_r`). A closed-form `R_C` inside `R_J` and fewer
+  `Π` per sample (the strategy's `Ω` is recomputed on the bounce side) are the obvious
+  savings; neither would win the glossy cases, which it loses in relMSE as well.
 
 ## Known gaps: lighting
 
@@ -721,8 +833,8 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   is still sampled without regard to its cone (by solid angle for a rect, by area otherwise): a narrow spotlight wastes the NEE samples its cone
   cuts off (unbiased, but noisier than cone-aware sampling), and shaping is not applied
   to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the
-  reference's is. A tube light samples non-uniformly in world area (correct, not
-  optimal); a squashed sphere samples its visible cone. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
+  reference's is. A tube light samples the arc of wall facing the shading point; a
+  squashed sphere samples its visible cone. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
   than `latlong` are refused rather than mapped wrongly; and light-list picking by
   power is blind to position, orientation and visibility, so a far light gets as many

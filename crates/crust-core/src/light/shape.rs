@@ -5,9 +5,11 @@ use std::f32::consts::PI;
 
 use glam::{Affine3A, Mat3A, Vec3A};
 
+use crate::config::{DiskSampling, TubeSampling};
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 use crate::ray::TRACE_T_MIN;
 
+use super::ellipse::SphericalEllipse;
 use super::rect::{RectShape, SphericalRect};
 
 /// The emitting surface of an area light, decoupled from any material: pure
@@ -125,21 +127,25 @@ fn quadratic_roots(oc: Vec3A, d: Vec3A, r: f32) -> Option<(f32, f32)> {
 /// the density of a point, from the same `from`, through the one sampler
 /// [`LightShape::solid_angle_sampler`] returns. Implemented for every shape
 /// and not overridable, so neither half can answer where the other does not.
+///
+/// Each answers `None` both where the shape has no strategy from `from` and
+/// where the strategy refuses the point (see [`SolidAngleSampler::sample`]);
+/// [`AreaLight`](super::AreaLight), which must tell the two apart, asks
+/// [`LightShape::solid_angle_sampler`] itself.
 pub trait SolidAngleSampling: LightShape {
     /// A point on the surface as seen from `from`, sampled by the shape's
-    /// solid-angle density there, as `(point, pdf)`. `None` where the shape
-    /// has no such strategy from `from`.
+    /// solid-angle density there, as `(point, pdf)`.
     #[must_use]
     fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
-        self.solid_angle_sampler(from).map(|s| s.sample(u, v))
+        self.solid_angle_sampler(from).and_then(|s| s.sample(u, v))
     }
 
     /// The solid-angle pdf, seen from `from`, of
     /// [`SolidAngleSampling::sample_solid_angle`] having produced `p` — the
-    /// bounce side of MIS. `None` exactly when `sample_solid_angle` is.
+    /// bounce side of MIS.
     #[must_use]
     fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<PdfSolidAngle> {
-        self.solid_angle_sampler(from).map(|s| s.pdf(p))
+        self.solid_angle_sampler(from).and_then(|s| s.pdf(p))
     }
 }
 
@@ -172,6 +178,33 @@ enum Strategy<'a> {
         shape: &'a RectShape,
         rect: SphericalRect,
     },
+    /// A disk under an affine placement: the unit disk's spherical ellipse
+    /// in local space, mapped out.
+    Ellipse {
+        shape: &'a AffineShape,
+        from_local: Vec3A,
+        ellipse: SphericalEllipse,
+    },
+    /// A one-sided tube seen from outside: the azimuth uniform over the arc
+    /// of wall that faces `from`, `|φ − φ₀| < half_arc` in local space, and
+    /// the axial position uniform or equiangular along that wall line.
+    Tube {
+        shape: &'a AffineShape,
+        view: TubeView,
+    },
+}
+
+/// A tube as seen from one shading point outside it: what its strategy
+/// needs of `from` (see the lighting design record, "Disk and tube lights").
+#[derive(Clone, Copy)]
+pub(super) struct TubeView {
+    from: Vec3A,
+    /// `(f.y, f.z)` of `from` in local space, whose length is `ρ > 1`.
+    across: (f32, f32),
+    /// The arc's centre and half-width, `w = acos(1/ρ)`.
+    phi0: f32,
+    half_arc: f32,
+    equiangular: bool,
 }
 
 impl<'a> SolidAngleSampler<'a> {
@@ -180,26 +213,30 @@ impl<'a> SolidAngleSampler<'a> {
     }
 
     /// A point on the surface from two unit random numbers, and its
-    /// solid-angle pdf.
+    /// solid-angle pdf. `None` for a point the strategy refuses because its
+    /// density there is not finite — a tube's silhouette — which
+    /// [`SolidAngleSampler::pdf`] refuses too, so NEE never delivers it and
+    /// the bounce side keeps its emission whole. Every other strategy always
+    /// answers.
     #[inline(always)]
-    pub fn sample(&self, u: f32, v: f32) -> (Vec3A, PdfSolidAngle) {
+    pub fn sample(&self, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
         match self.0 {
             Strategy::Cone {
                 center,
                 radius,
                 from,
                 cone,
-            } => (point_on_cone(center, radius, from, &cone, u, v), cone.pdf()),
+            } => Some((point_on_cone(center, radius, from, &cone, u, v), cone.pdf())),
             Strategy::AffineCone {
                 shape,
                 from_local,
                 cone,
             } => {
                 let p_local = point_on_cone(Vec3A::ZERO, 1.0, from_local, &cone, u, v);
-                (
+                Some((
                     shape.light_to_world.transform_point3a(p_local),
                     shape.world_solid_angle_pdf(cone.pdf(), p_local - from_local),
-                )
+                ))
             }
             // The point is returned through the rectangle's own `(s, t)`
             // rather than the map's local coordinates, so it lies on the
@@ -207,28 +244,68 @@ impl<'a> SolidAngleSampler<'a> {
             // bounce ray hits, and at the texel a textured card looks up.
             Strategy::Rect { shape, rect } => {
                 let (s, t) = rect.sample(u as f64, v as f64);
-                (shape.sample_point(s as f32, t as f32), rect.pdf())
+                Some((shape.sample_point(s as f32, t as f32), rect.pdf()))
+            }
+            // Out of line, both, handed their state by value and answering
+            // in registers — a point, then its density — so this match's
+            // result never leaves them. Each other way cost every sphere and
+            // rect sample on `veach_mis`, which has neither shape, 2–14% of
+            // `sample_li`'s instructions (callgrind): inlined bodies, a
+            // borrowed sampler copied to memory, or a returned
+            // `Option<(Vec3A, _)>`, which merged every arm's answer in memory.
+            // Each point's density is the one `pdf` gives it, so the two
+            // halves of MIS agree on it bit for bit.
+            Strategy::Ellipse {
+                shape,
+                from_local,
+                ellipse,
+            } => {
+                let p = shape.ellipse_point(from_local, ellipse, u, v);
+                p.is_finite()
+                    .then(|| (p, shape.ellipse_pdf(from_local, ellipse, p)))
+            }
+            Strategy::Tube { shape, view } => {
+                let p = shape.tube_point(view, u, v);
+                shape.tube_pdf(view, p).map(|pdf| (p, pdf))
             }
         }
     }
 
     /// The solid-angle pdf of [`SolidAngleSampler::sample`] having produced
-    /// `p`, a point on the surface.
+    /// `p`, a point on the surface. `None` exactly where `sample` refuses.
     #[inline(always)]
-    pub fn pdf(&self, p: Vec3A) -> PdfSolidAngle {
+    pub fn pdf(&self, p: Vec3A) -> Option<PdfSolidAngle> {
         match self.0 {
-            Strategy::Cone { cone, .. } => cone.pdf(),
+            Strategy::Cone { cone, .. } => Some(cone.pdf()),
             Strategy::AffineCone {
                 shape,
                 from_local,
                 cone,
             } => {
                 let p_local = shape.world_to_light.transform_point3a(p);
-                shape.world_solid_angle_pdf(cone.pdf(), p_local - from_local)
+                Some(shape.world_solid_angle_pdf(cone.pdf(), p_local - from_local))
             }
-            Strategy::Rect { rect, .. } => rect.pdf(),
+            Strategy::Rect { rect, .. } => Some(rect.pdf()),
+            Strategy::Ellipse {
+                shape,
+                from_local,
+                ellipse,
+            } => Some(shape.ellipse_pdf(from_local, ellipse, p)),
+            Strategy::Tube { shape, view } => shape.tube_pdf(view, p),
         }
     }
+}
+
+/// The straight line of a tube's wall at one azimuth, in world units, as the
+/// equiangular density sees it from a shading point: the point's
+/// foot at `s0` along it from the `x = −½` end, its distance `h` from it, its
+/// world `length`, and the angles `θ = atan((s − s0) / h)` of its two ends.
+struct WallLine {
+    s0: f32,
+    h: f32,
+    length: f32,
+    theta_a: f32,
+    theta_b: f32,
 }
 
 /// `sin² 1.5°`, pbrt-v4's threshold. Below it a cone's `1 − cos θ_max` is
@@ -475,11 +552,15 @@ impl UnitShape {
 /// to the light by its transform stack" requires of a squashed sphere, an
 /// elliptical disk or an elliptical tube.
 ///
-/// A sphere seen from outside is sampled by its visible cone in local space
-/// (see [`LightShape::sample_solid_angle`] below). Otherwise — a disk, a tube,
-/// or a point inside the sphere — sampling is uniform in the shape's *local*
-/// area and mapped through the placement, so in world space it is denser
-/// where the placement compresses the surface. That is fine — MIS needs a density both sides agree on, not a
+/// A sphere seen from outside is sampled by its visible cone in local space,
+/// a one-sided tube seen from outside by the arc of wall facing the point,
+/// and a disk seen from in front, with `CRUST_DISK_SAMPLING=ellipse`, by its
+/// spherical ellipse (see [`LightShape::solid_angle_sampler`] below).
+/// Otherwise — a point inside the sphere or the tube, a disk seen from behind
+/// or out of its band, or either strategy switched off — sampling is uniform
+/// in the shape's *local* area and mapped through the placement, so in world
+/// space it is denser where the placement compresses the surface. That is
+/// fine — MIS needs a density both sides agree on, not a
 /// uniform one — and [`LightShape::inv_pdf_area`] reports it exactly: an
 /// affine map `M` scales the area element at a point with unit local normal
 /// `n` by `|det M| · |M⁻ᵀ n|`. For a disk that factor is constant, so the
@@ -493,16 +574,28 @@ pub struct AffineShape {
     pub(super) normal_mat: Mat3A,
     pub(super) abs_det: f32,
     pub(super) area: f32,
+    /// How a tube is sampled from outside (`CRUST_TUBE_SAMPLING`).
+    tube: TubeSampling,
+    /// How a disk is sampled from in front (`CRUST_DISK_SAMPLING`).
+    disk: DiskSampling,
+    /// Whether the emitter on this surface is one-sided, which
+    /// [`AreaLight::new`](super::AreaLight::new) sets. A tube's visible-arc
+    /// strategy needs it: a two-sided tube seen through an open end shows
+    /// its inner wall, which the outer arc never reaches.
+    front_only: bool,
 }
 
 impl AffineShape {
     /// `None` for a transform that collapses the shape (not invertible).
+    /// Disks and tubes are sampled as the process's [`crate::config()`] says;
+    /// [`AffineShape::with_sampling`] chooses otherwise.
     pub fn new(unit: UnitShape, light_to_world: Affine3A) -> Option<Self> {
         let det = light_to_world.matrix3.determinant();
         if !det.is_finite() || det.abs() < 1e-30 {
             return None;
         }
         let world_to_light = light_to_world.inverse();
+        let config = crate::config();
         let mut shape = Self {
             unit,
             light_to_world,
@@ -510,9 +603,25 @@ impl AffineShape {
             normal_mat: world_to_light.matrix3.transpose(),
             abs_det: det.abs(),
             area: 0.0,
+            tube: config.tube_sampling,
+            disk: config.disk_sampling,
+            front_only: false,
         };
         shape.area = shape.integrate_area();
         Some(shape)
+    }
+
+    /// The same shape, sampled by these strategies whatever the environment
+    /// says: both sides of a switch in one process.
+    #[must_use]
+    pub fn with_sampling(mut self, tube: TubeSampling, disk: DiskSampling) -> Self {
+        self.tube = tube;
+        self.disk = disk;
+        self
+    }
+
+    pub(super) fn set_front_only(&mut self, front_only: bool) {
+        self.front_only = front_only;
     }
 
     pub fn unit(&self) -> UnitShape {
@@ -631,18 +740,43 @@ impl LightShape for AffineShape {
     /// world density is the local cone's times the solid-angle Jacobian of the
     /// direction map (see [`AffineShape::world_solid_angle_pdf`]), so unlike
     /// the round sphere's it varies across the cap.
+    ///
+    /// A disk seen strictly from in front is sampled by the spherical
+    /// ellipse the unit disk subtends in local space, within a solid-angle
+    /// band (`SphericalEllipse::new`), the same way. A one-sided tube seen
+    /// from outside is sampled over the arc of wall facing `from`, which an
+    /// affine map preserves for the same reason (the lighting design record,
+    /// "Disk and tube lights").
     #[inline(always)]
     fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
-        if self.unit != UnitShape::Sphere {
-            return None;
+        match self.unit {
+            UnitShape::Sphere => {
+                let from_local = self.world_to_light.transform_point3a(from);
+                let cone = SubtendedCone::new(Vec3A::ZERO, 1.0, from_local)?;
+                Some(SolidAngleSampler(Strategy::AffineCone {
+                    shape: self,
+                    from_local,
+                    cone,
+                }))
+            }
+            // Their setup out of line, as their strategies' bodies are (see
+            // `SolidAngleSampler::sample`), behind the switch, which a disk or
+            // tube that keeps area sampling reads without a call.
+            UnitShape::Disk if self.disk != DiskSampling::Area => {
+                let from_local = self.world_to_light.transform_point3a(from);
+                let ellipse = SphericalEllipse::new(from_local)?;
+                Some(SolidAngleSampler(Strategy::Ellipse {
+                    shape: self,
+                    from_local,
+                    ellipse,
+                }))
+            }
+            UnitShape::Cylinder if self.tube != TubeSampling::Area && self.front_only => {
+                let view = self.tube_view(from)?;
+                Some(SolidAngleSampler(Strategy::Tube { shape: self, view }))
+            }
+            UnitShape::Disk | UnitShape::Cylinder => None,
         }
-        let from_local = self.world_to_light.transform_point3a(from);
-        let cone = SubtendedCone::new(Vec3A::ZERO, 1.0, from_local)?;
-        Some(SolidAngleSampler(Strategy::AffineCone {
-            shape: self,
-            from_local,
-            cone,
-        }))
     }
 
     /// In local space, where the surface is the unit one: an affine map
@@ -671,5 +805,138 @@ impl AffineShape {
     ) -> PdfSolidAngle {
         let stretch = (self.light_to_world.matrix3 * to_local.normalize()).length();
         PdfSolidAngle::from_measure(local_pdf.get() * stretch * stretch * stretch / self.abs_det)
+    }
+
+    /// The tube as seen from `from` for its visible-arc strategy,
+    /// `None` on the wall or inside it. The caller has checked the switch and
+    /// that the emitter is one-sided.
+    #[inline(never)]
+    fn tube_view(&self, from: Vec3A) -> Option<TubeView> {
+        let f = self.world_to_light.transform_point3a(from);
+        let rho2 = f.y * f.y + f.z * f.z;
+        // On the wall or inside the tube, a one-sided tube shows only
+        // its back, which area sampling already finds dark for free.
+        if !(rho2 > 1.0 && rho2.is_finite()) {
+            return None;
+        }
+        let half_arc = (1.0 / rho2.sqrt()).acos();
+        if half_arc.is_nan() || half_arc <= 0.0 {
+            return None;
+        }
+        Some(TubeView {
+            from,
+            across: (f.y, f.z),
+            phi0: f.z.atan2(f.y),
+            half_arc,
+            equiangular: self.tube == TubeSampling::Equiangular,
+        })
+    }
+
+    /// The disk's spherical-ellipse sample: on the unit disk in local space,
+    /// as an area sample is, then placed. NaN, refused by the caller, if the
+    /// map cannot be rebuilt from `from_local` — which `ellipse` was built
+    /// from, so never.
+    #[inline(never)]
+    fn ellipse_point(&self, from_local: Vec3A, ellipse: SphericalEllipse, u: f32, v: f32) -> Vec3A {
+        match ellipse.sample(from_local, u as f64, v as f64) {
+            Some(p) => self
+                .light_to_world
+                .transform_point3a(Vec3A::from(p.as_vec3())),
+            None => Vec3A::NAN,
+        }
+    }
+
+    /// The disk's spherical-ellipse density at the world point `p`: the local
+    /// one, uniform, through the direction map's Jacobian, as for the
+    /// squashed sphere.
+    #[inline(never)]
+    fn ellipse_pdf(&self, from_local: Vec3A, ellipse: SphericalEllipse, p: Vec3A) -> PdfSolidAngle {
+        let p_local = self.world_to_light.transform_point3a(p);
+        self.world_solid_angle_pdf(ellipse.pdf(), p_local - from_local)
+    }
+
+    /// The tube's sample: the azimuth uniform over the arc
+    /// from `v`, the axial position from `u`, uniform or equiangular along
+    /// that wall line.
+    #[inline(never)]
+    fn tube_point(&self, view: TubeView, u: f32, v: f32) -> Vec3A {
+        let (sin, cos) = (view.phi0 + view.half_arc * (2.0 * v - 1.0)).sin_cos();
+        let x = if view.equiangular {
+            let line = self.wall_line(view.from, cos, sin);
+            let theta = line.theta_a + u * (line.theta_b - line.theta_a);
+            let s = (line.s0 + line.h * theta.tan()).clamp(0.0, line.length);
+            s / line.length - 0.5
+        } else {
+            u - 0.5
+        };
+        self.light_to_world
+            .transform_point3a(Vec3A::new(x, cos, sin))
+    }
+
+    /// The tube's wall line at the azimuth `(cos φ, sin φ)`, in world space,
+    /// as seen from `from`. The line is straight under any affine
+    /// placement, which is what makes the equiangular density follow the
+    /// real `1/r²` on a tube scaled `(length, r, r)`.
+    fn wall_line(&self, from: Vec3A, cos: f32, sin: f32) -> WallLine {
+        let start = self
+            .light_to_world
+            .transform_point3a(Vec3A::new(-0.5, cos, sin));
+        let axis = self.light_to_world.matrix3.x_axis;
+        let length = axis.length();
+        let along = axis / length;
+        let d = from - start;
+        let s0 = d.dot(along);
+        // Positive from outside the tube: `from` on the line needs `ρ = 1`.
+        let h = d.cross(along).length();
+        WallLine {
+            s0,
+            h,
+            length,
+            theta_a: (-s0 / h).atan(),
+            theta_b: ((length - s0) / h).atan(),
+        }
+    }
+
+    /// The tube strategy's solid-angle density at the world point `p` on
+    /// the wall, seen from `from` (local `across` = `(f.y, f.z)`): `1 / 2w`
+    /// over the arc times the axial density, through the area
+    /// scale and the area-to-solid-angle Jacobian. `None` for a point that
+    /// does not face `from` (outside the arc, where a one-sided tube is dark
+    /// and NEE never samples) or seen edge-on, where it is infinite.
+    #[inline(never)]
+    fn tube_pdf(&self, view: TubeView, p: Vec3A) -> Option<PdfSolidAngle> {
+        let TubeView {
+            from,
+            across,
+            half_arc,
+            equiangular,
+            ..
+        } = view;
+        let local = self.world_to_light.transform_point3a(p);
+        let n_local = Vec3A::new(0.0, local.y, local.z).normalize_or(Vec3A::Y);
+        // `n · (f − p) > 0` on the unit wall: the point faces `from`, i.e.
+        // lies strictly inside the arc.
+        if n_local.y * across.0 + n_local.z * across.1 <= 1.0 {
+            return None;
+        }
+        let to = p - from;
+        let dist2 = to.length_squared();
+        let n_world = (self.normal_mat * n_local).normalize_or(Vec3A::Z);
+        let cos = n_world.dot(-to.normalize()).abs();
+        let arc_area = 2.0 * half_arc * self.area_scale(n_local);
+        if !equiangular {
+            return InvPdfArea::new(arc_area).to_solid_angle(dist2, cos);
+        }
+        // The equiangular axial density in world arc length is
+        // `h / ((θb − θa) (h² + (s − s0)²))`, and `h² + (s − s0)²` is the
+        // distance squared, which the area-to-solid-angle Jacobian cancels:
+        // the solid-angle density is `L h / ((θb − θa) · 2w · scale · cos)`.
+        let line = self.wall_line(from, n_local.y, n_local.z);
+        let pdf = line.length * line.h / ((line.theta_b - line.theta_a) * arc_area * cos);
+        if cos > 0.0 {
+            PdfSolidAngle::new(pdf)
+        } else {
+            None
+        }
     }
 }

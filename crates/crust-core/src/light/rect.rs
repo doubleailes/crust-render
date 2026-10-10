@@ -49,13 +49,13 @@ pub(super) struct RectFrame {
 /// Below this solid angle (sr) a rectangle is area-sampled: `cos θ_l / r²`
 /// is nearly constant across it, so area sampling is already close to
 /// optimal and cheaper. pbrt-v4's `BilinearPatch::MinSphericalSampleArea`.
-const MIN_SPHERICAL_RECT_SR: f64 = 1e-4;
+pub(super) const MIN_SPHERICAL_RECT_SR: f64 = 1e-4;
 
 /// Above this (sr) — a shading point almost on the light's plane, where the
 /// rectangle fills nearly a hemisphere — the map's `sin(a_u)` divisions
 /// degenerate, and the rectangle is area-sampled. pbrt-v4's
 /// `MaxSphericalSampleArea`.
-const MAX_SPHERICAL_RECT_SR: f64 = 6.22;
+pub(super) const MAX_SPHERICAL_RECT_SR: f64 = 6.22;
 
 /// How far from perpendicular a rectangle's edges may be, as the cosine of
 /// the angle between them in f64, before it is treated as a sheared
