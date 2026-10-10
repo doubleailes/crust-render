@@ -63,7 +63,9 @@ resolved estimate. Alternatives considered:
   engine anyway.
 
 Applying it after the resolve keeps the integrator, the clamp, the stopping rule and
-the LPE ↔ beauty bit-identity pair exactly as they are. Exposure becomes a pure
+the LPE ↔ beauty bit-identity pair exactly as they are. Whatever an output is divided by the beauty
+must move with it: the clamp counter's removed luminance takes the scale, so
+`crust diagnostic`'s clamp share does not depend on the exposure. Exposure becomes a pure
 post-multiplication.
 
 **D2. Where in the engine.** The scale is applied in two places, the only two from
@@ -93,9 +95,11 @@ default free. The resolve takes `if scale != 1.0`.
 scale with C++'s operations, in `f32` and in C++'s order, from the five attributes at
 `eval_time()`. The import sets `RenderSettings::exposure_scale`, so the stamp,
 `crust check` and the engine read it where they already read settings. The
-procedural fallback scene keeps the default of 1. A non-finite or non-positive result
-raises `camera.invalid_exposure` (`Refused`, logged each time; there is one render
-camera) and stores 1.
+procedural fallback scene keeps the default of 1. Each camera the traversal builds carries its
+scale unchecked. Once the render camera is resolved, and only when its exposure
+applies (D6), a non-finite or non-positive scale raises `camera.invalid_exposure`
+(`Refused`) naming that camera and stores 1. A fallback candidate that is not rendered
+through, or an exposure turned off, warns about nothing.
 
 **D6. `enableExposureCompensation`, as Hydra reads it.** The import reads the render
 setting off the `RenderSettings` prim. `crust:enableExposureCompensation` wins over

@@ -769,6 +769,35 @@ fn retune_renders_what_new_renders() {
     }
 }
 
+/// The clamp counter reports in the image's units: under a camera exposure the
+/// luminance it saw removed scales with the beauty, so a share of the beauty
+/// (what `crust diagnostic` reports) does not move with the exposure.
+#[test]
+fn the_clamp_counter_scales_with_the_exposure() {
+    use super::Instruments;
+    use crate::Renderer;
+    let measure = |exposure: f32| {
+        let scene = sample_scene("cornellbox.usda");
+        let s = scene
+            .settings
+            .with_resolution(48, 32)
+            .with_samples_per_pixel(16)
+            .with_indirect_clamp(0.0)
+            .with_exposure_scale(exposure);
+        let instruments = Instruments {
+            clamp: Some(0.25),
+            ..Instruments::default()
+        };
+        Renderer::new(scene.camera, scene.world, scene.lights, s)
+            .render_measured(None, instruments)
+            .clamp
+    };
+    let (one, four) = (measure(1.0), measure(4.0));
+    assert!(one.removed_luminance > 0.0, "{one:?}");
+    assert_eq!(four.pixels_touched, one.pixels_touched);
+    assert_eq!(four.removed_luminance, 4.0 * one.removed_luminance);
+}
+
 /// The clamp counter observes only: the image is the unclamped one, bit
 /// for bit, and what it measures is exactly the luminance the clamp takes
 /// from the image when it is on.

@@ -165,10 +165,14 @@ pub(crate) struct Measured {
 
 impl Measured {
     /// Multiplies the result by the render camera's exposure `scale`: the
-    /// beauty and the radiance planes by `scale`, the variances (the AOV
-    /// film's and the per-pixel `var_map`) by its square.
+    /// beauty, the radiance planes and the luminance the clamp counter saw it
+    /// remove by `scale`, the variances (the AOV film's and the per-pixel
+    /// `var_map`) by its square. Everything a caller divides by the beauty
+    /// is then in the beauty's units, so `crust diagnostic`'s clamp share
+    /// does not move with the exposure.
     fn apply_exposure(&mut self, scale: f32) {
         self.buffer.scale(scale);
+        self.clamp.removed_luminance *= f64::from(scale);
         if let Some(film) = &mut self.film {
             film.apply_exposure(scale);
         }

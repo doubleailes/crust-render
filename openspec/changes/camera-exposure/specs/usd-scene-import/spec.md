@@ -49,6 +49,12 @@ scale 1 whatever the camera authors.
 - **THEN** a `camera.invalid_exposure` warning names the camera and the exposure scale
   is 1
 
+#### Scenario: Only the render camera is checked
+
+- **WHEN** a camera whose exposure cannot apply is on the stage, but the
+  `RenderSettings` prim names another camera with `exposure = 2`
+- **THEN** no `camera.invalid_exposure` warning is raised and the exposure scale is 4
+
 #### Scenario: Exposure compensation turned off
 
 - **WHEN** the render camera authors `exposure = 2` and the stage's `RenderSettings`
