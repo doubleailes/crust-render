@@ -228,6 +228,40 @@ impl TileData {
     pub fn channels(&self) -> usize {
         crate::uv_texture::channels(self.alpha)
     }
+
+    /// The payload as RGB when its alpha is opaque at every texel — a byte
+    /// of 255, or a `half` of exactly 1.0 — and unchanged otherwise.
+    ///
+    /// The tile then reads what it read with the alpha (the sampler takes 1.0
+    /// for a tile without one, which is what `ALPHA_U8[255]` and a `half` 1.0
+    /// decode to) at three quarters of the bytes.
+    pub fn without_opaque_alpha(self) -> TileData {
+        if !self.alpha {
+            return self;
+        }
+        let rgb = match self.kind {
+            TileKind::U8 => {
+                let (bytes, alpha) = crate::drop_opaque_alpha(self.bytes, u8::MAX);
+                if alpha {
+                    return TileData::u8(bytes, true);
+                }
+                bytes
+            }
+            TileKind::Half => {
+                let one = f16::ONE.to_bits().to_le_bytes();
+                let (texels, _) = self.bytes.as_chunks::<8>();
+                if texels.iter().any(|t| t[6..] != one) {
+                    return self;
+                }
+                texels.iter().flat_map(|t| t[..6].iter().copied()).collect()
+            }
+        };
+        TileData {
+            bytes: rgb,
+            kind: self.kind,
+            alpha: false,
+        }
+    }
 }
 
 #[cfg(test)]

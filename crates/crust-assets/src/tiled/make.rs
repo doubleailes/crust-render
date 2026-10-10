@@ -223,16 +223,51 @@ pub fn tx_sibling(src: &Path) -> PathBuf {
     src.with_extension("tx")
 }
 
-/// Whether `dst` is missing or older than `src` — i.e. whether a conversion
-/// would change what the renderer reads. An unreadable modification time
-/// counts as current rather than stale: re-converting a file whose age cannot
-/// be told would happen on every render.
-pub fn tx_is_stale(src: &Path, dst: &Path) -> bool {
+/// Why the `.tx` at `dst` is not what converting `src` now would write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxStaleness {
+    /// There is no `.tx`.
+    Missing,
+    /// The `.tx` is older than its source.
+    Older,
+    /// A crust conversion wrote the `.tx` before texture alpha was carried
+    /// ([`super::TX_VERSION`] 1), and its source declares alpha: the `.tx`
+    /// holds RGB, so a cutout reading it would be opaque. It is newer than
+    /// its source, so its age alone would never retire it.
+    PredatesAlpha,
+}
+
+/// Whether, and why, a conversion would change what the renderer reads from
+/// `dst` ([`TxStaleness`]), or `None` when the `.tx` is current.
+///
+/// An unreadable modification time counts as current rather than stale:
+/// re-converting a file whose age cannot be told would happen on every
+/// render. [`TxStaleness::PredatesAlpha`] reads two headers and no pixel: the
+/// `.tx`'s version marker, then whether the source declares alpha. A
+/// declared alpha that turns out opaque everywhere is reconverted once all the
+/// same — telling it apart would mean decoding the source — and the new `.tx`
+/// carries the current version, so it is not stale again.
+pub fn tx_staleness(src: &Path, dst: &Path) -> Option<TxStaleness> {
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     match (mtime(src), mtime(dst)) {
-        (_, None) if !dst.exists() => true,
-        (Some(s), Some(d)) => d < s,
-        _ => false,
+        (_, None) if !dst.exists() => return Some(TxStaleness::Missing),
+        (Some(s), Some(d)) if d < s => return Some(TxStaleness::Older),
+        _ => {}
+    }
+    let predates_alpha = super::crust_tx_version(dst).is_some_and(|v| v < 2);
+    (predates_alpha && source_declares_alpha(src)).then_some(TxStaleness::PredatesAlpha)
+}
+
+/// Whether a conversion source declares an alpha channel, from its header.
+fn source_declares_alpha(src: &Path) -> bool {
+    let exr = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("exr"));
+    if exr {
+        super::exr_declares_alpha(src)
+    } else {
+        crate::image_file::declares_alpha(src)
     }
 }
 
@@ -309,7 +344,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names.len(), 2, "no temporary left over: {names:?}");
-        assert!(!tx_is_stale(&src, &made.dst));
+        assert_eq!(tx_staleness(&src, &made.dst), None);
     }
 
     #[test]
@@ -355,18 +390,105 @@ mod tests {
         assert!(!is_ptex(&dir.join("a.png")));
     }
 
+    /// Rewrites the first `from` in a file to `to`, the same length, in place.
+    fn patch(path: &Path, from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len());
+        let mut bytes = std::fs::read(path).unwrap();
+        let at = bytes
+            .windows(from.len())
+            .position(|w| w == from)
+            .unwrap_or_else(|| panic!("{} holds no {:?}", path.display(), from));
+        bytes[at..at + from.len()].copy_from_slice(to);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// **A `.tx` an older crust wrote from a source with alpha is stale**,
+    /// though it is newer than the source: it holds RGB (crust dropped alpha
+    /// before `crust:txversion` existed), so its cutout would read opaque
+    /// and `--auto-tx` must reconvert it. One from a source without alpha is
+    /// current, and so is any `.tx` crust did not write (no `crust:mipspace`).
+    #[test]
+    fn a_tx_written_before_alpha_is_stale_for_a_source_that_has_one() {
+        let dir = scratch("predates_alpha");
+        let cut = dir.join("cut.png");
+        image::RgbaImage::from_fn(8, 8, |x, _| image::Rgba([90, 160, 40, (x * 30) as u8]))
+            .save(&cut)
+            .expect("png");
+        let solid = dir.join("solid.png");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([90, 160, 40]))
+            .save(&solid)
+            .expect("png");
+        let cut_exr = dir.join("cut_src.exr");
+        exr::prelude::write_rgba_file(&cut_exr, 4, 4, |x, _| {
+            (0.5f32, 0.25f32, 0.1f32, x as f32 / 4.0)
+        })
+        .expect("exr");
+
+        // What each conversion writes now: versioned, and current.
+        let made = make_tx(&cut, &dir.join("cut.tx"), ColorSpace::AUTO, TxFormat::Tiff).unwrap();
+        assert!(made.alpha);
+        assert_eq!(super::super::crust_tx_version(&made.dst), Some(2));
+        assert_eq!(tx_staleness(&cut, &made.dst), None);
+        let made = make_tx(
+            &cut_exr,
+            &dir.join("cut_exr.tx"),
+            ColorSpace::RAW,
+            TxFormat::Exr,
+        )
+        .unwrap();
+        assert_eq!(super::super::crust_tx_version(&made.dst), Some(2));
+        assert_eq!(tx_staleness(&cut_exr, &made.dst), None);
+
+        // What an older crust wrote beside each: RGB, with no version.
+        let old_tiff = dir.join("old.tx");
+        make_tx(&solid, &old_tiff, ColorSpace::AUTO, TxFormat::Tiff).unwrap();
+        patch(&old_tiff, b" crust:txversion=2", b"                  ");
+        assert_eq!(super::super::crust_tx_version(&old_tiff), Some(1));
+        let old_exr = dir.join("old_exr.tx");
+        make_tx(&solid, &old_exr, ColorSpace::RAW, TxFormat::Exr).unwrap();
+        patch(&old_exr, b"crust:txversion", b"crust:txversioX");
+        assert_eq!(super::super::crust_tx_version(&old_exr), Some(1));
+
+        for old in [&old_tiff, &old_exr] {
+            assert_eq!(
+                tx_staleness(&cut, old),
+                Some(TxStaleness::PredatesAlpha),
+                "{}",
+                old.display()
+            );
+            assert_eq!(
+                tx_staleness(&cut_exr, old),
+                Some(TxStaleness::PredatesAlpha)
+            );
+            assert_eq!(tx_staleness(&solid, old), None, "no alpha to have dropped");
+        }
+
+        // A `.tx` crust did not write is OIIO's business, whatever it holds.
+        patch(&old_tiff, b"crust:mipspace", b"oiio_:mipspace");
+        assert_eq!(super::super::crust_tx_version(&old_tiff), None);
+        assert_eq!(tx_staleness(&cut, &old_tiff), None);
+    }
+
     #[test]
     fn staleness_follows_modification_time() {
         let dir = scratch("stale");
         let src = dir.join("s.png");
         let dst = dir.join("s.tx");
-        assert!(tx_is_stale(&src, &dst), "missing is stale");
+        assert_eq!(
+            tx_staleness(&src, &dst),
+            Some(TxStaleness::Missing),
+            "missing is stale"
+        );
         std::fs::write(&dst, b"x").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&src, b"y").unwrap();
-        assert!(tx_is_stale(&src, &dst), "older than its source");
+        assert_eq!(
+            tx_staleness(&src, &dst),
+            Some(TxStaleness::Older),
+            "older than its source"
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&dst, b"z").unwrap();
-        assert!(!tx_is_stale(&src, &dst));
+        assert_eq!(tx_staleness(&src, &dst), None);
     }
 }

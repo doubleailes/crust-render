@@ -133,9 +133,16 @@ fn write_tiff(
 }
 
 /// The `ImageDescription` string recording which colour space a file's mip
-/// chain was reduced in. Parsed back by [`crate::tiled::mip_space`].
+/// chain was reduced in, and which version of crust's conversion wrote it
+/// ([`super::TX_VERSION`]). Parsed back by `TiffFile::open` and
+/// [`super::crust_tx_version`].
 pub(crate) fn mip_space_tag(space: ResolvedColorSpace) -> String {
-    format!("crust:mipspace={}", space_name(space))
+    format!(
+        "crust:mipspace={} {}={}",
+        space_name(space),
+        super::TX_VERSION_KEY,
+        super::TX_VERSION
+    )
 }
 
 /// The stable spelling of a colour space in a `.tx`: the space the stored

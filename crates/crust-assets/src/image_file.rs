@@ -53,6 +53,21 @@ pub(crate) fn decode_with_alpha(path: &Path) -> Result<(image::DynamicImage, boo
     Ok((image, alpha))
 }
 
+/// Whether an image's header declares an alpha channel, without decoding a
+/// pixel — what [`decode_with_alpha`] would report as authored, for every
+/// format but EXR (which `image` does not read here; see
+/// `crate::tiled::exr_declares_alpha`). A TIFF whose extra sample is
+/// unspecified declares none: `tiff` reads it as RGB. `false` for a file that
+/// cannot be read.
+pub(crate) fn declares_alpha(path: &Path) -> bool {
+    use image::ImageDecoder;
+    image::ImageReader::open(path)
+        .ok()
+        .and_then(|r| r.with_guessed_format().ok())
+        .and_then(|r| r.into_decoder().ok())
+        .is_some_and(|d| d.color_type().has_alpha())
+}
+
 /// `Some(little_endian)` for a classic TIFF header, `None` for anything else.
 fn tiff_byte_order(bytes: &[u8]) -> Option<bool> {
     match bytes.get(0..4)? {

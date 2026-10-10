@@ -145,3 +145,66 @@ fn a_texture_without_alpha_reads_opaque() {
     assert_eq!(opacity_at(&scene, 0.25), 1.0);
     assert_eq!(opacity_at(&scene, 0.75), 1.0);
 }
+
+/// The leaf's `.tx` as a crust from before this change wrote it: RGB, with
+/// no `crust:txversion`, and newer than its source.
+fn pre_alpha_tx(dir: &Path) -> PathBuf {
+    let rgb = dir.join("leaf_rgb.png");
+    image::RgbImage::from_pixel(64, 64, image::Rgb([200, 20, 20]))
+        .save(&rgb)
+        .expect("write png");
+    let tx = dir.join("leaf.tx");
+    crust_assets::make_tx(
+        &rgb,
+        &tx,
+        crust_core::ColorSpace::AUTO,
+        crust_assets::TxFormat::Tiff,
+    )
+    .expect("convert");
+    let mut bytes = std::fs::read(&tx).expect("read");
+    let marker = b" crust:txversion=2";
+    let at = bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("a versioned .tx");
+    bytes[at..at + marker.len()].fill(b' ');
+    std::fs::write(&tx, bytes).expect("write");
+    tx
+}
+
+/// A `.tx` an older crust converted from the leaf dropped its alpha and is
+/// newer than the leaf, so its age never retires it. Without `--auto-tx` it
+/// is refused and the leaf preloads (and cuts), with a warning naming the
+/// fix; with it, the `.tx` is reconverted and streams the alpha.
+#[test]
+fn a_tx_from_before_alpha_is_refused_or_reconverted() {
+    let dir = scratch("pre_alpha_tx");
+    leaf_png(&dir.join("leaf.png"));
+    let tx = pre_alpha_tx(&dir);
+    let stage = leaf_stage(&dir, "leaf.png");
+
+    let scene = load(&stage, &FileAssets::new());
+    assert_eq!(
+        opacity_at(&scene, 0.25),
+        0.0,
+        "the refused .tx does not answer"
+    );
+    assert_eq!(opacity_at(&scene, 0.75), 1.0);
+    assert!(
+        scene
+            .warnings
+            .iter()
+            .any(|w| w.code.as_str() == "texture.stream_fallback"),
+        "{:?}",
+        scene.warnings
+    );
+
+    let scene = load(&stage, &FileAssets::new().with_auto_tx(true));
+    assert_eq!(opacity_at(&scene, 0.25), 0.0);
+    assert_eq!(opacity_at(&scene, 0.75), 1.0);
+    let bytes = std::fs::read(&tx).expect("read");
+    assert!(
+        bytes.windows(17).any(|w| w == b"crust:txversion=2"),
+        "--auto-tx reconverted it"
+    );
+}

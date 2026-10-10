@@ -283,6 +283,17 @@ impl StreamingTexture {
             if lx >= tile.width || ly >= tile.height {
                 return self.fallback;
             }
+            // A tile whose alpha was opaque throughout is cached as RGB
+            // (`TiledFile::read_tile`), and reads 1.0 there. Decided per
+            // tile, in the alpha sampler only: the RGB fetch never asks.
+            if !tile.data.alpha {
+                let [r, g, b] = if HALF {
+                    tile.rgb_half(lx, ly)
+                } else {
+                    tile.rgb_u8(lx, ly, &self.to_linear)
+                };
+                return [r, g, b, 1.0];
+            }
             if HALF {
                 tile.rgba_half(lx, ly)
             } else {
@@ -449,7 +460,7 @@ impl StreamingTexture {
 mod tests {
     use super::*;
     use crate::UvTexture;
-    use crate::tiled::write_tx;
+    use crate::tiled::{TILE_EDGE, write_tx};
 
     /// Writes a `.tx` and the equivalent PNG, so the two paths can be pointed
     /// at the same image.
@@ -1002,6 +1013,140 @@ mod tests {
             }
         }
         assert_eq!(stream.eval(0.5, 0.5, 0.0)[3], 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that declares alpha but never cuts — an OIIO `.tx` of an RGBA
+    /// image whose alpha is opaque — is cached as the RGB it is, tile by
+    /// tile, and reads exactly what the same image without alpha reads. The
+    /// cache would otherwise hold a third more bytes for nothing.
+    #[test]
+    fn a_tile_whose_alpha_is_opaque_is_cached_as_rgb() {
+        let dir = std::env::temp_dir().join("crust_stream_opaque_tiles");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (w, h) = (150usize, 100usize);
+        let rgb: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, (i * 7 % 253) as u8, (i / 3 % 256) as u8])
+            .collect();
+        let rgba: Vec<u8> = rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|t| [t[0], t[1], t[2], 255])
+            .collect();
+        let space = crust_core::ResolvedColorSpace::SRGB;
+        let floats = |v: &[u8]| v.iter().map(|&b| b as f32 / 255.0).collect::<Vec<f32>>();
+        // Written directly, as a tool that keeps an opaque alpha would.
+        let pairs = [
+            (dir.join("rgba.tx"), dir.join("rgb.tx"), false),
+            (dir.join("rgba_exr.tx"), dir.join("rgb_exr.tx"), true),
+        ];
+        crate::tiled::write_tx_rgba(&pairs[0].0, &rgba, w, h, space).expect("rgba");
+        write_tx(&pairs[0].1, &rgb, w, h, space).expect("rgb");
+        crate::tiled::write_tx_exr_rgba(&pairs[1].0, &floats(&rgba), w, h, space).expect("rgba");
+        crate::tiled::write_tx_exr(&pairs[1].1, &floats(&rgb), w, h, space).expect("rgb");
+
+        for (with, without, exr) in &pairs {
+            let file = TiledFile::open(with).expect("open");
+            assert!(file.has_alpha(), "the file declares alpha");
+            let mut r = file.reader().expect("reader");
+            for level in 0..file.level_count() {
+                let tile = file.read_tile(&mut r, level, 0).expect("tile");
+                let (tw, th) = file.level(level).tile_size(0, TILE_EDGE);
+                assert!(
+                    !tile.alpha,
+                    "level {level}: an opaque tile is cached as RGB"
+                );
+                assert_eq!(tile.len(), tw * th * 3);
+            }
+            let cache = || {
+                Arc::new(TileCache::new(
+                    16 * 1024 * 1024,
+                    crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+                ))
+            };
+            let a = StreamingTexture::open(with, space.into(), cache()).expect("stream");
+            let b = StreamingTexture::open(without, space.into(), cache()).expect("stream");
+            assert!(a.has_alpha() && !b.has_alpha());
+            for &width in &[0.0f32, 0.01, 0.05, 0.3, 2.0] {
+                for i in 0..23 {
+                    for j in 0..17 {
+                        let (u, v) = (i as f32 / 22.0, j as f32 / 16.0);
+                        assert_eq!(
+                            a.eval(u, v, width),
+                            b.eval(u, v, width),
+                            "exr {exr} at ({u}, {v}) width {width}"
+                        );
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cutting `.tx` whose opaque tiles are cached as RGB still streams
+    /// exactly what its source preloads: the RGB tiles read 1.0, as
+    /// `ALPHA_U8[255]` does.
+    #[test]
+    fn a_cutout_with_opaque_tiles_agrees_bit_for_bit_with_preloaded() {
+        let dir = std::env::temp_dir().join("crust_stream_mixed_tiles");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (w, h) = (256u32, 192u32);
+        // Cut on the left 40 columns, opaque elsewhere: level 0's first tile
+        // column cuts, its others are opaque, and the coarse levels mix.
+        let png = dir.join("card.png");
+        image::RgbaImage::from_fn(w, h, |x, y| {
+            let c = if (x / 3 + y / 3) % 2 == 0 { 230 } else { 20 };
+            image::Rgba([
+                c,
+                (x * 11 % 251) as u8,
+                (y * 17 % 251) as u8,
+                if x < 40 { 0 } else { 255 },
+            ])
+        })
+        .save(&png)
+        .expect("png");
+        let tx = dir.join("card.tx");
+        let made = crate::tiled::make_tx(
+            &png,
+            &tx,
+            crust_core::ColorSpace::SRGB,
+            crate::tiled::TxFormat::Tiff,
+        )
+        .expect("convert");
+        assert!(made.alpha);
+        let file = TiledFile::open(&tx).expect("open");
+        let mut r = file.reader().expect("reader");
+        assert!(
+            file.read_tile(&mut r, 0, 0).expect("tile").alpha,
+            "tile 0 cuts"
+        );
+        assert!(
+            !file.read_tile(&mut r, 0, 1).expect("tile").alpha,
+            "tile 1 is opaque"
+        );
+
+        let pre = UvTexture::open_with(&png, crust_core::ColorSpace::SRGB, true).expect("preload");
+        let cache = Arc::new(TileCache::new(
+            16 * 1024 * 1024,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ));
+        let stream =
+            StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache).expect("stream");
+        for &width in &[0.0f32, 0.001, 0.004, 0.02, 0.09, 0.3, 0.7, 2.0, 9.0] {
+            for i in 0..23 {
+                for j in 0..17 {
+                    let (u, v) = (i as f32 / 22.0, j as f32 / 16.0);
+                    assert_eq!(
+                        stream.eval(u, v, width),
+                        pre.eval(u, v, width),
+                        "at ({u}, {v}) width {width}"
+                    );
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

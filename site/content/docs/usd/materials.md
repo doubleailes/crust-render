@@ -544,10 +544,11 @@ ones, and `CRUST_TEX_STREAM=0` turns streaming off (see
 Every mip level of a `.tx` has to be reduced in the same colour space the renderer
 decodes the texture in. Otherwise the full-resolution level looks right and the coarser
 levels are wrong, which looks like a filtering bug. So a `.tx` that Crust Render writes
-records that colour space in its `ImageDescription` tag:
+records that colour space in its `ImageDescription` tag (an EXR `.tx` in header
+attributes), beside the version of the conversion that wrote it:
 
 ```text
-crust:mipspace=srgb_texture
+crust:mipspace=srgb_texture crust:txversion=2
 ```
 
 The values are `srgb_texture`, `g22_rec709`, `g18_rec709` and `raw`. If the recorded colour
@@ -559,5 +560,7 @@ is accepted as it is.
 
 A `.tx` keeps its source's alpha channel when the alpha cuts something, so a streamed
 cutout reads the same mask as the source image. An alpha that is opaque everywhere is
-left out. OpenImageIO's `maketx` stores the colour of an image with alpha premultiplied;
+left out. Crust Render versions before `crust:txversion=2` dropped the alpha: such a
+`.tx`, beside a source that has an alpha channel, is reconverted by `--auto-tx`, and
+without the flag it is refused with a warning and the source image is loaded instead. OpenImageIO's `maketx` stores the colour of an image with alpha premultiplied;
 Crust Render reads that colour as it is stored.

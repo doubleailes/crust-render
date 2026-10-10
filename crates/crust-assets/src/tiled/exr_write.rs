@@ -150,6 +150,11 @@ fn write_exr(
         super::exr_read::MIP_SPACE_KEY,
         space_name(space),
     );
+    put(
+        &mut attributes,
+        super::TX_VERSION_KEY,
+        &super::TX_VERSION.to_string(),
+    );
     // OIIO's own "this is a texture, not a picture" marker, as a first-class
     // attribute rather than smuggled through a description string the way TIFF
     // forces. Its companion `wrapmodes` is deliberately absent: OpenEXR

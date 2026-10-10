@@ -457,7 +457,8 @@ crust render -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nit
 
 The first time a UV texture is used, convert it to a tiled, mip-mapped `.tx` file beside
 the original (same path, `.tx` extension). A texture is converted when its `.tx` is
-missing or older than the source.
+missing or older than the source, or when an older Crust Render wrote it without the
+alpha channel the source has.
 
 Crust Render always streams from a `.tx` when one exists beside a texture. This flag only
 creates the missing ones. The run prints one line saying how many textures it converted,

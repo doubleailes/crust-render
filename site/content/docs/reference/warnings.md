@@ -211,4 +211,4 @@ plain text and are not counted.
 | `texture.udim_tile_missing` | skipped | A tile of a UDIM set does not decode; the set is used without it. | Fix or remove the tile the message names. |
 | `texture.tx_stale` | approximated | A .tx is older than its source and is used anyway. | Rerun with `--auto-tx` to reconvert. |
 | `texture.tx_convert_failed` | approximated | --auto-tx could not convert a texture; its source is read instead. | Check that the directory is writable and the source decodes. |
-| `texture.stream_fallback` | approximated | A texture could not be streamed and is preloaded instead. | Nothing to do; it renders the same, using more memory. |
+| `texture.stream_fallback` | approximated | A texture could not be streamed and is preloaded instead. | Nothing to do; it renders the same, using more memory. If the message says an older crust wrote the `.tx`, rerun with `--auto-tx` to reconvert it. |

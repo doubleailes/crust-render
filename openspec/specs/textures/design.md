@@ -33,8 +33,9 @@ for streaming. `CRUST_TEX_STREAM=0` turns it off and preloads everything, which 
 declines — no `.tx`, a UDIM set only partly converted (it would stream with black holes),
 a mip chain reduced in a different colour space, a file it cannot read — so a stray `.tx`
 can make a render slower but never break it. **`--auto-tx`** creates the missing ones:
-before a texture opens, every tile whose `.tx` is missing or older than its source is
-converted beside it (`tiled::make_tx_atomic`, in parallel, written to a temporary and
+before a texture opens, every tile whose `.tx` is missing, older than its source, or
+written by an older crust without the alpha its source declares (`tx_staleness`, below)
+is converted beside it (`tiled::make_tx_atomic`, in parallel, written to a temporary and
 renamed so an interrupted run leaves no truncated `.tx` to trust). A float source keeps
 `half` tiles even when its values fit in `[0, 1]` (`TxFormat::FromSampleType` —
 `maketx`'s by-range default would band linear data), and the colour space recorded is
@@ -244,7 +245,9 @@ the finest level held at every footprint). See
       behind that test out of line (`eval_alpha`, `#[inline(never)]`). And a
       `reduce_half` that read its stride at run time cost the RGB pyramid build a
       third more instructions at load (2.12 M → 2.83 M); a `const N` restores it
-      (2.16 M). Whole renders: +0.005% to +0.047%. Every sample scene is
+      (2.16 M). Whole-render instructions: +0.005% to +0.047% — far below the
+      ~15% run-to-run spread wall clock shows on this machine, which is why these
+      are instruction counts and not a `bench_ab.sh` timing. Every sample scene is
       bit-identical (`check_images.sh`, recorded with the base binary).
 
 ## Streaming textures
@@ -496,6 +499,34 @@ the finest level held at every footprint). See
     exactly when the preload does, so a source whose alpha is opaque converts to
     the RGB `.tx` it always did. A UDIM set may mix the two
     (`a_udim_set_streams_alpha_per_chart`).
+    - **A tile whose alpha is opaque throughout is cached as RGB**
+      (`TiledFile::read_tile` → `TileData::without_opaque_alpha`). A file only
+      *declares* alpha, and an OIIO `maketx` file of an RGBA image whose alpha
+      never cuts declares it all the same; without this its every tile cost the
+      cache a third more bytes than the RGB it reads as. Whether a whole file's
+      alpha is opaque cannot be known at open without reading every tile, so it
+      is decided tile by tile at page-in, where the tile is decoded anyway. The
+      alpha sampler then asks each tile (`texel_rgba`), and a tile without alpha
+      reads 1.0 — what `ALPHA_U8[255]` and a `half` 1.0 decode to, so a cutting
+      `.tx` with opaque tiles still matches its preload bit for bit
+      (`a_cutout_with_opaque_tiles_agrees_bit_for_bit_with_preloaded`). The RGB
+      fetch never asks.
+    - **A `.tx` written before alpha was carried is stale.** A crust conversion
+      before `decode-texture-alpha` wrote RGB from an RGBA source, and that file
+      is newer than its source, so its age would never retire it and its cutout
+      would read opaque — the issue's bug, back with no warning. Every `.tx`
+      crust writes now records its conversion version beside `crust:mipspace`
+      (`crust:txversion=2`, `TX_VERSION`), and `tx_staleness` calls a crust
+      `.tx` with no version stale (`PredatesAlpha`) when its source's header
+      declares alpha. Two header reads, no pixel: an alpha that turns out opaque
+      everywhere is reconverted once all the same, to a `.tx` that is then
+      current. `--auto-tx` reconverts it; without the flag it is refused and the
+      texture preloads with `texture.stream_fallback`, as a `.tx` of the wrong
+      mip space is — a stale `.tx` that only shows the old texture is used with a
+      warning, but one that would render the cutout opaque renders nothing
+      anybody converted. An OIIO file (no `crust:mipspace`) is never judged by
+      this (`a_tx_written_before_alpha_is_stale_for_a_source_that_has_one`,
+      `a_tx_from_before_alpha_is_refused_or_reconverted`).
   - **Conversion is explicit, or opt-in automatic.** `examples/maketx` converts by
     hand, and `--auto-tx` converts on first use (Arnold's `autotx`). Both run one
     conversion, `crust_assets::tiled::make_tx`. Automatic conversion stays behind a flag
