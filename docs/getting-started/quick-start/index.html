@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Quick Start | Crust Render</title>
+<meta name="description" content="Build Crust Render and render a bundled sample.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Quick Start">
+  <meta name="twitter:description" content="Build Crust Render and render a bundled sample.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Quick Start">
+  <meta property="og:description" content="Build Crust Render and render a bundled sample.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-01T08:00:00+00:00">
+  <meta property="og:site_name" content="Quick Start">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Getting Started",
+            "item": "https://doubleailes.github.io/crust-render/docs/getting-started/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Quick Start",
+            "item": "https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#requirements">Requirements</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#installation">Installation</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#pre-built-binaries">Pre-built binaries</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#nightly-binaries">Nightly binaries</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#from-source">From source</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#your-first-render">Your first render</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#common-variations">Common variations</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#sample-scenes">Sample scenes</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/#write-your-own-scene">Write your own scene</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Quick Start</h1>
+        <p class="lead">Build Crust Render, render a bundled sample, then render your own USD file.</p>
+        <h2 id="requirements">Requirements</h2>
+<ul>
+<li>A 64-bit Linux, macOS or Windows machine.</li>
+<li>To build from source: Rust <strong>1.96</strong> or newer. The repository's <code>rust-toolchain.toml</code>
+selects <strong>1.98.1</strong>, the version CI builds with, and <code>rustup</code> installs it on the first
+<code>cargo</code> command. Dependencies are locked in the committed <code>Cargo.lock</code>.</li>
+</ul>
+<h2 id="installation">Installation</h2>
+<h3 id="pre-built-binaries">Pre-built binaries</h3>
+<p>Each <a href="https://github.com/doubleailes/crust-render/releases">GitHub release</a> carries
+binaries for:</p>
+<ul>
+<li><code>x86_64-unknown-linux-musl</code> (Linux)</li>
+<li><code>x86_64-apple-darwin</code> (macOS)</li>
+<li><code>x86_64-pc-windows-gnu</code> (Windows)</li>
+</ul>
+<p>Unpack the archive and put the <code>crust</code> binary (<code>crust.exe</code> on Windows) on
+your <code>PATH</code>.</p>
+<h3 id="nightly-binaries">Nightly binaries</h3>
+<p>The <a href="https://github.com/doubleailes/crust-render/releases/tag/nightly"><code>nightly</code> pre-release</a>
+is rebuilt every day from the head of the default branch with the latest nightly Rust,
+and replaced only when the workspace's lints and tests passed on that same compiler. It carries
+binaries for:</p>
+<ul>
+<li><code>x86_64-unknown-linux-musl</code> (Linux)</li>
+<li><code>aarch64-apple-darwin</code> (macOS, Apple silicon)</li>
+<li><code>x86_64-apple-darwin</code> (macOS, Intel)</li>
+<li><code>x86_64-pc-windows-msvc</code> (Windows)</li>
+</ul>
+<p>with a <code>SHA256SUMS</code> file. Each archive's <code>BUILD-INFO.txt</code> names the commit and the
+compiler it was built from. Use it to try a change before it is in a numbered release;
+otherwise prefer the numbered releases above.</p>
+<h3 id="from-source">From source</h3>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">git clone https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render.git
+cd crust-render
+cargo build --release
+# the binary is target&#x2F;release&#x2F;crust
+</code></pre>
+<p>Always build with <code>--release</code>. A debug build is many times slower.</p>
+<p>By default the build includes the <code>jit</code> feature, which compiles MaterialX shading
+programs to machine code with Cranelift. To build a renderer that only interprets them:</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">cargo build --release --no-default-features
+</code></pre>
+<p>The two builds render the same image. At run time, <code>CRUST_SHADER_JIT=0</code> also turns the JIT
+off (see <a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a>).</p>
+<h2 id="your-first-render">Your first render</h2>
+<p>The repository includes sample scenes in <code>samples/</code>:</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash"># render the Cornell box: writes cornell.exr and cornell.png
+cargo run --release -- render -i samples&#x2F;cornellbox.usda -o cornell.exr
+
+# or, with an installed binary
+crust render -i samples&#x2F;cornellbox.usda -o cornell.exr
+</code></pre>
+<p>The run prints four <code>INFO</code> lines: the resolution and sample count, the render time, and
+the two images it wrote. The EXR holds linear radiance. The PNG is the same image tone-mapped to
+sRGB.</p>
+<p>Without <code>-i</code>, Crust Render draws a built-in procedural scene. This is useful to check that
+the binary works:</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">crust render
+</code></pre>
+<h2 id="common-variations">Common variations</h2>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash"># fewer samples for a quick preview
+crust render -i scene.usda -s 16
+
+# a given frame through a given camera
+crust render -i shot.usda -f 1012 --camera &#x2F;shot&#x2F;cam&#x2F;renderCam
+
+# subdivide every subdivision-surface mesh twice
+crust render -i character.usda --subdiv-level 2
+
+# print timings, memory use and scene statistics at the end
+crust render -i scene.usda --stats
+
+# keep a full debug log of the run in .&#x2F;logs&#x2F;
+crust render -i scene.usda -l debug --log-file logs
+</code></pre>
+<p><a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a> describes every flag.</p>
+<h2 id="sample-scenes">Sample scenes</h2>
+<table><thead><tr><th>scene</th><th>shows</th></tr></thead><tbody>
+<tr><td><code>cornellbox.usda</code></td><td>the classic test scene</td></tr>
+<tr><td><code>openpbr_showcase.usda</code></td><td><code>crust:openpbr</code> materials: metal, plastic, glass, coat, …</td></tr>
+<tr><td><code>materialx_showcase.usda</code></td><td>MaterialX look-dev graphs</td></tr>
+<tr><td><code>veach_mis.usda</code></td><td>the Veach multiple importance sampling test (try <code>--strategy light</code> and <code>--strategy bsdf</code>)</td></tr>
+<tr><td><code>cornellbox_guided.usda</code></td><td>path guiding through <code>crust:pathGuiding</code></td></tr>
+<tr><td><code>smoke.usda</code>, <code>fog.usda</code></td><td><code>crust:volume:*</code> volume regions</td></tr>
+<tr><td><code>motionblur.usda</code></td><td><code>crust:motion:translate</code> and <code>crust:rayMask</code></td></tr>
+<tr><td><code>light_visibility.usda</code></td><td><code>crust:light:cameraVisible</code></td></tr>
+<tr><td><code>light_linking.usda</code></td><td>UsdLux light and shadow linking</td></tr>
+<tr><td><code>domelight.usda</code>, <code>dome_backdrop.usda</code></td><td>dome lights and environment maps</td></tr>
+<tr><td><code>subdivision.usda</code></td><td>subdivision surfaces</td></tr>
+<tr><td><code>ptex_quads.usda</code></td><td>Ptex textures</td></tr>
+<tr><td><code>animation.usda</code></td><td>time samples (try <code>-f</code>)</td></tr>
+<tr><td><code>instancing.usda</code>, <code>nested_instancing.usda</code></td><td>USD instancing</td></tr>
+</tbody></table>
+<h2 id="write-your-own-scene">Write your own scene</h2>
+<p>Crust Render reads any USD stage, so you can export from a DCC (Maya, Houdini, Blender,
+…) or write <code>.usda</code> by hand. A minimal scene needs a camera, some geometry and a light.
+This one adds a material and a <code>RenderSettings</code> prim that sets the resolution and sample
+count. Save it as <code>first.usda</code> and run <code>crust render -i first.usda -o first.exr</code>:</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">#usda 1.0
+(
+    defaultPrim = &quot;World&quot;
+    upAxis = &quot;Y&quot;
+)
+
+def Xform &quot;World&quot;
+{
+    def Camera &quot;cam&quot;
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 1.2, 7)
+        uniform token[] xformOpOrder = [&quot;xformOp:translate&quot;]
+    }
+
+    def Mesh &quot;floor&quot;
+    {
+        uniform token subdivisionScheme = &quot;none&quot;
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, 10), (10, 0, 10), (10, 0, -10), (-10, 0, -10)]
+    }
+
+    def Sphere &quot;ball&quot; (
+        prepend apiSchemas = [&quot;MaterialBindingAPI&quot;]
+    )
+    {
+        double radius = 1
+        rel material:binding = &lt;&#x2F;World&#x2F;Looks&#x2F;red&gt;
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = [&quot;xformOp:translate&quot;]
+    }
+
+    def DistantLight &quot;sun&quot;
+    {
+        bool inputs:normalize = 1
+        float inputs:intensity = 3
+        float inputs:angle = 2
+        float3 xformOp:rotateXYZ = (-50, 30, 0)
+        uniform token[] xformOpOrder = [&quot;xformOp:rotateXYZ&quot;]
+    }
+
+    def DomeLight &quot;sky&quot;
+    {
+        float inputs:intensity = 0.3
+    }
+
+    def Scope &quot;Looks&quot;
+    {
+        def Material &quot;red&quot;
+        {
+            token outputs:surface.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;red&#x2F;Surface.outputs:surface&gt;
+
+            def Shader &quot;Surface&quot;
+            {
+                uniform token info:id = &quot;crust:openpbr&quot;
+                color3f inputs:baseColor = (0.8, 0.1, 0.1)
+                float inputs:specularRoughness = 0.2
+                token outputs:surface
+            }
+        }
+    }
+}
+
+def Scope &quot;Render&quot;
+{
+    def RenderSettings &quot;settings&quot;
+    {
+        rel camera = &lt;&#x2F;World&#x2F;cam&gt;
+        int2 resolution = (960, 540)
+        int crust:samplesPerPixel = 256
+        int crust:maxDepth = 16
+    }
+}
+</code></pre>
+<p><a href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD attributes</a> lists everything you can set on the stage.</p>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;getting-started&#x2F;quick-start.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+          
+          
+          <a class="ms-auto" href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;reference&#x2F;command-line&#x2F;">
+            <div class="card my-1">
+              <div class="card-body py-2">
+                Command line &rarr;
+              </div>
+            </div>
+          </a>
+          
+          
+          
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

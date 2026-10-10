@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Diagnosing a render | Crust Render</title>
+<meta name="description" content="Read crust diagnostic&#x27;s report, trust its verdicts, and use it in a loop.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Diagnosing a render">
+  <meta name="twitter:description" content="Read crust diagnostic&#x27;s report, trust its verdicts, and use it in a loop.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Diagnosing a render">
+  <meta property="og:description" content="Read crust diagnostic&#x27;s report, trust its verdicts, and use it in a loop.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-08T18:00:00+00:00">
+  <meta property="og:site_name" content="Diagnosing a render">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Help",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Diagnosing A Render",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#check-before-you-render">Check before you render</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#what-it-does">What it does</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#efficiency-and-how-it-is-measured">Efficiency, and how it is measured</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#verdicts-and-their-thresholds">Verdicts and their thresholds</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#the-picture-check">The picture check</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#when-the-verdict-is-insufficient-samples">When the verdict is insufficient_samples</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#reading-the-report">Reading the report</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#the-noise-breakdown">The noise breakdown</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#the-picture">The picture</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#a-worked-loop">A worked loop</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#limitations">Limitations</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Diagnosing a render</h1>
+        <p class="lead"><code>crust diagnostic</code> measures which settings make a stage render faster or cleaner, and says how sure it is. This page explains its report, the rules behind each verdict, and the diagnose → change → diagnose loop it is built for.</p>
+        <h2 id="check-before-you-render">Check before you render</h2>
+<p>A diagnostic spends a budget rendering. Before that, or before any long render,
+<code>crust check</code> answers in the time of one import what the render would do, as text or as
+JSON (<code>--json -</code>):</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">crust check -i shot.usda
+</code></pre>
+<p>It imports the stage exactly as the render would, renders nothing, and reports the
+camera, resolution and files the render would use, its effective settings, what the
+import cost, the diagnostic's findings that need no render (textures without a <code>.tx</code>,
+many lights picked uniformly, a visualisation strategy, peak memory), and every
+<a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">warning</a> the import raised: what crust refused,
+approximated or skipped. In a pipeline, <code>--deny refused,skipped</code> makes it exit <code>3</code>
+when the stage raised a warning of those kinds, so a broken stage stops before it is
+rendered. See <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#check"><code>crust check</code></a>.</p>
+<h2 id="what-it-does">What it does</h2>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">crust diagnostic -i shot.usda --budget 2m
+</code></pre>
+<p>The stage is imported once. Then, until the budget is spent:</p>
+<ol>
+<li><strong>Baseline.</strong> A 1 spp render times the scene, and sizes a full-frame render at 4 to 64
+samples per pixel (a quarter of the budget). It runs with the indirect clamp <strong>off</strong>,
+adaptive sampling <strong>off</strong> and a <strong>fixed</strong> sample count — the conditions every
+comparison below uses. It measures the noise of each kind of light path, the time
+spent in each 16×16 tile, what the clamp would remove, path statistics and cache hit
+rates.</li>
+<li><strong>Findings</strong>, from the import, the baseline and tier 3: textures without a <code>.tx</code>, a
+cache that misses, emissive geometry no shadow ray can find, many lights picked
+uniformly, guiding on where direct light dominates, memory near the machine's — and
+what makes the picture fragile: a clamp that removes a visible share of the image, a
+few pixels holding much of the energy, light that only BSDF sampling finds, a
+visualization strategy authored (see <a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#the-picture">The picture</a>).</li>
+<li><strong>Crops.</strong> Up to three windows of the frame: the noisiest, the slowest, and one
+typical of both (never pure background). Each is at least 128 pixels square and gives
+every worker thread four tiles. <code>--region</code> makes that region the only crop.</li>
+<li><strong>Tier 1, unbiased swaps.</strong> Each setting that changes only noise and time is tried
+on its own: the other MIS heuristic (<code>power</code> ↔ <code>balance</code>), every other light
+selection, 2 and 4 light samples at the camera vertex, 2 at the indirect ones,
+guiding on or off. Then the winners of different settings are tried together.
+<code>--strategy light</code> and <code>--strategy bsdf</code> are never tried: they show what MIS
+balances between, and on a scene with light only one of them reaches they render
+darker while looking less noisy. Every trial is checked for a change of the picture
+before its efficiency counts.</li>
+<li><strong>Tier 2, sample budget.</strong> The samples per pixel the best settings need to reach a
+target error, the projected render time and setup, and adaptive sampling measured
+on each crop.</li>
+<li><strong>Tier 3, picture-changing settings.</strong> What the clamp removes, how many paths
+<code>max_depth</code> cuts and what half the depth saves, what subdivision costs, and how much
+of each crop's energy light sampling alone reaches. These change the picture, so
+they are measured and never ranked.</li>
+</ol>
+<p>Once the baseline has run, tiers 2 and 3 <strong>reserve</strong> their estimated render cost, and
+tier 1 may spend everything else: the trials' sample count is the largest power of two
+at which all of tier 1 and the later tiers fit. What one tier leaves unspent passes to
+the next. The report states both reserves (<code>run.tier2_reserve_s</code>, <code>run.tier3_reserve_s</code>).
+A trial or measurement whose estimated cost would overrun is not started, and is listed
+under <code>not_tried</code> with the reason <code>budget</code> — in every tier, including when tier 1 ran
+long.</p>
+<h2 id="efficiency-and-how-it-is-measured">Efficiency, and how it is measured</h2>
+<p>A trial is judged by <strong>efficiency</strong>, <code>E = 1 / (render time × MRSE)</code>, where MRSE is the
+mean over pixels of the variance of the pixel over its squared luminance. Error falls
+as 1/spp while time grows as spp, so <code>E</code> does not depend on the sample count: a setting
+that is twice as slow but has a quarter of the error is twice as efficient. The report
+gives <code>ΔEff = E_trial / E_baseline</code>: above 1 the trial is better.</p>
+<p>These rules keep the measurement honest:</p>
+<ul>
+<li><strong>Interleaved pairs, one seed each.</strong> On each crop, the baseline and the trial are
+rendered alternately, <code>--repeats</code> times (B T B T B T), so background load lands on
+both sides. Both renders of a pair use the same sampler seed, and each pair a
+different one: pair 0 the scene's own (<code>crust:frame</code>, or <code>-f</code>), the next ones a fixed
+step from it, so two runs render the same images. <code>run.seeds</code> lists them. Each pair
+gives one ΔEff, and an independent draw of the error.</li>
+<li><strong>The picture first.</strong> Before its efficiency counts, every trial is checked for a
+change of the picture against the paired baseline (see
+<a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#the-picture-check">The picture check</a>).</li>
+<li><strong>One reference per crop.</strong> Every MRSE is measured against the same image: the
+inverse-variance blend of the baseline's image of every seed and of every trial image
+that passed the picture check. Measuring each image against its own noisy mean would
+bias the comparison; letting a darker image in would bias it too.</li>
+<li><strong>Trimmed error.</strong> Within a pair, the MRSE leaves out the 0.1% of pixels with the
+largest relative variance on either side — the same pixels on both — so one firefly
+that happened to land on one side does not decide the pair. The untrimmed values are
+reported beside the trimmed ones, and a crop is only <code>better</code> (or <code>worse</code>) when its
+untrimmed median ΔEff leans the same way: trimming can withhold a verdict, never
+create one.</li>
+<li><strong>Unbiased conditions.</strong> The clamp is off and adaptive sampling is off, so no trial
+can "win" by removing energy or by stopping where it happens to look converged.</li>
+</ul>
+<p><strong>Setup</strong> — the <code>learned</code> light selection's pre-pass and guiding's training — is
+reported per pair (<code>setup_trial_s</code>) but left out of a pair's ΔEff: on a small crop at a
+few samples it would weigh far more than in the render it stands for. It is charged
+where a render pays it, in the <strong>ΔEff at the target</strong> (<code>delta_eff_at_target</code>): the
+baseline's projected full-frame time to reach tier 2's target error, setup included,
+over the trial's. The pre-pass counts as measured (it trains over the whole frame
+whatever the crop), guiding's training scaled from the crop to the frame. Without
+setup on either side it equals the overall ΔEff. It is an estimate, and it can only
+veto a suggestion.</p>
+<h2 id="verdicts-and-their-thresholds">Verdicts and their thresholds</h2>
+<p>A crop's <strong>noise floor</strong> is how far its error estimate moves when only the seed
+changes: the largest over the smallest of the baseline's MRSEs across seeds (each
+trimmed on its own top 0.1%). A gain has to beat it.</p>
+<p>On each crop, the verdict is the first that applies:</p>
+<table><thead><tr><th>verdict</th><th>rule</th></tr></thead><tbody>
+<tr><td><code>biased</code></td><td>the trial changed the picture (see below), whatever its ΔEff</td></tr>
+<tr><td><code>better</code></td><td><strong>every</strong> pair above both 1.05 and the noise floor, and the untrimmed median above 1</td></tr>
+<tr><td><code>worse</code></td><td><strong>every</strong> pair below both 0.95 and the floor's reciprocal, and the untrimmed median below 1</td></tr>
+<tr><td><code>insufficient_samples</code></td><td>the noise floor is above 1.10: the probe could not have resolved a gain worth suggesting</td></tr>
+<tr><td><code>inconclusive</code></td><td>anything else — the setting does not matter here</td></tr>
+</tbody></table>
+<p>The <strong>overall ΔEff</strong> is the geometric mean of the per-crop medians. Overall, a trial is
+<code>biased</code> when any crop is; otherwise <code>mixed</code> when one crop is <code>better</code> and another
+<code>worse</code>; <code>better</code> when at least one crop is better, none is worse, and the overall ΔEff
+itself clears 1.05 (<code>worse</code> symmetrically); <code>insufficient_samples</code> when no crop is
+better or worse and one is <code>insufficient_samples</code>; <code>inconclusive</code> otherwise. Pairs of
+1.03, 1.08 and 0.98 under a floor of 1.04 are <code>inconclusive</code>, and not suggested; a
+baseline whose MRSE reads 2.7, 6.1 and 3.4 across its seeds has a floor of 2.26, and
+its crop is <code>insufficient_samples</code> whatever the trial's pairs say.</p>
+<p>A trial becomes a <strong>suggestion</strong> only when it is <code>better</code> with both an overall ΔEff and
+a ΔEff at the target of at least <strong>1.10</strong>. A <code>biased</code> trial is never suggested, never
+one of the winners the combined trial is built from, and never part of a reference.
+The combined trial is suggested when it beats the best single one.</p>
+<p>The scene is <strong>converged</strong> when no trial clears the suggestion bar, none is
+<code>insufficient_samples</code>, and no <code>time</code> or <code>noise</code> finding has an action left to take.</p>
+<h3 id="the-picture-check">The picture check</h3>
+<p>Every tier-1 trial, the combined one included, is checked on each crop against the
+baseline rendered in the same pair, with the same seed. The <strong>luminance shift</strong> is
+the relative difference of the two crops' mean luminance, <code>mean_T / mean_B − 1</code>,
+over the crop's pixels except the 1% whose two values differ most — so a handful of
+fireflies cannot produce it. Its <strong>z</strong> is the shift over its standard error, from both
+images' own per-pixel variance. A crop is <code>biased</code> when the shift is beyond <strong>2%</strong>
+(under 0.03 stops: below what a lighting review notices) <strong>and</strong> z is beyond <strong>4</strong>, in
+<strong>every</strong> pair. Each per-crop result reports both mean luminances, the shift and its z,
+so you can read "did this change the picture?" in the report itself.</p>
+<p>Why it exists: on ALab (frame 1004), before the check, the diagnostic ranked
+<code>--strategy light</code> its best change — ΔEff 14.3, <code>better</code> on every crop — and the
+light-only image is <strong>61% darker</strong> (beauty mean 0.361 against 0.937 with MIS). Its
+error was the lowest of every image, because the energy it lost is the energy that
+carried the noise; it then dominated each crop's reference and biased every other
+trial's measurement too. The light-only and BSDF-only strategies are no longer tried,
+and the check guards the trials that remain: every one of them is unbiased by design, so
+a <code>biased</code> verdict on one of them points at a renderer bug, not at the setting.</p>
+<h3 id="when-the-verdict-is-insufficient-samples">When the verdict is <code>insufficient_samples</code></h3>
+<p><code>inconclusive</code> says "this setting does not matter here"; <code>insufficient_samples</code> says
+"the probe cannot tell". The trials ran at too few samples for this scene's noise —
+typically one where rare, bright paths carry the picture, which the
+<a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/#the-picture">picture findings</a> then name. A larger <code>--budget</code> buys more samples per
+trial; <code>--region</code> on the crop that matters spends them where they count. Each larger
+budget raises the trial spp, but a scene may need more than you will spend: stop at
+the budget you accept, and treat what is still <code>insufficient_samples</code> then as not worth
+changing at that budget.</p>
+<p>With <code>--repeats 1</code> there is one seed and no noise floor (<code>noise_floor: null</code>, taken as
+1): such a run cannot report <code>insufficient_samples</code>.</p>
+<h2 id="reading-the-report">Reading the report</h2>
+<p>The Markdown on stdout and the JSON at <code>--json</code> hold the same data in the same order;
+the Markdown starts with a short <strong>Verdict</strong>: the top time sink (the largest profile
+section), the top noise source (with the firefly numbers when they are findings), the
+<strong>picture</strong> (every correctness finding and every <code>biased</code> trial, each with its number,
+or <code>none</code>), the best change, and whether the scene has converged — or that more budget
+is needed to decide.</p>
+<table><thead><tr><th>section</th><th>holds</th></tr></thead><tbody>
+<tr><td><code>scene</code></td><td>the stage, frame, camera, resolution and region — what makes two reports comparable</td></tr>
+<tr><td><code>effective_settings</code></td><td>every setting the diagnosis ran with, each with the flag and the <code>crust:*</code> attribute that set it</td></tr>
+<tr><td><code>run</code></td><td>budget, time used, import time, threads, repeats, the probe conditions, each phase's time, where the budget ran out, the exit status, each pair's seed, and the reserves held for tiers 2 and 3</td></tr>
+<tr><td><code>static_findings</code></td><td>each with an id, a kind (<code>time</code>, <code>noise</code>, <code>memory</code>, <code>correctness</code>), numbers, and an action: a flag and/or attribute with a value, or <code>none</code> with the reason crust has no setting for it. Assembled when the run ends, reported first</td></tr>
+<tr><td><code>baseline</code></td><td>its spp and time, MRSE, rays per second, path statistics, the largest profile sections, cache hit rates, peak memory</td></tr>
+<tr><td><code>noise_breakdown</code></td><td>the relative error of each kind of light path, and of each light group</td></tr>
+<tr><td><code>crops</code></td><td>each crop's rectangle (image pixels, top-left origin), why it was chosen, its share of the baseline's work, and its reference's own error</td></tr>
+<tr><td><code>trials</code></td><td>per crop: every pair's ΔEff (trimmed, and <code>delta_eff_untrimmed</code>), the median, min and max, both sides' error (trimmed and untrimmed), render time (<code>render_baseline_s</code>, <code>render_trial_s</code>) and setup, the verdict, both sides' mean luminance, the luminance shift and its z, the noise floor; then the overall ΔEff, the verdict and the ΔEff at the target</td></tr>
+<tr><td><code>sample_budget</code></td><td>estimates only: spp, render time and setup to a target error; adaptive sampling measured per crop</td></tr>
+<tr><td><code>picture_changing</code></td><td>the clamp, <code>max_depth</code> and subdivision numbers, and the light-sampling reach per crop</td></tr>
+<tr><td><code>not_tried</code></td><td>every trial or measurement that did not run, and why: <code>budget</code> or <code>not_applicable</code></td></tr>
+<tr><td><code>suggestions</code></td><td>each with its flag, attribute, value, expected overall ΔEff and ΔEff at the target, and the trials that are its evidence</td></tr>
+<tr><td><code>converged</code>, <code>suggested_command</code></td><td>the verdict, and a <code>crust render</code> line applying every suggestion</td></tr>
+<tr><td><code>deltas</code></td><td>with <code>--baseline</code> only: see below</td></tr>
+</tbody></table>
+<p>Keys are snake_case with their units in the name (<code>time_s</code>, <code>mem_bytes</code>); numbers carry
+four significant digits; a number that could not be measured is <code>null</code>. Two runs on the
+same scene differ only in times and what is derived from them.</p>
+<h3 id="the-noise-breakdown">The noise breakdown</h3>
+<table><thead><tr><th>row</th><th>light path expression</th><th>the light that…</th></tr></thead><tbody>
+<tr><td><code>emission</code></td><td><code>C[LO]</code></td><td>the camera sees directly</td></tr>
+<tr><td><code>direct_diffuse</code></td><td><code>C&lt;RD&gt;[LO]</code></td><td>one diffuse bounce brings from a source</td></tr>
+<tr><td><code>indirect_diffuse</code></td><td><code>C&lt;RD&gt;.+[LO]</code></td><td>a diffuse bounce brings after more bounces</td></tr>
+<tr><td><code>direct_glossy</code></td><td><code>C&lt;R[GS]&gt;[LO]</code></td><td>one glossy or mirror bounce brings from a source</td></tr>
+<tr><td><code>indirect_glossy</code></td><td><code>C&lt;R[GS]&gt;.+[LO]</code></td><td>a glossy bounce brings after more (caustic-like paths too)</td></tr>
+<tr><td><code>transmission</code></td><td><code>C&lt;T.&gt;.*[LO]</code></td><td>first goes through a surface</td></tr>
+<tr><td><code>volume</code></td><td><code>C&lt;V.&gt;.*[LO]</code></td><td>first scatters in a volume</td></tr>
+<tr><td><code>unlit_emitters</code></td><td><code>C.*O</code></td><td>ends on emissive geometry that is not a light — overlaps the rows above</td></tr>
+</tbody></table>
+<p>The first seven rows add up to the image. Each row gives its <strong>own</strong> relative error
+(<code>var / mean²</code>) and its error against the image (<code>var / image²</code>), never a share of the
+image's variance: the rows' variances do not add up to it. The row with the largest
+error against the image is the noise's <strong>dominant</strong> source, and orders the trials when
+the budget cannot fit them all: direct rows first try light selection and light samples,
+indirect rows first try guiding and indirect light samples, and more than eight lights
+first try light selection.</p>
+<p><strong>Light groups</strong> add one row per <code>crust:light:lpeTag</code>, or, with no tags and at most
+eight lights, one per light, named by its prim path. The labels only route light to the
+rows; the image is unchanged by them.</p>
+<h3 id="the-picture">The picture</h3>
+<p>Some findings describe the scene rather than a setting: what makes its picture depend
+on rare paths. They lead the verdict block, before the best change.</p>
+<table><thead><tr><th>finding</th><th>kind</th><th>fires when</th><th>evidence</th></tr></thead><tbody>
+<tr><td><code>clamp_bias</code></td><td><code>correctness</code></td><td>the authored indirect clamp would remove at least <strong>5%</strong> of the baseline's luminance</td><td>the limit, the share of luminance removed, the share of pixels touched</td></tr>
+<tr><td><code>firefly_energy</code></td><td><code>noise</code></td><td>the brightest <strong>0.1%</strong> of the baseline's pixels hold at least <strong>20%</strong> of its luminance, not counting light seen directly or in one glossy or mirror reflection (the <code>emission</code> and <code>direct_glossy</code> rows: the brightest thing in a pixel without being noise)</td><td>that share, the baseline's spp (more samples spread a firefly over more pixels), the row holding most of it</td></tr>
+<tr><td><code>light_sampling_misses</code></td><td><code>noise</code></td><td>light sampling alone reaches less than <strong>90%</strong> of a crop's energy, with |z| beyond 4</td><td>the lowest reach, its z, its crop</td></tr>
+<tr><td><code>visualization_strategy</code></td><td><code>correctness</code></td><td>the stage authors <code>--strategy light</code> or <code>bsdf</code></td><td>action: <code>--strategy power</code> / <code>crust:samplingStrategy = power</code></td></tr>
+</tbody></table>
+<p>The <strong>light-sampling reach</strong> (<code>picture_changing.light_sampling_reach</code>) is one light-only
+render of each crop over the crop's baseline image of the same seed and samples, every
+pixel counted. Both render the same paths, so <code>1 − reach</code> is exactly the share of the
+energy that only bounce-hit emission brings: the light MIS has no partner strategy for,
+where fireflies come from. It is <code>null</code>, and listed as <code>not_applicable</code>, when the scene
+has no light or the stage already authors a single strategy.</p>
+<p>The first three have no setting that fixes them: no crust setting makes these paths
+reachable by light sampling, and no clamp value is a gain — the clamp trades this energy
+for fireflies, and <code>--indirect-clamp</code> / <code>crust:indirectClamp</code> is that trade's knob. So
+their action is <code>none</code>, and they never keep the scene from converging. On ALab the
+default clamp removes 66% of the luminance, and the top 0.1% of pixels hold 41% of the
+beauty: the scene's noise <em>is</em> its picture.</p>
+<h2 id="a-worked-loop">A worked loop</h2>
+<p>The report is built for an agent — or a person — running:</p>
+<pre data-lang="text" class="language-text "><code class="language-text" data-lang="text">diagnose → change one setting → diagnose again with --baseline → stop when converged
+</code></pre>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash"># 1. Diagnose.
+crust diagnostic -i shot.usda --budget 3m --json r1.json &gt; r1.md
+</code></pre>
+<p>Say <code>r1.md</code> finds <code>--light-selection learned</code> <code>better</code> on every crop, overall ΔEff 1.42,
+and names it the best change. The suggested command applies it as a flag, so nothing in the
+stage has to change to try it:</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash"># 2. Apply the suggestion as a flag, and compare with the first run.
+crust diagnostic -i shot.usda --light-selection learned --budget 3m \
+    --baseline r1.json --json r2.json &gt; r2.md
+</code></pre>
+<p><code>r2.json</code>'s <code>deltas</code> lists <code>light_selection: power → learned</code>, the baseline's MRSE
+before and after (with each run's baseline spp: error falls as 1/spp), and which
+findings and suggestions went away — so you can check the change did what <code>r1</code>
+predicted. It also gives the baseline's time before and after, but that compares two
+runs made minutes apart, under whatever load each met: read it as indicative only.
+The evidence that a setting is faster is the trials' interleaved ΔEff. Repeat until <code>converged</code> is <code>true</code>, then render with
+the flags of the last <code>suggested_command</code> (adding <code>-s</code> and <code>-o</code>), or author the same
+values on the stage: every suggestion names its <code>crust:*</code> attribute.</p>
+<p><code>--baseline</code> refuses a report of another scene, frame, camera, resolution, region or
+format version: the deltas then say <code>not comparable</code> and hold nothing else.</p>
+<p>A <code>mixed</code> or <code>inconclusive</code> verdict is an answer, not a failure: the setting does not
+reliably help here. <code>insufficient_samples</code> is the probe saying it needs a larger
+<code>--budget</code> to answer (see above). A <code>biased</code> verdict on a tier-1 setting is worth a bug
+report: every one of them is meant to change only noise and time.</p>
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li><strong>Crops are not the frame.</strong> Three crops chosen for different reasons cover the usual
+cases, and disagreement between them is reported as <code>mixed</code>; full-frame projections
+are labelled estimates and never produce suggestions.</li>
+<li><strong>Guided renders are not repeatable.</strong> Whether a guided render's last pass is guided
+depends on an efficiency measured in wall-clock time, so two guided renders of the
+same settings can differ. Each pair's error is therefore measured on its own images.</li>
+<li><strong>Guiding has no flag.</strong> A guiding suggestion names <code>crust:pathGuiding</code> only; the
+suggested command lists it in a trailing comment, to be authored on the stage.</li>
+<li><strong>Small crops measure the thread pool.</strong> A frame smaller than the crop size is one
+crop, the whole frame, and a <code>--region</code> smaller than it is used as given, with a
+warning: either way, on many threads, part of what is timed is the pool's ramp-up.</li>
+<li><strong>Subdivision's build time is not recorded</strong>, so that number is <code>null</code>.</li>
+<li><strong>The picture check trims.</strong> A bias only a few pixels show — a caustic one setting
+drops — can pass it; the light-sampling reach and <code>firefly_energy</code>, which count every
+pixel, report that energy instead.</li>
+<li><strong>At a few samples, a biased trial's shift is a sign, not a measure.</strong> Where
+fireflies carry the image, the shift depends on which pixels each pair leaves out:
+on ALab at 4 spp guiding read +8–13% brighter, where it is in fact about 7% darker
+(at 32 spp the check read −4% to −13%). Trust the verdict; read the number at a
+larger <code>--budget</code>.</li>
+<li><strong>Thread time, not wall time.</strong> A crop's baseline time is the time its tiles took on
+their workers, summed: a share of the work.</li>
+</ul>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;help&#x2F;diagnosing-a-render.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;limitations&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Limitations
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

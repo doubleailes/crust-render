@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Materials and textures | Crust Render</title>
+<meta name="description" content="The crust:openpbr shader and its inputs, and the other material types Crust Render reads.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Materials and textures">
+  <meta name="twitter:description" content="The crust:openpbr shader and its inputs, and the other material types Crust Render reads.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Materials and textures">
+  <meta property="og:description" content="The crust:openpbr shader and its inputs, and the other material types Crust Render reads.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/usd/materials/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-02T08:00:00+00:00">
+  <meta property="og:site_name" content="Materials and textures">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Usd",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Materials",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/materials/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#material-types">Material types</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#materialx-networks-in-usd">MaterialX networks in USD</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#usdpreviewsurface-opacity">UsdPreviewSurface opacity</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#volume-materials">Volume materials</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#the-crust-openpbr-shader">The crust:openpbr shader</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#input-types">Input types</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#base">Base</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#specular">Specular</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#transmission">Transmission</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#subsurface">Subsurface</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#fuzz">Fuzz</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#coat">Coat</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#thin-film">Thin film</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#emission">Emission</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#geometry">Geometry</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#hair">Hair</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#displacement">Displacement</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#usdpreviewsurface">UsdPreviewSurface</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#materialx">MaterialX</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#renderman-pxrdisplace">RenderMan (PxrDisplace)</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#watertight-by-construction">Watertight by construction</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#not-supported">Not supported</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#texture-colour-spaces">Texture colour spaces</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#constant-colours">Constant colours</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#tx-files">.tx files</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Materials and textures</h1>
+        <p class="lead">Crust Render shades every surface with one OpenPBR übershader. The <code>crust:openpbr</code> shader sets its parameters directly.</p>
+        <h2 id="material-types">Material types</h2>
+<p>A prim gets its material through the standard <code>MaterialBindingAPI</code> (<code>rel material:binding</code>).
+Crust Render picks the material's surface shader by its <code>info:id</code>:</p>
+<table><thead><tr><th>shader</th><th>how it is read</th></tr></thead><tbody>
+<tr><td><code>info:id = "crust:openpbr"</code></td><td>Crust's own shader: every OpenPBR parameter, one to one. <a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#the-crust-openpbr-shader">See below</a>.</td></tr>
+<tr><td><code>info:id = "UsdPreviewSurface"</code></td><td>mapped onto OpenPBR, with <code>UsdUVTexture</code> and Ptex texture inputs</td></tr>
+<tr><td><code>info:id = "PxrDisneyBsdf"</code></td><td>mapped onto OpenPBR (as authored by the Moana Island)</td></tr>
+<tr><td>a reference into a <code>.mtlx</code> file</td><td>read as a MaterialX graph: standalone BSDF nodes, <code>open_pbr_surface</code>, <code>standard_surface</code>, <code>gltf_pbr</code>, image and UDIM textures, normal maps, <a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#hair">hair</a></td></tr>
+<tr><td><code>info:id = "ND_…"</code> (a MaterialX nodedef)</td><td>an inline MaterialX network, read exactly as the same graph in a <code>.mtlx</code>. <a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#materialx-networks-in-usd">See below</a>.</td></tr>
+</tbody></table>
+<p>A material Crust Render can't read logs a warning and renders as grey diffuse. Look for
+these warnings when a surface comes out grey.</p>
+<p>A MaterialX material is a <code>Material</code> prim that references a material inside a <code>.mtlx</code>
+document:</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Material &quot;Ceramic&quot; (
+    prepend references = @materials.mtlx@&lt;&#x2F;MaterialX&#x2F;Materials&#x2F;mtlx_ceramic&gt;
+)
+{
+}
+</code></pre>
+<h2 id="materialx-networks-in-usd">MaterialX networks in USD</h2>
+<p>A MaterialX material can also be authored inline, as <code>Shader</code> prims whose <code>info:id</code> names
+a MaterialX nodedef, wired to the material's <code>outputs:mtlx:surface</code> terminal. This is how
+<code>usdMtlx</code> brings a <code>.mtlx</code> into a stage, how DCCs export MaterialX, and how NVIDIA's
+Typhoon renderer receives materials.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Material &quot;Copper&quot;
+{
+    token outputs:mtlx:surface.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;Copper&#x2F;Surface.outputs:out&gt;
+
+    def Shader &quot;Surface&quot;
+    {
+        uniform token info:id = &quot;ND_open_pbr_surface_surfaceshader&quot;
+        float inputs:base_metalness = 1
+        color3f inputs:base_color = (0.95, 0.64, 0.54)
+        token outputs:out
+    }
+}
+</code></pre>
+<p>The node's type comes from the nodedef name (<code>ND_mix_vdf</code> is a <code>mix</code> of VDFs,
+<code>ND_dielectric_bsdf</code> a <code>dielectric_bsdf</code>). Inputs are read as values, or followed through
+connections, including through <code>NodeGraph</code> outputs and <code>Material</code> interface inputs.
+<code>asset</code> inputs resolve against the layer that authored them.</p>
+<p>A universal <code>outputs:surface</code> with a decodable shader, such as a <code>UsdPreviewSurface</code>, is
+still used first. The <code>mtlx</code> terminal is read when the material has nothing else Crust
+Render can decode, so a stage that rendered through its preview surface renders the same.</p>
+<h2 id="usdpreviewsurface-opacity">UsdPreviewSurface opacity</h2>
+<p><code>inputs:opacity</code> means one of two things, chosen by <code>inputs:opacityThreshold</code>:</p>
+<ul>
+<li><strong>Translucency</strong>, when <code>opacityThreshold</code> is 0 (the default). An <code>opacity</code> below 1
+makes the surface refract, as glass at <code>inputs:ior</code>.</li>
+<li><strong>A cutout</strong>, when <code>opacityThreshold</code> is above 0. A point is kept where <code>opacity</code> is at
+or above the threshold and cut away otherwise. Nothing refracts.</li>
+</ul>
+<p>A cutout's <code>opacity</code> is usually a texture's alpha, as DCCs export leaves and grass cards:</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Shader &quot;Surface&quot;
+{
+    uniform token info:id = &quot;UsdPreviewSurface&quot;
+    color3f inputs:diffuseColor.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;Leaf&#x2F;Tex.outputs:rgb&gt;
+    float inputs:opacity.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;Leaf&#x2F;Tex.outputs:a&gt;
+    float inputs:opacityThreshold = 0.5
+    token outputs:surface
+}
+def Shader &quot;Tex&quot;
+{
+    uniform token info:id = &quot;UsdUVTexture&quot;
+    asset inputs:file = @leaf.png@
+    float3 outputs:rgb
+    float outputs:a
+}
+</code></pre>
+<p><code>outputs:a</code> reads the file's alpha channel: a PNG's or TIFF's alpha, or an EXR's <code>A</code>
+channel. A file without alpha reads 1.0, so the surface is kept everywhere. Alpha is
+never colour-decoded: <code>sourceColorSpace</code> applies to <code>rgb</code> only.</p>
+<h2 id="volume-materials">Volume materials</h2>
+<p>A material's <code>volume</code> terminal (<code>outputs:mtlx:volume</code>, or <code>outputs:volume</code>) describes the
+medium <strong>inside</strong> the geometry the material is bound to. It is an <code>ND_volume</code> shader whose
+<code>vdf</code> input is a VDF network:</p>
+<table><thead><tr><th>node</th><th>medium</th></tr></thead><tbody>
+<tr><td><code>ND_anisotropic_vdf</code></td><td><code>absorption</code> and <code>scattering</code> coefficients (per unit length), Henyey–Greenstein <code>anisotropy</code></td></tr>
+<tr><td><code>ND_absorption_vdf</code></td><td><code>absorption</code> alone</td></tr>
+<tr><td><code>ND_mix_vdf</code>, <code>ND_add_vdf</code>, <code>ND_multiply_vdfC</code> / <code>vdfF</code></td><td>combinations: coefficients combine linearly, the anisotropy is weighted by how much each side scatters</td></tr>
+<tr><td><code>ND_mix_volumeshader</code></td><td>a mix of two <code>ND_volume</code> shaders</td></tr>
+</tbody></table>
+<p>There are two cases:</p>
+<ul>
+<li><strong>A volume with no surface</strong> makes the object a <strong>medium boundary</strong>. Its surface is
+invisible. Rays cross it without scattering, and travel through the medium inside. The
+medium is lit through the boundary, scatters light, and casts shadows. Objects inside it
+are seen and lit through it. This is how to make fog, smoke or murky water in a shape.</li>
+<li><strong>A volume with a MaterialX surface</strong> is the interior of that surface. A ray that
+refracts into a thick (not thin-walled) transmissive surface travels through it. It
+replaces the medium the surface's own <code>transmission_*</code> inputs would describe.</li>
+</ul>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Material &quot;Fog&quot;
+{
+    token outputs:mtlx:volume.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;Fog&#x2F;Volume.outputs:out&gt;
+
+    def Shader &quot;Volume&quot;
+    {
+        uniform token info:id = &quot;ND_volume&quot;
+        token inputs:vdf.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;Fog&#x2F;Vdf.outputs:out&gt;
+        token outputs:out
+    }
+
+    def Shader &quot;Vdf&quot;
+    {
+        uniform token info:id = &quot;ND_anisotropic_vdf&quot;
+        vector3f inputs:absorption = (0.02, 0.02, 0.02)
+        vector3f inputs:scattering = (0.9, 0.9, 0.9)
+        float inputs:anisotropy = 0.5
+        token outputs:out
+    }
+}
+</code></pre>
+<p>A <code>.mtlx</code> document can do the same with a <code>volumematerial</code> node.</p>
+<p>Rules for the geometry of a medium boundary:</p>
+<ul>
+<li>It must be <strong>closed</strong>, with normals facing <strong>out</strong>. Rays enter through its front faces.</li>
+<li>The medium is <strong>homogeneous</strong>: one set of coefficients per object. For smoke and noise,
+use a <a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">volume region</a>.</li>
+<li>One medium at a time: inside a medium boundary, other boundaries and glass don't change
+the medium.</li>
+<li>A camera that starts inside a medium boundary doesn't see the medium until its rays leave
+and enter it again.</li>
+<li>A volume's <code>edf</code> (volume emission) is ignored, with a warning.</li>
+</ul>
+<p><code>samples/materialx_volume.usda</code> shows a fog cube with a ball inside it, a glass sphere with
+a volume interior, and an inline OpenPBR surface.</p>
+<h2 id="the-crust-openpbr-shader">The crust:openpbr shader</h2>
+<p>A <code>Shader</code> prim with <code>info:id = "crust:openpbr"</code> sets the parameters of the
+<a href="https://academysoftwarefoundation.github.io/OpenPBR/">OpenPBR Surface</a> model directly.
+Each input is named after the OpenPBR parameter in camelCase: <code>base_color</code> becomes
+<code>inputs:baseColor</code>, <code>specular_roughness</code> becomes <code>inputs:specularRoughness</code>.</p>
+<p>Author only the inputs you want to change. The others keep their default.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Material &quot;red_plastic&quot;
+{
+    token outputs:surface.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;red_plastic&#x2F;Surface.outputs:surface&gt;
+
+    def Shader &quot;Surface&quot;
+    {
+        uniform token info:id = &quot;crust:openpbr&quot;
+        color3f inputs:baseColor = (0.8, 0.1, 0.1)
+        float inputs:specularRoughness = 0.25
+        float inputs:coatWeight = 1
+        token outputs:surface
+    }
+}
+</code></pre>
+<p><code>samples/openpbr_showcase.usda</code> shows metal, plastic, glass, coat and other presets.</p>
+<h3 id="input-types">Input types</h3>
+<p>The <code>crust:openpbr</code> inputs are read with these types. An input authored with another type
+is ignored, and its default is used.</p>
+<table><thead><tr><th>type</th><th>you can author</th></tr></thead><tbody>
+<tr><td><code>float</code></td><td><code>float</code> or <code>double</code></td></tr>
+<tr><td><code>color3f</code></td><td>a single-precision 3-vector: <code>color3f</code>, <code>float3</code>, <code>vector3f</code>, … (not <code>double3</code>)</td></tr>
+<tr><td><code>bool</code></td><td><code>bool</code> only</td></tr>
+</tbody></table>
+<p>Colours are <strong>linear</strong>: no transfer curve is applied. Values are constants: the inputs are
+read as values, not as connections to texture nodes. For textures, use
+<code>UsdPreviewSurface</code> or MaterialX.</p>
+<h3 id="base">Base</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:baseWeight</code></td><td><code>float</code></td><td>1.0</td><td>weight of the base layer</td></tr>
+<tr><td><code>inputs:baseColor</code></td><td><code>color3f</code></td><td>(0.8, 0.8, 0.8)</td><td>diffuse albedo, or metal colour</td></tr>
+<tr><td><code>inputs:baseDiffuseRoughness</code></td><td><code>float</code></td><td>0.0</td><td>diffuse roughness (0 = Lambertian)</td></tr>
+<tr><td><code>inputs:baseMetalness</code></td><td><code>float</code></td><td>0.0</td><td>0 = dielectric, 1 = metal</td></tr>
+</tbody></table>
+<h3 id="specular">Specular</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:specularWeight</code></td><td><code>float</code></td><td>1.0</td><td>weight of the specular reflection</td></tr>
+<tr><td><code>inputs:specularColor</code></td><td><code>color3f</code></td><td>(1, 1, 1)</td><td>specular tint</td></tr>
+<tr><td><code>inputs:specularRoughness</code></td><td><code>float</code></td><td>0.3</td><td>microfacet roughness</td></tr>
+<tr><td><code>inputs:specularIor</code></td><td><code>float</code></td><td>1.5</td><td>index of refraction</td></tr>
+<tr><td><code>inputs:specularRoughnessAnisotropy</code></td><td><code>float</code></td><td>0.0</td><td>roughness anisotropy</td></tr>
+</tbody></table>
+<h3 id="transmission">Transmission</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:transmissionWeight</code></td><td><code>float</code></td><td>0.0</td><td>1 = fully transmissive, like glass</td></tr>
+<tr><td><code>inputs:transmissionColor</code></td><td><code>color3f</code></td><td>(1, 1, 1)</td><td>transmission tint</td></tr>
+<tr><td><code>inputs:transmissionDepth</code></td><td><code>float</code></td><td>0.0</td><td>distance at which the tint is reached. 0 tints at the surface.</td></tr>
+<tr><td><code>inputs:transmissionScatter</code></td><td><code>color3f</code></td><td>(0, 0, 0)</td><td>scattering inside the medium</td></tr>
+<tr><td><code>inputs:transmissionScatterAnisotropy</code></td><td><code>float</code></td><td>0.0</td><td>phase-function anisotropy of that scattering</td></tr>
+<tr><td><code>inputs:transmissionDispersionScale</code></td><td><code>float</code></td><td>0.0</td><td>strength of dispersion</td></tr>
+<tr><td><code>inputs:transmissionDispersionAbbeNumber</code></td><td><code>float</code></td><td>20.0</td><td>Abbe number of the dispersion</td></tr>
+</tbody></table>
+<h3 id="subsurface">Subsurface</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:subsurfaceWeight</code></td><td><code>float</code></td><td>0.0</td><td>weight of subsurface scattering</td></tr>
+<tr><td><code>inputs:subsurfaceColor</code></td><td><code>color3f</code></td><td>(0.8, 0.8, 0.8)</td><td>subsurface albedo</td></tr>
+<tr><td><code>inputs:subsurfaceRadius</code></td><td><code>float</code></td><td>1.0</td><td>mean free path, in scene units</td></tr>
+<tr><td><code>inputs:subsurfaceRadiusScale</code></td><td><code>color3f</code></td><td>(1.0, 0.5, 0.25)</td><td>per-channel scale of the radius</td></tr>
+<tr><td><code>inputs:subsurfaceScatterAnisotropy</code></td><td><code>float</code></td><td>0.0</td><td>phase-function anisotropy</td></tr>
+</tbody></table>
+<h3 id="fuzz">Fuzz</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:fuzzWeight</code></td><td><code>float</code></td><td>0.0</td><td>coverage of the fuzz (sheen) layer</td></tr>
+<tr><td><code>inputs:fuzzColor</code></td><td><code>color3f</code></td><td>(1, 1, 1)</td><td>fuzz colour</td></tr>
+<tr><td><code>inputs:fuzzRoughness</code></td><td><code>float</code></td><td>0.5</td><td>fuzz roughness, from 0 (a narrow rim at grazing angles) to 1 (a soft, broad sheen)</td></tr>
+</tbody></table>
+<p>The fuzz is the one Adobe's OpenPBR reference implements: Zeltner, Burley and Chiang's
+sheen, a fit to a layer of fibres. How much light it reflects depends on the angle you see
+it from. A smooth fuzz is almost invisible head-on and shows as a bright rim toward the
+silhouette; a rough one reflects about a third of the light even head-on. Whatever the
+fuzz reflects toward you, it takes from the layers beneath it (coat, specular, base and
+emission), so a fuzzy surface never gains energy. Unlike Adobe's, crust's fuzz is also
+seen on the back of a surface that is not thin-walled, as cloth usually is.</p>
+<h3 id="coat">Coat</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:coatWeight</code></td><td><code>float</code></td><td>0.0</td><td>weight of the clear coat</td></tr>
+<tr><td><code>inputs:coatColor</code></td><td><code>color3f</code></td><td>(1, 1, 1)</td><td>coat tint</td></tr>
+<tr><td><code>inputs:coatRoughness</code></td><td><code>float</code></td><td>0.0</td><td>coat roughness</td></tr>
+<tr><td><code>inputs:coatRoughnessAnisotropy</code></td><td><code>float</code></td><td>0.0</td><td>coat roughness anisotropy</td></tr>
+<tr><td><code>inputs:coatIor</code></td><td><code>float</code></td><td>1.6</td><td>coat index of refraction</td></tr>
+<tr><td><code>inputs:coatDarkening</code></td><td><code>float</code></td><td>1.0</td><td>how much the coat darkens and saturates the layers below</td></tr>
+</tbody></table>
+<h3 id="thin-film">Thin film</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:thinFilmWeight</code></td><td><code>float</code></td><td>0.0</td><td>weight of the thin-film iridescence</td></tr>
+<tr><td><code>inputs:thinFilmThickness</code></td><td><code>float</code></td><td>0.5</td><td>film thickness, in micrometres</td></tr>
+<tr><td><code>inputs:thinFilmIor</code></td><td><code>float</code></td><td>1.4</td><td>film index of refraction</td></tr>
+</tbody></table>
+<h3 id="emission">Emission</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:emissionLuminance</code></td><td><code>float</code></td><td>0.0</td><td>emitted radiance, multiplied by the colour</td></tr>
+<tr><td><code>inputs:emissionColor</code></td><td><code>color3f</code></td><td>(1, 1, 1)</td><td>emission colour</td></tr>
+</tbody></table>
+<p>The surface emits <code>emissionColor × emissionLuminance</code>, in the same linear units as the
+image. An emissive surface is only found by rays that hit it, not sampled like a light,
+so use a UsdLux light for a scene's main light sources.</p>
+<h3 id="geometry">Geometry</h3>
+<table><thead><tr><th>input</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>inputs:geometryOpacity</code></td><td><code>float</code></td><td>1.0</td><td>0 = fully cut out</td></tr>
+<tr><td><code>inputs:geometryThinWalled</code></td><td><code>bool</code></td><td>false</td><td>treat the surface as an infinitely thin sheet (leaves, paper) rather than the boundary of a solid</td></tr>
+</tbody></table>
+<p>A thin-walled surface with <code>transmissionWeight</code> above 0 is a window: what it transmits
+goes straight through, unbent. Shadows see that. A shadow ray through the sheet is tinted
+by what it lets through instead of blocked, so a light behind a pane, a lampshade or a
+leaf is found by light sampling, and the surfaces it lights converge without fireflies.
+MaterialX surfaces with <code>thin_walled</code> (<code>open_pbr_surface</code>'s <code>geometry_thin_walled</code>,
+<code>standard_surface</code>'s <code>thin_walled</code>) work the same way. A closed, thick glass object still
+casts a solid shadow (<a href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/#materials-and-textures">why</a>).</p>
+<h2 id="hair">Hair</h2>
+<p>Hair and fur are <code>BasisCurves</code> prims shaded with MaterialX's <code>chiang_hair_bsdf</code>: the fibre
+model of Chiang et al. (2016), as pbrt-v3 implements it. It scatters light the way a
+strand does: a primary highlight (R), a secondary coloured highlight shifted along the
+strand (TRT), a glow when the hair is lit from behind (TT), and the light that bounces
+around inside the fibre several times. Bind it like any MaterialX material:</p>
+<pre data-lang="xml" class="language-xml "><code class="language-xml" data-lang="xml">&lt;materialx version=&quot;1.39&quot;&gt;
+  &lt;chiang_hair_roughness name=&quot;rough&quot; type=&quot;multioutput&quot;&gt;
+    &lt;input name=&quot;longitudinal&quot; type=&quot;float&quot; value=&quot;0.3&quot; &#x2F;&gt;
+    &lt;input name=&quot;azimuthal&quot; type=&quot;float&quot; value=&quot;0.5&quot; &#x2F;&gt;
+  &lt;&#x2F;chiang_hair_roughness&gt;
+  &lt;deon_hair_absorption_from_melanin name=&quot;melanin&quot; type=&quot;vector3&quot;&gt;
+    &lt;input name=&quot;melanin_concentration&quot; type=&quot;float&quot; value=&quot;0.6&quot; &#x2F;&gt;
+    &lt;input name=&quot;melanin_redness&quot; type=&quot;float&quot; value=&quot;0.3&quot; &#x2F;&gt;
+  &lt;&#x2F;deon_hair_absorption_from_melanin&gt;
+  &lt;chiang_hair_bsdf name=&quot;hair&quot; type=&quot;BSDF&quot;&gt;
+    &lt;input name=&quot;roughness_R&quot; type=&quot;vector2&quot; nodename=&quot;rough&quot; output=&quot;roughness_R&quot; &#x2F;&gt;
+    &lt;input name=&quot;roughness_TT&quot; type=&quot;vector2&quot; nodename=&quot;rough&quot; output=&quot;roughness_TT&quot; &#x2F;&gt;
+    &lt;input name=&quot;roughness_TRT&quot; type=&quot;vector2&quot; nodename=&quot;rough&quot; output=&quot;roughness_TRT&quot; &#x2F;&gt;
+    &lt;input name=&quot;absorption_coefficient&quot; type=&quot;vector3&quot; nodename=&quot;melanin&quot; &#x2F;&gt;
+  &lt;&#x2F;chiang_hair_bsdf&gt;
+  &lt;surface name=&quot;hair_surface&quot; type=&quot;surfaceshader&quot;&gt;
+    &lt;input name=&quot;bsdf&quot; type=&quot;BSDF&quot; nodename=&quot;hair&quot; &#x2F;&gt;
+  &lt;&#x2F;surface&gt;
+  &lt;surfacematerial name=&quot;brown_hair&quot; type=&quot;material&quot;&gt;
+    &lt;input name=&quot;surfaceshader&quot; type=&quot;surfaceshader&quot; nodename=&quot;hair_surface&quot; &#x2F;&gt;
+  &lt;&#x2F;surfacematerial&gt;
+&lt;&#x2F;materialx&gt;
+</code></pre>
+<table><thead><tr><th>input</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>tint_R</code>, <code>tint_TT</code>, <code>tint_TRT</code></td><td>a colour multiplying that lobe. The longer paths inside the fibre take <code>tint_TRT</code>.</td></tr>
+<tr><td><code>ior</code></td><td>the fibre's index of refraction. Default 1.55.</td></tr>
+<tr><td><code>roughness_R</code>, <code>roughness_TT</code>, <code>roughness_TRT</code></td><td>a <code>vector2</code> per lobe: longitudinal variance and azimuthal scale, each clamped to [0.001, 1]. Connect them to <code>chiang_hair_roughness</code> rather than authoring them.</td></tr>
+<tr><td><code>cuticle_angle</code></td><td>the tilt of the fibre's scales, in [0, 1]: 0.5 is none, and the range maps to −90° to +90°. Real hair is about 2°, so about 0.51.</td></tr>
+<tr><td><code>absorption_coefficient</code></td><td>how strongly the fibre absorbs, per unit radius, per channel. Connect it to one of the absorption helpers.</td></tr>
+<tr><td><code>curve_direction</code></td><td>the strand's direction. Unconnected, it is the curve's own direction at the hit, which is what you want.</td></tr>
+</tbody></table>
+<p>The three helper nodes turn artist parameters into those inputs:</p>
+<table><thead><tr><th>node</th><th>outputs</th></tr></thead><tbody>
+<tr><td><code>chiang_hair_roughness</code></td><td><code>roughness_R</code>, <code>roughness_TT</code> and <code>roughness_TRT</code> from a <code>longitudinal</code> and an <code>azimuthal</code> roughness in [0, 1]</td></tr>
+<tr><td><code>chiang_hair_absorption_from_color</code></td><td>the <code>absorption</code> that makes a dense groom read as <code>color</code>, for a given <code>azimuthal_roughness</code></td></tr>
+<tr><td><code>deon_hair_absorption_from_melanin</code></td><td>the <code>absorption</code> of natural hair from a <code>melanin_concentration</code> and a <code>melanin_redness</code></td></tr>
+</tbody></table>
+<p><code>samples/hair.usda</code> renders one tuft per way of reaching the node. Light reaching a strand
+through the strand itself is already part of the model, so a strand never shadows its
+own transmitted light. It still shadows everything else, other strands included. If the
+hair node is mixed with a BSDF that transmits, such as a refracting <code>dielectric_bsdf</code> or
+a <code>translucent_bsdf</code>, only the hair's share of the light passes through the strand. The
+other BSDF's light meets the far side of the tube, as it would without the hair. Path
+guiding is off where such a mix is hit.</p>
+<p>Author grooms in centimetres (<code>metersPerUnit = 0.01</code>, the USD default). Crust Render
+starts every ray 0.001 units away from the surface it leaves; in a groom authored in
+metres that is 1 mm, wider than a hair, and neighbouring strands then stop lighting and
+shadowing each other. See <a href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/#materials-and-textures">limitations</a>.</p>
+<p>The node also works on a mesh, such as a hair card. There, <code>curve_direction</code> defaults to
+the mesh's UV tangent, so the card needs UVs whose <code>u</code> runs along the hair.</p>
+<h2 id="displacement">Displacement</h2>
+<p>A material can move the surface it's bound to, not just shade it. Crust Render reads a
+<strong>scalar</strong> displacement: each vertex of the mesh moves along its normal by a distance the
+material gives, in the mesh's own (local) units, so a scaled placement scales the offset
+with the mesh. Silhouettes, contact shadows and self-shadowing then come from the
+displaced shape. A normal map in the same material still perturbs the shading on top.</p>
+<p>Displacement is applied once, when the mesh is loaded, to the vertices its tessellation
+has. It adds no vertices of its own, so detail finer than the dicing rate is lost: set
+<a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-subdivisionlevel"><code>crust:subdivisionLevel</code></a> (or
+<code>--subdiv-level</code>, or adaptive <code>--subdiv-edge-length</code>) high enough for the map. At the
+default level 0 only the cage's vertices move, and the import warns once. Each lookup is
+filtered over the spacing between vertices, so a coarse tessellation reads a blurred
+version of the map rather than a random sample of it.</p>
+<p>A mesh with <code>subdivisionScheme = "none"</code> and a displacing material is diced bilinearly so
+that it has vertices to move. See <a href="https://doubleailes.github.io/crust-render/docs/usd/geometry/#crust-displacementbound">geometry</a>.</p>
+<h3 id="usdpreviewsurface">UsdPreviewSurface</h3>
+<p><code>inputs:displacement</code>, as a value or connected to a <code>UsdUVTexture</code>. The texture's output
+channel, <code>scale</code> and <code>bias</code> apply, as for any other input. The file is read as data (no
+colour decoding) unless <code>sourceColorSpace = "sRGB"</code> says otherwise.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Shader &quot;Surface&quot;
+{
+    uniform token info:id = &quot;UsdPreviewSurface&quot;
+    float inputs:displacement.connect = &lt;&#x2F;World&#x2F;Looks&#x2F;Ground&#x2F;Height.outputs:r&gt;
+    token outputs:surface
+}
+def Shader &quot;Height&quot;
+{
+    uniform token info:id = &quot;UsdUVTexture&quot;
+    asset inputs:file = @height.png@
+    float4 inputs:scale = (0.3, 0.3, 0.3, 1)
+    float outputs:r
+}
+</code></pre>
+<h3 id="materialx">MaterialX</h3>
+<p>A <code>surfacematerial</code> whose <code>displacementshader</code> is a <code>displacement</code> node with a <code>float</code>
+<code>displacement</code> input is displaced by that input times the node's <code>scale</code>. The input can be
+any graph. It's evaluated at each vertex with the vertex's texture coordinate, and its
+object-space <code>position</code> and <code>normal</code>, as MaterialX defines displacement. Nodes that depend
+on the view direction have no meaningful value there. An <code>image</code> that can't be loaded
+falls back to its <code>default</code> (0.5 unless authored), as it does for shading.</p>
+<pre data-lang="xml" class="language-xml "><code class="language-xml" data-lang="xml">&lt;image name=&quot;height&quot; type=&quot;float&quot;&gt;
+  &lt;input name=&quot;file&quot; type=&quot;filename&quot; value=&quot;height.png&quot; &#x2F;&gt;
+&lt;&#x2F;image&gt;
+&lt;displacement name=&quot;disp&quot; type=&quot;displacementshader&quot;&gt;
+  &lt;input name=&quot;displacement&quot; type=&quot;float&quot; nodename=&quot;height&quot; &#x2F;&gt;
+  &lt;input name=&quot;scale&quot; type=&quot;float&quot; value=&quot;0.3&quot; &#x2F;&gt;
+&lt;&#x2F;displacement&gt;
+&lt;surfacematerial name=&quot;ground&quot; type=&quot;material&quot;&gt;
+  &lt;input name=&quot;surfaceshader&quot; type=&quot;surfaceshader&quot; nodename=&quot;surf&quot; &#x2F;&gt;
+  &lt;input name=&quot;displacementshader&quot; type=&quot;displacementshader&quot; nodename=&quot;disp&quot; &#x2F;&gt;
+&lt;&#x2F;surfacematerial&gt;
+</code></pre>
+<p>A <code>vector3</code> <code>displacement</code> input is vector displacement, which is refused with a warning.</p>
+<h3 id="renderman-pxrdisplace">RenderMan (PxrDisplace)</h3>
+<p>A material whose <code>outputs:ri:displacement</code> reaches a <code>PxrDisplace</code> (as on the Moana
+Island) is displaced by <code>dispAmount</code> times <code>dispScalar</code>. <code>dispScalar</code> can be a value, or a
+<code>PxrPtexture</code> whose file is read as data, optionally through a <code>PxrDispTransform</code> and its
+remap mode, centre, depth and height. In place of the one <code>PxrPtexture</code>, a <code>PxrBlend</code>
+that multiplies two of them (<code>operation = 18</code>) is read as the product of the two maps.
+Inputs connected to the material's interface (<code>inputs:dispScale</code>,
+<code>inputs:displacementMap</code>) are followed.</p>
+<p>Any other network driving <code>dispScalar</code>, such as another <code>PxrBlend</code> operation or a UV
+<code>PxrTexture</code>, is refused with a warning. RenderMan's
+<code>primvars:displacementbound:sphere</code> on the mesh is read as its
+<a href="https://doubleailes.github.io/crust-render/docs/usd/geometry/#crust-displacementbound">displacement bound</a>.</p>
+<h3 id="watertight-by-construction">Watertight by construction</h3>
+<p>A vertex shared by several faces moves once, sampled from the first face that uses it. A
+mesh therefore can't crack along a UV seam or between Ptex faces, even where the map
+itself jumps. Where it does jump, the step shows as one ring of stretched triangles at the
+seam.</p>
+<h3 id="not-supported">Not supported</h3>
+<ul>
+<li><strong>Vector displacement</strong> is refused with a warning, and the mesh is not displaced.</li>
+<li><strong>Spheres</strong> (<code>UsdGeomSphere</code>) are not displaced.</li>
+</ul>
+<p><code>CRUST_DISPLACE=0</code> turns displacement off for an A/B; see
+<a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-displace">environment variables</a>.</p>
+<h2 id="texture-colour-spaces">Texture colour spaces</h2>
+<p>Textures are converted to linear light in the
+<a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#renderingcolorspace">working colour space</a> once, when they
+load. The colour space a texture is authored in comes from:</p>
+<ul>
+<li>the <code>colorspace</code> of a MaterialX <code>image</code> with a <code>color3</code> or <code>color4</code> output: the <code>file</code>
+input's own, else its node's, else its node graph's, else the document's (the root
+<code>&lt;materialx colorspace="..."&gt;</code>). An image of any other type, such as a <code>float</code> roughness
+or a <code>vector3</code> normal map, is data and is never converted.</li>
+<li>the <code>colorSpace</code> metadata on a <code>UsdUVTexture</code>'s <code>inputs:file</code>, when authored; otherwise
+its <code>sourceColorSpace</code>.</li>
+</ul>
+<table><thead><tr><th>authored</th><th>converted from</th></tr></thead><tbody>
+<tr><td>any colour space the <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#ocio-config">OCIO config</a> defines, by any name or alias: <code>srgb_texture</code>, <code>g22_rec709</code>, <code>acescg</code>, <code>g22_ap1</code>, <code>lin_rec2020</code>, <code>Utility - sRGB - Texture</code>, …</td><td>that space: its transfer curve, then its primaries into the working space's</td></tr>
+<tr><td><code>srgb</code> (older MaterialX documents)</td><td><code>srgb_texture</code></td></tr>
+<tr><td>MaterialX: no colour space, or <code>raw</code></td><td>nothing: the values are taken as already in the working space</td></tr>
+<tr><td><code>UsdUVTexture</code>: <code>sRGB</code> / <code>raw</code></td><td><code>srgb_texture</code> / nothing</td></tr>
+<tr><td><code>UsdUVTexture</code>: <code>auto</code> or unauthored</td><td><code>srgb_texture</code> for an 8-bit RGB or RGBA image, nothing otherwise</td></tr>
+</tbody></table>
+<p>So an sRGB albedo map rendered in ACEScg has its curve removed and its Rec.709 primaries
+converted to ACEScg's, and an <code>acescg</code> texture rendered in the default <code>lin_rec709</code> is
+converted the other way. Names are matched without regard to case. A colour that falls
+outside the working space's gamut has its negative components set to zero. A name the
+config doesn't know is refused with a warning, and the texture is used as stored.</p>
+<p>Colour Ptex is decoded as <code>g22_rec709</code>, the 2.2 power law the Moana island's networks
+apply, and converted into the working space. A Ptex displacement map isn't decoded.</p>
+<h3 id="constant-colours">Constant colours</h3>
+<p>A constant colour — UsdPreviewSurface <code>diffuseColor</code> and <code>emissiveColor</code>, the
+<code>crust:openpbr</code> colours, a light's <code>inputs:color</code> — is converted from the colour space
+<code>UsdColorSpaceAPI</code> gives it: its attribute's <code>colorSpace</code> metadata, else the
+<code>colorSpace:name</code> of its prim, else of the nearest ancestor that authors one. With none of
+those it's taken as already in the working space.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Scope &quot;Looks&quot; (
+    prepend apiSchemas = [&quot;ColorSpaceAPI&quot;]
+)
+{
+    uniform token colorSpace:name = &quot;lin_rec709_scene&quot;   # every colour below
+
+    def Material &quot;Red&quot; { ... }
+}
+
+color3f inputs:diffuseColor = (0.8, 0.2, 0.1) (
+    colorSpace = &quot;srgb_texture&quot;                          # this one only
+)
+</code></pre>
+<p>A texture file's own colour space (<code>inputs:file</code>, a light's <code>texture:file</code>) is resolved
+the same way.</p>
+<p>A MaterialX <code>color3</code> or <code>color4</code> value is converted from its colour space (the input's,
+its node's, its node graph's or the document's) when it has one. <code>PxrDisneyBsdf</code>
+<code>baseColor</code> is decoded as <code>g22_rec709</code> unless its <code>colorSpace</code> metadata says otherwise.</p>
+<h2 id="tx-files">.tx files</h2>
+<p>A <code>.tx</code> is a tiled, mip-mapped texture file. When one exists beside a UV texture (same
+path, <code>.tx</code> extension), Crust Render streams the texture from it instead of loading the
+whole image. <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#auto-tx"><code>--auto-tx</code></a> creates the missing
+ones, and <code>CRUST_TEX_STREAM=0</code> turns streaming off (see
+<a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-stream">Environment variables</a>).</p>
+<p>Every mip level of a <code>.tx</code> has to be reduced in the same colour space the renderer
+decodes the texture in. Otherwise the full-resolution level looks right and the coarser
+levels are wrong, which looks like a filtering bug. So a <code>.tx</code> that Crust Render writes
+records that colour space in its <code>ImageDescription</code> tag (an EXR <code>.tx</code> in header
+attributes), beside the version of the conversion that wrote it:</p>
+<pre data-lang="text" class="language-text "><code class="language-text" data-lang="text">crust:mipspace=srgb_texture crust:txversion=2
+</code></pre>
+<p>The values are <code>srgb_texture</code>, <code>g22_rec709</code>, <code>g18_rec709</code> and <code>raw</code>. If the recorded colour
+space doesn't match the one the material asks for, the <code>.tx</code> is refused with a warning and
+the source image is loaded instead.</p>
+<p>A <code>.tx</code> with no <code>crust:mipspace</code> tag, for example one written by OpenImageIO's <code>maketx</code>,
+is accepted as it is.</p>
+<p>A <code>.tx</code> keeps its source's alpha channel when the alpha cuts something, so a streamed
+cutout reads the same mask as the source image. An alpha that is opaque everywhere is
+left out. Crust Render versions before <code>crust:txversion=2</code> dropped the alpha: such a
+<code>.tx</code>, beside a source that has an alpha channel, is reconverted by <code>--auto-tx</code>, and
+without the flag it is refused with a warning and the source image is loaded instead. OpenImageIO's <code>maketx</code> stores the colour of an image with alpha premultiplied;
+Crust Render reads that colour as it is stored.</p>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;usd&#x2F;materials.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;reference&#x2F;warnings&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Warnings
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+          
+          
+          <a class="ms-auto" href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;overview&#x2F;">
+            <div class="card my-1">
+              <div class="card-body py-2">
+                Overview &rarr;
+              </div>
+            </div>
+          </a>
+          
+          
+          
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

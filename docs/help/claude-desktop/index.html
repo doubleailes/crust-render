@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Look-dev with Claude Desktop | Crust Render</title>
+<meta name="description" content="Keep a USD stage open in a crust session, edit it through composition and render it, from Claude Desktop.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Look-dev with Claude Desktop">
+  <meta name="twitter:description" content="Keep a USD stage open in a crust session, edit it through composition and render it, from Claude Desktop.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Look-dev with Claude Desktop">
+  <meta property="og:description" content="Keep a USD stage open in a crust session, edit it through composition and render it, from Claude Desktop.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-09T08:00:00+00:00">
+  <meta property="og:site_name" content="Look-dev with Claude Desktop">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Help",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Claude Desktop",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/claude-desktop/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#the-session-is-a-file">The session is a file</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#what-a-session-writes">What a session writes</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#install">Install</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#the-tools">The tools</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#editing">Editing</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#rendering">Rendering</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#a-look-dev-session">A look-dev session</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#limits">Limits</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Look-dev with Claude Desktop</h1>
+        <p class="lead"><code>crust mcp</code> serves a live session to Claude Desktop: the agent opens a stage once, then queries it, edits it and renders it by conversation. The session is an override layer on disk, which any USD tool opens and <code>crust render</code> renders as the session did.</p>
+        <h2 id="the-session-is-a-file">The session is a file</h2>
+<p><code>open_session(input, output)</code> writes a new USD layer at <code>output</code> whose only
+composition arc is a sublayer on <code>input</code>:</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">#usda 1.0
+(
+    subLayers = [
+        @.&#x2F;shot.usda@
+    ]
+)
+</code></pre>
+<p>Every edit the agent makes is an opinion in that layer, as an <code>over</code> where the prim
+is defined elsewhere, and the layer is saved after every edit. What is rendered is
+always the saved file, imported exactly as <code>crust render &lt;output&gt;</code> imports it. So:</p>
+<ul>
+<li>the file is the session's result: it opens in any USD tool, and renders in crust
+as it did in the session;</li>
+<li>nothing is lost if the server stops: at most the edit in flight;</li>
+<li>calling <code>open_session</code> again with the same <code>input</code> and <code>output</code> resumes it, with
+every opinion it holds. Undo history does not survive the process.</li>
+</ul>
+<p>The output must be a <code>.usda</code>: a session is a small text file of opinions, readable
+and diffable. The sublayer path is written relative to the output's directory
+(absolute when the two are on different drives), so the layer can move with its
+input.</p>
+<h2 id="what-a-session-writes">What a session writes</h2>
+<p>A session writes only:</p>
+<ul>
+<li>its override layer;</li>
+<li>the final render's files (<code>render_final</code>): the EXR and PNG preview, or every
+RenderProduct the stage authors;</li>
+<li>the <code>.tx</code> files <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#auto-tx"><code>--auto-tx</code></a> creates,
+as a render would.</li>
+</ul>
+<p>No tool modifies, saves or creates any other layer. An attribute whose current value
+lives in a referenced asset is overridden in the session's layer; the asset file is
+not touched. <code>open_session</code> refuses an <code>output</code> that is the input or one of the
+layers it composes, and an existing layer that does not sublayer the input, before
+writing anything.</p>
+<h2 id="install">Install</h2>
+<p><code>crust mcp</code> is the server: Claude Desktop launches it and talks to it over stdin and
+stdout.</p>
+<p>The simplest install is the extension bundle the
+<a href="https://github.com/doubleailes/crust-render/releases/tag/nightly">nightly release</a>
+ships for each platform Desktop runs on: <code>crust-nightly-x86_64-pc-windows-msvc.mcpb</code>,
+<code>crust-nightly-aarch64-apple-darwin.mcpb</code> (Apple silicon) or
+<code>crust-nightly-x86_64-apple-darwin.mcpb</code> (Intel). Open it with Claude Desktop, or drag it
+onto <strong>Settings → Extensions</strong>, and confirm: the bundle holds the <code>crust</code> binary and a
+manifest that launches it as <code>crust mcp</code>.</p>
+<p>To use a <code>crust</code> binary of your own instead, point Desktop at it in its
+<code>claude_desktop_config.json</code>, which Desktop opens from <strong>Settings → Developer → Edit
+Config</strong>:</p>
+<ul>
+<li>Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code></li>
+<li>macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code></li>
+</ul>
+<pre data-lang="json" class="language-json "><code class="language-json" data-lang="json">{
+  &quot;mcpServers&quot;: {
+    &quot;crust&quot;: {
+      &quot;command&quot;: &quot;C:\\tools\\crust.exe&quot;,
+      &quot;args&quot;: [&quot;mcp&quot;]
+    }
+  }
+}
+</code></pre>
+<p>On macOS the command is the binary's path, such as <code>/usr/local/bin/crust</code>. Restart
+Desktop, and the crust tools appear in the chat's tool menu. Pass absolute paths to
+<code>open_session</code>: Desktop starts the server in a working directory of its own choosing.</p>
+<p>Add <code>"-l", "debug"</code> to <code>args</code> to record every import and render in Desktop's MCP log.</p>
+<h2 id="the-tools">The tools</h2>
+<table><thead><tr><th>tool</th><th>what it does</th></tr></thead><tbody>
+<tr><td><code>open_session(input, output)</code></td><td>creates the override layer <code>output</code> on <code>input</code> (or resumes it) and imports it; reports the camera, the resolution and the warnings</td></tr>
+<tr><td><code>query(path)</code></td><td>a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and <code>source</code>, the layer its value comes from)</td></tr>
+<tr><td><code>check()</code></td><td>the <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#check"><code>crust check</code></a> report of the current layer, as <code>crust-check/2</code> JSON</td></tr>
+<tr><td><code>set_attribute(path, value, type?)</code></td><td>authors an attribute value in the layer, typed as the attribute is declared</td></tr>
+<tr><td><code>set_variant(prim, variant_set, variant)</code></td><td>authors a variant selection</td></tr>
+<tr><td><code>set_active(prim, active)</code></td><td>activates or deactivates a prim</td></tr>
+<tr><td><code>bind_material(prim, material)</code></td><td>binds a Material to a prim</td></tr>
+<tr><td><code>author_usda(text)</code></td><td>merges a USDA snippet of <code>over</code>, <code>def</code> and <code>class</code> specs into the layer, as one edit</td></tr>
+<tr><td><code>undo()</code></td><td>the layer as it was before the last edit</td></tr>
+<tr><td><code>render(region?, spp?, budget_s?, wait?)</code></td><td>starts a progressive render and answers with the image so far: at 4 samples per pixel by default, at completion with <code>wait="done"</code>, within <code>budget_s</code> (default 10) either way</td></tr>
+<tr><td><code>snapshot(render_id, budget_s?)</code></td><td>the render's latest image and progress, at once, or after waiting at most <code>budget_s</code> for the render to finish</td></tr>
+<tr><td><code>cancel(render_id)</code></td><td>stops a render, keeping what it traced</td></tr>
+<tr><td><code>probe(render_id, x, y)</code></td><td>the beauty and every AOV at a pixel, in the working space</td></tr>
+<tr><td><code>diff(render_a, render_b)</code></td><td>compares two renders as <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#diff"><code>crust diff</code></a> compares two files</td></tr>
+<tr><td><code>render_final()</code></td><td>renders the layer as <code>crust render &lt;output&gt;</code> would, and lists the files written</td></tr>
+</tbody></table>
+<h3 id="editing">Editing</h3>
+<p>Every edit tool authors opinions in the layer, saves it, and imports the saved file again,
+exactly as <code>crust render &lt;output&gt;</code> would. Its result says which
+<a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">warning codes</a> the import gained or lost, and how long it
+took: an edit crust does not read is not silent. An edit the import refuses is undone at
+once, and the layer is left as it was.</p>
+<ul>
+<li><strong>Values take the attribute's type.</strong> <code>set_attribute</code> reads the type the stage declares
+and converts the JSON value to it: a number for <code>float</code>, <code>[r, g, b]</code> for <code>color3f</code>, a
+string for <code>token</code>, <code>string</code> or <code>asset</code>, an array for an array type. A value that does
+not convert is refused, naming the type, and nothing is authored.</li>
+<li><strong>Undeclared attributes need a <code>type</code>.</strong> A schema attribute nothing authors yet, such
+as a light's <code>inputs:exposure</code>, has no type on the session's stage: neither openusd 0.7
+nor openusd-schemas 0.7 ships schema data. Pass <code>type</code> (<code>"float"</code>) the first time.</li>
+<li><strong>Asset paths follow the layer.</strong> A relative asset path is read from the <em>input's</em>
+directory, as <code>query</code> shows the input's own paths, and written relative to the layer's,
+so it names the same file wherever the layer is opened from.</li>
+<li><strong><code>author_usda</code> is one edit.</strong> Several opinions, or a new prim (a light, a material),
+go in one snippet: one save, one import, one <code>undo</code> step. Each field it authors replaces
+the layer's; sibling prims and properties stay. Text that does not parse, or that
+authors <code>subLayers</code>, is refused with the layer byte for byte unchanged.</li>
+<li><strong><code>undo</code> lasts for the server process.</strong> It restores the layer's exact bytes before the
+last edit. A resumed session starts with no history.</li>
+</ul>
+<h3 id="rendering">Rendering</h3>
+<ul>
+<li><strong><code>render</code> answers at the first image.</strong> As soon as every pixel has 4 samples, it
+answers with a PNG of the image so far (at most 1024 pixels on its long side,
+tone-mapped as <code>crust render</code>'s preview), the samples every pixel has reached, <code>done</code>,
+and a <code>render_id</code>. On the Cornell box that is about half a second, where a whole
+render takes ten. A render of 4 samples per pixel or fewer answers when it completes.
+The render goes on refining after the answer.</li>
+<li><strong>Waiting for the finished image.</strong> <code>snapshot(render_id, budget_s)</code> waits for the render
+to finish, for at most <code>budget_s</code>, without restarting it. <code>render(wait="done")</code> waits
+from the start. Either way, nothing waits longer than its budget: <code>render</code>'s defaults
+to 10 s, and a render that needs longer answers with <code>done = false</code>.</li>
+<li><strong><code>progress</code> counts what the progress bar counts.</strong> On a guided render
+(<code>crust:pathGuiding</code>) it counts the final pass only and stays at 0 while guiding
+trains, as <code>crust render</code>'s bar does. <code>spp_reached</code> (each pass's completed stage) and
+<code>generation</code> (bumped with every image update) move through training too.</li>
+<li><strong>One render at a time.</strong> A new render, an edit, <code>undo</code> or <code>open_session</code> cancels the
+one running, and the cancelled render's id is in the result.</li>
+<li><strong>The render settings are opinions.</strong> <code>render</code> takes only a region and a sample count;
+everything else that shapes the render is the stage's <code>RenderSettings</code>, so <code>render_final</code>
+needs no flag to reproduce it. Change them with <code>set_attribute</code> or <code>author_usda</code>.</li>
+<li><strong>Renders are reproducible.</strong> A session render at 16 spp to completion is bit for bit
+the image <code>crust render -i &lt;output&gt; -s 16</code> writes, with the same region.</li>
+<li><strong>The session keeps its 8 latest renders</strong> for <code>snapshot</code>, <code>probe</code> and <code>diff</code>; a render
+result lists the ids it evicted.</li>
+<li><strong><code>diff</code> compares like with like.</strong> It refuses two renders with different sample counts
+or regions, and a render still running.</li>
+</ul>
+<h2 id="a-look-dev-session">A look-dev session</h2>
+<p>Here is a session on the Cornell box, as the tool calls Claude makes. (Each line is one
+call and the part of its result that matters.)</p>
+<pre data-lang="text" class="language-text "><code class="language-text" data-lang="text">open_session(input=&quot;C:&#x2F;shots&#x2F;cornellbox.usda&quot;, output=&quot;C:&#x2F;shots&#x2F;lookdev&#x2F;cornellbox_lookdev.usda&quot;)
+  → camera &#x2F;scene&#x2F;camera1, 640 × 360, 1 warning (material.fallback_default)
+query(&quot;&#x2F;scene&#x2F;Sky&quot;)
+  → DomeLight, inputs:texture:file = sky_gradient.exr (authored in cornellbox.usda)
+render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait=&quot;done&quot;)
+  → render 1: the crop around the spheres, done
+set_attribute(&quot;&#x2F;scene&#x2F;Sky.inputs:exposure&quot;, -1, type=&quot;float&quot;)
+  → saved, no warning gained
+author_usda(&quot;&quot;&quot;
+  over &quot;scene&quot; {
+      def RectLight &quot;key&quot; {
+          float inputs:intensity = 30
+          float inputs:width = 1
+          float inputs:height = 1
+          double3 xformOp:translate = (0, 3.9, 0)
+          float3 xformOp:rotateXYZ = (-90, 0, 0)
+          uniform token[] xformOpOrder = [&quot;xformOp:translate&quot;, &quot;xformOp:rotateXYZ&quot;]
+      }
+  }&quot;&quot;&quot;)
+  → saved, no warning gained
+render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait=&quot;done&quot;)
+  → render 2: the same crop
+diff(render_a=1, render_b=2)
+  → not identical, relative MSE …
+probe(render_id=2, x=320, y=200)
+  → beauty [r, g, b]
+undo()
+  → the key light is gone; the layer is as it was after set_attribute
+render_final()
+  → C:&#x2F;shots&#x2F;lookdev&#x2F;cornellbox_lookdev.exr, …&#x2F;cornellbox_lookdev.png
+</code></pre>
+<p>The session's result is <code>cornellbox_lookdev.usda</code>, a few lines of opinions over the
+Cornell box, and its render. <code>crust render -i cornellbox_lookdev.usda</code> renders it again,
+and any USD tool opens it.</p>
+<h2 id="limits">Limits</h2>
+<ul>
+<li><strong>One session, one client.</strong> The server holds one session at a time, over stdio only.</li>
+<li><strong>Every edit imports the whole stage again.</strong> Seconds on a medium stage; each result
+says how long. A session holds the stage it authors and the scene it renders at once,
+about twice the memory of a render's import, which puts Moana-scale stages out of reach.</li>
+<li><strong><code>probe</code> does not name the prim.</strong> crust keeps no table from a hit to its prim yet, so
+<code>prim</code> and <code>material</code> are null, and the result says why.</li>
+<li><strong><code>render_final</code> blocks the session</strong> until it has written its files.</li>
+</ul>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;help&#x2F;claude-desktop.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;limitations&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Limitations
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Warnings | Crust Render</title>
+<meta name="description" content="Every coded import warning, its kind and what to do about it.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Warnings">
+  <meta name="twitter:description" content="Every coded import warning, its kind and what to do about it.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Warnings">
+  <meta property="og:description" content="Every coded import warning, its kind and what to do about it.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/reference/warnings/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-09T08:00:00+00:00">
+  <meta property="og:site_name" content="Warnings">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Reference",
+            "item": "https://doubleailes.github.io/crust-render/docs/reference/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Warnings",
+            "item": "https://doubleailes.github.io/crust-render/docs/reference/warnings/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#reading-a-warning">Reading a warning</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#how-warnings-are-counted">How warnings are counted</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#compatibility">Compatibility</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#render-settings">Render settings</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#colour">Colour</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#camera">Camera</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#products-and-aovs">Products and AOVs</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#transforms">Transforms</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#meshes-subdivision-and-displacement">Meshes, subdivision and displacement</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#curves-and-volumes">Curves and volumes</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#instancing">Instancing</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#lights">Lights</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#light-linking">Light linking</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#materials">Materials</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/#assets-and-textures">Assets and textures</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Warnings</h1>
+        <p class="lead">Every warning crust raises while it imports a stage has a stable code, such as <code>light.degenerate_shape</code>, and a kind. This page lists them all.</p>
+        <h2 id="reading-a-warning">Reading a warning</h2>
+<p>A coded warning in the log starts with its code in brackets:</p>
+<pre data-lang="text" class="language-text "><code class="language-text" data-lang="text">WARN [light.degenerate_shape] RectLight at &#x2F;lights&#x2F;key: width 0 × height 1 must be finite and positive — skipped
+</code></pre>
+<p>Search this page for the code to learn what it means and what to do.</p>
+<p>Each code has one <strong>kind</strong>:</p>
+<ul>
+<li><strong>refused</strong>: an invalid authored value (not finite, out of range, an unknown token, the
+wrong type) was replaced by a fallback.</li>
+<li><strong>approximated</strong>: a valid authored value is rendered differently from what it asks for.</li>
+<li><strong>skipped</strong>: something authored (a prim, an asset, an output channel) contributes
+nothing. A constant or a default may stand in for it.</li>
+</ul>
+<h2 id="how-warnings-are-counted">How warnings are counted</h2>
+<p>The import keeps one record per code. A record holds the code, its kind, how many times
+it fired (<code>count</code>), the first 16 distinct prims it fired on (<code>prims</code>) and the first
+occurrence's message. A warning about the whole stage counts without a prim.</p>
+<p>A few codes fire once per mesh and would flood the log on a large scene: they are logged
+once per import and counted every time. Their log line ends "(further occurrences are
+counted in the import's warnings)".</p>
+<p>A texture or other asset that fails to load is explained once, by the loader, naming the
+file. Each material or light that references it is counted, so <code>count</code> is the number of
+references, not of files. A texture that was never read — turned off with <code>CRUST_TEX=0</code>,
+or an asset the host does not decode, which raises <code>asset.unsupported_by_host</code> — falls
+back the same way but is not counted as unreadable.</p>
+<p>The <code>product.no_name</code>, <code>product.no_writable_vars</code> and <code>product.shared_path</code> codes are
+raised when the render chooses which products to write, after the import. <code>crust check</code>
+makes that choice too and reports them with the import's records.</p>
+<h2 id="compatibility">Compatibility</h2>
+<p>Codes are a public interface. A new release can add codes; renaming or removing a code, or
+changing its kind, changes the version of every report that carries warnings.</p>
+<p>Only warnings raised while the stage is imported have codes. Warnings about environment
+variables, from the render itself, and from <code>crust diagnostic</code>'s own analysis keep their
+plain text and are not counted.</p>
+<h2 id="render-settings">Render settings</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>settings.invalid_value</code></td><td>refused</td><td>A crust:* render setting has a value outside its domain; its default is used.</td><td>Fix the value on the RenderSettings prim; the message names the attribute and the default used.</td></tr>
+<tr><td><code>settings.light_samples_clamped</code></td><td>approximated</td><td>A light-sample count is above the most crust takes; the maximum is used.</td><td>Author at most the maximum the message names.</td></tr>
+<tr><td><code>time.outside_range</code></td><td>approximated</td><td>The frame lies outside the stage's time range; animated attributes hold their nearest sample.</td><td>Render a frame inside the stage's startTimeCode..endTimeCode, or extend the range.</td></tr>
+</tbody></table>
+<h2 id="colour">Colour</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>color.working_space_refused</code></td><td>refused</td><td>renderingColorSpace names no usable working space; the render is in lin_rec709.</td><td>Name a working space the OCIO config defines and crust can render in.</td></tr>
+<tr><td><code>color.unknown_space</code></td><td>refused</td><td>A colour space is not defined by the OCIO config; the value is used as stored.</td><td>Name a colour space the OCIO config defines, or set <code>OCIO</code> to the config the asset was authored for.</td></tr>
+<tr><td><code>color.no_conversion</code></td><td>approximated</td><td>Two colour spaces have no conversion between them; values are used as stored.</td><td>Use a config whose spaces convert to the working space.</td></tr>
+<tr><td><code>color.no_luminance</code></td><td>approximated</td><td>The working space has no RGB to XYZ matrix; colours are weighed by Rec.709 luminance.</td><td>Use a working space whose config gives an RGB to XYZ matrix.</td></tr>
+</tbody></table>
+<h2 id="camera">Camera</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>camera.not_a_camera</code></td><td>refused</td><td>RenderSettings.camera names a prim that is not a camera; the first camera met is used.</td><td>Point <code>RenderSettings.camera</code> (or <code>--camera</code>) at a camera; <code>crust ls camera</code> lists them.</td></tr>
+<tr><td><code>camera.missing</code></td><td>skipped</td><td>The stage authors no camera; the procedural default camera is used.</td><td>Author a <code>Camera</code> prim.</td></tr>
+<tr><td><code>camera.invalid_exposure</code></td><td>refused</td><td>The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled.</td><td>Check <code>exposure:fStop</code> (not 0) and that <code>exposure:time</code>, <code>exposure:iso</code> and <code>exposure:responsivity</code> are positive.</td></tr>
+<tr><td><code>camera.unreadable</code></td><td>skipped</td><td>A camera prim could not be built into a camera.</td><td>Check the camera's attributes (focal length, aperture, clipping).</td></tr>
+</tbody></table>
+<h2 id="products-and-aovs">Products and AOVs</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>product.not_a_render_product</code></td><td>skipped</td><td>RenderSettings.products targets a prim that is not a RenderProduct.</td><td>Point <code>products</code> at <code>RenderProduct</code> prims.</td></tr>
+<tr><td><code>product.unsupported_type</code></td><td>skipped</td><td>A RenderProduct's productType is not raster; no file is written for it.</td><td>Use <code>productType = "raster"</code>, or remove the product.</td></tr>
+<tr><td><code>product.camera_mismatch</code></td><td>skipped</td><td>A product renders through another camera or resolution than the first; no file is written for it.</td><td>Render the other camera or resolution as a separate render.</td></tr>
+<tr><td><code>product.motion_blur_mismatch</code></td><td>approximated</td><td>A product asks for other motion blur than the first; its file is written with the first's.</td><td>Give every product the same motion-blur setting.</td></tr>
+<tr><td><code>product.region_mismatch</code></td><td>approximated</td><td>A product asks for another dataWindowNDC than the first; its file is written over the first's.</td><td>Give every product the same <code>dataWindowNDC</code>.</td></tr>
+<tr><td><code>product.no_name</code></td><td>skipped</td><td>A RenderProduct authors no productName; nothing is written for it.</td><td>Author <code>productName</code>, the file the product writes.</td></tr>
+<tr><td><code>product.no_writable_vars</code></td><td>skipped</td><td>A RenderProduct has no RenderVar crust can write; nothing is written for it.</td><td>Point <code>orderedVars</code> at RenderVars whose source crust produces; their own warnings say why each was dropped.</td></tr>
+<tr><td><code>product.shared_path</code></td><td>skipped</td><td>A RenderProduct writes the path an earlier one already writes; nothing is written for it.</td><td>Give each product its own <code>productName</code> (with <code>-o</code>, the first product's path is the one given).</td></tr>
+<tr><td><code>product.unhonoured_attribute</code></td><td>approximated</td><td>A product authors a setting crust does not honour; it renders without it.</td><td>Remove the attribute, or accept that it is ignored.</td></tr>
+<tr><td><code>product.invalid_data_window</code></td><td>refused</td><td>dataWindowNDC is not finite or selects no pixel; the full frame is rendered.</td><td>Author a finite window that covers at least one pixel.</td></tr>
+<tr><td><code>product.data_window_clipped</code></td><td>approximated</td><td>dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped.</td><td>Keep <code>dataWindowNDC</code> inside 0..1.</td></tr>
+<tr><td><code>aov.not_a_render_var</code></td><td>skipped</td><td>orderedVars targets a prim that is not a RenderVar.</td><td>Point <code>orderedVars</code> at <code>RenderVar</code> prims.</td></tr>
+<tr><td><code>aov.unsupported_source</code></td><td>skipped</td><td>A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written.</td><td>Remove the var; the <a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">AOV page</a> lists the sources crust writes.</td></tr>
+<tr><td><code>aov.unknown_source</code></td><td>skipped</td><td>A RenderVar names an unknown source or sourceType; no channel is written.</td><td>Use a source name from the <a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">AOV page</a>.</td></tr>
+<tr><td><code>aov.type_mismatch</code></td><td>skipped</td><td>A RenderVar's data type is not numeric or cannot hold its source; no channel is written.</td><td>Author a numeric <code>dataType</code> with enough components for the source.</td></tr>
+<tr><td><code>aov.unknown_accumulation</code></td><td>refused</td><td>A RenderVar's accumulation token is not supported; the source's default is used.</td><td>Use <code>zmin</code> or leave the accumulation unauthored.</td></tr>
+<tr><td><code>aov.accumulation_ignored</code></td><td>approximated</td><td>A per-pixel source cannot be accumulated as authored; its default accumulation is used.</td><td>Leave the accumulation unauthored for per-pixel sources.</td></tr>
+<tr><td><code>aov.invalid_variance</code></td><td>skipped</td><td>crust:aov:variance is authored where it cannot apply; no channel is written.</td><td>Use <code>crust:aov:variance</code> only on an <code>lpe</code> var with a float type and filtered accumulation.</td></tr>
+<tr><td><code>aov.raw_ignored</code></td><td>approximated</td><td>crust:aov:raw is authored on a source that is not a light path expression; it is ignored.</td><td>Remove <code>crust:aov:raw</code>, or use it on an <code>lpe</code> var.</td></tr>
+<tr><td><code>aov.invalid_raw</code></td><td>skipped</td><td>crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written.</td><td>Start the expression with a diffuse reflection (<code>C&lt;RD&gt;…</code>).</td></tr>
+<tr><td><code>lpe.invalid</code></td><td>skipped</td><td>A light path expression does not parse or compile; no channel is written.</td><td>Fix the expression; the message gives the parser's error.</td></tr>
+</tbody></table>
+<h2 id="transforms">Transforms</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>xform.unknown_op</code></td><td>approximated</td><td>xformOpOrder lists an op that is not a UsdGeomXformOp kind; it reads as identity.</td><td>Use the UsdGeomXformOp kinds only.</td></tr>
+<tr><td><code>xform.uncomposable</code></td><td>refused</td><td>An xformOp stack could not be composed; the local transform is identity.</td><td>Fix the xformOp stack; the message gives the reason.</td></tr>
+<tr><td><code>xform.unknown_type</code></td><td>skipped</td><td>A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored.</td><td>Author the transform on an <code>Xform</code> above the prim, or use a stock USD type; a plugin or studio schema is not known to Crust Render.</td></tr>
+<tr><td><code>xform.motion_vector_unsupported</code></td><td>approximated</td><td>Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero.</td><td>Expect a zero motion vector on rotating or scaling geometry.</td></tr>
+</tbody></table>
+<h2 id="meshes-subdivision-and-displacement">Meshes, subdivision and displacement</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>mesh.non_invertible_transform</code></td><td>approximated</td><td>A mesh's transform is not invertible; it is baked instead of instanced.</td><td>Give the mesh a non-zero scale on every axis.</td></tr>
+<tr><td><code>mesh.motion_ignored</code></td><td>skipped</td><td>crust:motion:translate on baked (non-invertible) geometry is ignored.</td><td>Give the mesh an invertible transform.</td></tr>
+<tr><td><code>mesh.invalid_uvs</code></td><td>skipped</td><td>A subdivided mesh's texture coordinates do not index cleanly; it renders without them.</td><td>Fix the mesh's texture-coordinate indices.</td></tr>
+<tr><td><code>mesh.ptex_face_mismatch</code></td><td>approximated</td><td>A mesh's face count differs from its per-face texture's; its shading is wrong.</td><td>Bind a Ptex file made for this mesh.</td></tr>
+<tr><td><code>mesh.displaced_at_cage</code></td><td>approximated</td><td>A displaced mesh is not refined, so only its cage vertices move. Logged once per import.</td><td>Raise <code>--subdiv-level</code> or set <code>--subdiv-edge-length</code> to dice the mesh finer.</td></tr>
+<tr><td><code>mesh.ptex_displaced_at_cage</code></td><td>approximated</td><td>A subdivisionScheme = none mesh with Ptex displacement and non-quad faces is displaced at its cage. Logged once per import.</td><td>Use quads, or author a subdivision scheme.</td></tr>
+<tr><td><code>mesh.displacement_exceeds_bound</code></td><td>approximated</td><td>Displacement reaches past crust:displacementBound; it is applied unclamped.</td><td>Raise <code>crust:displacementBound</code> to the reach the message gives.</td></tr>
+<tr><td><code>subdiv.invalid_setting</code></td><td>refused</td><td>A subdivision level is negative or an edge length is not a positive pixel length; it is clamped or ignored.</td><td>Author a level of 0 or more and a positive edge length.</td></tr>
+<tr><td><code>subdiv.level_clamped</code></td><td>approximated</td><td>A subdivision level is above the most crust refines to; it is clamped.</td><td>Author a level at most the maximum the message names.</td></tr>
+<tr><td><code>subdiv.adaptive_needs_camera</code></td><td>approximated</td><td>Adaptive subdivision has no render camera to measure from; the uniform level is used.</td><td>Name the render camera with <code>--camera</code> or <code>RenderSettings.camera</code>.</td></tr>
+<tr><td><code>subdiv.legacy_level</code></td><td>skipped</td><td>The per-prim crust:subdivisionLevel is no longer read. Logged once per import.</td><td>Move <code>crust:subdivisionLevel</code> to the RenderSettings prim, or use <code>--subdiv-level</code>.</td></tr>
+<tr><td><code>subdiv.loop_needs_triangles</code></td><td>approximated</td><td>subdivisionScheme = loop on a mesh with non-triangle faces; the base cage is rendered.</td><td>Triangulate the mesh, or use <code>catmullClark</code>.</td></tr>
+<tr><td><code>subdiv.loop_ptex</code></td><td>approximated</td><td>subdivisionScheme = loop with a per-face texture cannot keep its face ids; the base cage is rendered.</td><td>Use <code>catmullClark</code>, or a UV texture.</td></tr>
+<tr><td><code>subdiv.failed</code></td><td>approximated</td><td>Subdivision or per-face tessellation failed; the base cage is rendered.</td><td>Check the mesh topology; the message gives the reason.</td></tr>
+<tr><td><code>displacement.vector_ignored</code></td><td>approximated</td><td>Vector displacement is not applied.</td><td>Use scalar displacement.</td></tr>
+<tr><td><code>displacement.unevaluated</code></td><td>skipped</td><td>The displacement amount is driven by a shader crust does not evaluate; the surface is not displaced.</td><td>Drive the displacement with a texture or a constant.</td></tr>
+</tbody></table>
+<h2 id="curves-and-volumes">Curves and volumes</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>curves.unsupported_basis</code></td><td>skipped</td><td>BasisCurves uses a basis crust does not support.</td><td>Use <code>bezier</code>, <code>bspline</code> or <code>catmullRom</code>.</td></tr>
+<tr><td><code>curves.invalid_counts</code></td><td>skipped</td><td>curveVertexCounts overruns the points; the remaining curves are skipped.</td><td>Make <code>curveVertexCounts</code> sum to the number of points.</td></tr>
+<tr><td><code>curves.non_invertible_transform</code></td><td>skipped</td><td>BasisCurves has a non-invertible transform.</td><td>Give the curves a non-zero scale on every axis.</td></tr>
+<tr><td><code>volume.unknown_type</code></td><td>skipped</td><td>crust:volume:type is not homogeneous, smoke or grid.</td><td>Use <code>homogeneous</code>, <code>smoke</code> or <code>grid</code>.</td></tr>
+<tr><td><code>volume.invalid_grid</code></td><td>skipped</td><td>A grid volume's gridDims and gridData are missing or do not match.</td><td>Author <code>crust:volume:gridDims</code> and a <code>crust:volume:gridData</code> of that many values.</td></tr>
+<tr><td><code>volume.in_prototype</code></td><td>skipped</td><td>A volume inside an instance prototype; volumes cannot be instanced.</td><td>Move the volume out of the prototype.</td></tr>
+</tbody></table>
+<h2 id="instancing">Instancing</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>instancing.instanceable_without_prototype</code></td><td>approximated</td><td>An instanceable prim has no prototype; it is imported directly.</td><td>Nothing to do unless the prim was meant to be shared.</td></tr>
+<tr><td><code>instancing.nesting_too_deep</code></td><td>skipped</td><td>A prototype nests instances past the supported depth; the deeper levels are not expanded.</td><td>Flatten the instance nesting.</td></tr>
+<tr><td><code>instancing.empty_prototype</code></td><td>skipped</td><td>A prototype contributed no geometry.</td><td>Check that the prototype holds geometry crust imports.</td></tr>
+<tr><td><code>instancing.no_prototypes</code></td><td>skipped</td><td>A PointInstancer has no prototypes targets.</td><td>Author the <code>prototypes</code> relationship.</td></tr>
+<tr><td><code>instancing.no_proto_indices</code></td><td>skipped</td><td>A PointInstancer has no protoIndices.</td><td>Author <code>protoIndices</code>.</td></tr>
+<tr><td><code>instancing.missing_positions</code></td><td>skipped</td><td>A PointInstancer has fewer positions than protoIndices; the extra instances are skipped.</td><td>Author one position per <code>protoIndices</code> entry.</td></tr>
+<tr><td><code>instancing.proto_index_out_of_range</code></td><td>skipped</td><td>A PointInstancer's protoIndices entry names no prototype; that instance is skipped.</td><td>Keep every index below the number of prototypes.</td></tr>
+</tbody></table>
+<h2 id="lights">Lights</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>light.non_finite_input</code></td><td>refused</td><td>A light input is not finite; its fallback is used.</td><td>Author a finite value.</td></tr>
+<tr><td><code>light.unsupported_multiplier</code></td><td>approximated</td><td>A per-lobe light multiplier (diffuse, specular) is not supported; the light contributes at 1.0.</td><td>Remove <code>inputs:diffuse</code> / <code>inputs:specular</code>, or set them to 1.</td></tr>
+<tr><td><code>light.degenerate_shape</code></td><td>skipped</td><td>A light's size or transform collapses its shape; the light is skipped.</td><td>Give the light a finite, positive size and a non-zero scale.</td></tr>
+<tr><td><code>light.unsupported_texture_format</code></td><td>skipped</td><td>A DomeLight's texture:format is not latlong; it emits its uniform colour.</td><td>Convert the map to lat-long.</td></tr>
+<tr><td><code>light.map_unreadable</code></td><td>skipped</td><td>A light's or dome's texture could not be loaded; it emits its uniform colour.</td><td>Check the file path and format; the message gives the loader's reason.</td></tr>
+<tr><td><code>ies.unreadable</code></td><td>skipped</td><td>An IES profile could not be loaded; the light renders without it.</td><td>Check the IES file path and format.</td></tr>
+</tbody></table>
+<h2 id="light-linking">Light linking</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>light_link.membership_expression</code></td><td>approximated</td><td>A light-link collection authors membershipExpression, which is not read; it includes every prim.</td><td>Use <code>includes</code> / <code>excludes</code> instead of <code>membershipExpression</code>.</td></tr>
+<tr><td><code>light_link.unreadable_collection</code></td><td>refused</td><td>A light-link collection cannot be read; it includes every prim.</td><td>Fix the collection; the message gives the reason.</td></tr>
+<tr><td><code>light_link.target_in_instance</code></td><td>approximated</td><td>A light-link collection targets a prim inside an instance; membership is judged on the instance.</td><td>Target the instance, or make the target not instanced.</td></tr>
+<tr><td><code>light_link.nested_not_composed</code></td><td>skipped</td><td>A nested collection lies outside the streamed chunk that reads it; it contributes nothing.</td><td>Author the nested collection outside the payload, or set <code>CRUST_STREAM_IMPORT=0</code>.</td></tr>
+<tr><td><code>light_link.too_many_classes</code></td><td>skipped</td><td>The scene needs more light-link classes than crust encodes; light links are ignored.</td><td>Reduce the number of distinct light-link sets.</td></tr>
+<tr><td><code>light_link.ray_mask_rewritten</code></td><td>approximated</td><td>Shadow linking rewrites the authored crust:rayMask bits 3-31.</td><td>Do not rely on <code>crust:rayMask</code> bits 3-31 with shadow linking.</td></tr>
+<tr><td><code>light_link.shadow_link_unencodable</code></td><td>approximated</td><td>A shadowLink collection cannot be encoded; the light is shadowed by every occluder.</td><td>Reduce the number of distinct shadow-link sets.</td></tr>
+</tbody></table>
+<h2 id="materials">Materials</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>material.fallback_default</code></td><td>skipped</td><td>A material cannot be resolved to a shader crust reads; the default grey OpenPBR is used.</td><td>Bind a material that exists and has a surface shader crust reads (UsdPreviewSurface, MaterialX, <code>crust:openpbr</code>).</td></tr>
+<tr><td><code>material.volume_ignored</code></td><td>skipped</td><td>A MaterialX volume terminal beside a non-MaterialX surface is ignored.</td><td>Make the surface MaterialX too, or drop the volume terminal.</td></tr>
+<tr><td><code>mtlx.incomplete</code></td><td>approximated</td><td>Part of a MaterialX network is not represented; those inputs fall back to their defaults.</td><td>Check the nodes the message names against the <a href="https://doubleailes.github.io/crust-render/docs/usd/materials/">materials page</a>.</td></tr>
+<tr><td><code>mtlx.unusable</code></td><td>skipped</td><td>A MaterialX document or network cannot be used; the material falls back.</td><td>Fix the MaterialX document; the message gives the reason.</td></tr>
+<tr><td><code>preview.multiple_primvars</code></td><td>approximated</td><td>A UsdPreviewSurface's textures read several primvars; the first is read for all.</td><td>Read one primvar for every texture of a material.</td></tr>
+<tr><td><code>preview.unsupported_connection</code></td><td>skipped</td><td>A UsdPreviewSurface input connects to something other than a UsdUVTexture output; its constant is used.</td><td>Connect the input to a <code>UsdUVTexture</code> output.</td></tr>
+<tr><td><code>preview.texture_without_file</code></td><td>skipped</td><td>A UsdUVTexture has no inputs:file; the input keeps its constant.</td><td>Author <code>inputs:file</code>.</td></tr>
+<tr><td><code>preview.unread_st</code></td><td>approximated</td><td>A UsdUVTexture's st is driven by a shader crust does not read; the mesh chart is used unchanged.</td><td>Drive <code>st</code> with a <code>UsdPrimvarReader_float2</code>.</td></tr>
+</tbody></table>
+<h2 id="assets-and-textures">Assets and textures</h2>
+<table><thead><tr><th>code</th><th>kind</th><th>meaning</th><th>what to do</th></tr></thead><tbody>
+<tr><td><code>asset.unsupported_by_host</code></td><td>skipped</td><td>The host's asset loader does not decode this type of asset.</td><td>Use a host that decodes assets (the <code>crust</code> CLI does).</td></tr>
+<tr><td><code>texture.unreadable</code></td><td>skipped</td><td>A texture could not be loaded; the input reads its fallback.</td><td>Check the file path and format; the message gives the loader's reason.</td></tr>
+<tr><td><code>texture.udim_tile_missing</code></td><td>skipped</td><td>A tile of a UDIM set does not decode; the set is used without it.</td><td>Fix or remove the tile the message names.</td></tr>
+<tr><td><code>texture.tx_stale</code></td><td>approximated</td><td>A .tx is older than its source and is used anyway.</td><td>Rerun with <code>--auto-tx</code> to reconvert.</td></tr>
+<tr><td><code>texture.tx_convert_failed</code></td><td>approximated</td><td>--auto-tx could not convert a texture; its source is read instead.</td><td>Check that the directory is writable and the source decodes.</td></tr>
+<tr><td><code>texture.stream_fallback</code></td><td>approximated</td><td>A texture could not be streamed and is preloaded instead.</td><td>Nothing to do; it renders the same, using more memory. If the message says an older crust wrote the <code>.tx</code>, rerun with <code>--auto-tx</code> to reconvert it.</td></tr>
+</tbody></table>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;reference&#x2F;warnings.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;getting-started&#x2F;quick-start&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Quick Start
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+          
+          
+          <a class="ms-auto" href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;usd&#x2F;overview&#x2F;">
+            <div class="card my-1">
+              <div class="card-body py-2">
+                Overview &rarr;
+              </div>
+            </div>
+          </a>
+          
+          
+          
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>
