@@ -2,7 +2,7 @@
 title = "Lights"
 description = "Camera visibility and light groups of UsdLux lights."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-10T08:00:00+00:00
 draft = false
 weight = 40
 sort_by = "weight"
@@ -28,6 +28,7 @@ Crust Render reads these UsdLux light types with their standard `inputs:intensit
 | `RectLight` | `inputs:width`, `inputs:height`, and an optional `inputs:texture:file` |
 | `DistantLight` | `inputs:angle` |
 | `DomeLight` | `inputs:texture:file`, a lat-long environment map (`inputs:texture:format` unauthored, `latlong` or `automatic`) |
+| `DomeLight_1` | the same inputs as `DomeLight`, plus `poleAxis` (see below) |
 
 A lat-long dome is oriented as the UsdLux schema specifies (the OpenEXR convention): in
 the light's own frame the top row is +Y, the centre of the image faces **+Z**, a quarter
@@ -35,6 +36,31 @@ of the way in faces +X and three quarters faces −X. The prim's transform then 
 that sky, so other UsdLux renderers place an HDRI's sun in the same direction. Releases
 before 0.5.2 put −Z at the image centre. A scene whose dome rotation was tuned on those
 releases needs 180° more about Y to keep its sun where it was.
+
+### poleAxis
+
+A `DomeLight_1` first turns that frame onto its `poleAxis`, as the schema specifies:
+
+| `poleAxis` | stage `upAxis` | the dome's top pole | the image centre faces |
+|------------|----------------|---------------------|------------------------|
+| `scene` (the default) | `Y`, or not authored | +Y | +Z |
+| `scene` (the default) | `Z` | **+Z** | **−Y** |
+| `Y` | any | +Y | +Z |
+| `Z` | any | **+Z** | **−Y** |
+
+The turn is +90° about X, the rotation OpenUSD's own imaging computes. It applies to the
+dome alone, before the prim's transform, and never to the prim's children. The stage's
+`upAxis` is read from the root layer, as every USD stage reads its metadata, so a wrapper
+layer that sublayers a Z-up asset must repeat `upAxis = "Z"`.
+
+A `DomeLight` always keeps its pole on +Y, even when it authors a `poleAxis`. That
+schema declares no such attribute, and OpenUSD's imaging ignores it there too. To get
+the pole turned, author the prim as `DomeLight_1`. To keep a Z-up `DomeLight_1` lit as
+a Y-pole sky, for instance one tuned in a renderer that ignores `poleAxis` (the OpenUSD
+reference renderer, Typhoon, is one), author `poleAxis = "Y"`.
+
+Earlier releases did not read `DomeLight_1` at all: a stage lit only by one rendered
+black.
 
 `inputs:color` and `inputs:shaping:focusTint` are in the
 [working colour space](@/docs/usd/render-settings.md#renderingcolorspace), as UsdLux

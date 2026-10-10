@@ -59,7 +59,8 @@ use openusd_schemas::geom::{
     Sphere as UsdSphere,
 };
 use openusd_schemas::lux::{
-    CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, RectLight, SphereLight,
+    CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, DomeLight_1, RectLight,
+    SphereLight,
 };
 
 mod adaptive;
@@ -90,8 +91,8 @@ use camera::{RenderCamera, build_camera, screen_projection};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
 use light_links::LightLinks;
 use lights::{
-    emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light, emit_rect_light,
-    emit_sphere_light,
+    DomeInputs, emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light,
+    emit_rect_light, emit_sphere_light,
 };
 pub(crate) use listing::{list_prims, list_records};
 use materials::{MaterialCache, resolve_bound, resolve_material};
@@ -396,7 +397,10 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 ctx.caches.working,
             );
         } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
-            emit_dome_light(ctx, &prim, &light, this_world);
+            emit_dome_light(ctx, &prim, &DomeInputs::dome_light(&light), this_world);
+        } else if let Ok(Some(light)) = DomeLight_1::get(stage, prim.path().clone()) {
+            let dome = DomeInputs::dome_light_1(stage, &light);
+            emit_dome_light(ctx, &prim, &dome, this_world);
         }
         ctx.links.saw(
             prim.path(),

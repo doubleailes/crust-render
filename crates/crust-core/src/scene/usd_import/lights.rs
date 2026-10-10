@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use crust_rt::Geometry;
 use glam::{Affine3A, Mat3A, Mat4 as GMat4, Vec3, Vec3A};
-use openusd::usd::{Prim, Stage};
+use openusd::usd::{Attribute, Prim, Stage};
+use openusd_schemas::geom::StageMetadata;
 use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema,
-    DistantLight as UsdDistantLight, DistantLightSchema, DomeLight, DomeLightSchema, LightAPI,
-    NonboundableLightBaseSchema, RectLight, RectLightSchema, ShapingAPI, SphereLight,
-    SphereLightSchema,
+    DistantLight as UsdDistantLight, DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema,
+    DomeLightSchema, LightAPI, NonboundableLightBaseSchema, PoleAxis, RectLight, RectLightSchema,
+    ShapingAPI, SphereLight, SphereLightSchema,
 };
 use tracing::debug;
 
@@ -745,7 +746,67 @@ pub(super) fn emit_distant_light(
     tag_last(lights, prim);
 }
 
-/// Imports a `UsdLuxDomeLight` as an infinite environment.
+/// What [`emit_dome_light`] reads from either dome schema. `DomeLight_1`
+/// does not derive from `DomeLight`, so each view answers for its own
+/// declarations.
+pub(super) struct DomeInputs {
+    schema: &'static str,
+    light_api: LightAPI,
+    texture_file: Attribute,
+    texture_format: Attribute,
+    /// Turns the dome's own frame onto its pole axis, before the prim's
+    /// transform: the identity, or +90° about X for a +Z pole.
+    pole: Mat3A,
+}
+
+impl DomeInputs {
+    /// A `UsdLuxDomeLight`, whose pole is +Y whatever the stage's up axis.
+    /// Its schema declares no `poleAxis`, and an authored one is ignored,
+    /// as OpenUSD's imaging reads it only through `UsdLuxDomeLight_1`.
+    pub(super) fn dome_light(light: &DomeLight) -> Self {
+        Self {
+            schema: "DomeLight",
+            light_api: light.light_api(),
+            texture_file: light.texture_file_attr(),
+            texture_format: light.texture_format_attr(),
+            pole: Mat3A::IDENTITY,
+        }
+    }
+
+    /// A `UsdLuxDomeLight_1`, whose `poleAxis` puts its top pole on +Z when
+    /// it is `Z`, or `scene` (the fallback) on a stage whose `upAxis` is
+    /// `Z`. That is OpenUSD's `_GetDomeOffset` (`usdImaging/
+    /// domeLight_1Adapter.cpp`): a +90° rotation about X, for the dome
+    /// alone. Typhoon (hdEmbree) never applies it; crust follows the schema.
+    pub(super) fn dome_light_1(stage: &Stage, light: &DomeLight_1) -> Self {
+        let z_pole = match light.pole_axis().ok().flatten().unwrap_or_default() {
+            PoleAxis::Z => true,
+            PoleAxis::Y => false,
+            // A stage takes its metadata from its root layer; unauthored
+            // reads as UsdGeom's fallback, Y.
+            PoleAxis::SceneUp => stage
+                .up_axis()
+                .ok()
+                .flatten()
+                .is_some_and(|axis| axis.as_str() == "Z"),
+        };
+        Self {
+            schema: "DomeLight_1",
+            light_api: light.light_api(),
+            texture_file: light.texture_file_attr(),
+            texture_format: light.texture_format_attr(),
+            // Columns are the images of local X, Y, Z: +Y → +Z, +Z → −Y.
+            pole: if z_pole {
+                Mat3A::from_cols(Vec3A::X, Vec3A::Z, -Vec3A::Y)
+            } else {
+                Mat3A::IDENTITY
+            },
+        }
+    }
+}
+
+/// Imports a `UsdLuxDomeLight` or `UsdLuxDomeLight_1` as an infinite
+/// environment.
 ///
 /// `inputs:texture:file` is resolved against the USD layer's directory and
 /// handed to the host's [`AssetLoader`] — crust-core decodes nothing
@@ -755,11 +816,12 @@ pub(super) fn emit_distant_light(
 ///
 /// Only `latlong` is supported; `inputs:texture:format` values that mean
 /// anything else warn and fall back to the uniform colour rather than
-/// silently mapping the image wrongly. The prim's rotation orients the sky.
+/// silently mapping the image wrongly. The pole rotation, then the prim's
+/// rotation, orient the sky.
 pub(super) fn emit_dome_light(
     ctx: &mut ImportCtx,
     prim: &Prim,
-    light: &DomeLight,
+    dome: &DomeInputs,
     world_xf: GMat4,
 ) {
     let (lights, stage_path, assets) = (&mut ctx.lights, ctx.stage_path, ctx.assets);
@@ -768,18 +830,18 @@ pub(super) fn emit_dome_light(
     // separate "decoding a 14k HDRI" from the rest of the traversal.
     let asset_time = &mut ctx.caches.asset_time;
     // `normalize` does not apply to a dome (its sizeFactor is 1).
-    let tint = lux_params(prim, &light.light_api(), working).emission;
+    let tint = lux_params(prim, &dome.light_api, working).emission;
 
-    let format = value_at(&light.texture_format_attr()).and_then(decode_text);
+    let format = value_at(&dome.texture_format).and_then(decode_text);
     // The authoring layer anchors the path, not the root layer: the Moana
     // island's lights author `../textures/islandsun.exr` relative to
     // `usd/island.usda` (see `asset_path`).
-    let map = match asset_path(&light.texture_file_attr(), stage_path) {
+    let map = match asset_path(&dome.texture_file, stage_path) {
         Some(texture) => match format.as_deref() {
             // `automatic` infers from the image; for the equirectangular
             // images a dome light normally carries that means latlong.
             None | Some("latlong") | Some("automatic") => {
-                let space = texture_color_space(&light.texture_file_attr(), working);
+                let space = texture_color_space(&dome.texture_file, working);
                 let failed = &mut ctx.caches.failed_assets;
                 let loaded = timed_asset(asset_time, || {
                     explained(failed, &texture, || {
@@ -790,8 +852,9 @@ pub(super) fn emit_dome_light(
                     record_warning!(
                         LightMapUnreadable,
                         at = prim.path(),
-                        "DomeLight at {}: could not load {} — falling back to \
+                        "{} at {}: could not load {} — falling back to \
                          the uniform colour",
+                        dome.schema,
                         prim.path(),
                         texture.display()
                     );
@@ -802,8 +865,9 @@ pub(super) fn emit_dome_light(
                 warning!(
                     LightUnsupportedTextureFormat,
                     at = prim.path(),
-                    "DomeLight at {}: texture:format \"{other}\" is not supported \
+                    "{} at {}: texture:format \"{other}\" is not supported \
                      (only latlong) — falling back to the uniform colour",
+                    dome.schema,
                     prim.path()
                 );
                 None
@@ -813,17 +877,19 @@ pub(super) fn emit_dome_light(
     };
 
     // Only the rotation orients the sky; a dome is at infinity, so its
-    // translation and scale are meaningless.
+    // translation and scale are meaningless. The pole turns the dome's own
+    // frame first, so it never reaches the prim's namespace children.
     let m = world_xf.to_cols_array_2d();
     let rotation = Mat3A::from_cols(
         Vec3A::new(m[0][0], m[0][1], m[0][2]).normalize_or(Vec3A::X),
         Vec3A::new(m[1][0], m[1][1], m[1][2]).normalize_or(Vec3A::Y),
         Vec3A::new(m[2][0], m[2][1], m[2][2]).normalize_or(Vec3A::Z),
-    );
+    ) * dome.pole;
 
     let mask = infinite_light_escape_mask(prim);
     debug!(
-        "Imported DomeLight at {} (tint={:?}, {}, camera-visible={})",
+        "Imported {} at {} (tint={:?}, {}, camera-visible={})",
+        dome.schema,
         prim.path(),
         tint,
         match &map {

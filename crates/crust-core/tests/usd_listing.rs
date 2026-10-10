@@ -233,6 +233,30 @@ def DomeLight "Sky" {}
     ));
 }
 
+/// `DomeLight_1` does not derive from `DomeLight`, so it is recognised on
+/// its own: listed, as a dome, by both the path listing and the records.
+#[test]
+fn a_dome_light_1_is_listed_as_a_dome() {
+    let path = stage(
+        "dome_light_1.usda",
+        r#"#usda 1.0
+(
+    upAxis = "Z"
+)
+def DomeLight_1 "Sky"
+{
+    float inputs:intensity = 3
+}
+"#,
+    );
+    assert_eq!(
+        Scene::list_usd(&path, ListKind::Light).expect("lists"),
+        ["/Sky"]
+    );
+    let sky = &lights(&path, None)[0];
+    assert_eq!((sky.kind, sky.intensity), ("dome", 3.0));
+}
+
 /// `bound` is the import's binding resolution: direct, inherited and
 /// collection bindings reach their material; one bound only for the preview
 /// purpose, and one bound by nothing, do not.
