@@ -1190,6 +1190,30 @@ has the full reasoning (D1–D7); the points to keep here:
   change's task 6.4).
 - `diffuse_albedo` stopped being an alias of `albedo`.
 
+## Camera exposure (`camera-exposure`)
+
+The render camera's exposure scale multiplies the resolved image, in one place the
+engine owns: `render_impl` scales its result once (`Measured::apply_exposure`), after
+every pass and after a guided render's blend, and the snapshot publish scales each
+estimate it writes. `AovSource::exposure_power` says what each source takes: 1 for
+`Color` and `Lpe` (raw light and light groups are LPE slots), 2 for `Variance`, 0 for
+the rest. It is an exhaustive match, so a new source has to choose. A slot with the
+`crust:aov:variance` modifier takes 2 whatever its source (`SlotKey::exposure_power`),
+and so does the diagnostics' `var_map`, which `crust diagnostic` divides by the
+luminance squared. `ChannelKind::Color` is not the test, because albedo and the
+diffuse filter are colour channels but reflectances.
+
+Applying it after the resolve leaves the integrator, the indirect clamp, adaptive
+sampling and the LPE ↔ beauty pair exactly as they were. The samples a render takes do
+not depend on the exposure (`exposure_does_not_change_the_samples_taken`), as in
+Typhoon, whose adaptive sampling reads the unexposed colour. Typhoon multiplies each
+sample as it is written to the Color AOV; crust multiplies the resolved value. The two
+are the same image, since accumulation is linear, and crust's placement also covers
+the LPE and variance planes Typhoon has no equivalent of. A scale of exactly 1 is
+skipped, so a camera without an exposure renders the bits it always did. Pinned by
+`exposure_scales_radiance_only` (×2 radiance, ×4 variances, every other channel
+identical) and `the_last_snapshot_is_exposed`.
+
 ## Known gaps
 
 - Every Non-Goal above, which is warned when authored, not silent.

@@ -11,6 +11,10 @@ one at its schema fallback (`exposure:responsivity` 1, `exposure:time` 1,
 `fStop` SHALL NOT enter the scale. A scale that is not finite or not positive SHALL be
 refused with a `camera.invalid_exposure` warning naming the camera, and SHALL read 1.
 Without a render camera prim (the procedural fallback scene), the scale SHALL be 1.
+The importer SHALL read the render setting `enableExposureCompensation` (and
+`crust:enableExposureCompensation`, which wins when both are authored) off the stage's
+`RenderSettings` prim, default `true`, as Hydra renderers do; `false` SHALL make the
+scale 1 whatever the camera authors.
 
 #### Scenario: Nothing authored
 
@@ -44,3 +48,15 @@ Without a render camera prim (the procedural fallback scene), the scale SHALL be
 - **WHEN** the render camera authors `exposure:fStop = 0`
 - **THEN** a `camera.invalid_exposure` warning names the camera and the exposure scale
   is 1
+
+#### Scenario: Exposure compensation turned off
+
+- **WHEN** the render camera authors `exposure = 2` and the stage's `RenderSettings`
+  prim authors `bool enableExposureCompensation = false`
+- **THEN** the exposure scale is 1
+
+#### Scenario: The crust alias wins
+
+- **WHEN** the `RenderSettings` prim authors `enableExposureCompensation = false` and
+  `crust:enableExposureCompensation = true`, and the camera authors `exposure = 2`
+- **THEN** the exposure scale is 4

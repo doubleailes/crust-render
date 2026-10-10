@@ -85,6 +85,7 @@ plain text and are not counted.
 |------|------|---------|------------|
 | `camera.not_a_camera` | refused | RenderSettings.camera names a prim that is not a camera; the first camera met is used. | Point `RenderSettings.camera` (or `--camera`) at a camera; `crust ls camera` lists them. |
 | `camera.missing` | skipped | The stage authors no camera; the procedural default camera is used. | Author a `Camera` prim. |
+| `camera.invalid_exposure` | refused | The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled. | Check `exposure:fStop` (not 0) and that `exposure:time`, `exposure:iso` and `exposure:responsivity` are positive. |
 | `camera.unreadable` | skipped | A camera prim could not be built into a camera. | Check the camera's attributes (focal length, aperture, clipping). |
 
 ## Products and AOVs

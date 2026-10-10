@@ -168,6 +168,8 @@ warning_codes! {
         "RenderSettings.camera names a prim that is not a camera; the first camera met is used.";
     CameraMissing => "camera.missing", Skipped, Each,
         "The stage authors no camera; the procedural default camera is used.";
+    CameraInvalidExposure => "camera.invalid_exposure", Refused, Each,
+        "The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled.";
     CameraUnreadable => "camera.unreadable", Skipped, Each,
         "A camera prim could not be built into a camera.";
 

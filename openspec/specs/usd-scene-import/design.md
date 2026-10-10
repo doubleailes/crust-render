@@ -649,6 +649,19 @@ same point.
   is the quickest way to discover the real one. A dangling `RenderSettings.camera`
   target warns and falls back to the first camera, since the stage, not the operator,
   made that mistake.
+- **Camera exposure** (`camera-exposure`, #266): `build_camera` returns a `RenderCamera`,
+  the ray camera with its linear exposure scale. The scale is USD's
+  (`UsdGeomCamera::ComputeLinearExposureScale`), computed exactly as C++ does: in `f32`,
+  `time × iso × 2^exposure × responsivity / (100 × fStop × fStop)`, so unauthored
+  attributes give exactly 1. It is read where the camera is built, inside whatever
+  chunk holds it, because a streamed chunk's stage is gone by the time the import
+  resolves the camera. The import then sets `RenderSettings::exposure_scale` unless the
+  `RenderSettings` prim says `enableExposureCompensation = false` (or
+  `crust:enableExposureCompensation`, which wins, read as `domeLightCameraVisibility`
+  is), as Hydra renderers and Typhoon (hdEmbree) honour it. A scale that is not finite
+  or not positive is `camera.invalid_exposure` and stores 1. The scale reaches the
+  image only after the film is resolved; the `aovs` design record says which outputs
+  take it.
 - **`disableMotionBlur` / `instantaneousShutter`** (`RenderSettingsBase`, the second the
   deprecated name of the first) are resolved in `import_render_products` like the render's
   camera and resolution — the first product's authored value, else the settings prim's,

@@ -448,6 +448,14 @@ mod tests {
             layer.attributes.other.get(&Text::from("colorInteropID")),
             Some(&AttributeValue::Text(Text::from("lin_rec709_scene")))
         );
+        // The stamp carries the exposure scale the channels were written at.
+        assert_eq!(
+            layer
+                .attributes
+                .other
+                .get(&Text::from("crust:exposureScale")),
+            Some(&AttributeValue::F32(1.0))
+        );
         // Top-down rows: the buffer's top row (y = h - 1) is the file's first.
         let r = &layer.channel_data.list[2];
         assert_eq!(r.name, Text::from("R"));

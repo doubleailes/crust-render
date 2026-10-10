@@ -393,6 +393,61 @@ def RenderSettings "settings"
 `samples/subdivision_adaptive.usda` places one cube five times at growing distances,
 refined to levels 3, 3, 2, 1 and 0.
 
+## Camera exposure
+
+The render camera's exposure multiplies the image, as USD defines it
+(`UsdGeomCamera::ComputeLinearExposureScale`). Five camera attributes give the scale:
+
+```text
+scale = exposure:time × exposure:iso × 2^exposure × exposure:responsivity
+        / (100 × exposure:fStop × exposure:fStop)
+```
+
+Each one is read at the render's frame, and an unauthored one takes its schema default
+(`exposure` 0, `exposure:time` 1, `exposure:iso` 100, `exposure:fStop` 1,
+`exposure:responsivity` 1), which together give exactly 1. `exposure:fStop` is the
+photometric f-stop. The lens's `fStop`, which sets the depth of field, does not change
+the brightness. So `float exposure = 2` on the camera renders four times brighter.
+
+The scale applies to the finished image only:
+
+- The beauty and every [light path expression](@/docs/usd/aovs.md) AOV are multiplied
+  by the scale. The `variance` AOV, and an expression's `crust:aov:variance`, are
+  multiplied by its square.
+- Depth, positions, normals, `st`, alpha, albedo, the diffuse filter, motion vectors
+  and the sample count are untouched.
+- Sampling, the [indirect clamp](#crust-indirectclamp) and adaptive sampling all work
+  before the exposure, so an exposure changes the brightness and nothing else: the
+  same samples, the same noise.
+
+Every EXR records the scale as `crust:exposureScale`, `crust check` reports it as
+`exposure_scale`, and `crust diff` notes when two files were written at different
+scales. A camera whose attributes give a scale that is not a positive number (an
+`exposure:fStop` of 0, say) is refused with a
+[`camera.invalid_exposure`](@/docs/reference/warnings.md) warning, and the image is
+not scaled.
+
+If you raised your lights to make up for an exposure Crust Render used to ignore,
+lower them again: the exposure now applies on top of them.
+
+### crust:enableExposureCompensation
+
+`bool`, default **true**.
+
+Whether the render camera's exposure applies. `false` renders at a scale of 1 whatever
+the camera authors.
+
+Hydra's standard `enableExposureCompensation` setting, as used by hdEmbree, is read
+too. If both are authored, `crust:enableExposureCompensation` wins.
+
+```usda
+def RenderSettings "settings"
+{
+    rel camera = </World/cam>
+    bool enableExposureCompensation = false
+}
+```
+
 ## Lights
 
 ### crust:domeLightCameraVisibility

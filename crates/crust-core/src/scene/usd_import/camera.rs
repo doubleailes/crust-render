@@ -7,6 +7,7 @@ use tracing::debug;
 
 use crate::camera::Camera;
 use crate::tracer::RenderSettings;
+use crate::warning;
 
 use super::attrs::attr_f32;
 use super::prim_at;
@@ -96,18 +97,64 @@ fn lens(cam: &UsdCamera, frame: &CameraFrame) -> CameraLens {
     }
 }
 
+/// The render camera as the import builds it: the rays it generates, and the
+/// linear exposure scale the resolved film is multiplied by.
+pub(super) struct RenderCamera {
+    pub(super) camera: Camera,
+    pub(super) exposure_scale: f32,
+}
+
+/// The camera at `prim` and its exposure scale, `None` when `prim` is not a
+/// camera on `stage`.
 pub(super) fn build_camera(
     stage: &Stage,
     prim: &Prim,
     settings: &RenderSettings,
-) -> Option<Camera> {
+) -> Option<RenderCamera> {
     let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
-    let frame = CameraFrame::read(&cam, stage, prim, settings);
+    Some(RenderCamera {
+        camera: lens_camera(&cam, stage, prim, settings),
+        exposure_scale: exposure_scale(&cam, prim),
+    })
+}
+
+/// The linear exposure scale of `cam` at the import's time (C++
+/// `UsdGeomCamera::ComputeLinearExposureScale`), computed as C++ computes it,
+/// in single precision and in its order:
+/// `time × iso × 2^exposure × responsivity / (100 × fStop × fStop)`. Each
+/// unauthored attribute reads its schema fallback, which together give
+/// exactly 1. `exposure:fStop` is the photometric f-stop; the lens's
+/// depth-of-field `fStop` does not enter. A scale that is not finite or not
+/// positive is refused and reads 1.
+fn exposure_scale(cam: &UsdCamera, prim: &Prim) -> f32 {
+    let time = attr_f32(&cam.exposure_time_attr()).unwrap_or(1.0);
+    let iso = attr_f32(&cam.exposure_iso_attr()).unwrap_or(100.0);
+    let f_stop = attr_f32(&cam.exposure_f_stop_attr()).unwrap_or(1.0);
+    let responsivity = attr_f32(&cam.exposure_responsivity_attr()).unwrap_or(1.0);
+    let exponent = attr_f32(&cam.exposure_attr()).unwrap_or(0.0);
+    let scale = (time * iso * 2.0_f32.powf(exponent) * responsivity) / (100.0 * f_stop * f_stop);
+    if scale.is_finite() && scale > 0.0 {
+        return scale;
+    }
+    warning!(
+        CameraInvalidExposure,
+        at = prim.path(),
+        "{}: the exposure attributes give a scale of {scale} (exposure {exponent}, time \
+         {time}, iso {iso}, fStop {f_stop}, responsivity {responsivity}) — the image is \
+         not scaled",
+        prim.path()
+    );
+    1.0
+}
+
+/// The ray-generating camera at `prim`, from its transform and lens.
+fn lens_camera(cam: &UsdCamera, stage: &Stage, prim: &Prim, settings: &RenderSettings) -> Camera {
+    let frame = CameraFrame::read(cam, stage, prim, settings);
     let CameraLens {
         f_stop,
         focus_distance,
         ..
-    } = lens(&cam, &frame);
+    } = lens(cam, &frame);
 
     let vfov_deg = 2.0 * frame.tan_half_vfov().atan().to_degrees();
     let aperture = if f_stop > 0.0 {
@@ -125,7 +172,7 @@ pub(super) fn build_camera(
         lookfrom, lookat, vup, vfov_deg, aspect, aperture, focus_distance
     );
 
-    Some(Camera::new(
+    Camera::new(
         lookfrom,
         lookat,
         vup,
@@ -133,7 +180,7 @@ pub(super) fn build_camera(
         aspect,
         aperture,
         focus_distance,
-    ))
+    )
 }
 
 /// What adaptive subdivision needs of the render camera, read before the

@@ -198,6 +198,14 @@ is what compositors expect from a `Z` channel.
   of the camera have a negative `Peye.Z`, and `depth` is `−Peye.Z`.
 - **Normals** stay in [−1, 1]. They are never remapped to [0, 1].
 
+### Camera exposure
+
+The render camera's [exposure](@/docs/usd/render-settings.md#camera-exposure) multiplies
+the beauty and every light path expression (raw light and light groups included), and
+the variances (`variance` and `crust:aov:variance`) by its square. Every other source is
+written as computed. A light path expression still sums to the beauty after the
+exposure, since both are multiplied by the same scale.
+
 ### Where the camera ray meets no surface
 
 - **Escaped** (the sky or a dome): the beauty gets the background; `alpha` is 0; data

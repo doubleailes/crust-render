@@ -19,6 +19,9 @@ const DEFAULT_GUIDING_TRAIN_ITERATIONS: u32 = 4;
 const DEFAULT_GUIDING_PROB: f32 = 0.5;
 /// Hydra's default for `domeLightCameraVisibility`: the camera sees domes.
 const DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY: bool = true;
+/// Hydra's default for `enableExposureCompensation`: the camera's exposure
+/// applies.
+const DEFAULT_ENABLE_EXPOSURE_COMPENSATION: bool = true;
 
 /// A camera the render was told to use, and who said so — which decides what
 /// happens if it is not on the stage.
@@ -131,6 +134,21 @@ pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
     custom_bool(&prim, "crust:domeLightCameraVisibility")
         .or_else(|| custom_bool(&prim, "domeLightCameraVisibility"))
         .unwrap_or(DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY)
+}
+
+/// Whether the render camera's exposure scales the image: Hydra's
+/// `enableExposureCompensation` render setting (the name hdEmbree reads), read
+/// off the `RenderSettings` prim, with `crust:enableExposureCompensation`
+/// winning when both are authored. Default `true`. `false` renders at a scale
+/// of 1 whatever the camera authors.
+pub(super) fn enable_exposure_compensation(stage: &Stage) -> bool {
+    let Some(path) = render_settings_path(stage) else {
+        return DEFAULT_ENABLE_EXPOSURE_COMPENSATION;
+    };
+    let prim = prim_at(stage, path);
+    custom_bool(&prim, "crust:enableExposureCompensation")
+        .or_else(|| custom_bool(&prim, "enableExposureCompensation"))
+        .unwrap_or(DEFAULT_ENABLE_EXPOSURE_COMPENSATION)
 }
 
 /// `crust:subdivisionLevel` as authored on the `RenderSettings` prim — the

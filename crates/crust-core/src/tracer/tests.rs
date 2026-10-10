@@ -1050,6 +1050,29 @@ fn a_staged_sweep_renders_the_unstaged_one_bit_for_bit() {
     }
 }
 
+/// A snapshot shows the image as it is written: under a camera exposure the
+/// last one is the exposed image the render returned, bit for bit.
+#[test]
+fn the_last_snapshot_is_exposed() {
+    use crate::RenderControl;
+    let scene = sample_scene("cornellbox.usda");
+    let s = scene
+        .settings
+        .with_resolution(48, 32)
+        .with_samples_per_pixel(16)
+        .with_exposure_scale(3.0);
+    let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
+    for tiled in [true, false] {
+        let control = RenderControl::new();
+        let out = r.render_with_control(tiled, None, None, &control);
+        let (_, snapshot) = control.snapshot().expect("the render published");
+        assert!(
+            bits(&snapshot) == bits(&out.buffer),
+            "tiled {tiled}: the snapshot is not the exposed image"
+        );
+    }
+}
+
 /// The control's last snapshot of an unguided render that completed is the
 /// image the render returned, bit for bit, at the control's generation —
 /// and that image is the one a render without a control returns. Before
