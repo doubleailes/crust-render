@@ -193,6 +193,19 @@ mod tests {
         assert_near(world_of_type("untyped_ops", "", ops), parent);
     }
 
+    /// The `Xformable` prims of UsdSkel and UsdVol compose their ops: the
+    /// schema registry knows their types only because crust-core compiles
+    /// those families in, and an unknown type would read as not `Xformable`.
+    #[test]
+    fn skel_and_vol_prims_compose_their_ops() {
+        let ops = r#"        double3 xformOp:translate = (1, 2, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]"#;
+        let placed = GMat4::from_translation(Vec3::new(1.0, 2.0, 10.0));
+        for ty in ["SkelRoot", "Skeleton", "Volume", "OpenVDBAsset"] {
+            assert_near(world_of_type(&format!("{ty}_ops"), ty, ops), placed);
+        }
+    }
+
     #[test]
     fn a_leading_reset_drops_the_parent() {
         let m = world_of(
