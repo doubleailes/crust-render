@@ -204,6 +204,13 @@ value is the old sampler bit for bit (pinned by the goldens and
   `(length, r, r)` where a local-`x` draw would not. In solid angle the `r²` cancels:
   `pdf = L H / ((θ_b − θ_a) · 2w · area_scale(n) · |cos θ_l|)`. `arc` is the same arc
   with `x` uniform, kept so each half of the gain stays measurable.
+- **Never as the difference of two `atan`s.** Seen far beyond an end, near the axis
+  line, both ends' angles sit by ±π/2, and `θ_b − θ_a` in f32 kept about three bits:
+  256 strata of `u` landed on five axial positions, which `pdf` did not describe. The
+  span is one `atan2(L H, H² + s₀ (s₀ − L))`, and the sample is
+  `s = R² sin ψ / (H cos ψ + s₀ sin ψ)` with `ψ = u · span` and `R² = H² + s₀²` (the
+  tangent's addition rule from the `s = 0` end; the denominator is `R cos θ`, positive).
+  `far_end_on_tube_samples_stay_equiangular` pins it.
 - **Only for a one-sided emitter** (`AffineShape::front_only`, set by `AreaLight::new`
   from `Emissive::is_one_sided`): a two-sided tube seen through an open end shows its
   inner wall, which the outer arc never reaches. From inside the tube, or on its wall,

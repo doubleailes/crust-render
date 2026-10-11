@@ -821,6 +821,9 @@ fn tube_samples_follow_their_density() {
         // Thick, up close: 0.6 from an axis of radius 0.5.
         ("thick, close", thick_tube(), Vec3A::new(0.2, 0.0, 1.2)),
         ("sheared", sheared_tube(), Vec3A::new(-0.3, 2.0, 1.5)),
+        // Far beyond an end, near the axis line: both ends' angles crowd
+        // ±π/2, where `atan(b) − atan(a)` in f32 kept about three bits.
+        ("thin, far end-on", thin_tube(), Vec3A::new(150.0, 2.0, 0.5)),
     ];
     for (name, m, f) in cases {
         let from = at(m, f);
@@ -908,6 +911,43 @@ fn sheared_disk_samples_follow_their_density() {
             );
         }
     }
+}
+
+/// A placement extreme enough that the direction map's Jacobian overflows:
+/// the ellipse refuses those points on both MIS sides, as the tube refuses
+/// its silhouette, and never hands NEE or the bounce side an infinite
+/// density (`PdfSolidAngle::new`).
+#[test]
+fn an_overflowing_ellipse_density_is_refused_on_both_sides() {
+    // `|det| = 1e-15` is accepted; `|Mω|³ / |det|` reaches 1e60.
+    let m = Affine3A::from_scale(glam::Vec3::new(1e15, 1e-15, 1e-15));
+    let light = round_light(
+        UnitShape::Disk,
+        m,
+        TubeSampling::Area,
+        DiskSampling::Ellipse,
+        true,
+    );
+    let from = at(m, Vec3A::new(0.3, -0.2, -1.0));
+    let sampler = affine(&light)
+        .solid_angle_sampler(from)
+        .expect("the ellipse applies from in front");
+    let mut rng = openqmc::pcg::Rng::new(13);
+    let mut refused = 0;
+    for _ in 0..256 {
+        let (u, v) = (rng.next_f32(), rng.next_f32());
+        match sampler.sample(u, v) {
+            Some((p, pdf)) => {
+                assert!(pdf.get().is_finite(), "pdf {}", pdf.get());
+                assert_eq!(sampler.pdf(p), Some(pdf));
+            }
+            None => refused += 1,
+        }
+        if let Some(s) = light.sample_li(from, u, v) {
+            assert!(s.pdf.get().is_finite(), "sample_li pdf {}", s.pdf.get());
+        }
+    }
+    assert!(refused > 0, "the placement overflows nowhere: no test");
 }
 
 /// Where a strategy does not apply the light is area-sampled, exactly as
@@ -1048,4 +1088,47 @@ fn round_strategies_do_not_grow_the_sampler() {
         sampler <= rect,
         "SolidAngleSampler is {sampler} bytes, the rect strategy {rect}"
     );
+}
+
+/// Seen far beyond an end and near the axis line, the equiangular sampler
+/// still spreads its samples continuously: the angle each subtends, in f64
+/// from the point it returns, is linear in `u`. Computed as the difference of
+/// two f32 `atan`s by ±π/2, the span kept about three bits and 256 strata
+/// landed on five axial positions.
+#[test]
+fn far_end_on_tube_samples_stay_equiangular() {
+    let m = thin_tube();
+    let along = m.matrix3.x_axis.as_dvec3().normalize();
+    for f in [
+        Vec3A::new(150.0, 2.0, 0.5),
+        Vec3A::new(-80.0, 0.3, -1.4),
+        Vec3A::new(0.2, 3.0, 1.0),
+    ] {
+        let from = at(m, f);
+        let light = round_light(
+            UnitShape::Cylinder,
+            m,
+            TubeSampling::Equiangular,
+            DiskSampling::Area,
+            true,
+        );
+        let sampler = affine(&light).solid_angle_sampler(from).unwrap();
+        const N: usize = 256;
+        let theta: Vec<f64> = (0..N)
+            .map(|i| {
+                let (p, _) = sampler.sample((i as f32 + 0.5) / N as f32, 0.5).unwrap();
+                let d = p.as_dvec3() - from.as_dvec3();
+                d.dot(along).atan2(d.cross(along).length())
+            })
+            .collect();
+        let (first, last) = (theta[0], theta[N - 1]);
+        for (i, t) in theta.iter().enumerate() {
+            let got = (t - first) / (last - first);
+            let want = i as f64 / (N - 1) as f64;
+            assert!(
+                (got - want).abs() < 1e-2,
+                "from {f}: u stratum {i} at {got}, not {want}"
+            );
+        }
+    }
 }

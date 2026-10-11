@@ -261,8 +261,12 @@ impl<'a> SolidAngleSampler<'a> {
                 ellipse,
             } => {
                 let p = shape.ellipse_point(from_local, ellipse, u, v);
-                p.is_finite()
-                    .then(|| (p, shape.ellipse_pdf(from_local, ellipse, p)))
+                if !p.is_finite() {
+                    return None;
+                }
+                shape
+                    .ellipse_pdf(from_local, ellipse, p)
+                    .map(|pdf| (p, pdf))
             }
             Strategy::Tube { shape, view } => {
                 let p = shape.tube_point(view, u, v);
@@ -290,7 +294,7 @@ impl<'a> SolidAngleSampler<'a> {
                 shape,
                 from_local,
                 ellipse,
-            } => Some(shape.ellipse_pdf(from_local, ellipse, p)),
+            } => shape.ellipse_pdf(from_local, ellipse, p),
             Strategy::Tube { shape, view } => shape.tube_pdf(view, p),
         }
     }
@@ -299,13 +303,13 @@ impl<'a> SolidAngleSampler<'a> {
 /// The straight line of a tube's wall at one azimuth, in world units, as the
 /// equiangular density sees it from a shading point: the point's
 /// foot at `s0` along it from the `x = −½` end, its distance `h` from it, its
-/// world `length`, and the angles `θ = atan((s − s0) / h)` of its two ends.
+/// world `length`, and the `span` `θb − θa` of the angles
+/// `θ = atan((s − s0) / h)` its two ends subtend.
 struct WallLine {
     s0: f32,
     h: f32,
     length: f32,
-    theta_a: f32,
-    theta_b: f32,
+    span: f32,
 }
 
 /// `sin² 1.5°`, pbrt-v4's threshold. Below it a cone's `1 − cos θ_max` is
@@ -795,9 +799,11 @@ impl AffineShape {
     /// The placement sends a local direction `ω` to `Mω / |Mω|`, which scales
     /// solid angle by `|det M| / |Mω|³`; a density scales by the reciprocal.
     ///
-    /// Taken as it comes rather than refused when not finite: the refusal has
-    /// to depend on `from` alone (see [`LightShape::sample_solid_angle`]), and
-    /// this varies across the cap.
+    /// Taken as it comes rather than refused when not finite: the squashed
+    /// sphere's cone uses it as is, inline on the sphere's hot path; the
+    /// disk's ellipse, out of line, refuses a non-finite one point by point
+    /// ([`AffineShape::ellipse_pdf`]), which [`SolidAngleSampler::sample`]
+    /// allows.
     pub(super) fn world_solid_angle_pdf(
         &self,
         local_pdf: PdfSolidAngle,
@@ -848,11 +854,21 @@ impl AffineShape {
 
     /// The disk's spherical-ellipse density at the world point `p`: the local
     /// one, uniform, through the direction map's Jacobian, as for the
-    /// squashed sphere.
+    /// squashed sphere. `None` where that Jacobian overflows (an extreme
+    /// placement): the strategy refuses the point, on both MIS sides, as the
+    /// tube refuses its silhouette.
     #[inline(never)]
-    fn ellipse_pdf(&self, from_local: Vec3A, ellipse: SphericalEllipse, p: Vec3A) -> PdfSolidAngle {
+    fn ellipse_pdf(
+        &self,
+        from_local: Vec3A,
+        ellipse: SphericalEllipse,
+        p: Vec3A,
+    ) -> Option<PdfSolidAngle> {
         let p_local = self.world_to_light.transform_point3a(p);
-        self.world_solid_angle_pdf(ellipse.pdf(), p_local - from_local)
+        PdfSolidAngle::new(
+            self.world_solid_angle_pdf(ellipse.pdf(), p_local - from_local)
+                .get(),
+        )
     }
 
     /// The tube's sample: the azimuth uniform over the arc
@@ -862,9 +878,13 @@ impl AffineShape {
     fn tube_point(&self, view: TubeView, u: f32, v: f32) -> Vec3A {
         let (sin, cos) = (view.phi0 + view.half_arc * (2.0 * v - 1.0)).sin_cos();
         let x = if view.equiangular {
+            // `s0 + h tan(θa + ψ)` from the `s = 0` end, by the tangent's
+            // addition rule, which leaves no `θ` near ±π/2 to round: the
+            // denominator is `R cos θ`, positive on the line.
             let line = self.wall_line(view.from, cos, sin);
-            let theta = line.theta_a + u * (line.theta_b - line.theta_a);
-            let s = (line.s0 + line.h * theta.tan()).clamp(0.0, line.length);
+            let (sin_psi, cos_psi) = (u * line.span).sin_cos();
+            let r2 = line.h * line.h + line.s0 * line.s0;
+            let s = (r2 * sin_psi / (line.h * cos_psi + line.s0 * sin_psi)).clamp(0.0, line.length);
             s / line.length - 0.5
         } else {
             u - 0.5
@@ -888,12 +908,15 @@ impl AffineShape {
         let s0 = d.dot(along);
         // Positive from outside the tube: `from` on the line needs `ρ = 1`.
         let h = d.cross(along).length();
+        // `atan(b) − atan(a) = atan2(b − a, 1 + ab)`, scaled by `h²`: one
+        // angle, never the difference of two. Seen far beyond an end, both
+        // ends' angles sit by ±π/2, where their f32 difference kept a few
+        // bits and the samples fell on a handful of positions.
         WallLine {
             s0,
             h,
             length,
-            theta_a: (-s0 / h).atan(),
-            theta_b: ((length - s0) / h).atan(),
+            span: (length * h).atan2(h * h + s0 * (s0 - length)),
         }
     }
 
@@ -932,7 +955,7 @@ impl AffineShape {
         // distance squared, which the area-to-solid-angle Jacobian cancels:
         // the solid-angle density is `L h / ((θb − θa) · 2w · scale · cos)`.
         let line = self.wall_line(from, n_local.y, n_local.z);
-        let pdf = line.length * line.h / ((line.theta_b - line.theta_a) * arc_area * cos);
+        let pdf = line.length * line.h / (line.span * arc_area * cos);
         if cos > 0.0 {
             PdfSolidAngle::new(pdf)
         } else {
