@@ -63,7 +63,7 @@ tokio = { version = "1.52", default-features = false, features = ["rt", "macros"
 # crate (and version) crust-core imports with.
 # With `serde`, so a queried value reaches the client as the JSON of its
 # `sdf::Value`.
-openusd = { version = "0.7", default-features = false, features = ["serde"], optional = true }
+openusd = { version = "0.8", default-features = false, features = ["serde"], optional = true }
 # `mcp`: the tools' parameters and results. `schemars` is the version rmcp
 # derives its input schemas with.
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -77,8 +77,8 @@ base64 = { version = "0.22", optional = true }
 # (`tex_probe`, `ptex_seams`) — the decoded `PtexColor` deliberately does not
 # replace those, since they sample without the colour decode.
 [dev-dependencies]
-openusd = { version = "0.7", default-features = false }
-openusd-schemas = { version = "0.7", default-features = false, features = ["geom"] }
+openusd = { version = "0.8", default-features = false }
+openusd-schemas = { version = "0.8", default-features = false, features = ["geom"] }
 ptex.workspace = true
 # `std` for `tracing::subscriber::with_default`, which the product writer's
 # test uses to see the warning an authored `crust:*` attribute gets.

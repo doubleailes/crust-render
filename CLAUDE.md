@@ -14,7 +14,7 @@ beside the behavioural `spec.md` for the same capability.
 Crust Render is a toy, physically-based path tracer written in safe Rust (edition 2024),
 inspired by PBRT, *Ray Tracing in One Weekend*, and Autodesk Standard Surface / OpenPBR.
 Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the pure-Rust
-[`openusd`](https://github.com/mxpv/openusd) crate (its GitHub `main`, patched over 0.7 in
+[`openusd`](https://github.com/mxpv/openusd) crate (its GitHub `main`, patched over 0.8 in
 the workspace `Cargo.toml`; typed schemas in `openusd-schemas`, which every stage must be
 opened with — `usd_import::stage_builder()`). Do not add loaders for any other scene or mesh format.
 
