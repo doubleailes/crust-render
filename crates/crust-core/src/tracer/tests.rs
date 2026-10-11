@@ -695,7 +695,6 @@ fn reconfigure_renders_what_new_renders() {
             .with_sampling_strategy(SamplingStrategy::BsdfOnly)
             .with_light_selection(LightSelection::Learned)
             .with_light_samples(3, 3)
-            .with_guiding(true, 2, 0.5)
             .with_max_depth(2);
         let cases = [
             base.with_sampling_strategy(SamplingStrategy::BalanceMis),
@@ -704,10 +703,6 @@ fn reconfigure_renders_what_new_renders() {
             base.with_light_selection(LightSelection::Learned),
             base.with_light_samples(2, 1),
             base.with_light_samples(1, 2),
-            // One training iteration: with more, whether the final pass is
-            // guided follows a ΔEff measured in wall-clock time, so two
-            // guided renders of the same settings may differ.
-            base.with_guiding(true, 1, 0.5),
             base.with_max_depth(3),
         ];
         for (k, s) in cases.into_iter().enumerate() {
@@ -901,7 +896,7 @@ fn the_tile_timer_times_every_unit_when_asked() {
     assert_eq!(m.tiles.iter().map(|(t, _)| t.area()).sum::<usize>(), 800);
     assert!(m.tiles.iter().all(|&(_, s)| s >= 0.0));
     assert_eq!(m.var_map.len(), 800);
-    assert!(m.render_s > 0.0 && m.setup_s == 0.0);
+    assert!(m.render_s > 0.0);
 }
 
 /// The first sweep's stages (design D1) double from 1 up to the sweep's end,
@@ -1002,7 +997,7 @@ fn small_cornell(spp: u32) -> crate::Renderer {
 /// Staging is scheduling only (design D1): a staged final pass renders the
 /// image, every AOV plane and every counter of the same pass swept in one
 /// go, bit for bit, under tiles and scanlines alike — adaptive, adaptive
-/// sampling off, with AOVs, and guided.
+/// sampling off, and with AOVs.
 #[test]
 fn a_staged_sweep_renders_the_unstaged_one_bit_for_bit() {
     use super::Instruments;
@@ -1030,17 +1025,6 @@ fn a_staged_sweep_renders_the_unstaged_one_bit_for_bit() {
         (
             "AOVs",
             cornell(|s| s.with_samples_per_pixel(40).with_adaptive_sampling(16, 0.2)),
-            Some(&aovs),
-        ),
-        // One training iteration: with more, whether the final pass is
-        // guided follows a ΔEff measured in wall-clock time.
-        (
-            "guided",
-            cornell(|s| {
-                s.with_samples_per_pixel(40)
-                    .with_adaptive_sampling(16, 0.2)
-                    .with_guiding(true, 1, 0.5)
-            }),
             Some(&aovs),
         ),
     ];
@@ -1102,7 +1086,7 @@ fn the_last_snapshot_is_exposed() {
     }
 }
 
-/// The control's last snapshot of an unguided render that completed is the
+/// The control's last snapshot of a render that completed is the
 /// image the render returned, bit for bit, at the control's generation —
 /// and that image is the one a render without a control returns. Before
 /// the render there is no snapshot.
@@ -1135,8 +1119,7 @@ fn the_last_snapshot_is_the_returned_image() {
 /// The samples a control reports reached are the first sweep's completed
 /// stages: none before the render or under a cancel that came first, the
 /// whole budget when the sweep covers it (4 spp, below the first check
-/// point), and the first check point when adaptive rounds follow it. A new
-/// pass starts the count over, but not its maximum.
+/// point), and the first check point when adaptive rounds follow it.
 #[test]
 fn samples_reached_follow_the_first_sweep() {
     use crate::RenderControl;
@@ -1151,32 +1134,13 @@ fn samples_reached_follow_the_first_sweep() {
     control.cancel();
     small_cornell(64).render_with_control(true, None, None, &control);
     assert_eq!(control.samples_reached(), 0, "cancelled before any stage");
-    // Each pass starts over: a count left from an earlier pass (as a guided
-    // render's training passes leave one for its final pass) is cleared
-    // before the pass's first stage.
+    // A render starts over: a count left from an earlier one is cleared
+    // before its first stage.
     let control = RenderControl::new();
     control.reach(8);
     control.cancel();
     small_cornell(64).render_with_control(true, None, None, &control);
     assert_eq!(control.samples_reached(), 0, "a new pass starts at zero");
-    assert_eq!(
-        control.max_samples_reached(),
-        8,
-        "the most any pass reached outlives the pass"
-    );
-    // A guided render's training passes (2, 2, 4 and 8 spp) each start over,
-    // and its final pass ends at its own 2: the maximum keeps the 8.
-    let scene = sample_scene("cornellbox.usda");
-    let s = scene
-        .settings
-        .with_resolution(48, 32)
-        .with_samples_per_pixel(2)
-        .with_guiding(true, 4, 0.5);
-    let control = RenderControl::new();
-    crate::Renderer::new(scene.camera, scene.world, scene.lights, s)
-        .render_with_control(true, None, None, &control);
-    assert_eq!(control.samples_reached(), 2, "the final pass's own count");
-    assert_eq!(control.max_samples_reached(), 8, "the last training pass's");
 }
 
 /// Snapshots read from another thread while the render runs only move
@@ -1217,25 +1181,24 @@ fn snapshots_read_from_another_thread_only_move_forward() {
 
 /// A control cancelled before the render is called stops it before any
 /// sample: the image is black, every AOV holds its clear value, and the
-/// counters are zero — guided or not.
+/// counters are zero.
 #[test]
 fn a_render_cancelled_before_it_starts_traces_nothing() {
     use crate::{AovSource, RenderControl, RenderOutcome};
     let request = every_kind_of_aov();
-    for guided in [false, true] {
+    {
         let scene = sample_scene("cornellbox.usda");
         let s = scene
             .settings
             .with_resolution(40, 20)
-            .with_samples_per_pixel(64)
-            .with_guiding(guided, 3, 0.5);
+            .with_samples_per_pixel(64);
         let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
         let control = RenderControl::new();
         control.cancel();
         let out = r.render_with_control(true, None, Some(&request), &control);
-        assert_eq!(out.outcome, RenderOutcome::Cancelled, "guided {guided}");
-        assert_eq!(out.rays.camera_rays, 0, "guided {guided}");
-        assert!(bits(&out.buffer).iter().all(|&b| b == 0), "guided {guided}");
+        assert_eq!(out.outcome, RenderOutcome::Cancelled);
+        assert_eq!(out.rays.camera_rays, 0);
+        assert!(bits(&out.buffer).iter().all(|&b| b == 0));
         let film = out.film.expect("a request gives a film");
         for var in request.products.iter().flat_map(|p| &p.vars) {
             let clear = match var.source {
@@ -1245,7 +1208,7 @@ fn a_render_cancelled_before_it_starts_traces_nothing() {
             for plane in film.var_channels(&out.buffer, var) {
                 assert!(
                     plane.iter().all(|v| v.to_bits() == clear.to_bits()),
-                    "guided {guided}: {} is not at its clear value {clear}",
+                    "{} is not at its clear value {clear}",
                     var.name
                 );
             }
@@ -1374,117 +1337,6 @@ fn a_render_cancelled_after_a_stage_is_that_stage_everywhere() {
         );
         assert_eq!(out.rays, rays, "{case}");
     }
-}
-
-/// A guided render cancelled in its final pass blends what it can weigh
-/// (design D6): the partial final pass joins the training passes once every
-/// pixel in it has two samples or more; before that it is left out, so
-/// wherever its 1 spp stage was cut, the image is the training passes'
-/// blend alone.
-#[test]
-fn a_guided_render_cancelled_in_its_final_pass_blends_what_it_can_weigh() {
-    use crate::{RenderControl, RenderOutcome};
-    let request = every_kind_of_aov();
-    let scene = sample_scene("cornellbox.usda");
-    let s = scene
-        .settings
-        .with_resolution(48, 32)
-        .with_samples_per_pixel(64)
-        .with_guiding(true, 3, 0.5);
-    let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
-    // Only the final pass reports progress: one step per tile per sample.
-    let render = |cancel_at: u64| {
-        let control = RenderControl::new();
-        let progress = |n: u64, _: u64| {
-            if n == cancel_at {
-                control.cancel();
-            }
-        };
-        let out = r.render_with_control(true, Some(&progress), Some(&request), &control);
-        assert_eq!(out.outcome, RenderOutcome::Cancelled, "at {cancel_at}");
-        let film = out.film.as_ref().expect("a request gives a film");
-        let planes = film_bits(&request, film, &out.buffer);
-        let image = bits(&out.buffer);
-        for b in image.iter().chain(planes.iter().flatten()) {
-            assert!(
-                !f32::from_bits(*b).is_nan(),
-                "a NaN, cancelled at {cancel_at}"
-            );
-        }
-        (image, planes, out.rays)
-    };
-    let after_four = render(24);
-    let after_one = render(6);
-    let within_one = render(1);
-    // The final pass's own counters (training passes count no spp) — and
-    // none at all once the final pass is left out of the image, so the
-    // interruption warning and `crust:sppTaken` never describe it.
-    assert_eq!((after_four.2.spp_min, after_four.2.spp_max), (4, 4));
-    assert_eq!(after_four.2.adaptive_pixels, 48 * 32);
-    for dropped in [&after_one.2, &within_one.2] {
-        assert_eq!(dropped.adaptive_pixels, 0, "{dropped:?}");
-        assert_eq!((dropped.spp_min, dropped.spp_max), (0, 0), "{dropped:?}");
-        assert_eq!(dropped.adaptive_samples, 0, "{dropped:?}");
-        assert!(dropped.camera_rays > 0, "the work is still counted");
-    }
-    // The training passes' 2 + 2 + 4 samples and the dropped pass's 1.
-    assert_eq!(after_one.2.camera_rays, (2 + 2 + 4 + 1) * 48 * 32);
-    assert!(after_one.0 == within_one.0, "the training blend moved");
-    assert!(after_one.1 == within_one.1, "the training AOV blend moved");
-    assert!(
-        after_four.0 != after_one.0,
-        "the 4 spp final pass did not join"
-    );
-}
-
-/// A guided render cancelled in its first training pass returns that partial
-/// pass alone: the pixels it sampled (two samples each) and black elsewhere,
-/// no NaN anywhere.
-#[test]
-fn a_guided_render_cancelled_in_its_first_training_pass_returns_it_alone() {
-    use crate::{RenderControl, RenderOutcome};
-    let (w, h) = (160usize, 120usize);
-    let request = every_kind_of_aov();
-    let scene = sample_scene("cornellbox.usda");
-    let s = scene
-        .settings
-        .with_resolution(w, h)
-        .with_samples_per_pixel(64)
-        .with_guiding(true, 3, 0.5);
-    let r = crate::Renderer::new(scene.camera, scene.world, scene.lights, s);
-    let control = RenderControl::new();
-    // Rows, cancelled as soon as the first one has published: the pass's
-    // other 119 rows are still to come.
-    let out = std::thread::scope(|s| {
-        s.spawn(|| {
-            while control.generation() == 0 {
-                std::thread::yield_now();
-            }
-            control.cancel();
-        });
-        r.render_with_control(false, None, Some(&request), &control)
-    });
-    assert_eq!(out.outcome, RenderOutcome::Cancelled);
-    let traced = out.rays.camera_rays;
-    assert!(
-        traced > 0 && traced < (w * h * 2) as u64,
-        "not cut inside the first training pass: {traced} camera rays"
-    );
-    let image = bits(&out.buffer);
-    assert!(image.iter().all(|&b| !f32::from_bits(b).is_nan()));
-    let film = out.film.expect("a request gives a film");
-    for plane in film_bits(&request, &film, &out.buffer) {
-        assert!(plane.iter().all(|&b| !f32::from_bits(b).is_nan()));
-    }
-    // Two samples a sampled pixel: at most that many pixels are not black.
-    let lit = image
-        .chunks(3)
-        .filter(|p| p.iter().any(|&b| b != 0))
-        .count();
-    assert!(
-        lit as u64 <= traced / 2,
-        "{lit} lit pixels from {traced} rays"
-    );
 }
 
 /// A control without snapshots still cancels, and the render publishes

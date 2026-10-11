@@ -152,6 +152,8 @@ warning_codes! {
         "A crust:* render setting has a value outside its domain; its default is used.";
     SettingsLightSamplesClamped => "settings.light_samples_clamped", Approximated, Each,
         "A light-sample count is above the most crust takes; the maximum is used.";
+    SettingsPathGuidingRemoved => "settings.path_guiding_removed", Refused, Once,
+        "The stage authors a path guiding setting; guiding was removed and the render is unguided.";
     TimeOutsideRange => "time.outside_range", Approximated, Each,
         "The frame lies outside the stage's time range; animated attributes hold their nearest sample.";
     ColorWorkingSpaceRefused => "color.working_space_refused", Refused, Each,

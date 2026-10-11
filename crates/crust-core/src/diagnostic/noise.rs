@@ -35,7 +35,7 @@ pub const PARTITION: usize = 7;
 /// Rows whose dominance points at the light-side settings.
 pub const DIRECT_ROWS: &[&str] = &["direct_diffuse", "direct_glossy"];
 
-/// Rows whose dominance points at guiding and the indirect light samples.
+/// Rows whose dominance points at the indirect light samples.
 pub const INDIRECT_ROWS: &[&str] = &[
     "indirect_diffuse",
     "indirect_glossy",
@@ -316,7 +316,6 @@ pub const FACTORS: &[&str] = &[
     "light_selection",
     "light_samples",
     "light_samples_indirect",
-    "guiding",
 ];
 
 /// The ordering rules, strongest first.
@@ -334,7 +333,7 @@ pub const RULES: &[Rule] = &[
     Rule {
         when: "indirect, glossy or volume rows dominate",
         holds: |d, _| d.is_some_and(|d| INDIRECT_ROWS.contains(&d)),
-        first: &["guiding", "light_samples_indirect"],
+        first: &["light_samples_indirect"],
     },
 ];
 
@@ -410,11 +409,11 @@ mod tests {
     }
 
     #[test]
-    fn indirect_noise_runs_guiding_before_strategy() {
+    fn indirect_noise_runs_indirect_light_samples_before_strategy() {
         let order = factor_order(Some("indirect_diffuse"), 2);
         let pos = |f| order.iter().position(|x| *x == f).unwrap();
-        assert!(pos("guiding") < pos("strategy"));
-        assert_eq!(order[0], "guiding");
+        assert!(pos("light_samples_indirect") < pos("strategy"));
+        assert_eq!(order[0], "light_samples_indirect");
         assert_eq!(order.len(), FACTORS.len());
     }
 

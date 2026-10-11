@@ -854,8 +854,8 @@ impl Material for OpenPBR {
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
         // Mirror the ray construction of `scatter_importance` for an
-        // externally chosen direction (e.g. from the guiding field), so a
-        // guided transmission direction crosses the interface with the same
+        // externally chosen direction, so a
+        // chosen transmission direction crosses the interface with the same
         // origin offset and interior-medium tagging as a BSDF-sampled one.
         if transmission_is_continuous(self) && rec.normal.dot(wi) < 0.0 {
             if rec.front_face

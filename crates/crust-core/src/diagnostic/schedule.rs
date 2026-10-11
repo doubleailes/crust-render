@@ -139,8 +139,8 @@ pub fn plan(
 }
 
 /// The estimated cost of `renders` renders of `pixels` pixels at `spp`:
-/// the sampling, and each render's own setup (the `learned` pre-pass and
-/// guiding's training, which `shoot` pays per render). What every tier-2
+/// the sampling, and each render's own setup (the `learned` pre-pass, which
+/// `shoot` pays per render). What every tier-2
 /// and tier-3 measurement is admitted on, and reserved for.
 pub fn render_cost_s(
     s_per_pixel_spp: f64,
@@ -150,15 +150,6 @@ pub fn render_cost_s(
     setup_per_render_s: f64,
 ) -> f64 {
     renders * (s_per_pixel_spp * pixels as f64 * spp as f64 + setup_per_render_s)
-}
-
-/// The samples per pixel guiding's training passes render before the final
-/// one, over `iterations`: 2, 2, 4, 8, … — `render_guided`'s schedule. A
-/// guided trial's setup is about this many samples of its crops.
-pub fn guiding_training_spp(iterations: u32) -> u64 {
-    (0..iterations.max(1))
-        .map(|k| (1u64 << k.min(16)).max(2))
-        .sum()
 }
 
 /// The baseline's sample count from a timed 1 spp calibration render (D3):
@@ -291,22 +282,6 @@ mod tests {
         let cost = render_cost_s(1e-6, 128 * 128, 4, 2.0, 0.5);
         assert!((cost - 2.0 * (0.065536 + 0.5)).abs() < 1e-12);
         assert_eq!(render_cost_s(1e-6, 128 * 128, 4, 0.0, 0.5), 0.0);
-    }
-
-    #[test]
-    fn guiding_training_is_priced_by_its_passes() {
-        // The default four iterations: 2 + 2 + 4 + 8.
-        assert_eq!(guiding_training_spp(4), 16);
-        assert_eq!(guiding_training_spp(1), 2);
-        assert_eq!(guiding_training_spp(0), 2);
-        // A first guided trial's setup is no longer estimated at zero: at
-        // 1 µs per pixel-sample over 3 crops of 128², R = 3, it adds
-        // 16 · 49152 µs · 3 ≈ 2.36 s to the trial's estimate.
-        let px = 3 * 128 * 128;
-        let setup = 1e-6 * px as f64 * guiding_training_spp(4) as f64;
-        let with = trial_cost_s(1e-6, px, 16, 3, setup * 3.0);
-        let without = trial_cost_s(1e-6, px, 16, 3, 0.0);
-        assert!((with - without - 2.359296).abs() < 1e-9);
     }
 
     #[test]

@@ -105,11 +105,7 @@ impl Options<'_> {
 const MAX_GROUP_LIGHTS: usize = 8;
 
 /// What decorrelates one pair's seed from the next (MurmurHash3's
-/// `0x85EB_CA6B`). Not guiding's pass step: a guided render's training
-/// passes add that to the pair's seed, and with the same step pass `k` of
-/// pair `i` drew pair `i + k + 1`'s samples. With this one no pair or pass
-/// seed meets another over 64 pairs and 32 training iterations
-/// (`no_pair_or_pass_shares_a_seed`).
+/// `0x85EB_CA6B`).
 const SEED_STEP: u32 = 0x85EB_CA6B;
 
 /// The sampler seed of pair `i` (D7): the scene's own for pair 0, then a
@@ -159,10 +155,6 @@ fn set_light_samples_indirect(s: RenderSettings, v: &str) -> RenderSettings {
     s.with_light_samples(s.light_samples(), v.parse().expect("a count"))
 }
 
-fn set_guiding(s: RenderSettings, v: &str) -> RenderSettings {
-    s.with_guiding(v == "true", s.guiding_train_iterations(), s.guiding_prob())
-}
-
 type Apply = fn(RenderSettings, &str) -> RenderSettings;
 
 fn change(
@@ -183,8 +175,7 @@ fn change(
 
 /// The tier-1 changes of `factor` from `base`, or why there are none.
 fn changes(factor: &str, base: RenderSettings, lights: usize) -> Result<Vec<Change>, String> {
-    let needs_lights = factor != "guiding";
-    if needs_lights && lights == 0 {
+    if lights == 0 {
         return Err("the scene has no light-list entry".into());
     }
     Ok(match factor {
@@ -259,14 +250,6 @@ fn changes(factor: &str, base: RenderSettings, lights: usize) -> Result<Vec<Chan
                 set_light_samples_indirect,
             )]
         }
-        "guiding" => vec![change(
-            "guiding",
-            (!base.guiding()).to_string(),
-            // crust render has no guiding flag: the stage authors it.
-            None,
-            "crust:pathGuiding",
-            set_guiding,
-        )],
         other => unreachable!("unknown factor {other}"),
     })
 }
@@ -276,27 +259,23 @@ struct Shot {
     image: CropImage,
     /// The `learned` pre-pass: over the full frame whatever the crop.
     selection_s: f64,
-    /// Guiding's training passes: over the crop.
-    training_s: f64,
     render_s: f64,
 }
 
 impl Shot {
     fn setup_s(&self) -> f64 {
-        self.selection_s + self.training_s
+        self.selection_s
     }
 }
 
-/// A render's setup, `(selection, training)`: the `learned` pre-pass and
-/// guiding's training passes. Every other selection is built in next to
-/// no time, and counts as none — so a trial without setup has none.
-fn setup_parts(settings: RenderSettings, selection: Duration, m: &Measured) -> (f64, f64) {
-    let selection_s = if settings.light_selection() == LightSelection::Learned {
+/// A render's setup: the `learned` pre-pass. Every other selection is built
+/// in next to no time, and counts as none — so a trial without setup has none.
+fn setup_of(settings: RenderSettings, selection: Duration) -> f64 {
+    if settings.light_selection() == LightSelection::Learned {
         selection.as_secs_f64()
     } else {
         0.0
-    };
-    (selection_s, m.setup_s)
+    }
 }
 
 /// Each pixel's luminance in a measured render, indexed as its variance
@@ -312,27 +291,25 @@ fn luminance(m: &Measured, rect: PixelRect, luma: utils::Luma) -> Vec<f64> {
 }
 
 /// Renders `settings` (switching the renderer to them) and measures it: the
-/// light selection's setup and guiding's training count as setup.
+/// light selection's setup counts as setup.
 fn shoot(renderer: &mut Renderer, settings: RenderSettings) -> (Shot, Measured) {
     let selection = renderer.reconfigure(settings);
     let mut m = renderer.render_measured(
         None,
         Instruments {
             variance: true,
-            quiet: true,
             ..Instruments::default()
         },
     );
     let rect = settings.region().flip_y(settings.get_dimensions().1);
     let lum = luminance(&m, rect, renderer.lights.luma());
-    let (selection_s, training_s) = setup_parts(settings, selection, &m);
+    let selection_s = setup_of(settings, selection);
     let shot = Shot {
         image: CropImage {
             lum,
             var: std::mem::take(&mut m.var_map),
         },
         selection_s,
-        training_s,
         render_s: m.render_s,
     };
     (shot, m)
@@ -387,34 +364,28 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
 }
 
 /// A run's setup at full-frame scale (D9): the `learned` pre-pass as
-/// measured, since it trains over the full frame whatever the crop, plus
-/// guiding's training scaled from the crop to the frame, median over the
-/// crops. A combined trial's is thereby the sum of its factors'.
-fn full_frame_setup(run: &Running, areas: &[usize], frame_pixels: f64) -> f64 {
+/// measured, since it trains over the full frame whatever the crop, median
+/// over the crops. A combined trial's is thereby the sum of its factors'.
+fn full_frame_setup(run: &Running) -> f64 {
     let selection = median(
         run.per_crop
             .iter()
             .flat_map(|c| c.pairs.iter().map(|(_, t)| t.selection_s)),
     );
-    let training = median(run.per_crop.iter().zip(areas).map(|(c, &a)| {
-        median(c.pairs.iter().map(|(_, t)| t.training_s)) * frame_pixels / a.max(1) as f64
-    }));
-    [selection, training]
-        .into_iter()
-        .filter(|x| x.is_finite())
-        .sum()
+    if selection.is_finite() {
+        selection
+    } else {
+        0.0
+    }
 }
 
 /// What every trial is judged against.
 struct Judging<'a> {
     crops: &'a [Crop],
-    /// Each crop's pixels.
-    areas: &'a [usize],
     refs: &'a [CropImage],
     /// Each crop's noise floor (D7).
     floors: &'a [Option<f64>],
     spp: u32,
-    frame_pixels: f64,
     /// The baseline's full-frame setup, and its projected render time to
     /// reach the target (D9).
     setup_b: f64,
@@ -490,7 +461,7 @@ fn judge(run: &Running, j: &Judging) -> Trial {
             .map(|c| (c.median.0, c.verdict))
             .collect::<Vec<_>>(),
     );
-    let setup_t = full_frame_setup(run, j.areas, j.frame_pixels);
+    let setup_t = full_frame_setup(run);
     let at_target = trials::delta_eff_at_target(geo, j.setup_b, setup_t, j.render_b);
     let (flag, usd_attribute) = run.names();
     Trial {
@@ -507,7 +478,7 @@ fn judge(run: &Running, j: &Judging) -> Trial {
     }
 }
 
-/// The baseline's images of crop `k`, one per seed. An unguided baseline
+/// The baseline's images of crop `k`, one per seed. A baseline
 /// renders the same image for every trial, so the first run's stand for
 /// all of them.
 fn baseline_images(runs: &[Running], k: usize) -> Vec<&CropImage> {
@@ -605,13 +576,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let started = Instant::now();
     let mut renderer = Renderer::new(scene.camera, scene.world, lights, probe(full, 1))
         .with_volumes(scene.volumes);
-    let _ = renderer.render_measured(
-        None,
-        Instruments {
-            quiet: true,
-            ..Instruments::default()
-        },
-    );
+    let _ = renderer.render_measured(None, Instruments::default());
     let calibration_s = started.elapsed().as_secs_f64();
     let spp_p1 = schedule::baseline_spp(budget_s, calibration_s);
     let rows = noise::rows(&groups);
@@ -627,7 +592,6 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             tile_times: true,
             clamp: authored.indirect_clamp(),
             variance: true,
-            quiet: true,
             ..Instruments::default()
         },
     );
@@ -644,8 +608,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     if sched.exhausted() {
         exceeded = Some("P1".into());
     }
-    let (p1_selection, p1_training) = setup_parts(p1_settings, selection, &p1);
-    let p1_setup = p1_selection + p1_training;
+    let p1_setup = setup_of(p1_settings, selection);
     info!(
         "diagnostic P1: {w}x{h} at {spp_p1} spp in {:.2}s (calibration {:.2}s at 1 spp)",
         p1_s, calibration_s
@@ -853,10 +816,9 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         Ok(())
     };
     // The authored settings' setup per render of crop `k`: the `learned`
-    // pre-pass covers the full frame whatever the crop, guiding's training
-    // scales with the pixels. Tier 3 renders these settings; tier 2's are
+    // pre-pass covers the full frame whatever the crop. Tier 3 renders these settings; tier 2's are
     // not known yet, so its reserve assumes them too.
-    let setup_at = |k: usize| p1_selection + p1_training * areas[k] as f64 / pixels;
+    let setup_at = |_: usize| p1_setup;
     let later = schedule::Later {
         tier2_s: if threshold > 0.0 {
             (0..areas.len())
@@ -905,10 +867,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let mut runs: Vec<Running> = Vec::new();
     let mut tier1_complete = exceeded.is_none();
     // The baseline's own setup per crop render, which every pair pays too:
-    // the light selection's (crop-independent) and guiding's training
-    // (scaling with the pixels).
-    let baseline_setup_s =
-        p1_selection * picked.len() as f64 + p1_training * crop_pixels as f64 / pixels;
+    // the light selection's (crop-independent).
+    let baseline_setup_s = p1_setup * picked.len() as f64;
     let measure = |renderer: &mut Renderer,
                    sched: &mut schedule::Schedule,
                    setup_by_factor: &mut Vec<(&'static str, f64)>,
@@ -919,8 +879,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
      -> Option<Running> {
         // Setup, per trial render: what this factor cost last time, else
         // measured (a `learned` pre-pass, over the full frame whatever the
-        // crop) or estimated (guiding's training passes) before admitting
-        // the trial — a first trial estimated at no setup could overrun.
+        // crop) before admitting the trial — a first trial estimated at no
+        // setup could overrun.
         let mut setup_total = 0.0f64;
         for c in &changes {
             let known = setup_by_factor
@@ -935,11 +895,6 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                         .as_secs_f64();
                     setup_by_factor.push((c.factor, s));
                     s * picked.len() as f64
-                }
-                None if c.factor == "guiding" && c.value == "true" => {
-                    per_px_spp
-                        * crop_pixels as f64
-                        * schedule::guiding_training_spp(full.guiding_train_iterations()) as f64
                 }
                 None => 0.0,
             };
@@ -1077,11 +1032,9 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         let floors = noise_floors(runs, &refs);
         let j = Judging {
             crops,
-            areas: &areas,
             refs: &refs,
             floors: &floors,
             spp: spp_t,
-            frame_pixels: pixels,
             setup_b: p1_setup,
             render_b,
         };
@@ -1236,7 +1189,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     // measured them; the baseline's own without one.
     let projected_setup = best
         .and_then(|t| runs.iter().find(|r| r.id == t.id))
-        .map_or(p1_setup, |r| full_frame_setup(r, &areas, pixels));
+        .map_or(p1_setup, full_frame_setup);
     let mut adaptive = Vec::new();
     // Every measurement the budget cannot fit is listed, whatever tier 1
     // left of it (D10).
@@ -1703,12 +1656,6 @@ pub fn effective_settings(s: &RenderSettings, flags: &SceneFlags) -> Vec<Setting
             s.pixel_filter().radius().to_string(),
             Some("--filter-radius"),
             Some("crust:pixelFilterRadius"),
-        ),
-        row(
-            "path_guiding",
-            s.guiding().to_string(),
-            None,
-            Some("crust:pathGuiding"),
         ),
         row(
             "variance_threshold",

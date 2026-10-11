@@ -20,7 +20,7 @@ pub fn luminance(c: Vec3A) -> f32 {
 
 /// The luminance weights of a working colour space — the `Y` row of its
 /// RGB → XYZ matrix — and so the scalar the renderer uses wherever a colour
-/// has to become one weight: guiding flux, light power, environment-map
+/// has to become one weight: light power, environment-map
 /// importance, adaptive-sampling variance, lobe selection. Carried by value
 /// to each of those rather than read from a global, since two scenes in one
 /// process may render in different spaces.

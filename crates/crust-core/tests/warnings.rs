@@ -90,6 +90,118 @@ fn render_settings_warnings() {
     );
 }
 
+/// A `RenderSettings` scope authoring `attrs`, for the path guiding tests.
+fn settings_with(attrs: &str) -> String {
+    format!(
+        r#"def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int2 resolution = (48, 32)
+        int crust:samplesPerPixel = 16
+{attrs}
+    }}
+}}
+"#
+    )
+}
+
+#[test]
+fn path_guiding_settings_are_warned_about_once_and_not_read() {
+    // Whatever the value, `false` included, and whichever attributes.
+    for (name, attrs, named) in [
+        (
+            "guiding_on",
+            "bool crust:pathGuiding = true",
+            ["crust:pathGuiding"].as_slice(),
+        ),
+        (
+            "guiding_off",
+            "bool crust:pathGuiding = false",
+            &["crust:pathGuiding"],
+        ),
+        (
+            "guiding_prob_only",
+            "float crust:guidingProb = 0.7",
+            &["crust:guidingProb"],
+        ),
+        (
+            "guiding_all",
+            "bool crust:pathGuiding = true\nint crust:guidingTrainIterations = 8\nfloat crust:guidingProb = 0.5",
+            &[
+                "crust:pathGuiding",
+                "crust:guidingTrainIterations",
+                "crust:guidingProb",
+            ],
+        ),
+    ] {
+        let scene = load(name, "", &settings_with(attrs));
+        assert_eq!(
+            codes(&scene),
+            [WarningCode::SettingsPathGuidingRemoved],
+            "{name}: {:#?}",
+            scene.warnings
+        );
+        let w = record(&scene, WarningCode::SettingsPathGuidingRemoved);
+        assert_eq!(w.kind, WarningKind::Refused);
+        assert_eq!(w.count, 1, "{name}");
+        assert_eq!(w.prims, ["/Render/settings"]);
+        for attribute in named {
+            assert!(w.message.contains(attribute), "{name}: {}", w.message);
+        }
+    }
+}
+
+#[test]
+fn a_stage_that_never_mentioned_guiding_has_no_guiding_warning() {
+    let scene = load("no_guiding", "", &settings_with(""));
+    assert!(
+        !codes(&scene).contains(&WarningCode::SettingsPathGuidingRemoved),
+        "{:#?}",
+        scene.warnings
+    );
+}
+
+/// A stage that still authors `crust:pathGuiding` renders what the same
+/// stage without it renders, bit for bit: the setting is warned about and
+/// otherwise ignored.
+#[test]
+fn a_stage_authoring_path_guiding_renders_unguided() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/cornellbox.usda");
+    let cornell = std::fs::read_to_string(root).expect("read cornellbox.usda");
+    let render = |name: &str, attrs: &str| {
+        let text = format!("{cornell}\n{}", settings_with(attrs));
+        let scene = Scene::from_usd(&write_stage(name, &text)).expect("loads");
+        let guiding = codes(&scene).contains(&WarningCode::SettingsPathGuidingRemoved);
+        let (w, h) = scene.settings.get_dimensions();
+        let buffer = crust_core::Renderer::new(
+            scene.camera,
+            scene.world,
+            scene.lights,
+            scene.settings.with_indirect_clamp(0.0),
+        )
+        .render_with_tiles();
+        let bits: Vec<u32> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let c = buffer.get_pixel(x, y);
+                [c.x.to_bits(), c.y.to_bits(), c.z.to_bits()]
+            })
+            .collect();
+        (bits, guiding)
+    };
+    let (plain, plain_warned) = render("cornell_plain", "");
+    let (off, off_warned) = render("cornell_guiding_off", "bool crust:pathGuiding = false");
+    let (on, on_warned) = render(
+        "cornell_guiding_on",
+        "bool crust:pathGuiding = true\nint crust:guidingTrainIterations = 4",
+    );
+    assert!(!plain_warned && off_warned && on_warned);
+    assert!(plain.iter().any(|&b| b != 0), "the render is not black");
+    assert!(plain == off, "guiding authored false changed the image");
+    assert!(plain == on, "guiding authored true changed the image");
+}
+
 #[test]
 fn a_frame_outside_the_time_range_is_stage_level() {
     let path = write_stage(

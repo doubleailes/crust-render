@@ -5,7 +5,7 @@
 //! constants at import. But it must also not be walked as a name-addressed DOM
 //! inside the integrator: every lookup would be a string hash, and the teapot's
 //! ceramic graph alone is ~50 nodes consulted several times per path vertex
-//! (once to sample, again for each NEE and guide evaluation).
+//! (once to sample, again for each NEE evaluation).
 //!
 //! So the graph is **compiled once** into a [`Program`]: a topologically
 //! ordered `Vec<Op>` whose operands are slot *indices* into the values

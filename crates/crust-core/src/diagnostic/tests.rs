@@ -15,20 +15,12 @@ pub(super) fn fixture() -> Report {
             resolution: [640, 360],
             region: None,
         },
-        effective_settings: vec![
-            Setting {
-                name: "light_selection".into(),
-                value: "power".into(),
-                flag: Some("--light-selection".into()),
-                usd_attribute: Some("crust:lightSelection".into()),
-            },
-            Setting {
-                name: "path_guiding".into(),
-                value: "false".into(),
-                flag: None,
-                usd_attribute: Some("crust:pathGuiding".into()),
-            },
-        ],
+        effective_settings: vec![Setting {
+            name: "light_selection".into(),
+            value: "power".into(),
+            flag: Some("--light-selection".into()),
+            usd_attribute: Some("crust:lightSelection".into()),
+        }],
         run: RunInfo {
             budget_s: n(120.0),
             used_s: n(61.23456),
@@ -424,13 +416,12 @@ fn baseline(name: &str, label: bool) -> crate::tracer::Measured {
             tile_times: true,
             clamp: Some(1.0),
             variance: true,
-            quiet: true,
             ..Instruments::default()
         },
     )
 }
 
-/// D5 rests on this: an unguided configuration renders the same image,
+/// D5 rests on this: a configuration renders the same image,
 /// and the same variance, every time — only its time varies between
 /// repeats. And the instruments change nothing of it.
 #[test]
@@ -572,21 +563,21 @@ fn the_suggested_command_applies_every_suggestion() {
     let s = crate::RenderSettings::default()
         .with_light_selection(crate::LightSelection::Learned)
         .with_light_samples(2, 1);
-    let guiding = Suggestion {
-        id: "guiding=true".into(),
+    let stage_only = Suggestion {
+        id: "variance_threshold=0.01".into(),
         flag: None,
-        usd_attribute: Some("crust:pathGuiding".into()),
-        value: "true".into(),
+        usd_attribute: Some("crust:varianceThreshold".into()),
+        value: "0.01".into(),
         expected_delta_eff: Num(1.3),
         evidence: vec!["combined".into()],
         expected_delta_eff_at_target: Num(1.3),
     };
-    let cmd = super::command(&o, &s, &[guiding], None);
+    let cmd = super::command(&o, &s, &[stage_only], None);
     assert_eq!(
         cmd,
         "crust render -i 'shots/a b.usda' -f 1012 --camera /cams/main --strategy power \
          --light-selection learned --light-samples 2 --light-samples-indirect 1 --auto-tx  \
-         # and author on the stage: crust:pathGuiding = true"
+         # and author on the stage: crust:varianceThreshold = 0.01"
     );
     o.region = Some(crate::PixelRect::new(0, 0, 64, 32));
     let cmd = super::command(&o, &s, &[], o.region);
@@ -676,25 +667,17 @@ fn each_pair_has_its_own_fixed_seed() {
     assert!(image(settings.with_frame(super::seed(frame, 2))) != one);
 }
 
-/// Every pair is an independent draw (D7): no pair's seed is another's, and
-/// no guided render's training pass — `seed + (k + 1) · step`, which a
-/// guided pair or a guided baseline blends into its image — draws another
-/// pair's or pass's samples. The tracer seeds with `frame as u32`, so the
-/// check is modulo 2³², and it does not depend on the frame.
+/// Every pair is an independent draw (D7): no pair's seed is another's. The
+/// tracer seeds with `frame as u32`, so the check is modulo 2³², and it does
+/// not depend on the frame.
 #[test]
-fn no_pair_or_pass_shares_a_seed() {
-    let step = crate::tracer::GUIDING_PASS_SEED_STEP;
+fn no_pair_shares_a_seed() {
     for frame in [0isize, 1004, -7] {
         let mut seen = std::collections::HashMap::new();
         for i in 0..64u32 {
-            let base = super::seed(frame, i) as u32;
-            // k = 0 is the pair's own seed, its final pass; k ≥ 1 its
-            // training passes.
-            for k in 0..=32u32 {
-                let s = base.wrapping_add(k.wrapping_mul(step));
-                if let Some(other) = seen.insert(s, (i, k)) {
-                    panic!("frame {frame}: pair {i} pass {k} reuses {other:?}'s seed");
-                }
+            let s = super::seed(frame, i) as u32;
+            if let Some(other) = seen.insert(s, i) {
+                panic!("frame {frame}: pair {i} reuses pair {other}'s seed");
             }
         }
     }
@@ -708,7 +691,6 @@ fn shot(lum: f64, var: f64, render_s: f64) -> super::Shot {
             var: vec![var; 400],
         },
         selection_s: 0.0,
-        training_s: 0.0,
         render_s,
     }
 }
@@ -742,11 +724,9 @@ fn judge_all(runs: &[super::Running]) -> (Vec<super::CropImage>, Vec<Trial>) {
     let floors = super::noise_floors(runs, &refs);
     let j = super::Judging {
         crops: &crops,
-        areas: &[400],
         refs: &refs,
         floors: &floors,
         spp: 4,
-        frame_pixels: 1600.0,
         setup_b: 0.0,
         render_b: 10.0,
     };
@@ -908,6 +888,36 @@ fn a_report_from_before_the_hardening_still_compares() {
     let d = super::compare::deltas(old, &now);
     assert!(d.comparable, "{:?}", d.note);
     assert_eq!(d.suggestions_gone, ["light_samples=2"]);
+}
+
+/// A report from before the guiding trial was removed names a `guiding`
+/// trial, its suggestion and its finding: `--baseline` reads it all the same,
+/// comparing what is still there and reporting the vanished ones as gone.
+#[test]
+fn a_baseline_that_ran_the_removed_guiding_trial_still_compares() {
+    let mut old: serde_json::Value =
+        serde_json::from_str(include_str!("snapshots/before_hardening.json")).unwrap();
+    let mut trial = old["trials"][0].clone();
+    trial["id"] = "guiding=true".into();
+    trial["factor"] = "guiding".into();
+    trial["value"] = "true".into();
+    trial["flag"] = serde_json::Value::Null;
+    trial["usd_attribute"] = "crust:pathGuiding".into();
+    old["trials"].as_array_mut().unwrap().push(trial);
+    let mut suggestion = old["suggestions"][0].clone();
+    suggestion["id"] = "guiding=true".into();
+    old["suggestions"].as_array_mut().unwrap().push(suggestion);
+    let mut finding = old["static_findings"][0].clone();
+    finding["id"] = "guiding_without_indirect".into();
+    old["static_findings"].as_array_mut().unwrap().push(finding);
+    let old = old.to_string();
+    let mut now = previous();
+    now.suggestions.clear();
+    let d = super::compare::deltas(&old, &now);
+    assert!(d.comparable, "{:?}", d.note);
+    assert!(d.suggestions_gone.contains(&"light_samples=2".to_owned()));
+    assert!(d.suggestions_gone.contains(&"guiding=true".to_owned()));
+    assert!(d.baseline_mrse.is_some());
 }
 
 /// Light seen directly or in a reflection is never what the brightest

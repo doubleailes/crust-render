@@ -283,7 +283,7 @@ pub struct Baseline {
     pub spp: u32,
     /// `setup_s + render_s`.
     pub time_s: Num,
-    /// The `learned` pre-pass and guiding's training.
+    /// The `learned` pre-pass.
     pub setup_s: Num,
     pub render_s: Num,
     /// Mean over pixels of variance over squared luminance, against the
@@ -416,7 +416,7 @@ pub struct CropTrial {
     pub render_baseline_s: Num,
     #[serde(alias = "time_trial_s")]
     pub render_trial_s: Num,
-    /// The `learned` pre-pass and guiding's training, per render.
+    /// The `learned` pre-pass, per render.
     pub setup_trial_s: Num,
     pub verdict: Verdict,
     /// Mean luminance of both sides over the pixels the picture check

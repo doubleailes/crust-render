@@ -186,7 +186,7 @@ impl LightList {
     /// The luminance weights of the working colour space the scene's colours
     /// are in ([`crate::color::luma`]): what every heuristic that weighs a
     /// colour by one number uses — light power here, and from here the
-    /// learned light cache, guiding's training signal and the renderer's
+    /// learned light cache and the renderer's
     /// adaptive-sampling and `variance` statistics. Rec.709's until
     /// [`LightList::set_luma`].
     pub fn luma(&self) -> utils::Luma {

@@ -114,21 +114,6 @@ fn strategy_and_filter_builders_replace_their_field() {
 }
 
 #[test]
-fn guiding_builder_clamps_its_probability() {
-    // Guiding has no getter, so the clamp is observable only through a
-    // render completing — but the builder must at least accept edge values.
-    let s = RenderSettings::default()
-        .with_resolution(4, 4)
-        .with_samples_per_pixel(2)
-        .with_max_depth(2)
-        .with_adaptive_sampling(2, 0.0);
-    let _ = s.with_guiding(true, 0, 0.0);
-    let _ = s.with_guiding(true, 100, 1.0);
-    let off = s.with_guiding(false, 3, 0.5);
-    assert_eq!(off.samples_per_pixel(), 2);
-}
-
-#[test]
 fn sampling_strategies_partition_unity_for_every_pair() {
     for s in [
         SamplingStrategy::PowerMis,

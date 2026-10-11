@@ -181,9 +181,6 @@ adopting Embree, not be replaced by it:
   correction) and free-standing `VolumeRegion`s (homogeneous / fBm noise / voxel
   grids) with delta tracking, ratio-tracked shadow transmittance, phase MIS. Embree
   has no concept of participating media at all.
-- **Path guiding** (Practical Path Guiding SD-tree with variance-weighted pass
-  blending and a guiding-efficiency gate) — renderer research territory Embree never
-  touches.
 - **QMC sampling** via the from-scratch `openqmc-rs` port (bit-for-bit against
   upstream), domain-tree threaded through the integrator by value.
 - **Adaptive sampling**, area-light NEE, **USD scene import** (with a local xformOp

@@ -49,7 +49,7 @@ The stage is imported once. Then, until the budget is spent:
    rates.
 2. **Findings**, from the import, the baseline and tier 3: textures without a `.tx`, a
    cache that misses, emissive geometry no shadow ray can find, many lights picked
-   uniformly, guiding on where direct light dominates, memory near the machine's — and
+   uniformly, memory near the machine's — and
    what makes the picture fragile: a clamp that removes a visible share of the image, a
    few pixels holding much of the energy, light that only BSDF sampling finds, a
    visualization strategy authored (see [The picture](#the-picture)).
@@ -58,8 +58,8 @@ The stage is imported once. Then, until the budget is spent:
    every worker thread four tiles. `--region` makes that region the only crop.
 4. **Tier 1, unbiased swaps.** Each setting that changes only noise and time is tried
    on its own: the other MIS heuristic (`power` ↔ `balance`), every other light
-   selection, 2 and 4 light samples at the camera vertex, 2 at the indirect ones,
-   guiding on or off. Then the winners of different settings are tried together.
+   selection, 2 and 4 light samples at the camera vertex, 2 at the indirect ones.
+   Then the winners of different settings are tried together.
    `--strategy light` and `--strategy bsdf` are never tried: they show what MIS
    balances between, and on a scene with light only one of them reaches they render
    darker while looking less noisy. Every trial is checked for a change of the picture
@@ -112,13 +112,13 @@ These rules keep the measurement honest:
 - **Unbiased conditions.** The clamp is off and adaptive sampling is off, so no trial
   can "win" by removing energy or by stopping where it happens to look converged.
 
-**Setup** — the `learned` light selection's pre-pass and guiding's training — is
+**Setup** — the `learned` light selection's pre-pass — is
 reported per pair (`setup_trial_s`) but left out of a pair's ΔEff: on a small crop at a
 few samples it would weigh far more than in the render it stands for. It is charged
 where a render pays it, in the **ΔEff at the target** (`delta_eff_at_target`): the
 baseline's projected full-frame time to reach tier 2's target error, setup included,
 over the trial's. The pre-pass counts as measured (it trains over the whole frame
-whatever the crop), guiding's training scaled from the crop to the frame. Without
+whatever the crop). Without
 setup on either side it equals the overall ΔEff. It is an estimate, and it can only
 veto a suggestion.
 
@@ -238,7 +238,7 @@ The first seven rows add up to the image. Each row gives its **own** relative er
 image's variance: the rows' variances do not add up to it. The row with the largest
 error against the image is the noise's **dominant** source, and orders the trials when
 the budget cannot fit them all: direct rows first try light selection and light samples,
-indirect rows first try guiding and indirect light samples, and more than eight lights
+indirect rows first try indirect light samples, and more than eight lights
 first try light selection.
 
 **Light groups** add one row per `crust:light:lpeTag`, or, with no tags and at most
@@ -316,11 +316,6 @@ report: every one of them is meant to change only noise and time.
 - **Crops are not the frame.** Three crops chosen for different reasons cover the usual
   cases, and disagreement between them is reported as `mixed`; full-frame projections
   are labelled estimates and never produce suggestions.
-- **Guided renders are not repeatable.** Whether a guided render's last pass is guided
-  depends on an efficiency measured in wall-clock time, so two guided renders of the
-  same settings can differ. Each pair's error is therefore measured on its own images.
-- **Guiding has no flag.** A guiding suggestion names `crust:pathGuiding` only; the
-  suggested command lists it in a trailing comment, to be authored on the stage.
 - **Small crops measure the thread pool.** A frame smaller than the crop size is one
   crop, the whole frame, and a `--region` smaller than it is used as given, with a
   warning: either way, on many threads, part of what is timed is the pool's ramp-up.
@@ -330,8 +325,7 @@ report: every one of them is meant to change only noise and time.
   pixel, report that energy instead.
 - **At a few samples, a biased trial's shift is a sign, not a measure.** Where
   fireflies carry the image, the shift depends on which pixels each pair leaves out:
-  on ALab at 4 spp guiding read +8–13% brighter, where it is in fact about 7% darker
-  (at 32 spp the check read −4% to −13%). Trust the verdict; read the number at a
+  a biased trial's shift can read well off its true value at 4 spp. Trust the verdict; read the number at a
   larger `--budget`.
 - **Thread time, not wall time.** A crop's baseline time is the time its tiles took on
   their workers, summed: a share of the work.

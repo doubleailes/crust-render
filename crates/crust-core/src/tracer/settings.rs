@@ -163,10 +163,6 @@ pub struct RenderSettings {
     // `with_adaptive_neighbour_tolerance`). Negative: no comparison.
     pub(super) adaptive_neighbour_tolerance: f32,
     pub(super) frame: isize,
-    // Path guiding (opt-in via `crust:pathGuiding`; see `with_guiding`).
-    pub(super) guiding: bool,
-    pub(super) guiding_train_iterations: u32,
-    pub(super) guiding_prob: f32,
     // MIS strategy (see `SamplingStrategy`; `crust:samplingStrategy` /
     // `--strategy`).
     pub(super) sampling_strategy: SamplingStrategy,
@@ -214,9 +210,6 @@ impl Default for RenderSettings {
             variance_threshold: 0.05,
             adaptive_neighbour_tolerance: DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
             frame: 0,
-            guiding: false,
-            guiding_train_iterations: 4,
-            guiding_prob: 0.5,
             sampling_strategy: SamplingStrategy::default(),
             pixel_filter: PixelFilter::default(),
             light_selection: LightSelection::default(),
@@ -315,30 +308,6 @@ impl RenderSettings {
 
     pub fn frame(&self) -> isize {
         self.frame
-    }
-
-    /// Enable (or disable) path guiding with the given number of training
-    /// iterations and guide-sampling probability α.
-    pub fn with_guiding(mut self, enabled: bool, train_iterations: u32, guide_prob: f32) -> Self {
-        self.guiding = enabled;
-        self.guiding_train_iterations = train_iterations.max(1);
-        self.guiding_prob = guide_prob.clamp(0.1, 0.9);
-        self
-    }
-
-    /// Whether path guiding is on — see [`RenderSettings::with_guiding`].
-    pub fn guiding(&self) -> bool {
-        self.guiding
-    }
-
-    /// Guiding's training iterations (at least 1).
-    pub fn guiding_train_iterations(&self) -> u32 {
-        self.guiding_train_iterations
-    }
-
-    /// Guiding's guide-sampling probability α.
-    pub fn guiding_prob(&self) -> f32 {
-        self.guiding_prob
     }
 
     /// Select how light sampling and BSDF sampling combine — see

@@ -2,13 +2,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::Vec3A;
 use rayon::prelude::*;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::aov::{AovFilm, AovLayout, AovRequest, CameraFrame, SampleExtras, UnitAov};
 use crate::buffer::Buffer;
 use crate::camera::Camera;
 use crate::filter::FilterSampler;
-use crate::guiding::{GuidingConfig, GuidingField, SampleData};
 use crate::profile::{self, Section};
 use crate::rt_world::World;
 use crate::stats::RayStats;
@@ -58,21 +57,10 @@ pub struct Rendered {
     /// request needs none, as [`Renderer::render_with_aovs`] returns.
     pub film: Option<AovFilm>,
     /// What the integrator did — every sample traced, a cancelled render's
-    /// included. The adaptive counters describe the final pass, and are
-    /// empty when a cancel leaves the image without one (a guided render
-    /// cancelled in training, or before its final pass gave every pixel two
-    /// samples). A completed guided render at 1 spp keeps them although its
-    /// blend gives that pass no weight.
+    /// included.
     pub rays: RayStats,
     /// Whether the render completed or was cancelled.
     pub outcome: RenderOutcome,
-}
-
-/// Per-pass guiding state handed down the integrator.
-struct GuidingContext<'a> {
-    field: &'a GuidingField,
-    /// Record `SampleData` for field training during this pass?
-    training: bool,
 }
 
 /// Parameters of one full-frame render pass.
@@ -98,10 +86,9 @@ struct PassConfig {
     measure_clamp: Option<f32>,
     /// Sweep to the first check point in stages of 1, 2, 4, … spp
     /// ([`sweep_stages`]) rather than in one go. Scheduling only: the image
-    /// is bit-identical either way. On for every final pass; off for
-    /// training passes, whose samples must sit contiguously per pixel in
-    /// their unit's buffer, and for the unstaged reference the tests pin
-    /// staging against ([`Instruments::unstaged`]).
+    /// is bit-identical either way. On for every pass; off only for the
+    /// unstaged reference the tests pin staging against
+    /// ([`Instruments::unstaged`]).
     staged: bool,
 }
 
@@ -111,18 +98,13 @@ struct PassConfig {
 /// unit or per camera sample only while it is on.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Instruments {
-    /// Wall-clock seconds per work unit (16×16 tile or row), summed over a
-    /// guided render's passes.
+    /// Wall-clock seconds per work unit (16×16 tile or row).
     pub(crate) tile_times: bool,
     /// While the render's own clamp is off: what this indirect clamp would
     /// remove, per pixel, measured on the final pass without applying it.
     pub(crate) clamp: Option<f32>,
-    /// Return the per-pixel variance of the image — for a guided render,
-    /// of its blend of passes, which needs every pass's variance kept.
+    /// Return the per-pixel variance of the image.
     pub(crate) variance: bool,
-    /// The render is one of many (the diagnostic's trials): what a render
-    /// says once at `INFO` goes to `DEBUG`, so the log stays bounded.
-    pub(crate) quiet: bool,
     /// Sweep the final pass to its first check point in one go, as before
     /// the sweep was staged: the reference the staged sweep is pinned
     /// bit-identical against. For tests; no render sets it.
@@ -154,10 +136,7 @@ pub(crate) struct Measured {
     /// [`Instruments::tile_times`] asked for them.
     pub(crate) tiles: Vec<(PixelRect, f64)>,
     pub(crate) clamp: ClampMeasure,
-    /// Wall-clock seconds of guiding's training passes: setup, not the
-    /// image's sampling (though they blend into it).
-    pub(crate) setup_s: f64,
-    /// Wall-clock seconds of the final (or only) pass.
+    /// Wall-clock seconds of the pass.
     pub(crate) render_s: f64,
     /// Whether a [`RenderControl`] cut the render short.
     pub(crate) outcome: RenderOutcome,
@@ -182,85 +161,17 @@ impl Measured {
 }
 
 /// Image-quality statistics of one render pass.
-/// A pass's guiding training samples, where the workers left them: one
-/// buffer per work unit (tile or row), and the order to read them in.
-///
-/// The SD-tree accumulates its samples in floating point, so they must reach
-/// it in scanline order whichever order the pixels were rendered in. Rather
-/// than copy every sample into one frame-order vector, the pass records, per
-/// pixel in scanline order, which buffer holds its samples and where; reading
-/// through [`PassSamples::iter`] visits them in exactly that order.
-#[derive(Default)]
-struct PassSamples {
-    buffers: Vec<Vec<SampleData>>,
-    /// `(buffer, start, end)` runs in scanline order.
-    order: Vec<(u32, u32, u32)>,
-}
-
-impl PassSamples {
-    fn len(&self) -> usize {
-        self.buffers.iter().map(Vec::len).sum()
-    }
-
-    /// Appends the run `buffer[start..end]`, extending the last run when it
-    /// continues it (the next pixel of the same tile row).
-    fn push_run(&mut self, buffer: u32, start: u32, end: u32) {
-        match self.order.last_mut() {
-            Some((b, _, e)) if *b == buffer && *e == start => *e = end,
-            _ => self.order.push((buffer, start, end)),
-        }
-    }
-
-    /// Every sample, in scanline order.
-    fn iter(&self) -> impl Iterator<Item = &SampleData> {
-        self.order
-            .iter()
-            .flat_map(|&(b, s, e)| &self.buffers[b as usize][s as usize..e as usize])
-    }
-}
-
 struct PassStats {
-    /// Mean per-pixel variance of the pixel estimate — the inverse-variance
-    /// blending weight (`f64::INFINITY` when spp < 2 makes estimation
-    /// impossible).
-    variance: f64,
-    /// Per-pixel variance of the pixel-mean luminance, row-major. Feeds the
-    /// guiding efficiency estimate, which normalizes it against a reference
-    /// image shared by every pass being compared (`mean_relative_error`).
+    /// Per-pixel variance of the pixel-mean luminance, row-major.
     var_map: Vec<f64>,
     /// Integrator work this pass did.
     rays: RayStats,
     /// Each unit's rectangle and seconds, when the pass was timed.
     tiles: Vec<(PixelRect, f64)>,
     clamp: ClampMeasure,
-    /// Fewest samples any pixel took: the pass's budget (or the adaptive
-    /// minimum) unless it was cut short.
-    min_taken: u32,
     /// A [`RenderControl`] stopped the pass before every pixel took what it
     /// was scheduled to.
     interrupted: bool,
-}
-
-/// A guided render's pass that a [`RenderControl`] cut short: what the end
-/// of the render needs to decide whether it joins the blend (design D6).
-struct PartialPass {
-    buffer: Buffer,
-    film: Option<AovFilm>,
-    variance: f64,
-    var_map: Vec<f64>,
-    min_taken: u32,
-}
-
-impl PartialPass {
-    fn new(buffer: Buffer, film: Option<AovFilm>, stats: PassStats) -> Self {
-        PartialPass {
-            buffer,
-            film,
-            variance: stats.variance,
-            var_map: stats.var_map,
-            min_taken: stats.min_taken,
-        }
-    }
 }
 
 pub struct Renderer {
@@ -382,9 +293,7 @@ impl Renderer {
             .buffer
     }
 
-    /// Renders with a progress callback — see [`ProgressCallback`]. With
-    /// guiding enabled, only the final pass reports (training passes are
-    /// silent, as before).
+    /// Renders with a progress callback — see [`ProgressCallback`].
     pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
         self.render_impl(tiled, Some(progress), None, Instruments::default(), None)
             .buffer
@@ -394,9 +303,6 @@ impl Renderer {
     /// integrator did — see [`RayStats`]. Counting is unconditional and
     /// costs an increment per ray, so this is the same render either way;
     /// the other entry points simply discard the numbers.
-    ///
-    /// With guiding enabled the counters cover **every** pass, training
-    /// included, since all of them spend time.
     pub fn render_with_stats(&self, tiled: bool, progress: ProgressCallback) -> (Buffer, RayStats) {
         let m = self.render_impl(tiled, Some(progress), None, Instruments::default(), None);
         (m.buffer, m.rays)
@@ -439,9 +345,7 @@ impl Renderer {
     /// return for the same settings, bit for bit. A cancelled one returns the
     /// image, the AOVs and the counters of the samples it traced, each pixel
     /// estimated from its own samples, a pixel that took none black (and its
-    /// AOVs at their clear values); a cancelled guided render returns the
-    /// blend of the passes it completed, and the adaptive counters only of a
-    /// final pass that joined it. `progress` reports as it does for
+    /// AOVs at their clear values). `progress` reports as it does for
     /// the other entry points, and stops where the render stopped.
     pub fn render_with_control(
         &self,
@@ -519,35 +423,10 @@ impl Renderer {
         instruments: Instruments,
         control: Option<&RenderControl>,
     ) -> Measured {
-        let mut m = if self.settings.guiding {
-            self.render_guided(tiled, progress, layout, instruments, control)
-        } else {
-            self.render_unguided(tiled, progress, layout, instruments, control)
-        };
-        // The camera's exposure multiplies the resolved image, after every
-        // pass (and a guided render's blend): the samples, the clamp and the
-        // stopping rule all worked in scene radiance. Scale 1, every camera
-        // without an exposure, is skipped, so its image is the bits it was.
-        let scale = self.settings.exposure_scale;
-        if scale != 1.0 {
-            m.apply_exposure(scale);
-        }
-        m
-    }
-
-    /// One final pass, as everything but a guided render is.
-    fn render_unguided(
-        &self,
-        tiled: bool,
-        progress: Option<ProgressCallback>,
-        layout: Option<&AovLayout>,
-        instruments: Instruments,
-        control: Option<&RenderControl>,
-    ) -> Measured {
         let start = std::time::Instant::now();
         let cfg = self.final_pass_config(tiled, instruments);
-        let (buffer, film, _, pass) = self.render_pass(cfg, None, progress, layout, control);
-        Measured {
+        let (buffer, film, pass) = self.render_pass(cfg, progress, layout, control);
+        let mut m = Measured {
             outcome: if pass.interrupted {
                 RenderOutcome::Cancelled
             } else {
@@ -563,9 +442,17 @@ impl Renderer {
             },
             tiles: pass.tiles,
             clamp: pass.clamp,
-            setup_s: 0.0,
             render_s: start.elapsed().as_secs_f64(),
+        };
+        // The camera's exposure multiplies the resolved image: the samples,
+        // the clamp and the stopping rule all worked in scene radiance.
+        // Scale 1, every camera without an exposure, is skipped, so its
+        // image is the bits it was.
+        let scale = self.settings.exposure_scale;
+        if scale != 1.0 {
+            m.apply_exposure(scale);
         }
+        m
     }
 
     /// Whether camera rays sample the shutter: `ray.time` is read by exactly
@@ -598,357 +485,9 @@ impl Renderer {
         }
     }
 
-    /// Progressive path-guided rendering: training passes with geometrically
-    /// growing sample budgets (2, 2, 4, … spp — the schedule is floored at
-    /// 2 spp so every pass can estimate its own variance) build the guiding
-    /// field, then the full per-pixel budget renders with the frozen field.
-    /// Every pass is an unbiased image of the same scene, so instead of
-    /// discarding the training passes the final image blends all of them
-    /// weighted by inverse variance — passes rendered before the field
-    /// converged simply receive small weights.
-    ///
-    /// The training passes double as a guiding efficiency estimate
-    /// (Li et al. 2026, "Path Guiding in Disney's Zootopia 2"): efficiency
-    /// is `E = 1/(cost · variance)`, with wall-clock cost and MRSE variance
-    /// (`mean_relative_error`). The first pass runs before the field has
-    /// trained — effectively an unguided render — and gives `E_pg−`; the
-    /// last training pass, with the field at its most trained, gives
-    /// `E_pg+`. Variance scales as 1/spp while cost scales as spp, so the
-    /// product is comparable across passes with different budgets. If
-    /// `ΔEff = E_pg+/E_pg− < 1`, guiding costs more than the variance it
-    /// removes here, and the final pass renders unguided instead (the
-    /// training passes still blend in — they are unbiased either way).
-    ///
-    /// Every pass publishes into `control` as its units finish, so a
-    /// snapshot shows the pass in progress over the previous pass. When the
-    /// control cancels the render, no further pass starts and the guiding
-    /// field is not consulted again: the render returns the blend of the
-    /// passes it completed, plus the interrupted one when every pixel in it
-    /// took at least the two samples its variance needs — or the interrupted
-    /// pass alone when none completed.
-    fn render_guided(
-        &self,
-        tiled: bool,
-        progress: Option<ProgressCallback>,
-        layout: Option<&AovLayout>,
-        instruments: Instruments,
-        control: Option<&RenderControl>,
-    ) -> Measured {
-        // Every pass costs time, training included, so the counters cover
-        // all of them rather than the final pass alone.
-        let mut rays = RayStats::default();
-        let bounds = match self.world.bounds() {
-            Some(b) => b,
-            None => {
-                warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                return self.render_unguided(tiled, progress, layout, instruments, control);
-            }
-        };
-        // Training time (setup), each pass's variance map when the caller
-        // wants the blend's, and unit times summed over every pass.
-        let mut setup_s = 0.0f64;
-        let mut var_maps: Vec<Vec<f64>> = Vec::new();
-        let mut tiles: Vec<(PixelRect, f64)> = Vec::new();
-        let mut add_tiles = |pass: &[(PixelRect, f64)]| {
-            if tiles.is_empty() {
-                tiles = pass.to_vec();
-            } else {
-                for (sum, (_, s)) in tiles.iter_mut().zip(pass) {
-                    sum.1 += s;
-                }
-            }
-        };
-        let cfg = GuidingConfig {
-            train_iterations: self.settings.guiding_train_iterations,
-            guide_prob: self.settings.guiding_prob,
-            ..GuidingConfig::default()
-        };
-        let mut field = GuidingField::new(bounds, cfg);
-        let base_seed = self.settings.frame as u32;
-        let mut passes: Vec<(Buffer, f64)> = Vec::new();
-        // Each pass's AOVs, blended with the beauty's own weights at the end.
-        let mut films: Vec<AovFilm> = Vec::new();
-        // The pass the control cut short, kept apart from the completed ones
-        // until the end decides whether it joins them.
-        let mut interrupted: Option<PartialPass> = None;
-        // (per-pixel variance map, seconds) of the first pass (untrained
-        // field → effectively unguided) and of the last training pass
-        // (most-trained field) — the two endpoints of the efficiency
-        // estimate. The first pass does carry the sample-recording overhead,
-        // which slightly understates the unguided efficiency, i.e. errs
-        // toward keeping guiding on.
-        let mut eff_unguided: Option<(Vec<f64>, f64)> = None;
-        let mut eff_guided: Option<(Vec<f64>, f64)> = None;
-
-        for k in 0..cfg.train_iterations {
-            let spp = (1u32 << k.min(16)).max(2);
-            // Decorrelate the Sobol sequences between passes.
-            let seed = base_seed.wrapping_add((k + 1).wrapping_mul(GUIDING_PASS_SEED_STEP));
-            let gctx = GuidingContext {
-                field: &field,
-                training: true,
-            };
-            let train_cfg = PassConfig {
-                spp,
-                seed,
-                tiled,
-                adaptive: false,
-                shutter: self.shutter(),
-                twins: !self.lights.twinned_lights().is_empty(),
-                timed: instruments.tile_times,
-                // The clamp is measured on the final pass alone.
-                measure_clamp: None,
-                // A training pass's samples must sit contiguously per pixel.
-                staged: false,
-            };
-            let start = std::time::Instant::now();
-            let (buffer, film, samples, stats) =
-                self.render_pass(train_cfg, Some(&gctx), None, layout, control);
-            rays.merge(&stats.rays);
-            add_tiles(&stats.tiles);
-            let secs = start.elapsed().as_secs_f64();
-            setup_s += secs;
-            if stats.interrupted {
-                // Its samples never reach the field: nothing trained on a
-                // partial pass is consulted.
-                debug!(
-                    "path guiding: training pass {}/{} cancelled at {} spp or more per pixel",
-                    k + 1,
-                    cfg.train_iterations,
-                    stats.min_taken
-                );
-                interrupted = Some(PartialPass::new(buffer, film, stats));
-                break;
-            }
-            if instruments.variance {
-                var_maps.push(stats.var_map.clone());
-            }
-            films.extend(film);
-            debug!(
-                "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
-                k + 1,
-                cfg.train_iterations,
-                spp,
-                samples.len(),
-                stats.variance,
-                secs
-            );
-            if k == 0 {
-                eff_unguided = Some((stats.var_map, secs));
-            } else if k == cfg.train_iterations - 1 {
-                eff_guided = Some((stats.var_map, secs));
-            }
-            field.update(samples.iter(), k + 1);
-            debug!(
-                "path guiding: field now holds {} spatial leaf/leaves after pass {}/{}",
-                field.leaf_count(),
-                k + 1,
-                cfg.train_iterations
-            );
-            passes.push((buffer, stats.variance));
-        }
-
-        let mut clamp = ClampMeasure::default();
-        let mut render_s = 0.0;
-        if interrupted.is_none() {
-            let guide_final = match (&eff_unguided, &eff_guided) {
-                (Some((var_pt, cost_pt)), Some((var_pg, cost_pg))) if *cost_pg > 0.0 => {
-                    // Reference image for relative error: the blend of all
-                    // training passes — our stand-in for the paper's denoised
-                    // accumulated image, and crucially the *same* image for both
-                    // sides of the ratio.
-                    let ref_lum =
-                        blend_luminance(&passes, self.settings.raster_region(), self.lights.luma());
-                    let mrse_pt = mean_relative_error(var_pt, &ref_lum);
-                    let mrse_pg = mean_relative_error(var_pg, &ref_lum);
-                    if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0
-                    {
-                        let delta_eff = (cost_pt * mrse_pt) / (cost_pg * mrse_pg);
-                        // INFO once per render; DEBUG when the render is one of
-                        // a diagnostic's many.
-                        macro_rules! say {
-                            ($($t:tt)*) => {
-                                if instruments.quiet { debug!($($t)*) } else { info!($($t)*) }
-                            };
-                        }
-                        say!(
-                            "path guiding: estimated efficiency improvement ΔEff = {:.2} (>1 means guiding pays off)",
-                            delta_eff
-                        );
-                        if delta_eff < 1.0 {
-                            say!(
-                                "path guiding: ΔEff < 1 — guiding costs more than the variance it removes here; rendering the final pass unguided"
-                            );
-                        }
-                        delta_eff >= 1.0
-                    } else {
-                        true
-                    }
-                }
-                // A single training iteration never runs a guided pass, and
-                // degenerate statistics give no basis to overrule the scene's
-                // explicit opt-in — keep guiding.
-                _ => true,
-            };
-
-            debug!(
-                "path guiding: final pass at {} spp ({})",
-                self.settings.samples_per_pixel,
-                if guide_final { "guided" } else { "unguided" }
-            );
-            let gctx = GuidingContext {
-                field: &field,
-                training: false,
-            };
-            let final_gctx = if guide_final { Some(&gctx) } else { None };
-            let start = std::time::Instant::now();
-            let (final_buffer, final_film, _, final_stats) = self.render_pass(
-                self.final_pass_config(tiled, instruments),
-                final_gctx,
-                progress,
-                layout,
-                control,
-            );
-            render_s = start.elapsed().as_secs_f64();
-            rays.merge(&final_stats.rays);
-            add_tiles(&final_stats.tiles);
-            clamp = final_stats.clamp;
-            if final_stats.interrupted {
-                debug!(
-                    "path guiding: final pass cancelled at {} spp or more per pixel",
-                    final_stats.min_taken
-                );
-                interrupted = Some(PartialPass::new(final_buffer, final_film, final_stats));
-            } else {
-                if instruments.variance {
-                    var_maps.push(final_stats.var_map);
-                }
-                passes.push((final_buffer, final_stats.variance));
-                films.extend(final_film);
-            }
-        }
-
-        let outcome = if interrupted.is_some() {
-            RenderOutcome::Cancelled
-        } else {
-            RenderOutcome::Completed
-        };
-        if let Some(partial) = interrupted {
-            if passes.is_empty() {
-                // Nothing completed: the partial pass is the image, unsampled
-                // pixels black, as an unguided render cancelled as early.
-                debug!("path guiding: no pass completed; returning the interrupted one alone");
-                return Measured {
-                    buffer: partial.buffer,
-                    film: partial.film,
-                    rays,
-                    var_map: if instruments.variance {
-                        partial.var_map
-                    } else {
-                        Vec::new()
-                    },
-                    tiles,
-                    clamp,
-                    setup_s,
-                    render_s,
-                    outcome,
-                };
-            }
-            // A pixel at fewer than two samples has no variance estimate, and
-            // would skew the pass's weight: such a pass is left out.
-            if partial.min_taken >= 2 {
-                if instruments.variance {
-                    var_maps.push(partial.var_map);
-                }
-                passes.push((partial.buffer, partial.variance));
-                films.extend(partial.film);
-            } else {
-                debug!(
-                    "path guiding: the interrupted pass has a pixel below 2 samples; blending \
-                     the {} completed pass(es) alone",
-                    passes.len()
-                );
-                // The counters a final pass fills describe the image's pixels;
-                // this one is not in the image (training passes fill none).
-                rays.forget_adaptive();
-            }
-        }
-
-        let (weights, total) = blend_weights(&passes);
-        // The blend's own variance: Σₖ (wₖ/W)² · varₖ per pixel, for passes
-        // that are independent. With nothing weightable the blend is the
-        // last pass, and so is its variance.
-        let var_map = if !instruments.variance {
-            Vec::new()
-        } else if total <= 0.0 {
-            var_maps.pop().unwrap_or_default()
-        } else {
-            let mut out = vec![0.0f64; var_maps[0].len()];
-            for (map, w) in var_maps.iter().zip(&weights) {
-                let share = (w / total) * (w / total);
-                if share > 0.0 {
-                    for (o, v) in out.iter_mut().zip(map) {
-                        *o += share * v;
-                    }
-                }
-            }
-            out
-        };
-        let film = (!films.is_empty()).then(|| {
-            if total <= 0.0 {
-                films.pop().expect("checked non-empty")
-            } else {
-                AovFilm::blend(films, &weights, total)
-            }
-        });
-        Measured {
-            buffer: self.blend_passes(passes),
-            film,
-            rays,
-            var_map,
-            tiles,
-            clamp,
-            setup_s,
-            render_s,
-            outcome,
-        }
-    }
-
-    /// Inverse-variance blend of independent unbiased passes. Passes whose
-    /// variance could not be estimated (spp < 2) get zero weight; if nothing
-    /// is weightable, the last (final) pass is returned as-is.
-    fn blend_passes(&self, mut passes: Vec<(Buffer, f64)>) -> Buffer {
-        let (weights, total) = blend_weights(&passes);
-        if total <= 0.0 {
-            return passes.pop().expect("at least the final pass exists").0;
-        }
-        debug!(
-            "path guiding: blending {} passes, weight shares {:?}",
-            passes.len(),
-            weights
-                .iter()
-                .map(|w| (w / total * 100.0).round() as i32)
-                .collect::<Vec<_>>()
-        );
-        let rect = self.settings.raster_region();
-        let mut out = Buffer::for_raster_rect(self.settings.width, self.settings.height, rect);
-        for y in rect.y0..rect.y1 {
-            for x in rect.x0..rect.x1 {
-                let mut c = Vec3A::ZERO;
-                for (pass, w) in passes.iter().zip(&weights) {
-                    c += pass.0.get_pixel(x, y) * (*w / total) as f32;
-                }
-                out.set_pixel(x, y, c);
-            }
-        }
-        out
-    }
-
     /// One pass over the render's region at `spp` samples per pixel. Returns
-    /// the image, its AOVs (when `layout` asks for any), whatever training
-    /// samples the pass recorded (empty unless a training `GuidingContext`
-    /// is supplied), and the pass's [`PassStats`] — every one of them sized
-    /// to the region. Rays, cones and sampling keys stay those of the full
+    /// the image, its AOVs (when `layout` asks for any) and the pass's
+    /// [`PassStats`] — every one of them sized to the region. Rays, cones and sampling keys stay those of the full
     /// frame: a region decides only which pixels are traced.
     ///
     /// The work unit is a 16×16 tile or a region-wide row; the two differ in
@@ -975,22 +514,18 @@ impl Renderer {
     fn render_pass(
         &self,
         cfg: PassConfig,
-        gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
         layout: Option<&AovLayout>,
         control: Option<&RenderControl>,
-    ) -> (Buffer, Option<AovFilm>, PassSamples, PassStats) {
+    ) -> (Buffer, Option<AovFilm>, PassStats) {
         let (w, h) = (self.settings.width, self.settings.height);
         // The pixels this pass traces, in raster space (rows bottom-up, as
         // `(i, j)` count them); every per-pixel plane is this size and is
         // indexed through `rect.index`.
         let rect = self.settings.raster_region();
         let mut buffer = Buffer::for_raster_rect(w, h, rect);
-        let mut all_samples = PassSamples::default();
-        let mut variance_sum = 0.0f64;
         let mut rays = RayStats::default();
         let mut var_map = vec![0.0f64; rect.area()];
-        let pixel_count = rect.area() as f64;
         // One tabulation per pass, shared read-only by every worker.
         let filter = FilterSampler::new(self.settings.pixel_filter);
         // Read once per pass and dispatched to one of two monomorphisations
@@ -1032,14 +567,12 @@ impl Renderer {
         };
         let rounds = schedule.len();
 
-        // Per *pass*, never per pixel or per ray: a guided render runs a
-        // handful of these and an ordinary one exactly one, so the whole
-        // block costs nothing an integrator would notice.
+        // Per *pass*, never per pixel or per ray: a render runs exactly one,
+        // so the whole block costs nothing an integrator would notice.
         let pass_start = std::time::Instant::now();
         debug!(
             "pass: {} spp, seed {}, {}, {} sweep stage(s), adaptive {} (min {} spp, variance \
-             threshold {}, neighbour tolerance {}, {} rounds), filter {} radius {}, strategy {:?}, \
-             guiding {}",
+             threshold {}, neighbour tolerance {}, {} rounds), filter {} radius {}, strategy {:?}",
             cfg.spp,
             cfg.seed,
             if cfg.tiled {
@@ -1056,11 +589,6 @@ impl Renderer {
             self.settings.pixel_filter.name(),
             self.settings.pixel_filter.radius(),
             self.settings.sampling_strategy,
-            match gctx {
-                Some(g) if g.training => "training",
-                Some(_) => "guided",
-                None => "off",
-            },
         );
 
         let tiles = if cfg.tiled {
@@ -1135,8 +663,7 @@ impl Renderer {
         // budget), stage by stage. The path scratch is held per rayon worker
         // rather than per unit; one buffer serves every sample of every
         // pixel it sees.
-        // A pass starts with no sample taken: a guided render's final pass
-        // must not report its last training pass's count.
+        // A pass starts with no sample taken.
         if let Some(control) = control {
             control.reach(0);
         }
@@ -1167,8 +694,7 @@ impl Renderer {
                                     return;
                                 }
                                 self.advance::<$aov>(
-                                    profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
-                                    target,
+                                    profiling, i, j, p, &cfg, &filter, work, scratch, st, target,
                                 );
                                 if finish {
                                     st.finish_round(cfg.spp, threshold);
@@ -1262,8 +788,7 @@ impl Renderer {
                                     }
                                 }
                                 self.advance::<$aov>(
-                                    profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
-                                    target,
+                                    profiling, i, j, p, &cfg, &filter, work, scratch, st, target,
                                 );
                                 st.finish_round(cfg.spp, threshold);
                                 traced = true;
@@ -1301,20 +826,12 @@ impl Renderer {
             report(&mut n, left);
         }
 
-        // Units finish in unit order, but what the pass hands on — the
-        // guiding field's training samples and the pass variance, an f64
-        // sum — is gathered in *scanline* order (rows top-down, pixels left
-        // to right), whichever the unit shape. Both are order-dependent in
-        // floating point (the SD-tree accumulates the samples it is given),
-        // so this is what keeps a guided render bit-identical whichever
-        // order the pixels were rendered in.
-        //
-        // The unit results are replayed in that order straight from the
-        // tile grid (`generate_tiles` and `generate_rows` emit tile rows by
-        // increasing `y`, each left to right, so walking it backwards by
-        // row gives rows in scanline order). Nothing full-frame is copied
-        // to do it: the samples stay in the unit buffers, and only their
-        // scanline-order runs are recorded, one per unit per row.
+        // The unit results are replayed in scanline order (rows top-down,
+        // pixels left to right) straight from the tile grid
+        // (`generate_tiles` and `generate_rows` emit tile rows by increasing
+        // `y`, each left to right, so walking it backwards by row gives rows
+        // in scanline order), whichever the unit shape. Nothing full-frame
+        // is copied to do it.
         // The AOVs need no ordering: each pixel's planes were accumulated in
         // its own sample order, so copying them in any order is exact.
         let film = layout.map(|layout| {
@@ -1332,7 +849,6 @@ impl Renderer {
             }
             film
         });
-        let training = units.iter().any(|u| !u.work.samples.is_empty());
         let tiles_x = units
             .iter()
             .take_while(|u| u.tile.y == rect.y0)
@@ -1340,7 +856,6 @@ impl Renderer {
             .max(1);
         let mut clamp = ClampMeasure::default();
         let mut tile_times = Vec::new();
-        let mut min_taken = u32::MAX;
         for unit in &units {
             rays.merge(&unit.work.rays);
             if cfg.timed {
@@ -1382,9 +897,7 @@ impl Renderer {
                         let st = &unit.pixels[p];
                         let (color, var) = st.estimate();
                         buffer.set_pixel(i, j, color);
-                        min_taken = min_taken.min(st.taken);
                         var_map[rect.index(i, j)] = var;
-                        variance_sum += var;
                         if cfg.adaptive {
                             rays.adaptive_pixels += 1;
                             rays.adaptive_samples += st.taken as u64;
@@ -1405,28 +918,15 @@ impl Renderer {
                             };
                             rays.spp_max = rays.spp_max.max(st.taken);
                         }
-                        // Where this pixel's samples sit in its unit's
-                        // buffer: from where the previous pixel's ended.
-                        let start = if p == 0 {
-                            0
-                        } else {
-                            unit.pixels[p - 1].samples_end
-                        };
-                        let end = st.samples_end;
-                        if training && end > start {
-                            all_samples.push_run(k as u32, start, end);
-                        }
                     }
                 }
             }
         }
-        all_samples.buffers = units.into_iter().map(|u| u.work.samples).collect();
 
         let elapsed = pass_start.elapsed();
         debug!(
             "pass done in {:?}: {} camera rays, {} closest-hit, {} shadow, {} vertices, \
-             {:.2} rays/camera ray, roulette killed {}/{}, ended {} escaped / {} at depth, \
-             mean variance {:.3e}",
+             {:.2} rays/camera ray, roulette killed {}/{}, ended {} escaped / {} at depth",
             elapsed,
             rays.camera_rays,
             rays.closest_hit,
@@ -1441,19 +941,15 @@ impl Renderer {
             rays.rr_tested,
             rays.ended_escaped,
             rays.ended_depth,
-            variance_sum / pixel_count,
         );
         (
             buffer,
             film,
-            all_samples,
             PassStats {
-                variance: variance_sum / pixel_count,
                 var_map,
                 rays,
                 tiles: tile_times,
                 clamp,
-                min_taken,
                 interrupted,
             },
         )
@@ -1473,7 +969,6 @@ impl Renderer {
         p: usize,
         cfg: &PassConfig,
         filter: &FilterSampler,
-        gctx: Option<&GuidingContext>,
         work: &mut UnitWork,
         scratch: &mut PathScratch,
         st: &mut PixelState,
@@ -1488,7 +983,7 @@ impl Renderer {
         macro_rules! go {
             ($profile:literal, $media:literal, $twins:literal) => {
                 self.advance_pixel::<$profile, AOV, $media, $twins>(
-                    i, j, p, cfg, filter, gctx, work, scratch, st, target,
+                    i, j, p, cfg, filter, work, scratch, st, target,
                 )
             };
         }
@@ -1520,7 +1015,6 @@ impl Renderer {
         p: usize,
         cfg: &PassConfig,
         filter: &FilterSampler,
-        gctx: Option<&GuidingContext>,
         unit: &mut UnitWork,
         scratch: &mut PathScratch,
         state: &mut PixelState,
@@ -1560,7 +1054,6 @@ impl Renderer {
             volumes: &self.volumes,
             depth: self.settings.max_depth as i32,
             strategy: self.settings.sampling_strategy,
-            guiding: gctx,
             light_samples: self.settings.light_samples,
             light_samples_indirect: self.settings.light_samples_indirect,
             // A measured clamp rides in the clamp's own slot, flagged as
@@ -1614,7 +1107,6 @@ impl Renderer {
                 &r,
                 &path_cx,
                 root,
-                &mut unit.samples,
                 scratch,
                 &mut unit.rays,
             ) * (wx * wy);
@@ -1644,7 +1136,6 @@ impl Renderer {
             state.lum_sq += lum * lum;
         }
         state.taken = target;
-        state.samples_end = unit.samples.len() as u32;
     }
 }
 
@@ -1677,8 +1168,6 @@ struct PixelState {
     lum_sum: f64,
     lum_sq: f64,
     taken: u32,
-    /// Where this pixel's training samples end in its unit's buffer.
-    samples_end: u32,
     /// Convergence index at `taken` samples: relative standard error of the
     /// mean over the threshold, `+∞` before the pixel has seen light. The
     /// value its neighbours compare against — f32, so every decision is a
@@ -1701,7 +1190,6 @@ impl PixelState {
             lum_sum: 0.0,
             lum_sq: 0.0,
             taken: 0,
-            samples_end: 0,
             index: f32::INFINITY,
             converged: false,
             stopped: false,
@@ -1859,11 +1347,10 @@ fn held_by_neighbour(
 }
 
 /// What a work unit's samples write besides the pixel accumulators: its
-/// training samples and its counters. Private to the unit, so no two
+/// counters. Private to the unit, so no two
 /// threads share a counter and there is nothing to synchronise.
 #[derive(Default)]
 struct UnitWork {
-    samples: Vec<SampleData>,
     rays: RayStats,
     /// The unit's AOV planes, beside (not inside) its `PixelState`s, so a
     /// render without AOVs keeps the pixel state it always had.
@@ -1921,62 +1408,12 @@ impl Unit {
     }
 }
 
-/// The inverse-variance weight of each pass and their sum — what
-/// [`Renderer::blend_passes`] and [`AovFilm::blend`] both apply, so a guided
-/// render's AOVs are the same combination of passes as its beauty. A pass
-/// whose variance could not be estimated weighs nothing.
-fn blend_weights(passes: &[(Buffer, f64)]) -> (Vec<f64>, f64) {
-    let weights: Vec<f64> = passes
-        .iter()
-        .map(|(_, var)| {
-            if var.is_finite() && *var > 0.0 {
-                1.0 / var
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let total = weights.iter().sum();
-    (weights, total)
-}
-
-/// Per-pixel luminance of the inverse-variance blend of `passes` over
-/// `rect` (raster space), indexed as the passes' variance maps are — the
-/// reference image the guiding efficiency estimate normalizes against.
-/// Un-weightable passes (non-finite or zero variance) contribute nothing;
-/// if no pass is weightable the result is black and the floor in
-/// `mean_relative_error` takes over.
-fn blend_luminance(passes: &[(Buffer, f64)], rect: PixelRect, luma: utils::Luma) -> Vec<f64> {
-    let weights: Vec<f64> = passes
-        .iter()
-        .map(|(_, var)| {
-            if var.is_finite() && *var > 0.0 {
-                1.0 / var
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let total: f64 = weights.iter().sum::<f64>().max(f64::MIN_POSITIVE);
-    let mut out = vec![0.0f64; rect.area()];
-    for y in rect.y0..rect.y1 {
-        for x in rect.x0..rect.x1 {
-            let mut c = Vec3A::ZERO;
-            for ((pass, _), w) in passes.iter().zip(&weights) {
-                c += pass.get_pixel(x, y) * (*w / total) as f32;
-            }
-            out[rect.index(x, y)] = luma.of(c) as f64;
-        }
-    }
-    out
-}
-
 /// Mean relative squared error of a pass (Rousselle et al. 2011): per-pixel
 /// variance over the squared luminance of a reference image, floored at
 /// 1e-4 so directly visible light sources don't dominate. The reference
 /// must be *shared* by every pass being compared — normalizing a low-spp
 /// pass by its own noisy mean correlates numerator and denominator and
-/// breaks the 1/spp scaling the efficiency ratio relies on.
+/// breaks the 1/spp scaling the comparison relies on.
 pub(crate) fn mean_relative_error(var_map: &[f64], ref_lum: &[f64]) -> f64 {
     let n = var_map.len().max(1) as f64;
     var_map
@@ -1993,10 +1430,6 @@ struct Tile {
     pub width: usize,
     pub height: usize,
 }
-
-/// What a guided render steps its training passes' seeds by: pass `k`
-/// renders with `frame + (k + 1) · step`, the final pass with `frame`.
-pub(crate) const GUIDING_PASS_SEED_STEP: u32 = 0x9E37_79B9;
 
 /// Edge length of a render tile, in pixels.
 const TILE: usize = 16;

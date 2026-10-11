@@ -40,7 +40,7 @@ in `openusd` are worked around inside the importer and reported upstream.
 - `crust-core` allows `unsafe` for one test-only memory allocator.
 - `crust-jit` has four `unsafe` blocks, needed to call the machine code it generates.
 
-The ray tracing kernel, BVH, materials, MaterialX reader, volumes and path guiding are all
+The ray tracing kernel, BVH, materials, MaterialX reader, volumes are all
 implemented here. Nothing comes from Embree, OpenPGL or another renderer.
 
 **Why.** Safe Rust rules out a whole class of memory bugs in a codebase that is mostly
@@ -98,7 +98,7 @@ Adobe's `openpbr-bsdf`).
 
 **Shade once per hit.** A textured material does its expensive work (graph evaluation,
 texture lookups) once per path vertex. The result is a `ShadingPoint`, which then answers
-every question about that hit: emission, scattering, light sampling, path guiding. A test
+every question about that hit: emission, scattering, light sampling. A test
 checks, for every material type, that this gives bit for bit what shading each query
 separately would.
 
@@ -125,7 +125,7 @@ the same image, only more slowly.
 [OpenQMC](https://github.com/AcademySoftwareFoundation/openqmc), through the `openqmc-rs`
 port: an Owen-scrambled Sobol sequence, decorrelated per pixel. Sampling follows OpenQMC's
 **domain tree**: each sample starts from a root keyed on `(pixel, frame, sample index)`,
-each path vertex derives its own sub-domain, and each sampling event (light, BSDF, guide,
+each path vertex derives its own sub-domain, and each sampling event (light, BSDF,
 phase function) derives a further keyed one. There is no other random number generator in
 the renderer.
 
@@ -162,10 +162,7 @@ sides rather than given a stand-in.
 ([`crust:indirectClamp`](@/docs/usd/render-settings.md#crust-indirectclamp), default 10)
 is the only biased default. Set it to 0 for reference renders.
 
-**Options on top.** Adaptive sampling stops converged pixels early. Path guiding
-(*Practical Path Guiding*, Müller et al. 2017, reimplemented in Rust) is opt-in. On the
-bundled `cornellbox_guided.usda`, where all light arrives indirectly, guiding cuts the
-error by about 20% at the same sample count. Light selection can learn which lights reach
+**Options on top.** Adaptive sampling stops converged pixels early. Light selection can learn which lights reach
 each region of the scene (`learned`).
 
 ## The engine decodes no files

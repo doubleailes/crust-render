@@ -68,6 +68,7 @@ plain text and are not counted.
 |------|------|---------|------------|
 | `settings.invalid_value` | refused | A crust:* render setting has a value outside its domain; its default is used. | Fix the value on the RenderSettings prim; the message names the attribute and the default used. |
 | `settings.light_samples_clamped` | approximated | A light-sample count is above the most crust takes; the maximum is used. | Author at most the maximum the message names. |
+| `settings.path_guiding_removed` | refused | The stage authors a path guiding setting; guiding was removed and the render is unguided. | Delete `crust:pathGuiding`, `crust:guidingTrainIterations` and `crust:guidingProb` from the RenderSettings prim; the message names the ones found. |
 | `time.outside_range` | approximated | The frame lies outside the stage's time range; animated attributes hold their nearest sample. | Render a frame inside the stage's startTimeCode..endTimeCode, or extend the range. |
 
 ## Colour

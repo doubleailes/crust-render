@@ -33,7 +33,7 @@ in the repository.
                      │    (file decoders, texture caches)
                      ▼         │
                     crust-core ◄┘
-         (USD import, integrator, materials, lights, volumes, guiding)
+         (USD import, integrator, materials, lights, volumes)
           │       │        │        │          │          │
           ▼       ▼        ▼        ▼          ▼          ▼
       crust-rt crust-mtlx crust-jit utils  openqmc-rs  openusd,
@@ -45,7 +45,7 @@ in the repository.
 | `crust-rt` | geometry, the BVH build, ray intersection, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | reading `.mtlx` documents, compiling node graphs into programs, the BSDF closure tree | any Crust type |
 | `crust-jit` | compiling MaterialX programs to machine code (optional, the `jit` feature) | everything but `crust-mtlx` |
-| `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, path guiding, statistics, the diagnostic and its report | decoding images, textures or IES files |
+| `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, statistics, the diagnostic and its report | decoding images, textures or IES files |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the texture tile caches, `.tx` conversion | the integrator |
 | `crust-render` | the command line, logging, the progress bar, writing the EXR and PNG, printing and saving the diagnostic's report | decoding anything |
 | `utils` | stateless math: sampling warps, MIS heuristics, luminance | everything |
@@ -78,9 +78,8 @@ extracted too.
    [`crust:lightSelection`](@/docs/usd/render-settings.md#crust-lightselection) is
    `learned`.
 5. **Rendering.** Tiles run in parallel. For each pixel and sample, a path is traced:
-   intersect, shade the hit once, sample a light, pick the next direction, repeat. Path
-   guiding (training passes) and adaptive sampling (stopping pixels early) wrap that same
-   per-pixel routine. The whole frame is taken to 1 sample per pixel first, then 2, 4, 8,
+   intersect, shade the hit once, sample a light, pick the next direction, repeat. Adaptive
+   sampling (stopping pixels early) wraps that same per-pixel routine. The whole frame is taken to 1 sample per pixel first, then 2, 4, 8,
    … up to the adaptive minimum, so a render watched with
    [`--checkpoint`](@/docs/reference/command-line.md#checkpoint) shows the full image early;
    the order changes no pixel. Ctrl-C [stops the render](@/docs/reference/command-line.md#interrupting-a-render)

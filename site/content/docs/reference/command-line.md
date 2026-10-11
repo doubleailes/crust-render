@@ -158,8 +158,6 @@ whenever a pixel's sample count does not depend on its neighbours: a fixed count
 [`crust:adaptiveNeighbourTolerance`](@/docs/usd/render-settings.md#crust-adaptiveneighbourtolerance)
 negative. Otherwise a pixel on the region's border may stop a little earlier than it
 would in the full frame, since its neighbour outside the region is never sampled.
-[Path guiding](@/docs/usd/render-settings.md#path-guiding) learns from the region's
-paths only, so a guided crop differs from the same pixels of a guided full render.
 
 [`--stats`](#stats) reports the region and the share of the frame it covers.
 
@@ -530,11 +528,6 @@ still exits with `130`.
 A second Ctrl-C, while those outputs are written, quits at once without writing more, as
 does a first one once a render's outputs are being written. So does a Ctrl-C before the
 render has started (while the stage loads), which writes nothing.
-
-A [path-guided](@/docs/usd/render-settings.md#path-guiding) render stopped in its final pass blends the
-passes it completed with the partial final pass once every pixel of it has two samples or
-more, and the completed passes alone before that. Stopped during its training passes, it
-writes those it completed, or the first one as far as it got.
 
 ## Diagnostics
 

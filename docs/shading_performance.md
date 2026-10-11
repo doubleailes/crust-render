@@ -42,7 +42,7 @@ Both did this work on **every** `Material` call. The comment on
 
 ### How many times a vertex is shaded
 
-At one vertex of an unguided path (`tracer/`), before step 2:
+At one vertex of a path (`tracer/`), before step 2:
 
 | Call | Site | Graph runs |
 |---|---|---|
@@ -51,10 +51,6 @@ At one vertex of an unguided path (`tracer/`), before step 2:
 | NEE `mat.eval` toward the sampled light | `trace_path` | 1 |
 | `eval(..).is_none()` on the *previous* vertex, when the bounce hits an emitter | `bounce_emission_weight` | +1 |
 | `eval(..).is_some()` on the previous vertex, when the path escapes | `escaped_emission` | +1 |
-
-A guided render adds one or two more `eval` calls in `sample_bounce_direction`:
-the guide branch evaluates the BSDF at the guided direction, and the BSDF branch
-calls `eval(..).is_some()` to decide whether to mix densities.
 
 So a textured surface's network ran **3–5 times per vertex**. Every run
 evaluates every graph instruction, fetches every texture and repeats the
@@ -68,7 +64,7 @@ OSL (Arnold, RenderMan) and pbrt-v4 split shading into two phases:
    pbrt-v4's `BSDF` returned by `Material::GetBSDF`. All texture fetches and
    pattern arithmetic happen here.
 2. **Sample and evaluate that BSDF** as many times as the integrator needs, for
-   NEE, the bounce, guiding and MIS weights. None of this touches textures or the
+   NEE, the bounce and MIS weights. None of this touches textures or the
    pattern network.
 
 A JIT makes one shader run cheaper. The split removes most of the runs. A JIT
@@ -213,7 +209,7 @@ struct ShadingPoint {
 ```
 
 The integrator calls `prepare` once per vertex and routes `emitted_at`,
-`scatter_importance`, NEE `eval` and every guided / MIS `eval` through the
+`scatter_importance`, NEE `eval` and every MIS `eval` through the
 `ShadingPoint`. The previous vertex keeps its `ShadingPoint` in `PrevVertex`, so
 `bounce_emission_weight` and `escaped_emission` read it without shading again.
 
@@ -250,8 +246,8 @@ most. It changes the `Material` trait and the integrator's vertex records.
   Everything else returns `None` and is queried in place: no copy, which is why
   `cornellbox` does not move.
 - **`ShadingPoint`** wraps either case, and the integrator builds one per surface
-  vertex, where the ray arrives. The emission there, the scatter, NEE's `eval`,
-  the guide branch's `eval` and `make_ray` go through it. Every surface vertex
+  vertex, where the ray arrives. The emission there, the scatter, NEE's `eval`
+  go through it. Every surface vertex
   scatters, so it is never wasted work. `PrevVertex` needs nothing from it,
   because step 2 already removed its `eval` calls.
 - **Emission is computed from the pre-Ptex parameters.** `Resolution::emitted`

@@ -351,8 +351,7 @@ impl CropImage {
 }
 
 /// The reference of a crop: the inverse-variance blend of every unbiased
-/// image of it (each weighted by one over its mean variance, as
-/// `render_guided` blends passes), and that blend's own variance,
+/// image of it (each weighted by one over its mean variance), and that blend's own variance,
 /// `Σ (wₖ/W)² varₖ` per pixel. An image whose variance cannot be weighed
 /// (non-finite or zero) weighs nothing; with none weighable, the first
 /// image is the reference.
@@ -395,7 +394,7 @@ pub fn reference(images: &[&CropImage]) -> CropImage {
 }
 
 /// MRSE of `var` against a reference luminance — the tracer's
-/// `mean_relative_error`, the one estimator guiding's own ΔEff uses.
+/// `mean_relative_error`, the one estimator the diagnostic's efficiency comparisons use.
 pub fn mrse(var: &[f64], reference_lum: &[f64]) -> f64 {
     crate::tracer::mean_relative_error(var, reference_lum)
 }
@@ -548,7 +547,7 @@ mod tests {
 
     #[test]
     fn crops_that_disagree_are_mixed() {
-        // Guiding better on the high-variance crop, worse on the median.
+        // The trial better on the high-variance crop, worse on the median.
         let (_, v) = overall(&[
             (1.8, Verdict::Better),
             (0.7, Verdict::Worse),

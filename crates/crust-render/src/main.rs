@@ -1417,16 +1417,9 @@ fn checkpoints(
 }
 
 /// What an interrupted render reached, for its warning: the fewest and most
-/// samples a pixel of its final pass took. Every final pass fills those
-/// counters, adaptive or not; a guided render has none when it stopped in
-/// training, or before its final pass gave every pixel the two samples it
-/// needs to join the blend — its image is then its training passes'.
+/// samples a pixel took. Every pass fills those counters, adaptive or not.
 fn samples_reached(rays: &RayStats, spp: u32) -> String {
-    if rays.adaptive_pixels == 0 {
-        "it stopped before path guiding's final pass gave every pixel two samples, so the \
-         image is made of its training passes"
-            .to_owned()
-    } else if rays.spp_min == rays.spp_max {
+    if rays.spp_min == rays.spp_max {
         format!("every pixel took {} of {spp} samples", rays.spp_min)
     } else {
         format!(
@@ -1739,8 +1732,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         info!("Render finished in {duration:?}");
     }
     // How the pixels were sampled, recorded in every EXR written.
-    let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time)
-        .for_outcome(rendered.outcome, &ray_stats);
+    let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time);
     let output_start = Instant::now();
     let mut files = Vec::new();
     if let Some(film) = &film {
@@ -2123,8 +2115,7 @@ mod tests {
         assert!(late.leave_rendering(), "the accepted Ctrl-C was lost");
     }
 
-    /// The interruption warning says how far the final pass got, and that a
-    /// guided render without one in its image shows its training passes.
+    /// The interruption warning says how far the render got.
     #[test]
     fn the_interruption_warning_names_the_samples_reached() {
         let pass = |pixels, min, max| crust_core::RayStats {
@@ -2141,7 +2132,6 @@ mod tests {
             samples_reached(&pass(1536, 0, 9), 64),
             "pixels took 0 to 9 of 64 samples"
         );
-        assert!(samples_reached(&pass(0, 0, 0), 64).contains("training passes"));
     }
 
     /// `--checkpoint` takes a positive number of seconds, fractions

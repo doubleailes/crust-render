@@ -153,10 +153,8 @@ once, and the layer is left as it was.
   to finish, for at most `budget_s`, without restarting it. `render(wait="done")` waits
   from the start. Either way, nothing waits longer than its budget: `render`'s defaults
   to 10 s, and a render that needs longer answers with `done = false`.
-- **`progress` counts what the progress bar counts.** On a guided render
-  (`crust:pathGuiding`) it counts the final pass only and stays at 0 while guiding
-  trains, as `crust render`'s bar does. `spp_reached` (each pass's completed stage) and
-  `generation` (bumped with every image update) move through training too.
+- **`progress` counts what the progress bar counts.** `spp_reached`
+  (the completed stage) and `generation` (bumped with every image update) are separate counters.
 - **One render at a time.** A new render, an edit, `undo` or `open_session` cancels the
   one running, and the cancelled render's id is in the result.
 - **The render settings are opinions.** `render` takes only a region and a sample count;

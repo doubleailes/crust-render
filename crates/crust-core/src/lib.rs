@@ -1,5 +1,5 @@
 //! The engine as a library: renderer, integrator, materials, lights,
-//! volumes, path guiding and USD import.
+//! volumes and USD import.
 //!
 //! `deny(unsafe_code)` rather than `forbid`, for exactly two reasons: the
 //! subdivision allocation probe in `scene/subdiv.rs` installs a counting
@@ -28,7 +28,6 @@ pub mod diagnostic;
 mod environment;
 mod error;
 mod filter;
-mod guiding;
 mod hittable;
 mod light;
 mod light_cache;
@@ -91,7 +90,6 @@ pub use environment::EnvironmentMap;
 pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};
 pub use glam::{Mat3A, Mat4, Vec3A};
-pub use guiding::{GuidingConfig, GuidingField, SampleData};
 pub use hittable::{FaceHit, HitRecord};
 pub use light::{
     AffineShape, AreaLight, AreaShape, DistantLight, DomeLight, EVERY_CLASS, FoundAlong, Light,
