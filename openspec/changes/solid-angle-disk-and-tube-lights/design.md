@@ -101,6 +101,13 @@ p(s) = H / ((θb − θa) (H² + (s − s₀)²))
 
 Then `x = s / L − ½`, with `p(x | φ) = L · p(s)`.
 
+In f32 this is evaluated without the difference of two angles, which loses its bits
+when both ends sit by ±π/2 (a point far beyond an end, near the axis line). The span
+is `θb − θa = atan2(L H, H² + s₀ (s₀ − L))`, and the sample, by the tangent's addition
+rule from the `s = 0` end, is `s = R² sin ψ / (H cos ψ + s₀ sin ψ)`, with
+`ψ = u (θb − θa)` and `R² = H² + s₀²`. The denominator is `R cos θ`, positive on the
+line.
+
 Working in world units along the line, rather than in local `x`, is what makes the
 density follow the real `1/r²` on a tube scaled `(length, r, r)`. It is exact in
 shape for any affine map, because the line at fixed `φ` is straight in world space.
