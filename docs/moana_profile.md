@@ -4,20 +4,26 @@
 document records what the frame costs today, keeps the first profile
 (2026-09-27) and the fix it led to as history, and ends with the dated
 measurements made since (the sky rig, memory, packet layouts, adaptive
-subdivision).
+subdivision, streamed Ptex).
 
-Measured 2026-10-05 at `4143c58` (0.5.0), on the same machine as
-`docs/alab_profile.md` (72 vCPUs, 93 GiB). The main findings:
+Measured 2026-10-11 at `fc0b962` (openusd 0.8.0, `main` at `7d11cdd`), on the
+same machine as `docs/alab_profile.md` (72 vCPUs, 93 GiB). The previous
+profile, 2026-10-05 at `4143c58` (0.5.0), is the "0.5.0" column of every table
+below. The main findings:
 
-- **The full default frame renders in 29.3 s at 128 spp.** The first profile
-  took 5:24 at 4 spp and estimated three hours at 128. The render is now 8.6%
-  of a 5:42 run; the import is the other 91%.
-- **The render is still traversal.** Trace and Occlusion are 90% of render
-  thread time, at 17.7 µs per closest-hit query and 8.3 µs per shadow ray.
-  That is about 3× ALab's 5.9 µs, and the first profile's 5.97 ms is gone.
-  Shading and textures are 1.2%.
-- **Peak memory is 31.6 GiB**, against 51.5 GiB in the first profile, with
-  displacement now read.
+- **The frame takes 4:07, down from 5:42 at 0.5.0, and peaks at 23.9 GiB
+  instead of 31.6.** Streamed Ptex did most of it (`stream-ptex-by-default`):
+  `Load assets` fell from 1:52 to 31 s and Ptex residency from 7.34 GiB to
+  0.64 GiB. The traversal is 16 s faster (2:45 against 3:02), in line with the
+  openusd update's −6–10% measured on 2026-10-10.
+- **The full default frame renders in 31.6 s at 128 spp, 2.3 s more than at
+  0.5.0.** Streamed Ptex accounts for about half of that: a texture `eval`
+  costs 5.56 µs against 617 ns preloaded. The ray and path counts match
+  0.5.0 to within 0.2%.
+- **The render is still traversal.** Trace and Occlusion are 86% of render
+  thread time, at 17.6 µs per closest-hit query and 8.3 µs per shadow ray,
+  the same as at 0.5.0. That is about 3× ALab's 5.5 µs. Shading is 5.0%, up
+  from 1.2%, all of it the streamed Ptex.
 
 ## Setup
 
@@ -35,36 +41,45 @@ cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam --profile 
   189 of its 213 mesh-bearing files, and at the default level 0 the cages stay
   unrefined, shaded with smooth cage normals. Refined levels are measured in
   "Adaptive subdivision" below.
-- **Ptex:** preloaded at the default 32×32 cap, which was the default when this
-  profile was taken. Since `stream-ptex-by-default` the 53 largest `.ptx` stream
-  under the `capped` chain, for the same image; see "Ptex streamed by default"
-  below for what that moves.
+- **Ptex:** the default since `stream-ptex-by-default`. The 53 largest `.ptx`
+  stream under the `capped` chain, and the 3 579 others are preloaded at the
+  32×32 cap ("Ptex streamed by default" below). The 0.5.0 column preloaded all
+  3 632.
 - **Displacement:** read, which is the default since `add-mesh-displacement`.
-  The island's `PxrDisplace` networks move 47 meshes, 151 169 cage vertices,
-  in 41 ms (max |offset| 6.25). All 47 are displaced at cage resolution, and
-  the import warns about it once. `CRUST_DISPLACE=0` turns it off.
+  The island's `PxrDisplace` networks move 47 meshes, 151 169 cage vertices
+  (max |offset| 6.25). All 47 are displaced at cage resolution, and the import
+  warns about it once per mesh. `CRUST_DISPLACE=0` turns it off.
 - **Runs:** one unprofiled `--stats` run for wall times and memory, then one
-  `--profile` run for section shares. The profiled run's import was 22 s
-  faster, from a warm page cache, so wall times come from the first run. The
-  profiler's overhead is estimated at 1.1% of thread time.
+  `--profile` run for section shares, one after the other, right after two
+  ALab runs, with no other render running. The page cache was warm for both.
+  The profiled run's traversal was 7.5 s slower (2:52.6 against 2:45.1), and
+  its render the same (31.5 s). The profiler's overhead is estimated at 1.1%
+  of thread time. Each is a single run, so a few percent either way is inside
+  this VM's run-to-run spread.
 
 ## The run
 
-| phase | wall | RSS at end | peak | first profile |
-|---|---|---|---|---|
-| Parse USD stage | 5:13.1 | 31.05 GiB | 31.56 GiB | 5:44.8 |
-| · Traverse prims | 3:01.6 | 28.69 GiB | 29.09 GiB | 3:33.8 |
-| · Load assets (Ptex) | 1:52.0 | 28.69 GiB | 29.09 GiB | 1:41.5 |
-| · Commit acceleration structure | 19.1 s | 31.05 GiB | 31.56 GiB | 29.4 s |
-| Render | **29.3 s** (128 spp) | 30.17 GiB | 31.56 GiB | 5:23.9 (4 spp) |
-| **total** | **5:42.5** | | **31.56 GiB** | 11:08.8, 51.51 GiB |
+| phase | wall | RSS at end | peak | 0.5.0 | first profile |
+|---|---|---|---|---|---|
+| Parse USD stage | 3:35.2 | 23.36 GiB | 23.86 GiB | 5:13.1 | 5:44.8 |
+| · Traverse prims | 2:45.1 | 20.91 GiB | 21.32 GiB | 3:01.6 | 3:33.8 |
+| · Load assets (Ptex) | **30.9 s** | 20.91 GiB | 21.32 GiB | 1:52.0 | 1:41.5 |
+| · Commit acceleration structure | 19.0 s | 23.36 GiB | 23.86 GiB | 19.1 s | 29.4 s |
+| Render | **31.6 s** (128 spp) | 23.60 GiB | 23.86 GiB | 29.3 s | 5:23.9 (4 spp) |
+| **total** | **4:06.9** | | **23.86 GiB** | 5:42.5, 31.56 GiB | 11:08.8, 51.51 GiB |
 
-The render takes 29 s of a 5:42 run. Of the import, the traversal is 3:02 and
-the Ptex preload 1:52. Streaming Ptex measured 25 s for `Load assets` on
-2026-10-01 ("Benchmark" below); making it the default is the open change
-`stream-ptex-by-default`.
+The render takes 32 s of a 4:07 run. Of the import, the traversal is 2:45 and
+the Ptex load 31 s. The peak is unchanged from the 2026-10-09 streamed-Ptex
+measurement (23.92–24.14 GiB): openusd `main` does not move the island's peak,
+because the import composes one masked stage per chunk and drops it, so the
+peak is crust's own geometry and acceleration structure.
 
 ### What the scene holds
+
+Unchanged from 0.5.0 except for Ptex. The island's 3 151 850 geometries and
+13.54 GiB of kernel memory are identical, so the openusd update's prototype
+sharing, which removed 43% of ALab's triangles (`docs/alab_profile.md`), changed
+nothing here. Why it does not apply to the island was not investigated.
 
 | | |
 |---|---|
@@ -75,57 +90,65 @@ the Ptex preload 1:52. Streaming Ptex measured 25 s for `Load assets` on
 | lights | 22 (21 rect, 1 dome), plus `sky_dome_cam_llc` as a camera-only backdrop |
 | kernel memory | 13.54 GiB (3.65 triangle packets, 2.48 instances, 2.45 BVH nodes, 1.73 curve spans, 1.36 triangle records, 0.65 leaves, 0.73 vertices + normals) |
 | packet lanes filled | 81.2%; 238.8 bytes per triangle |
-| Ptex | 3 632 textures, 2 671 206 faces, 7.34 GiB resident |
+| Ptex | 3 632 textures, 2 671 206 faces: **604 MiB preloaded** (3 579) **+ 47.7 MiB streamed** (53, of a 951 MiB budget, nothing evicted). 0.5.0 preloaded 7.34 GiB |
 
-- **Kernel memory fell from 39.31 to 13.54 GiB.** Three changes did it:
-  grouping per prototype ("Outcome" below), storing each triangle once, and
-  storing instances and curve spans inline ("Memory" below).
-- **Ptex is 7.34 GiB, up from 6.02.** The 14 displacement maps are now read,
-  and so are their faces.
-- **The rest of the peak, about 10.7 GiB, is the composed stage and import
+- **Kernel memory fell from 39.31 to 13.54 GiB before 0.5.0.** Three changes
+  did it: grouping per prototype ("Outcome" below), storing each triangle once,
+  and storing instances and curve spans inline ("Memory" below).
+- **The rest of the peak, about 9.7 GiB, is the composed stage and import
   state.**
 
 ## Render profile
 
-Thread time over the render: 32:14 across 72 threads, which is 89.3% of 72 ×
-wall. The missing 10.7% is probably the same load imbalance the first profile
+Thread time over the render: 33:36 across 72 threads, which is 88.9% of 72 ×
+wall. The missing 11.1% is probably the same load imbalance the first profile
 found (16.6%, threads waiting on the last expensive tiles). No stack snapshot
 was taken this time.
 
-| section | glob. | thread time | calls | per call |
-|---|---|---|---|---|
-| **Trace** | **75.5%** | 24:19.5 | 82 492 231 | **17.69 µs** |
-| **Occlusion** | **14.9%** | 4:47.8 | 34 813 796 | **8.27 µs** |
-| SurfaceLighting (local) | 3.2% | 1:02.7 | 69 578 693 | |
-| MainLoop | 3.1% | 1:00.0 | 1 589 145 | |
-| Bounce | 1.7% | 32.7 s | 69 578 693 | 471 ns |
-| EvalBsdfs (local) | 0.7% | 14.4 s | 69 578 693 | 346 ns incl. textures |
-| Texture | 0.5% | 9.7 s | 15 714 262 | 617 ns |
-| GeneratePrimary | 0.2% | 4.8 s | 26 004 253 | 184 ns |
-| Contributions | 0.1% | 2.7 s | 26 004 253 | 103 ns |
+| section | glob. | thread time | calls | per call | 0.5.0 |
+|---|---|---|---|---|---|
+| **Trace** | **72.1%** | 24:13.2 | 82 525 715 | **17.61 µs** | 75.5%, 17.69 µs |
+| **Occlusion** | **14.3%** | 4:48.3 | 34 877 752 | **8.27 µs** | 14.9%, 8.27 µs |
+| Texture | 4.3% | 1:27.5 | 15 743 031 | **5.56 µs** | 0.5%, 617 ns |
+| MainLoop | 3.4% | 1:07.7 | 2 741 011 | | 3.1% |
+| SurfaceLighting (local) | 3.1% | 1:03.0 | 69 517 285 | 0.91 µs local | 3.2% |
+| Bounce | 1.7% | 34.5 s | 69 517 285 | 496 ns | 1.7%, 471 ns |
+| EvalBsdfs (local) | 0.7% | 13.2 s | 69 517 285 | 1.45 µs incl. textures | 0.7%, 346 ns incl. textures |
+| GeneratePrimary | 0.3% | 5.4 s | 26 002 503 | 208 ns | 0.2%, 184 ns |
+| Contributions | 0.1% | 2.9 s | 26 002 503 | 111 ns | 0.1%, 103 ns |
 
-By category: **Raytrace 90.3%**, Integrator 8.4%, Shading 1.2%. The first
-profile measured 99.9% raytrace at 5.97 ms per closest hit. The grouping fix
-brought that to 22.3 µs (at 4 spp). Today's 17.7 µs is the same order, at a
-different sample count. Shading costs nothing here: the island's materials are
-plain OpenPBR with Ptex colour, 0.35 µs per shading point.
+By category: **Raytrace 86.4%**, Integrator 8.6%, Shading 5.0%. 0.5.0 measured
+90.3 / 8.4 / 1.2, and the first profile 99.9% raytrace at 5.97 ms per closest
+hit. The grouping fix brought that to 22.3 µs (at 4 spp). Today's 17.6 µs is
+the same order, at a different sample count. Shading costs little: the
+island's materials are plain OpenPBR with Ptex colour.
+
+- **A streamed Ptex `eval` costs 9× a preloaded one.** 43.2% of the 14.0 M
+  texel fetches hit the thread microcache, 54.0% the reader cache, and 2.8%
+  (389 193) read from disk. At 72 threads the extra 4.9 µs per `eval` comes to
+  about 1.2 s of wall time, half of the render's 2.3 s rise. The other half is
+  within one run's spread. "Ptex streamed by default" below measured +0.26 s
+  at 4 spp and +0.50 s at 16 spp; at 128 spp more faces reach the levels
+  derived from the cap.
 
 ### Rays and paths
 
-| | now | first profile |
-|---|---|---|
-| ray queries | 117.3 M (4.00 Mray/s) | 3.85 M |
-| shadow rays occluded | 62.2% | 80.8% |
-| light samples worth a shadow ray | 53.4% | |
-| paths escaping | 49.7% | 56.0% |
-| roulette / absorbed | 43.8% / 6.5% (89.5% of roulette tests kill) | |
-| mean path length | 2.68 | 2.35 |
-| adaptive: stopped early | 15.9% of pixels, mean 112.9 of 128 spp | (4 spp, no adaptive stop) |
+| | now | 0.5.0 | first profile |
+|---|---|---|---|
+| ray queries | 117.5 M (3.72 Mray/s) | 117.3 M (4.00 Mray/s) | 3.85 M |
+| shadow rays occluded | 61.8% | 62.2% | 80.8% |
+| light samples worth a shadow ray | 53.6% | 53.4% | |
+| paths escaping | 50.0% | 49.7% | 56.0% |
+| roulette / absorbed | 43.9% / 6.1% (89.5% of roulette tests kill) | 43.8% / 6.5% | |
+| mean path length | 2.67 | 2.68 | 2.35 |
+| adaptive: stopped early | 15.9% of pixels, mean 112.9 of 128 spp | the same | (4 spp, no adaptive stop) |
 
-The drop in occluded shadow rays fits the 2026-10-02 far-light fix: the sun
-stopped shadowing itself ("The sky rig" below). Displacement and the light
-links changed between the two profiles as well, so the drop is not
-attributed to the fix alone.
+Every count matches 0.5.0 to within 0.2%, so the throughput drop
+(4.00 → 3.72 Mray/s) is the render's wall time, not more work. The images were
+not compared. The drop in occluded shadow rays from the first profile fits
+the 2026-10-02 far-light fix: the sun stopped shadowing itself ("The sky rig"
+below). Displacement and the light links changed between those two profiles
+as well, so the drop is not attributed to the fix alone.
 
 ## Other findings
 
@@ -142,14 +165,15 @@ attributed to the fix alone.
 
 ## What is left, in order of what it would buy
 
-1. **The import.** It is 91% of the frame. The traversal takes 3:02, and the
-   Ptex preload 1:52, which streaming would cut to about 25 s
-   (`stream-ptex-by-default`).
-2. **Traversal.** It is 90% of render thread time. Closest-hit queries cost 3×
+1. **The import.** It is 87% of the frame. The traversal takes 2:45, and
+   the acceleration structure 19 s. The Ptex load is down to 31 s.
+2. **Traversal.** It is 86% of render thread time. Closest-hit queries cost 3×
    ALab's. No per-instance attribution has been run since the grouping fix
    (`--features traversal-stats`, "Tooling" below).
-3. **Load balance.** 10.7% of thread time is idle.
-4. **The sky-rig colour comparison** predates both the far-light fix and the
+3. **Load balance.** 11.1% of thread time is idle.
+4. **Streamed Ptex lookups.** 4.3% of render thread time, from a 43%
+   microcache hit rate.
+5. **The sky-rig colour comparison** predates both the far-light fix and the
    light links being read, and needs re-measuring.
 
 ## History: the first profile (2026-09-27, `abae004`)
