@@ -83,7 +83,7 @@ Each variant: 16 spp, `--indirect-clamp 0`, frames 1–4 (independent noise), re
 `(relMSE·t_min)_area / (relMSE·t_min)_variant`. Timed on a quiet machine with the
 final hot-path build (4); relMSE is deterministic and matched the first run exactly.
 
-ALab frame 1004 was not available in this environment.
+ALab frame 1004 was not available in the environment of this sweep; it is measured in "Real scenes" below.
 
 | scene | variant | relMSE | t min / mean (s) | equal time |
 |---|---|---|---|---|
@@ -179,3 +179,153 @@ against 17.5× at 16 spp × 1. `openqmc` stratifies the arc across the draws.
 - **Open Question 2: no band for the tube.** The back-facing half it skips does not
   shrink with distance; the smallest tube still won 7.4×.
 - **Open Question 3: nothing to design.** See above.
+
+## Real scenes
+
+2026-10-11, `cdg2-phil-01`: Intel Xeon E5-2699 v4, 72 vCPUs (one thread per core), 93 GiB,
+every render on all 72 threads (rayon's default). `after` is this branch (`b066bd6`).
+`before` is the change's merge base, `2c7e0c3`, not the current `main`: `main` has
+since gained `honour-dome-pole-axis`, which turns dome lights and would fail every
+no-change check on a dome-lit scene for a reason unrelated to this change. Each binary
+was built in its own worktree and target directory.
+
+### Lights
+
+`crust ls light --json -` lists the authored lights. `--stats-json`'s `light_kinds`
+lists the ones the import kept.
+
+| scene | listed | imported |
+|---|---|---|
+| ALab, frame 1004 | 23 sphere, **13 cylinder**, 8 rect, **1 disk**, 1 dome, 1 distant | 23 sphere, **13 cylinder**, 4 rect, **1 disk**, 1 dome, 1 distant |
+| OpenPBR Playground (`renderCam_main`) | 4 rect, 1 sphere, 1 dome | 4 rect, 1 sphere, 1 dome |
+| Moana island (`shotCam`) | 21 rect, 2 dome | 21 rect, 1 dome |
+
+The ALab rects that are listed but not imported are the four `lgt_screenLights*` of the
+`electronics_ham_equipment03` rigs. The island has a second dome that is not imported.
+Neither case involves a disk or a tube.
+ALab's tubes are the 13 button lights of two ham radios (`lgt_buttonLight*`, intensity 4)
+and of the oscilloscope (`lgt_red*Button*`). Its disk is the oscilloscope screen
+(`lgt_LightAreaDisk`, intensity 1). The Playground and the island have neither shape,
+so they get only the no-change check.
+
+### No change where there should be none
+
+Each check rendered at `-s 16 --indirect-clamp 0`. `crust diff before after` exited 0
+with `"identical": true` and 0 differing pixels on every check:
+- Playground, `after` at its defaults;
+- island, `after` at its defaults;
+- ALab, `after` with `CRUST_TUBE_SAMPLING=area CRUST_DISK_SAMPLING=area`.
+
+All three rendered at the 640 × 360 fallback, because the scenes author no resolution.
+
+### Equal time on ALab
+
+ALab is the only scene with a tube or a disk, so it is the only one measured here.
+**Its frame is its animation, so every figure below is one seed** (`-f 1004`). `-f`
+also sets the sampler's seed, and no flag reseeds frame 1004.
+
+Setup:
+- **Stage.** Every render goes through a wrapper `.usda` that sublayers `entry.usda`,
+  repeats its time metadata and units, and authors `/Render/settings` with only
+  `crust:minSamplesPerPixel = 1024`. ALab authors no RenderSettings prim. With the
+  wrapper no pixel ever stops early, so every render takes exactly its `-s`.
+- **Reference.** 1024 spp, with both switches at `area` and `--indirect-clamp 0`.
+- **Variants.**
+  - Tubes: `CRUST_TUBE_SAMPLING` = `area`, `arc` or `equiangular`, with the disk at
+    `area`.
+  - Disk: `CRUST_DISK_SAMPLING=ellipse`, with the tube at `area`.
+- **Error.** `relmse_trimmed` from `crust diff --json` against the reference.
+- **Time.** `Render` min and mean over 6 interleaved reps. Each variant ran in its own
+  `scripts/bench_ab.sh` pair against `area`, so the `area` row gives the range of its
+  three pairs.
+- **Efficiency.** `(relMSE·t_min)_area / (relMSE·t_min)_variant`, with each pair's own
+  `area` time.
+
+**The crop** is `--region 470,150,620,250` (150 × 100 px), around the oscilloscope and
+the ham radios. Between `area` and `equiangular` at 64 spp it holds 87% of the
+absolute difference in 6.5% of the frame. Its pixels match the full frame's, and the
+crop has its own region-rendered reference.
+
+| scene | region | variant | `Render` min / mean (s) | trimmed relMSE | equal time |
+|---|---|---|---|---|---|
+| ALab | frame | `area` | 3.161–3.186 / 3.202–3.205 | 3.3703274 | 1 |
+| | | `arc` | 3.206 / 3.247 | 3.3703175 | 0.99 |
+| | | `equiangular` | 3.224 / 3.321 | 3.3703163 | 0.99 |
+| | | disk `ellipse` | 3.178 / 3.203 | 3.3703278 | 1.00 |
+| ALab | crop | `area` | 0.392–0.404 / 0.400–0.411 | 1.6424746 | 1 |
+| | | `arc` | 0.401 / 0.408 | 1.6424487 | 1.01 |
+| | | `equiangular` | 0.400 / 0.410 | 1.6424318 | 0.99 |
+| | | disk `ellipse` | 0.394 / 0.408 | 1.6424816 | 1.00 |
+| ALab, round lights only, direct | crop | `area` | 0.109–0.111 / 0.111–0.120 | 5.5816e-4 | 1 |
+| | | `arc` | 0.112 / 0.125 | 4.5964e-4 | 1.18 |
+| | | `equiangular` | 0.113 / 0.116 | 4.5475e-4 | **1.21** |
+| | | disk `ellipse` | 0.107 / 0.112 | 5.2137e-4 | 1.10 |
+
+**On the scene as authored, the switches change nothing measurable.** Across the
+variants, relMSE agrees to the sixth significant figure, and every time delta (−0.7%
+to +1.8% on the min) is below what timing resolves. `arc` (+1.4%) and `equiangular`
+(+1.2%) cost the same on the frame, so the 0.99s are noise in `t_min`, not a loss.
+There are two reasons the switches have so little to act on:
+- ALab at clamp 0 is dominated by indirect fireflies.
+- The round lights carry ~2.3% of the crop's direct light: a mean of 0.0032 against
+  0.138.
+
+The relMSE that the tube sampler itself can move was bounded from the 16 spp pair. The
+two renders share every random draw except the tube's own (keyed sub-domains), so
+their difference is the tube's NEE estimator difference alone. Over the reference,
+`relsq(area − equiangular)` is at most 1.9e-5 in the crop, against 1.64. Direct
+lighting alone (`crust:maxDepth = 1` in the wrapper) still left the four variants
+within 0.08% of each other (trimmed 0.13809 `area`, 0.13798 `equiangular`).
+
+**Round lights only.** To see the samplers on these lights' real geometry, a third
+wrapper deactivates the other 33 lights (`active = false`), which leaves the 13
+cylinders and the disk. It also renders direct light only (`crust:maxDepth = 1`).
+`equiangular` wins 1.21× at equal time, `arc` 1.18× and the disk's `ellipse` 1.10×.
+That is far below the sweep's 1.3–20×. The button tubes are short and thin, and they
+are far from most of what they light, where any tube looks like a short segment. The
+renders are ~0.11 s, so a few ms of jitter is several percent of the time.
+
+**Bias.** The trimmed relMSE falls without a floor as the spp quadruple, where 4× per
+step is expected. From 64 to 256 spp the 1024 spp reference's own variance caps the
+expected drop at ~3.4×.
+
+| region | variant | 16 | 64 | 256 spp |
+|---|---|---|---|---|
+| frame | `equiangular` | 3.3703 | 1.3475 | 0.30696 |
+| frame | `ellipse` | 3.3703 | 1.3475 | 0.30696 |
+| crop | `area` | 1.6425 | 0.75904 | 0.18899 |
+| crop | `equiangular` | 1.6424 | 0.75906 | 0.18899 |
+| crop | `ellipse` | 1.6425 | 0.75904 | 0.18899 |
+| round lights only | `area` | 5.58e-4 | 1.90e-4 | 4.41e-5 |
+| round lights only | `equiangular` | 4.55e-4 | 1.70e-4 | 3.52e-5 |
+| round lights only | `ellipse` | 5.21e-4 | 1.69e-4 | 4.22e-5 |
+
+The crop's mean luminance agrees between the variants within the standard error. With
+one seed, the standard error is the pixels' own: the standard deviation of the
+per-pixel difference over √15 000.
+
+| render | spp | `area − equiangular` | `area − ellipse` |
+|---|---|---|---|
+| crop | 16 | −1.4e-5 ± 9.1e-6 | 3e-8 ± 6.1e-6 |
+| crop | 64 | −2.7e-6 ± 4.0e-6 | −1.9e-6 ± 3.3e-6 |
+| crop | 256 | −5.8e-7 ± 2.1e-6 | 2.4e-7 ± 1.6e-6 |
+| round lights only | 16 | −1.9e-6 ± 8.6e-6 | −1.5e-6 ± 1.1e-5 |
+| round lights only | 64 | −2.5e-6 ± 4.2e-6 | 1.8e-6 ± 4.9e-6 |
+| round lights only | 256 | 1.1e-6 ± 2.1e-6 | −1.3e-6 ± 2.1e-6 |
+
+The crop means these differences are taken against are 0.47 and 0.0032.
+
+### Judgement against D7
+
+- **`equiangular` stays the tube default.** It does not lose at equal time on any real
+  scene. On ALab as authored it ties `area` within noise (0.99–1.00, relMSE equal to
+  the sixth figure). With ALab's round lights isolated, it wins 1.21×, the most of the
+  three tube strategies.
+- **`area` stays the disk default.** On ALab the ellipse ties as authored (1.00) and
+  wins 1.10× with the round lights isolated. But ALab's one disk is a single scene and
+  not a win "on every scene with disks". The sweep and `usdlux` still show losses
+  (0.30–0.67× on glossy floors and small disks), so the condition for changing the
+  default is not met.
+
+Neither conclusion changes, so the lighting design record and
+`docs/light_sampling.md` §3.13 are left as they are.
