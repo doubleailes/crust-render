@@ -113,7 +113,7 @@ jobs:
         if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
         run: rustc --version > receipt-clippy.txt
       - if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-receipt-clippy
           path: receipt-clippy.txt
@@ -152,7 +152,7 @@ jobs:
         if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
         run: rustc --version > receipt-test.txt
       - if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-receipt-test
           path: receipt-test.txt
@@ -195,7 +195,7 @@ jobs:
         if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
         run: rustc --version > receipt-bvh8.txt
       - if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-receipt-bvh8
           path: receipt-bvh8.txt
@@ -320,7 +320,7 @@ jobs:
       # the `latest` legs passed on (a new nightly may land in between).
       - name: Record the toolchain
         run: rustc --version > "dist/toolchain-${{ matrix.target }}.txt"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-${{ matrix.target }}
           path: dist/*
