@@ -717,7 +717,7 @@ Note: `openusd` is a hard dependency and USD is always compiled in — there is 
 feature flag.
 
 **`openusd` tracks its GitHub `main`**, through a `[patch.crates-io]` in the workspace
-`Cargo.toml` (the three manifests still ask for `0.7`; `Cargo.lock` pins the commit, and
+`Cargo.toml` (the three manifests ask for `0.8`; `Cargo.lock` pins the commit, and
 `cargo update -p openusd -p openusd-schemas` moves it). `main` carries the stage-open,
 traversal and shared-asset-bytes work of mxpv/openusd#106 — #142 measured the full Moana
 island at 22.3 s → 14.3 s and 5.32 → 3.58 GiB peak in openusd alone — which no release
@@ -729,6 +729,13 @@ has shipped yet. Dropping the patch is the whole revert once one does. In crust,
 23.7–23.9 GiB peak. The island's peak is crust's own data: its import composes one masked
 stage per chunk and drops it, so no stage is resident at the peak, and the faster openusd
 only shortens `Traverse prims` (159.4 / 167.8 → 149.5 / 151.6 s).
+Moving `main` from `933aa8f` to `7d11cdd` (0.8.0) took ALab further: its 12 605 native
+instances draw on 380 prototypes instead of 1 417, so 9.2 M duplicate triangles and 1 037
+duplicate materials are no longer imported. Two imports run at once (2026-10-11, same
+load on both) gave `Traverse prims` 126.2 → 86.9 s (−31%) and a 15.6 → 11.9 GiB peak, and
+the 16 spp image is bit-identical on 92% of pixels, the rest consistent with noise (trimmed relMSE
+6.2e-3). The island's counts did not move (`docs/alab_profile.md`,
+`docs/moana_profile.md`).
 
 **The import reads USD files through memory mappings** (`CRUST_USD_MMAP`, on), the other
 gain that issue reports (~30% on Moana, and a −19% to −42% heap peak, measured upstream).
@@ -904,9 +911,9 @@ nested instancers were grouped per (prototype, part). That gave 64 724 top-level
 instances whose boxes all spanned the dune field, and a ray entered ~12 500 instances
 per query. Grouping per prototype (see "Nesting" under instancing) took the 4 spp render
 from **312.6 s to 1.195 s** (`bench_ab.sh`, min of 2; −99.6%), Trace from 5.97 ms to 22 µs, kernel memory from 39.31 to
-33.92 GiB and peak RSS from 51.5 to 46.2 GiB. Re-profiled 2026-10-05 at the defaults
-(128 spp, displacement on): the render takes 29.3 s of a 5:42 run, peaks at 31.6 GiB,
-and is still 90% traversal, at 17.7 µs per closest hit.
+33.92 GiB and peak RSS from 51.5 to 46.2 GiB. Re-profiled 2026-10-11 at the defaults
+(128 spp, displacement on, Ptex streamed, openusd 0.8.0): the render takes 31.6 s of a
+4:07 run, peaks at 23.9 GiB, and is still 86% traversal, at 17.6 µs per closest hit.
 
 Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and both
 textures decode, since `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 GiB.
@@ -1045,13 +1052,16 @@ resolution, which moves cage vertices only and warns once.
 - **ALab gaps** (Netflix Animation Studios' ALab 2.2, `samples/ALab/`, gitignored).
   Shot mk020_0281, frames 1004–1057. `entry.usda` sublayers the baked procedurals
   (fur and cloth as value-clipped `BasisCurves`), the trailer cameras and the shot. It
-  imports and animates under `-f`. Frame 1004, measured 2026-10-05: 13 302 geometries,
-  21.2 M triangles plus 9.4 M cubic fur spans in memory, 1 794 materials, 43 lights
-  (the four `lgt_screenLights` link to no receiver and are dropped), ~2:57 to parse
-  (see "Where import time goes"), 28.7 GiB peak, and 23.4 s to render at the importer
-  defaults (640x360, 128 spp), so the import is 88% of the frame.
+  imports and animates under `-f`. Frame 1004, measured 2026-10-11 (openusd 0.8.0):
+  13 302 geometries, 12.0 M triangles plus 9.4 M cubic fur spans in memory, 757
+  materials, 43 lights (the four `lgt_screenLights` link to no receiver and are
+  dropped), ~1:34 to parse (see "Where import time goes"), 11.9 GiB peak, and 23.9 s
+  to render at the importer defaults (640x360, 128 spp), so the import is 80% of the
+  frame. The triangle and material counts fell from 21.2 M and 1 794 at 0.5.0 because
+  openusd 0.8.0 builds the 12 605 instances from 380 prototypes instead of 1 417; the
+  image is unchanged up to noise.
   **`docs/alab_profile.md` is the `--profile` of that render**: texture lookups are
-  43% of render thread time and tracing 40%. 72 threads render 5.51x faster than 8
+  38% of render thread time and tracing 40%. 72 threads render 5.51x faster than 8
   at equal spp (5.16x before `grow-texture-microcache`), against at most ~5.6x that
   this 72-vCPU VM allows.
   Its first profile (2026-09-27) found the lookups at 89% and 3:20 to render, from

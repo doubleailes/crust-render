@@ -5,21 +5,27 @@ Studios' ALab 2.2, shot mk020_0281, frame 1004. This document records what the
 frame costs today, then keeps the first profile (2026-09-27) and the fixes it
 led to as history.
 
-Measured 2026-10-05 at `4143c58` (0.5.0). The main findings:
+Measured 2026-10-11 at `fc0b962` (openusd 0.8.0, `main` at `7d11cdd`). The
+previous profile, 2026-10-05 at `4143c58` (0.5.0), is the "0.5.0" column of
+every table below. The main findings:
 
-- **The render is no longer the frame.** Rendering takes 23.4 s, down from
-  3:20.7 in the first profile (−88%). It is now 12% of a 3:20 run. The other
-  88% is USD composition during the prim traversal.
-- **Texture lookups are still the largest render section, at 43% of thread
-  time.** That is 1.57 µs per `eval`, against 21.55 µs before the cache fix.
-  Ray tracing is next at 40%, so the frame is now close to the even split a
-  healthy render shows.
+- **The frame takes 1:58, down from 3:20 at 0.5.0, and peaks at 11.9 GiB
+  instead of 28.7.** All of it is the import. The traversal takes 1:30
+  against 2:53, and the composed stage holds about 8.5 GiB against 24.8.
+  "Where the import went" below separates the changes that did it.
+  Composition is still 76% of the frame.
+- **Under openusd 0.8.0, instances share prototypes.** The 12 605 instances are now
+  built from 380 prototypes instead of 1 417, so 9.2 M duplicate triangles and
+  1 037 duplicate materials are no longer imported. The image is unchanged up
+  to sampling noise.
+- **The render is 23.9 s, as at 0.5.0, for 19% more rays.** Texture lookups
+  are 38% of render thread time (1.19 µs per `eval`, against 1.57 µs) and
+  tracing 40%.
 - **The render scales with threads, close to what the machine allows.** 72
   threads render 5.51× faster than 8 at equal spp, against 5.16× before
   `grow-texture-microcache` and 1.25× in the first profile. This VM allows
-  at most about 5.6× from 8 to 72 threads (see "Thread scaling"), so most of
-  the gap to 9× is the machine. Texture lookups no longer carry contention of
-  their own; what is left is idle threads at the end of the pass.
+  at most about 5.6× from 8 to 72 threads (see "Thread scaling", measured
+  2026-10-08/09), so most of the gap to 9× is the machine.
 
 ## Setup
 
@@ -40,95 +46,135 @@ cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -
   light selection, triangle filter, indirect clamp 10, bucket order.
 - **Assets:** the techvar assets are merged over `fragment/` (see "Known gaps: ALab" in
   `openspec/specs/usd-scene-import/design.md`). Every ALab texture is a tiled mip EXR, so all 5 722 of them
-  stream through the `.tx` cache and none is preloaded.
+  stream through the `.tx` cache and none is preloaded. One texture set is
+  missing on disk (`tool_wrench_boxend03` roughness, `texture.unreadable`), the
+  import's only warning.
 - **Runs:** one unprofiled `--stats` run for wall times and memory, then one
-  `--profile` run for section shares, run one after the other. The profiled
-  run's traversal was 22 s faster (2:30.2 against 2:52.8), because the page
-  cache was warm. Take wall times from the unprofiled run and shares from the
-  profiled one. The profiler's own overhead is estimated at 3.1% of thread time.
+  `--profile` run for section shares, one after the other, with no other
+  render running. The page cache was warm for both (ALab had been imported
+  minutes before). The profiled run's traversal was 13 s faster (1:17.2
+  against 1:29.8) and its render 2.5 s slower (26.4 s), so take wall times
+  from the unprofiled run and shares from the profiled one. Each is a single
+  run, so a few percent either way is inside this VM's run-to-run spread.
 
 ## The run
 
-| phase | wall | RSS at end | peak | first profile |
-|---|---|---|---|---|
-| Parse USD stage | 2:56.8 | 28.37 GiB | 28.37 GiB | 3:01.6 |
-| · Open stage | 0.004 s | 8.02 MiB | 8.02 MiB | 0.020 s |
-| · Traverse prims | 2:52.8 | 28.01 GiB | 28.01 GiB | 2:56.3 |
-| · Load assets | 2.6 s | 28.01 GiB | 28.01 GiB | 3.1 s |
-| · Commit acceleration structure | 1.4 s | 28.37 GiB | 28.37 GiB | 2.1 s |
-| Render | **23.4 s** | 28.64 GiB | 28.64 GiB | 3:20.7 |
-| Write output | 0.047 s | | | 0.036 s |
-| **total** | **3:20.3** | | **28.65 GiB** | 6:22.4, 33.20 GiB |
+| phase | wall | RSS at end | peak | 0.5.0 | first profile |
+|---|---|---|---|---|---|
+| Parse USD stage | 1:33.8 | 11.66 GiB | 11.66 GiB | 2:56.8 | 3:01.6 |
+| · Open stage | 0.010 s | 13.42 MiB | 13.42 MiB | 0.004 s | 0.020 s |
+| · Traverse prims | **1:29.8** | 11.30 GiB | 11.30 GiB | 2:52.8 | 2:56.3 |
+| · Load assets | 2.6 s | 11.30 GiB | 11.30 GiB | 2.6 s | 3.1 s |
+| · Commit acceleration structure | 1.3 s | 11.66 GiB | 11.66 GiB | 1.4 s | 2.1 s |
+| Render | **23.9 s** | 11.92 GiB | 11.92 GiB | 23.4 s | 3:20.7 |
+| Write output | 0.039 s | | | 0.047 s | 0.036 s |
+| **total** | **1:57.7** | | **11.93 GiB** | 3:20.3, 28.65 GiB | 6:22.4, 33.20 GiB |
 
-The import is now 88% of the run, and nearly all of that is openusd composition
+The import is 80% of the run, and nearly all of that is openusd composition
 during the traversal (see "Where import time goes" in
-`openspec/specs/usd-scene-import/design.md`). It has barely moved since the
-first profile, so it is now the lever for the frame as a whole. Peak memory is
-reached during the traversal, and the render adds only 0.3 GiB on top.
+`openspec/specs/usd-scene-import/design.md`). Peak memory is reached during
+the traversal, and the render adds only 0.3 GiB on top.
+
+### Where the import went
+
+Two openusd updates landed between the two profiles, the first with the
+memory-mapped reads, and each was measured on its own:
+
+| change | measured as | traversal | peak |
+|---|---|---|---|
+| openusd 0.7.0 → `main` at `933aa8f`, with memory-mapped USD reads | `bench_ab.sh`, 4 runs a side, 2026-10-10 | −15% (min), −17% (mean) | 28.5 → 15.5 GiB |
+| · of which the memory mapping (`mmap` feature) | `bench_ab.sh`, 3 runs a side, 2026-10-10 | −3% | −3.5 GiB |
+| openusd `main` at `933aa8f` → `7d11cdd` (0.8.0) | both binaries at once, same load, 2026-10-11 | **126.2 → 86.9 s (−31%)** | **15.6 → 11.9 GiB** |
+
+The first two rows are recorded in
+`openspec/changes/archive/2026-10-10-retire-openusd-workarounds/notes.md`. The third is the prototype
+sharing below: two `crust check -l debug` imports, `51250e8` and `fc0b962`,
+run concurrently so that load fell on both.
 
 ### What the scene holds
 
-| | |
-|---|---|
-| geometries | 13 302 |
-| top-level BVH primitives | 1 991 360 (1 979 504 triangles, 11 819 instances, 37 analytic light shapes) |
-| primitives in memory | 30 597 852 (21 166 922 triangles, 9 418 288 cubic curve spans, 12 605 instances) |
-| allocated materials | 1 794: 1 749 textured `UsdPreviewSurface`, 45 `Emissive` |
-| lights | 43: 23 sphere, 13 cylinder, 4 rect, 1 disk, 1 distant, 1 dome |
-| kernel memory | 3.82 GiB (1.40 triangle packets, 0.86 curve spans, 0.67 BVH nodes, 0.48 triangle records, 0.18 leaves, 0.12 vertices, 0.11 normals) |
-| packet lanes filled | 82.7%; 193.6 bytes per triangle |
+| | now | 0.5.0 |
+|---|---|---|
+| geometries | 13 302 | 13 302 |
+| top-level BVH primitives | 1 991 360 (1 979 504 triangles, 11 819 instances, 37 analytic light shapes) | the same |
+| native-instancing prototypes | **380** | 1 417 |
+| primitives in memory | **21 438 434** (12 007 504 triangles, 9 418 288 cubic curve spans, 12 605 instances) | 30 597 852 (21 166 922 triangles) |
+| allocated materials | **757**: 712 textured `UsdPreviewSurface`, 45 `Emissive` | 1 794: 1 749 and 45 |
+| lights | 43: 23 sphere, 13 cylinder, 4 rect, 1 disk, 1 distant, 1 dome | the same |
+| kernel memory | **2.71 GiB** (0.84 curve spans, 0.76 triangle packets, 0.53 BVH nodes, 0.27 triangle records, 0.14 leaves, 0.07 vertices, 0.06 normals) | 3.82 GiB |
+| packet lanes filled | 82.6%; 242.3 bytes per triangle | 82.7%; 193.6 |
 
-- **Kernel memory fell from 9.16 to 3.82 GiB**, because each triangle is now
-  stored once, with shared vertex and normal tables
-  (`openspec/specs/intersection-kernel/design.md`).
-- **The rest of the 28.65 GiB peak, about 24.8 GiB, is the composed USD
-  stage.** A single-stage import keeps it allocated (`skip_stage_teardown`).
+- **Prototypes are shared now.** Under openusd `main` at `933aa8f`, ALab's
+  12 605 instances drew on 1 417 prototypes, each with its own copy of the
+  meshes and materials under it. At `7d11cdd` they draw on 380 (distinct
+  `/__Prototype_N` in an `-l debug` import log). Which of the 19 upstream
+  commits between the two did it was not identified. The top level, the instance count
+  and the lights are unchanged, so nothing left the frame. At 16 spp with
+  `--indirect-clamp 0`, 92% of the pixels are bit-identical to `51250e8`. The
+  rest differ by trimmed relMSE 6.2e-3, which fits the BVH ordering exact ties
+  differently. The 1/√N check across sample counts was not run.
+- **Bytes per triangle rose** only because it divides all of kernel memory,
+  including the 0.84 GiB of curve spans, by fewer triangles.
+- **The rest of the 11.93 GiB peak, about 8.5 GiB, is the composed USD stage
+  and import state**, against 24.8 GiB at 0.5.0. A single-stage import keeps it
+  allocated (`skip_stage_teardown`).
 - **Four fewer lights than the first profile**, because of light links (below).
 
 ## Render profile
 
-Thread time over the whole render: 28:56 across 72 threads, which is 95.2% of
-72 × wall.
+Thread time over the whole render: 30:13 across 72 threads, which is 95.2% of
+72 × wall (26.4 s in the profiled run).
 
-| section | glob. | thread time | calls | per call | first profile |
-|---|---|---|---|---|---|
-| **Texture** | **43.0%** | 12:25.7 | 480 977 911 | **1.57 µs** | 88.6%, 21.55 µs |
-| Trace | 33.7% | 9:44.3 | 99 758 594 | 5.86 µs | 6.5%, 7.60 µs |
-| Occlusion | 6.3% | 1:49.1 | 41 157 683 | 2.65 µs | 1.5%, 3.94 µs |
-| EvalBsdfs (local) | 5.4% | 1:34.4 | 99 745 233 | 0.95 µs local, 8.49 µs incl. textures | 1.0% |
-| SurfaceLighting (local) | 4.9% | 1:24.5 | 99 745 233 | 0.85 µs local | 1.2% |
-| MainLoop | 3.3% | 56.7 s | 1 828 312 | | 0.6% |
-| Bounce | 2.5% | 43.6 s | 99 745 233 | 437 ns | 0.5%, 597 ns |
-| GeneratePrimary | 0.4% | 7.6 s | 29 278 681 | 258 ns | 0.1% |
-| TextureLoad | 0.4% | 7.1 s | 51 399 | 139 µs | 0.1% |
-| Contributions | 0.2% | 3.0 s | 29 278 681 | 104 ns | 0.0% |
+| section | glob. | thread time | calls | per call | 0.5.0 | first profile |
+|---|---|---|---|---|---|---|
+| **Texture** | **38.0%** | 11:29.1 | 585 188 572 | **1.19 µs** | 43.0%, 1.57 µs | 88.6%, 21.55 µs |
+| Trace | 32.7% | 9:52.6 | 108 645 066 | 5.45 µs | 33.7%, 5.86 µs | 6.5%, 7.60 µs |
+| Occlusion | 7.1% | 2:08.1 | 48 809 443 | 2.63 µs | 6.3%, 2.65 µs | 1.5%, 3.94 µs |
+| MainLoop | 6.8% | 2:04.0 | 2 982 651 | | 3.3% | 0.6% |
+| EvalBsdfs (local) | 5.8% | 1:44.3 | 108 630 680 | 0.96 µs local, 7.39 µs incl. textures | 5.4%, 0.95 / 8.49 µs | 1.0% |
+| SurfaceLighting (local) | 5.5% | 1:40.2 | 108 630 680 | 0.92 µs local | 4.9%, 0.85 µs | 1.2% |
+| Bounce | 2.9% | 52.6 s | 108 630 680 | 484 ns | 2.5%, 437 ns | 0.5%, 597 ns |
+| TextureLoad | 0.5% | 9.4 s | 55 095 | 171 µs | 0.4%, 139 µs | 0.1% |
+| GeneratePrimary | 0.5% | 8.8 s | 29 309 688 | 301 ns | 0.4%, 258 ns | 0.1% |
+| Contributions | 0.2% | 3.4 s | 29 309 688 | 116 ns | 0.2%, 104 ns | 0.0% |
 
-By category: **Shading 48.4%, Raytrace 39.9%, Integrator 11.3%**, IO 0.4%. The
-first profile measured 89.5 / 8.0 / 2.4. Guerilla's documentation calls a
-roughly even split between Raytrace, Shading and Integrator the healthy shape.
-The frame is now near it, with shading still the largest share.
+By category: **Shading 43.8%, Raytrace 39.8%, Integrator 15.9%**, IO 0.5%.
+0.5.0 measured 48.4 / 39.9 / 11.3, the first profile 89.5 / 8.0 / 2.4.
+Guerilla's documentation calls a roughly even split between Raytrace, Shading
+and Integrator the healthy shape. The frame is near it, with shading still the
+largest share.
+
+- **The frame does more work than at 0.5.0.** 167.5 M ray queries against
+  140.9 M, and 108.6 M shading points against 99.7 M, at 7.0 Mray/s. The
+  increase was already there at `3c8b861` ("Thread scaling"). It was not
+  traced to a commit.
+- **The per-call costs of the light integrator sections rose 10–15%**
+  (Bounce, GeneratePrimary, Contributions, SurfaceLighting), and `MainLoop`'s
+  own share doubled, on 63% more calls. Each side is one profiled run, which
+  cannot resolve 10%. Count instructions before reading anything into it.
 
 The execution tree is the same shape as before: `MainLoop → EvalBsdfs →
-Texture`. Of EvalBsdfs' 14:07 total, 12:33 is inside `Texture`.
-`TextureLoad`, which pages a tile in from disk, is only 7 s of that. Shading a
+Texture`. Of EvalBsdfs' 13:23 total, 11:39 is inside `Texture`.
+`TextureLoad`, which pages a tile in from disk, is only 9 s of that. Shading a
 point without its textures costs under 1 µs. The texture path is still what a
 shading point costs.
 
 ### Texture lookups
 
-| | now | first profile |
-|---|---|---|
-| texture `eval`s per shading point | 4.82 | 4.8 |
-| texel lookups per `eval` | 6.59 | 6.5 |
-| lookups | 3.17 G | 3.28 G |
-| thread microcache hits | 85.3% | 74.9% |
-| shard-cache hits | 14.7% | 25.1% |
-| loaded | 597.8 MiB in 51 617 tiles, nothing evicted, 1 GiB budget | 503 MiB in 45 968 tiles |
-| concurrent double fills | 641 | 353 |
+| | now | 0.5.0 | first profile |
+|---|---|---|---|
+| texture `eval`s per shading point | 5.39 | 4.82 | 4.8 |
+| texel lookups per `eval` | 6.59 | 6.59 | 6.5 |
+| lookups | 3.86 G | 3.17 G | 3.28 G |
+| thread microcache hits | **94.7%** | 85.3% | 74.9% |
+| shard-cache hits | 5.3% | 14.7% | 25.1% |
+| loaded | 665.5 MiB in 55 106 tiles, nothing evicted, 1 GiB budget | 597.8 MiB in 51 617 tiles | 503 MiB in 45 968 tiles |
+| concurrent double fills | 765 | 641 | 353 |
 
-The microcache hit rate is the one the cache fix reached, so 15% of lookups
-still take a shard mutex. The textures would total 44.95 GiB with every level
-resident. Streaming holds the frame under 0.6 GiB.
+`grow-texture-microcache` landed after 0.5.0, and its gain shows here: 5% of
+lookups take a shard mutex, against 15%. That is why a lookup costs 1.19 µs
+against 1.57. The textures would total 44.95 GiB with every level resident.
+Streaming holds the frame under 0.7 GiB.
 
 ## Thread scaling
 
@@ -277,19 +323,19 @@ at 32 spp:
   about the link, ignored it, and let these lights illuminate everything. It
   has not been checked whether the targets are an authoring quirk or a path
   openusd should have remapped through the reference.
-- **NEE wastes less, but most shadow rays still miss.** Of 99.7 M light
-  samples, 41.3% were worth a shadow ray, and 81.7% of the 41.2 M shadow rays
-  cast were occluded, against 96.0% before. So about 7.6% of light samples now
-  deliver light, against 1.7%. This comparison has three causes, and they are
+- **NEE wastes less, but most shadow rays still miss.** Of 108.6 M light
+  samples, 44.9% were worth a shadow ray, and 83.0% of the 48.8 M shadow rays
+  cast were occluded (81.7% at 0.5.0), against 96.0% in the first profile. So
+  about 7.6% of light samples deliver light, against 1.7%. This comparison has three causes, and they are
   not separated here: the louvered windows no longer block the sun lights, the
   screen lights are gone, and the adaptive sampler has changed. Power selection
   is still the default; `--light-selection learned` is the remedy measured
   under "Outcome: NEE's misses".
 - **Paths end by absorption or roulette, almost never by escaping.** Absorbed:
-  58.0%. Roulette: 42.0% (76.0% of roulette tests kill). Escaped: 0.04%. Depth
-  cap: 919 paths. The mean path length is 3.41 vertices.
-- **Adaptive sampling barely engages.** 1.2% of pixels stopped early (0.6%
-  more were held back by a neighbour), and the average is 127.1 of 128 spp.
+  45.2%. Roulette: 54.7% (79.0% of roulette tests kill). Escaped: 0.05%. Depth
+  cap: 927 paths. The mean path length is 3.71 vertices (3.41 at 0.5.0).
+- **Adaptive sampling barely engages.** 1.1% of pixels stopped early (0.7%
+  more were held back by a neighbour), and the average is 127.2 of 128 spp.
 
 ## Shadow-linked lights and their noise (2026-10-08)
 
@@ -365,18 +411,18 @@ twinned light: the 20° sun cone or one of the two rect suns.
 
 ## What is left, in order of what it would buy
 
-1. **The import.** At 2:53 of a 3:20 frame, composition is now where a
-   single frame's time goes. The render could halve again and the frame would
-   be 6% faster.
+1. **The import.** At 1:30 of a 1:58 frame, composition is still where a
+   single frame's time goes, even after the two openusd updates halved it. The
+   render could halve again and the frame would be 10% faster.
 2. **The end of the pass.** Texture contention is gone
    (`grow-texture-microcache`: a texture call's 8 → 72 slowdown is now the
    machine's 1.61×). What is left of the 72-thread gap is threads idling while
    the last tiles finish: 5.1% of capacity. Removing it would take 72 threads
    from 5.51× to about 5.7× over 8, not to 9×, which this VM cannot reach
    ("Thread scaling").
-3. **Traversal.** Trace is now a third of render thread time, at 5.9 µs per
+3. **Traversal.** Trace is now a third of render thread time, at 5.5 µs per
    closest-hit query on this VM.
-4. **Light selection.** 82% of shadow rays are still occluded under power
+4. **Light selection.** 83% of shadow rays are still occluded under power
    selection.
 
 ## History: the first profile (2026-09-27, `bd07ea2`)
