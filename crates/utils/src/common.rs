@@ -65,16 +65,6 @@ pub fn power_heuristic(pdf_a: f32, pdf_b: f32) -> f32 {
     pdf_a2 / (pdf_a2 + pdf_b2 + 1e-6)
 }
 
-pub trait Lerp {
-    fn lerp(self, b: Self, t: Self) -> Self;
-}
-
-impl Lerp for f32 {
-    fn lerp(self, b: f32, t: f32) -> f32 {
-        self * (1.0 - t) + b * t
-    }
-}
-
 /// Cosine-weighted hemisphere sample from an explicit 2D uniform pair.
 /// Returns a direction in the local frame with the surface normal on +Z.
 pub fn cosine_hemisphere(uv: [f32; 2]) -> Vec3A {

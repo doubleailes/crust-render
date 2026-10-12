@@ -153,9 +153,9 @@ render.
 - **Every edit imports the whole stage again**, and a session holds the stage it authors
   beside the scene it renders, about twice a render's import memory: Moana-scale stages
   are out of reach. See [Look-dev with Claude Desktop](@/docs/help/claude-desktop.md#limits).
-- **Unauthored schema attributes have no type in a session.** Neither openusd 0.7 nor
-  openusd-schemas 0.7 ships schema data, and the session registers none, so
-  `set_attribute` on an attribute nothing authors yet (a light's `inputs:exposure`) needs
-  its `type`, and `query` cannot show its fallback. openusd-schemas' unreleased `main`
-  ships the data; the fix comes with crust's move to the release that includes it.
+- **Unauthored schema attributes have no type in a session.** The session's authoring
+  stage registers no schema registry, so `set_attribute` on an attribute nothing authors
+  yet (a light's `inputs:exposure`) needs its `type`, and `query` cannot show its
+  fallback. openusd-schemas 0.8 ships the schema data the render's import already
+  registers; the session does not use it yet.
 - **`probe` names no prim or material**: there is no table from a hit to its prim yet.

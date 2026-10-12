@@ -18,7 +18,7 @@ version = "0.7.0"
 publish = false
 
 [workspace.dependencies]
-glam = "0.33.2"
+glam = "0.34.1"
 tracing = {version = "0.1.41", default-features = false}
 exr = "1.74.2"
 # Decoder-side image formats. Declared once so `crust-assets` (which decodes)
@@ -118,12 +118,10 @@ panic = "abort"
 lto = "fat"
 codegen-units = 1
 
-# openusd tracks its GitHub `main` rather than the 0.7.0 release: main carries
-# the stage-open, traversal and shared-asset-bytes work from mxpv/openusd#106
-# (#142 and after) that no release has shipped yet. A patch rather than a
-# `git =` in each manifest, so the three crates that name openusd keep their
-# `0.7` requirement and dropping this section is the whole revert once a
-# release carries the work. Cargo.lock pins the commit; `cargo update -p
+# openusd tracks its GitHub `main` rather than the 0.8.0 release, to take its
+# fixes as they land. A patch rather than a `git =` in each manifest, so the
+# crates that name openusd keep their `0.8` requirement and dropping this
+# section is the whole revert to the release. Cargo.lock pins the commit; `cargo update -p
 # openusd -p openusd-schemas` moves it.
 [patch.crates-io]
 openusd = { git = "https://github.com/mxpv/openusd", branch = "main" }

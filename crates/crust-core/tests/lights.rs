@@ -3,9 +3,10 @@
 //! normalisation conventions of the infinite lights, and the light list.
 
 use crust_core::{
-    AffineShape, AreaLight, DistantLight, DomeLight, Emissive, EnvironmentMap, Light, LightList,
-    LightSelection, LightShape, LightTexture, PdfSolidAngle, RectShape, RectTexture, Shaping,
-    SolidAngleSampling, SphereShape, UnitShape, Vec3A, projected_cone_solid_angle,
+    AffineShape, AreaLight, DiskSampling, DistantLight, DomeLight, Emissive, EnvironmentMap, Light,
+    LightList, LightSelection, LightShape, LightTexture, PdfSolidAngle, RectShape, RectTexture,
+    Shaping, SolidAngleSampling, SphereShape, TubeSampling, UnitShape, Vec3A,
+    projected_cone_solid_angle,
 };
 use glam::Mat3A;
 use openqmc::pcg::Rng;
@@ -794,8 +795,12 @@ fn affine_shapes_without_a_cone_fall_back_to_area_sampling() {
         assert!(approx(bounce, s.pdf.get(), 1e-3 * s.pdf.get().max(1.0)));
     }
 
+    // With their own strategies off (`CRUST_DISK_SAMPLING` /
+    // `CRUST_TUBE_SAMPLING` at `area`), whatever the environment says.
     for unit in [UnitShape::Disk, UnitShape::Cylinder] {
-        let flat = AffineShape::new(unit, ellipsoid_placement()).unwrap();
+        let flat = AffineShape::new(unit, ellipsoid_placement())
+            .unwrap()
+            .with_sampling(TubeSampling::Area, DiskSampling::Area);
         let from = Vec3A::new(-6.0, 9.0, 4.0);
         assert!(flat.sample_solid_angle(from, 0.5, 0.5).is_none());
         assert!(flat.solid_angle_pdf(from, Vec3A::ZERO).is_none());

@@ -241,8 +241,8 @@ fn attribute_json(stage: &Stage, path: &sdf::Path) -> Result<Value, String> {
     let Some(type_name) = attr.type_name().ok().flatten() else {
         return Err(format!(
             "no layer authors {path}. If a schema declares it, its type and fallback are not known \
-             here: neither openusd 0.7 nor openusd-schemas 0.7 ships schema data, and the \
-             session registers none. Set it with set_attribute and an explicit `type`"
+             here: the session's stage registers no schema registry. Set it with \
+             set_attribute and an explicit `type`"
         ));
     };
     let mut layers: Vec<String> = Vec::new();
