@@ -129,8 +129,8 @@ once, and the layer is left as it was.
   string for `token`, `string` or `asset`, an array for an array type. A value that does
   not convert is refused, naming the type, and nothing is authored.
 - **Undeclared attributes need a `type`.** A schema attribute nothing authors yet, such
-  as a light's `inputs:exposure`, has no type on the session's stage: neither openusd 0.7
-  nor openusd-schemas 0.7 ships schema data. Pass `type` (`"float"`) the first time.
+  as a light's `inputs:exposure`, has no type on the session's stage, which registers no
+  schema registry. Pass `type` (`"float"`) the first time.
 - **Asset paths follow the layer.** A relative asset path is read from the *input's*
   directory, as `query` shows the input's own paths, and written relative to the layer's,
   so it names the same file wherever the layer is opened from.
