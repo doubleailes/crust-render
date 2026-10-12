@@ -240,8 +240,7 @@ fn attribute_json(stage: &Stage, path: &sdf::Path) -> Result<Value, String> {
     let attr = stage.attribute(path.clone()).map_err(|e| e.to_string())?;
     let Some(type_name) = attr.type_name().ok().flatten() else {
         return Err(format!(
-            "no layer authors {path}. If a schema declares it, its type and fallback are not known \
-             here: the session's stage registers no schema registry. Set it with \
+            "no schema of the prim declares {path} and no layer authors it. Author it with \
              set_attribute and an explicit `type`"
         ));
     };

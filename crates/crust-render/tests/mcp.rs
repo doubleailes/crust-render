@@ -377,12 +377,20 @@ fn query_names_the_layer_an_opinion_comes_from() {
     assert_eq!(format["value"], "latlong", "{format:#}");
     let source = format["source"].as_str().expect("a layer");
     assert!(source.ends_with("shot.usda"), "{format:#}");
-    // Unauthored, it has no type here (the session's stage registers no
-    // schema registry), and the error says why and how to author it anyway.
-    let e = client
+    // Unauthored, a schema attribute answers its declared type and the
+    // schema's fallback.
+    let exposure = client
         .call("query", json!({ "path": "/scene/Sky.inputs:exposure" }))
-        .expect_err("no layer authors the exposure");
-    assert!(e.contains("registers no schema registry"), "{e}");
+        .expect("UsdLux declares the exposure");
+    assert_eq!(exposure["type"], "float", "{exposure:#}");
+    assert_eq!(exposure["value"], 0.0, "{exposure:#}");
+    assert_eq!(exposure["source"], "fallback", "{exposure:#}");
+    // A name no schema declares and no layer authors is refused, and the
+    // error says how to author it anyway.
+    let e = client
+        .call("query", json!({ "path": "/scene/Sky.inputs:nonsense" }))
+        .expect_err("nothing declares it");
+    assert!(e.contains("no schema"), "{e}");
     assert!(e.contains("explicit `type`"), "{e}");
     let scene = client
         .call("query", json!({ "path": "/scene" }))
@@ -465,18 +473,26 @@ fn set_attribute_authors_an_opinion_over_the_source() {
     let (mut client, input, output) = cornellbox_session("set_attribute", &[]);
     let source = std::fs::read(&input).expect("input");
 
-    // Nothing declares the exposure: the type is needed, and given.
+    // UsdLux declares the exposure a float: a different `type` is refused,
+    // naming it, and authors nothing.
+    let before = std::fs::read(&output).unwrap();
     let e = client
         .call(
             "set_attribute",
-            json!({ "path": "/scene/Sky.inputs:exposure", "value": -0.5 }),
+            json!({ "path": "/scene/Sky.inputs:exposure", "value": -0.5, "type": "double" }),
         )
-        .expect_err("no declared type");
-    assert!(e.contains("type"), "{e}");
+        .expect_err("the schema says float");
+    assert!(e.contains("float"), "{e}");
+    assert_eq!(
+        std::fs::read(&output).unwrap(),
+        before,
+        "the layer is unchanged"
+    );
+    // Nothing authors it yet, and no `type` is needed: the schema's is taken.
     let set = client
         .call(
             "set_attribute",
-            json!({ "path": "/scene/Sky.inputs:exposure", "value": -0.5, "type": "float" }),
+            json!({ "path": "/scene/Sky.inputs:exposure", "value": -0.5 }),
         )
         .expect("set");
     assert_eq!(set["undo_depth"], 1, "{set:#}");
@@ -784,8 +800,8 @@ fn undo_restores_the_layer_byte_for_byte() {
     assert_eq!(std::fs::read(&output).unwrap(), before);
     let q = client
         .call("query", json!({ "path": "/scene/Sky.inputs:exposure" }))
-        .expect_err("the opinion is gone");
-    assert!(q.contains("no layer authors"), "{q}");
+        .expect("the schema's fallback");
+    assert_eq!(q["source"], "fallback", "the opinion is gone: {q:#}");
 
     // A resumed session starts with no history.
     client
