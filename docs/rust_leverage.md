@@ -554,9 +554,8 @@ on purpose.
   from closure chains. `Add`/`Sub`/`Mul` with broadcasting make them read as
   arithmetic. The JIT ↔ interpreter bitwise test pins the change (operand
   order must stay the same).
-- Texel blends are manual `for k in 0..3` loops over `[f32; 4]`, while
-  `utils::Lerp` is implemented only for `f32`. `impl Lerp for [f32; 4]` (or
-  `glam::Vec4`) removes them.
+- Texel blends are manual `for k in 0..3` loops over `[f32; 4]`. Holding the
+  texels as `glam::Vec4` and blending with its `lerp` removes them.
 - `LobePmf` keeps five named fields parallel to `Lobe` with a hand-unrolled
   `pick`. `[f32; 5]` with `impl Index<Lobe>` ties the two together, so adding
   a lobe cannot miss the pmf.
