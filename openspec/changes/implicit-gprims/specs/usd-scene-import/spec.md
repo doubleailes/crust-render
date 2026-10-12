@@ -164,12 +164,12 @@ tessellation SHALL never be subdivided.
 
 ### Requirement: Adaptive radial count of implicit shapes
 
-When the render camera is resolvable before traversal (from `--camera` or
-`RenderSettings.camera`), each **unshared** `Cylinder`, `Cylinder_1`, `Cone`,
-`Capsule` or `Capsule_1` SHALL take the smallest radial count, within a fixed
-range, whose silhouette chord error projects to no more than a fixed fraction of a
-pixel at the nearest point of its world bounds. Shared shapes, and every shape when
-no camera is resolvable early, SHALL take one fixed count.
+With the render camera resolvable before traversal (`--camera` or
+`RenderSettings.camera`), each **unshared** curved implicit shape SHALL take the
+smallest radial count, within a fixed range, whose silhouette chord error projects
+to at most a fixed fraction of a pixel at the nearest point of its world bounds.
+Unshared and shared are as for adaptive subdivision. Shared shapes, and all shapes
+without an early camera, SHALL take one fixed count.
 
 #### Scenario: Larger on screen means more segments
 
@@ -195,10 +195,24 @@ no camera is resolvable early, SHALL take one fixed count.
 - **WHEN** a prototype containing a `Cylinder` is placed more than once
 - **THEN** the cylinder takes the fixed count, whatever its distance
 
+#### Scenario: Nested native instance
+
+- **WHEN** a `Cylinder` is inside a prototype reached only through a native instance
+  nested in another prototype, and the outer prototype is placed once
+- **THEN** the cylinder takes the fixed count, as nested prototypes are always
+  built shared
+
 #### Scenario: Off screen
 
-- **WHEN** a placed-once cylinder lies wholly outside the camera's view pyramid
+- **WHEN** a placed-once cylinder lies wholly outside the camera's view pyramid,
+  with the frustum test on (the default)
 - **THEN** it takes the minimum count
+
+#### Scenario: Off screen with the frustum test off
+
+- **WHEN** `CRUST_ADAPTIVE_FRUSTUM=0` and a placed-once cylinder lies wholly outside
+  the camera's view pyramid
+- **THEN** its count follows its distance alone, as if it were on screen
 
 #### Scenario: Capsule caps follow
 
@@ -209,8 +223,10 @@ no camera is resolvable early, SHALL take one fixed count.
 
 A `UsdGeomGprim` prim that the importer reads as neither a surface nor a volume
 SHALL raise the `geom.unsupported_type` warning instead of being dropped silently.
-It SHALL be raised once per prim type per load, carrying the count of prims of that
-type, from the top-level traversal and the prototype walk alike.
+It SHALL be raised once per prim type per load, from the top-level traversal and
+the prototype walk alike, carrying a count: one per prim met by the top-level walk,
+and one per prim per prototype build, not per placement. A streamed load may build
+a prototype once per chunk.
 
 #### Scenario: Points prim
 
@@ -222,6 +238,12 @@ type, from the top-level traversal and the prototype walk alike.
 
 - **WHEN** an unread `Gprim` type is inside a prototype
 - **THEN** it is reported in the same way
+
+#### Scenario: Placements do not multiply the count
+
+- **WHEN** a prototype holding one `Points` prim is placed fifty times, in a load
+  that is not streamed
+- **THEN** the warning for `Points` carries count 1
 
 #### Scenario: Non-geometry prims are not reported
 

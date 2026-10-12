@@ -76,6 +76,10 @@ See proposal.md - Why. The current state that shapes the approach:
 - Displacement on implicit shapes.
 - `doubleSided`. Crust ignores it on every gprim; surfaces are two-sided as they
   are today.
+- An instance prim's own schema. A native instance is expanded from its prototype,
+  which holds the instance's children, before any dispatch (`traverse_into`), so a
+  prim that is itself an instanceable `Cube`, `Mesh` or `crust:volume:*` prim
+  imports nothing of its own. That is unchanged here and goes in the known gaps.
 
 ## Decisions
 
@@ -162,7 +166,16 @@ so equal shapes at similar screen sizes still dedup.
 
 The same `MeshPlace::World` / `Shared` split as subdivision decides "unshared":
 - a direct prim is placed in the world;
-- a prototype part is `Shared` unless the walk was given `ProtoPlace::Unshared`.
+- a prototype part is `Shared` unless the walk was given `ProtoPlace::Unshared`;
+- a prototype reached through a native instance nested in another prototype is
+  always `Shared`, because `collect_proto_parts` splices nested instances from the
+  cached shared build (`count_placements` does not descend into instances). This
+  matches subdivision exactly, and changing it is out of scope for both.
+
+"Off screen gives `N_MIN`" holds while the frustum test is on (the default).
+Under `CRUST_ADAPTIVE_FRUSTUM=0`, `sigma_culled` skips the overlap test by design
+(that is the switch's "off" side), so an off-screen shape is sized by distance
+alone, like an adaptive mesh under the same switch.
 
 *Alternatives considered:*
 - **(A) Driving the count from `crust:subdivisionEdgeLength`.** It is opt-in, so
@@ -180,7 +193,13 @@ moves above `Mesh`.
   geometry branches together keeps the two walks readable side by side.
 - **Unsupported gprims** are recognised by `prim.is_a("Gprim")` (openusd's
   `UsdPrim::IsA`, resolved through the schema registry) after every reading branch
-  has failed. They are counted per type name in `ImportCaches` and emitted once per
+  has failed. They are counted per type name in `ImportCaches`: once per prim met
+by the top-level walk, and once per prim per prototype *build*. Placements never
+add to the count (the walk runs once per build, not per placement), but a streamed
+load rebuilds a prototype once per chunk that uses it. Deduplicating across chunks
+is not possible by path, since `/__Prototype_N` is renumbered per chunk
+(`ImportCaches::epoch`). The count is therefore documented as "prims read", which
+is exact for a load that is not streamed and emitted once per
   type at the end of the load as `GeomUnsupportedType` (Skipped, registered `Each`
   because one is raised per type; the message carries the count). Emitting at the end, on the
   importing thread, keeps the count exact across streamed chunks and still lands

@@ -85,6 +85,8 @@
       count. Add tests:
       - 3 `Points` + 1 `NurbsPatch` give exactly two warnings with counts 3 and 1;
       - one inside a prototype is counted;
+      - a prototype holding one `Points`, placed fifty times in a non-streamed
+        load, gives count 1;
       - `Xform`, `Scope`, `Camera`, `Material`, lights and the seven shapes raise
         none.
 
@@ -121,7 +123,10 @@
       - monotonic in distance;
       - clamped at `N_MIN` off-screen (σ = 0) and at `N_MAX` with the camera inside
         (σ = ∞);
-      - a shared prototype takes `N_FIXED`;
+      - a shared prototype takes `N_FIXED`, and so does a cylinder reached only
+        through a nested native instance whose outer prototype is placed once;
+      - with `CRUST_ADAPTIVE_FRUSTUM=0`, an off-screen cylinder is sized by
+        distance, not clamped to `N_MIN`;
       - the sagitta at the chosen N is ≤ ε px, and at N − 1 it is > ε px (unless
         clamped).
 - [ ] 5.4 A DEBUG line at the end of import with the histogram of radial counts
@@ -136,7 +141,8 @@
         in the prototype walk; the Python bindings lack `_1`), and a "Known gaps:
         implicit shapes" section (no UVs or Ptex, no displacement, terminator
         artefacts on off-screen shapes at `N_MIN`, the fixed count for shared
-        prototypes);
+        and nested prototypes, the unsupported-type count per prototype build, an
+        instance prim's own schema not read);
       - the importer table in `docs/architecture.md`.
 
       Done when `zola build` passes.
