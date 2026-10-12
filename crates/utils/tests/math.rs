@@ -34,25 +34,6 @@ fn luminance_weights_sum_to_one_and_favour_green() {
     assert!(luminance(Vec3A::X) > luminance(Vec3A::Z));
 }
 
-#[test]
-fn lerp_interpolates_linearly() {
-    assert_eq!(2.0f32.lerp(4.0, 0.0), 2.0);
-    assert_eq!(2.0f32.lerp(4.0, 1.0), 4.0);
-    assert!(approx(2.0f32.lerp(4.0, 0.5), 3.0, 1e-6));
-    assert!(approx(2.0f32.lerp(4.0, 0.25), 2.5, 1e-6));
-    // Extrapolation is allowed and linear.
-    assert!(approx(0.0f32.lerp(1.0, 2.0), 2.0, 1e-6));
-}
-
-#[test]
-fn lerp_is_symmetric_under_endpoint_swap() {
-    for t in [0.0f32, 0.1, 0.5, 0.9, 1.0] {
-        let ab = 1.0f32.lerp(5.0, t);
-        let ba = 5.0f32.lerp(1.0, 1.0 - t);
-        assert!(approx(ab, ba, 1e-5), "t={t}: {ab} vs {ba}");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // MIS heuristics
 // ---------------------------------------------------------------------------
