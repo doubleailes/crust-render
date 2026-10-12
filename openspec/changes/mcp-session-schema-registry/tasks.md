@@ -4,22 +4,22 @@
       `openusd_schemas::schema_registry()`, re-export it from `lib.rs`, and have
       `usd_import::stage_builder()` call it. Done when the workspace builds and every
       import test passes unchanged.
-- [ ] 1.2 In `crates/crust-render/src/mcp/session.rs`, pass it to
+- [x] 1.2 In `crates/crust-render/src/mcp/session.rs`, pass it to
       `Stage::builder().schema_registry(..)` in `open_stage`; keep the session's
       resolver and `InitialLoadSet::LoadNone`.
 
 ## 2. Query and set_attribute
 
-- [ ] 2.1 `tests/mcp.rs`: the unauthored `/scene/Sky.inputs:exposure` query answers
+- [x] 2.1 `tests/mcp.rs`: the unauthored `/scene/Sky.inputs:exposure` query answers
       `type` `"float"`, `value` `0`, `source` `"fallback"` (replacing the current
       `expect_err`); `/scene/Sky.inputs:nonsense` fails naming an explicit `type`.
-- [ ] 2.2 `tests/mcp.rs`: `set_attribute` on the unauthored exposure with no `type`
+- [x] 2.2 `tests/mcp.rs`: `set_attribute` on the unauthored exposure with no `type`
       authors `float inputs:exposure`; with `type` `"double"` it is refused naming
       `float`, and the layer is unchanged.
 - [ ] 2.3 Check that `query`'s fallback for a DistantLight's unauthored
       `inputs:intensity` equals the intensity the render imports for it. If they
       differ, record it in the `mcp-session` design record's known gaps.
-- [ ] 2.4 Reword the remaining refusal in `mcp/query.rs` (`attribute_json`) per D4.
+- [x] 2.4 Reword the remaining refusal in `mcp/query.rs` (`attribute_json`) per D4.
 
 ## 3. Verify and document
 
