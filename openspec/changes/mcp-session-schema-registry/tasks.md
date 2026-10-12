@@ -1,6 +1,6 @@
 ## 1. Register the schemas on the session's stage
 
-- [ ] 1.1 In crust-core, add `pub fn usd_schema_registry()` returning
+- [x] 1.1 In crust-core, add `pub fn usd_schema_registry()` returning
       `openusd_schemas::schema_registry()`, re-export it from `lib.rs`, and have
       `usd_import::stage_builder()` call it. Done when the workspace builds and every
       import test passes unchanged.
@@ -29,7 +29,7 @@
       (and drop `type="float"` from its `inputs:exposure` example) and from
       `site/content/docs/architecture/limitations.md`; update the `mcp-session`
       record. Done when `zola build` passes.
-- [ ] 3.3 CI locally: `cargo fmt --all -- --check`,
+- [x] 3.3 CI locally: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast`, and
       `openspec validate mcp-session-schema-registry --strict`.
