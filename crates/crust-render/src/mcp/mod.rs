@@ -7,6 +7,7 @@
 //! nothing else, on one thread: the session's stage lives on a thread of its
 //! own ([`session`]), and renders on the rayon pool.
 
+mod delta;
 mod edit;
 mod layer;
 mod query;
@@ -416,15 +417,18 @@ impl Server {
 
     /// A pixel's values in a render, in its linear working space: the beauty,
     /// and every AOV channel of the stage's RenderProducts once the render
-    /// has returned. `prim` and `material` (what the camera ray hit there)
-    /// are null until crust keeps a table from hits to prims.
+    /// has returned. `prim` and `material` name what the camera ray through
+    /// the pixel's centre hit (inside a native instance or a PointInstancer,
+    /// the instance or instancer prim); null where it hit nothing, or once
+    /// the scene was imported again since the render.
     #[tool]
     async fn probe(&self, Parameters(p): Parameters<Probe>) -> Result<CallToolResult, ErrorData> {
         reply(
             self.session
                 .call(move |state| {
-                    let job = state.session()?.renders.get(p.render_id)?;
-                    render::probe(&job, p.x, p.y)
+                    let open = state.session()?;
+                    let job = open.renders.get(p.render_id)?;
+                    render::probe(&job, &open.scene, p.x, p.y)
                 })
                 .await,
         )

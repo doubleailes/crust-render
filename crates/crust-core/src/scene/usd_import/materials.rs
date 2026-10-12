@@ -53,6 +53,51 @@ pub(super) struct MaterialCache {
 }
 
 impl MaterialCache {
+    /// Each material prim the cache resolved → the `world` slots holding it
+    /// and whether a mesh was displaced by it ([`crate::live::Provenance`]).
+    /// By `Arc` identity: a slot holds exactly the `Arc` the cache handed out.
+    /// Prototype-scoped paths (`/__Prototype_N`, renumbered per streamed
+    /// stage) are left out: no edit names one, and two epochs' `Arc`s under
+    /// one such path are different materials.
+    /// `(prim read, material reading it)` for every material the cache
+    /// resolved, prototype-scoped ones included ([`material_reads`]).
+    pub(super) fn reads(&self) -> Vec<(String, String)> {
+        let mut reads: Vec<(String, String)> = self
+            .by_path
+            .iter()
+            .flat_map(|((_, path), cached)| cached.reads.iter().map(|r| (r.clone(), path.clone())))
+            .collect();
+        reads.sort();
+        reads.dedup();
+        reads
+    }
+
+    pub(super) fn origins(
+        &self,
+        world: &crate::World,
+    ) -> HashMap<String, crate::live::MaterialOrigin> {
+        let mut by_arc: HashMap<*const (), &str> = HashMap::new();
+        let mut out: HashMap<String, crate::live::MaterialOrigin> = HashMap::new();
+        for ((_, path), cached) in &self.by_path {
+            if path.starts_with("/__Prototype") {
+                continue;
+            }
+            by_arc.insert(Arc::as_ptr(&cached.material) as *const (), path);
+            let origin = out.entry(path.clone()).or_default();
+            origin.displaced |= matches!(cached.displacement, Some(Some(_)));
+        }
+        for (slot, material) in world.materials().iter().enumerate() {
+            if let Some(path) = by_arc.get(&(Arc::as_ptr(material) as *const ())) {
+                out.get_mut(*path)
+                    .expect("every path has an entry")
+                    .slots
+                    .push(slot as u32);
+            }
+        }
+        out.retain(|_, o| !o.slots.is_empty());
+        out
+    }
+
     pub(super) fn default_material(&mut self) -> Arc<dyn Material> {
         self.default.get_or_insert_with(default_material).clone()
     }
@@ -105,6 +150,9 @@ pub(super) struct BoundMaterial {
 /// kept here until then.
 pub(super) struct CachedMaterial {
     material: Arc<dyn Material>,
+    /// The prims outside the material that its network reads (see
+    /// [`material_reads`]).
+    reads: Vec<String>,
     mtlx: Option<Arc<crate::materialx::MtlxDisplacement>>,
     /// `None` until a mesh asked; then the answer, which may be no
     /// displacement.
@@ -224,13 +272,13 @@ fn cached_material(
     // is what keeps one streamed chunk's `/__Prototype_N` apart from the
     // next's — see `MaterialCache::key`.
     debug!("Resolving material {mat_path} (epoch {})", key.0);
-    caches.materials.mtlx_displacement = None;
-    let material = resolve_material_uncached(stage, &mat_path, caches);
-    let mtlx = caches.materials.mtlx_displacement.take();
+    let (material, mtlx) = resolve_fresh(stage, &mat_path, caches);
+    let reads = material_reads(stage, &mat_path);
     caches.materials.by_path.insert(
         key.clone(),
         CachedMaterial {
             material,
+            reads,
             mtlx,
             displacement: None,
         },
@@ -238,11 +286,58 @@ fn cached_material(
     Some((key, mat_path))
 }
 
+/// The prims outside the material at `mat_path` that its network reads: the
+/// paths of the specs its prims compose from elsewhere (an `inherits`,
+/// `specializes` or `references` arc's target, a referenced layer's prim) and
+/// the prims its connections reach. An in-place edit of a prim one of these
+/// names would change this material too ([`crate::live`]). A path in another
+/// layer's namespace may coincide with an edited one; that costs a full
+/// import, never a stale material.
+fn material_reads(stage: &Stage, mat_path: &sdf::Path) -> Vec<String> {
+    let mut reads = Vec::new();
+    let mut stack = vec![prim_at(stage, mat_path.clone())];
+    while let Some(prim) = stack.pop() {
+        for site in prim.prim_stack().unwrap_or_default() {
+            if !site.path.has_prefix(mat_path) {
+                reads.push(site.path.to_string());
+            }
+        }
+        for attr in prim.authored_attributes().unwrap_or_default() {
+            for target in attr.connections().unwrap_or_default() {
+                let target = target.prim_path();
+                if !target.has_prefix(mat_path) {
+                    reads.push(target.to_string());
+                }
+            }
+        }
+        stack.extend(prim.children().unwrap_or_default());
+    }
+    reads.sort();
+    reads.dedup();
+    reads
+}
+
+/// The material at `mat_path`, resolved without the cache, and the `.mtlx`
+/// displacement program compiled with it: what a cache miss stores, and what
+/// an in-place material update ([`super::live`]) rebuilds.
+pub(super) fn resolve_fresh(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+) -> (
+    Arc<dyn Material>,
+    Option<Arc<crate::materialx::MtlxDisplacement>>,
+) {
+    caches.materials.mtlx_displacement = None;
+    let material = resolve_material_uncached(stage, mat_path, caches);
+    (material, caches.materials.mtlx_displacement.take())
+}
+
 /// The scalar displacement a material defines, read from whichever of the
 /// three authoring paths it uses: RenderMan's `PxrDisplace`, a MaterialX
 /// `displacementshader`, or `UsdPreviewSurface.inputs:displacement`. `None`
 /// when it defines none — the common case, which costs one child scan.
-fn resolve_displacement(
+pub(super) fn resolve_displacement(
     stage: &Stage,
     mat_path: &sdf::Path,
     mtlx: Option<Arc<crate::materialx::MtlxDisplacement>>,
@@ -684,7 +779,7 @@ fn inline_mtlx_material(
     )
 }
 
-fn default_material() -> Arc<dyn Material> {
+pub(super) fn default_material() -> Arc<dyn Material> {
     Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)))
 }
 

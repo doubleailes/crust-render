@@ -232,6 +232,43 @@ impl LightList {
         self.cache = None;
     }
 
+    /// Refuses replacing the light at `index` with `light` when the list was
+    /// built on something it says differently: another kind of light, one
+    /// at or away from infinity, another geometry, or a list whose links
+    /// were resolved ([`crate::live`]).
+    pub fn check_replace(
+        &self,
+        index: usize,
+        light: &LightKind,
+    ) -> Result<(), crate::live::Structural> {
+        use crate::live::Structural;
+        let Some(old) = self.lights.get(index) else {
+            return Err(Structural(format!("the light list has no light {index}")));
+        };
+        if self.links.is_some() || !self.backdrops.is_empty() {
+            return Err(Structural("the lights author links".into()));
+        }
+        if !crate::live::same_light_shape(old, light) {
+            return Err(Structural(format!(
+                "light {index} would change kind, infinity or geometry"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Replaces the light at `index` with `light`, after
+    /// [`LightList::check_replace`] passed. Its name, LPE tag, escape mask
+    /// and geometry index stay. The selection falls back to uniform, as after
+    /// [`LightList::add`]: the light's power is part of it, so it must be
+    /// rebuilt ([`LightList::select_by`], the renderer's `reconfigure`).
+    pub fn replace(&mut self, index: usize, light: LightKind) {
+        debug_assert!(self.check_replace(index, &light).is_ok());
+        self.lights[index] = light;
+        self.pmf.clear();
+        self.cdf.clear();
+        self.cache = None;
+    }
+
     /// Removes the light at `index` (in [`LightList::lights`] order) and
     /// returns it with the escape mask it was added with ([`MASK_ALL`] for a
     /// finite light). Every later light shifts down one place, and its

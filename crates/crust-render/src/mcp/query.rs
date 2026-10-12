@@ -3,7 +3,7 @@
 //! session's import (no frame) reads them.
 
 use openusd::sdf;
-use openusd::usd::{LoadPolicy, Prim, Stage};
+use openusd::usd::{LoadPolicy, Prim, ResolveInfoSource, Stage};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -240,8 +240,7 @@ fn attribute_json(stage: &Stage, path: &sdf::Path) -> Result<Value, String> {
     let attr = stage.attribute(path.clone()).map_err(|e| e.to_string())?;
     let Some(type_name) = attr.type_name().ok().flatten() else {
         return Err(format!(
-            "no layer authors {path}. If a schema declares it, its type and fallback are not known \
-             here: the session's stage registers no schema registry. Set it with \
+            "no schema of the prim declares {path} and no layer authors it. Author it with \
              set_attribute and an explicit `type`"
         ));
     };
@@ -252,13 +251,22 @@ fn attribute_json(stage: &Stage, path: &sdf::Path) -> Result<Value, String> {
         }
     }
     let value = attr.get::<sdf::Value>().ok().flatten();
+    // Where the value comes from: the layer whose opinion `get` resolved, at
+    // the same default time, or the schema's fallback. Not the first layer
+    // in the stack, which can author only metadata on the property.
+    let source = attr
+        .resolve_info_at(None)
+        .ok()
+        .and_then(|info| match info.source() {
+            ResolveInfoSource::Fallback => Some("fallback".to_owned()),
+            ResolveInfoSource::None => None,
+            _ => info.spec_site().map(|site| site.layer.clone()),
+        });
     Ok(json!({
         "path": path.to_string(),
         "type": type_name.to_string(),
         "value": value.as_ref().map(value_json),
-        // Where the value comes from: the strongest layer that authors it,
-        // or the schema's fallback when none does.
-        "source": layers.first().cloned().unwrap_or_else(|| "fallback".to_owned()),
+        "source": source,
         "layers": layers,
         "time_samples": attr.num_time_samples().unwrap_or(0),
     }))

@@ -45,6 +45,9 @@ pub struct Scene {
     /// order they first fired ([`crate::warnings`]). Empty for a
     /// hand-assembled scene.
     pub warnings: Vec<crate::Warning>,
+    /// Where the scene's materials, lights and geometry came from, for an
+    /// in-place update ([`crate::live`]). `None` for a hand-assembled scene.
+    pub provenance: Option<crate::live::Provenance>,
 }
 
 impl Scene {
@@ -61,6 +64,7 @@ impl Scene {
             camera_path: None,
             time: None,
             warnings: Vec::new(),
+            provenance: None,
         }
     }
 
@@ -74,6 +78,9 @@ mod displace;
 mod subdiv;
 mod tessellate;
 mod usd_import;
+
+pub(crate) use usd_import::rebuild;
+pub use usd_import::usd_schema_registry;
 
 impl Scene {
     /// Load a full runtime scene (camera, geometry, lights, render settings)

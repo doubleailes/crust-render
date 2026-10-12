@@ -101,7 +101,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | tool | what it does |
 |------|--------------|
 | `open_session(input, output)` | creates the override layer `output` on `input` (or resumes it) and imports it; reports the camera, the resolution and the warnings |
-| `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from) |
+| `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from, `fallback` for a schema's fallback nothing authors, or null when nothing gives it a value) |
 | `check()` | the [`crust check`](@/docs/reference/command-line.md#check) report of the current layer, as `crust-check/2` JSON |
 | `set_attribute(path, value, type?)` | authors an attribute value in the layer, typed as the attribute is declared |
 | `set_variant(prim, variant_set, variant)` | authors a variant selection |
@@ -112,25 +112,55 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | `render(region?, spp?, budget_s?, wait?)` | starts a progressive render and answers with the image so far: at 4 samples per pixel by default, at completion with `wait="done"`, within `budget_s` (default 10) either way |
 | `snapshot(render_id, budget_s?)` | the render's latest image and progress, at once, or after waiting at most `budget_s` for the render to finish |
 | `cancel(render_id)` | stops a render, keeping what it traced |
-| `probe(render_id, x, y)` | the beauty and every AOV at a pixel, in the working space |
+| `probe(render_id, x, y)` | the beauty and every AOV at a pixel, in the working space, and the prim and material the camera ray hits there |
 | `diff(render_a, render_b)` | compares two renders as [`crust diff`](@/docs/reference/command-line.md#diff) compares two files |
 | `render_final()` | renders the layer as `crust render <output>` would, and lists the files written |
 
 ### Editing
 
-Every edit tool authors opinions in the layer, saves it, and imports the saved file again,
-exactly as `crust render <output>` would. Its result says which
-[warning codes](@/docs/reference/warnings.md) the import gained or lost, and how long it
-took: an edit crust does not read is not silent. An edit the import refuses is undone at
-once, and the layer is left as it was.
+Every edit tool authors opinions in the layer, saves it, and brings the scene up to date
+with the saved file, so that it renders exactly as `crust render <output>` would. Its
+result says which [warning codes](@/docs/reference/warnings.md) the scene gained or lost,
+how long the update took (`import_s`), and how it was applied (`applied`): an edit crust
+does not read is not silent. An edit the import refuses is undone at once, and the layer is
+left as it was.
+
+Most look-dev edits do not need the whole stage read again. crust compares the layer
+before and after the edit, and applies it in place when every value it changed is one of
+these:
+
+| `applied` | what changed | what crust does |
+|-----------|--------------|-----------------|
+| `settings` | an attribute of the `RenderSettings` prim the render uses, or of the render camera (not its transform) | reads the settings and the camera again |
+| `materials` | an `inputs:*` value on a shader of a material the scene uses, or one of the material's own inputs | rebuilds those materials |
+| `lights` | an `inputs:*` value on a light (not its `width`, `height`, `radius` or `length`) | rebuilds those lights and the light selection |
+| `full` | anything else: a prim added or removed, a binding, a connection, a transform, visibility, a variant, a light's size | imports the saved file again |
+
+An edit with changes of several kinds is applied as the most expensive of them, in the
+order of the table. A change that turns out to need more is applied as `full`: a material
+that becomes a cutout, emissive or displaced, a light that stops emitting, a setting that
+changes the working colour space or the subdivision, or one whose rebuild would report a
+different warning, a shader another material also uses (through `inherits` or a
+connection), or any edit made after a texture file changed on disk. Either way the render is the same, bit for bit, as after a full import
+of the same layer. `undo` is applied the same way.
+
+The decoded textures, Ptex files, light textures and IES profiles stay with the session,
+so even a `full` edit does not decode them again. A file that changes on disk (a texture
+re-exported mid-session, or a tile added to a UDIM set) is read again by the next
+edit, which is then applied as `full`. Set
+[`CRUST_SCENE_DELTAS=0`](@/docs/reference/environment-variables.md#crust-scene-deltas)
+to import every edit whole with nothing kept, as earlier versions did.
 
 - **Values take the attribute's type.** `set_attribute` reads the type the stage declares
   and converts the JSON value to it: a number for `float`, `[r, g, b]` for `color3f`, a
   string for `token`, `string` or `asset`, an array for an array type. A value that does
   not convert is refused, naming the type, and nothing is authored.
-- **Undeclared attributes need a `type`.** A schema attribute nothing authors yet, such
-  as a light's `inputs:exposure`, has no type on the session's stage, which registers no
-  schema registry. Pass `type` (`"float"`) the first time.
+- **Schema attributes are typed before anything authors them.** The session's stage
+  carries the same USD schemas as the render's import, so an attribute a prim's schema
+  declares, such as a light's `inputs:exposure`, has its type and fallback value even
+  when no layer authors it: `query` answers them with `source` `fallback`, and
+  `set_attribute` needs no `type`. A `type` that contradicts the schema is refused. Only
+  a custom attribute no schema declares needs `type` the first time.
 - **Asset paths follow the layer.** A relative asset path is read from the *input's*
   directory, as `query` shows the input's own paths, and written relative to the layer's,
   so it names the same file wherever the layer is opened from.
@@ -179,7 +209,7 @@ query("/scene/Sky")
   → DomeLight, inputs:texture:file = sky_gradient.exr (authored in cornellbox.usda)
 render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait="done")
   → render 1: the crop around the spheres, done
-set_attribute("/scene/Sky.inputs:exposure", -1, type="float")
+set_attribute("/scene/Sky.inputs:exposure", -1)
   → saved, no warning gained
 author_usda("""
   over "scene" {
@@ -198,7 +228,7 @@ render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait="done")
 diff(render_a=1, render_b=2)
   → not identical, relative MSE …
 probe(render_id=2, x=320, y=200)
-  → beauty [r, g, b]
+  → beauty [r, g, b], prim /scene/pCube1, material /scene/Looks/initialShadingGroup
 undo()
   → the key light is gone; the layer is as it was after set_attribute
 render_final()
@@ -212,9 +242,20 @@ and any USD tool opens it.
 ## Limits
 
 - **One session, one client.** The server holds one session at a time, over stdio only.
-- **Every edit imports the whole stage again.** Seconds on a medium stage; each result
-  says how long. A session holds the stage it authors and the scene it renders at once,
+- **Most structural edits import the whole stage again.** A `full` edit takes seconds on
+  a medium stage; each result says how long. Only the edits in the table above are
+  applied in place. Decoded textures the scene no longer uses are let go at the next
+  `full` edit. A session holds the stage it authors and the scene it renders at once,
   about twice the memory of a render's import, which puts Moana-scale stages out of reach.
-- **`probe` does not name the prim.** crust keeps no table from a hit to its prim yet, so
-  `prim` and `material` are null, and the result says why.
+- **`probe` names the prim the import recorded, not the one you may expect.** It names
+  the first surface the camera ray through the pixel's centre meets, before any opacity,
+  so a cutout's hole names the surface it cuts. A hit inside a native instance or a
+  `PointInstancer` names the instance or the instancer prim, not the prototype's mesh,
+  and the material is null for geometry no Material prim fills (an area light's
+  emitter). Once an edit has imported the stage again, a render from before it names
+  nothing: render again.
+- **A schema fallback is not always what renders.** Where crust has its own default for
+  an unauthored attribute, the render uses it, not the fallback `query` shows: a
+  DistantLight with no `inputs:intensity` queries as `50000` and renders as `1`, and a
+  camera with no `verticalAperture` queries as `15.2908` but follows the image's aspect.
 - **`render_final` blocks the session** until it has written its files.

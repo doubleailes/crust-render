@@ -9,6 +9,7 @@
 //! caller's commands run in the order it sent them, however many callers
 //! interleave theirs.
 
+use super::delta::{Applied, classify, layer_diff};
 use super::edit::{
     Snippet, active_snippet, attribute_snippet, binding_snippet, reanchor, variant_snippet,
 };
@@ -18,6 +19,7 @@ use super::render::{Job, Renders};
 use super::scene::{Imported, import};
 use crate::{Cli, Command, RenderRun, render_and_write};
 use clap::Parser;
+use crust_assets::FileAssets;
 use crust_core::{PixelRect, RenderControl};
 use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Stage};
@@ -52,13 +54,47 @@ pub struct Open {
     pub undo: Vec<Vec<u8>>,
     /// The session's renders.
     pub renders: Renders,
+    /// The asset loader every import of the session goes through, keeping
+    /// its decodes; `None` under `CRUST_SCENE_DELTAS=0`, where each import
+    /// gets a fresh one.
+    pub(super) assets: Option<Arc<FileAssets>>,
+}
+
+/// The loader for the session's next import or update: the session's own,
+/// its decodes revalidated against the files on disk, or a fresh one under
+/// `CRUST_SCENE_DELTAS=0`; and how many kept decodes changed on disk.
+fn loader(kept: Option<&Arc<FileAssets>>) -> (Arc<FileAssets>, usize) {
+    match kept {
+        Some(assets) => {
+            let dropped = assets.revalidate();
+            if dropped > 0 {
+                debug!("{dropped} decoded asset(s) changed on disk and will be read again");
+            }
+            (assets.clone(), dropped)
+        }
+        None => (Arc::new(FileAssets::new()), 0),
+    }
+}
+
+/// Imports the saved layer at `layer` through `assets`, then lets go of the
+/// kept decodes the new scene does not use.
+fn import_kept(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String> {
+    let scene = import(layer, assets.clone())?;
+    let unused = assets.sweep();
+    if unused > 0 {
+        debug!("{unused} decoded asset(s) the scene no longer uses let go");
+    }
+    Ok(scene)
 }
 
 /// Opens `path`'s layer as the authoring stage, payloads unloaded: they load
 /// only for the prims a query reaches (design, Risks).
 fn open_stage(path: &Path) -> Result<Stage, String> {
     let id = path.to_str().ok_or("the layer path is not UTF-8")?;
+    // The import's schema registry, not its resolver: a declared attribute
+    // then has its schema type and fallback here, as in the render.
     Stage::builder()
+        .schema_registry(crust_core::usd_schema_registry())
         .load(InitialLoadSet::LoadNone)
         .open(id)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))
@@ -111,11 +147,11 @@ impl Open {
                     .save()
                     .map_err(|e| format!("cannot save {}: {e}", self.output.display()))
             });
-        let imported = saved.and_then(|()| import(&self.output));
-        match imported {
-            Ok(scene) => {
+        let synced = saved.and_then(|()| self.sync(&before));
+        match synced {
+            Ok(mut result) => {
                 self.undo.push(before);
-                let mut result = self.swap(scene);
+                result["undo_depth"] = self.undo.len().into();
                 result["authored_specs"] = snippet.specs().into();
                 result["cancelled_render"] = cancelled.into();
                 Ok(result)
@@ -145,9 +181,9 @@ impl Open {
         let cancelled = self.renders.stop();
         let current =
             std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
-        let imported = self.restore(&before).and_then(|()| import(&self.output));
-        let scene = match imported {
-            Ok(scene) => scene,
+        let synced = self.restore(&before).and_then(|()| self.sync(&current));
+        let mut result = match synced {
+            Ok(result) => result,
             Err(e) => {
                 let back = match self.restore(&current) {
                     Ok(()) => "the layer is as it was".to_owned(),
@@ -160,7 +196,7 @@ impl Open {
             }
         };
         self.undo.pop();
-        let mut result = self.swap(scene);
+        result["undo_depth"] = self.undo.len().into();
         result["cancelled_render"] = cancelled.into();
         Ok(result)
     }
@@ -231,8 +267,9 @@ impl Open {
         }
         let aovs = self.scene.aovs.clone();
         let space = self.scene.working_space;
+        let geometry = self.scene.geometry;
         self.renders
-            .start(&mut self.scene.renderer, settings, aovs, space)
+            .start(&mut self.scene.renderer, settings, aovs, space, geometry)
     }
 
     /// Writes `bytes` as the layer and reopens the authoring stage on it.
@@ -242,23 +279,70 @@ impl Open {
         Ok(())
     }
 
-    /// Replaces the scene with a new import of the layer, and says what that
-    /// changed: the warning codes it gained and lost, and the import time.
-    fn swap(&mut self, scene: Imported) -> serde_json::Value {
-        let old = self.scene.warning_codes();
-        let new = scene.warning_codes();
+    /// Brings the scene up to date with the saved layer, whose bytes were
+    /// `before` until the change just made (spec: "Edits apply in place when
+    /// they are confined"), and says what that changed: the warning codes it
+    /// gained and lost, the time taken, and how the change was applied. The
+    /// scene is unchanged when this fails.
+    fn sync(&mut self, before: &[u8]) -> Result<serde_json::Value, String> {
+        let old: Vec<&'static str> = self.scene.warning_codes();
+        self.apply_change(before)?;
+        let new = self.scene.warning_codes();
         let gained: Vec<&str> = new.iter().filter(|c| !old.contains(c)).copied().collect();
         let lost: Vec<&str> = old.iter().filter(|c| !new.contains(c)).copied().collect();
-        let result = serde_json::json!({
+        Ok(serde_json::json!({
             "saved": self.output,
-            "import_s": scene.took.as_secs_f64(),
-            "warnings": scene.report.warnings.len(),
+            "applied": self.scene.applied.as_str(),
+            "import_s": self.scene.took.as_secs_f64(),
+            "warnings": self.scene.report.warnings.len(),
             "warnings_gained": gained,
             "warnings_lost": lost,
-            "undo_depth": self.undo.len(),
-        });
-        self.scene = scene;
-        result
+        }))
+    }
+
+    /// The change from `before` to the saved layer, in place when it is
+    /// confined to settings, light inputs or material inputs and the scene
+    /// takes it, else by importing the saved layer.
+    ///
+    /// The kept decodes are revalidated first, whichever way the change goes:
+    /// when a file the scene read changed on disk, the scene's other parts
+    /// still hold its old decode, so only a full import gives what a fresh one
+    /// would.
+    fn apply_change(&mut self, before: &[u8]) -> Result<(), String> {
+        let (assets, changed_on_disk) = loader(self.assets.as_ref());
+        if changed_on_disk > 0 {
+            debug!("Edit applied as full: {changed_on_disk} asset file(s) changed on disk");
+        } else if self.assets.is_some()
+            && let Some((applied, change)) = self.classify(before)
+        {
+            match self.scene.update(&self.output, &change, applied) {
+                Ok(()) => return Ok(()),
+                // One per edit batch that falls back.
+                Err(why) => debug!("{applied} edit applied as full instead: {why}"),
+            }
+        }
+        self.scene = import_kept(&self.output, assets)?;
+        Ok(())
+    }
+
+    /// The class of the change from `before` to the saved layer and what it
+    /// rebuilds, `None` when it needs a full import.
+    fn classify(&self, before: &[u8]) -> Option<(Applied, crust_core::live::Change)> {
+        let provenance = self.scene.provenance()?;
+        let after = std::fs::read(&self.output).ok()?;
+        let parse = |bytes: &[u8]| {
+            std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|text| openusd::usda::parse(text).ok())
+        };
+        let (before, after) = (parse(before)?, parse(&after)?);
+        let changes = layer_diff(&before, &after);
+        let (applied, change, full) = classify(&changes, &self.stage, provenance);
+        if let Some(why) = full {
+            debug!("Edit applied as full: {why}");
+            return None;
+        }
+        Some((applied, change))
     }
 
     /// `path`, an existing prim of the stage, which an edit may target: not
@@ -449,7 +533,10 @@ impl State {
                 }
             }
         };
-        let scene = match import(&output) {
+        let assets = crust_core::config()
+            .scene_deltas
+            .then(|| Arc::new(FileAssets::new().keep_decoded()));
+        let scene = match import_kept(&output, loader(assets.as_ref()).0) {
             Ok(scene) => scene,
             Err(e) => {
                 // A new layer the import refuses is no session: leave nothing.
@@ -485,6 +572,7 @@ impl State {
             scene,
             undo: Vec::new(),
             renders: Renders::default(),
+            assets,
         });
         Ok(result)
     }

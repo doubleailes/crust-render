@@ -1009,14 +1009,15 @@ fn check(args: &CheckArgs) -> ExitCode {
         error!("$OCIO: {e}");
         return ExitCode::FAILURE;
     }
-    let checked = match import_checked(args, true) {
+    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let checked = match import_checked(args, true, &assets) {
         Ok(checked) => checked,
         Err(e) => {
             error!("{e}");
             return ExitCode::FAILURE;
         }
     };
-    checked.assets.release_texture_files();
+    assets.release_texture_files();
     let report = checked.report;
 
     // The reports first, the status after: a report that cannot be written
@@ -1046,13 +1047,20 @@ fn check(args: &CheckArgs) -> ExitCode {
 /// check` reports on it: what `check` prints, and what an MCP session keeps
 /// to render from and to answer its `check` tool with.
 struct Checked {
-    /// The imported scene, its settings with the scene flags applied. Its
-    /// `aovs` and `warnings` are moved out, into `aovs` and the report.
+    /// The imported scene, as the import left it: its own settings,
+    /// products and warnings.
     #[cfg_attr(
         not(feature = "mcp"),
         expect(dead_code, reason = "an MCP session renders it")
     )]
     scene: Scene,
+    /// The scene's settings with the scene flags applied: what it renders
+    /// with.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        expect(dead_code, reason = "an MCP session renders with them")
+    )]
+    settings: RenderSettings,
     /// The products a render would write, resolved and refused as `render`
     /// resolves them (`select_products`); empty for the single beauty EXR.
     #[cfg_attr(
@@ -1061,38 +1069,64 @@ struct Checked {
     )]
     aovs: AovRequest,
     report: CheckReport,
-    /// The asset loader the scene was imported with, which owns its texture
-    /// caches: kept as long as the scene is rendered.
-    assets: FileAssets,
+    /// How many UV textures the import preloaded, which the report's facts
+    /// count: kept for an MCP session's re-check of a scene it updated in
+    /// place, which loads none.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        expect(dead_code, reason = "an MCP session re-checks with it")
+    )]
+    preloaded: u64,
 }
 
 /// The body of `crust check`: import `args`' stage, choose its products and
 /// build the `crust-check/2` report. The error is the message to log.
 /// `keep_stage` is [`load_scene`]'s.
-fn import_checked(args: &CheckArgs, keep_stage: bool) -> std::result::Result<Checked, String> {
+fn import_checked(
+    args: &CheckArgs,
+    keep_stage: bool,
+    assets: &FileAssets,
+) -> std::result::Result<Checked, String> {
+    if args.scene.input.is_none() {
+        return Err("crust check needs a stage: -i <INPUT>".to_owned());
+    }
+    let scene = load_scene(&args.scene, None, assets, keep_stage)?;
+    let import_peak = crust_core::peak_memory_bytes();
+    let preloaded = assets.texture_cache_stats().preloaded;
+    check_scene(args, scene, preloaded, import_peak)
+}
+
+/// [`import_checked`] past the import: the scene's settings under `args`'
+/// overrides, its products chosen, and the report built. Also how an MCP
+/// session re-checks a scene it updated in place. The scene keeps its own
+/// products and warnings; the chosen products and the report's warnings
+/// are copies. `preloaded` is how many UV textures the import preloaded.
+fn check_scene(
+    args: &CheckArgs,
+    mut scene: Scene,
+    preloaded: u64,
+    import_peak: Option<u64>,
+) -> std::result::Result<Checked, String> {
     let input = args
         .scene
         .input
         .as_ref()
         .ok_or("crust check needs a stage: -i <INPUT>")?;
-    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
-    let mut scene = load_scene(&args.scene, None, &assets, keep_stage)?;
-    let import_peak = crust_core::peak_memory_bytes();
     let mut settings = apply_scene_overrides(&args.scene, scene.settings);
     if let Some(region) = args.scene.region {
         settings = settings
             .with_region(region)
             .map_err(|e| format!("--region: {e}"))?;
     }
-    scene.settings = settings;
     let (w, h) = settings.get_dimensions();
 
     // What the render would write, resolved as it resolves it. The products
     // it refuses are the import's warnings too.
-    let mut aovs = std::mem::take(&mut scene.aovs);
+    let mut aovs = scene.aovs.clone();
     let selecting = WarningScope::enter();
     select_products(&mut aovs, None);
-    scene.warnings.extend(selecting.finish());
+    let mut warnings = scene.warnings.clone();
+    warnings.extend(selecting.finish());
     let products = if aovs.products.is_empty() {
         vec![ProductInfo {
             prim: None,
@@ -1118,9 +1152,10 @@ fn import_checked(args: &CheckArgs, keep_stage: bool) -> std::result::Result<Che
         subdivision_edge_length: args.scene.subdiv_edge_length,
         auto_tx: args.scene.auto_tx,
     };
-    let preloaded = assets.texture_cache_stats().preloaded;
+    // The facts are about the settings the scene renders with.
+    let own = std::mem::replace(&mut scene.settings, settings);
     let facts = Facts::from_import(&scene, args.scene.auto_tx, preloaded, import_peak);
-    let warnings = std::mem::take(&mut scene.warnings);
+    scene.settings = own;
     let kinds: Vec<WarningKind> = args.deny.iter().flat_map(|d| d.kinds()).copied().collect();
     let report = CheckReport {
         scene: SceneInfo {
@@ -1143,9 +1178,10 @@ fn import_checked(args: &CheckArgs, keep_stage: bool) -> std::result::Result<Che
     };
     Ok(Checked {
         scene,
+        settings,
         aovs,
         report,
-        assets,
+        preloaded,
     })
 }
 

@@ -153,9 +153,10 @@ render.
 - **Every edit imports the whole stage again**, and a session holds the stage it authors
   beside the scene it renders, about twice a render's import memory: Moana-scale stages
   are out of reach. See [Look-dev with Claude Desktop](@/docs/help/claude-desktop.md#limits).
-- **Unauthored schema attributes have no type in a session.** The session's authoring
-  stage registers no schema registry, so `set_attribute` on an attribute nothing authors
-  yet (a light's `inputs:exposure`) needs its `type`, and `query` cannot show its
-  fallback. openusd-schemas 0.8 ships the schema data the render's import already
-  registers; the session does not use it yet.
+- **`query` can show a fallback the render does not use.** An unauthored schema
+  attribute answers the USD schema's fallback (`source` `fallback`), but where crust has
+  its own default the render uses that instead: a DistantLight with no
+  `inputs:intensity` queries as `50000` and renders as `1`; a camera with no
+  `verticalAperture` queries as `15.2908` but follows the image's aspect, and one with
+  no `focusDistance` queries as `0` but focuses at `10`. Author the value to be sure.
 - **`probe` names no prim or material**: there is no table from a hit to its prim yet.
