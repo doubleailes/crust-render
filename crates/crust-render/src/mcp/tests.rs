@@ -232,6 +232,26 @@ def Xform "World"
         rel material:binding = </World/Looks/Std>
     }}
 
+    def Sphere "Left" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {{
+        double radius = 0.5
+        double3 xformOp:translate = (-2, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Looks/Base>
+    }}
+
+    def Sphere "Right" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {{
+        double radius = 0.5
+        double3 xformOp:translate = (2, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Looks/Derived>
+    }}
+
     def Scope "Looks"
     {{
         def Material "Tex"
@@ -261,6 +281,24 @@ def Xform "World"
                 string inputs:varname = "st"
                 float2 outputs:result
             }}
+        }}
+
+        def Material "Base"
+        {{
+            token outputs:mtlx:surface.connect = </World/Looks/Base/Surface.outputs:out>
+
+            def Shader "Surface"
+            {{
+                uniform token info:id = "ND_standard_surface_surfaceshader_100"
+                color3f inputs:base_color = (0.2, 0.7, 0.3)
+                token outputs:out
+            }}
+        }}
+
+        def Material "Derived" (
+            inherits = </World/Looks/Base>
+        )
+        {{
         }}
 
         def Material "Std"
@@ -504,4 +542,59 @@ fn a_re_exported_texture_is_read_again() {
     let moved = r#"over "World" { over "Ball" { double3 xformOp:translate = (0, 1.5, 0) } }"#;
     assert_eq!(author(&mut state, moved), "full");
     same_as_full_import(&mut state, &dir, "re-exported");
+}
+
+/// A shader another used material composes (here through `inherits`) is
+/// not confined to its own material: the edit is `full`, and the scene is a
+/// full import's.
+#[test]
+fn an_edit_another_material_reads_is_full() {
+    let (mut state, dir) = lookdev_session("shared_shader");
+    let base = r#"over "World" { over "Looks" { over "Base" { over "Surface" {
+        color3f inputs:base_color = (0.9, 0.1, 0.1) } } } }"#;
+    assert_eq!(author(&mut state, base), "full");
+    same_as_full_import(&mut state, &dir, "shared shader");
+}
+
+/// A file the scene read changed on disk before an edit that would apply in
+/// place: the scene's materials hold its old decode, so the edit is `full`
+/// and the scene a fresh import's.
+#[test]
+fn a_file_changed_on_disk_makes_the_next_edit_full() {
+    let (mut state, dir) = lookdev_session("changed_on_disk");
+    let s = samples();
+    let texture = dir.join("albedo.png");
+    std::fs::copy(s.join("textures/mtlx_base.1001.png"), &texture).unwrap();
+    let use_it = format!(
+        r#"over "World" {{ over "Looks" {{ over "Tex" {{ over "Albedo" {{
+            asset inputs:file = @{}@ }} }} }} }}"#,
+        texture.display()
+    );
+    assert_eq!(author(&mut state, &use_it), "materials");
+    std::fs::copy(s.join("textures/mtlx_base.1002.png"), &texture).unwrap();
+    let dim = r#"over "World" { over "Key" { float inputs:intensity = 4 } }"#;
+    assert_eq!(author(&mut state, dim), "full");
+    same_as_full_import(&mut state, &dir, "changed on disk");
+}
+
+/// After an in-place edit, the check report lists the import's phases and
+/// then the update, and counts the import's preloaded textures.
+#[test]
+fn the_report_after_an_in_place_edit_names_the_update() {
+    let (mut state, _dir) = lookdev_session("report");
+    let before = state.session().unwrap().scene.report.clone();
+    let dim = r#"over "World" { over "Key" { float inputs:intensity = 4 } }"#;
+    assert_eq!(author(&mut state, dim), "lights");
+    let after = &state.session().unwrap().scene.report;
+    let names = |r: &crust_core::check::CheckReport| -> Vec<String> {
+        r.import.iter().map(|p| p.name.clone()).collect()
+    };
+    let mut expected = names(&before);
+    expected.push("Update in place (lights)".to_owned());
+    assert_eq!(names(after), expected);
+    assert_eq!(after.findings, before.findings);
+    // A second update replaces the first's phase rather than adding to it.
+    let again = r#"over "World" { over "Key" { float inputs:intensity = 5 } }"#;
+    assert_eq!(author(&mut state, again), "lights");
+    assert_eq!(names(&state.session().unwrap().scene.report), expected);
 }

@@ -140,12 +140,14 @@ An edit with changes of several kinds is applied as the most expensive of them, 
 order of the table. A change that turns out to need more is applied as `full`: a material
 that becomes a cutout, emissive or displaced, a light that stops emitting, a setting that
 changes the working colour space or the subdivision, or one whose rebuild would report a
-different warning. Either way the render is the same, bit for bit, as after a full import
+different warning, a shader another material also uses (through `inherits` or a
+connection), or any edit made after a texture file changed on disk. Either way the render is the same, bit for bit, as after a full import
 of the same layer. `undo` is applied the same way.
 
 The decoded textures, Ptex files, light textures and IES profiles stay with the session,
 so even a `full` edit does not decode them again. A file that changes on disk (a texture
-re-exported mid-session) is read again by the next edit. Set
+re-exported mid-session, or a tile added to a UDIM set) is read again by the next
+edit, which is then applied as `full`. Set
 [`CRUST_SCENE_DELTAS=0`](@/docs/reference/environment-variables.md#crust-scene-deltas)
 to import every edit whole with nothing kept, as earlier versions did.
 
@@ -241,8 +243,8 @@ and any USD tool opens it.
 - **One session, one client.** The server holds one session at a time, over stdio only.
 - **Most structural edits import the whole stage again.** A `full` edit takes seconds on
   a medium stage; each result says how long. Only the edits in the table above are
-  applied in place. Decoded textures kept for the session are bounded by the texture
-  caches, and ones the scene no longer uses are not let go before the session ends. A session holds the stage it authors and the scene it renders at once,
+  applied in place. Decoded textures the scene no longer uses are let go at the next
+  `full` edit. A session holds the stage it authors and the scene it renders at once,
   about twice the memory of a render's import, which puts Moana-scale stages out of reach.
 - **`probe` does not name the prim.** crust keeps no table from a hit to its prim yet, so
   `prim` and `material` are null, and the result says why.

@@ -115,7 +115,7 @@ crust-render::mcp::run                       stdio JSON-RPC (rmcp) on a one-thre
          │   (the import's own functions, on a masked stage), Update::apply,
          │   check_scene, Renderer::new around the same committed world
          └─ full (or a refused rebuild): re-import the saved file through the
-             session's one FileAssets (keep_decoded, revalidated per import)
+             session's one FileAssets (keep_decoded, revalidated per edit, swept per import)
 ```
 
 The file on disk *is* the session: what is imported, rendered and left behind is the

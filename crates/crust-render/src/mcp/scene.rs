@@ -29,6 +29,8 @@ struct Rest {
     camera_path: Option<String>,
     time: Option<f64>,
     provenance: Option<Provenance>,
+    /// How many UV textures the import preloaded.
+    preloaded: u64,
 }
 
 /// One import of the override layer.
@@ -105,7 +107,13 @@ impl Imported {
         let volumes = std::mem::take(&mut renderer.volumes).into_regions();
         let mut scene =
             Scene::new(renderer.camera, world, lights, self.rest.settings).with_volumes(volumes);
-        scene.stats = std::mem::take(&mut self.rest.stats);
+        // The report's phases are the import's, then this update's; the
+        // next update starts from the import's again.
+        let import_stats = std::mem::take(&mut self.rest.stats);
+        scene.stats = import_stats.clone();
+        scene
+            .stats
+            .record(format!("Update in place ({applied})"), 0, started.elapsed());
         scene.aovs = std::mem::take(&mut self.rest.aovs);
         scene.working_space = self.working_space;
         scene.camera_path = self.rest.camera_path.take();
@@ -115,15 +123,20 @@ impl Imported {
         update
             .apply(&mut scene)
             .expect("the update was checked against this world and these lights");
-        let checked =
-            crate::check_scene(&args, scene, &self._assets, crust_core::peak_memory_bytes())
-                .expect("a session's check arguments set no region to refuse");
+        let checked = crate::check_scene(
+            &args,
+            scene,
+            self.rest.preloaded,
+            crust_core::peak_memory_bytes(),
+        )
+        .expect("a session's check arguments set no region to refuse");
         let took = started.elapsed();
         debug!(
             "Session update ({applied}) of {} in {took:.2?}",
             layer.display()
         );
         *self = Imported::of(checked, self._assets.clone(), took, applied);
+        self.rest.stats = import_stats;
         Ok(())
     }
 
@@ -134,6 +147,7 @@ impl Imported {
             settings,
             aovs,
             report,
+            preloaded,
         } = checked;
         let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings)
             .with_volumes(scene.volumes);
@@ -154,6 +168,7 @@ impl Imported {
                 camera_path: scene.camera_path,
                 time: scene.time,
                 provenance: scene.provenance,
+                preloaded,
             },
         }
     }

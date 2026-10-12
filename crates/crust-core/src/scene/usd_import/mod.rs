@@ -1069,6 +1069,7 @@ pub(crate) fn load_scene(
     scene.warnings = warning_scope.finish();
     scene.provenance = Some(Provenance {
         materials: ctx.caches.materials.origins(&scene.world),
+        material_reads: ctx.caches.materials.reads(),
         lights: ctx.light_origins.into_iter().collect(),
         geometry: geometry_runs,
         stage: StageFacts {

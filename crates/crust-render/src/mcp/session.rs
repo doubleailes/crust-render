@@ -60,20 +60,31 @@ pub struct Open {
     pub(super) assets: Option<Arc<FileAssets>>,
 }
 
-/// The loader for the session's next import: the session's own, its decodes
-/// revalidated against the files on disk, or a fresh one under
-/// `CRUST_SCENE_DELTAS=0`.
-fn loader(kept: Option<&Arc<FileAssets>>) -> Arc<FileAssets> {
+/// The loader for the session's next import or update: the session's own,
+/// its decodes revalidated against the files on disk, or a fresh one under
+/// `CRUST_SCENE_DELTAS=0`; and how many kept decodes changed on disk.
+fn loader(kept: Option<&Arc<FileAssets>>) -> (Arc<FileAssets>, usize) {
     match kept {
         Some(assets) => {
             let dropped = assets.revalidate();
             if dropped > 0 {
                 debug!("{dropped} decoded asset(s) changed on disk and will be read again");
             }
-            assets.clone()
+            (assets.clone(), dropped)
         }
-        None => Arc::new(FileAssets::new()),
+        None => (Arc::new(FileAssets::new()), 0),
     }
+}
+
+/// Imports the saved layer at `layer` through `assets`, then lets go of the
+/// kept decodes the new scene does not use.
+fn import_kept(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String> {
+    let scene = import(layer, assets.clone())?;
+    let unused = assets.sweep();
+    if unused > 0 {
+        debug!("{unused} decoded asset(s) the scene no longer uses let go");
+    }
+    Ok(scene)
 }
 
 /// Opens `path`'s layer as the authoring stage, payloads unloaded: they load
@@ -288,8 +299,16 @@ impl Open {
     /// The change from `before` to the saved layer, in place when it is
     /// confined to settings, light inputs or material inputs and the scene
     /// takes it, else by importing the saved layer.
+    ///
+    /// The kept decodes are revalidated first, whichever way the change goes:
+    /// when a file the scene read changed on disk, the scene's other parts
+    /// still hold its old decode, so only a full import gives what a fresh one
+    /// would.
     fn apply_change(&mut self, before: &[u8]) -> Result<(), String> {
-        if self.assets.is_some()
+        let (assets, changed_on_disk) = loader(self.assets.as_ref());
+        if changed_on_disk > 0 {
+            debug!("Edit applied as full: {changed_on_disk} asset file(s) changed on disk");
+        } else if self.assets.is_some()
             && let Some((applied, change)) = self.classify(before)
         {
             match self.scene.update(&self.output, &change, applied) {
@@ -298,7 +317,7 @@ impl Open {
                 Err(why) => debug!("{applied} edit applied as full instead: {why}"),
             }
         }
-        self.scene = import(&self.output, loader(self.assets.as_ref()))?;
+        self.scene = import_kept(&self.output, assets)?;
         Ok(())
     }
 
@@ -513,7 +532,7 @@ impl State {
         let assets = crust_core::config()
             .scene_deltas
             .then(|| Arc::new(FileAssets::new().keep_decoded()));
-        let scene = match import(&output, loader(assets.as_ref())) {
+        let scene = match import_kept(&output, loader(assets.as_ref()).0) {
             Ok(scene) => scene,
             Err(e) => {
                 // A new layer the import refuses is no session: leave nothing.
