@@ -29,7 +29,7 @@ context: |
       (EXR/LDR environment maps, Ptex, UV/UDIM textures) over exr, image, ptex-rs.
     - crust-render: the thin CLI binary `crust` (main.rs only; writes EXR + PNG, decodes
       nothing) — clap args, builds a Scene with crust_assets::FileAssets, runs the Renderer.
-    - utils: stateless math helpers (sampling warps, MIS heuristics, luminance, align_to_normal, Lerp).
+    - utils: stateless math helpers (sampling warps, MIS heuristics, luminance, align_to_normal).
   - Key deps: glam (Vec3A/Mat4), rayon (parallelism), exr + image (output and decoding),
     openusd 0.7 + openusd-schemas (scene import — always compiled in, no feature flag), openqmc-rs (QMC
     sampling), opensubdiv-rs (subdivision), ptex-rs (Ptex), roxmltree (MaterialX XML),
