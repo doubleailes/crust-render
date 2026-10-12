@@ -16,7 +16,7 @@
 - [x] 2.2 `tests/mcp.rs`: `set_attribute` on the unauthored exposure with no `type`
       authors `float inputs:exposure`; with `type` `"double"` it is refused naming
       `float`, and the layer is unchanged.
-- [ ] 2.3 Check that `query`'s fallback for a DistantLight's unauthored
+- [x] 2.3 Check that `query`'s fallback for a DistantLight's unauthored
       `inputs:intensity` equals the intensity the render imports for it. If they
       differ, record it in the `mcp-session` design record's known gaps.
 - [x] 2.4 Reword the remaining refusal in `mcp/query.rs` (`attribute_json`) per D4.
@@ -25,7 +25,7 @@
 
 - [ ] 3.1 `scripts/check_images.sh check` against goldens recorded before the change:
       every sample unchanged (the import's stage is untouched).
-- [ ] 3.2 Docs: remove the limitation from `site/content/docs/help/claude-desktop.md`
+- [x] 3.2 Docs: remove the limitation from `site/content/docs/help/claude-desktop.md`
       (and drop `type="float"` from its `inputs:exposure` example) and from
       `site/content/docs/architecture/limitations.md`; update the `mcp-session`
       record. Done when `zola build` passes.

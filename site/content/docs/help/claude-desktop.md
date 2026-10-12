@@ -256,4 +256,7 @@ and any USD tool opens it.
   and the material is null for geometry no Material prim fills (an area light's
   emitter). Once an edit has imported the stage again, a render from before it names
   nothing: render again.
+- **A schema fallback is not always what renders.** Where crust has its own default for
+  an unauthored attribute, the render uses it, not the fallback `query` shows: a
+  DistantLight with no `inputs:intensity` queries as `50000` and renders as `1`.
 - **`render_final` blocks the session** until it has written its files.

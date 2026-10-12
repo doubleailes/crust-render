@@ -35,6 +35,27 @@
   frame) did not change, so a session render after a region or samples change pays
   no second `learned` pre-pass (first-pixel D4).
 
+## The authoring stage knows the schemas (`mcp-session-schema-registry`)
+
+- **The session's stage opens with the import's schema registry**
+  (`crust_core::usd_schema_registry()`, which `usd_import::stage_builder()` uses too), so
+  the families are the import's by construction (crust-core's openusd-schemas
+  features), not a second list kept in step. An attribute a prim's schema declares
+  has its schema type and fallback before any layer authors it: `query` answers
+  `source` `"fallback"`, and `set_attribute` takes the schema's type and refuses a
+  different explicit `type`. Only an attribute no schema declares and no layer authors
+  is refused, with the error pointing at `set_attribute` and an explicit `type`.
+- **Only the registry, not the import's resolver.** The memory-mapped resolver is a
+  read-throughput choice; the session's stage is small, payloads unloaded, and the
+  layer it writes is replaced by rename (`replace_file`), which a mapping would only
+  complicate.
+- **A prim `query` lists authored attributes only.** A light's schemas declare some 30
+  properties and a material many more; listing them would bury what the scene authors.
+  An agent queries a declared attribute by path. Revisit if agents guess names.
+- **The schema's declared type wins over an authored one**, as in C++ USD: a source
+  that authors `double inputs:exposure` reads as `float`, `set_attribute` authors a
+  `float`, and `type="double"` is refused. The tests pin this.
+
 ## Edits applied in place (`live-stage-scene-deltas`)
 
 Until this change every edit batch was a full re-import with a fresh `FileAssets`:
@@ -252,6 +273,14 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
 
 ### Known gaps
 
+- **`query` shows a schema fallback the render may not use.** The import reads every
+  attribute through `value_at`, which takes a value equal to the schema fallback as
+  unauthored and substitutes crust's own default. Where those differ, the session's
+  answer is not what renders: a DistantLight with no `inputs:intensity` queries as
+  `50000` (UsdLux's fallback) and imports as `1.0` (`light_inputs`; measured with
+  `crust ls light --json` beside a session `query`). Lights' `exposure` (0) agree.
+  Closing it means either the import honouring UsdLux's per-type fallbacks (a render
+  change) or `query` reporting crust's default where the import substitutes one.
 - **A Hydra render delegate** (`crust-hydra`: a C++ `HdRenderDelegate` over a C ABI
   into the engine) would reuse the provenance and the `live` entry points, which take
   paths and built values for that reason. It adds Pixar's C++ USD as a build dependency
