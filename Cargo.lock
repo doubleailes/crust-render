@@ -126,9 +126,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "base64"
-version = "0.22.1"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bit_field"
@@ -1393,8 +1393,8 @@ source = "git+https://github.com/doubleailes/OpenSubdiv-rs?tag=0.5.0#c672796f958
 
 [[package]]
 name = "openusd"
-version = "0.7.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#933aa8f10edb0841301e62b7de92d68465673c3c"
+version = "0.8.0"
+source = "git+https://github.com/mxpv/openusd?branch=main#7d11cdd5e159e50c27928b23a40c033f5650d1d4"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -1414,8 +1414,8 @@ dependencies = [
 
 [[package]]
 name = "openusd-build"
-version = "0.7.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#933aa8f10edb0841301e62b7de92d68465673c3c"
+version = "0.8.0"
+source = "git+https://github.com/mxpv/openusd?branch=main#7d11cdd5e159e50c27928b23a40c033f5650d1d4"
 dependencies = [
  "openusd",
  "prettyplease",
@@ -1429,8 +1429,8 @@ dependencies = [
 
 [[package]]
 name = "openusd-schemas"
-version = "0.7.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#933aa8f10edb0841301e62b7de92d68465673c3c"
+version = "0.8.0"
+source = "git+https://github.com/mxpv/openusd?branch=main#7d11cdd5e159e50c27928b23a40c033f5650d1d4"
 dependencies = [
  "derive_more",
  "openusd",
