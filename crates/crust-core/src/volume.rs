@@ -412,6 +412,12 @@ impl Volumes {
         &self.regions
     }
 
+    /// The regions, given back: how a host takes a renderer's scene apart to
+    /// update it in place ([`crate::live`]).
+    pub fn into_regions(self) -> Vec<VolumeRegion> {
+        self.regions
+    }
+
     /// Clipped per-region intervals over `(t_eps, t_max)`, and the summed
     /// majorant of the intersected regions. Summing majorants over the
     /// union span majorizes the summed extinction everywhere on it

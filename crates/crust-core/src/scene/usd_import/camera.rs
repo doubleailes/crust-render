@@ -213,7 +213,7 @@ pub(super) struct ScreenProjection {
 
 /// Composed local-to-world by walking the prim path upwards. Slower than
 /// tracking it during DFS, but exact and only used at build_camera time.
-fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
+pub(super) fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
     let mut ancestors: Vec<Prim> = Vec::new();
     let mut cur_path = prim.path().clone();
     ancestors.push(prim_at(stage, cur_path.clone()));

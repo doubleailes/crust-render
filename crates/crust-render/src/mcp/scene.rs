@@ -1,17 +1,35 @@
 //! The session's scene: the saved override layer imported exactly as `crust
 //! render <output>` imports it (design D1), kept as a renderer that every
 //! session render retunes, beside the `crust-check/2` report of that
-//! same import.
+//! same import — or that import updated in place, which gives the same scene
+//! (`live-stage-scene-deltas`, [`Imported::update`]).
 
+use super::delta::Applied;
 use crate::{CheckArgs, Checked, Cli, Command};
 use clap::Parser;
 use crust_assets::FileAssets;
 use crust_core::check::CheckReport;
-use crust_core::{AovRequest, RenderSettings, Renderer};
+use crust_core::live::{Change, Provenance, Structural};
+use crust_core::{AovRequest, LightList, RenderSettings, Renderer, Scene, WorldBuilder};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::debug;
+
+/// What the scene was imported with that the renderer does not hold: what
+/// an in-place update puts back together with the renderer's parts.
+struct Rest {
+    /// The scene's own settings, before the scene flags.
+    settings: RenderSettings,
+    /// The products the stage asks for, before any is refused.
+    aovs: AovRequest,
+    /// The import's warnings, before the product selection's.
+    warnings: Vec<crust_core::Warning>,
+    stats: crust_core::RenderStats,
+    camera_path: Option<String>,
+    time: Option<f64>,
+    provenance: Option<Provenance>,
+}
 
 /// One import of the override layer.
 pub struct Imported {
@@ -33,8 +51,11 @@ pub struct Imported {
     /// The scene-linear space the scene renders in, which its images are
     /// encoded from.
     pub working_space: crust_core::color::Space,
-    /// How long the import took.
+    /// How long the import (or the in-place update) took.
     pub took: Duration,
+    /// How the layer's last change was applied to give this scene.
+    pub applied: Applied,
+    rest: Rest,
 }
 
 impl Imported {
@@ -45,6 +66,96 @@ impl Imported {
             .iter()
             .map(|w| w.code.as_str())
             .collect()
+    }
+
+    /// Where the scene's parts came from, `None` for a scene the import did
+    /// not build from a stage.
+    pub fn provenance(&self) -> Option<&Provenance> {
+        self.rest.provenance.as_ref()
+    }
+
+    /// `change`, made to the saved layer at `layer` since this scene was
+    /// imported, applied in place (spec: "Edits apply in place when they are
+    /// confined"): the parts it names rebuilt by the import's own code and
+    /// put into the scene, the scene re-checked, and the renderer rebuilt
+    /// around the same world, so its light selection is a fresh import's.
+    /// Refused, with the scene untouched, when the change is not confined
+    /// after all; the caller then imports the layer.
+    pub fn update(
+        &mut self,
+        layer: &Path,
+        change: &Change,
+        applied: Applied,
+    ) -> Result<(), Structural> {
+        let started = Instant::now();
+        let provenance = self
+            .rest
+            .provenance
+            .as_ref()
+            .ok_or_else(|| Structural("the scene has no provenance".into()))?;
+        let update = provenance.rebuild(layer, &*self._assets, &self.rest.warnings, change)?;
+        update.check(&self.renderer.world, &self.renderer.lights)?;
+        let args = check_args(layer).map_err(Structural)?;
+        // Past the checks nothing refuses: take the renderer apart into the
+        // scene it was built from.
+        let renderer = Arc::get_mut(&mut self.renderer)
+            .ok_or_else(|| Structural("the scene is still held by a render".into()))?;
+        let world = std::mem::replace(&mut renderer.world, WorldBuilder::new().commit());
+        let lights = std::mem::replace(&mut renderer.lights, LightList::new());
+        let volumes = std::mem::take(&mut renderer.volumes).into_regions();
+        let mut scene =
+            Scene::new(renderer.camera, world, lights, self.rest.settings).with_volumes(volumes);
+        scene.stats = std::mem::take(&mut self.rest.stats);
+        scene.aovs = std::mem::take(&mut self.rest.aovs);
+        scene.working_space = self.working_space;
+        scene.camera_path = self.rest.camera_path.take();
+        scene.time = self.rest.time;
+        scene.warnings = std::mem::take(&mut self.rest.warnings);
+        scene.provenance = self.rest.provenance.take();
+        update
+            .apply(&mut scene)
+            .expect("the update was checked against this world and these lights");
+        let checked =
+            crate::check_scene(&args, scene, &self._assets, crust_core::peak_memory_bytes())
+                .expect("a session's check arguments set no region to refuse");
+        let took = started.elapsed();
+        debug!(
+            "Session update ({applied}) of {} in {took:.2?}",
+            layer.display()
+        );
+        *self = Imported::of(checked, self._assets.clone(), took, applied);
+        Ok(())
+    }
+
+    /// The session's scene from a checked import.
+    fn of(checked: Checked, assets: Arc<FileAssets>, took: Duration, applied: Applied) -> Imported {
+        let Checked {
+            scene,
+            settings,
+            aovs,
+            report,
+        } = checked;
+        let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings)
+            .with_volumes(scene.volumes);
+        Imported {
+            renderer: Arc::new(renderer),
+            settings,
+            aovs: Arc::new(aovs),
+            report,
+            _assets: assets,
+            working_space: scene.working_space,
+            took,
+            applied,
+            rest: Rest {
+                settings: scene.settings,
+                aovs: scene.aovs,
+                warnings: scene.warnings,
+                stats: scene.stats,
+                camera_path: scene.camera_path,
+                time: scene.time,
+                provenance: scene.provenance,
+            },
+        }
     }
 }
 
@@ -62,31 +173,15 @@ fn check_args(layer: &Path) -> Result<CheckArgs, String> {
     }
 }
 
-/// Imports the saved layer at `layer`.
-pub fn import(layer: &Path) -> Result<Imported, String> {
+/// Imports the saved layer at `layer` through `assets`.
+pub fn import(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String> {
     let args = check_args(layer)?;
     let started = Instant::now();
     // The session imports once per edit batch and lives on: each stage is
     // freed, and with it any mapping of the layer it read.
-    let Checked {
-        scene,
-        aovs,
-        report,
-        assets,
-    } = crate::import_checked(&args, false)?;
-    let settings = scene.settings;
-    let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings)
-        .with_volumes(scene.volumes);
+    let checked = crate::import_checked(&args, false, &assets)?;
     let took = started.elapsed();
     // One per edit batch: a count that grows with the session.
     debug!("Session import of {} in {took:.2?}", layer.display());
-    Ok(Imported {
-        renderer: Arc::new(renderer),
-        settings,
-        aovs: Arc::new(aovs),
-        report,
-        _assets: Arc::new(assets),
-        working_space: scene.working_space,
-        took,
-    })
+    Ok(Imported::of(checked, assets, took, Applied::Full))
 }

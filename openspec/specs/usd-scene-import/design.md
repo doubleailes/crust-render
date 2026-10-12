@@ -958,6 +958,34 @@ The displacement Ptex files are read raw and preloaded or streamed under the sam
 as colour Ptex. At the default level 0 every island mesh is displaced at its cage
 resolution, which moves cage vertices only and warns once.
 
+## Provenance and in-place rebuilds
+
+An imported `Scene` carries `provenance` (`crust_core::live::Provenance`): which `World`
+slots each material prim fills, where each light went in the `LightList` and which
+`geom_id`s it emitted, the geometry runs `LightLinks` interns (kept instead of dropped),
+and the stage-wide facts the import decided once (the `RenderSettings` path, the
+subdivision level, adaptive subdivision, the dome's camera visibility, the working space,
+whether any light is linked, the render camera, the host's options). Nothing per
+triangle. `Provenance::rebuild` builds one material, one light, or the settings and
+camera again, for the `crust mcp` session's in-place edits; the record of why and how,
+with its traps, is `openspec/specs/mcp-session/design.md` § Edits applied in place.
+
+What it asked of the import, so a rebuild runs the traversal's code and not a copy:
+
+- `load_scene`'s index phase is `read_index` (settings, products, data window, motion
+  blur, working space, subdivision policy, the wanted camera, the frame seed), and the
+  camera exposure step is `apply_exposure`.
+- The traversal's light dispatch is `emit_light`, and a cache miss in
+  `cached_material` is `resolve_fresh` (with `resolve_displacement` beside it).
+- `camera::local_to_world` (the root-to-prim fold of `compose_with_parent`) gives a
+  rebuilt light the transform the traversal composed for it.
+- A rebuilt light's geometry gets the `geom_id`s it had by claiming the ids before it
+  in a scratch `WorldBuilder` (`reserve_slot`) before the emitter runs.
+
+*Trap:* `MaterialCache::origins` leaves out prototype-scoped paths. One
+`/__Prototype_N/...` path names a different material in each streamed chunk (that is
+what the epoch in its key is for); an authored path has one `Arc` across every chunk.
+
 ## Known gaps: instancing
 
 - **Instancing caveats.** The kernel nests instances to arbitrary depth (transforms
@@ -1119,3 +1147,13 @@ resolution, which moves cage vertices only and warns once.
     = false )`) removes both.
   - The rig's **13 `CylinderLight`s** (oscilloscope and ham-radio button lights) now
     import as analytic cylinder lights; this used to be a gap.
+
+## Known gaps: following a stage live
+
+- **No Hydra render delegate.** A `crust-hydra` `HdRenderDelegate` over a C ABI would
+  drive the provenance and the `live` entry points (keyed by path strings, given built
+  values), but it brings Pixar's C++ USD as a build dependency and `unsafe` FFI.
+- **No subtree re-traversal.** A transform, topology, binding, visibility, variant or
+  namespace edit re-imports the stage, however small the subtree.
+- **No BVH refit.** A refit tree is not the tree a fresh build gives, so it would break
+  the session's bit-identity with `crust render`.

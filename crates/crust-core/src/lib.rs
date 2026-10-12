@@ -32,6 +32,7 @@ mod guiding;
 mod hittable;
 mod light;
 mod light_cache;
+pub mod live;
 pub mod lpe;
 mod lux;
 mod material;

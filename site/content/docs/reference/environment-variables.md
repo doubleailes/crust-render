@@ -66,6 +66,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 |----------|---------|------|
 | [`CRUST_STREAM_IMPORT`](#crust-stream-import) | on | USD import |
 | [`CRUST_USD_MMAP`](#crust-usd-mmap) | on | USD import |
+| [`CRUST_SCENE_DELTAS`](#crust-scene-deltas) | on | MCP session |
 | [`CRUST_MESH_BAKE`](#crust-mesh-bake) | on | USD import |
 | [`CRUST_SUBDIV`](#crust-subdiv) | on | USD import |
 | [`CRUST_DISPLACE`](#crust-displace) | on | USD import |
@@ -123,6 +124,19 @@ has finished, the files can be changed freely.
 
 `0` reads each file into memory, as before. A renderer built without its default `mmap`
 feature (`cargo build --no-default-features`) always does, whatever this says.
+
+### CRUST_SCENE_DELTAS
+
+Boolean, default **on**.
+
+On, a [`crust mcp`](@/docs/help/claude-desktop.md#editing) session applies an edit in
+place when it only changes the render settings, a light's inputs or a material's inputs,
+instead of importing the whole stage again. Every import of the session goes through one
+asset loader that keeps the textures it decoded, and reads again only the files that
+changed on disk. The render is the same either way.
+
+`0` imports the whole stage on every edit, with a fresh asset loader each time, as
+before. Each edit's result then reports `applied = full`.
 
 ### CRUST_MESH_BAKE
 

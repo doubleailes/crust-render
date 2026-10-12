@@ -109,13 +109,23 @@ crust-render::mcp::run                       stdio JSON-RPC (rmcp) on a one-thre
      │   ├─ authoring Stage on <output>      payloads unloaded; loaded where a query reaches
      │   └─ import_checked(<output>)         as `crust check -i <output>`: the report is kept,
      │                                        the scene becomes one Renderer, retuned per render
-     └─ every edit batch: author into <output>, Layer::save, re-import the saved file
+     └─ every edit batch: author into <output>, Layer::save, then
+         ├─ diff the layer before/after → settings | materials | lights | full
+         ├─ settings / materials / lights: Provenance::rebuild the named parts
+         │   (the import's own functions, on a masked stage), Update::apply,
+         │   check_scene, Renderer::new around the same committed world
+         └─ full (or a refused rebuild): re-import the saved file through the
+             session's one FileAssets (keep_decoded, revalidated per import)
 ```
 
 The file on disk *is* the session: what is imported, rendered and left behind is the
 saved override layer, read by the unchanged `load_scene`, so the streaming import's
 masked stages see every edit with no special case. Nothing else is written but the
-final render's files and the `.tx` files `--auto-tx` creates. Behaviour:
+final render's files and the `.tx` files `--auto-tx` creates. An edit confined to the
+render settings, light inputs or material inputs is applied in place
+(`mcp/delta.rs` classifies it, `crust_core::live` rebuilds it), and gives the
+scene a full re-import would; anything else re-imports, with the session's kept
+decodes. Behaviour:
 `openspec/specs/mcp-session/spec.md`. Design: the archived changes
 `openspec/changes/archive/2026-10-09-mcp-session/design.md` and
 `2026-10-09-mcp-first-pixel/design.md` beside it (the first-image answer, `retune`).
@@ -182,6 +192,17 @@ other. The pairs:
   that changes the import or the outputs belongs in those functions, never in one
   caller.
 
+- **An in-place update ↔ a full re-import.** An MCP edit applied in place
+  (`settings`, `materials`, `lights`) must give the scene a fresh import of the
+  same layer gives, warnings included. So the rebuild calls the functions the
+  traversal called (`read_index`, `apply_exposure`, `resolve_fresh`,
+  `emit_light`), never copies of them; `World::check_materials` and
+  `LightList::check_replace` refuse a swap that would move anything the world,
+  the geometry or the list was built on (`live::Signature`); and the renderer is
+  rebuilt with `Renderer::new`, so the light selection is a fresh one's. A new
+  material property the import bakes into geometry or a world flag belongs in
+  `Signature`. Pinned per class, undo included, by
+  `edits_in_place_render_as_a_full_import` (`crust-render/src/mcp/tests.rs`).
 - **`Renderer::new` ↔ `Renderer::reconfigure`.** `new` is `reconfigure` on a
   fresh renderer, and `reconfigure` rebuilds everything that depends on the
   settings (the light selection, the `learned` pre-pass); every other setting
@@ -354,6 +375,7 @@ probe that needs another setting builds a `Config` and passes it
 |----------|---------|-------|--------|
 | `CRUST_STREAM_IMPORT` | on | `usd_import/mod.rs` | `0`: import under one stage instead of one masked stage per subtree |
 | `CRUST_USD_MMAP` | on | `usd_import/mod.rs` (`stage_builder`) | With the `mmap` feature only (on in the renderer's defaults). `0`: read each USD file into memory instead of serving it from a read-only memory mapping (bit-identical; the mapping is openusd's, opted into by crust-core's one non-test `unsafe`) |
+| `CRUST_SCENE_DELTAS` | on | `crust-render/src/mcp/session.rs` | `0`: every MCP edit batch is re-imported whole with a fresh asset loader, instead of applied in place when confined to settings, light inputs or material inputs, through one loader that keeps its decodes (bit-identical either way) |
 | `CRUST_MESH_BAKE` | on | `usd_import/mesh.rs` | `0`: instance every mesh instead of baking single placements (not bit-identical: an instanced mesh is intersected in local space, so ~0.2% of cornellbox's pixels differ in the last ulp at 16 spp, relmse 4e-18) |
 | `CRUST_SUBDIV` | on | `usd_import/attrs.rs` | `0`: render every mesh as its faceted cage (unlike `--subdiv-level 0`, no smooth cage normals) |
 | `CRUST_DISPLACE` | on | `usd_import/materials.rs` | `0`: no material yields a displacement — every mesh imports undisplaced, a `none` mesh as its faceted cage (bit-identical to the stage with its displacement inputs removed) |

@@ -307,6 +307,15 @@ pub trait Material: Send + Sync {
         let _ = (r_in, rec);
         self.emitted_directional(cos_theta_o)
     }
+
+    /// Whether this material can emit anywhere — known when it is built.
+    /// Defaults to a non-zero [`Material::emitted`]; a material that emits
+    /// only through [`Material::emitted_at`] must override it. An in-place
+    /// update refuses a material that starts or stops emitting
+    /// ([`crate::live`]).
+    fn may_emit(&self) -> bool {
+        self.emitted() != Vec3A::ZERO
+    }
 }
 
 /// What [`Material::resolve`] hands back for one hit.

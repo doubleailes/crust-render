@@ -147,6 +147,10 @@ impl<T: PatternMaterial> Material for T {
         self.pattern_has_straight_transmission()
     }
 
+    fn may_emit(&self) -> bool {
+        self.can_emit()
+    }
+
     fn emitted(&self) -> Vec3A {
         self.constant_emission()
             .map_or(Vec3A::ZERO, |c| c.emitted())

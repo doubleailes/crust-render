@@ -29,6 +29,7 @@ mod error;
 mod exr_planes;
 mod ies;
 mod image_file;
+mod kept;
 mod mip_filter;
 mod ptex_stream;
 mod ptex_texture;
@@ -271,12 +272,17 @@ pub struct FileAssets {
     /// chunk's textures a different backend from the next's.
     ptex_mip_space: ptex_stream::MipSpace,
     /// Every Ptex texture opened, so the render can be reported on and — for
-    /// the streamed ones — re-budgeted as more arrive. See [`PtexHandle`].
-    ptex: std::sync::Mutex<Vec<PtexHandle>>,
+    /// the streamed ones — re-budgeted as more arrive — with the path each
+    /// was opened from, so a kept one can be let go ([`FileAssets::revalidate`]).
+    /// See [`PtexHandle`].
+    ptex: std::sync::Mutex<Vec<(std::path::PathBuf, PtexHandle)>>,
     /// UV textures that took the preload path, and the bytes they hold —
     /// the half of texture residency the tile cache cannot see.
     preloaded_textures: std::sync::atomic::AtomicU64,
     preloaded_texture_bytes: std::sync::atomic::AtomicU64,
+    /// The decodes kept for later imports, when the host asked for them
+    /// ([`FileAssets::keep_decoded`]); `None` decodes on every call.
+    kept: Option<kept::Kept>,
 }
 
 /// Which streaming candidate [`FileAssets::open_streaming`] may open.
@@ -432,7 +438,81 @@ impl FileAssets {
             ptex: std::sync::Mutex::new(Vec::new()),
             preloaded_textures: std::sync::atomic::AtomicU64::new(0),
             preloaded_texture_bytes: std::sync::atomic::AtomicU64::new(0),
+            kept: None,
         }
+    }
+
+    /// Keeps every texture, Ptex, light texture and IES profile decoded, and
+    /// hands the same one back when a later import asks for it again: for a
+    /// host that imports one stage many times (the `crust mcp` session). The
+    /// host calls [`FileAssets::revalidate`] before each import, which lets go
+    /// of anything whose file changed. A one-shot render has nothing to keep
+    /// for, and does not ask.
+    pub fn keep_decoded(mut self) -> FileAssets {
+        self.kept = Some(kept::Kept::default());
+        self
+    }
+
+    /// Before an import, on a loader that [keeps its decodes](FileAssets::keep_decoded):
+    /// lets go of every kept decode one of whose files changed length or
+    /// modification time on disk (a `.tx` appearing beside a texture
+    /// included), so the import decodes it afresh; and restarts the preload
+    /// counters, which then count this import's textures as a fresh loader's
+    /// would. Returns how many decodes were let go.
+    ///
+    /// Residency cannot change a pixel (streamed and preloaded textures, and
+    /// capped Ptex, are pinned bit-identical), so a kept decode renders
+    /// exactly as a fresh one.
+    pub fn revalidate(&self) -> usize {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.preloaded_textures.store(0, Relaxed);
+        self.preloaded_texture_bytes.store(0, Relaxed);
+        let Some(kept) = &self.kept else {
+            return 0;
+        };
+        let stale = kept.revalidate();
+        let ptex: Vec<&Path> = stale
+            .iter()
+            .filter_map(|k| match k {
+                kept::Key::Ptex(p, _) => Some(p.as_path()),
+                _ => None,
+            })
+            .collect();
+        if !ptex.is_empty() {
+            let mut opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
+            opened.retain(|(p, _)| !ptex.contains(&p.as_path()));
+            self.rebudget_ptex(&opened);
+        }
+        stale.len()
+    }
+
+    /// How many decodes went to a file on a loader that
+    /// [keeps its decodes](FileAssets::keep_decoded): kept ones handed back
+    /// again do not count. `0` on any other loader.
+    pub fn decodes(&self) -> u64 {
+        self.kept.as_ref().map_or(0, kept::Kept::decodes)
+    }
+
+    /// `decode` on a miss of the kept decodes (or always, when none are
+    /// kept), keeping a success under `key` with `files`' stamps.
+    fn kept_or<V>(
+        &self,
+        key: kept::Key,
+        unwrap: impl Fn(kept::Value) -> Option<V>,
+        wrap: impl Fn(&V) -> kept::Value,
+        files: impl FnOnce() -> Vec<std::path::PathBuf>,
+        decode: impl FnOnce() -> Option<V>,
+    ) -> Option<V> {
+        let Some(kept) = &self.kept else {
+            return decode();
+        };
+        if let Some(hit) = kept.get(&key).and_then(unwrap) {
+            return Some(hit);
+        }
+        kept.count_decode();
+        let decoded = decode()?;
+        kept.insert(key, wrap(&decoded), files());
+        Some(decoded)
     }
 
     /// Converts textures on first use: before a UV texture is opened, every
@@ -614,10 +694,10 @@ impl FileAssets {
     /// readers may stream instead, so that dividing exactly still leaves each
     /// one something usable. `max_streams` enforces that cap at admission, so
     /// by the time this runs `streams.len()` is already small enough.
-    fn rebudget_ptex(&self, opened: &[PtexHandle]) {
+    fn rebudget_ptex(&self, opened: &[(std::path::PathBuf, PtexHandle)]) {
         let streams: Vec<_> = opened
             .iter()
-            .filter_map(|h| match h {
+            .filter_map(|(_, h)| match h {
                 PtexHandle::Streamed(s) => Some(s),
                 PtexHandle::Preloaded { .. } => None,
             })
@@ -669,10 +749,10 @@ impl FileAssets {
     }
 
     /// Streamed textures opened so far. Callers hold the lock.
-    fn streamed_count(opened: &[PtexHandle]) -> usize {
+    fn streamed_count(opened: &[(std::path::PathBuf, PtexHandle)]) -> usize {
         opened
             .iter()
-            .filter(|h| matches!(h, PtexHandle::Streamed(_)))
+            .filter(|(_, h)| matches!(h, PtexHandle::Streamed(_)))
             .count()
     }
 
@@ -690,7 +770,7 @@ impl FileAssets {
             micro_reserve_bytes: ptex_stream::micro_reserve(self.ptex_budget()) as u64,
             ..Default::default()
         };
-        for h in opened.iter() {
+        for (_, h) in opened.iter() {
             out.textures += 1;
             match h {
                 PtexHandle::Preloaded { faces, bytes, why } => {
@@ -832,8 +912,10 @@ impl FileAssets {
     }
 }
 
-impl AssetLoader for FileAssets {
-    fn load_environment(&self, path: &Path, space: ColorSpace) -> Option<EnvironmentMap> {
+/// The decoders behind the seam, each run on a miss of the kept decodes
+/// ([`FileAssets::keep_decoded`]).
+impl FileAssets {
+    fn decode_environment(&self, path: &Path, space: ColorSpace) -> Option<EnvironmentMap> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -858,11 +940,12 @@ impl AssetLoader for FileAssets {
         }
     }
 
-    fn load_texture(
+    /// A UV texture, and its resident bytes when it took the preload path.
+    fn decode_texture(
         &self,
         path: &Path,
         space: ColorSpace,
-    ) -> Option<std::sync::Arc<dyn Texture2D>> {
+    ) -> Option<(std::sync::Arc<dyn Texture2D>, Option<u64>)> {
         // Same A/B switch as CRUST_PTEX, for the same reason: with every
         // texture declined a MaterialX surface renders on its constant
         // inputs, which is how you tell a wrong chart from a wrong material.
@@ -882,12 +965,12 @@ impl AssetLoader for FileAssets {
             // OIIO `.tx`, or a tiled mip EXR — every ALab texture is one)
             // streams as it is, and converting it would only write a copy.
             if let Some(streamed) = self.open_streaming(path, space, Candidates::Source) {
-                return Some(streamed);
+                return Some((streamed, None));
             }
             if self.prepare_tx(path, space)
                 && let Some(streamed) = self.open_streaming(path, space, Candidates::Sibling)
             {
-                return Some(streamed);
+                return Some((streamed, None));
             }
         }
         if self.streaming {
@@ -928,10 +1011,11 @@ impl AssetLoader for FileAssets {
             loaded.color_space(),
             started.elapsed()
         );
-        Some(std::sync::Arc::new(loaded))
+        let bytes = loaded.bytes() as u64;
+        Some((std::sync::Arc::new(loaded), Some(bytes)))
     }
 
-    fn load_light_texture(
+    fn decode_light_texture(
         &self,
         path: &Path,
         space: ColorSpace,
@@ -959,7 +1043,7 @@ impl AssetLoader for FileAssets {
         }
     }
 
-    fn load_ies(&self, path: &Path) -> Option<std::sync::Arc<IesProfile>> {
+    fn decode_ies(&self, path: &Path) -> Option<std::sync::Arc<IesProfile>> {
         let loaded = load_ies(path);
         match &loaded {
             Some(p) => debug!(
@@ -976,7 +1060,7 @@ impl AssetLoader for FileAssets {
         loaded.map(std::sync::Arc::new)
     }
 
-    fn load_ptex(
+    fn decode_ptex(
         &self,
         path: &Path,
         space: crust_core::ColorSpace,
@@ -1069,7 +1153,7 @@ impl AssetLoader for FileAssets {
                     } else {
                         let tex = std::sync::Arc::new(tex);
                         let mut opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
-                        opened.push(PtexHandle::Streamed(tex.clone()));
+                        opened.push((path.to_path_buf(), PtexHandle::Streamed(tex.clone())));
                         // Every sibling's share shrinks as this one joins, so the
                         // total stays what was asked for rather than growing with
                         // the texture count.
@@ -1104,14 +1188,14 @@ impl AssetLoader for FileAssets {
                     tex.bytes() as f64 / (1024.0 * 1024.0),
                     started.elapsed()
                 );
-                self.ptex
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(PtexHandle::Preloaded {
+                self.ptex.lock().unwrap_or_else(|e| e.into_inner()).push((
+                    path.to_path_buf(),
+                    PtexHandle::Preloaded {
                         faces: PtexTexture::num_faces(&tex),
                         bytes: tex.bytes(),
                         why,
-                    });
+                    },
+                ));
                 Some(std::sync::Arc::new(tex))
             }
             Err(e) => {
@@ -1122,5 +1206,88 @@ impl AssetLoader for FileAssets {
                 None
             }
         }
+    }
+}
+
+impl AssetLoader for FileAssets {
+    fn load_environment(&self, path: &Path, space: ColorSpace) -> Option<EnvironmentMap> {
+        self.decode_environment(path, space)
+    }
+
+    fn load_texture(
+        &self,
+        path: &Path,
+        space: ColorSpace,
+    ) -> Option<std::sync::Arc<dyn Texture2D>> {
+        self.kept_or(
+            kept::Key::Texture(path.to_path_buf(), space),
+            |v| match v {
+                kept::Value::Texture { texture, preloaded } => {
+                    // Counted again, as the fresh loader this one stands in
+                    // for would have counted it.
+                    if let Some(bytes) = preloaded {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        self.preloaded_textures.fetch_add(1, Relaxed);
+                        self.preloaded_texture_bytes.fetch_add(bytes, Relaxed);
+                    }
+                    Some((texture, preloaded))
+                }
+                _ => None,
+            },
+            |(texture, preloaded)| kept::Value::Texture {
+                texture: texture.clone(),
+                preloaded: *preloaded,
+            },
+            || kept::texture_stamp_files(path),
+            || self.decode_texture(path, space),
+        )
+        .map(|(texture, _)| texture)
+    }
+
+    fn load_light_texture(
+        &self,
+        path: &Path,
+        space: ColorSpace,
+    ) -> Option<std::sync::Arc<LightTexture>> {
+        self.kept_or(
+            kept::Key::LightTexture(path.to_path_buf(), space),
+            |v| match v {
+                kept::Value::LightTexture(t) => Some(t),
+                _ => None,
+            },
+            |t| kept::Value::LightTexture(t.clone()),
+            || vec![path.to_path_buf()],
+            || self.decode_light_texture(path, space),
+        )
+    }
+
+    fn load_ies(&self, path: &Path) -> Option<std::sync::Arc<IesProfile>> {
+        self.kept_or(
+            kept::Key::Ies(path.to_path_buf()),
+            |v| match v {
+                kept::Value::Ies(p) => Some(p),
+                _ => None,
+            },
+            |p| kept::Value::Ies(p.clone()),
+            || vec![path.to_path_buf()],
+            || self.decode_ies(path),
+        )
+    }
+
+    fn load_ptex(
+        &self,
+        path: &Path,
+        space: crust_core::ColorSpace,
+    ) -> Option<std::sync::Arc<dyn PtexTexture>> {
+        self.kept_or(
+            kept::Key::Ptex(path.to_path_buf(), space),
+            |v| match v {
+                kept::Value::Ptex(t) => Some(t),
+                _ => None,
+            },
+            |t| kept::Value::Ptex(t.clone()),
+            || vec![path.to_path_buf()],
+            || self.decode_ptex(path, space),
+        )
     }
 }
