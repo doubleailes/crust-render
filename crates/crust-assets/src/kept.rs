@@ -8,7 +8,8 @@
 //! same stage again and again — the `crust mcp` session, once per edit batch —
 //! where a fresh loader per import re-decoded every texture on every edit.
 //! [`Kept::revalidate`] drops the entries whose files changed on disk; the
-//! host calls it before each import.
+//! host calls it before each import, and [`Kept::sweep`] after a full one, to
+//! let go of what that import no longer asked for.
 //!
 //! Only successes are kept. A file that failed to load is tried again by the
 //! next import, which then raises the same warnings a fresh loader would.
@@ -69,12 +70,17 @@ fn stamp(path: PathBuf) -> Stamp {
 struct Entry {
     value: Value,
     stamps: Vec<Stamp>,
+    /// The [`Kept::generation`] that last asked for it.
+    used: u64,
 }
 
 /// The kept decodes.
 #[derive(Default)]
 pub(crate) struct Kept {
     entries: Mutex<HashMap<Key, Entry>>,
+    /// Bumped by every [`Kept::revalidate`]: the import (or update) about to
+    /// run. An entry asked for since is the generation's.
+    generation: AtomicU64,
     /// Decodes that went to a file, hits excluded: what
     /// [`FileAssets::decodes`](crate::FileAssets::decodes) reports.
     decodes: AtomicU64,
@@ -82,8 +88,10 @@ pub(crate) struct Kept {
 
 impl Kept {
     pub(crate) fn get(&self, key: &Key) -> Option<Value> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.get(key).map(|e| e.value.clone())
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = entries.get_mut(key)?;
+        entry.used = self.generation.load(Ordering::Relaxed);
+        Some(entry.value.clone())
     }
 
     /// Keeps `value` under `key`, stamped with `files` as they are now. The
@@ -91,8 +99,16 @@ impl Kept {
     /// not seen as changed; the next rewrite is.
     pub(crate) fn insert(&self, key: Key, value: Value, files: Vec<PathBuf>) {
         let stamps = files.into_iter().map(stamp).collect();
+        let used = self.generation.load(Ordering::Relaxed);
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.insert(key, Entry { value, stamps });
+        entries.insert(
+            key,
+            Entry {
+                value,
+                stamps,
+                used,
+            },
+        );
     }
 
     pub(crate) fn count_decode(&self) {
@@ -103,10 +119,11 @@ impl Kept {
         self.decodes.load(Ordering::Relaxed)
     }
 
-    /// Drops every entry one of whose files changed length or modification
-    /// time, or appeared or vanished, since it was kept. Returns the dropped
-    /// keys.
+    /// Starts a generation, and drops every entry one of whose files changed
+    /// length or modification time, or appeared or vanished, since it was
+    /// kept. Returns the dropped keys.
     pub(crate) fn revalidate(&self) -> Vec<Key> {
+        self.generation.fetch_add(1, Ordering::Relaxed);
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let stale: Vec<Key> = entries
             .iter()
@@ -122,14 +139,40 @@ impl Kept {
         }
         stale
     }
+
+    /// Drops every entry nothing asked for since the last
+    /// [`Kept::revalidate`]: after a full import, what its scene does not use.
+    /// Returns the dropped keys.
+    pub(crate) fn sweep(&self) -> Vec<Key> {
+        let current = self.generation.load(Ordering::Relaxed);
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let unused: Vec<Key> = entries
+            .iter()
+            .filter(|(_, e)| e.used < current)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &unused {
+            entries.remove(key);
+        }
+        unused
+    }
 }
 
 /// The files a UV texture's decode may have read: each tile (or the one
 /// image), and the `.tx` sibling the streaming path looks for beside each.
+/// A `<UDIM>` / `<UVTILE>` set also stamps its directory, whose modification
+/// time moves when a tile is added or removed: the set is the tiles on disk,
+/// and one that appears later must be read.
 pub(crate) fn texture_stamp_files(path: &Path) -> Vec<PathBuf> {
     let mut files = crate::texture_files(path);
     if files.is_empty() {
         files.push(path.to_path_buf());
+    }
+    let name = path.to_string_lossy();
+    if (name.contains("<UDIM>") || name.contains("<UVTILE>"))
+        && let Some(dir) = path.parent()
+    {
+        files.push(dir.to_path_buf());
     }
     let siblings: Vec<PathBuf> = files.iter().map(|f| f.with_extension("tx")).collect();
     files.extend(siblings);

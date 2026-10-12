@@ -471,7 +471,29 @@ impl FileAssets {
             return 0;
         };
         let stale = kept.revalidate();
-        let ptex: Vec<&Path> = stale
+        self.let_go(&stale);
+        stale.len()
+    }
+
+    /// After a full import on a loader that
+    /// [keeps its decodes](FileAssets::keep_decoded): lets go of every kept
+    /// decode that import did not ask for, which its scene therefore does not
+    /// use, and of the Ptex streams opened from them, so the budget is shared
+    /// by the streams in use. Returns how many decodes were let go. Without
+    /// it a long session would keep every texture it ever decoded.
+    pub fn sweep(&self) -> usize {
+        let Some(kept) = &self.kept else {
+            return 0;
+        };
+        let unused = kept.sweep();
+        self.let_go(&unused);
+        unused.len()
+    }
+
+    /// Closes the Ptex handles of `dropped`'s Ptex decodes and re-divides the
+    /// budget over the streams left.
+    fn let_go(&self, dropped: &[kept::Key]) {
+        let ptex: Vec<&Path> = dropped
             .iter()
             .filter_map(|k| match k {
                 kept::Key::Ptex(p, _) => Some(p.as_path()),
@@ -483,7 +505,6 @@ impl FileAssets {
             opened.retain(|(p, _)| !ptex.contains(&p.as_path()));
             self.rebudget_ptex(&opened);
         }
-        stale.len()
     }
 
     /// How many decodes went to a file on a loader that

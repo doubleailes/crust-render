@@ -59,6 +59,19 @@ impl MaterialCache {
     /// Prototype-scoped paths (`/__Prototype_N`, renumbered per streamed
     /// stage) are left out: no edit names one, and two epochs' `Arc`s under
     /// one such path are different materials.
+    /// `(prim read, material reading it)` for every material the cache
+    /// resolved, prototype-scoped ones included ([`material_reads`]).
+    pub(super) fn reads(&self) -> Vec<(String, String)> {
+        let mut reads: Vec<(String, String)> = self
+            .by_path
+            .iter()
+            .flat_map(|((_, path), cached)| cached.reads.iter().map(|r| (r.clone(), path.clone())))
+            .collect();
+        reads.sort();
+        reads.dedup();
+        reads
+    }
+
     pub(super) fn origins(
         &self,
         world: &crate::World,
@@ -137,6 +150,9 @@ pub(super) struct BoundMaterial {
 /// kept here until then.
 pub(super) struct CachedMaterial {
     material: Arc<dyn Material>,
+    /// The prims outside the material that its network reads (see
+    /// [`material_reads`]).
+    reads: Vec<String>,
     mtlx: Option<Arc<crate::materialx::MtlxDisplacement>>,
     /// `None` until a mesh asked; then the answer, which may be no
     /// displacement.
@@ -257,15 +273,48 @@ fn cached_material(
     // next's — see `MaterialCache::key`.
     debug!("Resolving material {mat_path} (epoch {})", key.0);
     let (material, mtlx) = resolve_fresh(stage, &mat_path, caches);
+    let reads = material_reads(stage, &mat_path);
     caches.materials.by_path.insert(
         key.clone(),
         CachedMaterial {
             material,
+            reads,
             mtlx,
             displacement: None,
         },
     );
     Some((key, mat_path))
+}
+
+/// The prims outside the material at `mat_path` that its network reads: the
+/// paths of the specs its prims compose from elsewhere (an `inherits`,
+/// `specializes` or `references` arc's target, a referenced layer's prim) and
+/// the prims its connections reach. An in-place edit of a prim one of these
+/// names would change this material too ([`crate::live`]). A path in another
+/// layer's namespace may coincide with an edited one; that costs a full
+/// import, never a stale material.
+fn material_reads(stage: &Stage, mat_path: &sdf::Path) -> Vec<String> {
+    let mut reads = Vec::new();
+    let mut stack = vec![prim_at(stage, mat_path.clone())];
+    while let Some(prim) = stack.pop() {
+        for site in prim.prim_stack().unwrap_or_default() {
+            if !site.path.has_prefix(mat_path) {
+                reads.push(site.path.to_string());
+            }
+        }
+        for attr in prim.authored_attributes().unwrap_or_default() {
+            for target in attr.connections().unwrap_or_default() {
+                let target = target.prim_path();
+                if !target.has_prefix(mat_path) {
+                    reads.push(target.to_string());
+                }
+            }
+        }
+        stack.extend(prim.children().unwrap_or_default());
+    }
+    reads.sort();
+    reads.dedup();
+    reads
 }
 
 /// The material at `mat_path`, resolved without the cache, and the `.mtlx`

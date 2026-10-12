@@ -46,6 +46,10 @@ use crate::tracer::RenderSettings;
 pub struct Provenance {
     /// Material prim path → the `World` material slots holding it.
     pub(crate) materials: HashMap<String, MaterialOrigin>,
+    /// `(prim, material)`: a prim outside a material that the material's
+    /// network reads, through a composition arc or a connection — every
+    /// material the import resolved, prototype-scoped ones included.
+    pub(crate) material_reads: Vec<(String, String)>,
     /// Light prim path → its place in the light list and its geometry.
     pub(crate) lights: HashMap<String, LightOrigin>,
     /// `(first geom_id, prim path)` per prim that emitted geometry, in
@@ -102,6 +106,27 @@ impl Provenance {
     /// The material at `path`, when the scene uses it.
     pub fn material(&self, path: &str) -> Option<&MaterialOrigin> {
         self.materials.get(path)
+    }
+
+    /// The materials other than `owner` whose network reads `prim` or a prim
+    /// above or below it, through a composition arc or a connection: an edit
+    /// of `prim` changes them too, so it cannot be applied to `owner` alone.
+    pub fn other_readers<'a>(
+        &'a self,
+        prim: &'a str,
+        owner: &'a str,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        let related = |a: &str, b: &str| {
+            a.strip_prefix(b).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with('/') || rest.starts_with('.')
+            })
+        };
+        self.material_reads
+            .iter()
+            .filter(move |(read, reader)| {
+                reader != owner && (related(prim, read) || related(read, prim))
+            })
+            .map(|(_, reader)| reader.as_str())
     }
 
     /// The light at `path`, when the scene has it.

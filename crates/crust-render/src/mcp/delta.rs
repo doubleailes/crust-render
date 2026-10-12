@@ -198,6 +198,9 @@ pub fn classify(
             .then(|| owning_material(stage, &prim, provenance))
             .flatten()
         {
+            if let Some(reader) = provenance.other_readers(prim_str, &material).next() {
+                return full(format!("{attr} is also read by {reader}"));
+            }
             if !change.materials.contains(&material) {
                 change.materials.push(material);
             }

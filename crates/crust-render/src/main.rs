@@ -1069,6 +1069,14 @@ struct Checked {
     )]
     aovs: AovRequest,
     report: CheckReport,
+    /// How many UV textures the import preloaded, which the report's facts
+    /// count: kept for an MCP session's re-check of a scene it updated in
+    /// place, which loads none.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        expect(dead_code, reason = "an MCP session re-checks with it")
+    )]
+    preloaded: u64,
 }
 
 /// The body of `crust check`: import `args`' stage, choose its products and
@@ -1084,18 +1092,19 @@ fn import_checked(
     }
     let scene = load_scene(&args.scene, None, assets, keep_stage)?;
     let import_peak = crust_core::peak_memory_bytes();
-    check_scene(args, scene, assets, import_peak)
+    let preloaded = assets.texture_cache_stats().preloaded;
+    check_scene(args, scene, preloaded, import_peak)
 }
 
 /// [`import_checked`] past the import: the scene's settings under `args`'
 /// overrides, its products chosen, and the report built. Also how an MCP
 /// session re-checks a scene it updated in place. The scene keeps its own
 /// products and warnings; the chosen products and the report's warnings
-/// are copies.
+/// are copies. `preloaded` is how many UV textures the import preloaded.
 fn check_scene(
     args: &CheckArgs,
     mut scene: Scene,
-    assets: &FileAssets,
+    preloaded: u64,
     import_peak: Option<u64>,
 ) -> std::result::Result<Checked, String> {
     let input = args
@@ -1143,7 +1152,6 @@ fn check_scene(
         subdivision_edge_length: args.scene.subdiv_edge_length,
         auto_tx: args.scene.auto_tx,
     };
-    let preloaded = assets.texture_cache_stats().preloaded;
     // The facts are about the settings the scene renders with.
     let own = std::mem::replace(&mut scene.settings, settings);
     let facts = Facts::from_import(&scene, args.scene.auto_tx, preloaded, import_peak);
@@ -1173,6 +1181,7 @@ fn check_scene(
         settings,
         aovs,
         report,
+        preloaded,
     })
 }
 

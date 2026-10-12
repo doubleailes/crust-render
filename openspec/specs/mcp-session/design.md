@@ -51,10 +51,23 @@ every import (`import_checked(args, keep_stage, assets)`). The loader keeps ever
 texture, Ptex, light texture and IES profile it decoded (`crust-assets/src/kept.rs`),
 stamped with the length and modification time of each file the decode read — for a UV
 texture, each UDIM tile and the `.tx` sibling the streaming path looks for, so a `.tx`
-appearing later counts as a change. Before each import `FileAssets::revalidate()` drops
-the entries whose stamps moved (and the Ptex handles opened from them, re-budgeting the
-streams left), and restarts the preload counters, so `crust-check/2`'s facts count the
-import as a fresh loader's would.
+appearing later counts as a change, and for a `<UDIM>` / `<UVTILE>` set its directory,
+whose modification time moves when a tile is added or removed. Before every edit,
+in place or not, `FileAssets::revalidate()` drops the entries whose stamps moved (and
+the Ptex handles opened from them, re-budgeting the streams left), starts a new
+generation, and restarts the preload counters, so `crust-check/2`'s facts count an
+import as a fresh loader's would. After each full import `FileAssets::sweep()` lets go
+of every entry that import did not ask for: what the scene no longer uses, and the Ptex
+streams opened from it.
+
+- *Trap:* when anything changed on disk the edit is `full`, even one confined to a
+  light. The scene's *other* materials and lights still hold the old decode, and only a
+  re-import replaces them (`a_file_changed_on_disk_makes_the_next_edit_full`). The first
+  version revalidated only on the full path, so an in-place edit after a re-export
+  rendered stale texels.
+- *Trap:* an in-place update loads no texture, so it re-checks the scene with the
+  preload count its import recorded; the report's phases are the import's followed by
+  `Update in place (<class>)`, the update's own time.
 
 - Only successes are kept: a file that failed is tried again by the next import, which
   raises the warnings a fresh loader would.
@@ -77,7 +90,7 @@ cheapest class that can follow all of them:
 |---|---|
 | attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera (not `xformOp:*` / `xformOpOrder`) | `settings` |
 | `inputs:*` value on a light the scene has, other than `width`, `height`, `radius`, `length`, `treatAsPoint`, `treatAsLine` (the BVH holds its shape) | `lights` |
-| `inputs:*` value on a `Shader` under a material the scene uses, or on that `Material` | `materials` |
+| `inputs:*` value on a `Shader` under a material the scene uses, or on that `Material`, when no other material reads it | `materials` |
 | anything else: a spec defined or removed, a relationship, a connection, metadata, a transform, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
 
 A batch is applied as its most expensive class, `settings` < `materials` < `lights` <
@@ -96,6 +109,16 @@ only a prototype uses, is `full`.
 
 *Alternative rejected:* classifying the parsed `Snippet`. An undo has no snippet, and
 merging can turn an authored spec into no change at all.
+
+*Trap:* a shader can belong to more than one material. Another material can compose
+it through an `inherits`, `specializes` or `references` arc, or connect into it, and an
+edit there changes that material too. So the import records, per material it resolved
+(prototype-scoped ones included), the prims outside it that its network reads: the
+paths of its prims' `prim_stack` sites and its connection targets
+(`material_reads`). An edit at or above or below a prim another material reads is
+`full` (`Provenance::other_readers`, `an_edit_another_material_reads_is_full`). A
+referenced layer's paths are in that layer's namespace and may coincide with an edited
+one; that costs a full import, never a stale material.
 
 ### Provenance
 
@@ -230,8 +253,8 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   changed subtree, and BVH refit, are not done: a refit tree is not the tree a fresh
   build gives. A light with no geometry (distant, dome) could move without touching the
   BVH; it is `full` until the simpler classes have proved themselves.
-- **Kept decodes are not let go** while the session lives, even when the scene no longer
-  uses them; the texture caches' budgets bound what streams, not what preloads.
+- **Kept decodes are let go only by a full import.** A run of in-place edits that stops
+  using a texture keeps it until the next `full` edit sweeps.
 - **Environment maps are decoded again** by every import and dome rebuild.
 - **The session re-composes the stage per rebuild** (a masked stage per material or
   light, the index stage for settings) rather than keeping one composed stage across
