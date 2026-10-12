@@ -23,7 +23,7 @@
 
 ## 3. Verify and document
 
-- [ ] 3.1 `scripts/check_images.sh check` against goldens recorded before the change:
+- [x] 3.1 `scripts/check_images.sh check` against goldens recorded before the change:
       every sample unchanged (the import's stage is untouched).
 - [x] 3.2 Docs: remove the limitation from `site/content/docs/help/claude-desktop.md`
       (and drop `type="float"` from its `inputs:exposure` example) and from
