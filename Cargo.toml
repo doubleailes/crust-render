@@ -18,7 +18,7 @@ version = "0.7.0"
 publish = false
 
 [workspace.dependencies]
-glam = "0.33.2"
+glam = "0.34.1"
 tracing = {version = "0.1.41", default-features = false}
 exr = "1.74.2"
 # Decoder-side image formats. Declared once so `crust-assets` (which decodes)
