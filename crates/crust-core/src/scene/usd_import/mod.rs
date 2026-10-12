@@ -54,7 +54,9 @@ use crate::volume::VolumeRegion;
 #[cfg(feature = "mmap")]
 use openusd::ar::DefaultResolver;
 use openusd::sdf;
-use openusd::usd::{InitialLoadSet, Prim, Stage, StageBuilder, StagePopulationMask};
+use openusd::usd::{
+    InitialLoadSet, Prim, SchemaRegistry, Stage, StageBuilder, StagePopulationMask,
+};
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Camera as UsdCamera, Mesh as UsdMesh, PointInstancer,
     Sphere as UsdSphere,
@@ -573,6 +575,15 @@ fn release_stage(stage: Stage, keep: bool) {
     }
 }
 
+/// The typed schemas' registry every stage the import opens carries: the
+/// families crust-core enables on openusd-schemas (`geom`, `lux`, `shade`,
+/// `render`, `skel`, `vol`, `proc`, `media`). Built once per process. A stage
+/// that authors the scene (`crust mcp`'s session) opens with this one, so
+/// it resolves a declared type and a schema fallback as the import does.
+pub fn usd_schema_registry() -> Arc<SchemaRegistry> {
+    openusd_schemas::schema_registry()
+}
+
 /// `Stage::builder()` carrying the typed schemas' registry, and reading files
 /// through memory mappings when the `mmap` feature is built in, unless
 /// `CRUST_USD_MMAP=0`. Every stage the import
@@ -581,7 +592,7 @@ fn release_stage(stage: Stage, keep: bool) {
 /// `Settings`, …) answers `None` and no schema fallback resolves — the scene
 /// would import as empty, without an error.
 pub(super) fn stage_builder() -> StageBuilder {
-    let builder = Stage::builder().schema_registry(openusd_schemas::schema_registry());
+    let builder = Stage::builder().schema_registry(usd_schema_registry());
     #[cfg(feature = "mmap")]
     if crate::config().usd_mmap {
         return builder.resolver(mapping_resolver());

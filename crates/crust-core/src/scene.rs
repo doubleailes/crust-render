@@ -80,6 +80,7 @@ mod tessellate;
 mod usd_import;
 
 pub(crate) use usd_import::rebuild;
+pub use usd_import::usd_schema_registry;
 
 impl Scene {
     /// Load a full runtime scene (camera, geometry, lights, render settings)

@@ -101,7 +101,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | tool | what it does |
 |------|--------------|
 | `open_session(input, output)` | creates the override layer `output` on `input` (or resumes it) and imports it; reports the camera, the resolution and the warnings |
-| `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from) |
+| `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from, or `fallback` for a schema's fallback nothing authors) |
 | `check()` | the [`crust check`](@/docs/reference/command-line.md#check) report of the current layer, as `crust-check/2` JSON |
 | `set_attribute(path, value, type?)` | authors an attribute value in the layer, typed as the attribute is declared |
 | `set_variant(prim, variant_set, variant)` | authors a variant selection |
@@ -155,9 +155,12 @@ to import every edit whole with nothing kept, as earlier versions did.
   and converts the JSON value to it: a number for `float`, `[r, g, b]` for `color3f`, a
   string for `token`, `string` or `asset`, an array for an array type. A value that does
   not convert is refused, naming the type, and nothing is authored.
-- **Undeclared attributes need a `type`.** A schema attribute nothing authors yet, such
-  as a light's `inputs:exposure`, has no type on the session's stage, which registers no
-  schema registry. Pass `type` (`"float"`) the first time.
+- **Schema attributes are typed before anything authors them.** The session's stage
+  carries the same USD schemas as the render's import, so an attribute a prim's schema
+  declares, such as a light's `inputs:exposure`, has its type and fallback value even
+  when no layer authors it: `query` answers them with `source` `fallback`, and
+  `set_attribute` needs no `type`. A `type` that contradicts the schema is refused. Only
+  a custom attribute no schema declares needs `type` the first time.
 - **Asset paths follow the layer.** A relative asset path is read from the *input's*
   directory, as `query` shows the input's own paths, and written relative to the layer's,
   so it names the same file wherever the layer is opened from.
@@ -208,7 +211,7 @@ query("/scene/Sky")
   → DomeLight, inputs:texture:file = sky_gradient.exr (authored in cornellbox.usda)
 render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait="done")
   → render 1: the crop around the spheres, done
-set_attribute("/scene/Sky.inputs:exposure", -1, type="float")
+set_attribute("/scene/Sky.inputs:exposure", -1)
   → saved, no warning gained
 author_usda("""
   over "scene" {

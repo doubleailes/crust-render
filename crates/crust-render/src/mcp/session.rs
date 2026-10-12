@@ -91,7 +91,10 @@ fn import_kept(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String
 /// only for the prims a query reaches (design, Risks).
 fn open_stage(path: &Path) -> Result<Stage, String> {
     let id = path.to_str().ok_or("the layer path is not UTF-8")?;
+    // The import's schema registry, not its resolver: a declared attribute
+    // then has its schema type and fallback here, as in the render.
     Stage::builder()
+        .schema_registry(crust_core::usd_schema_registry())
         .load(InitialLoadSet::LoadNone)
         .open(id)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))

@@ -117,7 +117,7 @@ pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, World
 pub use scene::Scene;
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
-    MaterialRecord, NoAssets, UsdImportOptions,
+    MaterialRecord, NoAssets, UsdImportOptions, usd_schema_registry,
 };
 #[cfg(feature = "traversal-stats")]
 pub use stats::traversal_report;
