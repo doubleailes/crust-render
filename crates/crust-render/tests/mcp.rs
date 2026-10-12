@@ -404,6 +404,66 @@ fn query_names_the_layer_an_opinion_comes_from() {
     client.finish();
 }
 
+/// A layer that authors only metadata on a schema attribute does not supply
+/// its value: `source` names the opinion the value comes from, here the
+/// schema's fallback, not the first layer in the property stack.
+#[test]
+fn query_names_the_fallback_under_a_metadata_only_opinion() {
+    let dir = work_dir("query_metadata_only");
+    let input = dir.join("shot.usda");
+    std::fs::write(
+        &input,
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def SphereLight "key"
+    {
+        float inputs:exposure (
+            doc = "documented, never set"
+        )
+        float inputs:radius = 0.5
+    }
+
+    def Sphere "ball"
+    {
+    }
+}
+"#,
+    )
+    .expect("the stage");
+    let output = dir.join("shot_lookdev.usda");
+    let mut client = Client::start(&[]);
+    client
+        .call("open_session", json!({ "input": input, "output": output }))
+        .expect("opened");
+    let q = client
+        .call("query", json!({ "path": "/World/key.inputs:exposure" }))
+        .expect("the schema declares it");
+    assert_eq!(q["value"], 0.0, "{q:#}");
+    assert_eq!(q["source"], "fallback", "{q:#}");
+    // The layer still has an opinion on the property, and is listed as one.
+    let layers = q["layers"].as_array().expect("layers");
+    assert!(
+        layers
+            .iter()
+            .any(|l| l.as_str().unwrap().ends_with("shot.usda")),
+        "{q:#}"
+    );
+    // An authored value names the layer that authors it.
+    let q = client
+        .call("query", json!({ "path": "/World/key.inputs:radius" }))
+        .expect("authored");
+    assert!(
+        q["source"].as_str().unwrap().ends_with("shot.usda"),
+        "{q:#}"
+    );
+    client.finish();
+}
+
 /// `crust <args>` in `dir`, its stdout.
 fn crust_cli(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_crust"))
