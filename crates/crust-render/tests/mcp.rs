@@ -377,11 +377,12 @@ fn query_names_the_layer_an_opinion_comes_from() {
     assert_eq!(format["value"], "latlong", "{format:#}");
     let source = format["source"].as_str().expect("a layer");
     assert!(source.ends_with("shot.usda"), "{format:#}");
-    // Unauthored, it has no type here (openusd 0.7 has no schema
-    // definitions), and the error says how to author it anyway.
+    // Unauthored, it has no type here (the session's stage registers no
+    // schema registry), and the error says why and how to author it anyway.
     let e = client
         .call("query", json!({ "path": "/scene/Sky.inputs:exposure" }))
         .expect_err("no layer authors the exposure");
+    assert!(e.contains("registers no schema registry"), "{e}");
     assert!(e.contains("explicit `type`"), "{e}");
     let scene = client
         .call("query", json!({ "path": "/scene" }))
