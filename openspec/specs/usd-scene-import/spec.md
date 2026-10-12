@@ -888,3 +888,70 @@ with one warning, and the material imported as before.
 - **WHEN** a mesh is bound to a material with only an `outputs:mtlx:volume`
   terminal over an `ND_volume`
 - **THEN** the imported world has a medium boundary, and the mesh is it
+
+### Requirement: Camera exposure
+
+The importer SHALL read the render camera's exposure as USD's linear exposure scale
+(C++ `UsdGeomCamera::ComputeLinearExposureScale`):
+`exposure:responsivity × exposure:time × (exposure:iso / 100) × 2^exposure /
+exposure:fStop²`, each attribute read at the import's evaluation time, an unauthored
+one at its schema fallback (`exposure:responsivity` 1, `exposure:time` 1,
+`exposure:iso` 100, `exposure` 0, `exposure:fStop` 1). The camera's depth-of-field
+`fStop` SHALL NOT enter the scale. A scale that is not finite or not positive SHALL be
+refused with a `camera.invalid_exposure` warning naming the camera, and SHALL read 1.
+Without a render camera prim (the procedural fallback scene), the scale SHALL be 1.
+The importer SHALL read the render setting `enableExposureCompensation` (and
+`crust:enableExposureCompensation`, which wins when both are authored) off the stage's
+`RenderSettings` prim, default `true`, as Hydra renderers do; `false` SHALL make the
+scale 1 whatever the camera authors.
+
+#### Scenario: Nothing authored
+
+- **WHEN** the render camera authors none of the exposure attributes
+- **THEN** the exposure scale is exactly 1
+
+#### Scenario: Stops
+
+- **WHEN** the render camera authors `exposure = 2`
+- **THEN** the exposure scale is 4
+
+#### Scenario: The full photometric set
+
+- **WHEN** the render camera authors `exposure = 1`, `exposure:time = 0.5`,
+  `exposure:iso = 400`, `exposure:fStop = 2` and `exposure:responsivity = 1.5`
+- **THEN** the exposure scale is `1.5 × 0.5 × 4 × 2 / 4 = 1.5`
+
+#### Scenario: The depth-of-field f-stop does not expose
+
+- **WHEN** the render camera authors `fStop = 4` and no `exposure:fStop`
+- **THEN** the exposure scale is 1
+
+#### Scenario: Animated exposure
+
+- **WHEN** the render camera's `exposure` is time-sampled 0 at frame 1 and 1 at frame 2,
+  and the stage is rendered at `-f 2`
+- **THEN** the exposure scale is 2
+
+#### Scenario: A scale that cannot apply
+
+- **WHEN** the render camera authors `exposure:fStop = 0`
+- **THEN** a `camera.invalid_exposure` warning names the camera and the exposure scale
+  is 1
+
+#### Scenario: Only the render camera is checked
+
+- **WHEN** a camera whose exposure cannot apply is on the stage, but the
+  `RenderSettings` prim names another camera with `exposure = 2`
+- **THEN** no `camera.invalid_exposure` warning is raised and the exposure scale is 4
+
+#### Scenario: Exposure compensation turned off
+
+- **WHEN** the render camera authors `exposure = 2` and the stage's `RenderSettings`
+  prim authors `bool enableExposureCompensation = false`
+- **THEN** the exposure scale is 1
+
+#### Scenario: The crust alias wins
+
+- **WHEN** the `RenderSettings` prim authors `enableExposureCompensation = false` and
+  `crust:enableExposureCompensation = true`, and the camera authors `exposure = 2`
+- **THEN** the exposure scale is 4
