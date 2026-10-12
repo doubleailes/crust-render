@@ -33,7 +33,10 @@
 - [x] 3.1 Remove the `guiding` factor, `set_guiding`, the `guiding_without_indirect`
       finding, `schedule::guiding_training_spp`, the training-cost branch in the budget
       admission, and `guiding` from the noise-row ordering (`noise.rs`) and
-      `Facts` (`checks.rs`). Done when the diagnostic's unit and integration tests pass
+      `Facts` (`checks.rs`), together with `Facts::indirect_dominant`, which only that finding read:
+      its computation in `diagnostic/mod.rs` and the places `checks.rs` and
+      `tests/diagnostic.rs` set it (`noise::INDIRECT_ROWS` stays: the factor ordering still
+      uses it). Done when the diagnostic's unit and integration tests pass
       with their guiding cases deleted or rewritten, and the Markdown snapshot
       (`fixture.md`) is regenerated with no guiding row.
 - [x] 3.2 Make `--baseline` skip a trial whose factor is unknown. Done when a test reads

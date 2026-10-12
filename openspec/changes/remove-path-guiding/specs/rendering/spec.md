@@ -72,6 +72,24 @@ strategies whatever the tolerance.
   tiled and the scanline strategy
 - **THEN** the two images are bit-identical
 
+### Requirement: The final pass sweeps in stages
+
+A final pass SHALL take every pixel to its first adaptive check point (or the
+whole budget when adaptive sampling is off) in stages of 1, 2, 4, 8, … samples per
+pixel, each stage covering the whole region before the next starts. A pixel's
+convergence test SHALL run only once the last stage is complete.
+
+#### Scenario: Stages double up to the first check point
+
+- **WHEN** a final pass renders with a minimum of 32 spp and a 64 spp budget
+- **THEN** every pixel reaches 1, 2, 4, 8, 16 and 32 samples in turn, frame-wide,
+  before the first adaptive round starts
+
+#### Scenario: A non-adaptive render is staged to its budget
+
+- **WHEN** a final pass renders at 100 spp with a variance threshold of 0
+- **THEN** the stages are 1, 2, 4, …, 64 and finally 100 samples per pixel
+
 ### Requirement: Rendering a region of the frame
 
 When the render has a region smaller than the frame, the renderer SHALL
