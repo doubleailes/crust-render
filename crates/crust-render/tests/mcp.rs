@@ -1047,7 +1047,12 @@ fn probe_reads_the_pixel_the_cli_writes() {
     let probed = client
         .call("probe", json!({ "render_id": id, "x": x, "y": y }))
         .expect("probed");
-    assert!(probed["prim"].is_null(), "{probed:#}");
+    // The mesh the pixel's camera ray hits, and its bound material.
+    assert_eq!(probed["prim"], "/scene/pCube1", "{probed:#}");
+    assert_eq!(
+        probed["material"], "/scene/Looks/initialShadingGroup",
+        "{probed:#}"
+    );
     assert!(probed["prim_note"].is_string(), "{probed:#}");
     let e = client
         .call("probe", json!({ "render_id": id, "x": 10, "y": 10 }))

@@ -112,7 +112,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | `render(region?, spp?, budget_s?, wait?)` | starts a progressive render and answers with the image so far: at 4 samples per pixel by default, at completion with `wait="done"`, within `budget_s` (default 10) either way |
 | `snapshot(render_id, budget_s?)` | the render's latest image and progress, at once, or after waiting at most `budget_s` for the render to finish |
 | `cancel(render_id)` | stops a render, keeping what it traced |
-| `probe(render_id, x, y)` | the beauty and every AOV at a pixel, in the working space |
+| `probe(render_id, x, y)` | the beauty and every AOV at a pixel, in the working space, and the prim and material the camera ray hits there |
 | `diff(render_a, render_b)` | compares two renders as [`crust diff`](@/docs/reference/command-line.md#diff) compares two files |
 | `render_final()` | renders the layer as `crust render <output>` would, and lists the files written |
 
@@ -227,7 +227,7 @@ render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait="done")
 diff(render_a=1, render_b=2)
   → not identical, relative MSE …
 probe(render_id=2, x=320, y=200)
-  → beauty [r, g, b]
+  → beauty [r, g, b], prim /scene/pCube1, material /scene/Looks/initialShadingGroup
 undo()
   → the key light is gone; the layer is as it was after set_attribute
 render_final()
@@ -246,6 +246,11 @@ and any USD tool opens it.
   applied in place. Decoded textures the scene no longer uses are let go at the next
   `full` edit. A session holds the stage it authors and the scene it renders at once,
   about twice the memory of a render's import, which puts Moana-scale stages out of reach.
-- **`probe` does not name the prim.** crust keeps no table from a hit to its prim yet, so
-  `prim` and `material` are null, and the result says why.
+- **`probe` names the prim the import recorded, not the one you may expect.** It names
+  the first surface the camera ray through the pixel's centre meets, before any opacity,
+  so a cutout's hole names the surface it cuts. A hit inside a native instance or a
+  `PointInstancer` names the instance or the instancer prim, not the prototype's mesh,
+  and the material is null for geometry no Material prim fills (an area light's
+  emitter). Once an edit has imported the stage again, a render from before it names
+  nothing: render again.
 - **`render_final` blocks the session** until it has written its files.

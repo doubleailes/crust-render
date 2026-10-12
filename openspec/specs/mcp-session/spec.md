@@ -249,13 +249,26 @@ bit-identical to `crust render <output>` with the same region and samples.
 ### Requirement: Probing a pixel
 
 `probe(render_id, x, y)` SHALL return the pixel's beauty and AOV values in the
-render's linear working space. When the prim-path table is available, it SHALL also
-return the prim the camera ray first hits there and the material bound to it.
+render's linear working space. It SHALL also return the prim whose geometry the camera
+ray through the pixel's centre first hits, as the import's geometry records it, and the
+Material prim bound to it: for a hit inside a native instance or a PointInstancer, the
+instance or the instancer prim. `prim` and `material` SHALL be null, with a note saying
+why, when the ray hits nothing or the scene has been imported again since the render.
 
 #### Scenario: What is this grey thing?
 
 - **WHEN** the agent probes a pixel on a mesh
 - **THEN** the result names the mesh's prim path and its bound material
+
+#### Scenario: A hit inside an instance
+
+- **WHEN** the agent probes a pixel on a prototype's mesh placed by a PointInstancer
+- **THEN** the result names the PointInstancer prim, and says so
+
+#### Scenario: A render from before a re-import
+
+- **WHEN** the agent probes a render made before an edit that imported the stage again
+- **THEN** `prim` and `material` are null, and the note says to render again
 
 ### Requirement: Comparing renders
 

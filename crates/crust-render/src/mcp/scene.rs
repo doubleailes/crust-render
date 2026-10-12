@@ -11,8 +11,10 @@ use crust_assets::FileAssets;
 use crust_core::check::CheckReport;
 use crust_core::live::{Change, Provenance, Structural};
 use crust_core::{AovRequest, LightList, RenderSettings, Renderer, Scene, WorldBuilder};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -57,7 +59,30 @@ pub struct Imported {
     pub took: Duration,
     /// How the layer's last change was applied to give this scene.
     pub applied: Applied,
+    /// Which import built the scene's geometry: new with every full import,
+    /// kept by an in-place update, which moves no geometry. A render's hits
+    /// are named against the scene only while it is the one it rendered.
+    pub geometry: u64,
+    /// `World` slot (a hit's `geom_id`) → the material prim filling it: the
+    /// provenance's per-material slot lists turned around once per scene,
+    /// so a `probe` looks a hit's material up instead of scanning them.
+    material_of_slot: HashMap<u32, String>,
     rest: Rest,
+}
+
+/// The source of [`Imported::geometry`].
+static GEOMETRY: AtomicU64 = AtomicU64::new(0);
+
+/// What a camera ray hit, named by where the scene's parts came from.
+pub struct HitNames<'a> {
+    pub geom_id: u32,
+    /// The prim that emitted the hit geometry: for a hit inside a native
+    /// instance or a `PointInstancer`, the instance or instancer prim, which
+    /// is what the import's geometry runs record.
+    pub prim: Option<&'a str>,
+    /// The material prim bound to it, `None` for geometry no material prim
+    /// fills (an area light's emitter, the fallback material).
+    pub material: Option<&'a str>,
 }
 
 impl Imported {
@@ -74,6 +99,35 @@ impl Imported {
     /// not build from a stage.
     pub fn provenance(&self) -> Option<&Provenance> {
         self.rest.provenance.as_ref()
+    }
+
+    /// The `geom_id` of the first surface the camera ray through the centre
+    /// of image pixel (`x`, `y`) meets — through the lens centre, at shutter
+    /// open, before any opacity — for a render of `width` × `height` pixels
+    /// through `camera`. `None` when it meets nothing.
+    pub fn hit(
+        &self,
+        camera: &crust_core::Camera,
+        (width, height): (usize, usize),
+        (x, y): (usize, usize),
+    ) -> Option<u32> {
+        // Image rows go down, the camera's `t` up (as the tracer's raster).
+        let s = (x as f32 + 0.5) / width as f32;
+        let t = ((height - 1 - y) as f32 + 0.5) / height as f32;
+        let ray = camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        self.renderer
+            .world
+            .intersect(&ray, crust_core::TRACE_T_MIN, f32::INFINITY)
+            .map(|h| h.geom_id)
+    }
+
+    /// The prim and the material of the geometry `geom_id`.
+    pub fn names(&self, geom_id: u32) -> HitNames<'_> {
+        HitNames {
+            geom_id,
+            prim: self.provenance().and_then(|p| p.prim_of_geometry(geom_id)),
+            material: self.material_of_slot.get(&geom_id).map(String::as_str),
+        }
     }
 
     /// `change`, made to the saved layer at `layer` since this scene was
@@ -135,13 +189,19 @@ impl Imported {
             "Session update ({applied}) of {} in {took:.2?}",
             layer.display()
         );
-        *self = Imported::of(checked, self._assets.clone(), took, applied);
+        *self = Imported::of(checked, self._assets.clone(), took, applied, self.geometry);
         self.rest.stats = import_stats;
         Ok(())
     }
 
     /// The session's scene from a checked import.
-    fn of(checked: Checked, assets: Arc<FileAssets>, took: Duration, applied: Applied) -> Imported {
+    fn of(
+        checked: Checked,
+        assets: Arc<FileAssets>,
+        took: Duration,
+        applied: Applied,
+        geometry: u64,
+    ) -> Imported {
         let Checked {
             scene,
             settings,
@@ -151,6 +211,12 @@ impl Imported {
         } = checked;
         let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings)
             .with_volumes(scene.volumes);
+        let material_of_slot = scene
+            .provenance
+            .iter()
+            .flat_map(|p| p.materials())
+            .flat_map(|(path, origin)| origin.slots.iter().map(move |&s| (s, path.to_owned())))
+            .collect();
         Imported {
             renderer: Arc::new(renderer),
             settings,
@@ -160,6 +226,8 @@ impl Imported {
             working_space: scene.working_space,
             took,
             applied,
+            geometry,
+            material_of_slot,
             rest: Rest {
                 settings: scene.settings,
                 aovs: scene.aovs,
@@ -198,5 +266,6 @@ pub fn import(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String>
     let took = started.elapsed();
     // One per edit batch: a count that grows with the session.
     debug!("Session import of {} in {took:.2?}", layer.display());
-    Ok(Imported::of(checked, assets, took, Applied::Full))
+    let geometry = GEOMETRY.fetch_add(1, Ordering::Relaxed) + 1;
+    Ok(Imported::of(checked, assets, took, Applied::Full, geometry))
 }
