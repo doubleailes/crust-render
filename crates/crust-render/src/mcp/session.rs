@@ -264,8 +264,9 @@ impl Open {
         }
         let aovs = self.scene.aovs.clone();
         let space = self.scene.working_space;
+        let geometry = self.scene.geometry;
         self.renders
-            .start(&mut self.scene.renderer, settings, aovs, space)
+            .start(&mut self.scene.renderer, settings, aovs, space, geometry)
     }
 
     /// Writes `bytes` as the layer and reopens the authoring stage on it.

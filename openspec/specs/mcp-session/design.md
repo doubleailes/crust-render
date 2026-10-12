@@ -24,6 +24,13 @@
 - **Undo is a stack of the layer's bytes** (D4), for the server process only.
 - **Renders are time-bounded and progressive** (D6, first-pixel D1–D3); `probe` and
   `diff` read the retained buffers (D7); `render_final` is the CLI's render body (D8).
+- **`probe` names a hit from the provenance**: it casts the pixel-centre camera ray
+  (lens centre, shutter open, no opacity) through the render's own camera against the
+  session's world, then `Provenance::prim_of_geometry` and a slot → material map turned
+  around once per import (`Imported::names`). A job remembers which full import built
+  its geometry (`Imported::geometry`, kept by in-place updates, which move none), and
+  names nothing once a re-import replaced it. The runs record the prim that emitted the
+  geometry, so instances and PointInstancers name the instance or instancer prim.
 - **`Renderer::retune`** keeps a light selection whose inputs (strategy, resolution,
   frame) did not change, so a session render after a region or samples change pays
   no second `learned` pre-pass (first-pixel D4).

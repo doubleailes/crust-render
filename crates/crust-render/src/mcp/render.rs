@@ -8,13 +8,15 @@
 //! render cancels it, or `cancel` does. The latest [`RETAINED`] renders are
 //! kept, their images and AOVs, for `snapshot`, `probe` and `diff`.
 
+use super::scene::Imported;
 use crate::{OutputColor, tone_map};
 use base64::Engine;
 use crust_core::Precision;
 use crust_core::color::{PREVIEW_DISPLAY, PREVIEW_VIEW, Space};
 use crust_core::compare::{Channel, Planes};
 use crust_core::{
-    AovFilm, AovRequest, Buffer, RayStats, RenderControl, RenderOutcome, RenderSettings, Renderer,
+    AovFilm, AovRequest, Buffer, Camera, RayStats, RenderControl, RenderOutcome, RenderSettings,
+    Renderer,
 };
 use exr::prelude::f16;
 use serde_json::{Value, json};
@@ -59,6 +61,11 @@ pub struct Job {
     /// requests them.
     pub aovs: Arc<AovRequest>,
     pub working_space: Space,
+    /// The camera it renders through, which `probe` casts its ray from: an
+    /// in-place update may move the session's since.
+    pub camera: Camera,
+    /// The import whose geometry it renders ([`Imported::geometry`]).
+    pub geometry: u64,
     started: Instant,
     /// The progress callback's `(done, total)`.
     done: AtomicU64,
@@ -195,6 +202,7 @@ impl Renders {
         settings: RenderSettings,
         aovs: Arc<AovRequest>,
         working_space: Space,
+        geometry: u64,
     ) -> Result<(Arc<Job>, Vec<u64>), String> {
         self.stop();
         let scene = Arc::get_mut(renderer).ok_or("the scene is still held by a render")?;
@@ -210,6 +218,8 @@ impl Renders {
             settings,
             aovs,
             working_space,
+            camera: scene.camera,
+            geometry,
             started: Instant::now(),
             done: AtomicU64::new(0),
             total: AtomicU64::new(0),
@@ -411,15 +421,46 @@ pub fn answer(job: &Job, extra: Value) -> rmcp::model::CallToolResult {
     result
 }
 
-/// Why `probe` names no prim: the table from a hit to its prim path is not
-/// built yet.
-const NO_PRIM_TABLE: &str = "crust keeps no table from a hit to its prim yet \
-(change add-identity-aovs-openexrid), so the prim and its material are not known";
+/// What `probe` says of the prim it names.
+const PRIM_NOTE: &str = "the first surface the camera ray through the pixel's centre meets \
+(through the lens centre, at shutter open, before any opacity); a hit inside a native \
+instance or a PointInstancer names the instance or the instancer prim, not the prototype's";
+
+/// `prim`, `material` and their note for the hit at image pixel (`x`, `y`)
+/// of `job`, named against `scene` while it holds the geometry `job`
+/// rendered.
+fn hit_names(job: &Job, scene: &Imported, x: usize, y: usize) -> (Value, Value, Value, String) {
+    if scene.geometry != job.geometry {
+        let note = format!(
+            "the scene was imported again since render {} (an edit or an undo that is not \
+             applied in place): render again to name what a pixel hits",
+            job.id
+        );
+        return (Value::Null, Value::Null, Value::Null, note);
+    }
+    match scene.hit(&job.camera, job.settings.get_dimensions(), (x, y)) {
+        None => (
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            "the camera ray through the pixel's centre meets no geometry".to_owned(),
+        ),
+        Some(geom_id) => {
+            let names = scene.names(geom_id);
+            (
+                json!(names.geom_id),
+                json!(names.prim),
+                json!(names.material),
+                PRIM_NOTE.to_owned(),
+            )
+        }
+    }
+}
 
 /// `probe`: the render's values at pixel (`x`, `y`) of the frame, in the
 /// working space: the beauty, and once the render has returned every channel
 /// of every product it gathered.
-pub fn probe(job: &Job, x: usize, y: usize) -> Result<Value, String> {
+pub fn probe(job: &Job, scene: &Imported, x: usize, y: usize) -> Result<Value, String> {
     let r = job.settings.region();
     if !(r.x0..r.x1).contains(&x) || !(r.y0..r.y1).contains(&y) {
         return Err(format!(
@@ -449,6 +490,7 @@ pub fn probe(job: &Job, x: usize, y: usize) -> Result<Value, String> {
             aovs.insert(product.prim_path.clone(), Value::Object(values));
         }
     }
+    let (geom_id, prim, material, prim_note) = hit_names(job, scene, x, y);
     Ok(json!({
         "render_id": job.id,
         "status": job.status(),
@@ -463,9 +505,10 @@ pub fn probe(job: &Job, x: usize, y: usize) -> Result<Value, String> {
         } else {
             None
         },
-        "prim": Value::Null,
-        "material": Value::Null,
-        "prim_note": NO_PRIM_TABLE,
+        "geom_id": geom_id,
+        "prim": prim,
+        "material": material,
+        "prim_note": prim_note,
     }))
 }
 

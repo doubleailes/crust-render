@@ -1,11 +1,12 @@
 //! The session against the CLI, in process: what needs the session's own
 //! buffers rather than what the protocol carries.
 
-use super::render::planes;
+use super::render::{self, planes};
 use super::session::State;
 use crate::{Cli, Command, RenderRun, render_and_write};
 use clap::Parser;
 use crust_core::RenderControl;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -597,4 +598,88 @@ fn the_report_after_an_in_place_edit_names_the_update() {
     let again = r#"over "World" { over "Key" { float inputs:intensity = 5 } }"#;
     assert_eq!(author(&mut state, again), "lights");
     assert_eq!(names(&state.session().unwrap().scene.report), expected);
+}
+
+/// Starts a full-frame render of the session's scene at 1 spp and waits for it.
+fn finished_render(state: &mut State) -> std::sync::Arc<super::render::Job> {
+    let (job, _) = state
+        .session()
+        .expect("open")
+        .start_render(None, Some(1))
+        .expect("started");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(job.wait(Duration::from_secs(3600)));
+    job
+}
+
+/// `probe` at pixel (`x`, `y`) of render `job`: its `prim` and `material`.
+fn probe_names(state: &mut State, job: &super::render::Job, x: usize, y: usize) -> [Value; 2] {
+    let open = state.session().expect("open");
+    let result = render::probe(job, &open.scene, x, y).expect("probed");
+    [result["prim"].clone(), result["material"].clone()]
+}
+
+/// `probe` names the prim a pixel's camera ray hits and its bound material
+/// (spec: "Probing a pixel"), through an in-place edit, which moves no
+/// geometry, and not once the scene was imported again.
+#[test]
+fn probe_names_the_prim_and_material_a_pixel_hits() {
+    let (mut state, _dir) = lookdev_session("probe");
+    let job = finished_render(&mut state);
+    // The lookdev stage at 48 × 32: the ball fills the centre, the floor the
+    // bottom rows, and the top rows look past everything into the dome.
+    let ball = [json!("/World/Ball"), json!("/World/Looks/Std")];
+    let floor = [json!("/World/Floor"), json!("/World/Looks/Tex")];
+    assert_eq!(probe_names(&mut state, &job, 24, 16), ball);
+    assert_eq!(probe_names(&mut state, &job, 24, 31), floor);
+    assert_eq!(
+        probe_names(&mut state, &job, 24, 0),
+        [Value::Null, Value::Null]
+    );
+
+    let colour = r#"over "World" { over "Looks" { over "Std" { over "Surface" {
+        color3f inputs:base_color = (0.1, 0.3, 0.9) } } } }"#;
+    assert_eq!(author(&mut state, colour), "materials");
+    assert_eq!(probe_names(&mut state, &job, 24, 16), ball);
+
+    let moved = r#"over "World" { over "Ball" { double3 xformOp:translate = (0, 1.5, 0) } }"#;
+    assert_eq!(author(&mut state, moved), "full");
+    let open = state.session().expect("open");
+    let stale = render::probe(&job, &open.scene, 24, 16).expect("probed");
+    assert_eq!(stale["prim"], Value::Null);
+    assert!(
+        stale["prim_note"]
+            .as_str()
+            .unwrap()
+            .contains("imported again"),
+        "{stale}"
+    );
+    let job = finished_render(&mut state);
+    assert_eq!(probe_names(&mut state, &job, 24, 16), ball);
+}
+
+/// A hit inside a native instance names the instance prim, and one inside a
+/// PointInstancer's prototype the instancer: what the import's geometry runs
+/// record. The material is the prototype mesh's.
+#[test]
+fn probe_names_the_instance_or_the_instancer() {
+    let dir = work_dir("probe_instancing");
+    let layer = dir.join("lookdev.usda");
+    let input = samples().join("instancing.usda");
+    let mut state = State::default();
+    state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .expect("opened");
+    let job = finished_render(&mut state);
+    assert_eq!(
+        probe_names(&mut state, &job, 35, 110),
+        [json!("/World/TowerA"), json!("/World/Looks/Copper")]
+    );
+    assert_eq!(
+        probe_names(&mut state, &job, 420, 135),
+        [json!("/World/Scatter"), json!("/World/Looks/Emerald")]
+    );
 }
