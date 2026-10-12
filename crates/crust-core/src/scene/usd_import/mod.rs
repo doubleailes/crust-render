@@ -43,6 +43,7 @@ use tracing::{debug, info};
 
 use crate::camera::Camera;
 use crate::light::LightList;
+use crate::live::{LightOrigin, Provenance, StageFacts};
 use crate::rt_world::WorldBuilder;
 use crate::scene::AssetLoader;
 use crate::scene::Scene;
@@ -71,6 +72,7 @@ mod instancing;
 mod light_links;
 mod lights;
 mod listing;
+mod live;
 mod materials;
 mod mesh;
 mod mtlx_network;
@@ -95,6 +97,7 @@ use lights::{
     emit_rect_light, emit_sphere_light,
 };
 pub(crate) use listing::{list_prims, list_records};
+pub(crate) use live::rebuild;
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use products::import_render_products;
@@ -252,6 +255,9 @@ struct ImportCtx<'a> {
     /// Receivers seen and lights whose `collection:lightLink` restricts
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
+    /// Each light met, by prim path: where it went in the light list and the
+    /// geometry it emitted ([`crate::live::Provenance`]).
+    light_origins: Vec<(String, LightOrigin)>,
     settings: RenderSettings,
     /// The stage file, for resolving asset paths against its directory.
     stage_path: &'a Path,
@@ -380,27 +386,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             emit_curves(&mut ctx.world, &prim, &curves, this_world, mat);
         } else if visit_camera(stage, &prim, ctx) {
             // Recorded (and built, if it is the one) inside the call.
-        } else if let Ok(Some(light)) = SphereLight::get(stage, prim.path().clone()) {
-            emit_sphere_light(stage, ctx, &prim, &light, this_world);
-        } else if let Ok(Some(light)) = RectLight::get(stage, prim.path().clone()) {
-            emit_rect_light(stage, ctx, &prim, &light, this_world);
-        } else if let Ok(Some(light)) = DiskLight::get(stage, prim.path().clone()) {
-            emit_disk_light(stage, ctx, &prim, &light, this_world);
-        } else if let Ok(Some(light)) = CylinderLight::get(stage, prim.path().clone()) {
-            emit_cylinder_light(stage, ctx, &prim, &light, this_world);
-        } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
-            emit_distant_light(
-                &mut ctx.lights,
-                &prim,
-                &light,
-                this_world,
-                ctx.caches.working,
-            );
-        } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
-            emit_dome_light(ctx, &prim, &DomeInputs::dome_light(&light), this_world);
-        } else if let Ok(Some(light)) = DomeLight_1::get(stage, prim.path().clone()) {
-            let dome = DomeInputs::dome_light_1(stage, &light);
-            emit_dome_light(ctx, &prim, &dome, this_world);
+        } else {
+            emit_light(stage, ctx, &prim, this_world);
         }
         ctx.links.saw(
             prim.path(),
@@ -412,6 +399,13 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         if ctx.lights.count() > lights_before {
             ctx.links
                 .light_added(ctx.index.as_ref(), stage, prim.path(), lights_before);
+            ctx.light_origins.push((
+                prim.path().to_string(),
+                LightOrigin {
+                    index: lights_before,
+                    geoms: geoms_before as u32..ctx.world.count() as u32,
+                },
+            ));
         }
 
         // Recurse. We push children onto the stack unconditionally; the
@@ -422,6 +416,30 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             }
         }
     }
+}
+
+/// Emits `prim` if it is a UsdLux light — the one dispatch the traversal
+/// and an in-place light rebuild ([`live`]) share. `false` when it is not one.
+fn emit_light(stage: &Stage, ctx: &mut ImportCtx, prim: &Prim, world_xf: GMat4) -> bool {
+    if let Ok(Some(light)) = SphereLight::get(stage, prim.path().clone()) {
+        emit_sphere_light(stage, ctx, prim, &light, world_xf);
+    } else if let Ok(Some(light)) = RectLight::get(stage, prim.path().clone()) {
+        emit_rect_light(stage, ctx, prim, &light, world_xf);
+    } else if let Ok(Some(light)) = DiskLight::get(stage, prim.path().clone()) {
+        emit_disk_light(stage, ctx, prim, &light, world_xf);
+    } else if let Ok(Some(light)) = CylinderLight::get(stage, prim.path().clone()) {
+        emit_cylinder_light(stage, ctx, prim, &light, world_xf);
+    } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
+        emit_distant_light(&mut ctx.lights, prim, &light, world_xf, ctx.caches.working);
+    } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
+        emit_dome_light(ctx, prim, &DomeInputs::dome_light(&light), world_xf);
+    } else if let Ok(Some(light)) = DomeLight_1::get(stage, prim.path().clone()) {
+        let dome = DomeInputs::dome_light_1(stage, &light);
+        emit_dome_light(ctx, prim, &dome, world_xf);
+    } else {
+        return false;
+    }
+    true
 }
 
 /// Records `prim` if it is a camera — as a candidate for the error listing
@@ -883,64 +901,26 @@ pub(crate) fn load_scene(
     if let Some(t) = time {
         check_time_range(&index, t);
     }
-    // Render settings come first — the camera importer needs the aspect ratio.
-    let mut settings = import_render_settings(&index);
-    // The products the render writes. The first one's camera and resolution
-    // are the render's: the settings' own unless that product overrides them.
-    let products = import_render_products(&index);
-    if let Some((w, h)) = products.resolution {
-        settings = settings.with_resolution(w, h);
-    }
-    // The region, after the resolution it is counted in. A host's region
-    // (`--region`) replaces it later, on the settings.
-    if let Some(window) = products.data_window {
-        let (w, h) = settings.get_dimensions();
-        if let Some(region) = products::region_from_ndc(window, w, h) {
-            settings = settings
-                .with_region(region)
-                .expect("region_from_ndc returns a region inside the frame");
-            debug!("dataWindowNDC: rendering region {region} of the {w}x{h} frame");
-        }
-    }
-    settings = settings.with_motion_blur(products.motion_blur);
-    let domes_seen_by_camera = dome_light_camera_visibility(&index);
-    let exposure_compensation = enable_exposure_compensation(&index);
-    // The working colour space, before any colour is read: every texture
-    // request and authored colour is converted into it.
-    let working = host_working.unwrap_or_else(|| render_settings_color_space(&index));
-    debug!("Rendering in {} ({})", working.label(), working.name());
-    // Geometry, not tracer, settings: every mesh whose scheme is not `none`
-    // is refined to this one level, so it must be known before the traversal.
-    let subdiv_level = resolve_subdiv_level(
-        options.subdivision_level,
-        render_settings_subdiv_level(&index),
-    );
-    debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
-    // Which camera to render through: the host's explicit choice, else the
-    // stage's own `RenderSettings.camera`. Decided here, on the index stage,
-    // because the traversal needs it before it meets any camera.
-    let wanted_camera = settings::wanted_camera(requested_camera, products.camera.clone(), &index);
-    if let Some(choice) = &wanted_camera {
-        debug!("Rendering through {choice}");
-    }
-    let subdiv = subdiv_policy(
+    let IndexRead {
+        settings,
+        products,
+        domes_seen_by_camera,
+        exposure_compensation,
+        working,
+        wanted_camera,
+        subdiv,
+    } = read_index(
         &index,
         path,
         path_str,
         options,
-        subdiv_level,
-        wanted_camera.as_ref(),
-        &settings,
+        &ValidOptions {
+            time,
+            camera: requested_camera,
+            working: host_working,
+        },
     )?;
-    if let Some(t) = time {
-        // The sampler's frame seed follows the frame being rendered, so an
-        // image sequence gets independent noise per frame instead of one
-        // pattern swimming over moving geometry. Integer part only: the
-        // seed is an integer, and a subframe shares its frame's seed.
-        let seed = t.floor() as isize;
-        debug!("Frame {t} sets the sampler frame seed to {seed} (over crust:frame)");
-        settings = settings.with_frame(seed);
-    }
+    let render_settings = settings::render_settings_path(&index).map(|p| p.to_string());
     let chunks = stream_roots(&index);
     let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
         subtree_roots(&index)
@@ -979,6 +959,7 @@ pub(crate) fn load_scene(
         },
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
+        light_origins: Vec::new(),
         settings,
         stage_path: path,
         index: Some(index),
@@ -1019,31 +1000,20 @@ pub(crate) fn load_scene(
         },
         camera_path,
     ) = resolve_camera(&mut ctx)?;
-    // `enableExposureCompensation = false` renders at 1, as Hydra does. The
-    // scale is checked here, once, for the camera rendered through: a
-    // candidate the traversal built and dropped, or an exposure turned off,
-    // warns about nothing.
-    let settings = if !exposure_compensation {
-        debug!("enableExposureCompensation = false: the camera's exposure is not applied");
-        settings
-    } else if exposure_scale.is_finite() && exposure_scale > 0.0 {
-        settings.with_exposure_scale(exposure_scale)
-    } else {
-        let camera = camera_path.as_deref().unwrap_or("the render camera");
-        warning!(
-            CameraInvalidExposure,
-            at = camera,
-            "{camera}: the exposure attributes give a scale of {exposure_scale} — the image is \
-             not scaled"
-        );
-        settings
-    };
+    let settings = apply_exposure(
+        settings,
+        exposure_compensation,
+        exposure_scale,
+        camera_path.as_deref(),
+    );
 
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen
     // before `commit`, which is what consumes the geometry table.
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
+    let geometry_runs = ctx.links.geometry_runs();
+    let linked = ctx.links.restricts();
     std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
     drop(ctx.index.take());
     if !domes_seen_by_camera {
@@ -1097,7 +1067,146 @@ pub(crate) fn load_scene(
     scene.camera_path = camera_path;
     scene.time = time;
     scene.warnings = warning_scope.finish();
+    scene.provenance = Some(Provenance {
+        materials: ctx.caches.materials.origins(&scene.world),
+        lights: ctx.light_origins.into_iter().collect(),
+        geometry: geometry_runs,
+        stage: StageFacts {
+            options: options.clone(),
+            render_settings,
+            subdiv_level: ctx.caches.meshes.subdiv.level,
+            adaptive: ctx.caches.meshes.subdiv.adaptive.is_some(),
+            domes_seen_by_camera,
+            working: Some(working),
+            linked,
+            camera: scene.camera_path.clone(),
+        },
+    });
     Ok(scene)
+}
+
+/// What the import reads before it traverses anything: the index stage's
+/// render settings and products, and the stage-wide choices made from them.
+/// The settings carry the products' resolution, region and motion blur, and
+/// the frame's seed; the camera's exposure comes later, from the camera.
+struct IndexRead {
+    settings: RenderSettings,
+    products: products::RenderProducts,
+    domes_seen_by_camera: bool,
+    exposure_compensation: bool,
+    working: crate::color::Space,
+    wanted_camera: Option<CameraChoice>,
+    subdiv: SubdivPolicy,
+}
+
+/// Reads [`IndexRead`] off the payload-free `index` stage: once by
+/// [`load_scene`], and again by an in-place settings update ([`live`]), so
+/// the two read the same settings by construction.
+fn read_index(
+    index: &Stage,
+    path: &Path,
+    path_str: &str,
+    options: &crate::UsdImportOptions,
+    valid: &ValidOptions,
+) -> Result<IndexRead, crate::Error> {
+    // Render settings come first — the camera importer needs the aspect ratio.
+    let mut settings = import_render_settings(index);
+    // The products the render writes. The first one's camera and resolution
+    // are the render's: the settings' own unless that product overrides them.
+    let products = import_render_products(index);
+    if let Some((w, h)) = products.resolution {
+        settings = settings.with_resolution(w, h);
+    }
+    // The region, after the resolution it is counted in. A host's region
+    // (`--region`) replaces it later, on the settings.
+    if let Some(window) = products.data_window {
+        let (w, h) = settings.get_dimensions();
+        if let Some(region) = products::region_from_ndc(window, w, h) {
+            settings = settings
+                .with_region(region)
+                .expect("region_from_ndc returns a region inside the frame");
+            debug!("dataWindowNDC: rendering region {region} of the {w}x{h} frame");
+        }
+    }
+    settings = settings.with_motion_blur(products.motion_blur);
+    let domes_seen_by_camera = dome_light_camera_visibility(index);
+    let exposure_compensation = enable_exposure_compensation(index);
+    // The working colour space, before any colour is read: every texture
+    // request and authored colour is converted into it.
+    let working = valid
+        .working
+        .unwrap_or_else(|| render_settings_color_space(index));
+    debug!("Rendering in {} ({})", working.label(), working.name());
+    // Geometry, not tracer, settings: every mesh whose scheme is not `none`
+    // is refined to this one level, so it must be known before the traversal.
+    let subdiv_level = resolve_subdiv_level(
+        options.subdivision_level,
+        render_settings_subdiv_level(index),
+    );
+    debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
+    // Which camera to render through: the host's explicit choice, else the
+    // stage's own `RenderSettings.camera`. Decided here, on the index stage,
+    // because the traversal needs it before it meets any camera.
+    let wanted_camera =
+        settings::wanted_camera(valid.camera.clone(), products.camera.clone(), index);
+    if let Some(choice) = &wanted_camera {
+        debug!("Rendering through {choice}");
+    }
+    let subdiv = subdiv_policy(
+        index,
+        path,
+        path_str,
+        options,
+        subdiv_level,
+        wanted_camera.as_ref(),
+        &settings,
+    )?;
+    if let Some(t) = valid.time {
+        // The sampler's frame seed follows the frame being rendered, so an
+        // image sequence gets independent noise per frame instead of one
+        // pattern swimming over moving geometry. Integer part only: the
+        // seed is an integer, and a subframe shares its frame's seed.
+        let seed = t.floor() as isize;
+        debug!("Frame {t} sets the sampler frame seed to {seed} (over crust:frame)");
+        settings = settings.with_frame(seed);
+    }
+    Ok(IndexRead {
+        settings,
+        products,
+        domes_seen_by_camera,
+        exposure_compensation,
+        working,
+        wanted_camera,
+        subdiv,
+    })
+}
+
+/// `settings` with the render camera's exposure scale applied:
+/// `enableExposureCompensation = false` renders at 1, as Hydra does. The
+/// scale is checked here, once, for the camera rendered through: a
+/// candidate the traversal built and dropped, or an exposure turned off,
+/// warns about nothing.
+fn apply_exposure(
+    settings: RenderSettings,
+    exposure_compensation: bool,
+    exposure_scale: f32,
+    camera_path: Option<&str>,
+) -> RenderSettings {
+    if !exposure_compensation {
+        debug!("enableExposureCompensation = false: the camera's exposure is not applied");
+        settings
+    } else if exposure_scale.is_finite() && exposure_scale > 0.0 {
+        settings.with_exposure_scale(exposure_scale)
+    } else {
+        let camera = camera_path.unwrap_or("the render camera");
+        warning!(
+            CameraInvalidExposure,
+            at = camera,
+            "{camera}: the exposure attributes give a scale of {exposure_scale} — the image is \
+             not scaled"
+        );
+        settings
+    }
 }
 
 /// How this load refines subdivision surfaces: one `subdiv_level` for every

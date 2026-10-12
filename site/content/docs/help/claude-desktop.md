@@ -118,11 +118,36 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 
 ### Editing
 
-Every edit tool authors opinions in the layer, saves it, and imports the saved file again,
-exactly as `crust render <output>` would. Its result says which
-[warning codes](@/docs/reference/warnings.md) the import gained or lost, and how long it
-took: an edit crust does not read is not silent. An edit the import refuses is undone at
-once, and the layer is left as it was.
+Every edit tool authors opinions in the layer, saves it, and brings the scene up to date
+with the saved file, so that it renders exactly as `crust render <output>` would. Its
+result says which [warning codes](@/docs/reference/warnings.md) the scene gained or lost,
+how long the update took (`import_s`), and how it was applied (`applied`): an edit crust
+does not read is not silent. An edit the import refuses is undone at once, and the layer is
+left as it was.
+
+Most look-dev edits do not need the whole stage read again. crust compares the layer
+before and after the edit, and applies it in place when every value it changed is one of
+these:
+
+| `applied` | what changed | what crust does |
+|-----------|--------------|-----------------|
+| `settings` | an attribute of the `RenderSettings` prim the render uses, or of the render camera (not its transform) | reads the settings and the camera again |
+| `materials` | an `inputs:*` value on a shader of a material the scene uses, or one of the material's own inputs | rebuilds those materials |
+| `lights` | an `inputs:*` value on a light (not its `width`, `height`, `radius` or `length`) | rebuilds those lights and the light selection |
+| `full` | anything else: a prim added or removed, a binding, a connection, a transform, visibility, a variant, a light's size | imports the saved file again |
+
+An edit with changes of several kinds is applied as the most expensive of them, in the
+order of the table. A change that turns out to need more is applied as `full`: a material
+that becomes a cutout, emissive or displaced, a light that stops emitting, a setting that
+changes the working colour space or the subdivision, or one whose rebuild would report a
+different warning. Either way the render is the same, bit for bit, as after a full import
+of the same layer. `undo` is applied the same way.
+
+The decoded textures, Ptex files, light textures and IES profiles stay with the session,
+so even a `full` edit does not decode them again. A file that changes on disk (a texture
+re-exported mid-session) is read again by the next edit. Set
+[`CRUST_SCENE_DELTAS=0`](@/docs/reference/environment-variables.md#crust-scene-deltas)
+to import every edit whole with nothing kept, as earlier versions did.
 
 - **Values take the attribute's type.** `set_attribute` reads the type the stage declares
   and converts the JSON value to it: a number for `float`, `[r, g, b]` for `color3f`, a
@@ -214,8 +239,10 @@ and any USD tool opens it.
 ## Limits
 
 - **One session, one client.** The server holds one session at a time, over stdio only.
-- **Every edit imports the whole stage again.** Seconds on a medium stage; each result
-  says how long. A session holds the stage it authors and the scene it renders at once,
+- **Most structural edits import the whole stage again.** A `full` edit takes seconds on
+  a medium stage; each result says how long. Only the edits in the table above are
+  applied in place. Decoded textures kept for the session are bounded by the texture
+  caches, and ones the scene no longer uses are not let go before the session ends. A session holds the stage it authors and the scene it renders at once,
   about twice the memory of a render's import, which puts Moana-scale stages out of reach.
 - **`probe` does not name the prim.** crust keeps no table from a hit to its prim yet, so
   `prim` and `material` are null, and the result says why.

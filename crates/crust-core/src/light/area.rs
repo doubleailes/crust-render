@@ -123,6 +123,17 @@ impl AreaLight {
         }
     }
 
+    /// The light's shape.
+    pub fn shape(&self) -> &AreaShape {
+        &self.shape
+    }
+
+    /// The `Emissive` this light shares with its geometry's material slot:
+    /// the one answer to what it emits ([`Emissive::radiance_toward`]).
+    pub fn emitter(&self) -> &Arc<Emissive> {
+        &self.material
+    }
+
     /// Solid-angle pdf, as seen from `from`, of the strategy
     /// [`Light::sample_li`] used to reach `light_point`: the shape's own
     /// solid-angle density where it has a strategy from `from`, otherwise

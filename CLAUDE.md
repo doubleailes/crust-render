@@ -146,7 +146,10 @@ without the other (full list: `docs/architecture.md` § Invariants):
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; streamed `capped` Ptex ↔
   preloaded Ptex at and below the cap (one `decode_face`, one `reduce_level`); tiles ↔
   scanlines (a render mode is scheduling only); the staged first sweep ↔ one unstaged
-  sweep (so is staging); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).
+  sweep (so is staging); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`);
+  an MCP edit applied in place ↔ a full re-import of the same layer (`crust_core::live`
+  rebuilds through the import's own functions; a material property the import bakes
+  into geometry or a world flag belongs in `live::Signature`).
 - Anything keyed on a prototype path is scoped by the stage epoch
   (`ImportCaches::epoch`): `/__Prototype_N` is renumbered per masked stage.
 - `Material::resolve` must return exactly what per-query shading would (pinned for every

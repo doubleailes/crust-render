@@ -400,6 +400,10 @@ impl Material for MtlxMaterial {
         true
     }
 
+    fn may_emit(&self) -> bool {
+        self.can_emit()
+    }
+
     fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
         if !self.can_emit() {
             return Vec3A::ZERO;

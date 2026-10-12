@@ -787,6 +787,14 @@ impl WorldBuilder {
         self.materials.len()
     }
 
+    /// The material bound to `id`.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn material(&self, id: u32) -> &Arc<dyn Material> {
+        &self.materials[id as usize]
+    }
+
     /// Claims a `geom_id` and binds its material now, leaving the geometry to
     /// be supplied later by [`WorldBuilder::set_geometry`].
     ///
@@ -1215,6 +1223,52 @@ impl World {
     }
 
     /// The material bound to a geometry.
+    /// The material table, by `geom_id`.
+    pub fn materials(&self) -> &[Arc<dyn Material>] {
+        &self.materials
+    }
+
+    /// Refuses swapping each of `swaps`' materials into its slots when the
+    /// world or the geometry in those slots was built on something the new
+    /// material says differently ([`crate::live`]): its cutout, straight
+    /// transmission or medium boundary (the flags [`WorldBuilder::commit`]
+    /// derives), whether it emits, its kind, or the UV and per-face tables
+    /// the import gave the geometry. Everything else about a material is
+    /// read per hit, so a swap that passes renders as a fresh import would.
+    pub fn check_materials(
+        &self,
+        swaps: &[(&[u32], &Arc<dyn Material>)],
+    ) -> Result<(), crate::live::Structural> {
+        use crate::live::{Signature, Structural};
+        for (slots, new) in swaps {
+            let wanted = Signature::of(new.as_ref());
+            for &slot in *slots {
+                let Some(old) = self.materials.get(slot as usize) else {
+                    return Err(Structural(format!("the world has no slot {slot}")));
+                };
+                let had = Signature::of(old.as_ref());
+                if had != wanted {
+                    return Err(Structural(format!(
+                        "the material in slot {slot} would change from {had:?} to {wanted:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Swaps each of `swaps`' materials into its slots, after
+    /// [`World::check_materials`] passed: the kernel scene, the side tables and
+    /// every flag stay as committed, which the check is what makes right.
+    pub fn replace_materials(&mut self, swaps: &[(&[u32], &Arc<dyn Material>)]) {
+        debug_assert!(self.check_materials(swaps).is_ok());
+        for (slots, new) in swaps {
+            for &slot in *slots {
+                self.materials[slot as usize] = Arc::clone(new);
+            }
+        }
+    }
+
     pub fn material(&self, geom_id: u32) -> &dyn Material {
         self.materials[geom_id as usize].as_ref()
     }

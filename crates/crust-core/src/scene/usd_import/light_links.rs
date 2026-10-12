@@ -176,6 +176,26 @@ pub(super) struct LightLinks {
 }
 
 impl LightLinks {
+    /// `(first geom_id, prim path)` per prim that emitted geometry, in
+    /// traversal order: the runs [`LightLinks::resolve`] judges receivers by,
+    /// kept for [`crate::live::Provenance`].
+    pub(super) fn geometry_runs(&self) -> Vec<(u32, String)> {
+        let mut by_id: Vec<Option<&sdf::Path>> = vec![None; self.paths.len()];
+        for (p, &id) in &self.paths {
+            by_id[id as usize] = Some(p);
+        }
+        self.runs
+            .iter()
+            .filter_map(|&(first, id)| Some((first, by_id[id as usize]?.to_string())))
+            .collect()
+    }
+
+    /// Whether any light's link restricts it: resolving then renumbers the
+    /// light list and rewrites geometry masks.
+    pub(super) fn restricts(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     fn intern(&mut self, path: &sdf::Path) -> u32 {
         if let Some(&id) = self.paths.get(path) {
             return id;

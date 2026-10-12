@@ -226,6 +226,11 @@ pub struct Config {
     /// `CRUST_USD_MMAP`: the import reads USD files through a read-only
     /// memory mapping (`false`: read each file into memory, as before).
     pub usd_mmap: bool,
+    /// `CRUST_SCENE_DELTAS`: an `crust mcp` session applies an edit confined
+    /// to settings, light inputs or material inputs in place, and keeps its
+    /// decoded assets across imports (`false`: every edit is a full
+    /// re-import with a fresh asset loader, as before).
+    pub scene_deltas: bool,
     /// `CRUST_MESH_BAKE`: bake single-placement meshes into world space
     /// (`false`: instance every mesh; bit-identical).
     pub mesh_bake: bool,
@@ -332,6 +337,7 @@ impl Default for Config {
         Config {
             stream_import: true,
             usd_mmap: true,
+            scene_deltas: true,
             mesh_bake: true,
             subdiv: true,
             displace: true,
@@ -377,6 +383,7 @@ impl Config {
         Config {
             stream_import: flag("CRUST_STREAM_IMPORT", d.stream_import),
             usd_mmap: flag("CRUST_USD_MMAP", d.usd_mmap),
+            scene_deltas: flag("CRUST_SCENE_DELTAS", d.scene_deltas),
             mesh_bake: flag("CRUST_MESH_BAKE", d.mesh_bake),
             subdiv: flag("CRUST_SUBDIV", d.subdiv),
             displace: flag("CRUST_DISPLACE", d.displace),

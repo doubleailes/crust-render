@@ -53,6 +53,38 @@ pub(super) struct MaterialCache {
 }
 
 impl MaterialCache {
+    /// Each material prim the cache resolved → the `world` slots holding it
+    /// and whether a mesh was displaced by it ([`crate::live::Provenance`]).
+    /// By `Arc` identity: a slot holds exactly the `Arc` the cache handed out.
+    /// Prototype-scoped paths (`/__Prototype_N`, renumbered per streamed
+    /// stage) are left out: no edit names one, and two epochs' `Arc`s under
+    /// one such path are different materials.
+    pub(super) fn origins(
+        &self,
+        world: &crate::World,
+    ) -> HashMap<String, crate::live::MaterialOrigin> {
+        let mut by_arc: HashMap<*const (), &str> = HashMap::new();
+        let mut out: HashMap<String, crate::live::MaterialOrigin> = HashMap::new();
+        for ((_, path), cached) in &self.by_path {
+            if path.starts_with("/__Prototype") {
+                continue;
+            }
+            by_arc.insert(Arc::as_ptr(&cached.material) as *const (), path);
+            let origin = out.entry(path.clone()).or_default();
+            origin.displaced |= matches!(cached.displacement, Some(Some(_)));
+        }
+        for (slot, material) in world.materials().iter().enumerate() {
+            if let Some(path) = by_arc.get(&(Arc::as_ptr(material) as *const ())) {
+                out.get_mut(*path)
+                    .expect("every path has an entry")
+                    .slots
+                    .push(slot as u32);
+            }
+        }
+        out.retain(|_, o| !o.slots.is_empty());
+        out
+    }
+
     pub(super) fn default_material(&mut self) -> Arc<dyn Material> {
         self.default.get_or_insert_with(default_material).clone()
     }
@@ -224,9 +256,7 @@ fn cached_material(
     // is what keeps one streamed chunk's `/__Prototype_N` apart from the
     // next's — see `MaterialCache::key`.
     debug!("Resolving material {mat_path} (epoch {})", key.0);
-    caches.materials.mtlx_displacement = None;
-    let material = resolve_material_uncached(stage, &mat_path, caches);
-    let mtlx = caches.materials.mtlx_displacement.take();
+    let (material, mtlx) = resolve_fresh(stage, &mat_path, caches);
     caches.materials.by_path.insert(
         key.clone(),
         CachedMaterial {
@@ -238,11 +268,27 @@ fn cached_material(
     Some((key, mat_path))
 }
 
+/// The material at `mat_path`, resolved without the cache, and the `.mtlx`
+/// displacement program compiled with it: what a cache miss stores, and what
+/// an in-place material update ([`super::live`]) rebuilds.
+pub(super) fn resolve_fresh(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+) -> (
+    Arc<dyn Material>,
+    Option<Arc<crate::materialx::MtlxDisplacement>>,
+) {
+    caches.materials.mtlx_displacement = None;
+    let material = resolve_material_uncached(stage, mat_path, caches);
+    (material, caches.materials.mtlx_displacement.take())
+}
+
 /// The scalar displacement a material defines, read from whichever of the
 /// three authoring paths it uses: RenderMan's `PxrDisplace`, a MaterialX
 /// `displacementshader`, or `UsdPreviewSurface.inputs:displacement`. `None`
 /// when it defines none — the common case, which costs one child scan.
-fn resolve_displacement(
+pub(super) fn resolve_displacement(
     stage: &Stage,
     mat_path: &sdf::Path,
     mtlx: Option<Arc<crate::materialx::MtlxDisplacement>>,
@@ -684,7 +730,7 @@ fn inline_mtlx_material(
     )
 }
 
-fn default_material() -> Arc<dyn Material> {
+pub(super) fn default_material() -> Arc<dyn Material> {
     Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)))
 }
 

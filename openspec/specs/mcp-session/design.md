@@ -1,0 +1,238 @@
+# mcp-session — design record
+
+> Design record for the **mcp-session** capability (`crust mcp`): the reasoning,
+> measurements and history behind the behaviour `spec.md` states.
+> `openspec/specs/*/design.md` is the whole record; `docs/architecture.md` is the map.
+> The session's founding decisions are summarised here and argued in full in the
+> archived changes `openspec/changes/archive/2026-10-09-mcp-session/design.md`
+> (D1–D10) and `2026-10-09-mcp-first-pixel/design.md` (the first image, `retune`).
+
+## The session is a file
+
+- **The override layer is a real `.usda` on disk, and the import reads that file**
+  (mcp-session D1). `open_session` writes `<output>.usda` with `subLayers = [@<input>@]`
+  and nothing else; every edit is merged into it and saved. What the session renders,
+  and what it leaves behind, is what `crust render <output>` renders: the session
+  imports through the CLI's own argument defaults (`Cli::try_parse_from`) and the
+  CLI's own `import_checked` / `check_scene`, so a render flag that changes the import
+  belongs in those, never in one caller.
+- **One thread owns the authoring stage** (D2). openusd's `Stage` is `Rc` / `RefCell`;
+  the protocol's async handlers reach it through a channel, one command at a time.
+- **Every edit is a USDA snippet merged into the layer** (D3, `mcp/edit.rs`): per
+  field, children lists unioned, variant selections and dictionaries key by key,
+  `apiSchemas`-style list ops item by item, an `over` never downgrading a `def`.
+- **Undo is a stack of the layer's bytes** (D4), for the server process only.
+- **Renders are time-bounded and progressive** (D6, first-pixel D1–D3); `probe` and
+  `diff` read the retained buffers (D7); `render_final` is the CLI's render body (D8).
+- **`Renderer::retune`** keeps a light selection whose inputs (strategy, resolution,
+  frame) did not change, so a session render after a region or samples change pays
+  no second `learned` pre-pass (first-pixel D4).
+
+## Edits applied in place (`live-stage-scene-deltas`)
+
+Until this change every edit batch was a full re-import with a fresh `FileAssets`:
+dimming one light re-composed the stage, re-traversed every prim, re-decoded every
+texture and re-compiled every MaterialX program. The founding design named it as its
+open problem (D10, "the seam phase 3 will widen").
+
+### Where an edit's time goes
+
+The BVH commit is a small share of an import — 19.1 s of Moana's 5:13 parse, 1.4 s of
+ALab's 2:57 (`docs/moana_profile.md`, `docs/alab_profile.md`). Composition, traversal
+and, on textured stages, asset decoding dominate. So keeping the traversal and
+refitting the BVH would save almost nothing, and a refit tree is not the tree a fresh
+build gives, which would break the session's bit-identity with `crust render`. The win
+is in not traversing at all, and in not decoding again.
+
+### Assets live as long as the session
+
+The session owns one `Arc<FileAssets>` built with `keep_decoded()` and passes it to
+every import (`import_checked(args, keep_stage, assets)`). The loader keeps every
+texture, Ptex, light texture and IES profile it decoded (`crust-assets/src/kept.rs`),
+stamped with the length and modification time of each file the decode read — for a UV
+texture, each UDIM tile and the `.tx` sibling the streaming path looks for, so a `.tx`
+appearing later counts as a change. Before each import `FileAssets::revalidate()` drops
+the entries whose stamps moved (and the Ptex handles opened from them, re-budgeting the
+streams left), and restarts the preload counters, so `crust-check/2`'s facts count the
+import as a fresh loader's would.
+
+- Only successes are kept: a file that failed is tried again by the next import, which
+  raises the warnings a fresh loader would.
+- Environment maps are not kept: they cross `AssetLoader` by value, so a kept one would
+  be copied per hit. A dome's map is decoded again by each import and each dome rebuild.
+- *Trap:* JIT programs belong to the materials, not to `FileAssets`. A `full` edit
+  recompiles every MaterialX program; an in-place material edit compiles only the
+  changed material.
+- *Accepted:* a file rewritten without its length or mtime changing is not seen.
+  `CRUST_SCENE_DELTAS=0` gives a fresh loader per import.
+
+### Classification: an allow-list over a layer diff
+
+After an edit batch is merged and saved (or an undo restored), `mcp/delta.rs` compares
+the layer's bytes before and after — both parsed with `openusd::usda::parse` — spec by
+spec and field by field (`layer_diff`), and `classify` puts the changes into the
+cheapest class that can follow all of them:
+
+| change | class |
+|---|---|
+| attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera (not `xformOp:*` / `xformOpOrder`) | `settings` |
+| `inputs:*` value on a light the scene has, other than `width`, `height`, `radius`, `length`, `treatAsPoint`, `treatAsLine` (the BVH holds its shape) | `lights` |
+| `inputs:*` value on a `Shader` under a material the scene uses, or on that `Material` | `materials` |
+| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
+
+A batch is applied as its most expensive class, `settings` < `materials` < `lights` <
+`full`, and rebuilds every part it names. Namespace bookkeeping is not a change: an
+`over` prim spec that only names children (what an edit authors to reach an attribute,
+and what an undo removes) and the `primChildren` / `propertyChildren` lists. An
+attribute spec that only declares and sets a value (`typeName`, `variability`,
+`custom`, `default`, `timeSamples`) is a value change, both when it appears and when an
+undo removes it. A diff with no change at all is applied in place with nothing to
+rebuild and reports `settings`.
+
+Composed prim types come from the session's authoring stage, so an opinion on an
+`over` classifies by what the prim is. Which lights and materials "the scene has" is the
+import's provenance (below), not the stage: a light the import skipped, or a material
+only a prototype uses, is `full`.
+
+*Alternative rejected:* classifying the parsed `Snippet`. An undo has no snippet, and
+merging can turn an authored spec into no change at all.
+
+### Provenance
+
+`Scene::provenance` (`crust_core::live::Provenance`), filled from what the import
+already builds:
+
+- material prim path → the `World` slots holding its `Arc` (`MaterialCache::origins`,
+  by pointer, after commit), and whether a mesh was displaced by it;
+- light prim path → its index in the `LightList` and the `geom_id`s it emitted (an area
+  light's emitter);
+- the `LightLinks` geometry runs (first `geom_id`, prim path), kept instead of dropped
+  — `Provenance::prim_of_geometry`;
+- the stage-wide facts a settings change must not move: the host's import options, the
+  `RenderSettings` path, the subdivision level, adaptive subdivision, the dome's camera
+  visibility, the working space, whether any light authors a link, the render camera.
+
+Memory is in proportion to the material, light and emitting-prim counts, nothing per
+triangle. *Trap:* `MaterialCache` keys a prototype-scoped path (`/__Prototype_N`) by
+epoch, so one such path names a different material in each streamed chunk. Those paths
+are left out: no edit names one (an edit inside an instance is refused), and an
+authored path keys on the path alone, so it has exactly one `Arc` however many chunks
+bind it (pinned by `a_streamed_import_maps_a_shared_material_from_every_chunk`).
+
+### Rebuilds go through the import's own code
+
+`Provenance::rebuild` (`scene/usd_import/live.rs`) runs at the scene's time code
+(`EvalTimeScope`), with the session's `FileAssets` and import caches seeded empty, so
+everything resolves as a fresh import does. It never copies an import function — the
+bit-identity would then rest on two copies agreeing — so the import was factored to
+share them:
+
+- **materials:** a stage population-masked to the material's prim with payloads loaded
+  (one streamed chunk's kind of stage), then `resolve_fresh` — what a `MaterialCache`
+  miss runs — and `resolve_displacement`. Refused when the network connects to a prim
+  outside the material (the masked stage would not compose it), or when it defines a
+  displacement (its inputs shape geometry).
+- **lights:** a stage masked to the light, the world transform by `local_to_world`
+  (the traversal's own fold of `compose_with_parent`), and `emit_light`, the dispatch
+  the traversal itself calls, into a scratch context whose `WorldBuilder` has the
+  light's first `geom_id`s claimed first, so its emitter gets the id it had. Refused
+  when it would not emit exactly one light over the same geometry ids, or when the scene
+  has light links (resolving them renumbers the list and rewrites masks).
+- **settings:** the index stage re-read by `read_index` — the function `load_scene`
+  reads it with — then the camera rebuilt by `build_camera` on a stage masked to it and
+  its exposure applied by `apply_exposure`. Refused when the working space, the
+  subdivision level, adaptive subdivision (which reads the camera), the dome's camera
+  visibility or the render camera would change.
+
+**Warnings.** The update keeps the scene's warnings list, so it is refused whenever
+that list might not be what a fresh import reports: a material or light rebuild when
+the scene's warnings name the prim (or have kept their sixteen prims and may name it
+beyond), or when the rebuild raises one that the scene does not already carry for the
+same prim (an ancestor's, raised again, is fine); a settings refresh when the scene
+carries a warning of a family a setting can move (`settings.`, `product.`, `aov.`,
+`lpe.`, `camera.`, `time.`, `color.`, `subdiv.`) or the refresh raises any.
+
+### Applying the rebuilt parts
+
+`Update::check` then `Update::apply`, both in `crust-core`, keyed by slot and index:
+
+- `World::check_materials` compares each rebuilt material's `live::Signature` with the
+  one in every slot it goes into — `kind`, cutout, straight transmission, medium
+  boundary, `may_emit`, `uses_uv`, `uv_primvar`, the Ptex face count. These are what
+  `WorldBuilder::commit` derives flags from and what the mesh import built the UV and
+  per-face side tables and the face-count warning on; everything else about a material
+  is read per hit. `World::replace_materials` then swaps the `Arc`s; the committed
+  kernel scene, side tables and flags stay. `Material::may_emit` is new: its default is
+  a non-zero `emitted()`, and the MaterialX and pattern materials, which can emit
+  through `emitted_at` alone, answer from their compiled emission.
+- `LightList::check_replace` refuses another light kind, a move to or from infinity,
+  another `geom_id`, or a linked list; `LightList::replace` keeps the light's name, LPE
+  tag, escape mask and geometry index and drops the selection back to uniform. An area
+  light's new `Emissive` goes into its emitter's slot in the same update, so the light
+  and its geometry keep one `Emissive` and `radiance_toward` stays one answer
+  (`a_replaced_light_and_its_geometry_share_one_emissive`).
+- The session (`mcp/scene.rs`, `Imported::update`) checks first, then takes its
+  renderer apart into a `Scene`, applies, re-runs `check_scene` (the report, the product
+  selection and its warnings) and builds a new renderer with `Renderer::new` around the
+  same committed world. *Trap:* `retune` keeps the light selection when the strategy,
+  resolution and frame are unchanged — its key holds no scene content — so a lights or
+  materials update must not be retuned into an old renderer; `Renderer::new` rebuilds
+  the power table and the `learned` pre-pass.
+
+Any refusal, at classification, rebuild or check, falls back to `full` with the scene
+untouched, and the result reports `applied = full`.
+
+### In place ↔ full re-import is a bit-identity pair
+
+`edits_in_place_render_as_a_full_import` (`crust-render/src/mcp/tests.rs`) authors one
+edit of each kind on one stage — a camera exposure and a `crust:maxDepth`
+(`settings`), a `RectLight`'s intensity and colour and a dome's texture file (`lights`),
+a Standard Surface base colour, a preview surface roughness and a texture file
+(`materials`) — and after each, and after undoing each in reverse, renders at 16 spp
+and compares every plane bitwise, and the warnings list, with a second session that
+imports the same saved layer whole. Disabling the material swap fails it on the first
+light (24% of pixels), and skipping revalidation fails
+`a_re_exported_texture_is_read_again` (51%). `unconfined_edits_are_full` pins the
+`full` rows (a transform, an emission from 0, a light's width, a new prim, a binding)
+and a mixed batch's class; `a_full_edit_decodes_no_texture_again` the kept decodes.
+
+### Measured
+
+Edit latency (`import_s`), min / mean of 10 edits of each kind alternating two values,
+release build, one machine (4 cores), `CRUST_SCENE_DELTAS` on and off:
+
+| stage | open | `settings` | `lights` | `materials` | `full` |
+|---|---|---|---|---|---|
+| synthetic: 16 quads, each its own 2048² PNG, on | 0.81 s | 1.7 / 1.9 ms | 0.9 / 1.0 ms | 1.2 / 1.3 ms | 8.9 / 9.1 ms |
+| the same, off | 0.76 s | 608 / 632 ms | 633 / 662 ms | 634 / 659 ms | 624 / 644 ms |
+| `usdpreview_textured`, on | 18 ms | 1.0 / 1.2 ms | 0.6 / 0.7 ms | 0.9 / 1.3 ms | 4.3 / 5.1 ms |
+| the same, off | 15 ms | 5.7 / 6.5 ms | 5.8 / 6.3 ms | 5.5 / 6.5 ms | 5.6 / 6.1 ms |
+
+On the textured stage an in-place edit is ~400× faster, and a `full` edit ~70× faster,
+because the kept decodes leave nothing to decode. The DPEL teapot and ALab, the scenes
+the change was proposed against, are not in the repository's checkout and were not
+measured; neither were their `--stats` peak memories.
+
+The provenance's own cost on a render: callgrind on `crust render` of the Cornell box at
+`-s 2`, one thread, 4 222 741 990 instructions before and 4 222 911 859 after (+169 869,
+0.004%), all of it in the import (`sdf` path comparisons for the extra
+`RenderSettings` lookup, and the maps' allocations); no render function's count moved.
+Every checked-in sample renders bit-identical to goldens recorded before the change
+(`scripts/check_images.sh`).
+
+### Known gaps
+
+- **A Hydra render delegate** (`crust-hydra`: a C++ `HdRenderDelegate` over a C ABI
+  into the engine) would reuse the provenance and the `live` entry points, which take
+  paths and built values for that reason. It adds Pixar's C++ USD as a build dependency
+  and `unsafe` FFI, which `CLAUDE.md` makes a project decision.
+- **Transforms, topology and namespace edits re-import.** Re-traversing only the
+  changed subtree, and BVH refit, are not done: a refit tree is not the tree a fresh
+  build gives. A light with no geometry (distant, dome) could move without touching the
+  BVH; it is `full` until the simpler classes have proved themselves.
+- **Kept decodes are not let go** while the session lives, even when the scene no longer
+  uses them; the texture caches' budgets bound what streams, not what preloads.
+- **Environment maps are decoded again** by every import and dome rebuild.
+- **The session re-composes the stage per rebuild** (a masked stage per material or
+  light, the index stage for settings) rather than keeping one composed stage across
+  imports, which would need its own proof that composition gives the same result.
