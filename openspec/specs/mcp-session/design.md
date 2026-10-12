@@ -45,6 +45,12 @@
   `source` `"fallback"`, and `set_attribute` takes the schema's type and refuses a
   different explicit `type`. Only an attribute no schema declares and no layer authors
   is refused, with the error pointing at `set_attribute` and an explicit `type`.
+- **`source` is the opinion `get` resolved, not the first layer in the stack.** It
+  comes from `resolve_info_at(None)`, the same default time `get` reads: the spec
+  site's layer, `"fallback"` when the schema answered, `null` when nothing does.
+  *Trap:* the property stack also lists a layer that authors only metadata on the
+  property (a `doc`, no `default`), so its first entry can name a layer while the
+  value is the schema's fallback; `layers` still lists it as an opinion.
 - **Only the registry, not the import's resolver.** The memory-mapped resolver is a
   read-throughput choice; the session's stage is small, payloads unloaded, and the
   layer it writes is replaced by rename (`replace_file`), which a mapping would only
@@ -276,9 +282,16 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
 - **`query` shows a schema fallback the render may not use.** The import reads every
   attribute through `value_at`, which takes a value equal to the schema fallback as
   unauthored and substitutes crust's own default. Where those differ, the session's
-  answer is not what renders: a DistantLight with no `inputs:intensity` queries as
-  `50000` (UsdLux's fallback) and imports as `1.0` (`light_inputs`; measured with
-  `crust ls light --json` beside a session `query`). Lights' `exposure` (0) agree.
+  answer is not what renders:
+  - a DistantLight with no `inputs:intensity` queries as `50000` (UsdLux's fallback)
+    and imports as `1.0` (`light_inputs`; measured with `crust ls light --json`
+    beside a session `query`). Lights' `exposure` (0) agree.
+  - a camera with no `verticalAperture` queries as the schema's `15.2908` and imports
+    as `horizontalAperture × height / width`, which follows the image's aspect
+    (`CameraFrame::read`); one with no `focusDistance` queries as `0` and imports as
+    `10`.
+  - a render product with no `resolution` queries as the schema's and inherits the
+    settings' (`value_at`'s own list of these readers).
   Closing it means either the import honouring UsdLux's per-type fallbacks (a render
   change) or `query` reporting crust's default where the import substitutes one.
 - **A Hydra render delegate** (`crust-hydra`: a C++ `HdRenderDelegate` over a C ABI

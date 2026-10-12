@@ -101,7 +101,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | tool | what it does |
 |------|--------------|
 | `open_session(input, output)` | creates the override layer `output` on `input` (or resumes it) and imports it; reports the camera, the resolution and the warnings |
-| `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from, or `fallback` for a schema's fallback nothing authors) |
+| `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from, `fallback` for a schema's fallback nothing authors, or null when nothing gives it a value) |
 | `check()` | the [`crust check`](@/docs/reference/command-line.md#check) report of the current layer, as `crust-check/2` JSON |
 | `set_attribute(path, value, type?)` | authors an attribute value in the layer, typed as the attribute is declared |
 | `set_variant(prim, variant_set, variant)` | authors a variant selection |
@@ -258,5 +258,6 @@ and any USD tool opens it.
   nothing: render again.
 - **A schema fallback is not always what renders.** Where crust has its own default for
   an unauthored attribute, the render uses it, not the fallback `query` shows: a
-  DistantLight with no `inputs:intensity` queries as `50000` and renders as `1`.
+  DistantLight with no `inputs:intensity` queries as `50000` and renders as `1`, and a
+  camera with no `verticalAperture` queries as `15.2908` but follows the image's aspect.
 - **`render_final` blocks the session** until it has written its files.
