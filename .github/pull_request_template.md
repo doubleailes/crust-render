@@ -11,11 +11,15 @@
 
 ## Image impact
 
-<!-- Pick one and give the evidence. Compare at `-s 16` with `--indirect-clamp 0`. -->
+<!-- Pick one and give the evidence below. -->
 
-- [ ] Bit-identical — `scripts/check_images.sh check <dir>` passes
-- [ ] Changed intentionally — `crust diff` relmse below, and the difference is noise
-      (falls as 1/√N across spp), not bias
+- [ ] Bit-identical — goldens recorded from the base branch with `scripts/check_images.sh record <dir>`,
+      then `scripts/check_images.sh check <dir>` on this branch reports `identical` for every scene
+      (a `NO GOLDEN` line is skipped, not checked; the script renders at `-s 16` with the same
+      settings on both sides, so no clamp override is needed for bit identity)
+- [ ] Changed intentionally — paste the `crust diff` relmse against the base branch at two or more
+      sample counts (e.g. 16, 64, 256), rendered with `--indirect-clamp 0` on both sides; the
+      difference is noise only if relmse falls as 1/√N as spp grows, bias if it plateaus
 - [ ] Not applicable (docs, tooling, CI)
 
 ## Performance
