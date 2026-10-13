@@ -31,6 +31,11 @@
   its geometry (`Imported::geometry`, kept by in-place updates, which move none), and
   names nothing once a re-import replaced it. The runs record the prim that emitted the
   geometry, so instances and PointInstancers name the instance or instancer prim.
+- **`light_paths` inspects a render on its own layer** (`light-path-inspection` D8): a
+  job keeps a hash of the layer bytes it rendered, the call is refused once the saved
+  layer's differs (an undo back to it matches again, and an in-place update's scene is
+  the full import's), and it re-renders the region with the job's settings through
+  `inspect::run` on the session's renderer — refused while another render holds it.
 - **`Renderer::retune`** keeps a light selection whose inputs (strategy, resolution,
   frame) did not change, so a session render after a region or samples change pays
   no second `learned` pre-pass (first-pixel D4).

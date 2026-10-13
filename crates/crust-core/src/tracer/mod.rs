@@ -33,7 +33,7 @@ pub use settings::{
 };
 
 pub(crate) use path::PathScratch;
-pub(crate) use route::RouteCtx;
+pub(crate) use route::{NO_LIGHT, PathTerm, RouteCtx};
 
 /// Render-progress callback: invoked with `(completed, total)` steps as a
 /// pass advances. Each work unit (scanline row, or tile under bucket
@@ -161,6 +161,9 @@ pub(crate) struct Measured {
     pub(crate) render_s: f64,
     /// Whether a [`RenderControl`] cut the render short.
     pub(crate) outcome: RenderOutcome,
+    /// The light path inspector's records of the final pass, when the
+    /// layout asked for them ([`Renderer::render_inspection`]).
+    pub(crate) inspection: Option<crate::inspect::store::Collected>,
 }
 
 impl Measured {
@@ -239,6 +242,8 @@ struct PassStats {
     /// A [`RenderControl`] stopped the pass before every pixel took what it
     /// was scheduled to.
     interrupted: bool,
+    /// The pass's light path records, when its layout inspects.
+    inspection: Option<crate::inspect::store::Collected>,
 }
 
 /// A guided render's pass that a [`RenderControl`] cut short: what the end
@@ -483,6 +488,34 @@ impl Renderer {
         self.render_impl(true, None, layout.as_ref(), instruments, None)
     }
 
+    /// A tiled, silent render of the light path inspector (`cfg`): through
+    /// the AOV instantiation with the inspection's routing and none of the
+    /// stage's AOVs, so its beauty is the beauty-only render's, bit for bit,
+    /// and every camera sample of the final pass is folded into records.
+    pub(crate) fn render_inspection(
+        &self,
+        cfg: std::sync::Arc<crate::inspect::store::Config>,
+    ) -> Measured {
+        let layout = AovLayout {
+            luma: self.lights.luma(),
+            route: Some(std::sync::Arc::new(route::RouteCtx::inspection(
+                self.lights.count(),
+            ))),
+            inspect: Some(cfg),
+            ..AovLayout::default()
+        };
+        self.render_impl(
+            true,
+            None,
+            Some(&layout),
+            Instruments {
+                quiet: true,
+                ..Instruments::default()
+            },
+            None,
+        )
+    }
+
     /// The film layout `request` needs, or `None` when it needs no film (no
     /// products, or only a 3-channel beauty): such a render takes the
     /// beauty-only path.
@@ -565,6 +598,7 @@ impl Renderer {
             clamp: pass.clamp,
             setup_s: 0.0,
             render_s: start.elapsed().as_secs_f64(),
+            inspection: pass.inspection,
         }
     }
 
@@ -750,6 +784,9 @@ impl Renderer {
 
         let mut clamp = ClampMeasure::default();
         let mut render_s = 0.0;
+        // The final pass's records alone: the training passes' samples are
+        // other samples of the same pixels.
+        let mut inspection = None;
         if interrupted.is_none() {
             let guide_final = match (&eff_unguided, &eff_guided) {
                 (Some((var_pt, cost_pt)), Some((var_pg, cost_pg))) if *cost_pg > 0.0 => {
@@ -802,7 +839,7 @@ impl Renderer {
             };
             let final_gctx = if guide_final { Some(&gctx) } else { None };
             let start = std::time::Instant::now();
-            let (final_buffer, final_film, _, final_stats) = self.render_pass(
+            let (final_buffer, final_film, _, mut final_stats) = self.render_pass(
                 self.final_pass_config(tiled, instruments),
                 final_gctx,
                 progress,
@@ -813,6 +850,7 @@ impl Renderer {
             rays.merge(&final_stats.rays);
             add_tiles(&final_stats.tiles);
             clamp = final_stats.clamp;
+            inspection = final_stats.inspection.take();
             if final_stats.interrupted {
                 debug!(
                     "path guiding: final pass cancelled at {} spp or more per pixel",
@@ -852,6 +890,7 @@ impl Renderer {
                     setup_s,
                     render_s,
                     outcome,
+                    inspection,
                 };
             }
             // A pixel at fewer than two samples has no variance estimate, and
@@ -911,6 +950,7 @@ impl Renderer {
             setup_s,
             render_s,
             outcome,
+            inspection,
         }
     }
 
@@ -1332,6 +1372,11 @@ impl Renderer {
             }
             film
         });
+        // Here, beside the film, which reads the layout too: taken after the
+        // pixel gather below, it kept the layout live through that loop.
+        let inspection = layout
+            .and_then(|l| l.inspect.as_ref())
+            .map(|_| collect_inspection(&mut units));
         let training = units.iter().any(|u| !u.work.samples.is_empty());
         let tiles_x = units
             .iter()
@@ -1455,6 +1500,7 @@ impl Renderer {
                 clamp,
                 min_taken,
                 interrupted,
+                inspection,
             },
         )
     }
@@ -1610,14 +1656,15 @@ impl Renderer {
             }
             drop(primary);
             unit.rays.camera_rays += 1;
-            let color = trace_path::<PROFILE, AOV, MEDIA, TWINS>(
+            let radiance = trace_path::<PROFILE, AOV, MEDIA, TWINS>(
                 &r,
                 &path_cx,
                 root,
                 &mut unit.samples,
                 scratch,
                 &mut unit.rays,
-            ) * (wx * wy);
+            );
+            let color = radiance * (wx * wy);
             if AOV && let Some(planes) = unit.aov.as_mut() {
                 let extras = SampleExtras {
                     lpe: &scratch.route.out,
@@ -1626,6 +1673,24 @@ impl Renderer {
                     time,
                 };
                 planes.add(&scratch.first, &extras, fx, fy, wx * wy);
+            }
+            if AOV && let Some(store) = unit.inspect.as_deref_mut() {
+                // Every emission-ending term of the sample, as its records;
+                // a measured clamp is not applied to them, as to the AOVs.
+                store.begin_sample(i, j, sample, fx, fy, wx * wy);
+                let ctx = scratch.route_ctx.as_deref().expect("an inspection routes");
+                scratch.route.fold(
+                    ctx,
+                    &scratch.records,
+                    if measuring {
+                        None
+                    } else {
+                        path_cx.indirect_clamp
+                    },
+                    self.lights.luma(),
+                    |t| store.add(t),
+                );
+                store.end_sample(radiance);
             }
             if measuring {
                 // What `trace_path` found the clamp would remove from this
@@ -1646,6 +1711,21 @@ impl Renderer {
         state.taken = target;
         state.samples_end = unit.samples.len() as u32;
     }
+}
+
+/// Each unit's light path records, merged in unit order (design D5 of the
+/// light path inspection), so the merge is the same with any thread count.
+///
+/// Out of line and cold, as a merge only an inspection runs.
+#[cold]
+#[inline(never)]
+fn collect_inspection(units: &mut [Unit]) -> crate::inspect::store::Collected {
+    crate::inspect::store::Collected::merge(
+        units
+            .iter_mut()
+            .filter_map(|u| u.work.inspect.take().map(|s| *s))
+            .collect(),
+    )
 }
 
 /// The unbiased variance of a mean over `n` samples whose sum is `sum` and
@@ -1873,6 +1953,8 @@ struct UnitWork {
     /// Per pixel, Σ over samples of filter weight × the luminance the
     /// measured clamp would remove; empty unless the pass measures one.
     clamp: Vec<f32>,
+    /// The unit's light path records, when the layout inspects.
+    inspect: Option<Box<crate::inspect::store::UnitStore>>,
 }
 
 /// One work unit of a pass — a tile or a row — and its pixels' state.
@@ -1892,6 +1974,9 @@ impl Unit {
             work: UnitWork {
                 aov: layout.map(|l| UnitAov::new(l, cam, pixels)),
                 clamp: if clamp { vec![0.0; pixels] } else { Vec::new() },
+                inspect: layout
+                    .and_then(|l| l.inspect.clone())
+                    .map(|c| Box::new(crate::inspect::store::UnitStore::new(c))),
                 ..UnitWork::default()
             },
         }

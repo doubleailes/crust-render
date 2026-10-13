@@ -20,7 +20,8 @@ use super::scene::{Imported, import};
 use crate::{Cli, Command, RenderRun, render_and_write};
 use clap::Parser;
 use crust_assets::FileAssets;
-use crust_core::{PixelRect, RenderControl};
+use crust_core::inspect::{self, GroupBy};
+use crust_core::{PixelRect, RenderControl, RenderOutcome};
 use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Stage};
 use std::future::Future;
@@ -268,8 +269,84 @@ impl Open {
         let aovs = self.scene.aovs.clone();
         let space = self.scene.working_space;
         let geometry = self.scene.geometry;
-        self.renders
-            .start(&mut self.scene.renderer, settings, aovs, space, geometry)
+        let layer = self.layer_hash()?;
+        self.renders.start(
+            &mut self.scene.renderer,
+            settings,
+            aovs,
+            space,
+            geometry,
+            layer,
+        )
+    }
+
+    /// A hash of the saved layer's bytes: which layer a render rendered.
+    fn layer_hash(&self) -> Result<u64, String> {
+        use std::hash::{Hash, Hasher};
+        let bytes =
+            std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
+        let mut hasher = std::hash::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
+
+    /// `light_paths` (`light-path-inspection`): the `crust-light-paths/1`
+    /// report of `region` (`[x0, y0, x1, y1]`, image space) of completed
+    /// render `render_id`, re-rendered at that render's settings and samples
+    /// on the session's scene — which must be the scene it rendered: the
+    /// layer it rendered, saved again by an undo or never edited since.
+    pub fn light_paths(
+        &mut self,
+        render_id: u64,
+        region: [usize; 4],
+        group_by: GroupBy,
+        top: usize,
+    ) -> Result<serde_json::Value, String> {
+        let job = self.renders.get(render_id)?;
+        if job.finished().map(|f| f.outcome) != Some(RenderOutcome::Completed) {
+            return Err(format!(
+                "render {render_id} is {}: light_paths inspects a completed render (wait for                  it with snapshot's budget_s, or render again)",
+                job.status()
+            ));
+        }
+        if self.layer_hash()? != job.layer {
+            return Err(format!(
+                "the session changed since render {render_id}: its layer is not the one that                  render used. Render again and inspect the new render (or undo back to it)"
+            ));
+        }
+        let [x0, y0, x1, y1] = region;
+        let rect = PixelRect::new(x0, y0, x1, y1);
+        inspect::check_request(rect, group_by)?;
+        let rendered = job.settings.region();
+        if !(rendered.contains(x0, y0) && x1 <= rendered.x1 && y1 <= rendered.y1) {
+            return Err(format!(
+                "the region {region:?} is not inside render {render_id}'s region {:?}",
+                [rendered.x0, rendered.y0, rendered.x1, rendered.y1]
+            ));
+        }
+        if let Some(running) = self.renders.running() {
+            return Err(format!(
+                "render {running} is still running and holds the scene: wait for it or cancel                  it, then call light_paths again"
+            ));
+        }
+        let renderer =
+            Arc::get_mut(&mut self.scene.renderer).ok_or("the scene is still held by a render")?;
+        let options = inspect::Options {
+            top,
+            group_by,
+            command: Some(format!(
+                "crust light-paths -i {} -s {} --region {x0},{y0},{x1},{y1} --top {top} \
+                 --group-by {group_by}",
+                self.output.display(),
+                job.settings.samples_per_pixel()
+            )),
+            camera: self.scene.report.scene.camera.clone(),
+        };
+        let own = renderer.settings;
+        renderer.retune(job.settings);
+        let report = inspect::run(renderer, rect, &options);
+        renderer.retune(own);
+        serde_json::to_value(report?).map_err(|e| e.to_string())
     }
 
     /// Writes `bytes` as the layer and reopens the authoring stage on it.

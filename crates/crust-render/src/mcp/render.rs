@@ -66,6 +66,9 @@ pub struct Job {
     pub camera: Camera,
     /// The import whose geometry it renders ([`Imported::geometry`]).
     pub geometry: u64,
+    /// A hash of the override layer's bytes when it started: `light_paths`
+    /// inspects a render only while the session's layer is that one.
+    pub layer: u64,
     started: Instant,
     /// The progress callback's `(done, total)`.
     done: AtomicU64,
@@ -194,8 +197,22 @@ impl Renders {
         cancelled.then_some(job.id)
     }
 
+    /// The latest render, while it runs: its id. One that has returned is
+    /// joined first, so the session holds the renderer alone.
+    pub fn running(&mut self) -> Option<u64> {
+        let job = self.jobs.back()?;
+        if job.finished().is_none() {
+            return self.thread.is_some().then_some(job.id);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        None
+    }
+
     /// Stops the latest render, then starts one of `renderer` with
     /// `settings`. Returns it, and the ids of the renders it evicted.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         renderer: &mut Arc<Renderer>,
@@ -203,6 +220,7 @@ impl Renders {
         aovs: Arc<AovRequest>,
         working_space: Space,
         geometry: u64,
+        layer: u64,
     ) -> Result<(Arc<Job>, Vec<u64>), String> {
         self.stop();
         let scene = Arc::get_mut(renderer).ok_or("the scene is still held by a render")?;
@@ -220,6 +238,7 @@ impl Renders {
             working_space,
             camera: scene.camera,
             geometry,
+            layer,
             started: Instant::now(),
             done: AtomicU64::new(0),
             total: AtomicU64::new(0),

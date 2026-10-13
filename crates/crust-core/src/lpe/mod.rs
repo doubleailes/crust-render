@@ -104,6 +104,18 @@ impl EventType {
             _ => return None,
         })
     }
+
+    /// The type's letter in the grammar: [`EventType::letter`]'s inverse.
+    pub fn to_letter(self) -> char {
+        match self {
+            EventType::Camera => 'C',
+            EventType::Reflect => 'R',
+            EventType::Transmit => 'T',
+            EventType::Volume => 'V',
+            EventType::Light => 'L',
+            EventType::Object => 'O',
+        }
+    }
 }
 
 /// The scatter kind of an event. Camera, volume and emission events have
@@ -120,6 +132,13 @@ pub enum Scatter {
 
 impl Scatter {
     pub(crate) const COUNT: usize = 5;
+    pub(crate) const ALL: [Scatter; 5] = [
+        Scatter::Diffuse,
+        Scatter::Glossy,
+        Scatter::Singular,
+        Scatter::Straight,
+        Scatter::None,
+    ];
 
     fn letter(c: char) -> Option<Scatter> {
         Some(match c {
@@ -129,6 +148,18 @@ impl Scatter {
             's' => Scatter::Straight,
             _ => return None,
         })
+    }
+
+    /// The scatter's letter in an event's `<…>` form: `.` for none, which
+    /// only the wildcard matches.
+    pub fn to_letter(self) -> char {
+        match self {
+            Scatter::Diffuse => 'D',
+            Scatter::Glossy => 'G',
+            Scatter::Singular => 'S',
+            Scatter::Straight => 's',
+            Scatter::None => '.',
+        }
     }
 }
 
@@ -306,6 +337,79 @@ pub fn validate(expr: &str) -> Result<(), ParseError> {
 /// prefix on the AOV name, so it is dropped when present.
 pub fn strip_prefix(source_name: &str) -> &str {
     source_name.strip_prefix("lpe:").unwrap_or(source_name)
+}
+
+/// The labels of the light path inspector's alphabet: "no label", then the
+/// lobe labels — the ids every [`Lpe`] gives them, without the labels a
+/// render's expressions add. Lights carry no label in it: the inspection
+/// records which light ended a path by its light-list index, beside the
+/// symbol, and names its tag only when it writes the expression.
+pub(crate) const INSPECTION_LABELS: usize = 1 + LobeLabel::ALL.len();
+
+/// An event's symbol in the inspection alphabet: [`Lpe::symbol`]'s layout
+/// over [`INSPECTION_LABELS`], so every lobe, scatter and event type has its
+/// own symbol and [`inspection_event`] decodes it back.
+pub(crate) const fn inspection_symbol(ty: EventType, scatter: Scatter, label: LabelId) -> u16 {
+    ((ty as usize * Scatter::COUNT + scatter as usize) * INSPECTION_LABELS + label as usize) as u16
+}
+
+/// A surface lobe's symbol in the inspection alphabet.
+pub(crate) const fn inspection_lobe(e: LobeEvent) -> u16 {
+    let ty = if e.transmit {
+        EventType::Transmit
+    } else {
+        EventType::Reflect
+    };
+    inspection_symbol(ty, e.scatter, e.label as LabelId)
+}
+
+/// The event an inspection symbol stands for: its type, scatter and label
+/// (0 for none, else the [`LobeLabel`] `ALL[label - 1]`). `None` past the
+/// alphabet.
+pub(crate) fn inspection_event(sym: u16) -> Option<(EventType, Scatter, LabelId)> {
+    let sym = sym as usize;
+    let label = sym % INSPECTION_LABELS;
+    let rest = sym / INSPECTION_LABELS;
+    let ty = *EventType::ALL.get(rest / Scatter::COUNT)?;
+    Some((ty, Scatter::ALL[rest % Scatter::COUNT], label as LabelId))
+}
+
+/// An inspection symbol as the text of one event in the grammar, with
+/// `light_tag` as the label of an `L` — see [`event_text`]. Lobe labels
+/// are the lobes' own names.
+pub(crate) fn inspection_text(sym: u16, light_tag: Option<&str>) -> String {
+    let Some((ty, scatter, label)) = inspection_event(sym) else {
+        return String::from("?");
+    };
+    let label = match ty {
+        EventType::Light => light_tag,
+        _ => (label as usize)
+            .checked_sub(1)
+            .and_then(|i| LobeLabel::ALL.get(i))
+            .map(|l| l.name()),
+    };
+    event_text(ty, scatter, label)
+}
+
+/// One event as the grammar writes it, so that an expression built from
+/// these accepts exactly the word it was built from: `C`, `V`, `O` and an
+/// untagged `L` as their letter; a labelled light as `<L.'tag'>`; a surface
+/// event as `<RD'diffuse'>` (or `<Ts>` without a label). A label holding a
+/// quote cannot be written, so it is left out — the event then matches any
+/// label, as an untagged light's `L` does.
+pub fn event_text(ty: EventType, scatter: Scatter, label: Option<&str>) -> String {
+    let label = label.filter(|l| !l.contains('\''));
+    match (ty, label) {
+        (EventType::Camera, _) => "C".into(),
+        (EventType::Reflect | EventType::Transmit, label) => format!(
+            "<{}{}{}>",
+            ty.to_letter(),
+            scatter.to_letter(),
+            label.map_or_else(String::new, |l| format!("'{l}'"))
+        ),
+        (_, None) => ty.to_letter().to_string(),
+        (_, Some(l)) => format!("<{}.'{l}'>", ty.to_letter()),
+    }
 }
 
 #[cfg(test)]
