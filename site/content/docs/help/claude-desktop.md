@@ -113,6 +113,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | `snapshot(render_id, budget_s?)` | the render's latest image and progress, at once, or after waiting at most `budget_s` for the render to finish |
 | `cancel(render_id)` | stops a render, keeping what it traced |
 | `probe(render_id, x, y)` | the beauty and every AOV at a pixel, in the working space, and the prim and material the camera ray hits there |
+| `light_paths(render_id, region, group_by?, top?)` | the light paths behind up to 100 pixels of a completed render (`top`: 32 by default, at most 1000), as [`crust light-paths`](@/docs/reference/command-line.md#light-paths) reports them: each path's expression, light, contribution and sample, the brightest first, and their groups (see [Finding the path behind a firefly](@/docs/help/light-paths.md)) |
 | `diff(render_a, render_b)` | compares two renders as [`crust diff`](@/docs/reference/command-line.md#diff) compares two files |
 | `render_final()` | renders the layer as `crust render <output>` would, and lists the files written |
 
@@ -194,8 +195,13 @@ to import every edit whole with nothing kept, as earlier versions did.
   needs no flag to reproduce it. Change them with `set_attribute` or `author_usda`.
 - **Renders are reproducible.** A session render at 16 spp to completion is bit for bit
   the image `crust render -i <output> -s 16` writes, with the same region.
-- **The session keeps its 8 latest renders** for `snapshot`, `probe` and `diff`; a render
-  result lists the ids it evicted.
+- **The session keeps its 8 latest renders** for `snapshot`, `probe`, `light_paths` and
+  `diff`; a render result lists the ids it evicted.
+- **`light_paths` inspects the render as it was.** It renders the region again with the
+  render's settings and samples, so its pixels are the render's — on the layer that
+  render used. It is refused once an edit changed the layer (an `undo` back to it is
+  fine), for a render that did not complete, while another render runs, and for a region
+  outside the render's or over 100 pixels.
 - **`diff` compares like with like.** It refuses two renders with different sample counts
   or regions, and a render still running.
 
@@ -231,6 +237,8 @@ diff(render_a=1, render_b=2)
   → not identical, relative MSE …
 probe(render_id=2, x=320, y=200)
   → beauty [r, g, b], prim /scene/pCube1, material /scene/Looks/initialShadingGroup
+light_paths(render_id=2, region=[315, 195, 325, 205])
+  → summary, groups and the brightest paths: which expression, through which light
 undo()
   → the key light is gone; the layer is as it was after set_attribute
 render_final()

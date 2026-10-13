@@ -23,7 +23,7 @@ use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{EVERY_CLASS, Light, LightList, PathSampler, profile};
 
 use super::GuidingContext;
-use super::route::{Arrival, NO_EVENT, Route, RouteCtx};
+use super::route::{Arrival, NO_EVENT, NO_LIGHT, Route, RouteCtx};
 use super::settings::SamplingStrategy;
 use crate::lpe::LobeSplit;
 
@@ -1887,11 +1887,8 @@ fn collect_crossings(
         last.crossed += e * w;
         last.crossed_raw += e;
         if let Some(ctx) = routing {
-            route.cross(
-                ctx.emitter(lights, c.geom_id),
-                e * w,
-                arrival.prefix(c.passes),
-            );
+            let (sym, light) = ctx.emitter(lights, c.geom_id);
+            route.cross(sym, light, e * w, arrival.prefix(c.passes));
         }
     }
 }
@@ -1997,7 +1994,12 @@ fn link_twin<const PROFILE: bool, const MEDIA: bool>(
             weighted += e * weight;
             raw += e;
             if let Some(ctx) = routing {
-                route.cross(ctx.light(index), e * weight, Arrival::default());
+                route.cross(
+                    ctx.light(index),
+                    index as u32,
+                    e * weight,
+                    Arrival::default(),
+                );
             }
         });
     }
@@ -2097,6 +2099,7 @@ fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
         if let Some(ctx) = routing {
             route.nee(
                 ctx.light(index),
+                index as u32,
                 std::iter::once((ctx.volume(), contribution)),
             );
         }
@@ -2266,6 +2269,7 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
                 let light_pdf = light_pdf.get();
                 route.nee(
                     ctx.light(light_index),
+                    light_index as u32,
                     split.iter().enumerate().map(|(i, (e, f))| {
                         let tr = mixed.as_ref().map_or(shadow_tr, |m| m.tr(i));
                         (
@@ -2555,7 +2559,7 @@ pub(super) fn trace_path<
     let diffuse_filter_on = route_ctx.is_some_and(|c| c.diffuse_filter);
     let route = &mut scratch.route;
     if AOV {
-        route.begin();
+        route.begin(route_ctx.is_some_and(RouteCtx::inspects));
     }
     let split = &mut scratch.nee_split;
     let bounce_split = &mut scratch.bounce_split;
@@ -2676,7 +2680,8 @@ pub(super) fn trace_path<
                         last.next_emit = emitted;
                         last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
                         if let Some(ctx) = routing {
-                            route.next_emit(ctx.emitter(lights, hit.geom_id));
+                            let (sym, light) = ctx.emitter(lights, hit.geom_id);
+                            route.next_emit(sym, light);
                         }
                     }
                 }
@@ -3085,7 +3090,7 @@ pub(super) fn trace_path<
                     strategy,
                     |light, e| {
                         let sym = light.map_or(ctx.backdrop(), |i| ctx.light(i));
-                        route.escape_light(sym, e);
+                        route.escape_light(sym, light.map_or(NO_LIGHT, |i| i as u32), e);
                     },
                 );
                 let total = route.escaped_total();
@@ -3189,7 +3194,8 @@ pub(super) fn trace_path<
                     last.next_emit = atten * emitted;
                     last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
                     if let Some(ctx) = routing {
-                        route.next_emit(ctx.emitter(lights, hit.geom_id));
+                        let (sym, light) = ctx.emitter(lights, hit.geom_id);
+                        route.next_emit(sym, light);
                     }
                 }
             }
@@ -3198,7 +3204,8 @@ pub(super) fn trace_path<
         if let Some(ctx) = routing {
             route.vertex(arrival_ts);
             if emit_here.length_squared() > 0.0 {
-                route.emit(ctx.emitter(lights, hit.geom_id));
+                let (sym, light) = ctx.emitter(lights, hit.geom_id);
+                route.emit(sym, light);
             }
         }
 

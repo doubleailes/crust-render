@@ -532,9 +532,11 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
   settings in tier 2, or a tier 1 that rendered nothing, need more. The
   measurement is then not started and is listed under `not_tried` (`budget`),
   and a tier 1 that rendered nothing left its whole share to roll forward.
-- **No per-object or per-light attribution** of the missing energy: which path
-  or light carries it waits for `add-identity-aovs-openexrid`, and for light
-  groups on large rigs.
+- **No per-object attribution** of the missing energy, and none per light or
+  per path in the report itself: `crust light-paths` names the paths and lights
+  behind a few pixels (`light-path-inspection`), but the diagnostic does not run it
+  when `firefly_energy` fires, and which object carries the energy waits for
+  `add-identity-aovs-openexrid`.
 - **Report details** (found on ALab, not yet fixed): `scene.camera` is `null`
   when the RenderSettings camera is used — it should be the resolved path;
   `suggested_command` restates defaults and omits tier 2's projected `-s`; a rig

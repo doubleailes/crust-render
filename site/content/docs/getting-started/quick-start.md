@@ -18,7 +18,7 @@ top = false
 
 - A 64-bit Linux, macOS or Windows machine.
 - To build from source: Rust **1.96** or newer. The repository's `rust-toolchain.toml`
-  selects **1.98.1**, the version CI builds with, and `rustup` installs it on the first
+  selects **1.99**, the version CI builds with, and `rustup` installs it on the first
   `cargo` command. Dependencies are locked in the committed `Cargo.lock`.
 
 ## Installation

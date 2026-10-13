@@ -35,8 +35,10 @@ or outside the frame SHALL be refused as a usage error before the stage is loade
 
 The inspection SHALL render with the settings and sample count a `crust render` with
 the same flags would use. Each inspected pixel's beauty SHALL equal that render's
-pixel bit for bit, except under path guiding, where the report SHALL say the samples
-are not the frame's and why.
+pixel bit for bit, except under path guiding and under adaptive sampling's neighbour
+hold (a region smaller than the frame, a render that can stop early, a non-negative
+neighbour tolerance), where the report SHALL say the samples are not the frame's and
+why. The report SHALL list every inspected pixel's beauty.
 
 #### Scenario: Same pixels as the frame
 
@@ -50,6 +52,13 @@ are not the frame's and why.
 - **WHEN** the inspected stage enables path guiding
 - **THEN** the report's `reproduces_frame` is `false` with a reason naming guiding,
   and the inspection still runs
+
+#### Scenario: Adaptive sampling holds pixels for their neighbours
+
+- **WHEN** the region is inspected at a sample count past the adaptive minimum, with
+  the default neighbour tolerance
+- **THEN** the report's `reproduces_frame` is `false` with a reason naming adaptive
+  sampling, since a pixel at the region's edge can stop earlier than in the frame
 
 ### Requirement: A light path record
 
@@ -128,7 +137,7 @@ below 0.6 at any vertex SHALL be flagged `label_ambiguous`.
 ### Requirement: Ranking and grouping
 
 The report SHALL list the records with the largest luminance, at most `--top N`
-(default 32), and SHALL aggregate every record by `--group-by` (`none`, `light`,
+(default 32; more than 1000 SHALL be refused as a usage error), and SHALL aggregate every record by `--group-by` (`none`, `light`,
 `expr`, `expr+light`; default `expr+light`). Each group SHALL report its share of
 the region's luminance and second moment, its hit rate and its largest record.
 

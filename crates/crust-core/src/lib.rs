@@ -30,6 +30,9 @@ mod error;
 mod filter;
 mod guiding;
 mod hittable;
+/// The light path inspector: the individual light paths of a few pixels
+/// (`crust light-paths`).
+pub mod inspect;
 mod light;
 mod light_cache;
 pub mod live;

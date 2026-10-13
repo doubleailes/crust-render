@@ -683,3 +683,127 @@ fn probe_names_the_instance_or_the_instancer() {
         [json!("/World/Scatter"), json!("/World/Looks/Emerald")]
     );
 }
+
+/// Opens a session on the Cornell box and renders `region` at 16 spp to
+/// completion.
+fn cornell_render(name: &str, region: [usize; 4]) -> (State, std::sync::Arc<super::render::Job>) {
+    let dir = work_dir(name);
+    let layer = dir.join("lookdev.usda");
+    let mut state = State::default();
+    state
+        .open_session(
+            samples().join("cornellbox.usda").to_str().unwrap(),
+            layer.to_str().unwrap(),
+        )
+        .expect("opened");
+    let (job, _) = state
+        .session()
+        .expect("open")
+        .start_render(Some(region), Some(16))
+        .expect("started");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(job.wait(Duration::from_secs(3600)));
+    assert_eq!(job.status(), "done");
+    (state, job)
+}
+
+/// The spec's flow: a probe on a completed render, then `light_paths` on
+/// the region around the pixel, whose beauty is the render's; refused once
+/// an edit changed the layer, and the same report once the edit is undone.
+#[test]
+fn light_paths_inspects_the_render_its_layer_made() {
+    use crust_core::inspect::GroupBy;
+    let (mut state, job) = cornell_render("light_paths", [300, 150, 340, 190]);
+    let region = [315, 165, 325, 175];
+    let open = state.session().expect("open");
+    let probed = render::probe(&job, &open.scene, 320, 170).expect("probed");
+    assert!(probed["beauty"].is_array(), "{probed}");
+    let report = open
+        .light_paths(job.id, region, GroupBy::ExprLight, 8)
+        .expect("inspected");
+    assert_eq!(report["format"], "crust-light-paths/1");
+    assert_eq!(report["reproduces_frame"], true, "{report:#}");
+    assert_eq!(report["records"].as_array().unwrap().len(), 8);
+    let finished = job.finished().expect("finished");
+    let (_, h) = job.settings.get_dimensions();
+    for p in report["pixels"].as_array().unwrap() {
+        let (x, y) = (
+            p["pixel"][0].as_u64().unwrap() as usize,
+            p["pixel"][1].as_u64().unwrap() as usize,
+        );
+        let ours = finished.buffer.get_pixel(x, h - 1 - y);
+        for (c, want) in ours.to_array().iter().enumerate() {
+            let got = p["beauty"][c].as_f64().unwrap() as f32;
+            assert_eq!(got.to_bits(), want.to_bits(), "pixel {x},{y}");
+        }
+    }
+    assert!(
+        report["command"]
+            .as_str()
+            .unwrap()
+            .contains("-s 16 --region 315,165,325,175"),
+        "{}",
+        report["command"]
+    );
+
+    // Outside the render's region, or over the cap — its area past
+    // `usize` included — or more records than the cap.
+    for bad in [
+        [290, 165, 300, 175],
+        [300, 150, 340, 190],
+        [0, 0, usize::MAX, usize::MAX],
+    ] {
+        assert!(
+            open.light_paths(job.id, bad, GroupBy::Expr, 8).is_err(),
+            "{bad:?}"
+        );
+    }
+    let e = open
+        .light_paths(job.id, region, GroupBy::Expr, 1001)
+        .unwrap_err();
+    assert!(e.contains("1000"), "{e}");
+    let e = open
+        .light_paths(job.id, region, GroupBy::ExprPrimsLight, 8)
+        .unwrap_err();
+    assert!(e.contains("prim"), "{e}");
+
+    let edit = super::edit::Snippet::parse(
+        "over \"scene\" { over \"Sky\" { float inputs:exposure = -1 } }",
+    )
+    .expect("a snippet");
+    open.edit(&edit).expect("edited");
+    let e = open
+        .light_paths(job.id, region, GroupBy::ExprLight, 8)
+        .unwrap_err();
+    assert!(e.contains("changed since render"), "{e}");
+    assert!(!e.contains("  "), "one space between words: {e}");
+
+    open.undo().expect("undone");
+    let again = open
+        .light_paths(job.id, region, GroupBy::ExprLight, 8)
+        .expect("the layer is the render's again");
+    assert_eq!(again, report);
+}
+
+/// A render that has not completed has nothing to inspect.
+#[test]
+fn light_paths_refuses_a_render_that_did_not_complete() {
+    use crust_core::inspect::GroupBy;
+    let (mut state, _) = cornell_render("light_paths_running", [300, 150, 310, 160]);
+    let open = state.session().expect("open");
+    let (job, _) = open.start_render(None, Some(4096)).expect("started");
+    let e = open
+        .light_paths(job.id, [300, 150, 310, 160], GroupBy::ExprLight, 8)
+        .unwrap_err();
+    assert!(e.contains("rendering"), "{e}");
+    assert!(!e.contains("  "), "one space between words: {e}");
+    open.renders.cancel(job.id).expect("cancelled");
+    let e = open
+        .light_paths(job.id, [300, 150, 310, 160], GroupBy::ExprLight, 8)
+        .unwrap_err();
+    assert!(e.contains("cancelled"), "{e}");
+    assert!(!e.contains("  "), "one space between words: {e}");
+}

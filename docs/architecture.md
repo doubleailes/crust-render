@@ -45,9 +45,9 @@ graph TD
 | `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
-| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown) | image, texture and IES decoding; UI |
+| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown), the light path inspector (`inspect/`: the `crust-light-paths/1` report) | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
-| `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's report; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
+| `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's and the light path inspector's reports; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance` / `Luma`, `align_to_normal` | everything |
 
 Two properties of this graph are deliberate and worth keeping:
@@ -68,7 +68,8 @@ Two properties of this graph are deliberate and worth keeping:
 
 ```
 crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list_usd;
-                              `crust diagnostic` imports the same way, then diagnostic::run)
+                              `crust diagnostic` imports the same way, then diagnostic::run;
+                              `crust light-paths` too, then inspect::run over its region)
  ├─ FileAssets::new()                        crust-assets: residency policy from CRUST_* env
  ├─ Scene::from_usd_with_options(path, &assets, opts)
  │   └─ scene::usd_import::load_scene        crust-core
@@ -87,7 +88,8 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
  │   └─ per tile → per pixel → per sample: advance_pixel → trace_path
  │         forward walk: intersect, resolve material (ShadingPoint), NEE, scatter
  │         backward gather: MIS-weighted radiance, guiding training samples
- │         AOV instantiation only: the first hit → the unit's AOV planes
+ │         AOV instantiation only: the first hit → the unit's AOV planes;
+ │           an inspection's sample → Route::fold → the unit's record store
  └─ write EXR (linear) + PNG (tone-mapped) — crust-render only
        no products: write_rgb_file at -o; products: one scanline EXR each (main.rs, products.rs)
        --checkpoint: a scoped thread rewrites the PNG from the control's snapshots meanwhile;
@@ -179,6 +181,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
 | reporting | `stats.rs` (`--stats`, and `--stats-json`'s `crust-stats/1`), `profile.rs` (`--profile`), `report.rs` (the JSON reports' envelope and value rules), `stamp.rs` (the `crust:*` sampling stamp every EXR carries), `compare.rs` (`crust diff`: identity, metrics, comparability, over decoded planes), `error.rs` |
+| light path inspector | `inspect/` — `mod.rs` (`run`: the region render, the report's assembly, `GroupBy`), `store.rs` (per-unit top-N heap and group aggregates on interned keys, merged in unit order), `report.rs` (`Report`, the `crust-light-paths/1` JSON, the Markdown, the hint rules). The records come from `Route::fold` (`tracer/route.rs`), fed per camera sample by `advance_pixel`'s AOV instantiation, and the region renders through `Renderer::render_inspection` |
 | diagnostic | `diagnostic/` — `mod.rs` (`run`: calibration, baseline, crops, tiers 1–3, suggestions), `report.rs` (`Report`, the `crust-diagnostic/1` JSON), `markdown.rs`, `noise.rs` (the light path rows, light groups, tier-1 ordering rules, the brightest pixels' share), `crops.rs`, `schedule.rs` (budget, trial spp and the later tiers' reserves), `trials.rs` (the picture check, trimmed MRSE, the noise floor, ΔEff and at the target, verdicts, the per-crop reference), `checks.rs` (findings, picture ones included), `compare.rs` (`--baseline` deltas). It renders through `Renderer::render_measured` (`tracer/mod.rs`: `Instruments` → `Measured`), the only caller of the per-tile timer and the clamp counter |
 
 ## Invariants that span modules
@@ -335,6 +338,22 @@ other. The pairs:
   value by 0.2%); `escaped_emission` ↔ `escaped_split` (asserted bitwise in
   debug builds). The indirect clamp's factor is the beauty's, applied to
   every expression's continuation.
+- **The light path inspector's records ↔ the beauty.** `Route::fold`
+  (`tracer/route.rs`) walks the same recurrence forward and hands out one
+  record per term that ends on emission — `segment_emit`, `emit_here`, each
+  NEE light sample, `next_emit`, each crossing, the escaped segment's
+  emission and each light at infinity — valued as the gather values it
+  (the prefix's `atten · factor`, then the term with its MIS weight), the
+  beauty's clamp factor applied past the primary vertex. A new emission
+  term in `trace_path` needs its record, or the records stop summing to
+  the sample: every report states the largest difference
+  (`consistency`), and `records_rebuild_every_sample_and_pixel`
+  (`crust-core/tests/light_paths.rs`) pins it below 1e-5 on a box, MIS
+  plates, a volume and thin-walled glass. The inspection's routing
+  (`RouteCtx::inspection`) is the AOV instantiation's, so its beauty is
+  the beauty bit for bit (`the_region_is_the_frame_bit_for_bit`); the
+  light-list index each `L` entry carries beside its symbol is recorded
+  only when the path is inspected (`Route::begin`).
 - **Products ↔ settings.** The render's camera, resolution and motion-blur
   switch (`disableMotionBlur` / `instantaneousShutter`) are the first
   `RenderProduct`'s (`import_render_products`), applied before the camera is

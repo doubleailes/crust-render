@@ -11,7 +11,7 @@ counts under callgrind (deterministic), `--stats` counters, and a deterministic
 walk-level harness whose copy of `random_walk` was first checked bit-identical to the
 real one (4 000 walks, same weights, exit points, step and ray counts).
 
-Measured with the CI-pinned toolchain (1.98.1; a 1.94 rustc cannot build the locked
+Measured with the CI-pinned toolchain (1.99; a 1.94 rustc cannot build the locked
 `wasmtime-internal-jit-icache-coherence 49.0.1`) on a shared 4-vCPU machine with about
 two cores of throughput, so no wall-clock figure below is load-bearing; the instruction
 counts are.
@@ -246,8 +246,8 @@ unlike the subsurface walk's free 256 steps, so a dense interior is truncated by
 ## 4. Reproducing
 
 ```bash
-rustup toolchain install 1.98.1
-cargo +1.98.1 build --release
+rustup toolchain install 1.99
+cargo +1.99 build --release
 target/release/crust render -i samples/materialx_subsurface.usda -o sss.exr --stats --profile
 RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
     target/release/crust render -i samples/materialx_subsurface.usda -o /tmp/x.exr -s 2

@@ -105,6 +105,17 @@ enum Command {
     /// raised, 3 when one was (the reports are still written), 1 on error,
     /// 2 on a usage error.
     Check(Box<CheckArgs>),
+    /// Re-render a small region and report the light paths its samples
+    /// took: which expression, through which light, made those pixels
+    /// bright, each path with its contribution and the sample it came from.
+    ///
+    /// The region (`--region`, at most 100 pixels) is rendered with the
+    /// settings and sample count `crust render` with the same flags would
+    /// use, so its paths are the samples of the pixels a render shows. Writes
+    /// no image. The Markdown summary goes to stdout (to stderr with
+    /// `--json -`), the log to stderr. Exits 0 on success, 1 on error, 2 on a
+    /// usage error.
+    LightPaths(Box<LightPathsArgs>),
     /// Compare two EXRs: did the image change, and by how much?
     ///
     /// Every channel of every layer is compared bitwise; on the beauty
@@ -155,6 +166,27 @@ struct DiagnosticArgs {
     /// to the square of the scene's adaptive variance threshold.
     #[arg(long, value_name = "MRSE", value_parser = parse_target)]
     target_mrse: Option<f64>,
+}
+
+#[derive(Args)]
+struct LightPathsArgs {
+    #[command(flatten)]
+    scene: SceneArgs,
+    /// Samples per pixel, as `crust render -s` takes it: the inspection
+    /// reproduces a render made at this count. Overrides the scene's.
+    #[arg(short, long)]
+    samples: Option<u32>,
+    /// How many of the brightest light paths to list, at most 1000.
+    #[arg(long, value_name = "N", default_value_t = crust_core::inspect::DEFAULT_TOP)]
+    top: usize,
+    /// What the light paths are aggregated by.
+    #[arg(long, value_name = "KEY", default_value = "expr+light",
+          value_parser = choices(crust_core::inspect::GroupBy::CHOICES))]
+    group_by: crust_core::inspect::GroupBy,
+    /// Write the report as JSON (format `crust-light-paths/1`) to PATH; with
+    /// `-`, the JSON goes to stdout and the Markdown summary to stderr.
+    #[arg(long, value_name = "PATH|-")]
+    json: Option<std::path::PathBuf>,
 }
 
 #[derive(Args)]
@@ -879,9 +911,11 @@ fn main() -> ExitCode {
             },
             args.log_file.as_deref(),
         ),
-        Command::Ls { .. } | Command::Diagnostic(_) | Command::Check(_) | Command::Diff { .. } => {
-            (logging::Terminal::Stderr, None)
-        }
+        Command::Ls { .. }
+        | Command::Diagnostic(_)
+        | Command::Check(_)
+        | Command::LightPaths(_)
+        | Command::Diff { .. } => (logging::Terminal::Stderr, None),
         // stdout is the protocol: a log line there would corrupt it.
         #[cfg(feature = "mcp")]
         Command::Mcp => (logging::Terminal::Stderr, None),
@@ -900,6 +934,7 @@ fn main() -> ExitCode {
         } => ls(*kind, input, json.as_deref(), *frame),
         Command::Diagnostic(args) => diagnostic(args),
         Command::Check(args) => check(args),
+        Command::LightPaths(args) => light_paths(args),
         Command::Diff { a, b, json } => diff(a, b, json.as_deref()),
         #[cfg(feature = "mcp")]
         Command::Mcp => mcp::run(),
@@ -1265,6 +1300,130 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
         0 => ExitCode::SUCCESS,
         code => ExitCode::from(code as u8),
     }
+}
+
+/// What `crust light-paths` refuses before loading anything: no stage, no
+/// region, a region over the cap, the grouping by prims. The region on
+/// success, else the usage error to exit with.
+fn light_paths_request(args: &LightPathsArgs) -> std::result::Result<PixelRect, clap::Error> {
+    use clap::CommandFactory;
+    use clap::error::ErrorKind;
+    let usage = |kind, message: String| Cli::command().error(kind, message);
+    if args.scene.input.is_none() {
+        return Err(usage(
+            ErrorKind::MissingRequiredArgument,
+            "crust light-paths needs a stage: -i <INPUT>".into(),
+        ));
+    }
+    let Some(region) = args.scene.region else {
+        return Err(usage(
+            ErrorKind::MissingRequiredArgument,
+            format!(
+                "crust light-paths needs --region X0,Y0,X1,Y1: at most {} pixels",
+                crust_core::inspect::MAX_PIXELS
+            ),
+        ));
+    };
+    crust_core::inspect::check_request(region, args.group_by, args.top)
+        .map_err(|e| usage(ErrorKind::ValueValidation, e.to_string()))?;
+    Ok(region)
+}
+
+/// The settings `crust render` would use with the same flags
+/// ([`apply_overrides`]): `-s`, then the scene flags. The region is the
+/// inspection's to apply.
+fn light_paths_settings(args: &LightPathsArgs, settings: RenderSettings) -> RenderSettings {
+    let settings = match args.samples {
+        Some(spp) => settings.with_samples_per_pixel(spp),
+        None => settings,
+    };
+    apply_scene_overrides(&args.scene, settings)
+}
+
+/// `crust light-paths`: import the stage, re-render the region with the
+/// render's settings, and report its light paths — Markdown on stdout (on
+/// stderr with `--json -`), `crust-light-paths/1` with `--json`.
+fn light_paths(args: &LightPathsArgs) -> ExitCode {
+    let region = match light_paths_request(args) {
+        Ok(region) => region,
+        Err(e) => e.exit(),
+    };
+    if let Some(ocio) = &crust_core::config().ocio
+        && let Err(e) = crust_core::color::use_config(ocio)
+    {
+        error!("$OCIO: {e}");
+        return ExitCode::FAILURE;
+    }
+    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let scene = match load_scene(&args.scene, None, &assets, true) {
+        Ok(scene) => scene,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let settings = light_paths_settings(args, scene.settings);
+    let camera = scene.camera_path.clone();
+    let mut renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings)
+        .with_volumes(scene.volumes);
+    // The command as given, the binary named as the user would type it.
+    let command = std::iter::once("crust".to_owned())
+        .chain(std::env::args().skip(1).map(|a| {
+            if a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/._-,:+=".contains(c))
+            {
+                a
+            } else {
+                format!("'{}'", a.replace('\'', r"'\''"))
+            }
+        }))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let options = crust_core::inspect::Options {
+        top: args.top,
+        group_by: args.group_by,
+        command: Some(command),
+        camera,
+    };
+    let started = Instant::now();
+    let report = match crust_core::inspect::run(&mut renderer, region, &options) {
+        Ok(report) => report,
+        Err(e @ crust_core::Error::EmptyRegion { .. }) => {
+            error!("--region: {e}");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    assets.release_texture_files();
+    info!(
+        "Inspected {} pixels ({} samples, {} light paths) in {:.2?}",
+        report.pixels.len(),
+        report.samples,
+        report.truncated.of,
+        started.elapsed()
+    );
+    match args.json.as_deref() {
+        Some(path) if is_stdout(path) => {
+            if let Err(e) = write_json(path, &report.to_json()) {
+                error!("--json -: {e}");
+                return ExitCode::FAILURE;
+            }
+            eprint!("{}", report.to_markdown());
+        }
+        Some(path) => {
+            if let Err(e) = write_json(path, &report.to_json()) {
+                error!("--json {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+            print!("{}", report.to_markdown());
+            info!("Report written to {}", path.display());
+        }
+        None => print!("{}", report.to_markdown()),
+    }
+    ExitCode::SUCCESS
 }
 
 /// `crust ls`: print the stage's `kind` prims, one path per line; with
@@ -2493,6 +2652,116 @@ mod tests {
             a.extend_from_slice(render_only);
             let cli = Cli::try_parse_from(["crust", "diagnostic"].into_iter().chain(a));
             assert!(cli.is_err(), "{render_only:?} accepted");
+        }
+    }
+
+    /// `crust light-paths <args>`, parsed down to its own arguments.
+    fn light_paths_args<const N: usize>(
+        args: [&str; N],
+    ) -> std::result::Result<LightPathsArgs, clap::Error> {
+        let cli = Cli::try_parse_from(["crust", "light-paths"].into_iter().chain(args))?;
+        match cli.command {
+            Command::LightPaths(args) => Ok(*args),
+            _ => unreachable!("parsed as light-paths"),
+        }
+    }
+
+    /// The `cli` spec: `light-paths` takes the scene flags and `-s` as
+    /// `render` does, and refuses the render's output flags, a missing or
+    /// oversized region and the grouping by prims, all as usage errors.
+    #[test]
+    fn light_paths_takes_the_scene_flags_and_the_render_samples() {
+        let args = [
+            "-i",
+            "scene.usda",
+            "-s",
+            "64",
+            "--region",
+            "40,40,50,50",
+            "--strategy",
+            "balance",
+            "--light-selection",
+            "learned",
+            "--light-samples",
+            "2",
+            "--indirect-clamp",
+            "0",
+            "--filter",
+            "box",
+        ];
+        let l = light_paths_args(args).expect("every shared flag");
+        let r = render(args).expect("the same flags render");
+        let (_, base) = crust_core::get_settings();
+        assert_eq!(
+            format!("{:?}", light_paths_settings(&l, base)),
+            format!("{:?}", apply_overrides(&r, base))
+        );
+        assert_eq!(light_paths_settings(&l, base).samples_per_pixel(), 64);
+        assert_eq!(l.scene.region, r.region);
+        assert_eq!(light_paths_request(&l).ok(), r.region);
+        assert_eq!(l.top, 32);
+        assert_eq!(l.group_by, crust_core::inspect::GroupBy::ExprLight);
+        assert!(l.json.is_none());
+        let l = light_paths_args(["-i", "s.usda", "--region", "0,0,1,1", "--group-by", "light"])
+            .unwrap();
+        assert_eq!(l.group_by, crust_core::inspect::GroupBy::Light);
+        for refused in [
+            &["-o", "x.exr"][..],
+            &["--log-file"],
+            &["--scanline"],
+            &["--stats"],
+            &["--working-space", "acescg"],
+            &["--group-by", "prims"],
+            &["--top", "-1"],
+        ] {
+            let mut a = vec!["-i", "s.usda", "--region", "0,0,5,5"];
+            a.extend_from_slice(refused);
+            let cli = Cli::try_parse_from(["crust", "light-paths"].into_iter().chain(a));
+            assert!(cli.is_err(), "{refused:?} accepted");
+        }
+        for (args, what) in [
+            (&["-i", "s.usda"][..], "--region"),
+            (&["--region", "0,0,5,5"], "-i"),
+            (&["-i", "s.usda", "--region", "0,0,20,20"], "100"),
+            (&["-i", "s.usda", "--region", "0,0,101,1"], "100"),
+            // Its area past `usize`: wrapped, it would be 1 and pass.
+            (
+                &[
+                    "-i",
+                    "s.usda",
+                    "--region",
+                    "0,0,18446744073709551615,18446744073709551615",
+                ],
+                "100",
+            ),
+            (
+                &["-i", "s.usda", "--region", "0,0,5,5", "--top", "1001"],
+                "1000",
+            ),
+            (
+                &[
+                    "-i",
+                    "s.usda",
+                    "--region",
+                    "0,0,5,5",
+                    "--group-by",
+                    "expr+prims+light",
+                ],
+                "prim",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(
+                ["crust", "light-paths"]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            )
+            .expect("parses");
+            let Command::LightPaths(l) = cli.command else {
+                unreachable!()
+            };
+            let err = light_paths_request(&l).expect_err("refused");
+            assert_eq!(err.exit_code(), 2, "{args:?}");
+            assert!(err.to_string().contains(what), "{args:?}: {err}");
         }
     }
 

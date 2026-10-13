@@ -188,6 +188,24 @@ struct Probe {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct LightPaths {
+    /// The id `render` returned: a render that completed.
+    render_id: u64,
+    /// The pixels to inspect: `[x0, y0, x1, y1]` from the top-left corner,
+    /// x1 and y1 excluded, as `crust light-paths --region`; at most 100
+    /// pixels (10 × 10, say), inside the render's region.
+    region: [usize; 4],
+    /// What the light paths are aggregated by: `expr+light` (the default),
+    /// `expr`, `light` or `none`.
+    #[serde(default)]
+    group_by: Option<String>,
+    /// How many of the brightest light paths to list (default 32, at most
+    /// 1000; every group counts all of them either way).
+    #[serde(default)]
+    top: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct Diff {
     /// The reference render's id.
     render_a: u64,
@@ -429,6 +447,43 @@ impl Server {
                     let open = state.session()?;
                     let job = open.renders.get(p.render_id)?;
                     render::probe(&job, &open.scene, p.x, p.y)
+                })
+                .await,
+        )
+    }
+
+    /// The light paths behind a few pixels of a completed render, as `crust
+    /// light-paths` reports them (`crust-light-paths/1`): the region is
+    /// rendered again at the render's settings and samples, and every
+    /// camera sample's paths are kept — each with its light path expression
+    /// (pasted into an `lpe` RenderVar it routes that path over the frame),
+    /// its light, its contribution and its sample — the brightest listed,
+    /// all grouped, each group with its share of the region's light and of
+    /// its noise (second moment) and how rare it is. `summary` and the first
+    /// group are the conclusion. Refused for a render that has not
+    /// completed, once the session's layer is no longer the one the render
+    /// used (an undo back to it is), while another render runs, and for a
+    /// region outside the render's or over 100 pixels.
+    #[tool]
+    async fn light_paths(
+        &self,
+        Parameters(p): Parameters<LightPaths>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let group_by = match p.group_by.as_deref().map(str::parse).transpose() {
+            Ok(g) => g.unwrap_or_default(),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "group_by: {e}"
+                ))]));
+            }
+        };
+        let top = p.top.unwrap_or(crust_core::inspect::DEFAULT_TOP);
+        reply(
+            self.session
+                .call(move |state| {
+                    state
+                        .session()?
+                        .light_paths(p.render_id, p.region, group_by, top)
                 })
                 .await,
         )
