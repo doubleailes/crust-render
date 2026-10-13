@@ -484,6 +484,18 @@ fn light_geometry_camera_visibility() {
     assert!(!scene.world.is_transparent_emitter(geom(3.0)));
 }
 
+/// The implicit-shapes sample: two planes and nine shapes, each one
+/// geometry, imported with no warning through the camera
+/// `RenderSettings.camera` names.
+#[test]
+fn loads_implicit_shapes_usda() {
+    let scene = Scene::from_usd(&sample("implicit_shapes.usda")).expect("load");
+    // The dome and the distant light add no geometry.
+    assert_eq!(scene.world.count(), 11);
+    assert!(scene.warnings.is_empty(), "{:#?}", scene.warnings);
+    assert_eq!(scene.camera_path.as_deref(), Some("/World/Cam"));
+}
+
 #[test]
 fn loads_motionblur_usda() {
     let scene =
@@ -3750,4 +3762,293 @@ fn the_scene_records_its_time_code_and_the_procedural_camera() {
     let scene = load(None);
     assert_eq!(scene.time, None);
     assert_eq!(scene.camera_path, None, "the procedural camera has no prim");
+}
+
+// ---------------------------------------------------------------------------
+// Implicit shapes
+// ---------------------------------------------------------------------------
+
+/// `body` under `/World` in a fresh stage, loaded. No camera is named, so
+/// every curved shape takes the fixed radial count.
+fn implicit_stage(name: &str, body: &str) -> Scene {
+    let dir = std::env::temp_dir().join("crust_usd_scene_implicit");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(format!("{name}.usda"));
+    std::fs::write(
+        &path,
+        format!(
+            "#usda 1.0\n(\n    defaultPrim = \"World\"\n)\n\ndef Xform \"World\"\n{{\n{body}\n}}\n"
+        ),
+    )
+    .expect("write stage");
+    Scene::from_usd(&path).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// The scene's geometry warnings (the stages here have no camera, which
+/// warns too).
+fn geom_warnings(scene: &Scene) -> Vec<&crust_core::Warning> {
+    scene
+        .warnings
+        .iter()
+        .filter(|w| w.code.as_str().starts_with("geom."))
+        .collect()
+}
+
+/// Triangles of a cylinder or cone at the fixed count of 48 segments: two
+/// fans and a strip of quads, or one fan and a strip.
+const CYLINDER_TRIS: usize = 48 * 4;
+
+fn assert_box(scene: &Scene, min: [f32; 3], max: [f32; 3], what: &str) {
+    let b = scene
+        .world
+        .bounds()
+        .unwrap_or_else(|| panic!("{what}: no geometry"));
+    let (lo, hi) = (Vec3A::from(min), Vec3A::from(max));
+    assert!(
+        // The kernel pads its boxes by a relative 1e-4.
+        b.minimum.abs_diff_eq(lo, 1e-3) && b.maximum.abs_diff_eq(hi, 1e-3),
+        "{what}: bounds {:?}..{:?}, want {lo:?}..{hi:?}",
+        b.minimum,
+        b.maximum
+    );
+}
+
+/// "Implicit shape prim": each of the seven schemas becomes one geometry,
+/// spanning what its attributes and `axis` say.
+#[test]
+fn every_implicit_schema_attaches_geometry_with_its_bounds() {
+    let cases: [(&str, &str, [f32; 3], [f32; 3]); 7] = [
+        ("Cube", "double size = 3", [-1.5; 3], [1.5; 3]),
+        (
+            "Plane",
+            r#"double width = 3
+        double length = 1
+        token axis = "Y""#,
+            // A Y plane's width runs along Z, its length along X.
+            [-0.5, 0.0, -1.5],
+            [0.5, 0.0, 1.5],
+        ),
+        (
+            "Cylinder",
+            r#"double radius = 0.5
+        double height = 2
+        token axis = "X""#,
+            [-1.0, -0.5, -0.5],
+            [1.0, 0.5, 0.5],
+        ),
+        (
+            "Cylinder_1",
+            r#"double radiusBottom = 1
+        double radiusTop = 0.5
+        double height = 2
+        token axis = "Y""#,
+            [-1.0, -1.0, -1.0],
+            [1.0, 1.0, 1.0],
+        ),
+        (
+            "Cone",
+            "double height = 4",
+            [-1.0, -1.0, -2.0],
+            [1.0, 1.0, 2.0],
+        ),
+        // Fallbacks: radius 0.5, height 1 between the caps' centres.
+        ("Capsule", "", [-0.5, -0.5, -1.0], [0.5, 0.5, 1.0]),
+        (
+            "Capsule_1",
+            r#"double radiusBottom = 0.5
+        double radiusTop = 0.5
+        double height = 2
+        token axis = "Y""#,
+            [-0.5, -1.5, -0.5],
+            [0.5, 1.5, 0.5],
+        ),
+    ];
+    for (schema, attrs, min, max) in cases {
+        let scene = implicit_stage(
+            &format!("implicit_{schema}"),
+            &format!("    def {schema} \"Shape\"\n    {{\n        {attrs}\n    }}"),
+        );
+        assert_eq!(scene.world.count(), 1, "{schema}: one geometry");
+        assert_box(&scene, min, max, schema);
+        assert!(
+            geom_warnings(&scene).is_empty(),
+            "{schema}: {:#?}",
+            scene.warnings
+        );
+    }
+}
+
+/// "Identical implicit shapes share geometry": two equal cylinders are one
+/// distinct mesh, placed twice — so instanced, its triangles resident once.
+#[test]
+fn identical_cylinders_are_one_mesh_placed_twice() {
+    let scene = implicit_stage(
+        "implicit_twins",
+        r#"    def Cylinder "A" { double radius = 0.5 }
+    def Cylinder "B"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (3, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
+    );
+    assert_eq!(scene.world.count(), 2);
+    assert_eq!(scene.world.primitive_breakdown().instances, 2);
+    assert_eq!(scene.world.primitive_breakdown().triangles, 0);
+    assert_eq!(
+        scene.world.unique_primitive_breakdown().triangles,
+        CYLINDER_TRIS
+    );
+}
+
+/// A cylinder placed once is baked flat, like any mesh placed once.
+#[test]
+fn a_lone_cylinder_is_baked() {
+    let scene = implicit_stage("implicit_lone", r#"    def Cylinder "A" {}"#);
+    assert_eq!(scene.world.primitive_breakdown().instances, 0);
+    assert_eq!(scene.world.primitive_breakdown().triangles, CYLINDER_TRIS);
+}
+
+/// A moving cube is instanced (a baked one has no transform to move), and
+/// a scaled one spans its scaled box.
+#[test]
+fn a_moving_cube_instances_and_a_scaled_one_scales() {
+    let moving = implicit_stage(
+        "implicit_moving",
+        r#"    def Cube "Mover" { float3 crust:motion:translate = (1, 0, 0) }"#,
+    );
+    assert_eq!(moving.world.primitive_breakdown().instances, 1);
+    assert_eq!(moving.world.motion(0), Vec3A::new(1.0, 0.0, 0.0));
+
+    let scaled = implicit_stage(
+        "implicit_scaled",
+        r#"    def Cube "Box"
+    {
+        double3 xformOp:scale = (2, 1, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
+    }"#,
+    );
+    assert_box(&scaled, [-2.0, -1.0, -0.5], [2.0, 1.0, 0.5], "scaled cube");
+}
+
+/// "Displaced cube": the displacement is refused with a warning naming the
+/// prim, and the cube keeps its undisplaced box.
+#[test]
+fn a_displaced_cube_warns_and_stays_a_box() {
+    let scene = implicit_stage(
+        "implicit_displaced",
+        r#"    def Material "Puffed"
+    {
+        token outputs:surface.connect = </World/Puffed/Surface.outputs:surface>
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            float inputs:displacement = 0.1
+            token outputs:surface
+        }
+    }
+    def Cube "Box" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Puffed>
+    }"#,
+    );
+    assert_box(&scene, [-1.0; 3], [1.0; 3], "displaced cube");
+    let w = scene
+        .warnings
+        .iter()
+        .find(|w| w.code == crust_core::WarningCode::GeomImplicitDisplacement)
+        .unwrap_or_else(|| panic!("no warning in {:#?}", scene.warnings));
+    assert_eq!(w.prims, ["/World/Box"]);
+}
+
+/// "Cylinder side is smooth, caps are flat": a hit on the side shades with
+/// the radial normal, a hit on a cap with the axis.
+#[test]
+fn a_cylinder_side_shades_round_and_its_caps_flat() {
+    let scene = implicit_stage("implicit_shading", r#"    def Cylinder "C" {}"#);
+    // Mid-segment, where a faceted side would be furthest from radial.
+    let a = std::f32::consts::TAU / 48.0 * 0.5;
+    let dir = Vec3A::new(a.cos(), a.sin(), 0.0);
+    let hit = scene
+        .world
+        .intersect(&Ray::new(dir * 5.0, -dir), 1e-3, 1e4)
+        .expect("the side");
+    assert!(
+        hit.rec.normal.dot(dir) > 0.99999,
+        "side: {:?}",
+        hit.rec.normal
+    );
+    let cap = scene
+        .world
+        .intersect(&Ray::new(Vec3A::new(0.3, 0.2, 5.0), -Vec3A::Z), 1e-3, 1e4)
+        .expect("the top cap");
+    assert!(
+        cap.rec.normal.abs_diff_eq(Vec3A::Z, 1e-6),
+        "cap: {:?}",
+        cap.rec.normal
+    );
+    assert!((cap.rec.t - 4.0).abs() < 1e-5);
+}
+
+/// "Not subdivided": the level asks for refinement, the shape is unmoved.
+#[test]
+fn an_implicit_shape_is_never_subdivided() {
+    let dir = std::env::temp_dir().join("crust_usd_scene_implicit");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("implicit_level.usda");
+    std::fs::write(
+        &path,
+        "#usda 1.0\ndef Xform \"World\"\n{\n    def Cylinder \"C\" { int crust:subdivisionLevel = 2 }\n}\n",
+    )
+    .expect("write stage");
+    let options = crust_core::UsdImportOptions {
+        subdivision_level: Some(2),
+        ..Default::default()
+    };
+    let scene = Scene::from_usd_with_options(&path, &crust_core::NoAssets, &options).unwrap();
+    assert_eq!(scene.world.primitive_breakdown().triangles, CYLINDER_TRIS);
+}
+
+/// Inside prototypes: a capsule in a native prototype placed twice, and a
+/// cube in a `PointInstancer` prototype, each render at every placement.
+#[test]
+fn implicit_shapes_render_inside_prototypes() {
+    let scene = implicit_stage(
+        "implicit_prototypes",
+        r#"    class Xform "_Pill"
+    {
+        def Capsule "Pill" { double radius = 0.25 }
+    }
+    def Xform "A" (instanceable = true; references = </World/_Pill>) {}
+    def Xform "B" (instanceable = true; references = </World/_Pill>)
+    {
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def PointInstancer "Boxes"
+    {
+        rel prototypes = [</World/Boxes/Protos/Box>]
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 4, 0), (2, 4, 0)]
+        def Scope "Protos"
+        {
+            def Cube "Box" { double size = 0.5 }
+        }
+    }"#,
+    );
+    let down = |x: f32, y: f32| {
+        scene
+            .world
+            .intersect(&Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z), 1e-3, 1e4)
+            .map(|h| h.rec.t)
+    };
+    // The capsule's top pole sits at z = 0.5 + 0.25, the cube's face at 0.25.
+    for x in [0.0, 2.0] {
+        let t = down(x, 0.0).unwrap_or_else(|| panic!("capsule at x = {x}"));
+        assert!((t - 4.25).abs() < 1e-4, "capsule at x = {x}: t = {t}");
+        let t = down(x, 4.0).unwrap_or_else(|| panic!("cube at x = {x}"));
+        assert!((t - 4.75).abs() < 1e-4, "cube at x = {x}: t = {t}");
+    }
+    assert!(down(1.0, 0.0).is_none(), "nothing between the placements");
+    assert!(geom_warnings(&scene).is_empty(), "{:#?}", scene.warnings);
 }

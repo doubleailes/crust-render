@@ -787,3 +787,123 @@ fn a_hidden_zero_scale_placement_does_not_share_a_prototype() {
     );
     assert_eq!(sub.shared_meshes, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Implicit shapes: the radial count from the same camera
+// ---------------------------------------------------------------------------
+
+/// A unit-radius `Cylinder` named `name` at `at`, along the view axis.
+fn cylinder(name: &str, at: (f32, f32, f32)) -> String {
+    format!(
+        r#"
+    def Cylinder "{name}"
+    {{
+        double3 xformOp:translate = ({}, {}, {})
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}"#,
+        at.0, at.1, at.2
+    )
+}
+
+/// Triangles of a cylinder of `n` radial segments: two fans and a strip.
+fn cylinder_triangles(n: usize) -> usize {
+    4 * n
+}
+
+/// The cylinders' triangles in a stage holding `body`, through `settings`.
+fn shape_triangles(name: &str, body: &str, settings: &str) -> usize {
+    unique_triangles(&load(
+        &write_stage(name, &format!("{CAMERA}{body}"), settings),
+        &UsdImportOptions::default(),
+    ))
+}
+
+/// "Independent of adaptive subdivision" and "Larger on screen means more
+/// segments": with `RenderSettings.camera` named and no edge length, a
+/// cylinder ten units away gets more segments than one a hundred away, which
+/// is small enough on screen for the minimum. With no camera named, both get
+/// the fixed count.
+#[test]
+fn implicit_shapes_are_sized_on_screen_without_adaptive_subdivision() {
+    let near = shape_triangles("cyl_near", &cylinder("C", (0.0, 0.0, -10.0)), &settings(""));
+    let far = shape_triangles("cyl_far", &cylinder("C", (0.0, 0.0, -100.0)), &settings(""));
+    // At 9 units a unit radius spans ~170 px: ceil(π / acos(1 − 0.5/170)) = 41.
+    assert_eq!(near, cylinder_triangles(41));
+    assert_eq!(far, cylinder_triangles(16), "the minimum");
+    let unnamed = shape_triangles("cyl_unnamed", &cylinder("C", (0.0, 0.0, -10.0)), "");
+    assert_eq!(
+        unnamed,
+        cylinder_triangles(48),
+        "no camera named: the fixed count"
+    );
+}
+
+/// "Shared prototype" and "Nested native instance": a cylinder in a
+/// prototype placed twice takes the fixed count however close it is; in an
+/// adaptive load a prototype placed once is sized for its placement, but a
+/// cylinder it reaches through a nested native instance is always built
+/// shared, so it takes the fixed count too.
+#[test]
+fn shared_and_nested_prototype_shapes_take_the_fixed_count() {
+    let proto = |name: &str, nested: bool| {
+        let inner = if nested {
+            r#"
+        def Xform "Inner" (instanceable = true; references = </W/InnerProto>) {}"#
+        } else {
+            ""
+        };
+        format!(
+            r#"
+    class Xform "InnerProto" {{{}
+    }}
+    class Xform "{name}" {{{}{inner}
+    }}"#,
+            cylinder("Nested", (0.0, 0.0, 0.0)),
+            cylinder("Direct", (0.0, 0.0, 0.0)),
+        )
+    };
+    let placed = |name: &str, z: f32| {
+        format!(
+            r#"
+    def Xform "{name}" (instanceable = true; references = </W/Proto>) {{
+        double3 xformOp:translate = (0, 0, {z})
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}"#
+        )
+    };
+    let adaptive = settings("float crust:subdivisionEdgeLength = 2");
+
+    let twice = shape_triangles(
+        "cyl_proto_twice",
+        &format!(
+            "{}{}{}",
+            proto("Proto", false),
+            placed("A", -10.0),
+            placed("B", -12.0)
+        ),
+        &adaptive,
+    );
+    assert_eq!(twice, cylinder_triangles(48), "shared: the fixed count");
+
+    let once = shape_triangles(
+        "cyl_proto_once",
+        &format!("{}{}", proto("Proto", false), placed("A", -10.0)),
+        &adaptive,
+    );
+    assert_eq!(
+        once,
+        cylinder_triangles(41),
+        "placed once: sized as a direct prim"
+    );
+
+    let nested = shape_triangles(
+        "cyl_proto_nested",
+        &format!("{}{}", proto("Proto", true), placed("A", -10.0)),
+        &adaptive,
+    );
+    assert_eq!(
+        nested,
+        cylinder_triangles(41) + cylinder_triangles(48),
+        "the nested cylinder is built shared"
+    );
+}

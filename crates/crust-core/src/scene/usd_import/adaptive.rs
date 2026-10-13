@@ -1,5 +1,6 @@
 //! Adaptive subdivision: the level a subdivision mesh is refined to, chosen from
-//! how large its cage edges are on screen.
+//! how large its cage edges are on screen. The camera's [`ScreenProjection`]
+//! also sizes implicit shapes (`super::implicit`).
 //!
 //! Every quantity here errs toward *more* detail: the stretch of a transform is
 //! its exact spectral norm (the largest factor it can lengthen an edge by), the
@@ -13,21 +14,38 @@ use openusd::gf::Vec3f;
 /// Below this a distance, a stretch or an edge length is treated as zero.
 const EPS: f32 = 1e-6;
 
-/// The render camera's projection, the target and the ceiling: everything the
-/// level of a placement depends on besides the placement itself.
+/// The render camera's projection: how large a placement is on screen. Read
+/// before the traversal whenever the render camera is named, for adaptive
+/// subdivision ([`ScreenRate`]) and for the radial count of implicit shapes
+/// (`super::implicit`).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ScreenRate {
+pub(super) struct ScreenProjection {
     /// The camera position at shutter open.
     pub(super) eye: Vec3,
     /// Pixels per world unit at unit distance: `image height / (2 tan(vfov / 2))`.
     pub(super) f_px: f32,
+    /// The view pyramid: geometry wholly outside it is not refined.
+    /// `None` under `CRUST_ADAPTIVE_FRUSTUM=0`.
+    pub(super) frustum: Option<Frustum>,
+}
+
+/// The render camera's projection, the target and the ceiling: everything the
+/// subdivision level of a placement depends on besides the placement itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ScreenRate {
+    pub(super) projection: ScreenProjection,
     /// The target projected cage-edge length, in pixels. Positive and finite.
     pub(super) target: f32,
     /// The ceiling on the level.
     pub(super) max: u32,
-    /// The view pyramid: geometry wholly outside it is not refined.
-    /// `None` under `CRUST_ADAPTIVE_FRUSTUM=0`.
-    pub(super) frustum: Option<Frustum>,
+}
+
+impl std::ops::Deref for ScreenRate {
+    type Target = ScreenProjection;
+
+    fn deref(&self) -> &ScreenProjection {
+        &self.projection
+    }
 }
 
 /// The render camera's view pyramid, as planes through the eye with inward
@@ -104,7 +122,7 @@ impl Cull {
     }
 }
 
-impl ScreenRate {
+impl ScreenProjection {
     /// Pixels per local unit of a placement: its stretch over its distance to
     /// the camera. Infinite when the camera is inside `bounds` (in the
     /// placement's local frame, carried to world by `xf`).
@@ -113,8 +131,9 @@ impl ScreenRate {
         self.sigma_culled(xf, bounds, Cull::Pad(0.0))
     }
 
-    /// [`ScreenRate::sigma`] for a mesh displaced under `cull`: the frustum
-    /// test and the nearest-point distance both use the grown box.
+    /// [`ScreenProjection::sigma`] for a mesh displaced under `cull`: the
+    /// frustum test and the nearest-point distance both use the grown box.
+    /// Zero when the box is wholly out of view.
     pub(super) fn sigma_culled(&self, xf: &GMat4, bounds: &Aabb, cull: Cull) -> f32 {
         let Some(bounds) = cull.padded(bounds) else {
             return self.sigma_unculled(xf, bounds);
@@ -130,6 +149,18 @@ impl ScreenRate {
         stretch(&Mat3::from_mat4(*xf)) * self.f_px / d
     }
 
+    /// [`ScreenProjection::sigma`] without the frustum test, for a caller
+    /// that has made its own.
+    fn sigma_unculled(&self, xf: &GMat4, bounds: &Aabb) -> f32 {
+        let d = bounds.transformed(xf).distance_to(self.eye);
+        if d < EPS {
+            return f32::INFINITY;
+        }
+        stretch(&Mat3::from_mat4(*xf)) * self.f_px / d
+    }
+}
+
+impl ScreenRate {
     /// The smallest level at which a mean cage edge of `edge` local units,
     /// seen at `sigma` pixels per unit, projects to at most the target,
     /// clamped to `0..=max`.
@@ -186,16 +217,6 @@ impl ScreenRate {
         }
         let near = displaced.unwrap_or(bounds);
         self.segment_with_sigma(self.sigma_unculled(xf, &near), points)
-    }
-
-    /// [`ScreenRate::sigma`] without the frustum test, for a caller that has
-    /// made its own.
-    fn sigma_unculled(&self, xf: &GMat4, bounds: &Aabb) -> f32 {
-        let d = bounds.transformed(xf).distance_to(self.eye);
-        if d < EPS {
-            return f32::INFINITY;
-        }
-        stretch(&Mat3::from_mat4(*xf)) * self.f_px / d
     }
 
     /// A cage segment's projected length over the target at `sigma` pixels
@@ -357,12 +378,21 @@ mod tests {
 
     fn rate() -> ScreenRate {
         ScreenRate {
-            eye: Vec3::ZERO,
-            f_px: 1000.0,
+            projection: ScreenProjection {
+                eye: Vec3::ZERO,
+                f_px: 1000.0,
+                frustum: None,
+            },
             target: 2.0,
             max: 3,
-            frustum: None,
         }
+    }
+
+    /// [`rate`] with the [`frustum`] test on.
+    fn with_frustum() -> ScreenRate {
+        let mut r = rate();
+        r.projection.frustum = Some(frustum());
+        r
     }
 
     /// A camera at the origin looking down −Z, ±45° both ways.
@@ -405,10 +435,7 @@ mod tests {
 
     #[test]
     fn out_of_view_geometry_is_not_refined() {
-        let r = ScreenRate {
-            frustum: Some(frustum()),
-            ..rate()
-        };
+        let r = with_frustum();
         let behind = GMat4::from_translation(Vec3::new(0.0, 0.0, 3.0));
         let ahead = GMat4::from_translation(Vec3::new(0.0, 0.0, -3.0));
         let b = unit_box_at(Vec3::ZERO);
@@ -426,10 +453,7 @@ mod tests {
     /// diced at its screen rate rather than split once.
     #[test]
     fn a_displacement_bound_brings_geometry_into_view() {
-        let r = ScreenRate {
-            frustum: Some(frustum()),
-            ..rate()
-        };
+        let r = with_frustum();
         let id = GMat4::IDENTITY;
         // At z = −10 the view reaches x = 10; this segment starts at 11.
         let seg = [[11.0, 0.0, -10.0], [11.25, 0.0, -10.0]];
@@ -471,10 +495,7 @@ mod tests {
     /// "No bound known": the frustum term is off, so nothing is out of view.
     #[test]
     fn no_bound_turns_the_frustum_off() {
-        let r = ScreenRate {
-            frustum: Some(frustum()),
-            ..rate()
-        };
+        let r = with_frustum();
         let behind = GMat4::from_translation(Vec3::new(0.0, 0.0, 3.0));
         let seg = [[0.0, 0.0, 0.0], [0.25, 0.0, 0.0]];
         assert_eq!(
@@ -491,10 +512,7 @@ mod tests {
     /// An undisplaced mesh (`Pad(0)`) is rated exactly as before, bit for bit.
     #[test]
     fn a_zero_pad_keeps_every_rate() {
-        let r = ScreenRate {
-            frustum: Some(frustum()),
-            ..rate()
-        };
+        let r = with_frustum();
         for k in 0..200 {
             let f = k as f32 * 0.731;
             let xf = GMat4::from_scale_rotation_translation(

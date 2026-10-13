@@ -212,6 +212,125 @@ fn transform_curves_and_volume_warnings() {
     assert_eq!(op.prims, ["/World/odd"]);
 }
 
+/// "Points prim": three `Points` and a `NurbsPatch` render nothing and raise
+/// `geom.unsupported_type` once per type, in first-seen order, each naming
+/// its type's first prim and carrying its count.
+#[test]
+fn unread_geometry_types_are_reported_once_per_type() {
+    let scene = load(
+        "unsupported_types",
+        r#"    def Points "dust1" { point3f[] points = [(0, 0, 0)] }
+    def NurbsPatch "sheet" {}
+    def Points "dust2" { point3f[] points = [(1, 0, 0)] }
+    def Points "dust3" { point3f[] points = [(2, 0, 0)] }
+"#,
+        "",
+    );
+    let r = record(&scene, WarningCode::GeomUnsupportedType);
+    assert_eq!(r.kind, WarningKind::Skipped);
+    assert_eq!(r.count, 2, "one per type");
+    assert_eq!(r.prims, ["/World/dust1", "/World/sheet"]);
+    assert!(
+        r.message.starts_with("3 Points prims render nothing"),
+        "{}",
+        r.message
+    );
+    assert_eq!(scene.world.count(), 0);
+
+    let one = load(
+        "unsupported_type_one",
+        r#"    def NurbsPatch "sheet" {}
+"#,
+        "",
+    );
+    let r = record(&one, WarningCode::GeomUnsupportedType);
+    assert!(
+        r.message.starts_with("1 NurbsPatch prim render"),
+        "{}",
+        r.message
+    );
+}
+
+/// "Inside a prototype" and "Placements do not multiply the count": a
+/// `Points` in a prototype is counted once per build, however often it is
+/// placed.
+#[test]
+fn an_unread_type_in_a_prototype_is_counted_per_build() {
+    let positions: Vec<String> = (0..50).map(|i| format!("({i}, 0, 0)")).collect();
+    let scene = load(
+        "unsupported_in_prototype",
+        &format!(
+            r#"    def PointInstancer "scatter"
+    {{
+        rel prototypes = [</World/scatter/Protos/Dust>]
+        int[] protoIndices = [{}]
+        point3f[] positions = [{}]
+        def Scope "Protos"
+        {{
+            def Xform "Dust"
+            {{
+                def Points "grains" {{ point3f[] points = [(0, 0, 0)] }}
+            }}
+        }}
+    }}
+"#,
+            vec!["0"; 50].join(", "),
+            positions.join(", ")
+        ),
+        "",
+    );
+    let r = record(&scene, WarningCode::GeomUnsupportedType);
+    assert_eq!(r.count, 1);
+    assert_eq!(r.prims, ["/World/scatter/Protos/Dust/grains"]);
+    assert!(
+        r.message.starts_with("1 Points prim render"),
+        "{}",
+        r.message
+    );
+}
+
+/// "Non-geometry prims are not reported": transforms, scopes, cameras,
+/// materials and lights are not geometry, and the seven implicit shapes are
+/// read.
+#[test]
+fn read_prims_raise_no_unsupported_type() {
+    let scene = load(
+        "supported_types",
+        r#"    def Xform "group" {}
+    def Scope "scope" {}
+    def Material "look" {}
+    def SphereLight "lamp" { float inputs:radius = 0.1 }
+    def DistantLight "sun" {}
+    def Cube "cube" {}
+    def Plane "plane" {}
+    def Cylinder "cylinder" {}
+    def Cylinder_1 "cylinder1" {}
+    def Cone "cone" {}
+    def Capsule "capsule" {}
+    def Capsule_1 "capsule1" {}
+    def Mesh "mesh"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
+    def Sphere "sphere" {}
+    def Cube "fog" { token crust:volume:type = "homogeneous" }
+"#,
+        "",
+    );
+    assert!(
+        !codes(&scene).contains(&WarningCode::GeomUnsupportedType),
+        "{:#?}",
+        scene.warnings
+    );
+    assert_eq!(
+        scene.world.count(),
+        10,
+        "seven shapes, the mesh, the sphere and the SphereLight's emitter"
+    );
+}
+
 /// A prim of a type the registry does not know drops its ops with a warning;
 /// a `Scope` drops them silently, as C++ USD does by definition.
 #[test]

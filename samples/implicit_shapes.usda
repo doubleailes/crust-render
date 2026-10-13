@@ -1,0 +1,215 @@
+#usda 1.0
+(
+    doc = """The implicit shapes: Cube, Plane, Cylinder, Cylinder_1, Cone, Capsule and
+    Capsule_1, tessellated at import into the meshes usdview draws (OpenUSD's
+    GeomUtil generators), on every axis, and with unequal radii on the _1
+    variants. RenderSettings.camera names the camera, so each curved shape's
+    radial count follows its size on screen, keeping its outline within half a
+    pixel of the true curve. Cube and Plane shade faceted, the curved shapes
+    smooth. No mesh in the scene is authored by hand."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 2.4, 8.5)
+        float xformOp:rotateX = -11
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.55, 0.65, 0.85)
+        float inputs:intensity = 0.6
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 3
+        float inputs:intensity = 2.5
+        color3f inputs:color = (1, 0.95, 0.88)
+        float3 xformOp:rotateXYZ = (-50, 35, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Ground"
+        {
+            token outputs:surface.connect = </World/Looks/Ground/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.55, 0.55, 0.52)
+                float inputs:specularRoughness = 0.6
+                token outputs:surface
+            }
+        }
+        def Material "Clay"
+        {
+            token outputs:surface.connect = </World/Looks/Clay/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.8, 0.35, 0.2)
+                float inputs:specularRoughness = 0.45
+                token outputs:surface
+            }
+        }
+        def Material "Teal"
+        {
+            token outputs:surface.connect = </World/Looks/Teal/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.1, 0.5, 0.55)
+                float inputs:specularRoughness = 0.3
+                float inputs:coatWeight = 1.0
+                token outputs:surface
+            }
+        }
+        def Material "Brass"
+        {
+            token outputs:surface.connect = </World/Looks/Brass/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.9, 0.7, 0.35)
+                float inputs:baseMetalness = 1.0
+                float inputs:specularRoughness = 0.2
+                token outputs:surface
+            }
+        }
+    }
+
+    # The ground faces +Y, the backdrop +Z: a Plane's `axis` is its normal.
+    def Plane "Ground" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double width = 20
+        double length = 20
+        token axis = "Y"
+        rel material:binding = </World/Looks/Ground>
+    }
+
+    def Plane "Backdrop" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double width = 20
+        double length = 8
+        token axis = "Z"
+        rel material:binding = </World/Looks/Ground>
+        double3 xformOp:translate = (0, 4, -5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Front row: everything standing on its spine (axis Y).
+    def Cube "Cube" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Clay>
+        double3 xformOp:translate = (-3, 0.5, 0)
+        float xformOp:rotateY = 30
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+    }
+
+    def Cylinder "Cylinder" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.45
+        double height = 1
+        token axis = "Y"
+        rel material:binding = </World/Looks/Teal>
+        double3 xformOp:translate = (-1.5, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cone "Cone" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.5
+        double height = 1.2
+        token axis = "Y"
+        rel material:binding = </World/Looks/Brass>
+        double3 xformOp:translate = (0, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "Capsule" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.35
+        double height = 0.6
+        token axis = "Y"
+        rel material:binding = </World/Looks/Clay>
+        double3 xformOp:translate = (1.5, 0.65, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # A truncated cone: radiusTop below radiusBottom.
+    def Cylinder_1 "Frustum" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radiusBottom = 0.5
+        double radiusTop = 0.2
+        double height = 1
+        token axis = "Y"
+        rel material:binding = </World/Looks/Teal>
+        double3 xformOp:translate = (3, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Back row: lying on their sides (axis X, along the row; axis Z, toward
+    # the camera).
+    def Cylinder "Log" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.35
+        double height = 1.2
+        token axis = "X"
+        rel material:binding = </World/Looks/Brass>
+        double3 xformOp:translate = (-2.25, 0.35, -2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cone "Spike" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.4
+        double height = 1
+        token axis = "Z"
+        rel material:binding = </World/Looks/Clay>
+        double3 xformOp:translate = (-0.75, 0.4, -2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "Pill" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.3
+        double height = 0.8
+        token axis = "X"
+        rel material:binding = </World/Looks/Teal>
+        double3 xformOp:translate = (0.75, 0.3, -2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Unequal radii: each cap is tangent to the sloping side, so the larger
+    # one is a little more than a hemisphere.
+    def Capsule_1 "Drop" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radiusBottom = 0.4
+        double radiusTop = 0.15
+        double height = 0.6
+        token axis = "Z"
+        rel material:binding = </World/Looks/Brass>
+        double3 xformOp:translate = (2.25, 0.44, -2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (960, 540)
+        int crust:samplesPerPixel = 64
+    }
+}

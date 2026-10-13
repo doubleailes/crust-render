@@ -106,28 +106,31 @@ with:
 - **(c) Analytic shapes in `crust-rt`.** Exact silhouettes, but new geometry kinds,
   SIMD packets and bitwise pins. Out of proportion for blockout geometry.
 
-### D2. Four generators for seven schemas, a transcription of GeomUtil
+### D2. Five generators for seven schemas, a transcription of GeomUtil
 
 New file `usd_import/implicit.rs`:
 
 ```
  Cube                         ──► cuboid(size, size, size)
  Plane                        ──► plane(width, length) · basis(axis)
- Cylinder, Cylinder_1, Cone   ──► cylinder(N, rBottom, rTop, height) · basis(axis)
-                                    Cone: rTop = 0. Cylinder: rTop = rBottom = radius.
-                                    GeomUtil's cone generator is the rTop = 0 case
-                                    of the cylinder; the oracle pins both.
+ Cylinder, Cylinder_1         ──► cylinder(N, rBottom, rTop, height) · basis(axis)
+                                    Cylinder: rTop = rBottom = radius.
+ Cone                         ──► cone(N, radius, height) · basis(axis)
+                                    not the rTop = 0 cylinder: no top fan, its quads
+                                    close on N coincident apex points
  Capsule, Capsule_1           ──► capsule(N, M, rBottom, rTop, height) · basis(axis)
-                                    unequal radii: caps tangent to the cone,
-                                    with M doubled, as GeomUtil does
+                                    unequal radii: caps tangent to the cone, the
+                                    2M cap rings split between the caps by how much
+                                    of a sphere each covers, as GeomUtil does
 ```
 
 - The generators transcribe the C++ `_GeneratePointsImpl` / `_GenerateNormalsImpl`
   and `GenerateTopology`, including vertex order, the split cap rings, the seam at
   +X before the frame, and the `rightHanded` orientation.
 - `basis(axis)` transcribes `UsdImagingGprimAdapter::GetImplicitBasis`.
-- Points are computed in `f64` and stored as `f32`, as GeomUtil does when it writes
-  `GfVec3f`.
+- Points are computed in `f64` and stored as `f32`. GeomUtil itself computes in
+  `float` when Storm fills a `VtVec3fArray` (the scalar type follows the iterator), so
+  the oracle compares to float rounding (1e-6 of the extent), not bit for bit.
 - The scheme GeomUtil puts on the topology (`catmullClark` for curved shapes) is
   ignored: the result is a finished surface.
 - `Cube` and `Plane` render faceted because their normals are `uniform`, which
@@ -164,13 +167,19 @@ The constants:
 The count depends only on the stage, the camera, the resolution and the placement,
 so equal shapes at similar screen sizes still dedup.
 
-The same `MeshPlace::World` / `Shared` split as subdivision decides "unshared":
+The same `MeshPlace::World` / `Shared` split as subdivision decides "unshared"
+(only adaptive subdivision counts placements and hands the walk
+`ProtoPlace::Unshared`, so without an edge length every prototype part is shared):
 - a direct prim is placed in the world;
 - a prototype part is `Shared` unless the walk was given `ProtoPlace::Unshared`;
 - a prototype reached through a native instance nested in another prototype is
   always `Shared`, because `collect_proto_parts` splices nested instances from the
   cached shared build (`count_placements` does not descend into instances). This
   matches subdivision exactly, and changing it is out of scope for both.
+
+A count taken from the projection moves with the camera and the resolution, so the
+import records `StageFacts::on_screen_shapes` and an in-place settings update
+(`live.rs`) re-imports instead, as under adaptive subdivision.
 
 "Off screen gives `N_MIN`" holds while the frustum test is on (the default).
 Under `CRUST_ADAPTIVE_FRUSTUM=0`, `sigma_culled` skips the overlap test by design

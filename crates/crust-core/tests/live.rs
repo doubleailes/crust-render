@@ -222,3 +222,61 @@ fn a_replaced_light_and_its_geometry_share_one_emissive() {
     let area = scene.lights.lights()[key.index].clone();
     assert!(scene.lights.check_replace(sky, &area).is_err());
 }
+
+/// A stage rendering through a named camera, holding `shape`.
+fn shape_stage(name: &str, shape: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("crust_live_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(format!("{name}.usda"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"#usda 1.0
+def Xform "W"
+{{
+    def Camera "Cam"
+    {{
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def {shape} "Shape" {{}}
+}}
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </W/Cam>
+        uniform int2 resolution = (64, 32)
+    }}
+}}
+"#
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+/// A curved implicit shape sized from the render camera moves with the
+/// camera and the resolution, so a settings change re-imports rather than
+/// leave it tessellated for the old view; a cube, which has no radial count,
+/// leaves the settings to update in place.
+#[test]
+fn a_settings_change_reimports_shapes_sized_on_screen() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let rebuild = |path: &Path| {
+        let scene = Scene::from_usd(path).expect("load");
+        let prov = scene.provenance.as_ref().expect("provenance");
+        prov.rebuild(path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ())
+    };
+    let cylinder = shape_stage("live_cylinder", "Cylinder");
+    match rebuild(&cylinder) {
+        Err(crust_core::live::Structural(why)) => assert!(why.contains("implicit"), "{why}"),
+        Ok(()) => panic!("a cylinder sized on screen was updated in place"),
+    }
+    let cube = shape_stage("live_cube", "Cube");
+    assert_eq!(rebuild(&cube), Ok(()));
+}

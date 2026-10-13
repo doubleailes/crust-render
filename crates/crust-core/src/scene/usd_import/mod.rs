@@ -16,7 +16,7 @@
 //! | [`xform`]      | `xformOp:*` stacks → world matrices                          |
 //! | [`camera`]     | `UsdGeomCamera`                                              |
 //! | [`mesh`]       | `UsdGeomMesh`: interning, deferred bake-vs-instance, side tables |
-//! | [`adaptive`]   | adaptive subdivision: a mesh's level from its size on screen |
+//! | [`adaptive`]   | the camera's projection; adaptive subdivision: a mesh's level from its size on screen |
 //! | [`shapes`]     | `UsdGeomSphere`, `UsdGeomBasisCurves`                        |
 //! | [`implicit`]   | `Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` (+ `_1`) → GeomUtil meshes |
 //! | [`instancing`] | `PointInstancer` and native `instanceable` prototypes        |
@@ -88,12 +88,13 @@ mod time;
 mod volume;
 mod xform;
 
-use adaptive::{Frustum, ScreenRate};
+use adaptive::{Frustum, ScreenProjection, ScreenRate};
 use attrs::{
     custom_token, prim_value, resolve_adaptive_max_level, resolve_subdiv_edge_length,
     resolve_subdiv_level,
 };
 use camera::{RenderCamera, build_camera, screen_projection};
+use implicit::{ImplicitPolicy, Shape, undisplaced};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
 use light_links::LightLinks;
 use lights::{
@@ -103,7 +104,9 @@ use lights::{
 pub(crate) use listing::{list_prims, list_records};
 pub(crate) use live::rebuild;
 use materials::{MaterialCache, resolve_bound, resolve_material};
-use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
+use mesh::{
+    MeshArena, MeshPlace, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes, place_mesh_source,
+};
 use products::import_render_products;
 use settings::{
     CameraChoice, CameraPick, check_time_range, dome_light_camera_visibility,
@@ -352,9 +355,10 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // Dispatch by schema. Volume prims are checked first: a prim
         // carrying `crust:volume:type` imports as a participating-media
         // region only — never as geometry, so its bounds cannot occlude
-        // shadow rays. Otherwise order matters only for Meshes vs Sphere
-        // prims — both check first so we don't recurse into their
-        // materials as prims.
+        // shadow rays, and a volume `Cube` is never a box. The geometry
+        // branches then go in the prototype walk's order
+        // (`collect_proto_parts`), and a geometry prim no branch reads is
+        // counted for `geom.unsupported_type`.
         if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
             emit_point_instancer(
                 stage,
@@ -388,10 +392,25 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_curves(&mut ctx.world, &prim, &curves, this_world, mat);
+        } else if let Some(shape) = Shape::read(&prim) {
+            let bound = undisplaced(&prim, resolve_bound(stage, &prim, &mut ctx.caches));
+            let src =
+                ctx.caches
+                    .implicit
+                    .source(prim.path(), &shape, MeshPlace::World(&this_world));
+            place_mesh_source(
+                &mut ctx.world,
+                &prim,
+                src,
+                this_world,
+                bound,
+                &mut ctx.caches.meshes,
+                &mut ctx.pending_meshes,
+            );
         } else if visit_camera(stage, &prim, ctx) {
             // Recorded (and built, if it is the one) inside the call.
-        } else {
-            emit_light(stage, ctx, &prim, this_world);
+        } else if !emit_light(stage, ctx, &prim, this_world) {
+            ctx.caches.unread.saw(&prim);
         }
         ctx.links.saw(
             prim.path(),
@@ -922,6 +941,7 @@ pub(crate) fn load_scene(
         working,
         wanted_camera,
         subdiv,
+        projection,
     } = read_index(
         &index,
         path,
@@ -968,6 +988,7 @@ pub(crate) fn load_scene(
         // baked flat into the parent BVH when it is placed exactly once.
         caches: ImportCaches {
             subtrees,
+            implicit: ImplicitPolicy::new(projection),
             ..ImportCaches::new(assets, path, subdiv, working)
         },
         pending_meshes: Vec::new(),
@@ -995,6 +1016,7 @@ pub(crate) fn load_scene(
     // is reported as its own phase, so it comes back out of this figure.
     let asset_time = ctx.caches.asset_time;
     let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
+    ctx.caches.unread.report();
     let traverse_mem = MemorySample::now();
     debug!(
         "Traversal done in {:?}, plus {:?} of host asset decoding taken out of it and \
@@ -1037,6 +1059,21 @@ pub(crate) fn load_scene(
     }
 
     record_geometry_counters(&ctx.caches.meshes, &camera, &mut stats);
+    let implicit = &ctx.caches.implicit;
+    if implicit.shapes > 0 {
+        debug!(
+            "Implicit shapes: {} tessellated into {} triangles; curved ones by radial count \
+             {:?}{}",
+            implicit.shapes,
+            implicit.triangles,
+            implicit.counts,
+            if implicit.projection.is_some() {
+                ""
+            } else {
+                " (no camera named before the traversal: the fixed count)"
+            }
+        );
+    }
 
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
@@ -1094,6 +1131,7 @@ pub(crate) fn load_scene(
             working: Some(working),
             linked,
             camera: scene.camera_path.clone(),
+            on_screen_shapes: ctx.caches.implicit.on_screen,
         },
     });
     Ok(scene)
@@ -1111,6 +1149,8 @@ struct IndexRead {
     working: crate::color::Space,
     wanted_camera: Option<CameraChoice>,
     subdiv: SubdivPolicy,
+    /// The render camera's projection, when it was named (see [`subdiv_policy`]).
+    projection: Option<ScreenProjection>,
 }
 
 /// Reads [`IndexRead`] off the payload-free `index` stage: once by
@@ -1166,7 +1206,7 @@ fn read_index(
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
     }
-    let subdiv = subdiv_policy(
+    let (subdiv, projection) = subdiv_policy(
         index,
         path,
         path_str,
@@ -1192,6 +1232,7 @@ fn read_index(
         working,
         wanted_camera,
         subdiv,
+        projection,
     })
 }
 
@@ -1223,15 +1264,18 @@ fn apply_exposure(
     }
 }
 
-/// How this load refines subdivision surfaces: one `subdiv_level` for every
-/// mesh, or — when a target edge length is set — adaptively, from the render
-/// camera, which must then be resolved here, before the traversal meets it.
+/// How this load refines subdivision surfaces — one `subdiv_level` for every
+/// mesh, or, when a target edge length is set, adaptively from the render
+/// camera — and the camera's [`ScreenProjection`], which also sizes implicit
+/// shapes ([`implicit::ImplicitPolicy`]).
 ///
-/// The camera is read from the index stage when it is composed there, else
+/// The projection is read whenever the camera is named, with or without an
+/// edge length: from the index stage when the camera is composed there, else
 /// from a stage population-masked to its path with payloads loaded (a shot
-/// camera under a payload is the production case). Without a named camera,
-/// or when the path is not a camera, adaptive mode warns once and the uniform
-/// level applies: finding the first camera would take a traversal of its own.
+/// camera under a payload is the production case). Without a named camera, or
+/// when the path is not a camera, there is none: adaptive mode then warns once
+/// and the uniform level applies, and implicit shapes take their fixed count,
+/// silently. Finding the first camera would take a traversal of its own.
 fn subdiv_policy(
     index: &Stage,
     path: &Path,
@@ -1240,26 +1284,25 @@ fn subdiv_policy(
     subdiv_level: u32,
     wanted_camera: Option<&CameraChoice>,
     settings: &RenderSettings,
-) -> Result<SubdivPolicy, crate::Error> {
+) -> Result<(SubdivPolicy, Option<ScreenProjection>), crate::Error> {
     let target = resolve_subdiv_edge_length(
         options.subdivision_edge_length,
         render_settings_subdiv_edge_length(index),
-    );
-    let Some(target) = target.filter(|_| crate::config().subdiv) else {
-        return Ok(SubdivPolicy::new(subdiv_level));
-    };
+    )
+    .filter(|_| crate::config().subdiv);
     let Some(choice) = wanted_camera else {
-        warning!(
-            SubdivAdaptiveNeedsCamera,
-            "Adaptive subdivision ({target} px) needs the render camera before the stage \
-             is read — name it with --camera or RenderSettings.camera. Using the uniform \
-             level {subdiv_level}"
-        );
-        return Ok(SubdivPolicy::new(subdiv_level));
+        if let Some(target) = target {
+            warning!(
+                SubdivAdaptiveNeedsCamera,
+                "Adaptive subdivision ({target} px) needs the render camera before the stage \
+                 is read — name it with --camera or RenderSettings.camera. Using the uniform \
+                 level {subdiv_level}"
+            );
+        }
+        return Ok((SubdivPolicy::new(subdiv_level), None));
     };
     let camera_path = choice.path().clone();
-    let projection = match screen_projection(index, &prim_at(index, camera_path.clone()), settings)
-    {
+    let camera = match screen_projection(index, &prim_at(index, camera_path.clone()), settings) {
         Some(p) => Some(p),
         None => {
             let started = Instant::now();
@@ -1267,11 +1310,21 @@ fn subdiv_policy(
             let p = screen_projection(&stage, &prim_at(&stage, camera_path.clone()), settings);
             release_stage(stage, false);
             debug!(
-                "Read {camera_path} for adaptive subdivision from a stage masked to it in {:?}",
+                "Read {camera_path} for the screen projection from a stage masked to it in {:?}",
                 started.elapsed()
             );
             p
         }
+    };
+    let projection = camera.map(|p| ScreenProjection {
+        eye: p.eye,
+        f_px: p.f_px,
+        frustum: crate::config()
+            .adaptive_frustum
+            .then(|| Frustum::new(p.eye, p.forward, p.up, p.tan_v, p.tan_h)),
+    });
+    let Some(target) = target else {
+        return Ok((SubdivPolicy::new(subdiv_level), projection));
     };
     let Some(projection) = projection else {
         warning!(
@@ -1280,7 +1333,7 @@ fn subdiv_policy(
             "Adaptive subdivision ({target} px): {camera_path} is not a camera on this stage. \
              Using the uniform level {subdiv_level}"
         );
-        return Ok(SubdivPolicy::new(subdiv_level));
+        return Ok((SubdivPolicy::new(subdiv_level), None));
     };
     let max = resolve_adaptive_max_level(
         options.subdivision_level,
@@ -1292,23 +1345,16 @@ fn subdiv_policy(
     );
     // Shared prototypes take the uniform level: the level setting when one is
     // given (it is also the ceiling above), else 0.
-    Ok(SubdivPolicy::adaptive(
-        ScreenRate {
-            eye: projection.eye,
-            f_px: projection.f_px,
-            target,
-            max,
-            frustum: crate::config().adaptive_frustum.then(|| {
-                Frustum::new(
-                    projection.eye,
-                    projection.forward,
-                    projection.up,
-                    projection.tan_v,
-                    projection.tan_h,
-                )
-            }),
-        },
-        subdiv_level,
+    Ok((
+        SubdivPolicy::adaptive(
+            ScreenRate {
+                projection,
+                target,
+                max,
+            },
+            subdiv_level,
+        ),
+        Some(projection),
     ))
 }
 
@@ -1381,12 +1427,59 @@ struct ImportCaches<'a> {
     /// purpose ([`assets::explained`]): only references to these count a
     /// `*.unreadable` warning.
     failed_assets: std::collections::HashSet<std::path::PathBuf>,
+    /// How implicit shapes are tessellated, and what was.
+    implicit: ImplicitPolicy,
+    /// Geometry prims neither walk reads, for `geom.unsupported_type`.
+    unread: UnreadGprims,
     /// The working colour space every texture and authored colour is
     /// converted into ([`crate::color`]).
     pub(super) working: crate::color::Space,
     /// Its luminance weights, which every material's lobe selection weighs
     /// colours by ([`crate::color::luma`]).
     pub(super) luma: utils::Luma,
+}
+
+/// Geometry prims that neither walk reads as a surface or a volume — a
+/// `Points`, a `NurbsPatch`, a future type — by type, in first-seen order: one
+/// per prim the top-level walk meets, one per prim per prototype build.
+/// Reported once per type at the end of the load ([`UnreadGprims::report`]).
+#[derive(Default)]
+struct UnreadGprims {
+    /// `(type name, first prim, prims read)`.
+    types: Vec<(String, String, u64)>,
+}
+
+impl UnreadGprims {
+    /// Counts `prim`, which every reading branch has passed over, when it is
+    /// a `Gprim`: a camera, a light, a material or a transform is not one.
+    fn saw(&mut self, prim: &Prim) {
+        if !prim.is_a("Gprim").unwrap_or(false) {
+            return;
+        }
+        let ty = match prim.type_name() {
+            Ok(Some(t)) => t.as_str().to_owned(),
+            _ => return,
+        };
+        match self.types.iter_mut().find(|(t, ..)| *t == ty) {
+            Some((.., n)) => *n += 1,
+            None => self.types.push((ty, prim.path().to_string(), 1)),
+        }
+    }
+
+    /// One `geom.unsupported_type` per type, carrying its count — raised at
+    /// the end of the load, so a type met in several streamed chunks is
+    /// still one warning.
+    fn report(&self) {
+        for (ty, first, n) in &self.types {
+            let prims = if *n == 1 { "prim" } else { "prims" };
+            warning!(
+                GeomUnsupportedType,
+                at = first.as_str(),
+                "{n} {ty} {prims} render nothing: crust does not read the {ty} type \
+                 (the first at {first})"
+            );
+        }
+    }
 }
 
 impl ImportCaches<'_> {
@@ -1432,6 +1525,8 @@ impl<'a> ImportCaches<'a> {
             ies: HashMap::new(),
             light_textures: HashMap::new(),
             failed_assets: std::collections::HashSet::new(),
+            implicit: ImplicitPolicy::default(),
+            unread: UnreadGprims::default(),
             working,
             luma: crate::color::luma(working),
         }

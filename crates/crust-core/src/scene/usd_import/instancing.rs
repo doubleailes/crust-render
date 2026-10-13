@@ -41,6 +41,7 @@ use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
 };
+use super::implicit::{Shape, undisplaced};
 use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
@@ -303,6 +304,34 @@ pub(super) fn collect_proto_parts(
                     None,
                 ));
             }
+        } else if let Some(shape) = Shape::read(&prim) {
+            // An implicit shape is a mesh once tessellated, so it is a part
+            // like any mesh: interned, built at the end of the walk.
+            let material = undisplaced(&prim, resolve_bound(stage, &prim, caches)).material;
+            let part_world = match place {
+                ProtoPlace::Unshared(world) => Some(world * this_local),
+                ProtoPlace::Shared => None,
+            };
+            let src = caches.implicit.source(
+                prim.path(),
+                &shape,
+                part_world
+                    .as_ref()
+                    .map_or(MeshPlace::Shared, MeshPlace::World),
+            );
+            if let Some(slot) = caches.meshes.intern(&prim, src, &material, None) {
+                let faces = caches.meshes.slots[slot as usize].faces.clone();
+                let uvs = caches.meshes.slots[slot as usize].uvs.clone();
+                pending_meshes.push((parts.len(), slot));
+                parts.push(ProtoPart::leaf(
+                    placeholder_scene(),
+                    this_local,
+                    mask,
+                    material,
+                    faces,
+                    uvs,
+                ));
+            }
         } else if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
             // A PointInstancer inside a prototype: expand it into nested
             // sub-scenes rather than flattening. Flattening would multiply
@@ -322,6 +351,8 @@ pub(super) fn collect_proto_parts(
             ));
             // Its prototypes are reached through it, never drawn directly.
             continue;
+        } else {
+            caches.unread.saw(&prim);
         }
 
         if let Ok(children) = prim.children() {
