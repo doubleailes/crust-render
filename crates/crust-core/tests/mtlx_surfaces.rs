@@ -8,9 +8,9 @@ use crust_core::closure::{self, Lobe, Prepared};
 use crust_core::materialx::{self, Loaded};
 use crust_core::rt::Geometry;
 use crust_core::{
-    AreaLight, Emissive, HitRecord, LightList, MASK_ALL, MASK_INDIRECT, MASK_SHADOW, Material,
-    OpenPBR, PathSampler, Ray, RayCone, SamplingStrategy, ScatterSample, SphereShape, UvMap, Vec3A,
-    Volumes, World, WorldBuilder, ray_color,
+    AreaLight, BsdfDraw, Emissive, HitRecord, LightList, MASK_ALL, MASK_INDIRECT, MASK_SHADOW,
+    Material, OpenPBR, PathSampler, Ray, RayCone, SamplingStrategy, ScatterSample, SphereShape,
+    UvMap, Vec3A, Volumes, World, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 
@@ -898,7 +898,7 @@ fn stacked_placements_sharing_an_id_are_both_crossed() {
 struct FootprintMask;
 
 impl Material for FootprintMask {
-    fn scatter_importance(&self, _: &Ray, _: &HitRecord, _: PathSampler) -> Option<ScatterSample> {
+    fn scatter_importance(&self, _: &Ray, _: &HitRecord, _: BsdfDraw<'_>) -> Option<ScatterSample> {
         None
     }
 

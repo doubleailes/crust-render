@@ -177,3 +177,29 @@ fn every_product_carries_the_same_stamp() {
     };
     assert!(8 <= lo && lo <= hi && hi <= 16, "{lo}..{hi}");
 }
+
+/// The sampler is stamped: `--sampler latticeBn` as `latticeBn`, and a
+/// render with no sampler setting as `sobol`.
+#[test]
+fn the_sampler_is_recorded() {
+    let dir = work_dir("sampler");
+    let common = ["-s", "1", "--region", "0,0,8,8"];
+    render(
+        &dir,
+        &sample("cornellbox.usda"),
+        &[&["-o", "bn.exr", "--sampler", "latticeBn"][..], &common].concat(),
+    );
+    assert_eq!(
+        stamp(&dir.join("bn.exr"))["crust:sampler"],
+        text("latticeBn")
+    );
+    render(
+        &dir,
+        &sample("cornellbox.usda"),
+        &[&["-o", "default.exr"][..], &common].concat(),
+    );
+    assert_eq!(
+        stamp(&dir.join("default.exr"))["crust:sampler"],
+        text("sobol")
+    );
+}

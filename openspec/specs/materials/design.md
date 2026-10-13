@@ -50,7 +50,7 @@
 ## The Material trait
 
 - **`Material`** (`material/material.rs`) —
-  `scatter_importance(r_in, rec) -> Option<ScatterSample>` used by the integrator
+  `scatter_importance(r_in, rec, draw: BsdfDraw) -> Option<ScatterSample>` used by the integrator
   (`ScatterSample.delta` marks singular lobes like transmission: never mixed with a
   continuous density, no tracer cosine, emission carried at full weight),
   `eval(r_in, rec, wi) -> Option<(value, pdf)>` (evaluate the *continuous* component
@@ -80,6 +80,34 @@
   `Resolution` is built only by `Resolution::new`, which reads the emission and
   then resolves. `tests/resolve.rs` pins the contract bit for bit for every kind
   of material (plain, Ptex, glass, emissive, textured preview surface, MaterialX).
+  - **The scatter contract: numbers in, one 4D block.** A material samples from at most
+    four uniforms in `[0, 1)` that the integrator hands it, never from a sampler: the
+    same material, hit, ray and numbers give the same `ScatterSample` whichever QMC
+    sampler produced them (`openpbr/tests.rs::exact_uniforms_select_a_lobe` pins a coat
+    picked by hand-written uniforms, bit for bit across calls). Every implementation
+    draws exactly one block — `s[0]` picks the lobe or leaf, `s[1..3]` the direction,
+    `s[3]` a lobe's own discrete choice (dispersion channel, reflect-or-refract) — and
+    none derives a sub-domain, which is what let the sampler type leave the material
+    layer without changing a pixel: openqmc computes a whole 4D block per draw and
+    `draw_sample::<N>` returns its prefix, so a `<2>` draw moved out of a material and
+    into its caller is the first two values of the same block. The draw is **lazy** at
+    every point a material may not sample: the concrete entry points
+    (`OpenPBR::scatter_with`, `ResolvedClosure::scatter_choosing`,
+    `ResolvedClosure::straight_transmittance` and their `scatter_split` twins) take
+    `impl FnOnce() -> [f32; 4]` (`[f32; 2]` for the straight transmittance) and call it
+    only past the back-facing return, the empty-tree return and the no-thin-leaf case —
+    an unnecessary block per camera ray measured 4.2% of cornellbox (the `rendering`
+    record). The closure inlines away, so the code on these paths is what it was. The
+    `dyn Material` arm, reached in a render only by `Emissive` (draws nothing) and the
+    subsurface `ExitLambertian` (reads the block's first two), takes the object-safe
+    **`BsdfDraw<'_>`**: `Lazy(&dyn Fn() -> [f32; 4])` from the integrator, `Fixed([f32; 4])`
+    from a test, with `u()` drawing on demand; `ShadingPoint::scatter_importance` builds the
+    `Lazy` only on that arm, so the branch in `u()` is never on the hot path. A material
+    that one day needs unbounded numbers gets a `fn rng(&self)` on `BsdfDraw` (a
+    `pcg::Rng` seeded from the same domain): not a breaking change, and free until it
+    exists. Trap: a test helper that hands out "the next sampler" must now hand out the
+    next *block* and advance eagerly, as `S::next()` does in the openpbr and closure
+    tests — a lazily advanced index would skip a step at every early return.
   `PreviewSurface` gets its `Material` impl through `PatternMaterial`
   (`material/pattern.rs`), which states the order once; `MtlxMaterial` implements
   `resolve` directly and builds its resolution with `Resolution::closure`, which

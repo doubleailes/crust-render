@@ -34,7 +34,6 @@ use std::cell::RefCell;
 use std::f32::consts::FRAC_1_PI;
 use utils::cosine_hemisphere;
 
-use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::ScatterSample;
 use crate::material::brdf::{
@@ -541,16 +540,20 @@ impl ResolvedClosure {
     /// An unbiased estimate of the weight this closure gives the arriving
     /// ray continuing straight through: the summed contribution of its
     /// thin-walled transmitting leaves, each `weight · tint · (1 − F(v·h))`
-    /// at one microfacet normal `h` drawn from the leaf's VNDF with
-    /// `sampler`, exactly as [`sample_lobe`] draws it for the delta sample.
+    /// at one microfacet normal `h` drawn from the leaf's VNDF with the two
+    /// uniforms `draw` produces, exactly as [`sample_lobe`] draws it for the
+    /// delta sample. `draw` is called at most once, and only for a leaf
+    /// that is one: a closure with no thin-walled transmitting leaf draws
+    /// nothing.
     ///
     /// An estimate, not the value: a rough leaf's straight transmission is
     /// the average of `1 − F(v·h)` over its microfacets, which has no closed
     /// form. Its expectation is the delta lobe's, which is all the
     /// integrator's pass-through needs. Zero when no leaf is one.
-    pub fn straight_transmittance(&self, sampler: PathSampler) -> Vec3A {
+    pub fn straight_transmittance(&self, draw: impl FnOnce() -> [f32; 2]) -> Vec3A {
         let mut sum = Vec3A::ZERO;
         let mut uv = None;
+        let mut draw = Some(draw);
         for leaf in &self.leaves[..self.len] {
             let Lobe::Specular {
                 fresnel,
@@ -567,7 +570,7 @@ impl ResolvedClosure {
             if !mode.transmits() {
                 continue;
             }
-            let uv = *uv.get_or_insert_with(|| sampler.draw_sample_f32::<2>());
+            let uv = *uv.get_or_insert_with(|| draw.take().expect("drawn once")());
             let v = leaf.v;
             let v = Vec3A::new(v.x, v.y, v.z.max(1e-6)).normalize();
             let h = sample_vndf_ggx_aniso_local(v, ax, ay, uv);
@@ -818,11 +821,11 @@ impl ResolvedClosure {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
         out: &mut crate::lpe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
-        let (sample, choice) = self.scatter_choosing(r_in, rec, sampler)?;
+        let (sample, choice) = self.scatter_choosing(r_in, rec, draw)?;
         if !sample.delta {
             self.eval_lobes_at(sample.ray.direction(), out);
             if let Some(c) = choice {
@@ -896,14 +899,15 @@ impl ResolvedClosure {
         Some((value, pdf.max(1e-4)))
     }
 
-    /// [`crate::Material::scatter_importance`].
+    /// [`crate::Material::scatter_importance`], from the four uniforms
+    /// `draw` produces when called.
     pub fn scatter(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
     ) -> Option<ScatterSample> {
-        self.scatter_choosing(r_in, rec, sampler).map(|(s, _)| s)
+        self.scatter_choosing(r_in, rec, draw).map(|(s, _)| s)
     }
 
     /// [`ResolvedClosure::scatter`], and — where a fibre shares the vertex
@@ -918,14 +922,15 @@ impl ResolvedClosure {
         &self,
         _r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
     ) -> Option<(ScatterSample, Option<Choice>)> {
         if self.len == 0 {
             return None;
         }
         // One 4D block: `s[0]` picks the leaf, `s[1..3]` the direction and
-        // `s[3]` a leaf's own discrete choice (reflect or refract).
-        let s = sampler.draw_sample_f32::<4>();
+        // `s[3]` a leaf's own discrete choice (reflect or refract). Drawn
+        // here, after the empty-tree return.
+        let s = draw();
         let mut u = s[0] * self.select_total.max(0.0);
         let mut pick = self.len - 1;
         // Where in its own slice of `s[0]` the pick landed: a fresh uniform

@@ -8,8 +8,8 @@
 use crust_core::rt::Geometry;
 use crust_core::{
     AreaLight, Buffer, Camera, Emissive, Light, LightList, LightSelection, MASK_INDIRECT,
-    MASK_SHADOW, OpenPBR, PathSampler, Ray, RenderSettings, Renderer, SamplingStrategy,
-    SphereShape, Vec3A, Volumes, WorldBuilder, ray_color,
+    MASK_SHADOW, OpenPBR, PathSampler, Ray, RenderSettings, Renderer, SamplerKind,
+    SamplingStrategy, SphereShape, Vec3A, Volumes, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 
@@ -21,6 +21,11 @@ const H: usize = 36;
 /// Returns the renderer, whose light list is learned (or not), and a list
 /// over the same lights picking by power, for comparison.
 fn scene(selection: LightSelection, spp: u32) -> (Renderer, LightList) {
+    scene_with(selection, spp, SamplerKind::Sobol)
+}
+
+/// [`scene`], rendering with `sampler`.
+fn scene_with(selection: LightSelection, spp: u32, sampler: SamplerKind) -> (Renderer, LightList) {
     let mut world = WorldBuilder::new();
     world.attach(
         Geometry::TriangleMesh {
@@ -82,11 +87,36 @@ fn scene(selection: LightSelection, spp: u32) -> (Renderer, LightList) {
         .with_samples_per_pixel(spp)
         .with_max_depth(4)
         .with_adaptive_sampling(spp, 0.0)
-        .with_light_selection(selection);
+        .with_light_selection(selection)
+        .with_sampler(sampler);
     (
         Renderer::new(camera, world.commit(), lights, settings),
         by_power,
     )
+}
+
+/// The pre-pass draws from Sobol whatever `crust:sampler` says, so the
+/// learned table — and with it every pick — is the same under every
+/// sampler, and a sampler comparison measures the sampler alone.
+#[test]
+fn the_learned_table_is_the_same_under_every_sampler() {
+    let (sobol, _) = scene(LightSelection::Learned, 1);
+    for sampler in [SamplerKind::LatticeBn, SamplerKind::PmjBn] {
+        let (other, _) = scene_with(LightSelection::Learned, 1, sampler);
+        assert_eq!(other.settings.sampler(), sampler);
+        for z in -6..=6 {
+            for x in -6..=6 {
+                let p = Vec3A::new(x as f32 * 0.9, 0.0, z as f32 * 0.9);
+                for index in 0..2 {
+                    assert_eq!(
+                        sobol.lights.pmf_at(p, index).to_bits(),
+                        other.lights.pmf_at(p, index).to_bits(),
+                        "{sampler:?} at {p:?}, light {index}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

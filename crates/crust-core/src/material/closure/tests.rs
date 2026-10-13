@@ -6,12 +6,23 @@ use super::*;
 use crate::PathSampler;
 use crust_mtlx::{Compiler, Doc, ShadeCtx, flatten};
 
-/// A fresh QMC domain per draw, as the integrator derives one per vertex.
+/// A fresh 4D block per draw — one Sobol sample index after another, as
+/// the integrator draws one from the domain it derives per vertex. `Copy`,
+/// so one block can feed two queries that must agree.
 struct S(i32);
 impl S {
-    fn next(&mut self) -> PathSampler {
+    fn next(&mut self) -> impl Fn() -> [f32; 4] + Copy {
         self.0 += 1;
-        PathSampler::new(0, 0, 0, self.0)
+        let u = PathSampler::new(0, 0, 0, self.0).draw_sample_f32::<4>();
+        move || u
+    }
+}
+
+/// The first two of a block: what a 2D draw from the same domain was.
+fn pair(draw: impl Fn() -> [f32; 4]) -> impl FnOnce() -> [f32; 2] {
+    move || {
+        let u = draw();
+        [u[0], u[1]]
     }
 }
 
@@ -1119,7 +1130,7 @@ fn straight_transmittance_plus_the_rest_is_the_whole_closure() {
             let (mut t, mut part) = (Vec3A::ZERO, Vec3A::ZERO);
             for _ in 0..n {
                 let k = s.next();
-                t += full.straight_transmittance(k);
+                t += full.straight_transmittance(pair(k));
                 if let Some(x) = rest.scatter(&r, &rec, k) {
                     assert!(!x.delta, "{name}: the straight leaves were excluded");
                     part += x.value / x.pdf;
@@ -1171,8 +1182,9 @@ fn the_reduced_closure_samples_what_eval_reports() {
 fn a_thick_glass_has_no_straight_transmission() {
     let c = resolved(GLASS, "thick", 0.3, true);
     assert!(!c.has_straight());
+    // And draws nothing for it: the lazy draw stays lazy.
     assert_eq!(
-        c.straight_transmittance(PathSampler::new(0, 0, 0, 1)),
+        c.straight_transmittance(|| panic!("a thick closure drew for its straight transmittance")),
         Vec3A::ZERO
     );
 }

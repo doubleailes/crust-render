@@ -49,6 +49,7 @@ mod ray;
 /// The envelope and value rules every JSON report shares.
 pub mod report;
 mod rt_world;
+mod sampler;
 mod scene;
 /// What every EXR records about how it was sampled.
 pub mod stamp;
@@ -65,9 +66,12 @@ mod volume;
 pub mod warnings;
 mod world;
 
-/// The path tracer's QMC sampler: OpenQMC's Owen-scrambled Sobol, consumed
-/// through its native pass-by-value domain-tree API. Aliased here so a single
-/// edit can swap in another OpenQMC sampler (e.g. `SobolBnSampler`).
+/// The default QMC sampler — OpenQMC's Owen-scrambled Sobol, consumed
+/// through its native pass-by-value domain-tree API — by name: what the
+/// `learned` light-selection pre-pass always draws from, and what tests
+/// build their domains with. The integrator itself is generic over
+/// `openqmc::SamplerImpl`, and a render picks its sampler through
+/// [`SamplerKind`] (`crust:sampler` / `--sampler`).
 pub type PathSampler = openqmc::SobolSampler;
 
 /// The standalone MaterialX reader crust-core builds `MtlxMaterial` on.
@@ -117,6 +121,7 @@ pub use ray::{
     MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask, TRACE_T_MIN,
 };
 pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
+pub use sampler::SamplerKind;
 pub use scene::Scene;
 /// The implicit-shape tessellators, exposed for `tests/geomutil_oracle.rs`
 /// only: not a supported API.

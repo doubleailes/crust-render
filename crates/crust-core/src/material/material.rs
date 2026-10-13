@@ -1,4 +1,3 @@
-use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::closure::{PooledClosure, ResolvedClosure};
 use crate::material::{OpenPBR, ResolvedOpenPBR};
@@ -48,6 +47,41 @@ pub struct ScatterSample {
     pub subsurface: Option<u8>,
 }
 
+/// The uniform numbers a [`Material::scatter_importance`] draws its sample
+/// from: one block of four in `[0, 1)`, which the integrator stratifies
+/// through its QMC sampler and a test writes out by hand.
+///
+/// A material samples from numbers, never from a sampler: the same material,
+/// hit, ray and numbers give the same [`ScatterSample`] whichever sampler
+/// produced them, so the integrator can be generic over its sampler while
+/// `dyn Material` stays object-safe. The block is drawn only when `u` is
+/// called, so a material that needs no numbers for a query — an emitter, a
+/// back-facing hit — costs no draw.
+///
+/// Room to grow: a material that one day needs unbounded numbers gets a
+/// `fn rng(&self)` here (a `pcg::Rng` seeded from the same domain), which
+/// breaks no implementer and costs nothing until it exists.
+#[derive(Clone, Copy)]
+pub enum BsdfDraw<'a> {
+    /// The integrator's: drawn from the vertex's BSDF domain on demand.
+    Lazy(&'a dyn Fn() -> [f32; 4]),
+    /// A test's: the four numbers as written.
+    Fixed([f32; 4]),
+}
+
+impl BsdfDraw<'_> {
+    /// The four uniforms. `[0]` picks the lobe, `[1..3]` is the 2D direction
+    /// sample and `[3]` a lobe's own discrete choice; a material that draws
+    /// fewer reads the prefix.
+    #[inline]
+    pub fn u(&self) -> [f32; 4] {
+        match self {
+            BsdfDraw::Lazy(draw) => draw(),
+            BsdfDraw::Fixed(u) => *u,
+        }
+    }
+}
+
 /// The `Material` trait defines the behavior of materials in the ray tracing system.
 /// Materials determine how rays interact with surfaces, including scattering and emission.
 pub trait Material: Send + Sync {
@@ -62,18 +96,23 @@ pub trait Material: Send + Sync {
     /// # Parameters
     /// - `r_in`: The incoming ray.
     /// - `rec`: The hit record containing information about the intersection.
-    /// - `sampler`: A QMC sampler domain (by value) dedicated to this scatter
-    ///   event; the material draws its own ≤4-dimension block from it.
+    /// - `draw`: The uniform numbers dedicated to this scatter event (see
+    ///   [`BsdfDraw`]); the material reads at most one block of four, and
+    ///   only if it samples at all.
     ///
     /// # Returns
     /// - `Some(sample)` describing the sampled bounce (see [`ScatterSample`]).
     /// - `None` if the material does not scatter the ray.
+    ///
+    /// # Contract
+    /// A pure function of its arguments: the same material, hit, ray and
+    /// numbers give the same sample, whatever produced the numbers.
     #[must_use]
     fn scatter_importance(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: BsdfDraw<'_>,
     ) -> Option<ScatterSample>;
 
     /// Evaluates the *continuous* part of the BSDF toward a given
@@ -509,15 +548,15 @@ impl<'a> ShadingPoint<'a> {
     pub(crate) fn scatter_split(
         &self,
         r_in: &Ray,
-        sampler: PathSampler,
+        draw: impl Fn() -> [f32; 4],
         out: &mut crate::lpe::LobeSplit,
     ) -> Option<ScatterSample> {
         match &self.bsdf {
-            Resolved::Plain(m) => m.scatter_split(r_in, &self.rec, sampler, out),
-            Resolved::OpenPBR(m) => m.scatter_split(r_in, &self.rec, sampler, out),
-            Resolved::Closure(c) => c.scatter_split(r_in, &self.rec, sampler, out),
+            Resolved::Plain(m) => m.scatter_split(r_in, &self.rec, draw, out),
+            Resolved::OpenPBR(m) => m.scatter_split(r_in, &self.rec, draw, out),
+            Resolved::Closure(c) => c.scatter_split(r_in, &self.rec, draw, out),
             Resolved::Material(m) => {
-                let sample = m.scatter_importance(r_in, &self.rec, sampler)?;
+                let sample = m.scatter_importance(r_in, &self.rec, BsdfDraw::Lazy(&draw))?;
                 out.clear();
                 if !sample.delta {
                     out.push(
@@ -536,15 +575,16 @@ impl<'a> ShadingPoint<'a> {
     /// An unbiased estimate of the weight this BSDF gives the arriving ray
     /// `r_in` continuing straight through it — the thin-walled delta
     /// transmission, presence aside. Exact for an `OpenPBR` (the window
-    /// model is closed-form); one VNDF draw from `sampler` for a MaterialX
-    /// closure, whose rough thin leaf transmits the average of `1 − F(v·h)`
-    /// over its microfacets. Zero where the material has no such lobe.
-    pub fn straight_transmittance(&self, r_in: &Ray, sampler: PathSampler) -> Vec3A {
+    /// model is closed-form); one VNDF draw from `draw`'s two uniforms for a
+    /// MaterialX closure, whose rough thin leaf transmits the average of
+    /// `1 − F(v·h)` over its microfacets — drawn only when it has one. Zero
+    /// where the material has no such lobe.
+    pub fn straight_transmittance(&self, r_in: &Ray, draw: impl FnOnce() -> [f32; 2]) -> Vec3A {
         match &self.bsdf {
             Resolved::Material(_) => Vec3A::ZERO,
             Resolved::Plain(m) => m.straight_transmittance(r_in, &self.rec),
             Resolved::OpenPBR(m) => m.straight_transmittance(r_in, &self.rec),
-            Resolved::Closure(c) => c.straight_transmittance(sampler),
+            Resolved::Closure(c) => c.straight_transmittance(draw),
         }
     }
 
@@ -622,21 +662,28 @@ impl<'a> ShadingPoint<'a> {
         self.emitted
     }
 
-    /// [`Material::scatter_importance`] at this hit.
+    /// [`Material::scatter_importance`] at this hit, from the four uniforms
+    /// `draw` produces when called. The concrete arms take the closure
+    /// itself, so it inlines away; only the `dyn Material` arm boxes it in a
+    /// [`BsdfDraw`].
     ///
     /// `inline(always)`: a dispatch the integrator calls once per bounce.
     /// LLVM inlined it on its own until `trace_path` grew the hidden-light
     /// crossings; out of line it cost cornellbox 0.3% of its instructions.
     #[must_use]
     #[inline(always)]
-    pub fn scatter_importance(&self, r_in: &Ray, sampler: PathSampler) -> Option<ScatterSample> {
+    pub fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        draw: impl Fn() -> [f32; 4],
+    ) -> Option<ScatterSample> {
         match &self.bsdf {
-            Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, sampler),
+            Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, BsdfDraw::Lazy(&draw)),
             // No per-hit work means no Ptex at this hit, which is exactly when
             // `OpenPBR::scatter_importance` runs `scatter_resolved` on itself.
-            Resolved::Plain(m) => m.scatter_resolved(r_in, &self.rec, sampler),
-            Resolved::OpenPBR(m) => m.scatter(r_in, &self.rec, sampler),
-            Resolved::Closure(c) => c.scatter(r_in, &self.rec, sampler),
+            Resolved::Plain(m) => m.scatter_resolved(r_in, &self.rec, draw),
+            Resolved::OpenPBR(m) => m.scatter(r_in, &self.rec, draw),
+            Resolved::Closure(c) => c.scatter(r_in, &self.rec, draw),
         }
     }
 

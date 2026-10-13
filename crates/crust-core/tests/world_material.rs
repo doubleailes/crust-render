@@ -4,8 +4,9 @@
 
 use crust_core::rt::Geometry;
 use crust_core::{
-    Emissive, FaceMap, FanSlice, HitRecord, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Material,
-    OpenPBR, PathSampler, Ray, SubFace, UvMap, Vec3A, WorldBuilder, materialx, tangent_of,
+    BsdfDraw, Emissive, FaceMap, FanSlice, HitRecord, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW,
+    Material, OpenPBR, PathSampler, Ray, SubFace, UvMap, Vec3A, WorldBuilder, materialx,
+    tangent_of,
 };
 use std::sync::Arc;
 
@@ -749,8 +750,12 @@ fn emissive_material_emits_and_never_scatters() {
     };
     let r_in = Ray::new(Vec3A::Z, -Vec3A::Z);
     assert!(
-        e.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, 0))
-            .is_none()
+        e.scatter_importance(
+            &r_in,
+            &rec,
+            BsdfDraw::Lazy(&|| panic!("an emitter drew a block")),
+        )
+        .is_none()
     );
     assert!(e.eval(&r_in, &rec, Vec3A::Z).is_none());
     assert!(e.face_texture().is_none());
@@ -785,7 +790,11 @@ fn diffuse_scatter_samples_stay_in_the_upper_hemisphere() {
     let (r_in, rec) = upward_hit();
     for i in 0..256 {
         let s = m
-            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .scatter_importance(
+                &r_in,
+                &rec,
+                BsdfDraw::Fixed(PathSampler::new(0, 0, 0, i).draw_sample_f32::<4>()),
+            )
             .expect("a diffuse surface always scatters");
         assert!(
             s.ray.direction().dot(rec.normal) > 0.0,
@@ -805,7 +814,11 @@ fn diffuse_eval_is_consistent_with_its_samples() {
     let (r_in, rec) = upward_hit();
     for i in 0..64 {
         let s = m
-            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .scatter_importance(
+                &r_in,
+                &rec,
+                BsdfDraw::Fixed(PathSampler::new(0, 0, 0, i).draw_sample_f32::<4>()),
+            )
             .unwrap();
         let (value, pdf) = m
             .eval(&r_in, &rec, s.ray.direction().normalize())
@@ -841,7 +854,11 @@ fn directional_albedo(m: &OpenPBR) -> Vec3A {
     let mut sum = Vec3A::ZERO;
     for i in 0..n {
         let s = m
-            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .scatter_importance(
+                &r_in,
+                &rec,
+                BsdfDraw::Fixed(PathSampler::new(0, 0, 0, i).draw_sample_f32::<4>()),
+            )
             .unwrap();
         sum += s.value / s.pdf;
     }
@@ -886,7 +903,11 @@ fn metal_reflects_around_the_mirror_direction() {
     let mut close = 0;
     for i in 0..128 {
         let s = m
-            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .scatter_importance(
+                &r_in,
+                &rec,
+                BsdfDraw::Fixed(PathSampler::new(0, 0, 0, i).draw_sample_f32::<4>()),
+            )
             .unwrap();
         if s.ray.direction().normalize().dot(mirror) > 0.95 {
             close += 1;
@@ -909,7 +930,11 @@ fn glass_transmission_enters_the_interior() {
     let mut refracted = 0;
     for i in 0..128 {
         let s = m
-            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .scatter_importance(
+                &r_in,
+                &rec,
+                BsdfDraw::Fixed(PathSampler::new(0, 0, 0, i).draw_sample_f32::<4>()),
+            )
             .unwrap();
         if s.ray.direction().dot(rec.normal) < 0.0 {
             refracted += 1;
@@ -1028,7 +1053,11 @@ fn loading_the_sample_builds_a_material_that_shades() {
 
     let s = loaded
         .material
-        .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, 1))
+        .scatter_importance(
+            &r_in,
+            &rec,
+            BsdfDraw::Fixed(PathSampler::new(0, 0, 0, 1).draw_sample_f32::<4>()),
+        )
         .expect("scatters");
     assert!(s.pdf > 0.0);
     assert!(loaded.material.eval(&r_in, &rec, Vec3A::Z).is_some());

@@ -11,9 +11,11 @@ use crate::filter::FilterSampler;
 use crate::guiding::{GuidingConfig, GuidingField, SampleData};
 use crate::profile::{self, Section};
 use crate::rt_world::World;
+use crate::sampler::SamplerKind;
 use crate::stats::RayStats;
 use crate::volume::Volumes;
-use crate::{LightList, LightSelection, PathSampler};
+use crate::{LightList, LightSelection};
+use openqmc::{Sampler, SamplerImpl};
 
 mod control;
 mod path;
@@ -1020,6 +1022,44 @@ impl Renderer {
         layout: Option<&AovLayout>,
         control: Option<&RenderControl>,
     ) -> (Buffer, Option<AovFilm>, PassSamples, PassStats) {
+        // The sampler is chosen once per pass, here, and the pass body is
+        // monomorphised on it: no sample, pixel or unit branches on which
+        // sequence it draws from. Any table it draws from (the PMJ sequence,
+        // the blue-noise rankings) is built before the pass starts its
+        // timer, so a first pass never counts the build as sampling; a
+        // no-op once built, and for the cache-free samplers.
+        let kind = self.settings.sampler;
+        let warm = std::time::Instant::now();
+        kind.warm_cache();
+        let warm = warm.elapsed();
+        if warm > std::time::Duration::from_micros(50) {
+            debug!("sampler {}: tables built in {:?}", kind.name(), warm);
+        }
+        macro_rules! with {
+            ($imp:ty) => {
+                self.render_pass_with::<$imp>(cfg, gctx, progress, layout, control)
+            };
+        }
+        match kind {
+            SamplerKind::Sobol => with!(openqmc::sobol::SobolImpl),
+            SamplerKind::SobolBn => with!(openqmc::sobolbn::SobolBnImpl),
+            SamplerKind::Lattice => with!(openqmc::lattice::LatticeImpl),
+            SamplerKind::LatticeBn => with!(openqmc::latticebn::LatticeBnImpl),
+            SamplerKind::Pmj => with!(openqmc::pmj::PmjImpl),
+            SamplerKind::PmjBn => with!(openqmc::pmjbn::PmjBnImpl),
+        }
+    }
+
+    /// [`Renderer::render_pass`] drawing every sample from the QMC sampler
+    /// `S`.
+    fn render_pass_with<S: SamplerImpl>(
+        &self,
+        cfg: PassConfig,
+        gctx: Option<&GuidingContext>,
+        progress: Option<ProgressCallback>,
+        layout: Option<&AovLayout>,
+        control: Option<&RenderControl>,
+    ) -> (Buffer, Option<AovFilm>, PassSamples, PassStats) {
         let (w, h) = (self.settings.width, self.settings.height);
         // The pixels this pass traces, in raster space (rows bottom-up, as
         // `(i, j)` count them); every per-pixel plane is this size and is
@@ -1206,7 +1246,7 @@ impl Renderer {
                                     skipped = true;
                                     return;
                                 }
-                                self.advance::<$aov>(
+                                self.advance::<S, $aov>(
                                     profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
                                     target,
                                 );
@@ -1301,7 +1341,7 @@ impl Renderer {
                                         return;
                                     }
                                 }
-                                self.advance::<$aov>(
+                                self.advance::<S, $aov>(
                                     profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
                                     target,
                                 );
@@ -1511,7 +1551,7 @@ impl Renderer {
     /// film planes at pixel `p`.
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
-    fn advance<const AOV: bool>(
+    fn advance<S: SamplerImpl, const AOV: bool>(
         &self,
         profiling: bool,
         i: usize,
@@ -1533,7 +1573,7 @@ impl Renderer {
         // And on shadow-linked lights with a bounce-side twin (`TWINS`).
         macro_rules! go {
             ($profile:literal, $media:literal, $twins:literal) => {
-                self.advance_pixel::<$profile, AOV, $media, $twins>(
+                self.advance_pixel::<S, $profile, AOV, $media, $twins>(
                     i, j, p, cfg, filter, gctx, work, scratch, st, target,
                 )
             };
@@ -1559,7 +1599,13 @@ impl Renderer {
     /// planes (at the pixel `advance_dispatch` set), with the sample's own
     /// film offset and weight.
     #[allow(clippy::too_many_arguments)]
-    fn advance_pixel<const PROFILE: bool, const AOV: bool, const MEDIA: bool, const TWINS: bool>(
+    fn advance_pixel<
+        S: SamplerImpl,
+        const PROFILE: bool,
+        const AOV: bool,
+        const MEDIA: bool,
+        const TWINS: bool,
+    >(
         &self,
         i: usize,
         j: usize,
@@ -1618,7 +1664,7 @@ impl Renderer {
         let measuring = PROFILE && cfg.measure_clamp.is_some();
         for sample in state.taken..target {
             let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);
-            let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
+            let root = Sampler::<S>::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
                 .new_domain(tile);
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
             // Warp the in-pixel jitter through the reconstruction filter's
@@ -1656,7 +1702,7 @@ impl Renderer {
             }
             drop(primary);
             unit.rays.camera_rays += 1;
-            let radiance = trace_path::<PROFILE, AOV, MEDIA, TWINS>(
+            let radiance = trace_path::<S, PROFILE, AOV, MEDIA, TWINS>(
                 &r,
                 &path_cx,
                 root,

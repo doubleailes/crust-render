@@ -279,7 +279,10 @@ pub(crate) fn train(
                         })
                         .collect();
                     out.push(Receiver { p, contrib });
-                    let Some(sample) = sp.scatter_importance(&ray, vertex.new_domain(2)) else {
+                    let bsdf_dom = vertex.new_domain(2);
+                    let Some(sample) =
+                        sp.scatter_importance(&ray, || bsdf_dom.draw_sample_f32::<4>())
+                    else {
                         break;
                     };
                     // A subsurface sample's ray is the entry into a random

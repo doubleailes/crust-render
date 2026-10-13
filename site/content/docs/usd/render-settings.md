@@ -46,6 +46,9 @@ def Scope "Render"
         token crust:pixelFilter = "gaussian"
         float crust:pixelFilterRadius = 2
 
+        # the QMC sampler
+        token crust:sampler = "sobol"
+
         # path guiding
         bool crust:pathGuiding = true
         int crust:guidingTrainIterations = 8
@@ -289,6 +292,42 @@ An unknown name logs a warning and uses `triangle`.
 
 The filter radius in pixels, measured from the pixel center. Very small or negative
 values are raised to a minimum of 0.01.
+
+## Sampler
+
+### crust:sampler
+
+`token`, default **`sobol`**. CLI: [`--sampler`](@/docs/reference/command-line.md#sampler).
+
+The quasi-Monte Carlo sampler every number of the render is drawn from: the sub-pixel
+offsets, the lens, the time, every light pick and every BSDF sample. OpenQMC's three base
+sequences and their blue-noise variants:
+
+| value | meaning |
+|-------|---------|
+| `sobol` | Owen-scrambled Sobol. **Default**, and bit-identical to every render before the setting existed. |
+| `sobolBn` | Sobol, with the error distributed as blue noise across pixels. |
+| `lattice` | rank-1 lattice. |
+| `latticeBn` | rank-1 lattice, blue noise across pixels. |
+| `pmj` | progressive multi-jittered (0, 2) sequence. |
+| `pmjBn` | PMJ, blue noise across pixels. |
+
+No sampler wins everywhere, so none replaces `sobol`. Measured against it, unclamped, with
+a reference image: `lattice` lowered the error by 9% on the cornell box and raised it by 20%
+on a MaterialX scene, so whether it helps depends on the scene. The `*Bn` variants converge to
+the same error, but push it toward high frequencies, which a preview at a few samples a
+pixel, a progressive render or a denoiser sees as less visible noise; they cost 3–10% more
+render time. Use them for low-spp previews and denoised output, and compare on your scene
+before changing a final render's sampler.
+
+The sampler is recorded in every EXR as `crust:sampler`, and
+[`crust diff`](@/docs/reference/command-line.md#diff) warns when two images were sampled
+differently: their pixels then differ by noise even where both converge to the same image.
+The pre-pass that trains `crust:lightSelection = "learned"` always draws from `sobol`, so
+the learned table is the same under every sampler and a comparison measures the sampler
+alone.
+
+An unknown name logs a warning and uses `sobol`.
 
 ## Sampler seed
 

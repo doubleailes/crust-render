@@ -73,6 +73,7 @@ The flags of `crust render`:
 | [`--light-samples-indirect`](#light-samples-indirect) | count | scene / 1 | `crust:lightSamplesIndirect` |
 | [`--filter`](#filter) | name | scene / `triangle` | `crust:pixelFilter` |
 | [`--filter-radius`](#filter-radius) | pixels | per filter | `crust:pixelFilterRadius` |
+| [`--sampler`](#sampler) | name | scene / `sobol` | `crust:sampler` |
 | [`--indirect-clamp`](#indirect-clamp) | number | scene / 10 | `crust:indirectClamp` |
 | [`--ocio-config`](#ocio-config) | config | `$OCIO` / builtin ACES CG config | — |
 | [`--working-space`](#working-space) | colour space | scene / `lin_rec709` | `renderingColorSpace` |
@@ -369,6 +370,32 @@ filter has its own default radius (see the table above).
 
 ```bash
 crust render -i scene.usda --filter gaussian --filter-radius 2
+```
+
+### sampler
+
+`--sampler <SAMPLER>`
+
+The quasi-Monte Carlo sampler every number of the render is drawn from. Overrides
+[`crust:sampler`](@/docs/usd/render-settings.md#crust-sampler).
+
+| value | meaning |
+|-------|---------|
+| `sobol` | Owen-scrambled Sobol. **Default**, bit-identical to every render before the flag existed. |
+| `sobolBn` | Sobol, blue noise across pixels |
+| `lattice` | rank-1 lattice |
+| `latticeBn` | rank-1 lattice, blue noise across pixels |
+| `pmj` | progressive multi-jittered (0, 2) sequence |
+| `pmjBn` | PMJ, blue noise across pixels |
+
+`sobol` by default. `lattice` is better on some scenes and worse on others (−9% error on
+the cornell box, +20% on a MaterialX scene). The `*Bn` variants cost 3–10% more time for an
+error spectrum a low-spp preview or a denoiser sees as less noise; use them for previews
+and denoised output. The render's sampler is stamped into its EXR as `crust:sampler`, and
+`crust diff` warns when two images were sampled differently.
+
+```bash
+crust render -i scene.usda -s 4 --sampler sobolBn      # a blue-noise preview
 ```
 
 ### indirect-clamp
