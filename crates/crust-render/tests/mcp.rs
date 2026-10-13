@@ -181,6 +181,7 @@ const TOOLS: &[&str] = &[
     "snapshot",
     "cancel",
     "probe",
+    "light_paths",
     "diff",
     "render_final",
 ];

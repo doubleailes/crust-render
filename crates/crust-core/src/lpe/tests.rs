@@ -220,3 +220,81 @@ fn diffuse_starts_are_recognised_in_any_spelling() {
     assert!(!lpe.starts_with_diffuse_reflection(0));
     assert!(lpe.starts_with_diffuse_reflection(1));
 }
+
+/// Every lobe event, as the inspection alphabet names it: its symbol decodes
+/// back to it, and its text is an event the grammar accepts for exactly that
+/// event — `C<text>L` matches the word through it and through no other lobe.
+#[test]
+fn every_lobe_event_round_trips_through_the_inspection_alphabet() {
+    let mut lobes = Vec::new();
+    for transmit in [false, true] {
+        for scatter in [D, G, S, St] {
+            for label in LobeLabel::ALL {
+                lobes.push(LobeEvent {
+                    transmit,
+                    scatter,
+                    label,
+                });
+            }
+        }
+    }
+    let word = |e: &LobeEvent| {
+        let ty = if e.transmit { T } else { R };
+        [(C, N, 0), (ty, e.scatter, e.label as LabelId), (L, N, 0)]
+    };
+    let mut symbols = std::collections::HashSet::new();
+    for e in &lobes {
+        let sym = inspection_lobe(*e);
+        assert!(symbols.insert(sym), "{e:?} shares its symbol");
+        let ty = if e.transmit { T } else { R };
+        assert_eq!(
+            inspection_event(sym),
+            Some((ty, e.scatter, e.label as LabelId)),
+            "{e:?}"
+        );
+        let text = inspection_text(sym, None);
+        let lpe = one(&format!("C{text}L"));
+        for other in &lobes {
+            assert_eq!(
+                lpe.matches(&word(other), 0),
+                other == e,
+                "{text} against {other:?}"
+            );
+        }
+    }
+    assert_eq!(
+        inspection_text(
+            inspection_lobe(LobeEvent::reflect(G, LobeLabel::Coat)),
+            None
+        ),
+        "<RG'coat'>"
+    );
+}
+
+/// The events that end or pass a path: the camera, volume, object and light
+/// letters, a tagged light, and a cutout's straight pass-through.
+#[test]
+fn the_other_events_round_trip_through_the_inspection_alphabet() {
+    let cases = [
+        (inspection_symbol(C, N, 0), None, "C"),
+        (inspection_symbol(V, N, 0), None, "V"),
+        (inspection_symbol(O, N, 0), None, "O"),
+        (inspection_symbol(L, N, 0), None, "L"),
+        (inspection_symbol(L, N, 0), Some("sky"), "<L.'sky'>"),
+        // A tag a label cannot hold is left out.
+        (inspection_symbol(L, N, 0), Some("key'light"), "L"),
+        (inspection_symbol(T, St, 0), None, "<Ts>"),
+    ];
+    for (sym, tag, text) in cases {
+        assert_eq!(inspection_text(sym, tag), text);
+        validate(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+    }
+    let sky = one("C<RG'coat'><L.'sky'>");
+    let sky_label = sky.label("sky").expect("named");
+    assert!(sky.matches(&[(C, N, 0), (R, G, COAT), (L, N, sky_label)], 0));
+    assert!(!sky.matches(&[(C, N, 0), (R, G, COAT), (L, N, 0)], 0));
+    assert_eq!(inspection_event(u16::MAX), None);
+    let past = (EventType::COUNT * Scatter::COUNT * INSPECTION_LABELS) as u16;
+    assert_eq!(inspection_event(past), None);
+    assert!(inspection_event(past - 1).is_some());
+}

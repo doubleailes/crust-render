@@ -539,6 +539,9 @@ pub(crate) struct AovLayout {
     /// The compiled expressions and event symbols, built by the renderer
     /// (it needs the lights' tags) when `lpes` or `albedo` ask for routing.
     pub(crate) route: Option<std::sync::Arc<crate::tracer::RouteCtx>>,
+    /// The light path inspector's configuration: every camera sample's
+    /// records are kept per work unit ([`crate::inspect`]).
+    pub(crate) inspect: Option<std::sync::Arc<crate::inspect::store::Config>>,
 }
 
 impl AovLayout {

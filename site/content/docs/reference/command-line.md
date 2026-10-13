@@ -2,7 +2,7 @@
 title = "Command line"
 description = "Every crust command and flag."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-09T08:00:00+00:00
+updated = 2026-10-13T08:00:00+00:00
 draft = false
 weight = 10
 sort_by = "weight"
@@ -22,6 +22,7 @@ crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materi
 crust check -i <SCENE> [OPTIONS]    # what a render would use, and what crust refused
 crust diff <A> <B>                  # did the image change, and by how much?
 crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or cleaner
+crust light-paths -i <SCENE> --region X0,Y0,X1,Y1  # which light paths make these pixels bright
 crust mcp                           # serve a live editing session to Claude Desktop
 ```
 
@@ -32,6 +33,7 @@ crust mcp                           # serve a live editing session to Claude Des
 | [`check`](#check) | imports the stage as a render would and reports on it without rendering: the render it describes, its effective settings, the import's cost, findings and warnings. Takes the scene flags of `render`. |
 | [`diff`](#diff) | compares two EXRs: whether they are identical, by how much they differ, and whether they can be compared at all. |
 | [`diagnostic`](#diagnostic) | measures which settings make the stage's render faster or cleaner, within a time budget, and reports the evidence. Takes the scene flags of `render`. |
+| [`light-paths`](#light-paths) | re-renders a region of at most 100 pixels with the render's settings and reports its light paths: each path's expression, light, contribution and sample, the brightest first, and their groups. Takes the scene flags of `render` and `-s`. |
 | [`mcp`](#mcp) | serves a live session to an MCP client (Claude Desktop) on stdin/stdout: the agent opens a stage, edits it through an override layer, and renders it. Takes no flag but `-l`. |
 
 `-l, --level` applies to every command, and can go before or after it. `--log-file` belongs to
@@ -894,6 +896,64 @@ $ crust diagnostic -i samples/veach_mis.usda --budget 30s > report.md
 $ crust diagnostic -i samples/veach_mis.usda --light-selection learned --baseline crust-diagnostic.json
 ```
 
+## light-paths
+
+`crust light-paths -i <SCENE> --region X0,Y0,X1,Y1 [-s N] [--top 32] [--group-by expr+light] [--json PATH|-] [OPTIONS]`
+
+Re-renders a small region of the frame — at most 100 pixels, any shape — with the
+settings and sample count `crust render` with the same flags would use, and reports the
+**light paths** its camera samples took. A light path is one contribution of one sample
+that ends on emission: a light sampled directly (NEE), an emitter a bounce hits, a light
+it passes, a light at infinity it escapes to, or emission from something that is not a
+light. Each carries:
+
+- its contribution, before and after the [indirect clamp](#indirect-clamp), and its
+  luminance;
+- its **expression**, in the grammar of [light path expressions](@/docs/usd/aovs.md),
+  each vertex named by the lobe carrying most of its light, the light by its
+  `crust:light:lpeTag` (`<L.'sky'>`) or a plain `L`. Pasted into an `lpe` RenderVar it
+  routes the same path, over the whole frame;
+- each vertex's split between its lobes, and whether the label is ambiguous (the named
+  lobe carries less than 60%);
+- the light's prim path, the pixel, where in it the sample was taken, the sample index,
+  the path's depth and the camera.
+
+The paths are ranked by luminance (`--top`), and aggregated by `--group-by`, each group
+with its share of the region's luminance and of its second moment (what finds fireflies:
+a rare path can hold 2% of the light and 90% of the noise), its hit rate and its brightest
+path. The report opens with a one-sentence summary, states what it cut (`truncated`), and
+ends with hints, as codes. Finding the path behind a firefly, step by step, is in
+[Finding the path behind a firefly](@/docs/help/light-paths.md).
+
+The region's samples are the frame's, so each inspected pixel is the pixel a render
+writes, bit for bit (the report's `pixels` hold them) — except under path guiding,
+which trains on the region alone, and under adaptive sampling's neighbour hold, where a
+pixel at the region's edge can stop earlier than in the frame. The report says so
+(`reproduces_frame` with its reason), and the paths are the scene's either way.
+
+It writes **no image**. The Markdown summary goes to stdout (to stderr with `--json -`),
+the log to stderr. It accepts the scene flags of [`diagnostic`](#diagnostic), with the
+same names, values and defaults: [`-i`](#input) (required), [`-f`](#frame),
+[`--camera`](#camera), [`--region`](#region) (required), [`--strategy`](#strategy),
+[`--light-selection`](#light-selection), [`--light-samples`](#light-samples),
+[`--light-samples-indirect`](#light-samples-indirect), [`--indirect-clamp`](#indirect-clamp),
+[`--filter`](#filter), [`--filter-radius`](#filter-radius),
+[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
+[`--auto-tx`](#auto-tx); and `render`'s [`-s`](#samples), so it reproduces a render made
+at that count. The rest of `render`'s flags (`-o`, the colour and statistics flags,
+`--scanline`, `--log-file`) are refused. Its own flags:
+
+| flag | value | default | what it does |
+|------|-------|---------|--------------|
+| `--top` | count | 32 | How many of the brightest light paths to list. |
+| `--group-by` | key | `expr+light` | `none` (no groups), `light`, `expr` (lights told apart by their LPE tag, as the expression does), `expr+light`. `expr+prims+light` is refused: crust cannot resolve a hit to its prim yet, so every path's `prims` is `null` (the report's `prims_note` says so). |
+| `--json` | path or `-` | off | Also write the report as JSON, format `crust-light-paths/1`. With `-`, the JSON is all of stdout and the Markdown goes to stderr. The same command writes the same bytes, with any number of threads. |
+
+```bash
+$ crust light-paths -i shot.usda -s 256 --region 618,331,628,341
+$ crust light-paths -i samples/cornellbox.usda --region 100,50,110,60 --group-by light --json paths.json
+```
+
 ## mcp
 
 `crust mcp`
@@ -918,8 +978,8 @@ $ crust mcp -l debug        # what Claude Desktop runs; the log on stderr
 
 ## JSON reports
 
-`--stats-json`, `ls --json`, `check --json` and `diff --json` (and the
-[`diagnostic`](#diagnostic)'s report) share one shape, so a script reads them the same way:
+`--stats-json`, `ls --json`, `check --json`, `diff --json` and `light-paths --json` (and
+the [`diagnostic`](#diagnostic)'s report) share one shape, so a script reads them the same way:
 
 - each is one JSON object, opening with `format` — the report and its version, such as
   `crust-stats/1` — and `crust_version`;
@@ -958,6 +1018,14 @@ start. A tool that fails answers its call with an error and the server goes on.
 | `3` | a warning of a `--deny` kind was raised; the reports are still written |
 | `1` | an error: the stage can't be opened or imported, the region is outside the frame, or a report can't be written. No report is written. |
 | `2` | a usage error: an unknown or render-only flag, an unknown `--deny` kind, no `-i` |
+
+`crust light-paths` exits with:
+
+| status | when |
+|--------|------|
+| `0` | the report is written |
+| `1` | an error: the stage can't be opened or imported, the region has no pixel in the frame, or the JSON can't be written |
+| `2` | a usage error, before anything is loaded: an unknown or output flag, no `-i` or `--region`, a region over 100 pixels or empty, `--group-by expr+prims+light` |
 
 `crust diagnostic` exits with:
 

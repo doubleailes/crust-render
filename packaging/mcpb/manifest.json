@@ -44,6 +44,7 @@
     { "name": "snapshot", "description": "A render's latest image and progress." },
     { "name": "cancel", "description": "Stop a render, keeping what it traced." },
     { "name": "probe", "description": "A pixel's beauty and AOV values." },
+    { "name": "light_paths", "description": "The light paths behind a few pixels of a completed render." },
     { "name": "diff", "description": "Compare two renders as crust diff compares two images." },
     { "name": "render_final", "description": "Render the layer as crust render would, and list the files written." }
   ],

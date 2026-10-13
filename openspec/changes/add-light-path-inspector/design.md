@@ -120,10 +120,13 @@ bit-identical sub-image of the frame, so the records are the samples of the pixe
 the user saw — the firefly itself, not a lookalike. A test pins it: the inspected
 region's beauty equals the full render's pixels bitwise (Cornell box, `veach_mis`).
 
-Adaptive sampling stops per pixel on that pixel's own samples, so it reproduces too.
-Guiding does not (its training depends on the region and on wall-clock), so under
-guiding the report says `reproduces_frame: false` with the reason, and runs anyway:
-the paths are still the scene's paths, just not the same samples.
+Adaptive sampling stops per pixel on that pixel's own samples, so it reproduces too —
+except under its neighbour hold, found in implementation: the hold compares cross
+neighbours, and a neighbour outside the region is never sampled, so a pixel at the
+region's edge can stop earlier than in the frame. Guiding does not reproduce either
+(its training depends on the region and on wall-clock). In both cases the report
+says `reproduces_frame: false` with the reason, and runs anyway: the paths are still
+the scene's paths, just not the same samples.
 
 ### D5. The record store
 
