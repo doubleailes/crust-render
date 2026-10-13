@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a new feature or a change in behaviour.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scenes are loaded from USD only — requests for other scene or mesh formats
+        will be closed. Behavioural changes are designed through `openspec/changes/`;
+        check the capability's `openspec/specs/<capability>/design.md` "Known gaps"
+        first, the feature may already be listed there.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, or what renders wrongly? Name the USD schema, attribute or MaterialX node if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should crust do instead? A reference (PBRT, OpenPBR spec, another renderer's output) helps.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+  - type: textarea
+    id: scene
+    attributes:
+      label: Example scene
+      description: A minimal `.usda` that exercises the feature, if you have one.
+      render: usda

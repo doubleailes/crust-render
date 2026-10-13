@@ -1,0 +1,71 @@
+name: Bug report
+description: A render is wrong, a scene fails to load, or the CLI misbehaves.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Before filing, check
+        [the FAQ](https://doubleailes.github.io/crust-render/docs/help/faq/) and
+        [Diagnosing a render](https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - USD import / scene loading
+        - Materials (OpenPBR, MaterialX, UsdPreviewSurface)
+        - Lights / light sampling
+        - Textures / Ptex
+        - Integrator / noise / fireflies / volumes
+        - AOVs / EXR output
+        - Performance / memory
+        - CLI (render, check, diagnostic, diff, ls)
+        - MCP server (Claude Desktop)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+      description: Attach a crop or side-by-side image if the problem is visual.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Command and scene
+      description: |
+        The exact command line, and the scene — a `samples/` file, a minimal `.usda`
+        attached here, or a link. A one-prim reproduction is worth more than a whole set.
+      render: shell
+      placeholder: crust render -i scene.usda -o out.exr -s 16
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: "`crust check` output"
+      description: Output of `crust check -i scene.usda --json -` (what the render would use, plus the import's warnings).
+      render: json
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Output with `-l debug` (or `--stats` for performance issues). Trim to the relevant part.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit hash (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Linux x86_64 (AVX2), macOS arm64, Windows …
+    validations:
+      required: true
