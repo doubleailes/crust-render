@@ -1,7 +1,7 @@
 ---
 name: debug-noise
 description: Debug a noisy crust render — measure where the noise comes from with `crust diagnostic`, locate the firefly pixels, name the light path behind them with `crust light-paths`, and recommend the setting (or the scene change) that addresses it. Use when the user says a render is noisy, grainy, has fireflies or speckles, converges slowly, or asks which settings would make it cleaner.
-allowed-tools: Bash(cargo:*), Bash(target/release/crust:*), Bash(python3:*), Read
+allowed-tools: Bash(cargo:*), Bash(target/release/crust:*), Bash(python3:*), Bash(mkdir:*), Bash(mktemp:*), Read
 ---
 
 Find out **why** a crust render is noisy and **what to do about it**, backed by numbers
@@ -21,15 +21,23 @@ Reference, read when a step below is unclear: `site/content/docs/help/diagnosing
 (`## diagnostic`, `## light-paths`). Design records: `openspec/specs/diagnostics/design.md`,
 `openspec/specs/light-path-inspection/design.md`.
 
-**Input**: a stage (`-i`), plus whatever the user rendered it with: frame (`-f`), camera,
-sample count (`-s`), and any `--strategy` / `--light-selection` / `--light-samples*` /
+**Input**: a stage (`-i`), plus whatever the user rendered it with: frame (`-f`),
+camera, and any `--strategy` / `--light-selection` / `--light-samples*` /
 `--indirect-clamp` / subdivision flag. Call these the **scene flags** and pass them
 unchanged to every command below, so every measurement is of the render the user saw.
-If the user named a pixel or an area, note it. If no stage is given, ask for one.
+The sample count is kept apart as **`<spp>`**: only `crust render` and `crust light-paths`
+take `-s`; `check` and `diagnostic` refuse it. With no `-s` from the user, leave it off
+everywhere (the stage's own count applies). If the user named a pixel or an area, note
+it. If no stage is given, ask for one.
 
 ## Steps
 
-Work in the session scratchpad (`$OUT` below); write nothing beside the stage.
+**`$OUT`** is an absolute directory for every report and image; write nothing beside
+the stage. Use the session scratchpad when the system prompt names one, else create one
+with `mktemp -d`; `mkdir -p` it before step 1. Shell variables do not survive between
+tool calls, so either write the absolute path literally in each command or start each
+command with `OUT=<that path>;`. Never run a command with `$OUT` unset: the paths would
+land at `/`.
 
 0. **Build once.** `cargo build --release`, then use `target/release/crust` (abbreviated
    `crust` below). Don't use `cargo run` per step: every step would re-check the build.
@@ -43,10 +51,10 @@ Work in the session scratchpad (`$OUT` below); write nothing beside the stage.
 2. **Diagnose.**
 
    ```bash
-   crust diagnostic -i <stage> <scene flags minus -s> --budget 2m --json $OUT/d1.json > $OUT/d1.md
+   crust diagnostic -i <stage> <scene flags> --budget 2m --json $OUT/d1.json > $OUT/d1.md
    ```
 
-   `-s` is refused by `diagnostic`: it picks its own sample counts. Default budget 2m;
+   No `-s` here: the diagnostic picks its own sample counts. Default budget 2m;
    on a heavy production stage (import over a minute, baseline at 4 spp) use 5m and say so.
    If the user already named the area, add `--region` with a rectangle of at least 128
    pixels around it, so every trial spends its samples there.
@@ -81,20 +89,24 @@ Work in the session scratchpad (`$OUT` below); write nothing beside the stage.
    crop at the user's sample count and pick the isolated outliers:
 
    ```bash
-   crust render -i <stage> <scene flags> --region <crop rect> -o $OUT/crop.exr
+   crust render -i <stage> <scene flags> -s <spp> --region <crop rect> -o $OUT/crop.exr
    python3 .claude/skills/debug-noise/find_fireflies.py $OUT/crop.png --offset <x0>,<y0>
    ```
 
    The PNG holds only the region, so `--offset` is the crop's top-left corner; the script
    prints image-space pixels and a ready `--region` of 10×10 (100 pixels, the
    light-paths limit) around each. If the user named a pixel, use a 10×10 window around it
-   instead. If the script finds no isolated outliers, the noise is grain, not fireflies:
+   instead. The PNG is clamped and 8-bit, so a firefly inside an area that already clips
+   cannot be ranked: the script lists such areas separately, with a window each. A large
+   clipped area is usually a light seen directly or its highlight (the `emission` and
+   `direct_glossy` rows); inspect one of its windows in step 5 only when the dominant
+   row is another one, or when the user points there. If it finds neither, the noise is grain, not fireflies:
    inspect one 10×10 window in the middle of the crop anyway, to name the dominant path.
 
 5. **Name the paths.** For the strongest one or two windows:
 
    ```bash
-   crust light-paths -i <stage> <scene flags> --region <window> --json $OUT/lp1.json > $OUT/lp1.md
+   crust light-paths -i <stage> <scene flags> -s <spp> --region <window> --json $OUT/lp1.json > $OUT/lp1.md
    ```
 
    Same `-s` as the render: the region's samples are then the frame's, bit for bit

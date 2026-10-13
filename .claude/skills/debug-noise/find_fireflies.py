@@ -3,9 +3,14 @@
 
 A firefly is an isolated outlier: a pixel much brighter than the median of its
 3x3 neighbourhood. This reads the tone-mapped PNG crust writes beside its EXR
-(tone mapping is monotonic, so the ranking holds even where it saturates) and
-prints, for the strongest outliers, the image-space pixel and a `--region` of
-at most 100 pixels around it for `crust light-paths`.
+(no EXR reader is assumed) and prints, for the strongest outliers, the
+image-space pixel and a `--region` of at most 100 pixels around it for
+`crust light-paths`.
+
+The PNG is display-referred, clamped to [0, 1] and 8-bit: a firefly against a
+darker surround still stands out, but one inside an area that already clips
+does not. Such clipped areas are listed separately, as windows to inspect
+directly: the PNG cannot rank what is inside them.
 
     find_fireflies.py crop.png --offset X0,Y0 [--top 5] [--window 10]
 
@@ -33,8 +38,10 @@ def main() -> int:
     ox, oy = (int(v) for v in args.offset.split(","))
 
     img = np.asarray(Image.open(args.png).convert("RGB"), dtype=np.float64) / 255.0
-    # Rec.709 weights, as crust's luminance; on display values this is a ranking only.
+    # A ranking of display values only, never compared with crust's own luminance.
     luma = img @ np.array([0.2126, 0.7152, 0.0722])
+    # A channel at the 8-bit ceiling has lost its linear value.
+    clipped = img.max(axis=2) >= 254.5 / 255.0
     h, w = luma.shape
 
     padded = np.pad(luma, 1, mode="edge")
@@ -59,17 +66,41 @@ def main() -> int:
         if len(picked) == args.top:
             break
 
-    if not picked:
-        print("no isolated outliers: the noise here is not fireflies (read the noise breakdown instead)")
-        return 0
+    def region(gx: int, gy: int) -> str:
+        x0, y0 = max(gx - half, 0), max(gy - half, 0)
+        return f"{x0},{y0},{x0 + args.window},{y0 + args.window}"
 
-    print(f"{'pixel':>12}  {'luma':>5}  {'nbr median':>10}  light-paths region")
-    for x, y in picked:
-        gx, gy = x + ox, y + oy
-        x0, y0 = gx - half, gy - half
-        x0, y0 = max(x0, 0), max(y0, 0)
-        region = f"{x0},{y0},{x0 + args.window},{y0 + args.window}"
-        print(f"{gx:>5},{gy:<6}  {luma[y, x]:5.3f}  {median[y, x]:10.3f}  --region {region}")
+    if picked:
+        print(f"{'pixel':>12}  {'luma':>5}  {'nbr median':>10}  light-paths region")
+        for x, y in picked:
+            gx, gy = x + ox, y + oy
+            print(f"{gx:>5},{gy:<6}  {luma[y, x]:5.3f}  {median[y, x]:10.3f}  --region {region(gx, gy)}")
+    else:
+        print("no isolated outliers against an unclipped surround")
+
+    # Clipped pixels whose neighbours clip too: a firefly there is invisible to
+    # the ranking above. One window per cluster, largest clusters first.
+    nbr_clipped = np.stack(
+        [np.pad(clipped, 1)[dy : dy + h, dx : dx + w] for dy in range(3) for dx in range(3) if (dy, dx) != (1, 1)]
+    ).sum(axis=0)
+    hidden = clipped & (nbr_clipped >= 4)
+    ys, xs = np.nonzero(hidden)
+    if len(xs):
+        windows: list[tuple[int, int, int]] = []
+        for x, y in zip(xs.tolist(), ys.tolist()):
+            for i, (cx, cy, n) in enumerate(windows):
+                if abs(x - cx) <= half and abs(y - cy) <= half:
+                    windows[i] = (cx, cy, n + 1)
+                    break
+            else:
+                windows.append((x, y, 1))
+        windows.sort(key=lambda t: -t[2])
+        print(f"\n{len(xs)} pixels clip with clipped neighbours: the PNG cannot rank fireflies there.")
+        print("Inspect these windows directly (largest first):")
+        for cx, cy, n in windows[: args.top]:
+            print(f"  {n:>5} clipped px  --region {region(cx + ox, cy + oy)}")
+    elif not picked:
+        print("the noise here is not fireflies: read the diagnostic's noise breakdown instead")
     return 0
 
 
