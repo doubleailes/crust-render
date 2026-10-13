@@ -19,6 +19,11 @@ publish = false
 
 [workspace.dependencies]
 glam = "0.34.1"
+# The one thread pool: the kernel builds its BVH on it, the integrator renders
+# on it and the texture caches size their per-thread budget from it. Declared
+# once so the three crates can never name different versions of the pool they
+# share.
+rayon = "1.10.0"
 tracing = {version = "0.1.41", default-features = false}
 exr = "1.74.2"
 # Decoder-side image formats. Declared once so `crust-assets` (which decodes)
