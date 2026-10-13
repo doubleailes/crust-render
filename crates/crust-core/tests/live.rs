@@ -225,6 +225,12 @@ fn a_replaced_light_and_its_geometry_share_one_emissive() {
 
 /// A stage rendering through a named camera, holding `shape`.
 fn shape_stage(name: &str, shape: &str) -> PathBuf {
+    shape_stage_naming(name, shape, true)
+}
+
+/// A stage holding `shape` and one camera, which `RenderSettings.camera`
+/// names when `named`.
+fn shape_stage_naming(name: &str, shape: &str, named: bool) -> PathBuf {
     let dir = std::env::temp_dir().join("crust_live_tests");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(format!("{name}.usda"));
@@ -245,11 +251,12 @@ def Scope "Render"
 {{
     def RenderSettings "settings"
     {{
-        rel camera = </W/Cam>
+        {}
         uniform int2 resolution = (64, 32)
     }}
 }}
-"#
+"#,
+            if named { "rel camera = </W/Cam>" } else { "" }
         ),
     )
     .expect("write stage");
@@ -279,4 +286,36 @@ fn a_settings_change_reimports_shapes_sized_on_screen() {
     }
     let cube = shape_stage("live_cube", "Cube");
     assert_eq!(rebuild(&cube), Ok(()));
+}
+
+/// A cylinder that took the fixed radial count because no camera was named
+/// is sized from the screen by a fresh import once an edit names the camera
+/// the scene already rendered through, so that settings change re-imports
+/// too.
+#[test]
+fn naming_the_camera_reimports_shapes_sized_without_one() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = shape_stage_naming("live_cylinder_unnamed", "Cylinder", false);
+    let scene = Scene::from_usd(&path).expect("load");
+    assert_eq!(
+        scene.camera_path.as_deref(),
+        Some("/W/Cam"),
+        "the first camera"
+    );
+    let prov = scene.provenance.as_ref().expect("provenance");
+    // Unchanged, the settings still update in place.
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+    // The edit: the same layer, now naming that camera.
+    shape_stage_naming("live_cylinder_unnamed", "Cylinder", true);
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => assert!(why.contains("implicit"), "{why}"),
+        Ok(_) => panic!("a cylinder sized without a camera was updated in place"),
+    }
 }

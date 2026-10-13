@@ -26,7 +26,9 @@ use openusd_schemas::lux::{
 use openusd_schemas::shade::Material as UsdMaterial;
 use tracing::debug;
 
+use super::attrs::custom_token;
 use super::camera::camera_lens;
+use super::implicit::Shape;
 use super::lights::{LightInputs, light_inputs};
 use super::materials::{bound_material, surface_shader_id};
 use super::products::import_render_products;
@@ -255,7 +257,8 @@ fn read(kind: &'static str, prim: &Prim) -> (&'static str, LightInputs) {
 }
 
 /// The materials the import's binding resolution ([`bound_material`])
-/// resolves the geometry prims it renders to — meshes, spheres and curves,
+/// resolves the geometry prims it renders to — meshes, spheres, curves and
+/// implicit shapes,
 /// walked as the import walks them: pruned subtrees left out, an instance's
 /// prototype walked once in its place, a `PointInstancer`'s `prototypes`
 /// targets walked once each in prototype scope (they render through it, a
@@ -288,9 +291,12 @@ fn bound_materials(stage: &Stage, out: &mut HashSet<String>) {
                 }
             }
         }
+        // An implicit shape is a surface unless it is a volume, which the
+        // import checks first and which takes no material.
         let geometry = matches!(UsdMesh::get(stage, p()), Ok(Some(_)))
             || matches!(UsdSphere::get(stage, p()), Ok(Some(_)))
-            || matches!(UsdBasisCurves::get(stage, p()), Ok(Some(_)));
+            || matches!(UsdBasisCurves::get(stage, p()), Ok(Some(_)))
+            || (custom_token(&prim, "crust:volume:type").is_none() && Shape::read(&prim).is_some());
         if geometry && let Some(m) = bound_material(stage, &prim) {
             out.insert(m.to_string());
         }

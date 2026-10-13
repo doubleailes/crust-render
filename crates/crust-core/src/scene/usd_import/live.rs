@@ -323,6 +323,11 @@ fn refresh_settings(
         if read.subdiv.level != facts.subdiv_level || read.subdiv.adaptive.is_some() {
             return Err(Structural("the subdivision changed".into()));
         }
+        if facts.unsized_shapes && read.projection.is_some() {
+            return Err(Structural(
+                "implicit shapes would be sized for the newly named camera".into(),
+            ));
+        }
         if read.domes_seen_by_camera != facts.domes_seen_by_camera {
             return Err(Structural("the dome's camera visibility changed".into()));
         }

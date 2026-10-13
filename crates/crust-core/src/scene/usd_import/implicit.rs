@@ -532,10 +532,19 @@ impl Shape {
             Shape::Cuboid { .. } | Shape::Plane { .. } => None,
             Shape::Cylinder {
                 r_bottom, r_top, ..
-            }
-            | Shape::Capsule {
-                r_bottom, r_top, ..
             } => Some(r_bottom.abs().max(r_top.abs())),
+            // With unequal radii each cap's sphere is larger than its side's
+            // radius, and its rings reach the sphere's radius at the equator:
+            // the silhouette the count is chosen for is the spheres'.
+            Shape::Capsule {
+                r_bottom,
+                r_top,
+                height,
+                ..
+            } => {
+                let c = Caps::of(r_bottom, r_top, height);
+                Some(c.radius0.abs().max(c.radius1.abs()))
+            }
             Shape::Cone { radius, .. } => Some(radius.abs()),
         }
     }
@@ -702,6 +711,9 @@ pub(super) struct ImplicitPolicy {
     /// Whether any count came from the projection: a change of camera or
     /// resolution then changes the geometry (see `live`).
     pub(super) on_screen: bool,
+    /// Whether an unshared curved shape took [`N_FIXED`] for want of a
+    /// projection: naming a camera then changes the geometry (see `live`).
+    pub(super) fixed_unshared: bool,
 }
 
 impl ImplicitPolicy {
@@ -744,6 +756,7 @@ impl ImplicitPolicy {
             Some(r_max) => {
                 let (n, sigma) = self.radial_count(place, &shape.local_bounds(), r_max);
                 self.on_screen |= sigma.is_some();
+                self.fixed_unshared |= sigma.is_none() && matches!(place, MeshPlace::World(_));
                 *self.counts.entry(n).or_default() += 1;
                 debug!(
                     "{} at {at}: {n} radial segments ({})",
@@ -1174,6 +1187,32 @@ def Scope "Render"
         let mut placed = ImplicitPolicy::new(Some(projection(true)));
         placed.source(&at, &shape, MeshPlace::World(&near));
         assert!(placed.on_screen);
+    }
+
+    /// An unequal capsule is sized for its caps' spheres, which are larger
+    /// than either authored radius: at 100 px per unit, radii 1 and 0.1 over
+    /// a height of 1 give a bottom sphere of radius √1.81, whose silhouette
+    /// the chosen count keeps within `ε`.
+    #[test]
+    fn an_unequal_capsule_is_sized_for_its_caps() {
+        let shape = Shape::Capsule {
+            r_bottom: 1.0,
+            r_top: 0.1,
+            height: 1.0,
+            axis: Axis::Z,
+        };
+        let r = shape.r_max().unwrap();
+        assert!((r - 1.81_f64.sqrt()).abs() < 1e-12, "{r}");
+        let n = radial_count_at(100.0, r);
+        assert!(sagitta_px(100.0 * r, n) <= EPSILON_PX, "{n} segments");
+        // The mesh's widest ring is the bottom sphere's equator.
+        let t = shape.tessellate(N_MAX);
+        let widest = t
+            .points
+            .iter()
+            .map(|p| f64::from(p[0]).hypot(f64::from(p[1])))
+            .fold(0.0, f64::max);
+        assert!((widest - r).abs() < 1e-3 * r, "{widest} vs {r}");
     }
 
     /// The chosen count keeps the silhouette's sagitta within `ε`
