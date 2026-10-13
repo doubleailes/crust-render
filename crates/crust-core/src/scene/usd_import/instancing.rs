@@ -214,7 +214,19 @@ pub(super) fn collect_proto_parts(
 
         let mask = prim_ray_mask(&prim);
 
-        if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+        // Volumes first, as at the top level: a `crust:volume:*` prim is a
+        // volume whatever its schema, so a volume `Cube` must never be read
+        // as a box. Volumes live outside the surface BVH entirely (their
+        // bounds must not occlude shadow rays), so they cannot ride an
+        // instance transform. Say so rather than dropping silently.
+        if custom_token(&prim, "crust:volume:type").is_some() {
+            warning!(
+                VolumeInPrototype,
+                at = prim.path(),
+                "Volume at {} is inside a prototype — volumes cannot be instanced, skipped",
+                prim.path()
+            );
+        } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let bound = resolve_bound(stage, &prim, caches);
             let material = bound.material;
             let displacement = super::mesh::prim_displacement(&prim, bound.displacement);
@@ -291,16 +303,6 @@ pub(super) fn collect_proto_parts(
                     None,
                 ));
             }
-        } else if custom_token(&prim, "crust:volume:type").is_some() {
-            // Volumes live outside the surface BVH entirely (their bounds
-            // must not occlude shadow rays), so they cannot ride an
-            // instance transform. Say so rather than dropping silently.
-            warning!(
-                VolumeInPrototype,
-                at = prim.path(),
-                "Volume at {} is inside a prototype — volumes cannot be instanced, skipped",
-                prim.path()
-            );
         } else if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
             // A PointInstancer inside a prototype: expand it into nested
             // sub-scenes rather than flattening. Flattening would multiply

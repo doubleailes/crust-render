@@ -261,6 +261,12 @@ warning_codes! {
     DisplacementUnevaluated => "displacement.unevaluated", Skipped, Each,
         "The displacement amount is driven by a shader crust does not evaluate; the surface is not displaced.";
 
+    // Geometry types
+    GeomUnsupportedType => "geom.unsupported_type", Skipped, Each,
+        "A geometry prim type crust does not read (Points, NurbsPatch, TetMesh, ...); its prims render nothing.";
+    GeomImplicitDisplacement => "geom.implicit_displacement", Skipped, Each,
+        "Displacement bound to an implicit shape (Cube, Cylinder, Capsule, ...) is not applied; the shape renders undisplaced.";
+
     // Curves and volumes
     CurvesUnsupportedBasis => "curves.unsupported_basis", Skipped, Each,
         "BasisCurves uses a basis crust does not support.";

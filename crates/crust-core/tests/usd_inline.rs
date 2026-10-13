@@ -1829,6 +1829,52 @@ fn an_unknown_volume_type_is_skipped() {
     assert_eq!(scene.world.count(), 0, "still not turned into geometry");
 }
 
+/// A volume `Cube` inside a prototype — native or `PointInstancer` — is
+/// refused with a warning and never read as a box: the prototype walk checks
+/// for a volume before any geometry, as the top-level traversal does.
+#[test]
+fn a_volume_cube_in_a_prototype_is_neither_a_volume_nor_a_box() {
+    let scene = load(
+        "volume_in_prototype",
+        r#"
+    class Xform "_Fog"
+    {
+        def Cube "Fog"
+        {
+            token crust:volume:type = "homogeneous"
+        }
+    }
+    def Xform "A" (instanceable = true; references = </World/_Fog>) {}
+    def Xform "B" (instanceable = true; references = </World/_Fog>)
+    {
+        double3 xformOp:translate = (5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def PointInstancer "Scatter"
+    {
+        rel prototypes = [</World/Scatter/Protos/Puff>]
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 5, 0), (0, 10, 0)]
+        def Scope "Protos"
+        {
+            def Cube "Puff"
+            {
+                token crust:volume:type = "homogeneous"
+            }
+        }
+    }"#,
+    );
+    assert!(scene.volumes.is_empty(), "volumes cannot be instanced");
+    assert_eq!(scene.world.count(), 0, "nor are they read as boxes");
+    let refused: Vec<_> = scene
+        .warnings
+        .iter()
+        .filter(|w| w.code == crust_core::WarningCode::VolumeInPrototype)
+        .flat_map(|w| w.prims.iter().cloned())
+        .collect();
+    assert_eq!(refused.len(), 2, "one per prototype: {refused:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Subdivision
 // ---------------------------------------------------------------------------

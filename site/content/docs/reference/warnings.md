@@ -123,6 +123,13 @@ plain text and are not counted.
 | `xform.unknown_type` | skipped | A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored. | Author the transform on an `Xform` above the prim, or use a stock USD type; a plugin or studio schema is not known to Crust Render. |
 | `xform.motion_vector_unsupported` | approximated | Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero. | Expect a zero motion vector on rotating or scaling geometry. |
 
+## Geometry types
+
+| code | kind | meaning | what to do |
+|------|------|---------|------------|
+| `geom.unsupported_type` | skipped | A geometry prim type crust does not read (Points, NurbsPatch, TetMesh, ...); its prims render nothing. Raised once per type, with the number of prims read. | Convert the prims to a `Mesh`, `BasisCurves` or one of the [implicit shapes](@/docs/usd/geometry.md#supported-prims). |
+| `geom.implicit_displacement` | skipped | Displacement bound to an implicit shape (Cube, Cylinder, Capsule, ...) is not applied; the shape renders undisplaced. | Displace a `Mesh` instead: implicit shapes have no texture coordinates to displace along. |
+
 ## Meshes, subdivision and displacement
 
 | code | kind | meaning | what to do |

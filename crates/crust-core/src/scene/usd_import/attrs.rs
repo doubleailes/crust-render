@@ -215,6 +215,16 @@ pub(super) fn decode_f32(v: sdf::Value) -> Option<f32> {
     }
 }
 
+/// A scalar float in double precision, whatever precision it was authored in.
+pub(super) fn decode_f64(v: sdf::Value) -> Option<f64> {
+    match v {
+        sdf::Value::Double(d) => Some(d),
+        sdf::Value::Float(f) => Some(f64::from(f)),
+        sdf::Value::Half(h) => Some(f64::from(h.to_f32())),
+        _ => None,
+    }
+}
+
 /// A number where hand-written files author integers as often as floats
 /// (`clearValue`, MaterialX-style shader inputs): [`decode_f32`] plus `int`.
 pub(super) fn decode_number(v: sdf::Value) -> Option<f32> {
@@ -416,6 +426,10 @@ pub(super) fn custom_i32_array(prim: &Prim, name: &str) -> Option<Vec<i32>> {
 
 pub(super) fn attr_f32(attr: &Attribute) -> Option<f32> {
     value_at(attr).and_then(decode_f32)
+}
+
+pub(super) fn attr_f64(attr: &Attribute) -> Option<f64> {
+    value_at(attr).and_then(decode_f64)
 }
 
 pub(super) fn attr_bool(attr: &Attribute) -> Option<bool> {

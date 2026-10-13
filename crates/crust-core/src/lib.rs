@@ -115,6 +115,14 @@ pub use ray::{
 };
 pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
 pub use scene::Scene;
+/// The implicit-shape tessellators, exposed for `tests/geomutil_oracle.rs`
+/// only: not a supported API.
+#[doc(hidden)]
+pub mod implicit_shapes {
+    pub use crate::scene::implicit::{
+        Axis, MIN_CAP_AXIAL, MIN_RADIAL, Tessellation, capsule, cone, cuboid, cylinder, plane,
+    };
+}
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
     MaterialRecord, NoAssets, UsdImportOptions, usd_schema_registry,
