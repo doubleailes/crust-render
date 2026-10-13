@@ -113,7 +113,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | `snapshot(render_id, budget_s?)` | the render's latest image and progress, at once, or after waiting at most `budget_s` for the render to finish |
 | `cancel(render_id)` | stops a render, keeping what it traced |
 | `probe(render_id, x, y)` | the beauty and every AOV at a pixel, in the working space, and the prim and material the camera ray hits there |
-| `light_paths(render_id, region, group_by?, top?)` | the light paths behind up to 100 pixels of a completed render, as [`crust light-paths`](@/docs/reference/command-line.md#light-paths) reports them: each path's expression, light, contribution and sample, the brightest first, and their groups (see [Finding the path behind a firefly](@/docs/help/light-paths.md)) |
+| `light_paths(render_id, region, group_by?, top?)` | the light paths behind up to 100 pixels of a completed render (`top`: 32 by default, at most 1000), as [`crust light-paths`](@/docs/reference/command-line.md#light-paths) reports them: each path's expression, light, contribution and sample, the brightest first, and their groups (see [Finding the path behind a firefly](@/docs/help/light-paths.md)) |
 | `diff(render_a, render_b)` | compares two renders as [`crust diff`](@/docs/reference/command-line.md#diff) compares two files |
 | `render_final()` | renders the layer as `crust render <output>` would, and lists the files written |
 

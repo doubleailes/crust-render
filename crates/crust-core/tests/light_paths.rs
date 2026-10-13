@@ -187,8 +187,11 @@ fn coordinates_are_where_the_sample_was_taken() {
     ] {
         let mut r = load("cornellbox.usda", |s| fixed(8)(s.with_pixel_filter(filter)));
         let region = centre(&r);
-        let report = inspect(&mut r, region, GroupBy::None, 100_000);
-        assert_eq!(report.truncated.kept, report.truncated.of);
+        let report = inspect(&mut r, region, GroupBy::None, inspect::MAX_TOP);
+        assert_eq!(
+            report.truncated.kept,
+            report.truncated.of.min(inspect::MAX_TOP as u64)
+        );
         for rec in &report.records {
             let [x, y] = rec.pixel.map(|p| p as f32 + 0.5);
             let [cx, cy] = rec.coordinates;
@@ -407,7 +410,8 @@ fn every_expression_routes_its_path() {
 
 /// A light is named by its prim path, and its tag labels the expression's
 /// `L`; an untagged light ends in a plain `L`; emission that is no light's
-/// ends in `O` with no light.
+/// ends in `O` with no light. Read off the groups, which count every record
+/// whatever `--top` keeps.
 #[test]
 fn lights_are_named_by_path_and_tag() {
     let mut world = WorldBuilder::new();
@@ -467,12 +471,12 @@ fn lights_are_named_by_path_and_tag() {
         &mut r,
         PixelRect::new(15, 20, 25, 30),
         GroupBy::ExprLight,
-        100_000,
+        32,
     );
     let mut seen = [false; 3];
-    for rec in &report.records {
-        let e = &rec.expression;
-        match rec.light.as_deref() {
+    for group in &report.groups {
+        let e = group.expression.as_deref().expect("an expression");
+        match group.light.as_deref() {
             Some("/lights/key") => {
                 assert!(e.ends_with("<L.'key'>"), "{e}");
                 seen[0] = true;
@@ -487,9 +491,9 @@ fn lights_are_named_by_path_and_tag() {
             }
             other => panic!("{other:?}"),
         }
-        assert!(rec.prims.is_none());
     }
     assert_eq!(seen, [true; 3]);
+    assert!(report.records.iter().all(|r| r.prims.is_none()));
     assert!(report.prims_note.is_some());
 }
 
@@ -501,7 +505,7 @@ fn lights_are_named_by_path_and_tag() {
 fn expressions_name_the_dominant_lobe() {
     let mut r = load("veach_mis.usda", fixed(16));
     let region = centre(&r);
-    let report = inspect(&mut r, region, GroupBy::Expr, 2_000);
+    let report = inspect(&mut r, region, GroupBy::Expr, inspect::MAX_TOP);
     let mut ambiguous = 0;
     for rec in &report.records {
         assert_eq!(rec.lobe_split.len(), rec.depth);
@@ -529,18 +533,71 @@ fn expressions_name_the_dominant_lobe() {
     }
 }
 
-/// What no inspection runs with is refused, before anything renders.
+/// What no inspection runs with is refused, before anything renders, as
+/// a typed error: an empty region, one over the pixel cap — however far it
+/// reaches, `width × height` overflowing included — more records than the
+/// cap, the grouping by prims, and a region with no pixel in the frame.
 #[test]
 fn oversized_and_prim_requests_are_refused() {
+    use crust_core::Error;
+    use inspect::Refusal;
+    let check = |region, group_by, top| inspect::check_request(region, group_by, top);
     let big = PixelRect::new(0, 0, 20, 20);
-    let err = inspect::check_request(big, GroupBy::ExprLight).unwrap_err();
-    assert!(err.contains("100"), "{err}");
-    assert!(inspect::check_request(PixelRect::new(3, 3, 3, 9), GroupBy::Expr).is_err());
-    let err =
-        inspect::check_request(PixelRect::new(0, 0, 5, 5), GroupBy::ExprPrimsLight).unwrap_err();
-    assert!(err.contains("prim"), "{err}");
-    assert!(inspect::check_request(PixelRect::new(0, 0, 1, 100), GroupBy::None).is_ok());
+    let err = check(big, GroupBy::ExprLight, 32).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Inspection(Refusal::RegionTooLarge {
+                pixels: Some(400),
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("100"), "{err}");
+    // `width × height` past `usize`: wrapped, (2³²)² is 0 and (2⁶⁴ − 1)² is 1.
+    for far in [
+        PixelRect::new(0, 0, 1 << 32, 1 << 32),
+        PixelRect::new(0, 0, usize::MAX, usize::MAX),
+    ] {
+        assert!(
+            matches!(
+                check(far, GroupBy::ExprLight, 32),
+                Err(Error::Inspection(Refusal::RegionTooLarge {
+                    pixels: None,
+                    ..
+                }))
+            ),
+            "{far}"
+        );
+    }
+    assert!(matches!(
+        check(PixelRect::new(3, 3, 3, 9), GroupBy::Expr, 32),
+        Err(Error::Inspection(Refusal::EmptyRegion(_)))
+    ));
+    let err = check(PixelRect::new(0, 0, 5, 5), GroupBy::ExprPrimsLight, 32).unwrap_err();
+    assert!(matches!(err, Error::Inspection(Refusal::PrimsUnavailable)));
+    assert!(err.to_string().contains("prim"), "{err}");
+    let ok = PixelRect::new(0, 0, 1, 100);
+    assert!(check(ok, GroupBy::None, inspect::MAX_TOP).is_ok());
+    let err = check(ok, GroupBy::None, inspect::MAX_TOP + 1).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Inspection(Refusal::TooManyRecords(1001))
+    ));
+    assert!(err.to_string().contains("1000"), "{err}");
     let mut r = caustic(1);
     let outside = PixelRect::new(100, 100, 105, 105);
-    assert!(inspect::run(&mut r, outside, &Options::default()).is_err());
+    assert!(matches!(
+        inspect::run(&mut r, outside, &Options::default()),
+        Err(Error::EmptyRegion { .. })
+    ));
+    let options = Options {
+        top: usize::MAX,
+        ..Options::default()
+    };
+    assert!(matches!(
+        inspect::run(&mut r, PixelRect::new(0, 0, 2, 2), &options),
+        Err(Error::Inspection(Refusal::TooManyRecords(_)))
+    ));
 }

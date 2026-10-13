@@ -749,13 +749,22 @@ fn light_paths_inspects_the_render_its_layer_made() {
         report["command"]
     );
 
-    // Outside the render's region, or over the cap.
-    for bad in [[290, 165, 300, 175], [300, 150, 340, 190]] {
+    // Outside the render's region, or over the cap — its area past
+    // `usize` included — or more records than the cap.
+    for bad in [
+        [290, 165, 300, 175],
+        [300, 150, 340, 190],
+        [0, 0, usize::MAX, usize::MAX],
+    ] {
         assert!(
             open.light_paths(job.id, bad, GroupBy::Expr, 8).is_err(),
             "{bad:?}"
         );
     }
+    let e = open
+        .light_paths(job.id, region, GroupBy::Expr, 1001)
+        .unwrap_err();
+    assert!(e.contains("1000"), "{e}");
     let e = open
         .light_paths(job.id, region, GroupBy::ExprPrimsLight, 8)
         .unwrap_err();
@@ -770,6 +779,7 @@ fn light_paths_inspects_the_render_its_layer_made() {
         .light_paths(job.id, region, GroupBy::ExprLight, 8)
         .unwrap_err();
     assert!(e.contains("changed since render"), "{e}");
+    assert!(!e.contains("  "), "one space between words: {e}");
 
     open.undo().expect("undone");
     let again = open
@@ -789,9 +799,11 @@ fn light_paths_refuses_a_render_that_did_not_complete() {
         .light_paths(job.id, [300, 150, 310, 160], GroupBy::ExprLight, 8)
         .unwrap_err();
     assert!(e.contains("rendering"), "{e}");
+    assert!(!e.contains("  "), "one space between words: {e}");
     open.renders.cancel(job.id).expect("cancelled");
     let e = open
         .light_paths(job.id, [300, 150, 310, 160], GroupBy::ExprLight, 8)
         .unwrap_err();
     assert!(e.contains("cancelled"), "{e}");
+    assert!(!e.contains("  "), "one space between words: {e}");
 }
