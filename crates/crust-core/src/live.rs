@@ -98,6 +98,9 @@ pub(crate) struct StageFacts {
     /// Whether an implicit shape took its radial count from the camera's
     /// projection: a change of camera or resolution then moves geometry.
     pub(crate) on_screen_shapes: bool,
+    /// Whether an unshared curved implicit shape took the fixed radial count
+    /// because no camera was named: naming one then moves geometry.
+    pub(crate) unsized_shapes: bool,
 }
 
 impl Provenance {

@@ -1132,6 +1132,7 @@ pub(crate) fn load_scene(
             linked,
             camera: scene.camera_path.clone(),
             on_screen_shapes: ctx.caches.implicit.on_screen,
+            unsized_shapes: ctx.caches.implicit.fixed_unshared,
         },
     });
     Ok(scene)

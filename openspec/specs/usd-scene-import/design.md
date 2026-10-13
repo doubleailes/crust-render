@@ -530,7 +530,9 @@ rendered in usdview rendered with holes here.
   and ceiling. `subdiv_policy` resolves the projection whenever a camera is named before
   the traversal, edge length or not, and the import keeps it in `ImplicitPolicy`. For an
   unshared placement, with `σ = sigma_culled(world_xf, local_bounds, Cull::Pad(0))` and
-  `ρ = r_max · σ` the largest radius on screen in pixels,
+  `ρ = r_max · σ` the largest radius on screen in pixels (for a capsule with unequal
+  radii, the larger cap *sphere's* radius from `Caps::of`, which exceeds both authored
+  radii and is what the caps' rings reach at their equators),
   `N = clamp(ceil(π / acos(1 − ε/ρ)), N_MIN, N_MAX)`: the fewest segments whose chord
   sagitta is at most `ε` pixels. `ε = 0.5` px, `N_MIN = 16` (Storm uses 10; 16 keeps
   reflections of off-screen shapes round enough), `N_MAX = 256` (a sagitta of
@@ -556,7 +558,11 @@ rendered in usdview rendered with holes here.
   - **Trap: the count moves with the camera.** An in-place settings update (`crust mcp`,
     `live.rs` `refresh_settings`) would keep shapes tessellated for the old view, so the
     import records `StageFacts::on_screen_shapes` when any count came from the projection,
-    and a settings change then re-imports, as it does under adaptive subdivision.
+    and a settings change then re-imports, as it does under adaptive subdivision. The
+    other way round too: a load with no camera named gives its unshared shapes `N_FIXED`
+    and records `unsized_shapes`, and an edit that names a camera (even the one the scene
+    already rendered through as its first) re-imports, since a fresh import would size
+    them from the screen.
   - Resolving the projection may open a stage masked to a camera under a payload in a
     load that never reads it for subdivision. Only when a camera is named, and it is
     skipped when the index stage composes the camera.

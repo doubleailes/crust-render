@@ -396,3 +396,65 @@ def PointInstancer "Scatter"
         ]
     );
 }
+
+/// An implicit shape renders with its bound material, so a material bound
+/// only to a `Cube` (or any of the seven) lists as bound; one bound only to
+/// a `crust:volume:*` `Cube`, which imports as a volume and takes no
+/// material, does not.
+#[test]
+fn a_material_bound_only_to_an_implicit_shape_is_bound() {
+    let look = |name: &str| {
+        format!(
+            r#"
+    def Material "{name}"
+    {{
+        token outputs:surface.connect = </mtl/{name}/S.outputs:surface>
+        def Shader "S"
+        {{
+            uniform token info:id = "UsdPreviewSurface"
+            token outputs:surface
+        }}
+    }}"#
+        )
+    };
+    let usda = format!(
+        r#"#usda 1.0
+def Scope "mtl"
+{{{}{}{}
+}}
+def Xform "geo"
+{{
+    def Cube "Box" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        rel material:binding = </mtl/OnCube>
+    }}
+    def Capsule_1 "Pill" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        rel material:binding = </mtl/OnCapsule>
+    }}
+    def Cube "Fog" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        token crust:volume:type = "homogeneous"
+        rel material:binding = </mtl/OnVolume>
+    }}
+}}
+"#,
+        look("OnCube"),
+        look("OnCapsule"),
+        look("OnVolume"),
+    );
+    let path = stage("implicit_bindings.usda", &usda);
+    let bound: Vec<(String, bool)> = materials(&path)
+        .into_iter()
+        .map(|m| (m.path, m.bound))
+        .collect();
+    let want: Vec<(String, bool)> = [
+        ("/mtl/OnCube", true),
+        ("/mtl/OnCapsule", true),
+        ("/mtl/OnVolume", false),
+    ]
+    .iter()
+    .map(|(p, b)| ((*p).to_owned(), *b))
+    .collect();
+    assert_eq!(bound, want);
+}
