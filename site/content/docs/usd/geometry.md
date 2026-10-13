@@ -1,18 +1,88 @@
 +++
 title = "Geometry"
-description = "Per-prim ray visibility and transform motion blur."
+description = "The geometry prims Crust Render reads, per-prim ray visibility and transform motion blur."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-13T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Two attributes on geometry prims: <code>crust:rayMask</code> chooses which rays see a prim, and <code>crust:motion:translate</code> moves it during the shutter.'
+lead = 'Which geometry prims render, and two attributes on them: <code>crust:rayMask</code> chooses which rays see a prim, and <code>crust:motion:translate</code> moves it during the shutter.'
 toc = true
 top = false
 +++
+
+## Supported prims
+
+| prim | renders as |
+|------|------------|
+| `Mesh` | triangles; a subdivision surface unless `subdivisionScheme = "none"` (see [standard attributes](#standard-geometry-attributes)) |
+| `Sphere` | an exact sphere |
+| `BasisCurves` | round tubes |
+| `Cube`, `Plane`, `Cylinder`, `Cylinder_1`, `Cone`, `Capsule`, `Capsule_1` | triangles, tessellated as usdview draws them (below) |
+| `PointInstancer`, `instanceable` prims | their prototypes, stored once and placed per instance |
+
+Any other geometry type (`Points`, `NurbsPatch`, `NurbsCurves`, `HermiteCurves`,
+`TetMesh`) renders nothing. It is reported with one
+[`geom.unsupported_type`](@/docs/reference/warnings.md#geometry-types) warning per type,
+which counts the prims.
+
+### Implicit shapes
+
+The implicit shapes are turned into the same meshes OpenUSD's GeomUtil library builds for
+usdview's Storm renderer: the same points, faces and seam, and the same orientation for
+each `axis`. They then behave like any `Mesh`: bound materials, `crust:rayMask`,
+`crust:motion:translate`, light linking and instancing all apply. Their attributes,
+read at the render frame:
+
+| prim | attributes (default) |
+|------|----------------------|
+| `Cube` | `size` (2) |
+| `Plane` | `width` (2), `length` (2), `axis` (`"Z"`, the plane's normal) |
+| `Cylinder`, `Cone` | `radius` (1), `height` (2), `axis` (`"Z"`) |
+| `Cylinder_1` | `radiusBottom` (1), `radiusTop` (1), `height` (2), `axis` (`"Z"`) |
+| `Capsule` | `radius` (0.5), `height` (1, the straight part only), `axis` (`"Z"`) |
+| `Capsule_1` | `radiusBottom` (0.5), `radiusTop` (0.5), `height` (1), `axis` (`"Z"`) |
+
+- `Cube` and `Plane` render faceted. The curved shapes shade with smooth normals around
+  their sides; a cylinder's flat caps keep their own flat normal.
+- A `Cylinder_1` with `radiusTop = 0` is a cone. A `Capsule_1` with unequal radii has caps
+  that meet its sloping side smoothly.
+- The shapes are never subdivided, whatever `subdivisionScheme` or
+  [`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel) says.
+- They have no texture coordinates and no Ptex faces, so a material that reads
+  `primvars:st` or a Ptex file reads nothing on them.
+- [Displacement](@/docs/usd/materials.md#displacement) is not applied to them: the shape
+  renders undisplaced, with a
+  [`geom.implicit_displacement`](@/docs/reference/warnings.md#geometry-types) warning.
+- `doubleSided` is not read. Every surface is seen from both sides, as with every other
+  prim.
+- A prim carrying [`crust:volume:type`](@/docs/usd/volumes.md) is a volume, never a
+  surface, even when it is a `Cube`.
+
+### How many segments a curved shape gets
+
+A cylinder, cone or capsule is a polygon around its axis, so its outline is made of
+straight segments. Crust Render picks the number of segments for each shape from its size
+on screen. It uses the smallest number that keeps the outline within half a pixel of the
+true curve, between 16 and 256 segments. A capsule's end caps get a quarter as many rings,
+and at least two.
+
+This needs the render camera before the stage is read, so it applies only when the camera
+is named with `--camera` or `RenderSettings.camera`. It doesn't need adaptive subdivision
+to be turned on. Without a named camera, every curved shape gets 48 segments. So does a
+shape inside a prototype that is placed more than once, since one mesh serves every
+placement. A prototype placed once is sized for its placement only when
+[adaptive subdivision](@/docs/usd/render-settings.md#crust-subdivisionedgelength) is on,
+and a prototype reached through a native instance nested in another prototype always gets
+48. A shape outside the camera's view gets 16. Under
+[`CRUST_ADAPTIVE_FRUSTUM=0`](@/docs/reference/environment-variables.md#crust-adaptive-frustum)
+it is sized by its distance instead, as if it were in view.
+
+Up close a shape gets many triangles: a capsule that fills a 2K frame takes about 10 000.
+`-l debug` logs how many shapes took each segment count.
 
 ## crust:rayMask
 
@@ -36,8 +106,8 @@ Common values:
 | `1` | seen by the camera only: no shadows, not in reflections |
 | `0` | invisible to every ray |
 
-Read on `Mesh`, `Sphere` and `BasisCurves` prims, including prims inside instance
-prototypes. On a light, it replaces the light's default visibility; see
+Read on `Mesh`, `Sphere`, `BasisCurves` and the [implicit shapes](#implicit-shapes),
+including prims inside instance prototypes. On a light, it replaces the light's default visibility; see
 [Lights](@/docs/usd/lights.md#crust-raymask-on-a-light).
 
 ```usda
@@ -60,7 +130,7 @@ A world-space translation that the prim moves through while the shutter is open,
 transform motion blur. The prim starts at its authored position when the shutter opens and
 has moved by this vector when it closes.
 
-Read on `Mesh` and `Sphere` prims.
+Read on `Mesh`, `Sphere` and the [implicit shapes](#implicit-shapes).
 
 ```usda
 # A sphere that moves one unit to the right during the shutter.

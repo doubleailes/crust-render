@@ -557,6 +557,8 @@ fn commit_mesh(geom: MeshGeom) -> RtScene {
     b.commit_with(crate::commit_options())
 }
 
+/// Reads a direct `UsdGeomMesh` prim placed at `world_xf` and places it
+/// ([`place_mesh_source`]).
 pub(super) fn emit_mesh(
     world: &mut WorldBuilder,
     prim: &Prim,
@@ -572,7 +574,6 @@ pub(super) fn emit_mesh(
     } = bound;
     let displacement = prim_displacement(prim, displacement);
     let needs = MeshNeeds::of(&*material, displacement.as_deref());
-    let (want_faces, want_uvs) = (needs.faces, needs.uvs);
     let Some(src) = mesh_source(
         prim,
         mesh,
@@ -586,7 +587,41 @@ pub(super) fn emit_mesh(
         );
         return;
     };
+    place_mesh_source(
+        world,
+        prim,
+        src,
+        world_xf,
+        BoundMaterial {
+            material,
+            displacement,
+        },
+        meshes,
+        pending,
+    );
+}
 
+/// Places a direct prim's mesh, read already: everything after the read that
+/// a `Mesh` prim and an implicit shape ([`super::implicit`]) share. `bound`
+/// carries the displacement the prim applies (see [`prim_displacement`]).
+///
+/// A non-invertible placement is baked now; any other is interned and
+/// recorded, its representation decided by [`flush_meshes`].
+pub(super) fn place_mesh_source(
+    world: &mut WorldBuilder,
+    prim: &Prim,
+    src: MeshSource,
+    world_xf: GMat4,
+    bound: BoundMaterial,
+    meshes: &mut MeshArena,
+    pending: &mut Vec<MeshPlacement>,
+) {
+    let BoundMaterial {
+        material,
+        displacement,
+    } = bound;
+    let needs = MeshNeeds::of(&*material, displacement.as_deref());
+    let (want_faces, want_uvs) = (needs.faces, needs.uvs);
     let mask = prim_ray_mask(prim);
     let motion = prim_motion_translate(prim);
 

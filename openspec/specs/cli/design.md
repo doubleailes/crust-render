@@ -191,6 +191,18 @@ cargo test -p crust-core --test adobe_oracle                                    
 cargo test -p crust-core --test adobe_oracle -- --ignored --nocapture            # the report
 scripts/adobe_oracle.py                                       # rewrites crust-core/tests/data/adobe_oracle.txt
 
+# Does an implicit shape (Cube, Plane, Cylinder, Cone, Capsule and the _1
+# variants) tessellate into exactly the mesh usdview draws? The replay needs
+# nothing installed; regenerating the reference meshes needs a C++17 compiler,
+# network access to conda.anaconda.org and ~2 GB of disk: the script fetches
+# micromamba, creates a throwaway env with conda-forge openusd pinned to a
+# version and build, and compiles a probe against GeomUtil and
+# UsdImagingGprimAdapter::GetImplicitBasis (the Python bindings lack the _1
+# radii and the frame). --keep DIR reuses the env. See "Implicit shapes" in
+# openspec/specs/usd-scene-import/design.md.
+cargo test -p crust-core --test geomutil_oracle                                  # the check
+scripts/geomutil_oracle.py --keep /tmp/geomutil   # rewrites crust-core/tests/data/geomutil_oracle.txt
+
 # What OpenPBR parameters does a MaterialX graph actually reduce to? A wrong
 # albedo decode is a plausible pastel and a wrong mask is a plausible blend, so
 # a MaterialX surface cannot be checked by eye -- this prints the numbers at a

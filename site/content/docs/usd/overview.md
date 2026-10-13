@@ -52,7 +52,7 @@ shader inputs are stricter; see [Materials](@/docs/usd/materials.md#input-types)
 | attributes | on which prim | page |
 |------------|---------------|------|
 | `crust:samplesPerPixel`, `crust:maxDepth`, `crust:pixelFilter`, … | the `RenderSettings` prim | [Render settings](@/docs/usd/render-settings.md) |
-| `crust:rayMask`, `crust:motion:translate` | geometry: `Mesh`, `Sphere`, `BasisCurves` | [Geometry](@/docs/usd/geometry.md) |
+| `crust:rayMask`, `crust:motion:translate` | geometry: `Mesh`, `Sphere`, `BasisCurves`, the implicit shapes (`Cube`, `Cylinder`, …) | [Geometry](@/docs/usd/geometry.md) |
 | `crust:light:cameraVisible` | UsdLux lights | [Lights](@/docs/usd/lights.md) |
 | `info:id = "crust:openpbr"` and its `inputs:*` | a `Shader` prim | [Materials and textures](@/docs/usd/materials.md) |
 | `crust:volume:*` | any prim, typically a `Cube` | [Volumes](@/docs/usd/volumes.md) |
@@ -126,7 +126,7 @@ the `crust:` attribute wins:
 | [`crust:domeLightCameraVisibility`](@/docs/usd/render-settings.md#crust-domelightcameravisibility) | `bool` | RenderSettings | true |
 | [`crust:enableExposureCompensation`](@/docs/usd/render-settings.md#crust-enableexposurecompensation) | `bool` | RenderSettings | true |
 | [`crust:rayMask`](@/docs/usd/geometry.md#crust-raymask) | `int` | geometry, lights | 7 (geometry) |
-| [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) | `float3` | Mesh, Sphere | none |
+| [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) | `float3` | Mesh, Sphere, implicit shapes | none |
 | [`crust:light:cameraVisible`](@/docs/usd/lights.md#crust-light-cameravisible) | `bool` | lights | false (true for domes) |
 | [`info:id = "crust:openpbr"`](@/docs/usd/materials.md#the-crust-openpbr-shader) | `token` | Shader | — |
 | [`crust:volume:type`](@/docs/usd/volumes.md#crust-volume-type) and the other `crust:volume:*` | various | any | — |

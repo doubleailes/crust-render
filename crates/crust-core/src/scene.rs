@@ -79,6 +79,7 @@ mod subdiv;
 mod tessellate;
 mod usd_import;
 
+pub(crate) use usd_import::implicit;
 pub(crate) use usd_import::rebuild;
 pub use usd_import::usd_schema_registry;
 

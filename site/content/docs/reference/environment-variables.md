@@ -180,11 +180,14 @@ refined everywhere, its far end included. Use it to compare the two.
 
 ### CRUST_ADAPTIVE_FRUSTUM
 
-Boolean, default **on**. Only with
-[`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length).
+Boolean, default **on**. Read with
+[`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length), and for
+the [segment count](@/docs/usd/geometry.md#how-many-segments-a-curved-shape-gets) of
+cylinders, cones and capsules whenever the render camera is named.
 
 `0` refines geometry outside the camera's view by its distance like the rest, so its
-reflections and shadows keep their detail, at the cost of memory.
+reflections and shadows keep their detail, at the cost of memory. A curved shape outside
+the view then gets the segments its distance asks for, instead of the minimum.
 
 ## Ray tracing
 

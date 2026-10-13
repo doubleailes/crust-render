@@ -18,6 +18,7 @@
 //! | [`mesh`]       | `UsdGeomMesh`: interning, deferred bake-vs-instance, side tables |
 //! | [`adaptive`]   | adaptive subdivision: a mesh's level from its size on screen |
 //! | [`shapes`]     | `UsdGeomSphere`, `UsdGeomBasisCurves`                        |
+//! | [`implicit`]   | `Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` (+ `_1`) → GeomUtil meshes |
 //! | [`instancing`] | `PointInstancer` and native `instanceable` prototypes        |
 //! | [`lights`]     | every UsdLux light type, shaping and IES                     |
 //! | [`light_links`] | `collection:lightLink`: lights that illuminate nothing      |
@@ -70,6 +71,7 @@ mod adaptive;
 mod assets;
 mod attrs;
 mod camera;
+pub(crate) mod implicit;
 mod instancing;
 mod light_links;
 mod lights;
