@@ -28,7 +28,7 @@ bvh8 = []
 
 [dependencies]
 glam.workspace = true
-rayon = "1.10.0"
+rayon.workspace = true
 
 [dev-dependencies]
 criterion = "0.8"

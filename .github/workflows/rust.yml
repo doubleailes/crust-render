@@ -52,7 +52,7 @@ env:
   # code the checks validated (let chains and `is_multiple_of` need 1.88+).
   # rust-toolchain.toml pins the same version for local builds; the fmt job
   # fails if the two disagree.
-  RUST_VERSION: "1.98.1"
+  RUST_VERSION: "1.99"
 
 jobs:
   # Formatting is a pure text check: no dependencies, no build. It runs in
