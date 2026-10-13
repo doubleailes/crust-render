@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://doubleailes.github.io/crust-render/
+    about: Command-line reference, environment variables, USD attributes and the FAQ.
