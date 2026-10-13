@@ -52,6 +52,10 @@ pub enum Error {
         width: usize,
         height: usize,
     },
+    /// A light path inspection ([`inspect::run`](crate::inspect::run),
+    /// [`inspect::check_request`](crate::inspect::check_request)) asks for
+    /// what no inspection runs with; refused before anything renders.
+    Inspection(crate::inspect::Refusal),
 }
 
 impl fmt::Display for Error {
@@ -84,6 +88,7 @@ impl fmt::Display for Error {
                 f,
                 "region {region} holds no pixel of the {width}x{height} frame"
             ),
+            Error::Inspection(refusal) => write!(f, "{refusal}"),
             Error::CameraNotFound { path, available } => {
                 write!(f, "no UsdGeomCamera at {path} on this stage")?;
                 if available.is_empty() {

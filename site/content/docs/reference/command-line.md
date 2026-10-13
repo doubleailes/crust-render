@@ -945,7 +945,7 @@ at that count. The rest of `render`'s flags (`-o`, the colour and statistics fla
 
 | flag | value | default | what it does |
 |------|-------|---------|--------------|
-| `--top` | count | 32 | How many of the brightest light paths to list. |
+| `--top` | count | 32 | How many of the brightest light paths to list, at most 1000. The groups count every path either way. |
 | `--group-by` | key | `expr+light` | `none` (no groups), `light`, `expr` (lights told apart by their LPE tag, as the expression does), `expr+light`. `expr+prims+light` is refused: crust cannot resolve a hit to its prim yet, so every path's `prims` is `null` (the report's `prims_note` says so). |
 | `--json` | path or `-` | off | Also write the report as JSON, format `crust-light-paths/1`. With `-`, the JSON is all of stdout and the Markdown goes to stderr. The same command writes the same bytes, with any number of threads. |
 
@@ -1025,7 +1025,7 @@ start. A tool that fails answers its call with an error and the server goes on.
 |--------|------|
 | `0` | the report is written |
 | `1` | an error: the stage can't be opened or imported, the region has no pixel in the frame, or the JSON can't be written |
-| `2` | a usage error, before anything is loaded: an unknown or output flag, no `-i` or `--region`, a region over 100 pixels or empty, `--group-by expr+prims+light` |
+| `2` | a usage error, before anything is loaded: an unknown or output flag, no `-i` or `--region`, a region over 100 pixels or empty, `--top` over 1000, `--group-by expr+prims+light` |
 
 `crust diagnostic` exits with:
 

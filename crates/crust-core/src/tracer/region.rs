@@ -45,8 +45,11 @@ impl PixelRect {
         self.width() * self.height()
     }
 
+    /// Whether the rectangle holds no pixel: a side of zero. Not `area() ==
+    /// 0`, whose product overflows for a rectangle reaching toward
+    /// `usize::MAX` (an untrusted `--region`, or an MCP call's).
     pub fn is_empty(&self) -> bool {
-        self.area() == 0
+        self.width() == 0 || self.height() == 0
     }
 
     pub fn contains(&self, x: usize, y: usize) -> bool {
@@ -113,6 +116,16 @@ mod tests {
         assert_eq!(PixelRect::new(0, 360, 10, 400).clip_to(640, 360), None);
         assert_eq!(PixelRect::new(5, 5, 5, 9).clip_to(640, 360), None);
         assert!(PixelRect::new(9, 0, 5, 1).is_empty());
+    }
+
+    /// Emptiness is a side of zero, never an area that overflows: a
+    /// rectangle reaching `usize::MAX` is not empty, and asking does not
+    /// panic.
+    #[test]
+    fn a_rectangle_to_the_end_of_usize_is_not_empty() {
+        assert!(!PixelRect::new(0, 0, usize::MAX, usize::MAX).is_empty());
+        assert!(PixelRect::new(0, 7, usize::MAX, 7).is_empty());
+        assert!(!PixelRect::new(0, 0, 1 << 32, 1 << 32).is_empty());
     }
 
     #[test]

@@ -199,7 +199,8 @@ struct LightPaths {
     /// `expr`, `light` or `none`.
     #[serde(default)]
     group_by: Option<String>,
-    /// How many of the brightest light paths to list (default 32).
+    /// How many of the brightest light paths to list (default 32, at most
+    /// 1000; every group counts all of them either way).
     #[serde(default)]
     top: Option<usize>,
 }

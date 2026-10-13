@@ -77,6 +77,22 @@ fn usage_errors_exit_2_and_load_nothing() {
             "out.exr",
         ],
         &["light-paths", "-i", "missing.usda", "--region", "5,5,5,9"],
+        &[
+            "light-paths",
+            "-i",
+            "missing.usda",
+            "--region",
+            "0,0,5,5",
+            "--top",
+            "5000",
+        ],
+        &[
+            "light-paths",
+            "-i",
+            "missing.usda",
+            "--region",
+            "0,0,18446744073709551615,18446744073709551615",
+        ],
     ] {
         let out = crust(&dir, args);
         assert_eq!(

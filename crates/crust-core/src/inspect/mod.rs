@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::tracer::{NO_LIGHT, PixelRect};
-use crate::{RenderSettings, Renderer};
+use crate::{Error, RenderSettings, Renderer};
 use store::{Collected, Config, MIXED_LIGHTS, group_key, is_light};
 
 pub use report::{
@@ -41,6 +41,10 @@ pub const MAX_PIXELS: usize = 100;
 
 /// Records reported when no `--top` is given.
 pub const DEFAULT_TOP: usize = 32;
+
+/// The most records one inspection keeps: with the pixel cap, what bounds
+/// the record store and the report (each work unit keeps up to this many).
+pub const MAX_TOP: usize = 1000;
 
 /// A record whose dominant event carries less than this share of its
 /// vertex's luminance, at any vertex, is `label_ambiguous` (design D2).
@@ -120,23 +124,71 @@ impl Default for Options {
     }
 }
 
-/// Refuses what no inspection can run with, before anything is loaded: an
-/// empty region, one over [`MAX_PIXELS`] pixels, and the grouping by prims.
-pub fn check_request(region: PixelRect, group_by: GroupBy) -> Result<(), String> {
-    if region.is_empty() {
-        return Err(format!("the region {region} is empty"));
+/// Why an inspection is refused before anything renders
+/// ([`crate::Error::Inspection`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The region holds no pixel.
+    EmptyRegion(PixelRect),
+    /// The region holds more than [`MAX_PIXELS`] pixels: `pixels` of them,
+    /// `None` when there are more than a `usize` counts.
+    RegionTooLarge {
+        region: PixelRect,
+        pixels: Option<usize>,
+    },
+    /// More than [`MAX_TOP`] records asked for.
+    TooManyRecords(usize),
+    /// `expr+prims+light`, before a hit can be resolved to its prim.
+    PrimsUnavailable,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::EmptyRegion(region) => write!(f, "the region {region} is empty"),
+            Refusal::RegionTooLarge { region, pixels } => {
+                write!(f, "the region {region} covers ")?;
+                match pixels {
+                    Some(n) => write!(f, "{n} pixels")?,
+                    None => write!(f, "more pixels than can be counted")?,
+                }
+                write!(
+                    f,
+                    "; an inspection renders at most {MAX_PIXELS} (10x10, say)"
+                )
+            }
+            Refusal::TooManyRecords(top) => write!(
+                f,
+                "{top} records asked for; an inspection lists at most {MAX_TOP} (its groups \
+                 count every record)"
+            ),
+            Refusal::PrimsUnavailable => write!(
+                f,
+                "grouping by expr+prims+light needs the prim of every hit: {PRIMS_NOTE}"
+            ),
+        }
     }
-    if region.area() > MAX_PIXELS {
-        return Err(format!(
-            "the region {region} covers {} pixels; an inspection renders at most {MAX_PIXELS} \
-             (10x10, say)",
-            region.area()
-        ));
+}
+
+/// Refuses what no inspection can run with, before anything is loaded: an
+/// empty region, one over [`MAX_PIXELS`] pixels, more than [`MAX_TOP`]
+/// records, and the grouping by prims.
+pub fn check_request(region: PixelRect, group_by: GroupBy, top: usize) -> Result<(), Error> {
+    let refuse = |r| Err(Error::Inspection(r));
+    if region.is_empty() {
+        return refuse(Refusal::EmptyRegion(region));
+    }
+    // Checked: a rectangle out to `usize::MAX` wraps `area()` to something
+    // small, which the frame would then clip to the whole frame.
+    let pixels = region.width().checked_mul(region.height());
+    if pixels.is_none_or(|n| n > MAX_PIXELS) {
+        return refuse(Refusal::RegionTooLarge { region, pixels });
+    }
+    if top > MAX_TOP {
+        return refuse(Refusal::TooManyRecords(top));
     }
     if group_by == GroupBy::ExprPrimsLight {
-        return Err(format!(
-            "grouping by expr+prims+light needs the prim of every hit: {PRIMS_NOTE}"
-        ));
+        return refuse(Refusal::PrimsUnavailable);
     }
     Ok(())
 }
@@ -173,18 +225,13 @@ fn reproduces(settings: &RenderSettings) -> Result<(), String> {
 /// left as they were.
 ///
 /// Refuses what [`check_request`] refuses, and a region with no pixel in
-/// the frame; a region partly outside is clipped to it, as `--region` is.
-pub fn run(
-    renderer: &mut Renderer,
-    region: PixelRect,
-    options: &Options,
-) -> Result<Report, String> {
-    check_request(region, options.group_by)?;
+/// the frame ([`Error::EmptyRegion`]); a region partly outside is clipped
+/// to it, as `--region` is.
+pub fn run(renderer: &mut Renderer, region: PixelRect, options: &Options) -> Result<Report, Error> {
+    check_request(region, options.group_by, options.top)?;
     let original = renderer.settings;
     let (w, h) = original.get_dimensions();
-    let settings = original
-        .with_region(region)
-        .map_err(|e| format!("--region: {e}"))?;
+    let settings = original.with_region(region)?;
     // Interned tags: lights sharing one share an `expr` group, as they share
     // its `<L.'tag'>`. A tag a label cannot hold is no tag.
     let lights = &renderer.lights;

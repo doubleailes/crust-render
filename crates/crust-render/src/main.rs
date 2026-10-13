@@ -176,7 +176,7 @@ struct LightPathsArgs {
     /// reproduces a render made at this count. Overrides the scene's.
     #[arg(short, long)]
     samples: Option<u32>,
-    /// How many of the brightest light paths to list.
+    /// How many of the brightest light paths to list, at most 1000.
     #[arg(long, value_name = "N", default_value_t = crust_core::inspect::DEFAULT_TOP)]
     top: usize,
     /// What the light paths are aggregated by.
@@ -1324,8 +1324,8 @@ fn light_paths_request(args: &LightPathsArgs) -> std::result::Result<PixelRect, 
             ),
         ));
     };
-    crust_core::inspect::check_request(region, args.group_by)
-        .map_err(|e| usage(ErrorKind::ValueValidation, e))?;
+    crust_core::inspect::check_request(region, args.group_by, args.top)
+        .map_err(|e| usage(ErrorKind::ValueValidation, e.to_string()))?;
     Ok(region)
 }
 
@@ -1388,6 +1388,10 @@ fn light_paths(args: &LightPathsArgs) -> ExitCode {
     let started = Instant::now();
     let report = match crust_core::inspect::run(&mut renderer, region, &options) {
         Ok(report) => report,
+        Err(e @ crust_core::Error::EmptyRegion { .. }) => {
+            error!("--region: {e}");
+            return ExitCode::FAILURE;
+        }
         Err(e) => {
             error!("{e}");
             return ExitCode::FAILURE;
@@ -2720,6 +2724,20 @@ mod tests {
             (&["--region", "0,0,5,5"], "-i"),
             (&["-i", "s.usda", "--region", "0,0,20,20"], "100"),
             (&["-i", "s.usda", "--region", "0,0,101,1"], "100"),
+            // Its area past `usize`: wrapped, it would be 1 and pass.
+            (
+                &[
+                    "-i",
+                    "s.usda",
+                    "--region",
+                    "0,0,18446744073709551615,18446744073709551615",
+                ],
+                "100",
+            ),
+            (
+                &["-i", "s.usda", "--region", "0,0,5,5", "--top", "1001"],
+                "1000",
+            ),
             (
                 &[
                     "-i",

@@ -305,18 +305,20 @@ impl Open {
         let job = self.renders.get(render_id)?;
         if job.finished().map(|f| f.outcome) != Some(RenderOutcome::Completed) {
             return Err(format!(
-                "render {render_id} is {}: light_paths inspects a completed render (wait for                  it with snapshot's budget_s, or render again)",
+                "render {render_id} is {}: light_paths inspects a completed render (wait for \
+                 it with snapshot's budget_s, or render again)",
                 job.status()
             ));
         }
         if self.layer_hash()? != job.layer {
             return Err(format!(
-                "the session changed since render {render_id}: its layer is not the one that                  render used. Render again and inspect the new render (or undo back to it)"
+                "the session changed since render {render_id}: its layer is not the one that \
+                 render used. Render again and inspect the new render (or undo back to it)"
             ));
         }
         let [x0, y0, x1, y1] = region;
         let rect = PixelRect::new(x0, y0, x1, y1);
-        inspect::check_request(rect, group_by)?;
+        inspect::check_request(rect, group_by, top).map_err(|e| e.to_string())?;
         let rendered = job.settings.region();
         if !(rendered.contains(x0, y0) && x1 <= rendered.x1 && y1 <= rendered.y1) {
             return Err(format!(
@@ -326,7 +328,8 @@ impl Open {
         }
         if let Some(running) = self.renders.running() {
             return Err(format!(
-                "render {running} is still running and holds the scene: wait for it or cancel                  it, then call light_paths again"
+                "render {running} is still running and holds the scene: wait for it or cancel \
+                 it, then call light_paths again"
             ));
         }
         let renderer =
@@ -346,7 +349,11 @@ impl Open {
         renderer.retune(job.settings);
         let report = inspect::run(renderer, rect, &options);
         renderer.retune(own);
-        serde_json::to_value(report?).map_err(|e| e.to_string())
+        let report = report.map_err(|e| match e {
+            crust_core::Error::EmptyRegion { .. } => format!("region: {e}"),
+            e => e.to_string(),
+        })?;
+        serde_json::to_value(report).map_err(|e| e.to_string())
     }
 
     /// Writes `bytes` as the layer and reopens the authoring stage on it.

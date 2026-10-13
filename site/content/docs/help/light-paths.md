@@ -90,7 +90,7 @@ read it in:
   noise); `hit_rate` (the fraction of samples that took it); `max_luma`; and
   `top_records`, its paths among `records`. `--group-by` picks the key: `expr+light`
   (default), `expr`, `light` or `none`.
-- **`records`**, the `--top` brightest light paths (32 by default): `luma`,
+- **`records`**, the `--top` brightest light paths (32 by default, at most 1000): `luma`,
   `contribution` and `contribution_clamped` (RGB), `expression`, `lobe_split` (each
   vertex's share per lobe), `label_ambiguous`, `light`, `pixel`, `coordinates` (where in
   the pixel the sample was taken), `sample`, `depth`, `camera`, and its `group`.

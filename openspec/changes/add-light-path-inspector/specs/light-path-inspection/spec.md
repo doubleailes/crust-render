@@ -137,7 +137,7 @@ below 0.6 at any vertex SHALL be flagged `label_ambiguous`.
 ### Requirement: Ranking and grouping
 
 The report SHALL list the records with the largest luminance, at most `--top N`
-(default 32), and SHALL aggregate every record by `--group-by` (`none`, `light`,
+(default 32; more than 1000 SHALL be refused as a usage error), and SHALL aggregate every record by `--group-by` (`none`, `light`,
 `expr`, `expr+light`; default `expr+light`). Each group SHALL report its share of
 the region's luminance and second moment, its hit rate and its largest record.
 

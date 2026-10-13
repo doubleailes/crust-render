@@ -137,7 +137,9 @@ Either way the records are the scene's paths; only their samples differ.
 ## D5. The record store
 
 Per work unit (`inspect/store.rs`, `UnitStore`, on `UnitWork::inspect`): a bounded
-min-heap of the top N records and a hash map from group key to aggregate. Units
+min-heap of the top N records (N at most `MAX_TOP`, 1 000: with the pixel cap, what
+bounds the store and the report — the groups count every record whatever N keeps)
+and a hash map from group key to aggregate. Units
 merge **in unit order** after the render (`collect_inspection`, `Collected::merge`),
 and records rank by a total order — luminance (`total_cmp`) descending, then image
 row, column, sample and the record's index within its sample ascending — so the
@@ -219,9 +221,16 @@ snake_case, `null` for non-finite). Key order: `summary`, `command`, `region`,
 - **CLI** `crust light-paths` (`main.rs`): the scene flags `check` and `diagnostic`
   take, plus `render`'s `-s` — its settings are `apply_overrides`' order, `-s` then
   the scene flags (`light_paths_settings`, pinned against `render`'s). `--region`
-  required; `--top` (32), `--group-by` (`expr+light`), `--json PATH|-`.
+  required; `--top` (32, at most 1 000), `--group-by` (`expr+light`), `--json PATH|-`.
   `light_paths_request` refuses, as usage errors before the import (exit 2): no `-i`,
-  no `--region`, a region empty or over 100 pixels, `expr+prims+light`; clap refuses
+  no `--region`, and what `inspect::check_request` refuses — a region empty or over
+  100 pixels (counted with `checked_mul`: a rectangle out to `usize::MAX` wraps
+  `PixelRect::area` to 1, which the frame would then clip to the whole frame; and
+  `PixelRect::is_empty` compares the sides, since its old `area() == 0` overflowed
+  first), more
+  than 1 000 records, `expr+prims+light`. The engine's refusals are typed,
+  `Error::Inspection(Refusal)`, and a region with no pixel in the frame is the
+  settings' own `Error::EmptyRegion`; the hosts print them. Clap refuses
   `-o` and the other render flags. A region partly outside the frame is clipped, as
   `--region` is; one wholly outside is an error after the import (exit 1). With
   `--json -` the Markdown goes to stderr.
@@ -230,8 +239,8 @@ snake_case, `null` for non-finite). Key order: `summary`, `command`, `region`,
   `start_render`); the call is refused when the saved layer's hash differs (an undo
   back to it matches again — the scene of an in-place update is the full import's),
   when the render did not complete, when another render is still running (it holds
-  the renderer: `Renders::running` joins a returned one), and for a region outside
-  the render's or over the cap. It re-renders with the job's `RenderSettings`
+  the renderer: `Renders::running` joins a returned one), for a region outside the
+  render's, and for what `check_request` refuses. It re-renders with the job's `RenderSettings`
   (`retune`, then back), and answers the report's JSON value; its `command` names the
   session's layer, which `crust light-paths -i <layer>` reproduces.
 
