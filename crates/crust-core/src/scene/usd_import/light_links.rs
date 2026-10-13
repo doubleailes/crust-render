@@ -548,6 +548,9 @@ fn encode_shadows(
         }
     };
     let mut authored = false;
+    // The integrator asks a hit's class (`World::mask`) to tell what a
+    // restricted light's shadow rays pass (`PrevBounce::through`).
+    world.keep_masks();
     let n_geoms = world.count();
     for (k, &(start, id)) in runs.iter().enumerate() {
         let end = runs.get(k + 1).map_or(n_geoms as u32, |r| r.0);

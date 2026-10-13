@@ -650,6 +650,119 @@ fn every_strategy_agrees_on_a_shadow_link_that_matters() {
     }
 }
 
+/// The glossy floor under `GLOSSY_SUN`, now behind a slab of solid glass
+/// (two delta interfaces, transmission only: no specular weight) the camera
+/// does not see but every bounce off the floor crosses on its way up. With
+/// `slab` false the slab is absent and the sun unlinked: the image the link
+/// should give, since a light's shadow rays pass what its link excludes.
+fn glass_slab_scene(name: &str, slab: bool, strategy: &str, seed: isize) -> Scene {
+    let glass = if slab {
+        r#"def Material "Glass"
+    {
+        token outputs:surface.connect = </World/Glass/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "crust:openpbr"
+            float inputs:transmissionWeight = 1
+            float inputs:specularWeight = 0
+            float inputs:specularRoughness = 0
+            float inputs:specularIor = 1.5
+            token outputs:surface
+        }
+    }
+    def Cube "Blocker" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double size = 1
+        int crust:rayMask = 6
+        rel material:binding = </World/Glass>
+        double3 xformOp:translate = (0, 3.1, 0)
+        float3 xformOp:scale = (40, 0.2, 40)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }"#
+    } else {
+        ""
+    };
+    let links = if slab { EXCLUDE } else { "" };
+    let body = format!(
+        r#"    def Camera "Cam"
+    {{
+        float focalLength = 50
+        float horizontalAperture = 20
+        float verticalAperture = 20
+        double3 xformOp:translate = (0, 5, 6)
+        float xformOp:rotateX = -39.8
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }}
+    def Material "Metal"
+    {{
+        token outputs:surface.connect = </World/Metal/S.outputs:surface>
+        def Shader "S"
+        {{
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.8, 0.8, 0.8)
+            float inputs:metallic = 1
+            float inputs:roughness = 0.15
+            token outputs:surface
+        }}
+    }}
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]
+        rel material:binding = </World/Metal>
+    }}
+    {sun}
+    {glass}
+"#,
+        sun = GLOSSY_SUN.replace("LINKS", links)
+    );
+    // Depth 4: the floor, the slab's two faces, then the escape to the sun.
+    let mut scene = load(name, &body, &settings_at_depth(strategy, 64, 16, 4));
+    scene.settings = scene.settings.with_frame(seed);
+    scene
+}
+
+/// A bounce that leaves a continuous vertex and crosses, through delta
+/// transmissions only, surfaces a shadow-linked light's shadow rays ignore
+/// reaches that light along a line its link twin (and NEE) already estimated
+/// as if those surfaces were absent: it must not collect it a second time.
+/// The floor behind an excluded glass slab is the floor with no slab, under
+/// every strategy — where it used to be about twice as bright.
+#[test]
+fn an_excluded_glass_pane_does_not_count_a_linked_light_twice() {
+    let seeds = [1, 2, 3, 4];
+    let means = |slab: bool, strategy: &str| {
+        let xs: Vec<f64> = seeds
+            .iter()
+            .map(|&seed| {
+                let img = luminance(&render(glass_slab_scene(
+                    &format!("glass_slab_{slab}_{strategy}_{seed}"),
+                    slab,
+                    strategy,
+                    seed,
+                )));
+                img.iter().sum::<f64>() / img.len() as f64
+            })
+            .collect();
+        mean_and_error(&xs)
+    };
+    let (open, open_err) = means(false, "power");
+    assert!(open > 0.0, "the sun's highlight is in frame");
+    for strategy in ["light", "bsdf", "power"] {
+        let (behind, err) = means(true, strategy);
+        eprintln!(
+            "{strategy}: behind the slab {behind:.5} ± {err:.5}, open {open:.5} ± {open_err:.5}"
+        );
+        let sigma = (err * err + open_err * open_err).sqrt();
+        assert!(
+            (behind - open).abs() <= 5.0 * sigma + 0.02 * open,
+            "{strategy}: {behind} ± {err} behind the excluded slab vs {open} ± {open_err} without it"
+        );
+    }
+}
+
 /// The per-pixel noise variance of two renders differing only in seed,
 /// `(a − b)² / 4` per pixel, summed over the image.
 fn two_seed_variance(strategy: &str) -> f64 {

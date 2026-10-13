@@ -677,8 +677,58 @@ paths, for direct-light variance falling about as 1/N.
     only when the bounce escapes or stops on geometry the dome ignores.
   - **Delta vertices are unchanged**: after a mirror or glass bounce the light is found
     at full weight through the real occluders, so a mirror shows the physical shadow.
-  - **Cost.** `trace_path` is monomorphised on `TWINS` (as on `MEDIA`): a scene without
-    a twinned light runs an integrator without the call sites. Guarded at run time it
+    The exception is a delta *transmission* on a chain (next bullet).
+  - **Excluded glass transmits nothing more** (change
+    `excluded-glass-transmits-no-linked-light`). The twin and NEE see a light with the
+    excluded surfaces absent. A bounce that then *refracts* through one of those
+    surfaces reached the light a second time: at the glass faces' own NEE and twin, or
+    on escaping after a delta face. On ALab the windows are excluded from the three suns,
+    and they are `UsdPreviewSurface` with `opacity ≈ 0`, i.e. thick OpenPBR glass.
+    - **The trap:** thick OpenPBR transmission is a *continuous* Walter lobe with a
+      roughness floor (`transmission_is_continuous`), not a delta lobe. Its `<TS>` label
+      in a light-path report only means near-specular. A first fix that followed delta
+      transmissions alone changed nothing. Thin-walled panes never had the problem: the
+      bounce crosses them as thin walls, with no vertex, so `bounce_skips` already
+      applies.
+    - **The rule.** `PrevBounce::through` carries a *transmission chain*: the union of
+      the masks (`World::mask`, kept only when `encode_shadows` ran) of the surfaces
+      crossed by transmission since the chain's *owner*.
+      - An owner is a continuous vertex whose bounce reflects, or a phase scatter. A
+        transmission extends the chain, and a delta reflection ends it.
+      - A camera-started chain has no owner (`None`).
+      - Light `i` is dropped (`LightList::drops_through`) when it is restricted and its
+        shadow mask sees nothing on the chain. NEE drops a sample whose direction
+        transmits. The twin drops the light when the bounce transmits. After a delta
+        vertex, `bounce_emission_weight_at` / `escaped_emission` ↔ `escaped_split` drop
+        it through `PrevVertex::owned_after_delta`.
+      - "Transmits" is the side of the ray-facing normal (`transmits`), so closures,
+        whose `delta_event` cannot tell reflection from transmission, need no lobe
+        answer.
+      - Both MIS sides drop the same hemisphere of the same vertex, so the strategies
+        still agree.
+    - **One mask, not one chain per light.** A chain that passes a surface the light
+      sees (a leaf) and then an excluded one keeps the old double count for that light.
+      The leaf's mask fails the test for the whole chain.
+    - **Cost.** All of it sits behind `trace_path`'s `LINKED` (was `TWINS`, now
+      "any restricted shadow set", so a scene whose only restricted light is a dome
+      runs it too, with an empty twin loop). Guarded at run time instead, cornellbox ran
+      **+0.59%** instructions (callgrind, `-s 2`). Monomorphised it runs 4 244 804 411
+      against 4 244 820 933 (−0.0004%). Every golden is bit-identical (16 spp).
+    - **Measured.** The reduced scene is `glass_slab_scene` in
+      `tests/light_linking.rs`: the glossy floor under the 5° sun, behind a thick
+      transmission-only slab the sun's link excludes, 4 seeds, 64 spp, clamp off.
+      Before, it read bsdf **1.103 ± 0.016** against the slab-free 0.586, with light
+      0.598 ± 0.007. After, it reads light 0.589 ± 0.005, bsdf 0.584 ± 0.008 and
+      power 0.586 ± 0.001. On ALab (frame 1004, 64 spp, clamp off, adaptive off, two
+      seeds; `docs/alab_profile.md`, "Excluded glass"), the beauty reads **0.625 →
+      0.262**, and the two-seed variance falls **24.1 M → 2.08 M (−91%)**. The same
+      frame with both windows deactivated reads **0.251**. The direct terms
+      (`C<RG><L>`, `C<RD><L>` per sun) and the dome are bit-identical before and after.
+      The ALab image therefore changes: the sun used to be counted about 2.5× through
+      its windows.
+  - **Cost.** `trace_path` is monomorphised on `TWINS` (as on `MEDIA`; now `LINKED`, see
+    the next bullet's cost): a scene without a twinned light runs an integrator without
+    the call sites. Guarded at run time it
     cost cornellbox +0.22% instructions — the extra call site changed the inlined
     integrator's register allocation, and keeping the `ShadingPoint` alive for its curve
     flag was another 9 instructions a vertex (the twin now takes the flag from the bounce
@@ -857,7 +907,14 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   shadow-linked *dome* is NEE-only at continuous vertices (noisier on glossy
   receivers; its `bsdf`-only render sees it through the physical occluders); and every
   shadow-linked light is physically shadowed through delta vertices (a mirror shows the
-  occluder's shadow). Of RenderMan's per-light `visibility:*` primvars
+  occluder's shadow). Thick glass a light's link excludes transmits nothing more from it
+  along a path that already estimated the light past it (§ Shadow linking), but with
+  two gaps. Seen straight from the camera, the light is estimated at each glass face
+  (no owner, so no drop; the correct answer is one estimate along the exit direction).
+  And a chain that also crossed a surface the light *does* see keeps the old double
+  count (one mask per path, not per light). Lights without a restricted shadow set,
+  seen through glass that casts no shadows at all (`crust:rayMask` without the shadow
+  bit), double the same way, outside linking. Of RenderMan's per-light `visibility:*` primvars
   only `camera` is read. A textured
   `RectLight` is sampled by solid angle rather than by its map's luminance (a card
   with a small bright region is noisier than it need be), its lookup is nearest-texel

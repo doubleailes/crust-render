@@ -87,10 +87,10 @@ struct PassConfig {
     /// not per pixel, so the beauty-only hot path reads one flag as it
     /// always did.
     shutter: bool,
-    /// Whether the scene has a shadow-linked light with a link twin: which
-    /// `trace_path` instantiation (`TWINS`) the pass runs. Read once here
-    /// rather than per pixel.
-    twins: bool,
+    /// Whether the scene has a shadow-linked light: which `trace_path`
+    /// instantiation (`LINKED`) the pass runs. Read once here rather than
+    /// per pixel.
+    linked: bool,
     /// Time each work unit ([`Instruments::tile_times`]).
     timed: bool,
     /// The clamp whose effect this pass measures without applying it
@@ -621,7 +621,7 @@ impl Renderer {
             tiled,
             adaptive: true,
             shutter: self.shutter(),
-            twins: !self.lights.twinned_lights().is_empty(),
+            linked: self.lights.shadow_linked(),
             timed: instruments.tile_times,
             // Only while the render's own clamp is off: with it on there is
             // nothing left for the measurement to remove.
@@ -728,7 +728,7 @@ impl Renderer {
                 tiled,
                 adaptive: false,
                 shutter: self.shutter(),
-                twins: !self.lights.twinned_lights().is_empty(),
+                linked: self.lights.shadow_linked(),
                 timed: instruments.tile_times,
                 // The clamp is measured on the final pass alone.
                 measure_clamp: None,
@@ -1530,15 +1530,16 @@ impl Renderer {
         }
         // Monomorphised on medium boundaries too (`trace_path`'s `MEDIA`): a
         // world without one runs an integrator with none of their branches.
-        // And on shadow-linked lights with a bounce-side twin (`TWINS`).
+        // And on shadow-linked lights (`LINKED`): their link twins and
+        // transmission chains.
         macro_rules! go {
-            ($profile:literal, $media:literal, $twins:literal) => {
-                self.advance_pixel::<$profile, AOV, $media, $twins>(
+            ($profile:literal, $media:literal, $linked:literal) => {
+                self.advance_pixel::<$profile, AOV, $media, $linked>(
                     i, j, p, cfg, filter, gctx, work, scratch, st, target,
                 )
             };
         }
-        match (profiling, self.world.has_medium_boundaries(), cfg.twins) {
+        match (profiling, self.world.has_medium_boundaries(), cfg.linked) {
             (true, false, false) => go!(true, false, false),
             (false, false, false) => go!(false, false, false),
             (true, true, false) => go!(true, true, false),
@@ -1559,7 +1560,12 @@ impl Renderer {
     /// planes (at the pixel `advance_dispatch` set), with the sample's own
     /// film offset and weight.
     #[allow(clippy::too_many_arguments)]
-    fn advance_pixel<const PROFILE: bool, const AOV: bool, const MEDIA: bool, const TWINS: bool>(
+    fn advance_pixel<
+        const PROFILE: bool,
+        const AOV: bool,
+        const MEDIA: bool,
+        const LINKED: bool,
+    >(
         &self,
         i: usize,
         j: usize,
@@ -1656,7 +1662,7 @@ impl Renderer {
             }
             drop(primary);
             unit.rays.camera_rays += 1;
-            let radiance = trace_path::<PROFILE, AOV, MEDIA, TWINS>(
+            let radiance = trace_path::<PROFILE, AOV, MEDIA, LINKED>(
                 &r,
                 &path_cx,
                 root,

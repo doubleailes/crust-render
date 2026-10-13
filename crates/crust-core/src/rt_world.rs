@@ -602,6 +602,9 @@ pub struct WorldBuilder {
     /// answer for it: an id inside a range gets no record, whichever
     /// geometry it belongs to.
     forwarded: Vec<(u32, u32)>,
+    /// Whether the committed world keeps each geometry's mask (see
+    /// [`World::mask`]): set when shadow links encode occluder classes.
+    keep_masks: bool,
 }
 
 impl WorldBuilder {
@@ -868,6 +871,13 @@ impl WorldBuilder {
                 if one { "it" } else { "them" },
             );
         }
+        let masks = if self.keep_masks {
+            (0..self.count() as u32)
+                .map(|id| self.rt.mask(id))
+                .collect()
+        } else {
+            Vec::new()
+        };
         World {
             scene: self.rt.commit_with(crate::commit_options()),
             materials: self.materials,
@@ -884,7 +894,15 @@ impl WorldBuilder {
                 Vec::new()
             },
             motion: self.motion,
+            masks,
         }
+    }
+
+    /// Keeps every geometry's mask in the committed world, for
+    /// [`World::mask`]. Only the importer's link resolution calls this, once
+    /// shadow links have encoded occluder classes in the masks.
+    pub fn keep_masks(&mut self) {
+        self.keep_masks = true;
     }
 
     /// Marks the geometry at `id` as a light source that is a transparent
@@ -962,9 +980,25 @@ pub struct World {
     /// The moving geometries' translations, sorted by `geom_id`; empty for a
     /// static scene (see [`World::motion`]).
     motion: Vec<(u32, Vec3A)>,
+    /// Per `geom_id`, the mask it was attached with; empty unless shadow
+    /// links encoded occluder classes (see [`World::mask`]).
+    masks: Vec<RayMask>,
 }
 
 impl World {
+    /// The mask the geometry at `geom_id` was committed with: which ray
+    /// categories, and which lights' shadow rays
+    /// ([`LightList::shadow_mask`](crate::LightList::shadow_mask)), see it.
+    /// [`MASK_ALL`] when no shadow link encoded occluder classes, where
+    /// every light's shadow rays see every caster.
+    #[inline]
+    pub fn mask(&self, geom_id: u32) -> RayMask {
+        self.masks
+            .get(geom_id as usize)
+            .copied()
+            .unwrap_or(MASK_ALL)
+    }
+
     /// The world-space translation the geometry at `geom_id` moves through
     /// over the shutter — the `crust:motion:translate` the kernel blurs it
     /// by — or zero when it does not move, or moves in a way the record

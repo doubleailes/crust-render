@@ -409,6 +409,67 @@ The overlays and the comparison tool are scratch files and not committed.
 The twin casts a shadow ray only when the bounce direction actually reaches a
 twinned light: the 20° sun cone or one of the two rect suns.
 
+## Excluded glass (2026-10-13)
+
+Change `excluded-glass-transmits-no-linked-light`. Speckle in the bench close-up's
+shadows led to this. `crust light-paths` on one of them (the oscilloscope case under
+the electronics) showed pairs from the same camera sample: `C<RG>L` 243 from
+`lgt_sun_distant` (the receiver's link twin, which sees the sun with the windows
+absent), and `C<RG><TS><TS>L` 231 (the same bounce refracted through the window pane
+and reaching the sun again). The windows are `UsdPreviewSurface` with `opacity ≈ 0`,
+so thick OpenPBR glass with a *continuous* lobe. Each face ran its own NEE and twin
+toward the sun. The sun was counted once straight and once refracted.
+
+### Method
+
+`groups.usda` sublayers `alab.usda` and sets:
+- `crust:light:lpeTag` on the four exterior lights (`sd`, `sa1`, `sa2`, `dome`);
+- `varianceThreshold = 0`, `indirectClamp = 0`, `samplesPerPixel = 64` and
+  `lightSamples = 4` on `/Render/settings`;
+- one product of `C<RG><L.'t'>`, `C<RD><L.'t'>` and `C.*<T.><L.'t'>` (the last
+  event a transmission) per sun, plus `C.*<L.'dome'>`.
+
+Seed 2 is `groups_seed2.usda`, `subLayers = [@./groups.usda@ (offset = 1)]`, rendered
+at `-f 1005` (scene at 1004, seed 1005). The statistics are those of "Shadow-linked
+lights and their noise": the mean, the two-seed variance `(a − b)²/4` summed over the
+frame, the share of the 0.1% noisiest pixels, and the noisiest pixel's σ. The
+reference deactivates both `structure_window_louvered02_000N` prims on top of the
+same layers. The overlays are scratch files and not committed.
+
+```bash
+crust render -i groups.usda       -f 1004 --light-selection learned -o b1.exr
+crust render -i groups_seed2.usda -f 1005 --light-selection learned -o b2.exr
+```
+
+### Before and after
+
+Beauty and per-sun terms: mean luminance, then the two-seed variance (top 0.1%, worst σ).
+"Before" is `bffa7a3`.
+
+| layer | before | after | windows deactivated |
+|---|---|---|---|
+| beauty | **0.6253**, 24.1 M (56.4%, 899) | **0.2624**, 2.08 M (98.4%, 385) | **0.2508**, 0.42 M (92.7%, 244) |
+| `lgt_sun_area_01`, last event a transmission | 0.3351, 21.9 M | 0.0092, 1.14 M | 0.0023, 0.15 M |
+| `lgt_sun_distant`, last event a transmission | 0.0647, 91.6 k | 0.0289, 31.4 k | 0.0280, 25.8 k |
+| `lgt_sun_area_02`, last event a transmission | 0.0013 | 0.0001 | 0.0001 |
+| `lgt_sun_area_01` direct diffuse / glossy | 0.1097 / 0.0154 | identical | 0.1097 / 0.0154 |
+| `lgt_sun_distant` direct diffuse / glossy | 0.0268 / 0.0044 | identical | 0.0268 / 0.0044 |
+| `lgt_env_dome`, all paths | 0.0016 | identical | 0.0025 |
+
+- **The frame was 2.5× too bright, and almost all of its noise was the double
+  count.** The beauty falls 58%, to within 4.6% of the frame with no windows at
+  all. The no-window frame is what the shadow link means for the suns, though it also
+  drops the glass's own reflections and lets the dome in. Variance falls 91%.
+- **Direct light is untouched**: the per-sun direct terms and the dome are
+  bit-identical. Only paths that crossed the glass after a receiver changed.
+- **What is left** of `lgt_sun_area_01`'s transmission term (0.009 against the
+  no-window 0.002) comes from the rule's documented gaps: chains that start at the
+  camera, and chains that mix the windows with glass the sun does see.
+- **Render time was not measured with `bench_ab.sh`.** These were sequential runs on a
+  shared machine: before took 66.2 and 64.9 s, and the after runs took between 63.6 and
+  71.4 s. A dropped light sample casts *fewer* shadow rays, so no slowdown is expected.
+  Unlinked scenes run the same instructions (callgrind, see the lighting design record).
+
 ## What is left, in order of what it would buy
 
 1. **The import.** At 1:30 of a 1:58 frame, composition is still where a

@@ -672,6 +672,27 @@ impl LightList {
         }
     }
 
+    /// Whether any light's shadow set is restricted: whether a render
+    /// follows link twins and transmission chains at all (`trace_path`'s
+    /// `LINKED`).
+    pub fn shadow_linked(&self) -> bool {
+        self.links
+            .as_ref()
+            .is_some_and(|l| l.restricted.contains(&true))
+    }
+
+    /// Whether light `index` takes nothing through a transmission of a
+    /// surface on a chain whose masks are `chain` (the integrator's
+    /// `PrevBounce::through`): its shadow set is restricted and its shadow
+    /// rays pass every surface on the chain, so the vertex that owns the
+    /// chain estimated it past them already. False without shadow links.
+    #[inline]
+    pub fn drops_through(&self, index: usize, chain: RayMask) -> bool {
+        self.links
+            .as_ref()
+            .is_some_and(|l| l.restricted[index] && !l.shadow_masks[index].sees(chain))
+    }
+
     /// The lights [`LightList::twinned`] holds for, in list order: what a
     /// continuous vertex runs a link twin for. Empty without shadow links.
     #[inline]
