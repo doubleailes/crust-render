@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crust_core::preview_surface::{Target, TexOutput, UvInput, Wrap};
 use crust_core::{
-    Emissive, HitRecord, Material, OpenPBR, PathSampler, PreviewSurface, PtexRef, PtexTexture, Ray,
-    ShadingPoint, Texture2D, TextureRef, Vec3A, materialx,
+    BsdfDraw, Emissive, HitRecord, Material, OpenPBR, PathSampler, PreviewSurface, PtexRef,
+    PtexTexture, Ray, ShadingPoint, Texture2D, TextureRef, Vec3A, materialx,
 };
 
 fn sample(name: &str) -> PathBuf {
@@ -108,9 +108,9 @@ fn assert_resolve_matches(name: &str, mat: &dyn Material) {
             "{name}: emission"
         );
         for k in 0..64 {
-            let sampler = PathSampler::new(0, 0, 0, k);
-            let a = sp.scatter_importance(&r_in, sampler);
-            let b = mat.scatter_importance(&r_in, &rec, sampler);
+            let u = PathSampler::new(0, 0, 0, k).draw_sample_f32::<4>();
+            let a = sp.scatter_importance(&r_in, || u);
+            let b = mat.scatter_importance(&r_in, &rec, BsdfDraw::Fixed(u));
             match (a, b) {
                 (None, None) => {}
                 (Some(a), Some(b)) => {
@@ -306,7 +306,9 @@ fn straight_transmission_is_declared_and_split_from_the_resolution() {
             let sp = ShadingPoint::new(mat.as_ref(), &r_in, &rec, cos);
             let mut t = Vec3A::ZERO;
             for k in 0..64 {
-                t += sp.straight_transmittance(&r_in, PathSampler::new(0, 0, 0, k));
+                t += sp.straight_transmittance(&r_in, || {
+                    PathSampler::new(0, 0, 0, k).draw_sample_f32::<2>()
+                });
             }
             if t == Vec3A::ZERO {
                 continue;
@@ -319,12 +321,16 @@ fn straight_transmission_is_declared_and_split_from_the_resolution() {
             let mut rest = ShadingPoint::new(mat.as_ref(), &r_in, &rec, cos);
             rest.exclude_straight();
             assert_eq!(
-                rest.straight_transmittance(&r_in, PathSampler::new(0, 0, 0, 1)),
+                rest.straight_transmittance(&r_in, || {
+                    PathSampler::new(0, 0, 0, 1).draw_sample_f32::<2>()
+                }),
                 Vec3A::ZERO,
                 "{name}: excluded"
             );
             for k in 0..64 {
-                if let Some(x) = rest.scatter_importance(&r_in, PathSampler::new(0, 0, 0, k)) {
+                if let Some(x) = rest.scatter_importance(&r_in, || {
+                    PathSampler::new(0, 0, 0, k).draw_sample_f32::<4>()
+                }) {
                     let straight = x.ray.direction().normalize().dot(dir) > 1.0 - 1e-6;
                     assert!(!(x.delta && straight), "{name}: a straight delta remains");
                 }

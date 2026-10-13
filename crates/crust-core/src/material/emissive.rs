@@ -1,7 +1,6 @@
-use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::lux::{RectTexture, Shaping};
-use crate::material::{Material, ScatterSample};
+use crate::material::{BsdfDraw, Material, ScatterSample};
 use crate::ray::Ray;
 use glam::Vec3A;
 use std::sync::Arc;
@@ -135,13 +134,43 @@ impl Material for Emissive {
         self.radiance_toward(rec.p, -r_in.direction().normalize(), rec.front_face)
     }
 
-    // Emissive surfaces do not scatter.
+    // Emissive surfaces do not scatter, and draw nothing: `draw.u()` is
+    // never called.
     fn scatter_importance(
         &self,
         _r_in: &Ray,
         _rec: &HitRecord,
-        _sampler: PathSampler,
+        _draw: BsdfDraw<'_>,
     ) -> Option<ScatterSample> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// An emitter's scatter draws nothing: the lazy block is never asked
+    /// for (the `materials` spec, "An emitter draws nothing").
+    #[test]
+    fn an_emitter_never_draws_its_block() {
+        let drawn = Cell::new(false);
+        let draw = || {
+            drawn.set(true);
+            [0.1, 0.2, 0.3, 0.4]
+        };
+        let e = Emissive::new(Vec3A::ONE);
+        let r_in = Ray::new(Vec3A::Z, -Vec3A::Z);
+        let rec = HitRecord {
+            normal: Vec3A::Z,
+            front_face: true,
+            ..HitRecord::default()
+        };
+        assert!(
+            e.scatter_importance(&r_in, &rec, BsdfDraw::Lazy(&draw))
+                .is_none()
+        );
+        assert!(!drawn.get(), "an emitter drew a block");
     }
 }

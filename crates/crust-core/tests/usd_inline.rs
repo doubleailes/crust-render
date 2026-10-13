@@ -127,6 +127,59 @@ def Scope "Render"
 }
 "#;
 
+/// `crust:sampler` selects the QMC sampler; an unknown token warns once,
+/// naming the attribute, and renders with `sobol`.
+#[test]
+fn the_sampler_setting_is_read_and_an_unknown_one_warns() {
+    let lattice = load_with_settings(
+        "sampler_lattice",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        token crust:sampler = "lattice"
+    }
+}"#,
+    );
+    assert_eq!(lattice.settings.sampler(), crust_core::SamplerKind::Lattice);
+    assert!(
+        !lattice
+            .warnings
+            .iter()
+            .any(|w| w.code == crust_core::WarningCode::SettingsInvalidValue)
+    );
+
+    let halton = load_with_settings(
+        "sampler_halton",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        token crust:sampler = "halton"
+    }
+}"#,
+    );
+    assert_eq!(halton.settings.sampler(), crust_core::SamplerKind::Sobol);
+    let invalid: Vec<_> = halton
+        .warnings
+        .iter()
+        .filter(|w| w.code == crust_core::WarningCode::SettingsInvalidValue)
+        .collect();
+    assert_eq!(invalid.len(), 1, "{invalid:?}");
+    assert!(
+        invalid[0].message.contains("crust:sampler"),
+        "{}",
+        invalid[0].message
+    );
+
+    let none = load("sampler_default", "");
+    assert_eq!(none.settings.sampler(), crust_core::SamplerKind::Sobol);
+}
+
 // ---------------------------------------------------------------------------
 // Prims and geometry
 // ---------------------------------------------------------------------------

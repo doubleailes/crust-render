@@ -413,6 +413,11 @@ fn edits_in_place_render_as_a_full_import() {
             r#"over "Render" { over "settings" { int crust:maxDepth = 2 } }"#.to_owned(),
         ),
         (
+            "sampler",
+            "settings",
+            r#"over "Render" { over "settings" { token crust:sampler = "pmjBn" } }"#.to_owned(),
+        ),
+        (
             "rect light",
             "lights",
             r#"over "World" { over "Key" { float inputs:intensity = 20

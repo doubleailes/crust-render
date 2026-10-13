@@ -35,13 +35,13 @@
 //! 256 bounces — an open mesh, a sliver — is absorbed.
 
 use glam::Vec3A;
+use openqmc::{Sampler, SamplerImpl};
 use std::f32::consts::{FRAC_1_PI, PI};
 use utils::{cosine_hemisphere, exp3};
 
-use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::brdf::tangent_frame;
-use crate::material::{Material, ScatterSample};
+use crate::material::{BsdfDraw, Material, ScatterSample};
 use crate::medium::{hg_phase, sample_henyey_greenstein};
 use crate::ray::{MASK_ALL, Ray, TRACE_T_MIN};
 use crate::rt_world::World;
@@ -276,10 +276,10 @@ fn trace_owner(
 /// One random walk from `entry_p` on geometry `owner`, whose outward
 /// (viewer-side) surface normal there is `guide`, entered through a face of
 /// facing `entry_front`. `None` when the walk is absorbed or finds no exit.
-/// Draws come from `sampler`; the first bounce is stratified, the rest
-/// incidental.
+/// Draws come from `sampler`, whichever QMC sampler the render uses; the
+/// first bounce is stratified, the rest incidental.
 #[allow(clippy::too_many_arguments)]
-pub fn random_walk(
+pub fn random_walk<S: SamplerImpl>(
     world: &World,
     owner: u32,
     entry_p: Vec3A,
@@ -287,7 +287,7 @@ pub fn random_walk(
     entry_front: bool,
     entry: &SubsurfaceEntry,
     time: f32,
-    sampler: PathSampler,
+    sampler: Sampler<S>,
     cost: &mut WalkCost,
 ) -> Option<WalkExit> {
     let g = walk_anisotropy(entry.anisotropy);
@@ -527,10 +527,12 @@ impl Material for ExitLambertian {
         &self,
         _r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: BsdfDraw<'_>,
     ) -> Option<ScatterSample> {
         let (t, b) = tangent_frame(rec.normal);
-        let l = cosine_hemisphere(sampler.draw_sample_f32::<2>());
+        // The block's first two: what a 2D draw from the same domain was.
+        let u = draw.u();
+        let l = cosine_hemisphere([u[0], u[1]]);
         let wi = (t * l.x + b * l.y + rec.normal * l.z).normalize();
         let cos = l.z.max(0.0);
         if cos <= 0.0 {

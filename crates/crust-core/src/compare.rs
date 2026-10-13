@@ -567,6 +567,18 @@ pub fn comparability(a: &Stamp, b: &Stamp) -> Comparability {
             notes.push(format!("{name} differs: {} vs {}", show(va), show(vb)));
         }
     }
+    // A file written before the sampler was selectable drew from Sobol.
+    let sampler = |s: &Stamp| match s.get("crust:sampler") {
+        Some(StampValue::Text(v)) => v.clone(),
+        _ => "sobol".to_owned(),
+    };
+    let (sa, sb) = (sampler(a), sampler(b));
+    if sa != sb {
+        notes.push(format!(
+            "crust:sampler differs ({sa} vs {sb}): different samplers draw different numbers, \
+             so the pixels differ by noise even where both converge to the same image"
+        ));
+    }
     if a.color_interop_id != b.color_interop_id {
         let id = |s: &Stamp| {
             s.color_interop_id
@@ -789,6 +801,20 @@ mod tests {
                 c.notes
             );
         }
+
+        // Two samplers warn, naming the sampler; a stamp written before the
+        // sampler was selectable reads `sobol` and compares with one that
+        // records it; the exit status (`identical`) is the pixels' alone.
+        let pmj = with(s16(), "crust:sampler", Text("pmjBn".into()));
+        let c = comparability(&with(s16(), "crust:sampler", Text("sobol".into())), &pmj);
+        assert_eq!(c.status, ComparabilityStatus::Warn);
+        assert!(
+            c.notes.iter().any(|n| n.contains("crust:sampler differs")),
+            "{:?}",
+            c.notes
+        );
+        let c = comparability(&base, &with(s16(), "crust:sampler", Text("sobol".into())));
+        assert_eq!(c.status, ComparabilityStatus::Ok, "{:?}", c.notes);
 
         // A different camera exposure warns; a stamp written before the
         // scale was recorded reads 1 and compares with one that records 1.

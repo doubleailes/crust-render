@@ -22,6 +22,11 @@ cargo run --release -- render -i samples/materialx_basic.usda     # MaterialX fi
 cargo run --release -- render -i samples/usdpreview_textured.usda # UsdPreviewSurface + UsdUVTexture (UDIM, EXR, auto)
 cargo run --release -- render       # no -i → hard-coded procedural fallback (world::simple_scene)
 cargo run --release -- render --scanline -i samples/cornellbox.usda # row order (tiles are the default)
+cargo run --release -- render -i samples/cornellbox.usda -s 4 --sampler sobolBn # the QMC sampler: sobol (default) |
+    # sobolBn | lattice | latticeBn | pmj | pmjBn; stamped as crust:sampler, and `diff` warns
+    # when two EXRs' samplers differ. A sampler A/B is two renders with --indirect-clamp 0
+    # and the same -s, compared against a high-spp reference of either (relMSE); the
+    # numbers that chose the default are in the rendering design record.
 cargo run --release -- ls camera -i samples/cornellbox.usda # the --camera paths, one per line (log on stderr)
 cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; plurals accepted
 

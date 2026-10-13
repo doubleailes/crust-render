@@ -42,10 +42,9 @@
 use glam::Vec3A;
 use utils::cosine_hemisphere;
 
-use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::brdf::*;
-use crate::material::{Material, ScatterSample};
+use crate::material::{BsdfDraw, Material, ScatterSample};
 use crate::medium::Medium;
 use crate::ray::Ray;
 
@@ -340,12 +339,12 @@ impl ResolvedOpenPBR {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
     ) -> Option<ScatterSample> {
         if self.1 {
-            self.0.scatter_resolved(r_in, rec, sampler)
+            self.0.scatter_resolved(r_in, rec, draw)
         } else {
-            self.scatter_without_straight(r_in, rec, sampler)
+            self.scatter_without_straight(r_in, rec, draw)
         }
     }
 
@@ -360,10 +359,9 @@ impl ResolvedOpenPBR {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
     ) -> Option<ScatterSample> {
-        self.0
-            .scatter_with::<false, false>(r_in, rec, sampler, None)
+        self.0.scatter_with::<false, false>(r_in, rec, draw, None)
     }
 
     /// [`OpenPBR::scatter_split`] on the resolved parameters.
@@ -371,16 +369,16 @@ impl ResolvedOpenPBR {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
         out: &mut crate::lpe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
         if self.1 {
             self.0
-                .scatter_with::<true, true>(r_in, rec, sampler, Some(out))
+                .scatter_with::<true, true>(r_in, rec, draw, Some(out))
         } else {
             self.0
-                .scatter_with::<true, false>(r_in, rec, sampler, Some(out))
+                .scatter_with::<true, false>(r_in, rec, draw, Some(out))
         }
     }
 
@@ -495,13 +493,15 @@ impl OpenPBR {
         ))
     }
 
+    /// [`Material::scatter_importance`] with the parameters as they are,
+    /// from the four uniforms `draw` produces when called.
     pub(crate) fn scatter_resolved(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
     ) -> Option<ScatterSample> {
-        self.scatter_with::<false, true>(r_in, rec, sampler, None)
+        self.scatter_with::<false, true>(r_in, rec, draw, None)
     }
 
     /// The sampling behind [`OpenPBR::scatter_resolved`] and
@@ -510,12 +510,15 @@ impl OpenPBR {
     /// drawn; without, every `if SPLIT` compiles away and this is the
     /// scatter it always was. Without `STRAIGHT` the thin-walled delta
     /// transmission is not in the lobe set ([`LobePmf::selecting`]).
+    ///
+    /// `draw` is called once, after the back-facing return: a hit from
+    /// behind the shading normal draws nothing.
     #[inline(always)]
     fn scatter_with<const SPLIT: bool, const STRAIGHT: bool>(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
         mut split: Option<&mut crate::lpe::LobeSplit>,
     ) -> Option<ScatterSample> {
         if SPLIT && let Some(out) = split.as_deref_mut() {
@@ -528,10 +531,10 @@ impl OpenPBR {
             return None;
         }
 
-        // One 4D block from the BSDF domain: `s[0]` picks the lobe, `s[1..3]`
-        // is the 2D direction sample, and `s[3]` selects the dispersion channel
-        // for thick transmission.
-        let s = sampler.draw_sample_f32::<4>();
+        // One 4D block, the integrator's BSDF domain: `s[0]` picks the lobe,
+        // `s[1..3]` is the 2D direction sample, and `s[3]` selects the
+        // dispersion channel for thick transmission.
+        let s = draw();
         let dir_uv = [s[1], s[2]];
 
         let pmf = LobePmf::selecting::<STRAIGHT>(self, v_local.z);
@@ -735,11 +738,11 @@ impl OpenPBR {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: impl FnOnce() -> [f32; 4],
         out: &mut crate::lpe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
-        self.scatter_with::<true, true>(r_in, rec, sampler, Some(out))
+        self.scatter_with::<true, true>(r_in, rec, draw, Some(out))
     }
 
     /// The weight this BSDF gives the ray `r_in` continuing straight
@@ -797,11 +800,11 @@ impl Material for OpenPBR {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: BsdfDraw<'_>,
     ) -> Option<ScatterSample> {
         match self.shaded(rec) {
-            Some(m) => m.scatter(r_in, rec, sampler),
-            None => self.scatter_resolved(r_in, rec, sampler),
+            Some(m) => m.scatter(r_in, rec, || draw.u()),
+            None => self.scatter_resolved(r_in, rec, || draw.u()),
         }
     }
 

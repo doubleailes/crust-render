@@ -519,3 +519,35 @@ fn a_flag_overrides_the_stage_s_setting() {
     assert_eq!(row["flag"], "--light-selection");
     assert_eq!(row["usd_attribute"], "crust:lightSelection");
 }
+
+/// `--sampler` is a shared flag: the report's effective settings show it
+/// with its flag and attribute, as a render with the same flag would use.
+#[test]
+fn the_sampler_is_a_shared_flag() {
+    let dir = work_dir("sampler_flag");
+    let input = cornellbox();
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            input.to_str().unwrap(),
+            "--sampler",
+            "sobolBn",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    let row = v["effective_settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "sampler")
+        .expect("sampler")
+        .clone();
+    assert_eq!(row["value"], "sobolBn");
+    assert_eq!(row["flag"], "--sampler");
+    assert_eq!(row["usd_attribute"], "crust:sampler");
+}

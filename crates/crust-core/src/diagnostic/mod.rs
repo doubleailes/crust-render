@@ -1705,6 +1705,12 @@ pub fn effective_settings(s: &RenderSettings, flags: &SceneFlags) -> Vec<Setting
             Some("crust:pixelFilterRadius"),
         ),
         row(
+            "sampler",
+            s.sampler().name().into(),
+            Some("--sampler"),
+            Some("crust:sampler"),
+        ),
+        row(
             "path_guiding",
             s.guiding().to_string(),
             None,
