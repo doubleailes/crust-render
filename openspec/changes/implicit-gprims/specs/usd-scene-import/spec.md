@@ -216,8 +216,10 @@ without an early camera, SHALL take one fixed count.
 
 #### Scenario: Capsule caps follow
 
-- **WHEN** a capsule takes radial count `N`
-- **THEN** each hemispherical cap has a quarter as many rings, rounded up, at least two
+- **WHEN** a capsule with equal radii takes radial count `N`
+- **THEN** each hemispherical cap has a quarter as many rings, rounded up, at least two;
+  with unequal radii the caps share twice that many between them, as GeomUtil splits
+  them
 
 ### Requirement: Unread geometry types are reported
 

@@ -151,7 +151,10 @@ Schema mapping:
   vertices wind the opposite way, so without it `front_face` inverts.
   Non-invertible transforms still bake immediately, and a mesh authoring
   `crust:motion:translate` always instances (a baked mesh has no transform left to lerp).
-  `UsdGeomSphere` → analytic `Sphere` geometry.
+  `UsdGeomSphere` → analytic `Sphere` geometry. The implicit shapes (`Cube`, `Plane`,
+  `Cylinder`, `Cylinder_1`, `Cone`, `Capsule`, `Capsule_1`) → the meshes OpenUSD's
+  GeomUtil generators produce, through the same deferred decision ("Implicit shapes",
+  below). Any other `Gprim` raises `geom.unsupported_type`.
 - **Subdivision surfaces** (`scene/subdiv/`, via the pure-Rust
   [`opensubdiv-rs`](https://github.com/doubleailes/OpenSubdiv-rs) port of OpenSubdiv's
   Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned to its `0.5.0` release tag,
@@ -478,6 +481,119 @@ Schema mapping:
   transforms for the `motionvector` AOV (the `aovs` design record, "Motion vector AOV").
   Sample: `samples/motionvector.usda`.
 
+## Implicit shapes
+
+`Cube`, `Plane`, `Cylinder`, `Cylinder_1`, `Cone`, `Capsule` and `Capsule_1` render as
+the triangles usdview draws for them: `usd_import/implicit.rs` transcribes OpenUSD's
+`pxr/imaging/geomUtil` generators, and the result enters the mesh path after the read.
+They used to fall through both dispatch sites without a word, so a blockout that
+rendered in usdview rendered with holes here.
+
+- **Into the mesh path after the read.** `emit_mesh` is split: it reads a `MeshSource`
+  and hands it to `place_mesh_source`, which does everything after the read (the
+  non-invertible bake, `MeshArena::intern`, `reserve_slot` / `MeshPlacement`). An
+  implicit shape builds its `MeshSource` (`ImplicitPolicy::source`) and calls the same
+  function, and in the prototype walk the same `intern` → `ProtoPart::leaf`. So shapes
+  get deduplication, the bake-or-instance decision, prototypes, `crust:rayMask`,
+  `crust:motion:translate`, light linking and material binding with no new kernel
+  geometry. Rejected: a subdivision cage (an unauthored scheme is `catmullClark`, so a
+  cube rounds into a blob, and a creased cylinder shrinks below its radius); a USD
+  `Mesh` synthesised in an in-memory layer; analytic quadrics in `crust-rt` (new
+  geometry kinds, SIMD packets and bitwise pins for blockout geometry).
+  - **Trap: a `MeshSource`'s normals mean "smooth".** `MeshKey::smooth` enters the dedup
+    key from `normals.is_some()`, and authored USD `normals` are read nowhere. Curved
+    shapes carry GeomUtil's `vertex` normals; the cube and the plane, whose GeomUtil
+    normals are `uniform` and `constant`, carry `None` and shade faceted with no split
+    vertices. The scheme GeomUtil puts on a curved shape's topology (`catmullClark`) is
+    ignored: the tessellation is a finished surface, never subdivided.
+- **Five generators for seven schemas** (`cuboid`, `plane`, `cylinder`, `cone`,
+  `capsule`), each a transcription of GeomUtil's `_GeneratePointsImpl`,
+  `_GenerateNormalsImpl` and `GenerateTopology`: the vertex order, the cap rings split
+  from the side (a cylinder's rims are on rings of their own so its side normals do not
+  bend round them), the seam at +X before the frame, the `rightHanded` winding, and
+  `UsdImagingGprimAdapter::GetImplicitBasis(axis)` as the frame (a cyclic permutation of
+  the coordinates). `Cylinder` passes equal radii, `Capsule` likewise. Readers take
+  `double` or `float` at `eval_time()` with the schema fallbacks.
+  - **Trap: the cone is not a cylinder with `rTop = 0`.** GeomUtil's cone has no top fan:
+    its quads close on a ring of N coincident apex points, so the side's normals stay
+    smooth round the apex instead of averaging to the spine. A `Cylinder_1` with
+    `radiusTop = 0` is still the cylinder generator, top fan and all, as Storm draws it.
+  - Unequal capsule radii: each cap is tangent to the sloping side, so its sphere is
+    larger than the radius and its centre moves along the spine (`Caps::of`), and the
+    `2M` cap rings are split between the two caps in proportion to how much of a sphere
+    each covers (`GfRound`, half to even).
+  - Points are computed in `f64` and stored as `f32`. GeomUtil computes in `float` when
+    Storm fills a `VtVec3fArray`, so the two agree to float rounding of the angles, not
+    bit for bit (`cos(π/2)` is −4.4·10⁻⁸ there).
+- **The radial count from the screen.** `ScreenRate` is split into a
+  `ScreenProjection` (eye, `f_px`, frustum, `sigma_culled`) and the subdivision target
+  and ceiling. `subdiv_policy` resolves the projection whenever a camera is named before
+  the traversal, edge length or not, and the import keeps it in `ImplicitPolicy`. For an
+  unshared placement, with `σ = sigma_culled(world_xf, local_bounds, Cull::Pad(0))` and
+  `ρ = r_max · σ` the largest radius on screen in pixels,
+  `N = clamp(ceil(π / acos(1 − ε/ρ)), N_MIN, N_MAX)`: the fewest segments whose chord
+  sagitta is at most `ε` pixels. `ε = 0.5` px, `N_MIN = 16` (Storm uses 10; 16 keeps
+  reflections of off-screen shapes round enough), `N_MAX = 256` (a sagitta of
+  7.5·10⁻⁵ r, within `ε` up to ρ ≈ 6 600 px), and `N_FIXED = 48` (0.2 % of r) for
+  shared shapes and loads with no early camera. Off screen (`σ = 0`) or under `ε` gives
+  `N_MIN`, the camera inside the box (`σ = ∞`) `N_MAX`. A capsule's caps take
+  `max(2, ceil(N/4))` divisions each. The count depends only on the stage, the camera,
+  the resolution and the placement, so equal shapes at similar sizes still dedup.
+  `local_bounds` is the box of the true surface (a capsule's caps can bulge past the
+  side's radius), not of the tessellation, so the measure does not depend on the count it
+  chooses.
+  - "Unshared" is subdivision's `MeshPlace::World` / `Shared` split: a direct prim is
+    placed in the world; a prototype part only when the walk was given
+    `ProtoPlace::Unshared` — which only adaptive subdivision does, since only it counts
+    placements (`count_placements`) — and a prototype reached through a native instance
+    nested in another prototype is always built shared. So without an edge length, every
+    prototype's shapes take `N_FIXED`. Counting placements for shapes alone would rebuild
+    every once-placed prototype per placement in every load that names a camera, shapes
+    or not.
+  - Rejected: driving the count from `crust:subdivisionEdgeLength` (opt-in, so shapes
+    would be fixed by default, and an edge length measures the wrong thing for a
+    silhouette); a world-space tolerance (not scale-invariant).
+  - **Trap: the count moves with the camera.** An in-place settings update (`crust mcp`,
+    `live.rs` `refresh_settings`) would keep shapes tessellated for the old view, so the
+    import records `StageFacts::on_screen_shapes` when any count came from the projection,
+    and a settings change then re-imports, as it does under adaptive subdivision.
+  - Resolving the projection may open a stage masked to a camera under a payload in a
+    load that never reads it for subdivision. Only when a camera is named, and it is
+    skipped when the index stage composes the camera.
+  - The end of the import logs one DEBUG line: shapes read, triangles generated and the
+    histogram of radial counts.
+- **Dispatch order, the same in both walks**: volume, `Mesh`, `Sphere`, `BasisCurves`,
+  implicit shapes, then (top level) camera and lights, then an unread `Gprim`.
+- **Displacement is refused**: an implicit shape has no chart to displace along.
+  `undisplaced` drops the bound material's displacement with `geom.implicit_displacement`
+  and the shape renders with the rest of its material.
+- **Unread `Gprim`s are reported.** A prim no reading branch takes and that
+  `is_a("Gprim")` (openusd's `UsdPrim::IsA`, through the schema registry) is counted by
+  type in `ImportCaches::unread`: once per prim the top-level walk meets, once per prim
+  per prototype *build*. Placements never add (the walk runs once per build), but a
+  streamed load rebuilds a prototype once per chunk that uses it, and `/__Prototype_N`
+  is renumbered per chunk (`ImportCaches::epoch`), so the count is "prims read", exact
+  only for a load that is not streamed. One `geom.unsupported_type` per type is raised at
+  the end of the load, on the importing thread, its message carrying the count; so the
+  record's own `count` is the number of types.
+- **The oracle.** `scripts/geomutil_oracle.py` downloads micromamba from
+  conda.anaconda.org (micro.mamba.pm is not reachable from sandboxed sessions), creates a
+  throwaway env with conda-forge `openusd` pinned to version and build, compiles
+  `scripts/geomutil_oracle/probe.cpp` against GeomUtil and
+  `UsdImagingGprimAdapter::GetImplicitBasis`, and writes the fixture
+  `crates/crust-core/tests/data/geomutil_oracle.txt`; a second run reproduces it byte for
+  byte. `tests/geomutil_oracle.rs` replays every case: topology exactly, points within
+  10⁻⁶ of the case's extent, `vertex` normals within 10⁻⁶. The cases cover every family
+  and `axis`, the fallbacks, cones, truncated and flared cylinders, both kinds of unequal
+  capsule, `N ∈ {3, 10, 16, 48}`, `M ∈ {1, 2, 4, 12}`, zero heights, and a tiny and a
+  huge radius.
+  - **Trap: the Python bindings are not enough.** conda-forge's wrap only the original
+    signatures (no `radiusBottom` / `radiusTop`, no frame); the pip `usd-core` wheel has
+    no `GeomUtil` at all. Hence the C++ probe, which links `usd_python` and libpython
+    because conda-forge builds OpenUSD with Python support.
+- **Sample**: `samples/implicit_shapes.usda` — all seven schemas on every axis, unequal
+  radii on both `_1` variants, through a named camera. No mesh in it is authored by hand.
+
 ## Displacement
 
 Scalar displacement is applied **at import, once per distinct mesh**, between
@@ -604,7 +720,10 @@ same point.
 
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
   *first* in the dispatch, so it never becomes geometry — its bounds must not occlude
-  shadow rays). The local box is `[-size/2, size/2]³` when the prim authors `size` (a
+  shadow rays). The prototype walk checks it first too, so a volume `Cube` inside a
+  prototype is refused with `volume.in_prototype` and never read as a box: until
+  implicit shapes were read, that walk checked `Mesh`, `Sphere` and `BasisCurves` first
+  and the order did not matter, since a `Cube` matched none of them. The local box is `[-size/2, size/2]³` when the prim authors `size` (a
   `Cube`; USD's default size is 2), else the unit cube; placement/orientation/scale come
   from the composed prim transform. Attributes (all in `crust:volume:`, defaults in
   parentheses): `type` = `homogeneous` | `smoke` | `grid` (required); `densityScale` (1);
@@ -1027,6 +1146,31 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
   dicing reference camera.
 - **The rate ignores motion.** It is chosen at the camera's and the placement's
   shutter-open transforms.
+
+## Known gaps: implicit shapes
+
+- **No texture coordinates, and no Ptex faces of their own.** GeomUtil generates no
+  chart, so a UV texture reads nothing; a Ptex texture is addressed by the generated
+  faces (`intern` builds the face table as for any mesh), which no file is painted for.
+- **A UsdVol `Volume` is reported, not read.** It is a `Gprim`, so it raises
+  `geom.unsupported_type`; volumes are authored with `crust:volume:*`.
+- **No displacement**, for the same reason (`geom.implicit_displacement`).
+- **The shadow-terminator artefact on coarse shapes.** A smooth normal on a polygon
+  darkens near the terminator. `N_MIN` and the `ε` budget keep facets sub-pixel on
+  screen; a shape off screen, at `N_MIN`, can show it in a reflection.
+- **Shared and nested prototypes take the fixed count** however close they are, and
+  without an edge length so does every prototype (placements are counted only for
+  adaptive subdivision).
+- **The unsupported-type count is per prototype build**, which a streamed load repeats
+  per chunk.
+- **An instance prim's own schema is not read.** A native instance is expanded from its
+  prototype, which holds the instance's children, before any dispatch, so a prim that is
+  itself an instanceable `Cube` (or `Mesh`, or `crust:volume:*` prim) imports nothing of
+  its own.
+- **`doubleSided` is not read**, as on every gprim; and the schemas have no sweep, so
+  GeomUtil's partial sweeps are never needed.
+- **`Sphere` keeps its analytic path**, with its top-level scale gap ("Known gaps:
+  instancing").
 
 ## Known gaps: openusd bugs and workarounds
 

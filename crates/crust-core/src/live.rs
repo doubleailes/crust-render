@@ -95,6 +95,9 @@ pub(crate) struct StageFacts {
     pub(crate) linked: bool,
     /// The camera rendered through, `None` for the procedural one.
     pub(crate) camera: Option<String>,
+    /// Whether an implicit shape took its radial count from the camera's
+    /// projection: a change of camera or resolution then moves geometry.
+    pub(crate) on_screen_shapes: bool,
 }
 
 impl Provenance {

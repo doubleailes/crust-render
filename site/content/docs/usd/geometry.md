@@ -25,7 +25,8 @@ top = false
 | `PointInstancer`, `instanceable` prims | their prototypes, stored once and placed per instance |
 
 Any other geometry type (`Points`, `NurbsPatch`, `NurbsCurves`, `HermiteCurves`,
-`TetMesh`) renders nothing. It is reported with one
+`TetMesh`, and a UsdVol `Volume`, whose fields Crust Render does not read: author
+[`crust:volume:*`](@/docs/usd/volumes.md) instead) renders nothing. It is reported with one
 [`geom.unsupported_type`](@/docs/reference/warnings.md#geometry-types) warning per type,
 which counts the prims.
 
@@ -52,8 +53,9 @@ read at the render frame:
   that meet its sloping side smoothly.
 - The shapes are never subdivided, whatever `subdivisionScheme` or
   [`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel) says.
-- They have no texture coordinates and no Ptex faces, so a material that reads
-  `primvars:st` or a Ptex file reads nothing on them.
+- They have no texture coordinates, so a UV texture reads nothing on them. A Ptex
+  file is addressed by the faces Crust Render generates, which no Ptex file is painted
+  for.
 - [Displacement](@/docs/usd/materials.md#displacement) is not applied to them: the shape
   renders undisplaced, with a
   [`geom.implicit_displacement`](@/docs/reference/warnings.md#geometry-types) warning.

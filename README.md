@@ -121,8 +121,13 @@ ray on `samples/cornellbox.usda`.
 `UsdGeomBasisCurves` import as **round curve segments** (sphere-swept cones;
 cubic bezier/bspline/catmullRom spans stay cubic and are subdivided per ray) — see
 `samples/curves.usda`. A curve hit carries the strand's direction through every
-instance, which is what MaterialX hair (`samples/hair.usda`) shades along. Two
-per-prim extras:
+instance, which is what MaterialX hair (`samples/hair.usda`) shades along. The
+**implicit shapes** (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1`
+variants) are tessellated into exactly the meshes usdview draws, pinned point for
+point against OpenUSD's GeomUtil; with the render camera named, each curved shape
+gets the fewest segments that keep its outline within half a pixel
+(`samples/implicit_shapes.usda`). Any other geometry type is reported, once per
+type, instead of vanishing. Two per-prim extras:
 
 - `crust:motion:translate = (x, y, z)` — **transform motion blur**: the prim
   streaks through that world-space translation over the shutter

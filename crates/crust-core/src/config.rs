@@ -246,7 +246,8 @@ pub struct Config {
     /// level, the per-mesh adaptive behaviour this replaced).
     pub adaptive_per_face: bool,
     /// `CRUST_ADAPTIVE_FRUSTUM`: in adaptive subdivision, leave geometry wholly
-    /// outside the render camera's view unrefined (`false`: refine by distance
+    /// outside the render camera's view unrefined, and give an implicit shape
+    /// there the fewest radial segments (`false`: refine and size by distance
     /// alone, in view or not).
     pub adaptive_frustum: bool,
     /// `CRUST_TRI_PACKETS`: the kernel's triangle packet layout

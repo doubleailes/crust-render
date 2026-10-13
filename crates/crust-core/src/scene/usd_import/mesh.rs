@@ -2258,11 +2258,13 @@ mod subdiv_policy_tests {
         }));
         let eye = GMat4::from_translation(glam::Vec3::new(0.0, 0.0, -6.0));
         let rate = ScreenRate {
-            eye: glam::Vec3::ZERO,
-            f_px: 400.0,
+            projection: super::adaptive::ScreenProjection {
+                eye: glam::Vec3::ZERO,
+                f_px: 400.0,
+                frustum: None,
+            },
             target: 2.0,
             max: 3,
-            frustum: None,
         };
         let policies = [
             SubdivPolicy::new(0),
@@ -2503,11 +2505,13 @@ mod displacement_tests {
             // The eye sits just off the cube's +x+y+z corner, so its near
             // faces dice at the ceiling and its far ones coarser.
             let rate = ScreenRate {
-                eye: glam::Vec3::new(1.5, 1.5, 1.5),
-                f_px: 200.0,
+                projection: super::adaptive::ScreenProjection {
+                    eye: glam::Vec3::new(1.5, 1.5, 1.5),
+                    f_px: 200.0,
+                    frustum: None,
+                },
                 target: 40.0,
                 max: 4,
-                frustum: None,
             };
             let (v, t, policy) = displaced_cube(name, SubdivPolicy::adaptive(rate, 1), &d);
             assert_eq!(policy.per_face_meshes, 1, "{name}: tessellated per face");

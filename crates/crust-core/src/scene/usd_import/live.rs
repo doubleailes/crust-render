@@ -298,6 +298,11 @@ fn refresh_settings(
     if facts.adaptive {
         return Err(Structural("adaptive subdivision reads the camera".into()));
     }
+    if facts.on_screen_shapes {
+        return Err(Structural(
+            "implicit shapes are tessellated for their size on screen".into(),
+        ));
+    }
     let Some(camera) = facts.camera.as_deref() else {
         return Err(Structural("the scene renders the procedural camera".into()));
     };
