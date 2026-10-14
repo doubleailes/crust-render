@@ -239,20 +239,21 @@ warnings, plus `place_s`, the time the placement itself took.
   prims' geometry counts, so a cup can drop through a shelf onto the table below. A prim's
   own geometry never counts.
   - With `align_to_normal`, the prim is first turned so its up axis follows the surface
-    normal under the centre of its footprint.
+    normal under the centre of its footprint: the face's own normal, whatever vertex
+    normals the mesh authors.
   - The move is one op, `xformOp:transform:crustPlace`, first in the prim's
     `xformOpOrder`, after a `!resetXformStack!` if there is one. The prim's own ops,
     including ones a payload authors, follow it unchanged. Dropping again folds into the
     same op.
   - Each prim is reported `placed` (with its contact point and how far its origin
     moved), `no geometry`, or `nothing below`. A prim that is not placed gets no opinion.
-  - A path inside an instance, or one that cannot hold a transform (a `Scope`, an
-    untyped prim), refuses the whole call.
+  - A path inside an instance, one that cannot hold a transform (a `Scope`, an untyped
+    prim), or a prim given together with one of its ancestors, refuses the whole call.
 - **`scatter_on_surface(...)`** defines a new `PointInstancer` at `path`. Its instances lie
   on `target`'s triangles in proportion to their area, each prototype's origin on the
   surface, standing upright about the up axis.
-  - **Prototypes** are prim paths of the stage, or asset files relative to the input
-    stage's directory. Each becomes a child of the instancer's `Prototypes` scope that
+  - **Prototypes** are prim paths of the stage, or USD files (`.usd`, `.usda`, `.usdc`,
+    `.usdz`), absolute or relative to the input stage's directory. Each becomes a child of the instancer's `Prototypes` scope that
     references it and drops its own placement, so it is instanced at its own origin. The
     prim it references still renders where it is: deactivate it with `set_active` if it
     should not.
@@ -264,7 +265,8 @@ warnings, plus `place_s`, the time the placement itself took.
     - `scale: [min, max]` draws each instance's uniform scale.
   - **The same seed over the same scene authors the same bytes**, whatever the machine's
     thread count and the stage's sampler setting. To try other settings, `undo` and
-    scatter again: a path that already names a prim is refused.
+    scatter again: a path that already names a prim is refused, and so is one under an
+    instance, where USD would ignore it.
   - Curves and implicit shapes in the target are skipped and listed in `skipped`.
 
 ### Rendering

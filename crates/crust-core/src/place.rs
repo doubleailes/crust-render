@@ -91,7 +91,10 @@ impl IdSet {
 #[derive(Clone, Copy, Debug)]
 pub struct Found {
     pub point: Vec3A,
+    /// The kernel's hit normal: a mesh's interpolated vertex normals when it
+    /// authors them, else the geometric normal.
     pub normal: Vec3A,
+    pub geom_id: u32,
 }
 
 /// The first hit from `origin` along `dir` (unit) whose geometry `accept`
@@ -118,6 +121,7 @@ pub fn first_hit(
             return Some(Found {
                 point,
                 normal: hit.normal,
+                geom_id: hit.geom_id,
             });
         }
         from = point;
@@ -162,13 +166,14 @@ pub fn drop_prims(
         .iter()
         .map(|prim| {
             let own = IdSet::of(prov, std::slice::from_ref(prim));
-            drop_one(world, &own, target.as_ref(), up, align)
+            drop_one(world, prov, &own, target.as_ref(), up, align)
         })
         .collect()
 }
 
 fn drop_one(
     world: &World,
+    prov: &Provenance,
     own: &IdSet,
     target: Option<&IdSet>,
     up: UpAxis,
@@ -207,7 +212,7 @@ fn drop_one(
         let Some(below) = first_hit(world, top, down, &accept) else {
             return Dropped::NothingBelow;
         };
-        let n = below.normal.normalize();
+        let n = face_normal_at(world, prov, &below, down).unwrap_or(below.normal.normalize());
         let pivot = pivot.as_dvec3();
         turn = DMat4::from_translation(pivot)
             * DMat4::from_quat(DQuat::from_rotation_arc(up_v.as_dvec3(), n.as_dvec3()))
@@ -242,6 +247,49 @@ fn drop_one(
         contact: below.point.as_dvec3(),
         normal,
     }
+}
+
+/// The geometric normal where a ray along `dir` found `hit`, turned against
+/// the ray: the face normal of the triangle of its geometry the point lies
+/// on. The kernel's own hit normal interpolates a mesh's authored vertex
+/// normals when it has them — a shading normal, not the surface's.
+/// `None` when the hit is on no triangle (an analytic shape, whose kernel
+/// normal is its geometric one).
+fn face_normal_at(world: &World, prov: &Provenance, hit: &Found, dir: Vec3A) -> Option<Vec3A> {
+    let prim = prov.prim_of_geometry(hit.geom_id)?;
+    let p = hit.point;
+    // The triangle the point is nearest the plane of, among those it lies
+    // inside (to a tolerance), else among all.
+    let mut best: Option<(bool, f32, Vec3A)> = None;
+    for ids in prov.geometry_of(prim) {
+        world.visit(ids, MASK, |_, piece| {
+            let Piece::Triangle([a, b, c]) = piece else {
+                return;
+            };
+            let n = (b - a).cross(c - a);
+            let len = n.length();
+            if len <= 0.0 || !len.is_finite() {
+                return;
+            }
+            let n = n / len;
+            let off = (p - a).dot(n).abs();
+            let tol = 1e-4 * (b - a).length().max((c - a).length());
+            let inside = [(a, b), (b, c), (c, a)]
+                .iter()
+                .all(|&(u, v)| (v - u).cross(p - u).dot(n) >= -tol * (v - u).length());
+            let better = match best {
+                None => true,
+                Some((was_inside, was_off, _)) => {
+                    (inside && !was_inside) || (inside == was_inside && off < was_off)
+                }
+            };
+            if better {
+                best = Some((inside, off, n));
+            }
+        });
+    }
+    let (_, _, n) = best?;
+    Some(if n.dot(dir) > 0.0 { -n } else { n })
 }
 
 /// How far above a prim's top its rays start: clear of the top vertex's own
@@ -322,7 +370,8 @@ pub struct Scattered {
 
 /// The sampler domain a scatter's instance draws its point and prototype
 /// from, and the one it draws its turn and scale from: keys under a root of
-/// `PathSampler::new(0, 0, seed, index)`, which nothing else draws from.
+/// `PathSampler::new(0, 0, 0, index).new_domain(seed)`, which nothing else draws
+/// from.
 const K_SCATTER: i32 = 0;
 const K_SCATTER_SHAPE: i32 = 1;
 
@@ -403,7 +452,10 @@ pub fn scatter(
     let instances = (0..count as i32)
         .into_par_iter()
         .map(|i| {
-            let root = PathSampler::new(0, 0, request.seed as i32, i);
+            // The seed keys a domain, never the frame: openqmc adds the
+            // index's high bits to the frame unchecked, which overflows for
+            // a seed near `i32::MAX` past 65 536 instances.
+            let root = PathSampler::new(0, 0, 0, i).new_domain(request.seed as i32);
             let [u_tri, u0, u1, u_proto] = root.new_domain(K_SCATTER).draw_sample_f32::<4>();
             let [u_angle, u_scale] = root.new_domain(K_SCATTER_SHAPE).draw_sample_f32::<2>();
             let (_, _, bin) = cdf.sample(u_tri);

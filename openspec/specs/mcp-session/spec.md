@@ -307,8 +307,9 @@ that same op. The prim's other opinions and its descendants SHALL be unchanged.
 
 A prim that has no geometry in the scene, or that nothing lies beneath, SHALL be
 reported with the reason and left unchanged. A path that is not a prim of the stage,
-lies inside an instance, or names a prim that cannot hold a transform SHALL be refused
-with the reason, and nothing SHALL be authored for any prim of the call.
+lies inside an instance, or names a prim that cannot hold a transform, and a call that
+names a prim together with one of its ancestors, SHALL be refused with the reason, and
+nothing SHALL be authored for any prim of the call.
 
 #### Scenario: A vase onto a table
 
@@ -352,10 +353,16 @@ with the reason, and nothing SHALL be authored for any prim of the call.
 - **WHEN** one of the paths lies inside an instance
 - **THEN** the call fails naming that path, and the layer is unchanged
 
+#### Scenario: A prim with its ancestor
+
+- **WHEN** the agent drops `/World/vase` and `/World/vase/geo` in one call
+- **THEN** the call fails naming both, and the layer is unchanged
+
 ### Requirement: Aligning a dropped prim to the surface
 
 With `align_to_normal`, `drop_to_surface` SHALL also turn each prim so that its up axis
-follows the geometric normal of the surface beneath the centre of the prim's footprint,
+follows the geometric normal of the surface beneath the centre of the prim's footprint
+(the face's normal, whatever vertex normals the mesh authors),
 pivoting about the bottom of that footprint, and then drop it as without alignment. A
 prim with nothing beneath the centre of its footprint SHALL be reported and left
 unchanged.
@@ -366,6 +373,12 @@ unchanged.
   the X axis
 - **THEN** the box's up axis is the plane's normal within 1e-4, and its lowest vertex
   lies on the plane within 1e-4 stage units
+
+#### Scenario: A slope whose vertex normals point elsewhere
+
+- **WHEN** the tilted plane authors vertex normals that all point straight up, and the
+  agent drops a box onto it with `align_to_normal`
+- **THEN** the box's up axis is the plane's face normal, not the authored normals
 
 ### Requirement: Scattering instances over a surface
 
@@ -390,11 +403,12 @@ Optional inputs SHALL be:
 
 The call SHALL be refused, authoring nothing, when:
 - the instancer path names a prim the stage already composes, or its parent does not
-  exist;
+  exist, is an instance, or lies inside one (USD reads nothing authored there);
 - the target has no eligible triangle;
 - both or neither of `count` and `density` are given, or more than 100 000 instances
   would be authored;
-- a prototype is neither a prim of the stage nor a file that exists;
+- a prototype is neither a prim of the stage nor an existing `.usd`, `.usda`, `.usdc`
+  or `.usdz` file (an absolute path that names a file is a file);
 - `scale` is not `0 < min <= max`, or `max_slope` is not in `(0, 180]`.
 
 Geometry of the target that is not a triangle mesh (curves, implicit shapes) SHALL be
@@ -435,11 +449,22 @@ skipped and named in the result.
 - **WHEN** the instancer path names a prim the stage already composes
 - **THEN** the call fails naming it, and the layer is unchanged
 
+#### Scenario: A prototype that is not USD
+
+- **WHEN** a prototype is `rock.obj`
+- **THEN** the call fails naming it, and the layer is unchanged
+
+#### Scenario: Under an instance
+
+- **WHEN** the instancer path's parent is an instance, or lies inside one
+- **THEN** the call fails naming it, and the layer is unchanged
+
 ### Requirement: A scatter is reproducible
 
 Two `scatter_on_surface` calls with the same inputs over the same scene SHALL author
 byte-identical instancers, whatever the render's sampler setting and the number of
-threads. A different `seed` SHALL give a different distribution.
+threads. A different `seed` SHALL give a different distribution. Every `seed` from 0 to
+4 294 967 295 SHALL scatter up to the most instances a scatter places.
 
 #### Scenario: Scattering again with the same seed
 

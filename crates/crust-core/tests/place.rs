@@ -756,3 +756,72 @@ fn scatter_follows_area_and_the_seed() {
         .is_err()
     );
 }
+
+/// Alignment follows the surface's face, not a mesh's authored vertex
+/// normals: here they all point straight up, while the slope is tilted 30°.
+#[test]
+fn an_aligned_drop_follows_the_face_not_authored_normals() {
+    let dir = work_dir("align_normals");
+    let (s, c) = (30f64.to_radians().sin(), 30f64.to_radians().cos());
+    let stage = dir.join("normals.usda");
+    write(
+        &stage,
+        &format!(
+            r#"#usda 1.0
+
+def Xform "World"
+{{
+    def Mesh "slope"
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2, {a}, {b}), (-2, {na}, {nb}), (2, {na}, {nb}), (2, {a}, {b})]
+        normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+            interpolation = "vertex"
+        )
+    }}
+{box}}}
+"#,
+            a = 2.0 * s,
+            b = -2.0 * c,
+            na = -2.0 * s,
+            nb = 2.0 * c,
+            box = cube("box", [0., 3., 0.], 0.25)
+        ),
+    );
+    let scene = Scene::from_usd(&stage).expect("normals.usda");
+    let prov = scene.provenance.as_ref().expect("provenance");
+    let dropped = place::drop_prims(
+        &scene.world,
+        prov,
+        &["/World/box".into()],
+        None,
+        UpAxis::Y,
+        true,
+    );
+    let (delta, _, normal) = placed(&dropped[0]);
+    let n = DVec3::new(0.0, c, s);
+    assert!(normal.expect("aligned").abs_diff_eq(n, 1e-4), "{normal:?}");
+    assert!(
+        delta
+            .transform_vector3(DVec3::Y)
+            .normalize()
+            .abs_diff_eq(n, 1e-4)
+    );
+}
+
+/// A seed at the top of the range scatters past 65 536 instances: the seed
+/// keys a sampler domain, never openqmc's frame, which it would overflow.
+#[test]
+fn a_boundary_seed_scatters_many_instances() {
+    let dir = work_dir("boundary_seed");
+    let stage = scatter_stage(&dir);
+    let scene = Scene::from_usd(&stage).expect("scatter.usda");
+    let prov = scene.provenance.as_ref().expect("provenance");
+    for seed in [i32::MAX as u32, u32::MAX] {
+        let req = request("/World/pair", Amount::Count(70_000), seed);
+        let s = place::scatter(&scene.world, prov, &req).expect("scatter");
+        assert_eq!(s.instances.len(), 70_000);
+        assert_eq!(place::scatter(&scene.world, prov, &req).expect("again"), s);
+    }
+}
