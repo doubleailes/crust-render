@@ -48,6 +48,11 @@ pub struct Scene {
     /// Where the scene's materials, lights and geometry came from, for an
     /// in-place update ([`crate::live`]). `None` for a hand-assembled scene.
     pub provenance: Option<crate::live::Provenance>,
+    /// The file of every USD layer the import composed — the root layer, its
+    /// sublayers and the layers behind references and payloads, a layer inside
+    /// a package as the package — sorted. What a host watches to see the
+    /// stage change on disk. Empty for a hand-assembled scene.
+    pub layers: Vec<std::path::PathBuf>,
 }
 
 impl Scene {
@@ -65,6 +70,7 @@ impl Scene {
             time: None,
             warnings: Vec::new(),
             provenance: None,
+            layers: Vec::new(),
         }
     }
 

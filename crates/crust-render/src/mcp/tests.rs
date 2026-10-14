@@ -807,3 +807,298 @@ fn light_paths_refuses_a_render_that_did_not_complete() {
     assert!(e.contains("cancelled"), "{e}");
     assert!(!e.contains("  "), "one space between words: {e}");
 }
+
+// --- Sources on disk (`live-session-source-reload`) ---
+
+/// Writes a stage whose parts live in other layers, each of which another
+/// program may rewrite: `lights.usda` (a sublayer defining the key light),
+/// `prop.usda` (referenced) and `pay.usda` (behind a payload). Returns the
+/// root layer, the session's input.
+fn sourced_stage(dir: &Path) -> PathBuf {
+    std::fs::write(dir.join("lights.usda"), lights_layer(8.0)).unwrap();
+    std::fs::write(dir.join("prop.usda"), quad_layer("Prop", 0.0)).unwrap();
+    std::fs::write(dir.join("pay.usda"), quad_layer("Pay", 0.0)).unwrap();
+    let root = dir.join("shot.usda");
+    std::fs::write(
+        &root,
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    subLayers = [@./lights.usda@]
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 4
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 1, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "Prop" (
+        prepend references = @./prop.usda@
+    )
+    {
+    }
+
+    def Xform "Heavy" (
+        prepend payload = @./pay.usda@
+    )
+    {
+    }
+}
+"#,
+    )
+    .unwrap();
+    root
+}
+
+/// The sublayer: the key light at `intensity`.
+fn lights_layer(intensity: f32) -> String {
+    format!(
+        r#"#usda 1.0
+
+over "World"
+{{
+    def RectLight "Key"
+    {{
+        float inputs:width = 2
+        float inputs:height = 2
+        float inputs:intensity = {intensity}
+        color3f inputs:color = (1, 1, 1)
+        double3 xformOp:translate = (0, 4, 1)
+        float3 xformOp:rotateXYZ = (-90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }}
+}}
+"#
+    )
+}
+
+/// A 2 x 2 quad on the ground as `name`'s layer, lifted by `height`.
+fn quad_layer(name: &str, height: f64) -> String {
+    format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "{name}"
+)
+
+def Mesh "{name}"
+{{
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
+    double3 xformOp:translate = (0, {height}, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}}
+"#
+    )
+}
+
+/// What another program does to a source: `path` rewritten as `text`, its
+/// modification time a second on, so a coarse filesystem clock sees it.
+fn rewrite(path: &Path, text: &str) {
+    let before = std::fs::metadata(path).and_then(|m| m.modified()).unwrap();
+    std::fs::write(path, text).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(before + Duration::from_secs(1))
+        .unwrap();
+}
+
+/// Opens a session on the sourced stage in a fresh `dir`.
+fn sourced_session(name: &str) -> (State, PathBuf) {
+    let dir = work_dir(name).canonicalize().unwrap();
+    let input = sourced_stage(&dir);
+    let layer = dir.join("lookdev.usda");
+    let mut state = State::default();
+    state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .expect("opened");
+    (state, dir)
+}
+
+fn changed(result: &Value) -> Vec<String> {
+    result["sources_changed"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{result:#}"))
+        .iter()
+        .map(|p| p.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_session_watches_every_layer_its_import_composed() {
+    let (mut state, dir) = sourced_session("sources_listed");
+    let open = state.session().unwrap();
+    let mut layers = open.scene.layers.clone();
+    layers.sort();
+    let mut expected: Vec<PathBuf> = [
+        "lookdev.usda",
+        "lights.usda",
+        "pay.usda",
+        "prop.usda",
+        "shot.usda",
+    ]
+    .iter()
+    .map(|f| dir.join(f))
+    .collect();
+    expected.sort();
+    assert_eq!(layers, expected);
+}
+
+/// A light dimmed after its sublayer was rewritten is a full import, and
+/// renders as a fresh session of the same layer does; the same edit with
+/// nothing changed on disk applies in place.
+#[test]
+fn a_rewritten_sublayer_makes_the_next_edit_full() {
+    let (mut state, dir) = sourced_session("sources_sublayer_edit");
+    let tint = |c: &str| format!(r#"over "World" {{ over "Key" {{ color3f inputs:color = {c} }} }}"#);
+    assert_eq!(author(&mut state, &tint("(1, 0.9, 0.8)")), "lights");
+    rewrite(&dir.join("lights.usda"), &lights_layer(3.0));
+    let result = state
+        .session()
+        .unwrap()
+        .author_usda(&tint("(1, 0.8, 0.7)"))
+        .expect("authored");
+    assert_eq!(result["applied"], "full", "{result:#}");
+    assert_eq!(changed(&result), [dir.join("lights.usda").display().to_string()]);
+    same_as_full_import(&mut state, &dir, "sublayer rewritten");
+    // Seen once: the next edit applies in place again.
+    assert_eq!(author(&mut state, &tint("(1, 1, 1)")), "lights");
+}
+
+#[test]
+fn a_query_after_a_referenced_layer_changed_answers_the_new_value() {
+    let (mut state, dir) = sourced_session("sources_query");
+    let open = state.session().unwrap();
+    let ask = |open: &mut super::session::Open| {
+        open.refresh().expect("refreshed");
+        super::query::query(&open.stage, "/World/Prop.xformOp:translate").expect("queried")
+            ["value"]
+            .clone()
+    };
+    assert_eq!(ask(open), json!([0.0, 0.0, 0.0]));
+    rewrite(&dir.join("prop.usda"), &quad_layer("Prop", 0.5));
+    assert_eq!(ask(open), json!([0.0, 0.5, 0.0]));
+}
+
+/// A render with no edit in between shows a rewritten source — the layer
+/// behind a payload included — and is a fresh session's render.
+#[test]
+fn a_render_after_a_source_changed_shows_it() {
+    let (mut state, dir) = sourced_session("sources_render");
+    let before = render_planes(&mut state);
+    rewrite(&dir.join("pay.usda"), &quad_layer("Pay", 0.75));
+    let open = state.session().unwrap();
+    assert_eq!(
+        open.bring_current().expect("imported"),
+        vec![dir.join("pay.usda")]
+    );
+    assert!(open.bring_current().expect("current").is_empty());
+    let after = render_planes(&mut state);
+    let report = crust_core::compare::compare(&before[0].1, &after[0].1);
+    assert!(!report.identical, "the payload's quad moved");
+    same_as_full_import(&mut state, &dir, "payload rewritten");
+}
+
+/// A source rewritten into text that does not parse fails the render, the
+/// old scene unrendered; once it parses again the render goes ahead.
+#[test]
+fn a_source_that_no_longer_imports_fails_the_render_until_fixed() {
+    let (mut state, dir) = sourced_session("sources_broken");
+    let shot = dir.join("shot.usda");
+    let good = std::fs::read_to_string(&shot).unwrap();
+    rewrite(&shot, "#usda 1.0\ndef Xform \"World\" {\n");
+    let open = state.session().unwrap();
+    let e = open.start_render(None, Some(1)).map(|_| ()).unwrap_err();
+    assert!(e.contains("shot.usda"), "{e}");
+    assert!(open.stale.is_some());
+    let e = open.start_render(None, Some(1)).map(|_| ()).unwrap_err();
+    assert!(e.contains("shot.usda"), "tried again: {e}");
+    rewrite(&shot, &good);
+    open.start_render(None, Some(1)).expect("imports again");
+    assert!(open.stale.is_none());
+    same_as_full_import(&mut state, &dir, "fixed");
+}
+
+/// `light_paths` refuses a render made before a source changed on disk.
+#[test]
+fn light_paths_refuses_a_render_from_before_a_source_changed() {
+    use crust_core::inspect::GroupBy;
+    let (mut state, dir) = sourced_session("sources_light_paths");
+    let region = [20, 12, 26, 18];
+    let open = state.session().unwrap();
+    let (job, _) = open.start_render(Some(region), Some(4)).expect("started");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(job.wait(Duration::from_secs(3600)));
+    open.light_paths(job.id, region, GroupBy::ExprLight, 4)
+        .expect("inspected");
+    rewrite(&dir.join("lights.usda"), &lights_layer(2.0));
+    let e = open
+        .light_paths(job.id, region, GroupBy::ExprLight, 4)
+        .unwrap_err();
+    assert!(e.contains("source layer"), "{e}");
+}
+
+#[test]
+fn reload_names_what_changed_and_imports_even_when_nothing_did() {
+    let (mut state, dir) = sourced_session("sources_reload");
+    let before = render_planes(&mut state);
+    let result = state.session().unwrap().reload().expect("reloaded");
+    assert_eq!(result["applied"], "full", "{result:#}");
+    assert!(changed(&result).is_empty());
+    let again = render_planes(&mut state);
+    let report = crust_core::compare::compare(&before[0].1, &again[0].1);
+    assert!(report.identical, "{}", report.to_text());
+
+    rewrite(&dir.join("lights.usda"), &lights_layer(2.0));
+    let result = state.session().unwrap().reload().expect("reloaded");
+    assert_eq!(changed(&result), [dir.join("lights.usda").display().to_string()]);
+    same_as_full_import(&mut state, &dir, "reloaded");
+}
+
+/// The undo history survives a reload: the layer goes back to its bytes
+/// before the edit, composed over the rewritten source.
+#[test]
+fn undo_after_a_reload_composes_over_the_new_source() {
+    let (mut state, dir) = sourced_session("sources_undo");
+    let layer = dir.join("lookdev.usda");
+    let original = std::fs::read(&layer).unwrap();
+    author(
+        &mut state,
+        r#"over "World" { over "Key" { float inputs:exposure = 1 } }"#,
+    );
+    rewrite(&dir.join("lights.usda"), &lights_layer(2.0));
+    state.session().unwrap().reload().expect("reloaded");
+    undo(&mut state);
+    assert_eq!(std::fs::read(&layer).unwrap(), original);
+    same_as_full_import(&mut state, &dir, "undone after reload");
+}
+
+#[test]
+fn reload_cancels_a_running_render() {
+    let (mut state, _) = sourced_session("sources_reload_cancels");
+    let open = state.session().unwrap();
+    let (job, _) = open.start_render(None, Some(65536)).expect("started");
+    let result = open.reload().expect("reloaded");
+    assert_eq!(result["cancelled_render"], job.id, "{result:#}");
+    assert_eq!(job.status(), "cancelled");
+}

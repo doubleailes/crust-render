@@ -12,7 +12,7 @@ use crust_core::check::CheckReport;
 use crust_core::live::{Change, Provenance, Structural};
 use crust_core::{AovRequest, LightList, RenderSettings, Renderer, Scene, WorldBuilder};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -57,6 +57,10 @@ pub struct Imported {
     pub working_space: crust_core::color::Space,
     /// How long the import (or the in-place update) took.
     pub took: Duration,
+    /// The file of every USD layer the import composed
+    /// ([`crust_core::Scene::layers`]), kept by an in-place update, which
+    /// adds or removes no composition arc.
+    pub layers: Vec<PathBuf>,
     /// How the layer's last change was applied to give this scene.
     pub applied: Applied,
     /// Which import built the scene's geometry: new with every full import,
@@ -174,6 +178,7 @@ impl Imported {
         scene.time = self.rest.time;
         scene.warnings = std::mem::take(&mut self.rest.warnings);
         scene.provenance = self.rest.provenance.take();
+        scene.layers = std::mem::take(&mut self.layers);
         update
             .apply(&mut scene)
             .expect("the update was checked against this world and these lights");
@@ -225,6 +230,7 @@ impl Imported {
             _assets: assets,
             working_space: scene.working_space,
             took,
+            layers: scene.layers,
             applied,
             geometry,
             material_of_slot,

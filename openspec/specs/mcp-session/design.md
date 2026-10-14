@@ -313,3 +313,91 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
 - **The session re-composes the stage per rebuild** (a masked stage per material or
   light, the index stage for settings) rather than keeping one composed stage across
   imports, which would need its own proof that composition gives the same result.
+
+## Sources on disk (`live-session-source-reload`)
+
+A session can sit beside another program that rewrites the stage it is an override of,
+for example a scene-assembly agent running as a second MCP server in the same client.
+Before this change the session saw none of it:
+- the kept decodes were stamped, but no USD layer was;
+- the edit classifier diffed the override layer alone, so an edit after a rewrite could
+  apply in place over a stale scene;
+- the authoring stage kept the composition it opened with.
+
+### What is watched: the layers the import composed
+
+- **The import records them** (`Scene::layers`). Before each of its stages is released
+  (the single stage, every streamed chunk, the index stage), it adds the stage's
+  `layer_identifiers()` to a set (openusd's `GetUsedLayers`). Identifiers become files:
+  - a layer inside a package is the package;
+  - a relative identifier is anchored to the root layer's directory;
+  - file format arguments are dropped;
+  - anonymous layers are left out.
+
+  An in-place update keeps the list, since no in-place class adds or removes an arc. The
+  camera stage masked for adaptive subdivision is not collected: it composes one prim the
+  traversal composes too.
+- *Why the import, not the authoring stage:* the authoring stage has payloads unloaded and
+  composes only what `query` reaches, so it never knows the layers behind payloads. That
+  is where an assembled asset puts its geometry.
+- *Accepted:* a layer reached only through an inactive prim or an unselected variant is
+  not watched. Making it count takes an edit (`active`, a variant selection), which is
+  `full` already.
+- *Alternatives rejected:*
+  - a recording `ar` resolver, which would have to wrap the mapping resolver whose
+    safety argument rests on its one construction site;
+  - `usd_utils::compute_all_dependencies`, a second traversal reporting asset paths the
+    import did not read.
+
+### How a change is seen and applied
+
+- **Stamps.** `mcp/sources.rs` stamps each watched layer, other than the override layer,
+  with its length and modification time after each import, as `kept.rs` stamps decodes.
+  `Sources::changed()` re-stats every layer and re-stamps the ones that moved, so each
+  change is reported once.
+- **`Open::refresh()`.** Every tool that reads the stage or the scene calls it first:
+  `query`, `check`, `render`, the edit tools, `undo`, `light_paths`, `render_final`. On a
+  change it reopens the authoring stage and sets `stale` to the changed layers. It
+  imports nothing.
+- **The import is lazy.**
+  - An edit or `undo` while `stale` is set goes `full` without classifying, so one import
+    serves both the external change and the edit.
+  - `render` and `check` import first (`bring_current`).
+  - `query` only needs the reopened stage.
+  - A failed import keeps `stale` set, so the next call tries again, and `render` never
+    renders the old scene while it is set.
+  - A successful full import re-stamps the sources and clears `stale`.
+  - *Trap:* importing eagerly in `refresh` would make a `query` after a rewrite pay a full
+    import, and an edit pay two.
+- **`reload`** forces the same full import whether or not a stamp moved. It is the escape
+  hatch for what stamps cannot see. It leaves the undo stack alone: the stack holds
+  override-layer bytes, which compose over the sources as they are now.
+- **A render's identity is its layer and its sources.** The job's hash covers the override
+  layer's bytes and the sources' stamps at render start, so `light_paths` refuses a render
+  made before a rewrite, as it refuses one made before an edit.
+
+The tests that pin these behaviours are in `crust-render/src/mcp/tests.rs`, section
+"Sources on disk":
+- a rewritten sublayer then an in-place-class edit is `full` and renders bitwise as a
+  fresh session;
+- a query after a referenced layer's rewrite answers the new value;
+- a render after a payload layer's rewrite shows it;
+- a broken source fails `render` until it is fixed;
+- `light_paths` refuses a render from before a rewrite;
+- the `reload` cases.
+
+The listing is pinned in `crust-core/tests/usd_layers.rs`: single-stage, streamed (the
+reference and the payload reached from different chunks), and a `.usdz`.
+
+### Known gaps
+
+- **Files outside the USD layer graph are not watched.** This covers a MaterialX document
+  `crust-mtlx` reads, and environment maps, which are never kept. A kept decode is
+  revalidated by its own stamps. `reload` covers the rest.
+- **A rewrite that keeps both the length and the modification time is not seen**, as for
+  kept decodes. `reload` covers it.
+- **A layer rewritten in place during an import can fault the process** under the `mmap`
+  feature (the `mapping_resolver` safety note). Writers that replace the file by rename,
+  such as openusd's `Layer::save` and USD's `SdfLayer::Save`, are safe.
+- **No filesystem notification.** A change is seen when the next tool call looks; the
+  agent is not told between calls.

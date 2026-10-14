@@ -55,9 +55,10 @@ The relevant current state:
 
 ### D1. The import records the layers it composed: `Scene::layers`
 
-Before each import stage is dropped (`release_stage` in `traverse_stage`, and the camera
+Before each import stage is dropped (`release_stage` in `traverse_stage`, and the index
 stage), the import adds that stage's `layer_identifiers()` to a set on the import
-context. Each identifier is turned into a file:
+context. The stage masked to the camera for adaptive subdivision is not collected: it
+composes one prim the traversal composes too, so its layers are already in the set. Each identifier is turned into a file:
 
 - a package-relative identifier → its outer package file;
 - an anonymous layer → skipped;

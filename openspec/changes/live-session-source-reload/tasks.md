@@ -2,7 +2,7 @@
 
 ## 1. The import records its layers (design D1)
 
-- [ ] 1.1 Collect `layer_identifiers()` from every import stage before it is released (single-stage, each streamed chunk, the camera stage for adaptive subdivision), map identifiers to files (package → outer package, anonymous skipped, relative → root layer's directory), and expose the sorted set as `Scene::layers`; kept as is by in-place updates. Verify with crust-core tests: a stage with a sublayer, a reference and a payload lists all of them, streamed and single-stage imports list the same set, and a `.usdz` input lists the package file.
+- [x] 1.1 Collect `layer_identifiers()` from every import stage before it is released (single-stage, each streamed chunk, the index stage; the camera stage masked for adaptive subdivision composes a subset of the traversal's), map identifiers to files (package → outer package, anonymous skipped, relative → root layer's directory), and expose the sorted set as `Scene::layers`; kept as is by in-place updates. Verify with crust-core tests: a stage with a sublayer, a reference and a payload lists all of them, streamed and single-stage imports list the same set, and a `.usdz` input lists the package file.
 - [ ] 1.2 Verify the render path is unaffected: `cargo test --workspace` green, and callgrind on `samples/cornellbox.usda -s 2` shows no render function's instruction count moving (import-only delta recorded).
 
 ## 2. The session watches its sources (design D2, D3)

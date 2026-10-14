@@ -274,6 +274,9 @@ struct ImportCtx<'a> {
     /// the import's memory peak.
     index: Option<Stage>,
     assets: &'a dyn AssetLoader,
+    /// The identifiers of the layers the import's stages composed, each
+    /// stage's added before it is released ([`Scene::layers`]).
+    layers: std::collections::BTreeSet<String>,
 }
 
 /// Walks `root` and its subtree, emitting geometry, lights and volumes
@@ -747,6 +750,7 @@ fn traverse_stage(
             GMat4::IDENTITY,
             ctx,
         );
+        ctx.layers.extend(stage.layer_identifiers());
         release_stage(stage, skip_stage_teardown);
     } else {
         debug!("Streaming import over {} subtrees", chunks.len());
@@ -774,6 +778,7 @@ fn traverse_stage(
             // bound streaming exists for, and a streamed import's peak often
             // comes *after* the traversal — at the top-level BVH commit, on
             // the island — where a kept stage would stack on top of it.
+            ctx.layers.extend(stage.layer_identifiers());
             release_stage(stage, false);
             // Separate this stage's prototypes from the next stage's —
             // see ImportCaches::epoch. Deliberately not a clear: the
@@ -998,6 +1003,7 @@ pub(crate) fn load_scene(
         stage_path: path,
         index: Some(index),
         assets,
+        layers: Default::default(),
     };
 
     let traverse_start = Instant::now();
@@ -1050,7 +1056,9 @@ pub(crate) fn load_scene(
     let geometry_runs = ctx.links.geometry_runs();
     let linked = ctx.links.restricts();
     std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
-    drop(ctx.index.take());
+    if let Some(index) = ctx.index.take() {
+        ctx.layers.extend(index.layer_identifiers());
+    }
     if !domes_seen_by_camera {
         debug!(
             "domeLightCameraVisibility = false: every light at infinity is hidden from the camera"
@@ -1117,6 +1125,7 @@ pub(crate) fn load_scene(
     scene.camera_path = camera_path;
     scene.time = time;
     scene.warnings = warning_scope.finish();
+    scene.layers = layer_files(&ctx.layers, path);
     scene.provenance = Some(Provenance {
         materials: ctx.caches.materials.origins(&scene.world),
         material_reads: ctx.caches.materials.reads(),
@@ -1136,6 +1145,34 @@ pub(crate) fn load_scene(
         },
     });
     Ok(scene)
+}
+
+/// The files behind layer `identifiers`, sorted and without repeats: a layer
+/// inside a package is the package file, a relative identifier is anchored
+/// to the root layer `root`'s directory, file format arguments are dropped,
+/// and an anonymous layer, which has no file, is left out.
+fn layer_files(
+    identifiers: &std::collections::BTreeSet<String>,
+    root: &Path,
+) -> Vec<std::path::PathBuf> {
+    let dir = root.parent().unwrap_or(Path::new(""));
+    let files: std::collections::BTreeSet<std::path::PathBuf> = identifiers
+        .iter()
+        .filter(|id| !sdf::Layer::is_anonymous_identifier(id))
+        .map(|id| {
+            let id = id.split(":SDF_FORMAT_ARGS:").next().unwrap_or(id);
+            let file = openusd::ar::split_package_relative_path_outer(id)
+                .map(|(package, _)| package)
+                .unwrap_or_else(|| id.to_owned());
+            let file = Path::new(&file);
+            if file.is_absolute() {
+                file.to_path_buf()
+            } else {
+                dir.join(file)
+            }
+        })
+        .collect();
+    files.into_iter().collect()
 }
 
 /// What the import reads before it traverses anything: the index stage's

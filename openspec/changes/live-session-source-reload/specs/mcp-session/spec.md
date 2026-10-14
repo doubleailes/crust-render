@@ -13,8 +13,8 @@ progress bar SHALL be drawn.
 - **WHEN** an MCP client initialises the server and asks for its tools
 - **THEN** it receives `open_session`, `query`, `check`, `set_attribute`,
   `set_variant`, `set_active`, `bind_material`, `author_usda`, `undo`, `reload`,
-  `render`, `snapshot`, `cancel`, `probe`, `diff` and `render_final`, each with a
-  JSON input schema
+  `render`, `snapshot`, `cancel`, `probe`, `light_paths`, `diff` and `render_final`,
+  each with a JSON input schema
 
 #### Scenario: Nothing but protocol on stdout
 
