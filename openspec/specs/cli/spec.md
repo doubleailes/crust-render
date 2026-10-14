@@ -22,17 +22,23 @@ The CLI SHALL require a subcommand:
   over stdio (see the `mcp-session` capability);
 - `diff`, which compares two EXRs (see the `image-comparison` capability);
 - `diagnostic`, which measures and reports how to make the render faster
-  or cleaner (see the `diagnostics` capability).
+  or cleaner (see the `diagnostics` capability);
+- `light-paths`, which re-renders a small region and reports the light paths
+  its samples took (see the `light-path-inspection` capability).
 
 The render flags, `--log-file` among them, SHALL belong to `render`. The
 flags that shape the scene and its settings SHALL also be accepted by
-`diagnostic` and `check`, with the same names, values and defaults:
+`diagnostic`, `check` and `light-paths`, with the same names, values and
+defaults:
 
 - `-i`, `-f`, `--camera`, `--region`;
 - `--strategy`, `--light-selection`, `--light-samples`,
   `--light-samples-indirect`;
 - `--indirect-clamp`, `--filter`, `--filter-radius`;
 - `--subdiv-level`, `--subdiv-edge-length`, `--auto-tx`.
+
+`light-paths` SHALL also accept `render`'s `-s`, so that it reproduces a render
+made at that sample count.
 
 `-l/--level` SHALL be accepted by every subcommand, before or after its
 name. `--log-file`'s directory is optional, so it SHALL NOT be accepted
@@ -70,6 +76,18 @@ where it could take a subcommand's name or a positional as that directory.
 - **WHEN** an MCP client launches `crust mcp`
 - **THEN** the server waits for protocol messages on stdin and loads nothing until
   a session is opened
+
+#### Scenario: Inspecting light paths at the render's sample count
+
+- **WHEN** the user runs
+  `crust light-paths -i scene.usda -s 64 --region 40,40,50,50`
+- **THEN** the region is rendered at 64 samples per pixel, as `crust render -s 64`
+  would render it
+
+#### Scenario: Output flags are refused by light-paths
+
+- **WHEN** the user runs `crust light-paths -i scene.usda --region 0,0,5,5 -o out.exr`
+- **THEN** the arguments are refused as a usage error and nothing is loaded
 
 ### Requirement: Listing what a stage holds
 
