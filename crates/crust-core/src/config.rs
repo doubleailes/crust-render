@@ -253,6 +253,17 @@ pub struct Config {
     /// `CRUST_TRI_PACKETS`: the kernel's triangle packet layout
     /// (`gathered` | `indexed` | `auto`; bit-identical either way).
     pub tri_packets: TriPackets,
+    /// `CRUST_NEURAL_OCCLUSION`: train a learned occlusion proxy for every
+    /// eligible instanced prototype and answer shadow rays inside it with the
+    /// proxy (`false`, the default: exact shadow rays). An experiment whose
+    /// measurement gate failed: approximate and biased, never a default, and
+    /// only effective in a build with the `neural-bvh` feature (a build
+    /// without it warns and stays exact).
+    pub neural_occlusion: bool,
+    /// `CRUST_NEURAL_MIN_TRIS`: the smallest prototype, in triangles counted
+    /// through its placements, that `CRUST_NEURAL_OCCLUSION` trains a proxy
+    /// for.
+    pub neural_min_tris: usize,
     /// `CRUST_MTLX_OPT`: fold, hoist and prune MaterialX programs (`false`:
     /// run them as compiled; bit-identical).
     pub mtlx_opt: bool,
@@ -329,6 +340,10 @@ pub const DEFAULT_TEX_MAX_OPEN_FILES: usize = 256;
 /// Default preloaded UV tile edge cap, in pixels.
 pub const DEFAULT_TEX_MAX: usize = 1024;
 
+/// Default `CRUST_NEURAL_MIN_TRIS`: only prototypes this large get a learned
+/// occlusion proxy (design D8 of the `neural-bvh-experiment` change).
+pub const DEFAULT_NEURAL_MIN_TRIS: usize = 250_000;
+
 /// Default Ptex streaming admission floor, in MiB (see
 /// `crust_assets::PTEX_DEFAULT_STREAM_MIN_MB` for the measurement).
 pub const DEFAULT_PTEX_STREAM_MIN_MB: usize = 8;
@@ -345,6 +360,8 @@ impl Default for Config {
             adaptive_per_face: true,
             adaptive_frustum: true,
             tri_packets: TriPackets::Auto,
+            neural_occlusion: false,
+            neural_min_tris: DEFAULT_NEURAL_MIN_TRIS,
             mtlx_opt: true,
             shader_jit: true,
             ray_cones: true,
@@ -395,6 +412,13 @@ impl Config {
                 "CRUST_TRI_PACKETS",
                 d.tri_packets,
                 "`gathered`, `indexed` or `auto`",
+            ),
+            neural_occlusion: neural_occlusion(flag("CRUST_NEURAL_OCCLUSION", d.neural_occlusion)),
+            neural_min_tris: env_parse(
+                &lookup,
+                "CRUST_NEURAL_MIN_TRIS",
+                d.neural_min_tris,
+                "an integer",
             ),
             mtlx_opt: flag("CRUST_MTLX_OPT", d.mtlx_opt),
             shader_jit: flag("CRUST_SHADER_JIT", d.shader_jit),
@@ -462,6 +486,20 @@ impl Config {
             ocio: lookup("OCIO").filter(|v| !v.is_empty()),
         }
     }
+}
+
+/// `CRUST_NEURAL_OCCLUSION` as this build can honour it: a build without the
+/// `neural-bvh` feature has no proxies to train, so `on` warns once (the
+/// environment is read once) and the render stays exact.
+fn neural_occlusion(requested: bool) -> bool {
+    if requested && !cfg!(feature = "neural-bvh") {
+        warn!(
+            "CRUST_NEURAL_OCCLUSION=on has no effect in this build (it was built without the \
+             `neural-bvh` feature) — shadow rays stay exact"
+        );
+        return false;
+    }
+    requested
 }
 
 /// `CRUST_PTEX_MAX_LOG2`'s value: parsed only from an integer in `0..=14`.
@@ -689,6 +727,23 @@ mod tests {
         ]);
         assert_eq!(bad.tube_sampling, TubeSampling::Equiangular);
         assert_eq!(bad.disk_sampling, DiskSampling::Area);
+    }
+
+    #[test]
+    fn neural_occlusion_is_off_unless_asked_and_built() {
+        let d = with(&[]);
+        assert!(!d.neural_occlusion, "off by default: the exact renderer");
+        assert_eq!(d.neural_min_tris, DEFAULT_NEURAL_MIN_TRIS);
+        assert!(!with(&[("CRUST_NEURAL_OCCLUSION", "off")]).neural_occlusion);
+        // A bad value warns and is `off`.
+        assert!(!with(&[("CRUST_NEURAL_OCCLUSION", "fast")]).neural_occlusion);
+        // `on` takes effect only in a build that can train a proxy.
+        let on = with(&[("CRUST_NEURAL_OCCLUSION", "on")]).neural_occlusion;
+        assert_eq!(on, cfg!(feature = "neural-bvh"));
+        let c = with(&[("CRUST_NEURAL_MIN_TRIS", "1000")]);
+        assert_eq!(c.neural_min_tris, 1000);
+        let c = with(&[("CRUST_NEURAL_MIN_TRIS", "many")]);
+        assert_eq!(c.neural_min_tris, DEFAULT_NEURAL_MIN_TRIS);
     }
 
     #[test]

@@ -158,6 +158,16 @@ cargo run --release -p crust-rt --example ray_throughput -- --large [MTRIS]
 # nightly"; stable rejects the feature with E0554 by design):
 cargo +nightly test -p crust-rt --features bvh8
 RUSTFLAGS='-C target-cpu=x86-64-v3' cargo +nightly run --release -p crust-rt --example ray_throughput --features bvh8
+# Experiment (neural-bvh-experiment; its gate failed and was lifted): learned shadow-ray
+# occlusion proxies against the exact kernel. Per scene: exact vs proxied Mray/s (single-threaded, min-of-N,
+# interleaved), FP / FN % on fixture rays and on rays leaving surfaces, training
+# seconds, proxy bytes and a τ sweep. `--cut refined` is N-BVH's error-driven cut,
+# `--steps N` the training length. The verdict is in intersection-kernel/design.md.
+cargo run --release -p crust-rt --features neural-bvh --example ray_throughput -- --neural [--cut size|refined] [--steps N] [--large [MTRIS]]
+# ...the same columns on a USD stage's largest eligible instanced prototypes
+# (triangles only, static), shadow rays in the prototype's own space:
+cargo run --release -p crust-render --features neural-bvh --example neural_probe -- \
+    stage.usda [--top 3] [--min-tris 1000000] [--steps 2000] [--cut size|refined]
 # Did the image change? Exit 0 identical, 1 differs, 2 unreadable. Reads both EXRs'
 # crust:* sampling stamps and notes on stderr (or in --json's `comparability`) when
 # the pixels cannot be compared: adaptive sampling on, different clamps, frames,

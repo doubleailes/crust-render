@@ -25,10 +25,18 @@ traversal-stats = []
 # `RUSTFLAGS='-C target-cpu=x86-64-v3'` so an f32x8 is one AVX register rather
 # than two SSE halves. See docs/simd.md, "BVH8 on nightly".
 bvh8 = []
+# Learned shadow-ray occlusion proxies for large static triangle scenes (the
+# `neural-bvh-experiment` change): a hash grid and a small MLP trained at
+# commit, consulted by `occluded` at a cut of the BVH. An experiment, not a
+# default, and approximate by design; `intersect` never sees it. Brings in
+# `openqmc-rs`, the project's one RNG, for the training draws.
+neural-bvh = ["dep:openqmc-rs"]
 
 [dependencies]
 glam.workspace = true
 rayon.workspace = true
+# Training draws for `neural-bvh`, and the tests' seeded randomness below.
+openqmc-rs = { version = "0.2.4", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"

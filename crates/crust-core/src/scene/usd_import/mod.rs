@@ -1115,6 +1115,7 @@ pub(crate) fn load_scene(
     let committed = ctx.world.commit();
     let commit_elapsed = commit_start.elapsed();
     debug!("Top-level acceleration structure committed in {commit_elapsed:?}");
+    let occlusion_proxies = committed.occlusion_proxies();
     let commit_mem = MemorySample::now();
 
     // Memory is sampled where each phase actually ended, not here — the
@@ -1138,6 +1139,7 @@ pub(crate) fn load_scene(
         top_level: committed.primitive_breakdown().into(),
         unique: committed.unique_primitive_breakdown().into(),
         footprint: committed.memory_footprint(),
+        occlusion_proxies,
         lights: ctx.lights.count(),
         volumes: ctx.volumes.len(),
     };

@@ -2,7 +2,7 @@
 title = "Limitations"
 description = "What Crust Render does not do, or does only partly."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-09T08:00:00+00:00
+updated = 2026-10-14T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
@@ -58,6 +58,30 @@ render.
   step. RenderMan displacement networks other than a `PxrPtexture` (or a `PxrBlend` multiply of
   two) through an optional `PxrDispTransform` are refused. See
   [displacement](@/docs/usd/materials.md#displacement).
+
+## Learned occlusion
+
+[`CRUST_NEURAL_OCCLUSION`](@/docs/reference/environment-variables.md#crust-neural-occlusion)
+is an experiment, built only with the `neural-bvh` feature and off by default. It answers
+shadow rays inside large instanced prototypes with a small neural network instead of the
+exact triangles, the way recent GPU papers (N-BVH, Neural Intersection Functions) do. On
+a CPU it doesn't pay:
+
+- **It is biased.** The network gets 7–55 % of shadow rays wrong on large prototypes,
+  as light leaks and spurious shadows. The error doesn't shrink with more samples, and
+  multiple importance sampling then mixes this approximate visibility with the exact
+  visibility of bounce rays.
+- **It is rarely faster.** When a prototype's tree fits in the cache, the network is
+  about 5–9 times slower than the exact traversal. When it doesn't fit, the network is up
+  to 1.85 times faster, but only where its false "something is in the way" answers end
+  rays early.
+- **It saves no memory.** Each network adds about 1 MiB on top of the exact tree, which
+  camera rays and bounces still need. Training adds seconds per prototype to the import,
+  and minutes on the largest.
+- **Shadow rays only.** Camera rays, bounces, cutouts and glass stay exact.
+
+The measurements are in the intersection kernel's design record
+(`openspec/specs/intersection-kernel/design.md`).
 
 ## Materials and textures
 

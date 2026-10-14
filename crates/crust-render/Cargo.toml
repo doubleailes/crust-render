@@ -17,6 +17,9 @@ path = "src/main.rs"
 traversal-stats = ["crust-core/traversal-stats"]
 # Nightly only: 8-wide BVH nodes (crust-rt's `bvh8`).
 bvh8 = ["crust-core/bvh8"]
+# Learned shadow-ray occlusion proxies (crust-rt's `neural-bvh`), an
+# experiment measured against the exact kernel.
+neural-bvh = ["crust-core/neural-bvh"]
 # MaterialX shading programs compiled to machine code (see crust-core's `jit`
 # feature). `--no-default-features` builds the interpreter-only renderer.
 default = ["jit", "mcp", "mmap"]
@@ -89,6 +92,17 @@ tracing = { workspace = true, features = ["std"] }
 # The CLI tests read the JSON reports back (crust-core serializes them);
 # crust-core already depends on it, so it adds no package.
 serde_json = "1.0.151"
+# `neural_probe` includes crust-rt's shared proxy measurement
+# (`fixtures/neural.rs`), which names the kernel and draws with openqmc;
+# both are already in the graph through crust-core.
+crust-rt = { path = "../crust-rt" }
+openqmc-rs = "0.2.4"
+
+[[example]]
+name = "neural_probe"
+# Trains learned occlusion proxies: only meaningful, and only compiled, with
+# the experiment's feature.
+required-features = ["neural-bvh"]
 
 [dependencies.tracing-subscriber]
 version = "0.3.20"

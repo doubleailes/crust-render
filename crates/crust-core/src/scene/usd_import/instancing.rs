@@ -98,6 +98,14 @@ pub(super) struct PartSlot {
     scale: f32,
 }
 
+impl PartSlot {
+    /// Whether shadow rays may pass this slot's surface: a group holding one
+    /// never gets an occlusion proxy ([`crate::prototype_commit_options`]).
+    fn passes_shadow_rays(&self) -> bool {
+        crate::passes_shadow_rays(&*self.material)
+    }
+}
+
 /// A piece of a prototype, in the prototype root's frame: a committed
 /// kernel scene in its own local space, the transform placing it relative
 /// to the prototype root, its visibility mask, and what its hits resolve to.
@@ -538,8 +546,9 @@ fn nested_instancer_parts(
     if sub.count() == 0 {
         return Vec::new();
     }
+    let pass_through = slots.iter().any(PartSlot::passes_shadow_rays);
     vec![ProtoPart {
-        scene: Arc::new(sub.commit_with(crate::commit_options())),
+        scene: Arc::new(sub.commit_with(crate::prototype_commit_options(pass_through))),
         local,
         mask,
         slots: slots.into(),
@@ -587,8 +596,9 @@ fn group_parts(parts: &[ProtoPart]) -> Option<ProtoPart> {
     if slots.is_empty() {
         return None;
     }
+    let pass_through = slots.iter().any(PartSlot::passes_shadow_rays);
     Some(ProtoPart {
-        scene: Arc::new(b.commit_with(crate::commit_options())),
+        scene: Arc::new(b.commit_with(crate::prototype_commit_options(pass_through))),
         local: GMat4::IDENTITY,
         mask,
         slots: slots.into(),

@@ -968,6 +968,63 @@ outside the box, which was the 1% the first A/B against regions showed.
   cornellbox's instructions). Removing them would mean swapping a met wall's material
   for a precomputed twin without its straight lobe, which was not judged worth it.
 
+## Known gaps: neural shadow-ray occlusion is a bias
+
+- **What it is.** `CRUST_NEURAL_OCCLUSION=on` (a `neural-bvh` build only) answers
+  shadow rays inside large instanced prototypes with a learned occlusion proxy (the
+  kernel's record has the model and why it fails its own gate). Which prototypes:
+  instanced ones of at least `CRUST_NEURAL_MIN_TRIS` triangles (through placements),
+  triangles only, with no pass-through material. A prototype with a cutout or a
+  thin-walled straight-transmission material never gets one, because its shadow rays
+  must resolve a colour (`cutout_through`), not a verdict
+  (`crust_core::prototype_commit_options`). The top-level world never asks.
+- **Which rays.** Every query that reaches `World::occluded` with exactly
+  `MASK_SHADOW` uses the proxy: surface NEE, volume NEE (`shadow_transmittance`) and
+  the learned light cache's training. Camera rays, bounces and the pass-through walks
+  go through `intersect`, which never sees a proxy. Shadow rays of shadow-linked lights
+  carry class bits on top of `MASK_SHADOW`. The classes are written on the instances
+  that place a prototype, not inside it, so such a ray sees the prototype's geometry
+  exactly as a plain shadow ray does, and the proxy answers it
+  (`OcclusionProxy::answers`). **Trap:** the first version answered only a mask equal
+  to `MASK_SHADOW`. The Moana island authors shadow links, so every one of its shadow
+  rays carries class bits: 70 proxies, 25 minutes of training, and a bit-identical
+  image. A mask that would see different geometry inside (say, a part visible only to
+  some class) stays exact. In a world
+  with pass-throughs, a false "blocked" falls through to the exact `intersect` walk,
+  so only the leaks survive there.
+- **Why it is a bias, not noise.** NEE now sees approximate visibility, while
+  BSDF-sampled emission (`bounce_emission_weight`) still meets the light exactly. The
+  pairing invariant (every NEE weight has a bounce-side twin answering the same
+  visibility) no longer holds for proxied geometry, so MIS mixes two visibilities and
+  the error does not average out. `C.*[LO]` stays bitwise equal to the beauty, because
+  both go through the same `surface_visibility`.
+- **Measured.** On `gen_stress_scene.py`'s scene with its occluder slab removed (with the
+  slab, every shadow ray through the sphere field is blocked by the slab whatever the
+  proxy says, and on and off render bit-identically), `CRUST_NEURAL_MIN_TRIS=1000`, one
+  proxy for the 9.8 k-triangle sphere, `--indirect-clamp 0`. relmse(on, off) and mean
+  absolute difference:
+
+  | spp | relmse (trimmed) | mean abs | relmse(off_N, off_256), the noise |
+  | --- | --- | --- | --- |
+  | 16 | 1.7e-3 (1.3e-3) | 3.4e-3 | 1.5e-2 |
+  | 64 | 7.2e-4 (6.5e-4) | 3.3e-3 | 2.8e-3 |
+  | 256 | 5.1e-4 (4.7e-4) | 3.1e-3 | — |
+
+  The difference does not fall 4× per 4× samples, as noise would (1.7e-3 → 1.1e-4), and
+  the mean absolute difference is flat at ~3e-3: a plateau, the proxy's bias. 8.4 % of
+  the pixels differ at 4 spp. The render phase is **1.25× slower** with the switch on
+  (64 spp, interleaved, min 1.71 → 2.14 s, mean 1.75 → 2.20 s), because the prototype's
+  tree is in cache and the model costs more than the traversal it replaces. Training
+  adds 15.4 s to the import.
+- **The switch-off cost.** Off is the old renderer bit for bit: the goldens with the
+  switch unset and `off` on a feature-on build. It costs +0.083 % instructions on
+  cornellbox (callgrind, `-s 2`, 4 250 557 688 → 4 254 071 974), the one `is_some`
+  in `Scene::occluded`. **Trap:** the first build cost +0.25 %. A second caller of
+  `occlude_leaf` (the cut traversal) made LLVM stop inlining it into `Bvh::hit_any`.
+  Under the feature it is now `inline(always)`, and the cut traversal reaches it
+  through an out-of-line wrapper. The feature-off build keeps plain `#[inline]` and is
+  unchanged (+0.004 %).
+
 ## History: Henyey-Greenstein convention and carried-medium fixes
 
 - **HG convention fix**: `sample_henyey_greenstein` used to apply PBRT's inversion to the

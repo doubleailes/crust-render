@@ -578,6 +578,11 @@ files were open at the peak against
 [`CRUST_TEX_MAX_OPEN_FILES`](@/docs/reference/environment-variables.md#crust-tex-max-open-files),
 with the reopens that cap cost.
 
+With [`CRUST_NEURAL_OCCLUSION`](@/docs/reference/environment-variables.md#crust-neural-occlusion)
+on, a render that built learned occlusion proxies adds an `occlusion proxies` row with how
+many it built and how long they took to train, and an `occlusion proxies` line under
+`kernel memory` with their bytes. Renders without them show neither.
+
 Whether or not `--stats` is on, a texture tile that can't be read is reported: its file is
 named once in a warning, and the render ends with one warning counting the failed reads.
 Those lookups use the texture's fallback colour.

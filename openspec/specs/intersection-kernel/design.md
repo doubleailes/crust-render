@@ -374,3 +374,76 @@ model).
   (that needs the integrator restructured, not just the kernel); and the checked-in
   sample scenes are shading-bound, so kernel speedups barely show up there — use
   `scripts/gen_stress_scene.py` to benchmark traversal changes end to end.
+
+## Known gaps: learned occlusion proxies do not pay on a CPU
+
+- **The experiment** (`neural-bvh-experiment`, 2026-10-14). Recent papers replace part of
+  a BVH with a learned model: N-BVH (Weier et al. 2024), AMD's Neural Intersection
+  Function and LSNIF, Neural Bounding. All were measured on GPUs. The open question was
+  whether one pays on a CPU in the one regime that looked favourable: shadow rays inside
+  large prototypes whose trees are out of cache, where traversal is latency-bound at
+  ~140 ns a node (BVH8, above) while a 1 MiB hash table stays in cache. **The answer is
+  no, on accuracy before speed.** The gate below failed and was then lifted by decision:
+  the code ships behind a non-default `neural-bvh` feature on crust-rt (forwarded by
+  crust-core and crust-render) and, in a render, behind the off-by-default
+  `CRUST_NEURAL_OCCLUSION` switch, as a documented bias rather than an optimization.
+  With the feature off it changes nothing (goldens bit-identical). What the switch
+  does to a render (which rays, the bias plateau, the render time, the switch-off
+  cost and its inlining trap) is in `openspec/specs/rendering/design.md`, § "Known
+  gaps: neural shadow-ray occlusion is a bias".
+- **What was built.** N-BVH's shape, for occlusion only: a cut of the scene's own BVH4
+  (the highest lanes whose subtree holds at most 4 096 triangle references, instanced
+  ones counted per placement; or N-BVH's error-driven refinement, starting 4× coarser
+  and splitting the worst quarter of lanes over three rounds), and one model shared
+  across the cut: an Instant-NGP hash grid over the scene box (8 levels, 16 → 1 024 cells,
+  2^14 entries × 2 `f32` features, 1 MiB) read at the midpoints of 4 strata of the
+  segment clipped to a cut box, plus the unit direction and the relative length, into a
+  68 → 32 → 32 → 1 ReLU MLP. `occluded` with the trained mask (shadow) traverses exactly
+  to the cut and asks the model at each cut box it crosses; `intersect`, other masks and
+  the tree above the cut stay exact. Training is 2 000 Adam steps of 4 096 segments
+  (surface-origin 50 %, through-box 35 %, truncated 15 %, labelled by the exact
+  `hit_any`), class-balanced BCE, 64 fixed chunks summed in order. It is deterministic
+  (bit-identical at 1 and 8 threads, and under every `test_simd_matrix.sh` codegen) and
+  costs ~15 s a proxy (~8 ms a step on 72 threads). No dependency beyond `openqmc-rs`.
+- **The gate** (design D8 of the change): on a prototype of at least 1 M triangles traced
+  out of cache, proxied occlusion at **≥ 1.25× exact Mray/s with FP + FN ≤ 1 %** of
+  shadow rays. Measured on a Xeon E5-2699 v4 (72 threads, 16 MiB L3), single-threaded
+  queries, min of 3 with exact and proxied interleaved in each repeat, against exact
+  `occluded` on the same tree. FP is a spurious shadow, FN a light leak, both per ray:
+
+  | scene (kernel size) | rays | proxied / exact | FP + FN |
+  | --- | --- | --- | --- |
+  | `tri_spheres`, 43 k tris (in cache) | through / surface | 0.16× / 0.22× | 6.4 % / 14.5 % |
+  | `instances`, 125 × 576 tris (in cache) | through / surface | 0.17× / 0.19× | 1.5 % / 11.5 % |
+  | stress-scene sphere, 9.8 k tris (in cache) | surface / through | 0.19× / 0.11× | 15.0 % / 9.1 % |
+  | `--large` soup, 8 M tris (1.1 GiB) | through / surface | 0.96× / 1.21× | 55 % / 37 % |
+  | soup, 3 500 steps | through / surface | 1.57× / 1.61× | 33 % / 38 % |
+  | soup, refined cut (3 500 steps) | through / surface | 1.18× / 1.29× | 42 % / 37 % |
+  | `--large` field, 2 M instances of proxied 1–4 k-tri spheres | through | 0.65–0.73× | 0.1–0.4 % |
+  | Moana island, largest grouped prototype (9.1 G tris placed, 238 MiB) | surface / through | 1.85× / 1.13× | 14.7 % / 7.5 % |
+  | island, 2nd (4.5 G tris placed, 57 MiB) | surface / through | 0.79× / 0.70× | 3.3 % / 6.3 % |
+  | island, 3rd (4.0 G tris placed, 3.2 GiB) | surface / through | 0.95× / 0.61× | 48 % / 15 % |
+
+  The τ sweep (0.1 … 0.9) trades FP against FN but never brings their sum near 1 %
+  anywhere; the field's low error is only because 99 % of its rays are occluded anyway.
+- **Why it fails.** (1) *In cache the model is simply more work.* One evaluation is 256
+  table reads and ~3.3 k multiply-adds, ~2 µs scalar: proxied occlusion tops out at
+  0.4–0.7 Mray/s on every scene, while an in-cache exact any-hit runs at 2–3.6 Mray/s.
+  (2) *Out of cache the speed is bought with error.* The proxy only wins where exact
+  traversal is slow enough (0.03–0.6 Mray/s), and the rows that clear 1.25× are the ones
+  with the most false positives: a wrong "occluded" ends the query at the first cut box
+  (soup at 3 500 steps, FP 21–23 %, 1.6×; at 2 000 steps, FP 8–9 %, ≤ 1.2×). (3) *Per-segment
+  error compounds per ray.* Validation error per clipped segment is 3–10 %, and a long
+  shadow ray crosses many cut boxes, each a chance to leak or to block. (4) *The
+  information is not there.* A 1 MiB table holds ~0.03 parameters per triangle of the
+  soup, and four point samples per segment cannot see a thin triangle between them; the
+  refined cut halves the in-cache error but leaves the soup at 37–42 %.
+- **What would change the answer.** Not tuning: the gap is two orders of magnitude on
+  error. A model that answers far more cheaply (`f16` and SIMD-batched evaluation of
+  many rays at once, which needs ray packets crust does not trace) would only make the
+  first point less bad; the error needs a far larger model per triangle or far smaller
+  cut boxes, at which point it is a compressed BVH, not a learned one. Neural
+  closest-hit was never in scope. The probes:
+  `cargo run --release -p crust-rt --features neural-bvh --example ray_throughput -- --neural [--cut size|refined] [--steps N] [--large]`
+  and `cargo run --release -p crust-render --features neural-bvh --example neural_probe -- ~/Workspace/samples/island/usd/island.usda --top 3`
+  (island: 4 min import, 17 min total, 24 GiB peak).

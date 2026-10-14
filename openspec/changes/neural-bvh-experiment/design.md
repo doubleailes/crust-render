@@ -24,6 +24,25 @@ The motivation is in proposal.md, under Why.
   - `C.*[LO]` is pinned bitwise to the beauty;
   - the zero-AOV render is pinned to its instruction count.
 
+## Outcome
+
+The gate (D8) failed, on accuracy before speed. The numbers, the method and the
+reasons are in `openspec/specs/intersection-kernel/design.md`, § "Known gaps: learned
+occlusion proxies do not pay on a CPU". In short:
+- in cache, proxied occlusion runs at 0.11–0.22× exact;
+- out of cache it reaches 1.13–1.85× only with FP + FN of 7–55 % per shadow ray;
+- the speed-ups that clear 1.25× come from false positives ending queries early.
+
+The gate was then **lifted by decision** (2026-10-14). Phase 2 proceeds as D6–D8
+describe, behind the off-by-default switch. Two details differ from the plan:
+- **Proxy seed.** The proxy's seed is a hash of the geometry (bounds, triangle count,
+  node count), not "the proxy's index in commit order". The spec's determinism
+  requirement says training depends only on the geometry and the request, and a commit
+  index is not stable across the importer's parallel commits.
+- **Standalone proxies.** `Scene::train_occlusion_proxy` / `Scene::occluded_by` let a
+  probe train a proxy beside an already-committed prototype. `neural_probe` needs them,
+  because a committed `Scene` is immutable.
+
 ## Goals / Non-Goals
 
 **Goals:**

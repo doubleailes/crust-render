@@ -1770,7 +1770,7 @@ fn packet_layouts_are_bit_identical() {
             gt.clone(),
         ));
         b.attach(sphere(Vec3A::new(0.0, 0.0, 2.5), 0.4));
-        b.commit_with(crust_rt::CommitOptions { layout })
+        b.commit_with(crust_rt::CommitOptions::with_layout(layout))
     };
     let gathered = build(PacketLayout::Gathered);
     let indexed = build(PacketLayout::Indexed);

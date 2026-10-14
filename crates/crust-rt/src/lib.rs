@@ -44,12 +44,18 @@ pub use bvh::stats as traversal_stats;
 mod aabb;
 mod bvh;
 mod curve;
+#[cfg(feature = "neural-bvh")]
+mod neural;
 mod prim;
 mod ray;
 mod scene;
 mod triangle;
 
 pub use aabb::AABB;
+#[cfg(feature = "neural-bvh")]
+pub use neural::{
+    DEFAULT_STEPS as PROXY_DEFAULT_STEPS, OcclusionProxy, ProxyCut, ProxyReport, ProxyRequest,
+};
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayMask};
 pub use scene::{
     CommitOptions, CubicCurveSegment, CurveSegment, Geometry, InstanceHitId, MemoryFootprint,

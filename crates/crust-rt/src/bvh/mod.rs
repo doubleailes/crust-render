@@ -36,6 +36,8 @@ use crate::prim::{
 use crate::ray::{Ray, RayMask};
 use crate::scene::Piece;
 use crate::scene::PrimitiveBreakdown;
+#[cfg(feature = "neural-bvh")]
+use crate::scene::Scene;
 use crate::triangle::{
     Hit4, RayShear, Tri4, Tri4i, clip_triangle_aabb, triangle_intersect_sheared,
 };
@@ -1088,7 +1090,13 @@ impl Bvh {
     /// Boolean variant of [`Bvh::intersect_leaf`]: any lane hitting anywhere
     /// in range ends the query, so there is no ordering and no need to
     /// resolve which lane won.
-    #[inline]
+    ///
+    /// Forced inline under `neural-bvh`: with the cut traversal as a second
+    /// caller of `hit_any`, LLVM stopped inlining this into it, which cost
+    /// cornellbox +0.25% instructions with no proxy built. Plain `#[inline]`
+    /// otherwise, so the feature-off build is the code it always was.
+    #[cfg_attr(not(feature = "neural-bvh"), inline)]
+    #[cfg_attr(feature = "neural-bvh", inline(always))]
     fn occlude_leaf(
         &self,
         leaf_idx: u32,
@@ -1158,6 +1166,230 @@ impl Bvh {
         }
         false
     }
+}
+
+/// What a wide node's lane holds, for the occlusion proxy's cut.
+#[cfg(feature = "neural-bvh")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneChild {
+    Node(u32),
+    Leaf(u32),
+}
+
+/// Children per wide node, for code outside this module that walks lanes.
+#[cfg(feature = "neural-bvh")]
+pub(crate) const WIDTH: usize = LANES;
+
+/// The tree's shape and a cut-aware occlusion query, for the learned
+/// occlusion proxy (`crate::neural`). Nothing here runs without the feature.
+#[cfg(feature = "neural-bvh")]
+impl Bvh {
+    pub(crate) fn node_count(&self) -> usize {
+        self.wide.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn leaf_count(&self) -> usize {
+        self.leaves.len()
+    }
+
+    /// Lane `lane` of node `node`: its box and what it holds, or `None` for
+    /// an unused lane.
+    pub(crate) fn lane(&self, node: u32, lane: usize) -> Option<(AABB, LaneChild)> {
+        let n = &self.wide[node as usize];
+        if n.flags & (1 << lane) == 0 {
+            return None;
+        }
+        let b = AABB::new(
+            Vec3A::new(n.bmin_x[lane], n.bmin_y[lane], n.bmin_z[lane]),
+            Vec3A::new(n.bmax_x[lane], n.bmax_y[lane], n.bmax_z[lane]),
+        );
+        let c = n.child[lane];
+        Some((
+            b,
+            if n.is_leaf(lane) {
+                LaneChild::Leaf(c)
+            } else {
+                LaneChild::Node(c)
+            },
+        ))
+    }
+
+    /// Triangle references a leaf holds: its packet lanes, plus, for each
+    /// instance it lists, `per_instance` of that instance's scene.
+    pub(crate) fn leaf_weight(
+        &self,
+        leaf: u32,
+        per_instance: &mut dyn FnMut(&Scene) -> usize,
+    ) -> usize {
+        let l = &self.leaves[leaf as usize];
+        let first = l.pkt_first as usize;
+        let range = first..first + l.pkt_count as usize;
+        let packed: usize = match self.layout {
+            Layout::Gathered => self.packets[range]
+                .iter()
+                .map(|p| p.lanes.active.count_ones() as usize)
+                .sum(),
+            Layout::Indexed => self.packets_i[range]
+                .iter()
+                .map(|p| p.lanes.active.count_ones() as usize)
+                .sum(),
+        };
+        let first = l.idx_first as usize;
+        let scalar: usize = self.indices[first..first + l.idx_count as usize]
+            .iter()
+            .map(|&id| match id >> KIND_SHIFT {
+                KIND_INSTANCE => per_instance(&self.instances[(id & INDEX_MASK) as usize].scene),
+                _ => 1,
+            })
+            .sum();
+        packed + scalar
+    }
+
+    /// Whether every primitive is a triangle or an instance (of what, the
+    /// caller checks).
+    pub(crate) fn only_triangles_and_instances(&self) -> bool {
+        self.prims.is_empty() && self.cubics.is_empty()
+    }
+
+    /// Every distinct ray mask this tree's own primitives carry: its
+    /// triangles' (out-of-range records, which carry none, left out) and its
+    /// instances'. Not the masks inside the instanced scenes.
+    pub(crate) fn own_masks(&self, out: &mut Vec<RayMask>) {
+        let mut add = |m: RayMask| {
+            if !out.contains(&m) {
+                out.push(m);
+            }
+        };
+        for r in self.tris.iter().filter(|r| !r.is_degenerate()) {
+            add(r.mask);
+        }
+        for i in self.instances.iter() {
+            add(i.mask);
+        }
+    }
+
+    /// The scene of every instance, once per placement.
+    pub(crate) fn instance_scenes(&self) -> impl Iterator<Item = &std::sync::Arc<Scene>> {
+        self.instances.iter().map(|i| &i.scene)
+    }
+
+    pub(crate) fn own_triangle_count(&self) -> usize {
+        self.triangle_count()
+    }
+
+    /// [`Bvh::hit_any`] that stops at the cut: a lane in `cut` the ray
+    /// crosses is not descended, `eval` answers for it instead, given the
+    /// ray's parametric interval inside the lane's box and the box. Above
+    /// the cut the traversal is exactly [`Bvh::hit_any`]'s, so a ray that
+    /// meets no cut box costs what it costs there.
+    pub(crate) fn hit_any_cut(
+        &self,
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+        cut: &crate::neural::cut::CutSet,
+        eval: impl Fn(f32, f32, &AABB) -> bool,
+    ) -> bool {
+        if self.wide.is_empty() {
+            return false;
+        }
+        let rs = RaySlab::new(ray, t_min);
+        let shear = self.shear(ray);
+        let inv = safe_inv3(ray.dir);
+        let mut stack = TraversalStack::new(0);
+        while let Some(node_idx) = stack.pop() {
+            let node = &self.wide[node_idx as usize];
+            let (mut mask, _) = rs.slab(node, t_max);
+            while mask != 0 {
+                let l = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                if cut.contains(node_idx, l) {
+                    let b = self.lane(node_idx, l).expect("a hit lane is valid").0;
+                    if let Some((t0, t1)) = box_interval(&b, ray, inv, t_min, t_max)
+                        && eval(t0, t1, &b)
+                    {
+                        return true;
+                    }
+                } else if node.is_leaf(l) {
+                    if self.occlude_leaf_out_of_line(
+                        node.child[l],
+                        ray,
+                        shear.as_ref(),
+                        t_min,
+                        t_max,
+                    ) {
+                        return true;
+                    }
+                } else {
+                    stack.push(node.child[l]);
+                }
+            }
+        }
+        false
+    }
+
+    /// [`Bvh::occlude_leaf`] behind a call, for the cut traversal, which
+    /// reaches a leaf only for a lane outside the cut (never on a proxied
+    /// query's normal path): one out-of-line copy there rather than the
+    /// forced-inline body in the cold traversal.
+    #[inline(never)]
+    fn occlude_leaf_out_of_line(
+        &self,
+        leaf_idx: u32,
+        ray: &Ray,
+        shear: Option<&RayShear>,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        self.occlude_leaf(leaf_idx, ray, shear, t_min, t_max)
+    }
+
+    /// Every cut lane the ray crosses in `(t_min, t_max)`, with its interval
+    /// and box, in traversal order.
+    pub(crate) fn cut_crossings(
+        &self,
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+        cut: &crate::neural::cut::CutSet,
+        f: &mut dyn FnMut(u32, usize, f32, f32, &AABB),
+    ) {
+        if self.wide.is_empty() {
+            return;
+        }
+        let rs = RaySlab::new(ray, t_min);
+        let inv = safe_inv3(ray.dir);
+        let mut stack = TraversalStack::new(0);
+        while let Some(node_idx) = stack.pop() {
+            let node = &self.wide[node_idx as usize];
+            let (mut mask, _) = rs.slab(node, t_max);
+            while mask != 0 {
+                let l = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                if cut.contains(node_idx, l) {
+                    let b = self.lane(node_idx, l).expect("a hit lane is valid").0;
+                    if let Some((t0, t1)) = box_interval(&b, ray, inv, t_min, t_max) {
+                        f(node_idx, l, t0, t1, &b);
+                    }
+                } else if !node.is_leaf(l) {
+                    stack.push(node.child[l]);
+                }
+            }
+        }
+    }
+}
+
+/// The ray's parametric interval inside `b`, clipped to `(t_min, t_max)`;
+/// `None` when empty. The scalar form of the lane slab test.
+#[cfg(feature = "neural-bvh")]
+#[inline]
+fn box_interval(b: &AABB, ray: &Ray, inv: Vec3A, t_min: f32, t_max: f32) -> Option<(f32, f32)> {
+    let t0 = (b.minimum - ray.origin) * inv;
+    let t1 = (b.maximum - ray.origin) * inv;
+    let near = t0.min(t1).max_element().max(t_min);
+    let far = t0.max(t1).min_element().min(t_max);
+    (near <= far).then_some((near, far))
 }
 
 /// Finite reciprocal of every direction component: zero (and denormal-tiny)

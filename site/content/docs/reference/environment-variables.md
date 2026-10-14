@@ -73,6 +73,8 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_ADAPTIVE_PER_FACE`](#crust-adaptive-per-face) | on | USD import |
 | [`CRUST_ADAPTIVE_FRUSTUM`](#crust-adaptive-frustum) | on | USD import |
 | [`CRUST_TRI_PACKETS`](#crust-tri-packets) | `auto` | ray tracing |
+| [`CRUST_NEURAL_OCCLUSION`](#crust-neural-occlusion) | off | ray tracing (experiment) |
+| [`CRUST_NEURAL_MIN_TRIS`](#crust-neural-min-tris) | 250000 | ray tracing (experiment) |
 | [`CRUST_MTLX_OPT`](#crust-mtlx-opt) | on | shading |
 | [`CRUST_SHADER_JIT`](#crust-shader-jit) | on | shading |
 | [`CRUST_RAY_CONES`](#crust-ray-cones) | on | textures |
@@ -205,6 +207,49 @@ bit-identical results.
 | `indexed` | 92-byte packets of vertex indices. About a quarter less kernel memory per triangle, with 13–30% slower traversal. On the Moana island at subdivision level 1 it saves 8.4 GiB of 36.6 for an 8–9% slower render, and the import gets slightly faster. |
 
 Use `indexed` when a scene doesn't otherwise fit in memory.
+
+### CRUST_NEURAL_OCCLUSION
+
+Boolean, default **off**. Only in a `crust` built with the `neural-bvh` feature
+(`cargo build --release --features neural-bvh`). In any other build, `on` logs one warning
+and the render stays exact.
+
+This switch is an **experiment**, and unlike the others its "on" side is not an
+optimization. On, the import trains a small neural network (a hash grid and an MLP) for
+each eligible instanced prototype. Shadow rays inside that prototype then ask the network
+whether something is in the way, instead of tracing the prototype's triangles. Everything
+else stays exact: camera rays, bounces, and every hit the shading sees.
+
+A prototype is eligible when all of these hold:
+- it is made of triangles only, directly or through instances that don't move;
+- it holds at least [`CRUST_NEURAL_MIN_TRIS`](#crust-neural-min-tris) triangles,
+  counted through its placements;
+- no material bound in it lets shadow rays through (a cutout, or a thin-walled surface
+  with straight transmission).
+
+Shadow rays of [shadow-linked](@/docs/usd/lights.md) lights use the network too, as long
+as their linking doesn't change which triangles inside the prototype they can see.
+
+The answers are **approximate, and the render is biased**. Measured against the exact
+kernel, the network gets 7–55 % of shadow rays wrong on large prototypes: light leaks and
+spurious shadows. That error does not shrink with more samples. Each proxy also costs
+seconds of training at import (minutes on the largest prototypes) and about 1 MiB of
+memory on top of the prototype's exact tree, which is kept. Only in a few cases is it
+faster than the exact kernel, and then mostly because it wrongly stops at the first thing
+it thinks is in the way.
+
+Use it to see what a learned BVH does to an image, not to render faster.
+[Limitations](@/docs/architecture/limitations.md#learned-occlusion) has the numbers.
+`--stats` shows how many proxies were built, how long they took to train and how much
+memory they hold, and the log says once that shadow-ray visibility is approximate.
+
+### CRUST_NEURAL_MIN_TRIS
+
+Integer, default **250000**.
+
+The smallest prototype, in triangles counted through its placements, that
+[`CRUST_NEURAL_OCCLUSION`](#crust-neural-occlusion) trains a network for. Lower it to
+include smaller prototypes, at a few seconds of import each.
 
 ## Shading
 

@@ -147,6 +147,27 @@ pub struct SceneCounters {
     /// is itself informative.
     #[serde(rename = "kernel_memory", serialize_with = "footprint_json")]
     pub footprint: crate::rt::MemoryFootprint,
+    /// Learned shadow-ray occlusion proxies built for instanced prototypes
+    /// (`CRUST_NEURAL_OCCLUSION`, an experiment). Absent from the report
+    /// when none was built, which is every render by default.
+    #[serde(skip_serializing_if = "ProxyCounters::is_empty")]
+    pub occlusion_proxies: ProxyCounters,
+}
+
+/// How many learned occlusion proxies the import trained, and how long that
+/// took. Their bytes are a kernel-memory row
+/// (`MemoryFootprint::occlusion_proxies`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ProxyCounters {
+    pub count: usize,
+    /// Training time summed over the proxies, in milliseconds.
+    pub train_ms: u64,
+}
+
+impl ProxyCounters {
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 /// Work the integrator did, in rays and path vertices.
@@ -916,6 +937,10 @@ fn footprint_json<S: Serializer>(fp: &crate::rt::MemoryFootprint, s: S) -> Resul
         geometry_tables,
         lanes,
         lanes_filled,
+        // The neural-bvh experiment's proxies: inside `total_bytes`, given no
+        // key of their own (no render builds one; the probes report them).
+        #[cfg(feature = "neural-bvh")]
+            occlusion_proxies: _,
     } = fp;
     #[derive(Serialize)]
     struct Footprint {
@@ -1252,6 +1277,16 @@ impl RenderStats {
         if s.volumes > 0 {
             writeln!(f, "  {:<28} {}", "volume regions", thousands(s.volumes))?;
         }
+        let p = &s.occlusion_proxies;
+        if !p.is_empty() {
+            writeln!(
+                f,
+                "  {:<28} {} (trained in {:.1} s; shadow rays approximate)",
+                "occlusion proxies",
+                thousands(p.count),
+                p.train_ms as f64 / 1000.0
+            )?;
+        }
 
         // Exact kernel bytes, then peak RSS. The difference is everything
         // the kernel does not own — materials, the USD stage, caches — so
@@ -1281,6 +1316,15 @@ impl RenderStats {
                 if bytes > 0 {
                     writeln!(f, "    {:<26} {}", label, human_bytes(bytes as u64))?;
                 }
+            }
+            #[cfg(feature = "neural-bvh")]
+            if fp.occlusion_proxies > 0 {
+                writeln!(
+                    f,
+                    "    {:<26} {}",
+                    "occlusion proxies",
+                    human_bytes(fp.occlusion_proxies as u64)
+                )?;
             }
             // How well the packets are used, and the one number a layout
             // change is judged by: kernel bytes per resident triangle.

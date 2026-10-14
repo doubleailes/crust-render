@@ -1079,6 +1079,54 @@ impl World {
         }
     }
 
+    /// The committed kernel scene, for probes that measure the kernel on an
+    /// imported stage (`neural_probe`): the prototypes behind its instances.
+    #[cfg(feature = "neural-bvh")]
+    pub fn kernel(&self) -> &crust_rt::Scene {
+        &self.scene
+    }
+
+    /// The learned occlusion proxies the instanced prototypes hold
+    /// (`CRUST_NEURAL_OCCLUSION`), counted once per prototype, and logged:
+    /// one INFO line when there is any (shadow rays are then approximate),
+    /// one DEBUG line per proxy. Empty, and silent, without the
+    /// `neural-bvh` feature or the switch.
+    pub fn occlusion_proxies(&self) -> crate::stats::ProxyCounters {
+        #[allow(unused_mut)]
+        let mut counters = crate::stats::ProxyCounters::default();
+        #[cfg(feature = "neural-bvh")]
+        {
+            let mut seconds = 0.0f64;
+            for scene in self.scene.instanced_scenes() {
+                let Some(p) = scene.occlusion_proxy() else {
+                    continue;
+                };
+                counters.count += 1;
+                seconds += p.train_seconds;
+                tracing::debug!(
+                    "Occlusion proxy: {} triangles, {} cut lanes, trained in {:.1} s; \
+                     validation FP {:.2}% FN {:.2}% (contact FN {:.2}%)",
+                    p.triangles,
+                    p.cut_lanes,
+                    p.train_seconds,
+                    100.0 * p.false_positive,
+                    100.0 * p.false_negative,
+                    100.0 * p.contact_false_negative,
+                );
+            }
+            counters.train_ms = (seconds * 1000.0).round() as u64;
+            if counters.count > 0 {
+                tracing::info!(
+                    "Neural occlusion: {} prototype proxies trained in {:.1} s; shadow-ray \
+                     visibility through them is approximate (CRUST_NEURAL_OCCLUSION)",
+                    counters.count,
+                    seconds
+                );
+            }
+        }
+        counters
+    }
+
     /// Early-exit occlusion query — the shadow-ray fast path.
     #[must_use]
     pub fn occluded(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {

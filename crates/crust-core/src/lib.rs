@@ -96,9 +96,34 @@ pub use config::{
 /// What every kernel scene commits with — the `CRUST_TRI_PACKETS` switch,
 /// read once.
 pub(crate) fn commit_options() -> crust_rt::CommitOptions {
-    crust_rt::CommitOptions {
-        layout: config().tri_packets.into(),
+    crust_rt::CommitOptions::with_layout(config().tri_packets.into())
+}
+
+/// What an instanced prototype commits with: [`commit_options`], plus, with
+/// `CRUST_NEURAL_OCCLUSION` on (and the `neural-bvh` feature), a request for
+/// a learned shadow-ray occlusion proxy — never for a prototype with a
+/// `pass_through` material (a cutout, or a thin-walled surface with straight
+/// transmission), whose shadow rays must resolve a colour, not a verdict.
+/// The kernel then trains one only if the prototype is triangles alone
+/// (directly or through static instances) of at least
+/// `CRUST_NEURAL_MIN_TRIS`. The top-level world never asks.
+pub(crate) fn prototype_commit_options(pass_through: bool) -> crust_rt::CommitOptions {
+    #[allow(unused_mut)]
+    let mut options = commit_options();
+    #[cfg(feature = "neural-bvh")]
+    if config().neural_occlusion && !pass_through {
+        options.occlusion_proxy = Some(crust_rt::ProxyRequest::shadow(config().neural_min_tris));
     }
+    #[cfg(not(feature = "neural-bvh"))]
+    let _ = pass_through;
+    options
+}
+
+/// Whether shadow rays may pass a surface of `material`: what keeps a
+/// prototype from getting an occlusion proxy (see
+/// [`prototype_commit_options`]).
+pub(crate) fn passes_shadow_rays(material: &dyn Material) -> bool {
+    material.has_cutout() || material.has_straight_transmission()
 }
 pub use environment::EnvironmentMap;
 pub use error::Error;
@@ -140,8 +165,8 @@ pub use scene::{
 #[cfg(feature = "traversal-stats")]
 pub use stats::traversal_report;
 pub use stats::{
-    DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,
-    RayStats, RenderStats, SceneCounters, SubdivisionCounters, TextureCacheStats,
+    DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, ProxyCounters,
+    PtexCacheStats, RayStats, RenderStats, SceneCounters, SubdivisionCounters, TextureCacheStats,
     current_memory_bytes, machine_memory_bytes, peak_memory_bytes,
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};

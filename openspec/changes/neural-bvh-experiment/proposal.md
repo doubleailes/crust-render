@@ -1,3 +1,19 @@
+## Outcome (2026-10-14): the gate failed and was lifted
+
+Phase 1 was built and measured. The gate (design D8) failed on accuracy everywhere. D8
+required, on a 1 M+ triangle prototype out of cache, at least 1.25× exact Mray/s with
+FP + FN ≤ 1 %.
+- In cache the proxy runs at 0.11–0.22× exact.
+- Out of cache (an 8 M-triangle soup, and the Moana island's three largest grouped
+  prototypes) it reaches 1.13–1.85×, but only where false positives end queries early.
+  Its FP + FN is 7–55 % per shadow ray.
+
+The numbers are in `openspec/specs/intersection-kernel/design.md`. The gate was then
+**lifted by decision**: Phase 2 is built as planned below, behind the off-by-default
+`CRUST_NEURAL_OCCLUSION` switch, so the error can be seen in renders rather than only
+in probes. Nothing about the bias changes. It is documented and measured, and the
+switch is never a default.
+
 ## Why
 
 Recent papers replace part of a ray tracer's BVH with a learned model:

@@ -16,6 +16,19 @@
 //! packet layout (default `auto`), which is how the two are A/B'd per tree
 //! size.
 //!
+//! `--neural [--cut size|refined] [--steps N]` (a build with the `neural-bvh`
+//! feature) measures learned occlusion proxies against the exact kernel
+//! instead: each eligible scene is committed with a proxy, and the probe
+//! prints exact and proxied shadow-ray Mray/s, false-positive and
+//! false-negative rates (on the fixture rays and on rays leaving surfaces,
+//! where a leak at contact shows), the training time, the proxy bytes and a
+//! sweep of the threshold τ. With `--large`, the soup holds one proxy over
+//! its whole tree (out of cache) and the field's prototypes hold one each.
+//!
+//! ```text
+//! cargo run --release -p crust-rt --features neural-bvh --example ray_throughput -- --neural [--large [MTRIS]]
+//! ```
+//!
 //! The default scenes are small enough that their whole BVH stays in cache,
 //! so they measure the node test's arithmetic. `--large` adds two scenes
 //! sized to defeat the last-level cache (MTRIS million triangles, default 8,
@@ -28,6 +41,9 @@
 
 #[path = "../fixtures/mod.rs"]
 mod fixtures;
+#[cfg(feature = "neural-bvh")]
+#[path = "../fixtures/neural.rs"]
+mod neural;
 
 use crust_rt::{CommitOptions, Geometry, PacketLayout, Scene, SceneBuilder};
 use fixtures::{
@@ -46,6 +62,10 @@ const LARGE_HALF: f32 = 50.0;
 /// into the tree, rather than stopping on the first layer of a dense wall.
 /// With `n` triangles of area `a` the mean free path is `2V / (n a)`.
 fn soup_scene(n: usize) -> Scene {
+    soup_scene_with(n, commit)
+}
+
+fn soup_scene_with(n: usize, commit: impl Fn(SceneBuilder) -> Scene) -> Scene {
     let side = 2.0 * LARGE_HALF;
     let area = 8.0 * side * side / n as f32;
     let edge = (2.0 * area).sqrt();
@@ -74,11 +94,15 @@ fn soup_scene(n: usize) -> Scene {
 /// mean free path as the soup. The shape of an instanced production stage:
 /// the top-level tree is far out of cache, the prototypes' trees are not.
 fn instance_field_scene(count: usize) -> Scene {
+    instance_field_scene_with(count, commit)
+}
+
+fn instance_field_scene_with(count: usize, commit_proto: impl Fn(SceneBuilder) -> Scene) -> Scene {
     let protos: Vec<Arc<Scene>> = (0..8)
         .map(|k| {
             let mut p = SceneBuilder::new();
             p.attach(uv_sphere(Vec3A::ZERO, 1.0, 32 + 8 * k, 16 + 4 * k));
-            Arc::new(commit(p))
+            Arc::new(commit_proto(p))
         })
         .collect();
     let side = 2.0 * LARGE_HALF;
@@ -169,9 +193,9 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
 static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
 
 fn commit(b: SceneBuilder) -> Scene {
-    b.commit_with(CommitOptions {
-        layout: *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
-    })
+    b.commit_with(CommitOptions::with_layout(
+        *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
+    ))
 }
 
 fn main() {
@@ -187,6 +211,13 @@ fn main() {
             other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
         };
         LAYOUT.set(layout).expect("set once");
+    }
+    if args.peek().map(String::as_str) == Some("--neural") {
+        args.next();
+        #[cfg(feature = "neural-bvh")]
+        return neural_main(args);
+        #[cfg(not(feature = "neural-bvh"))]
+        panic!("--neural needs a build with `--features neural-bvh`");
     }
 
     let tri = triangle_scene(commit);
@@ -223,4 +254,108 @@ fn main() {
         );
         probe_with("inst_field", &field, LARGE_HALF, LARGE_RAYS, LARGE_REPEATS);
     }
+}
+
+/// `--neural`: proxies against the exact kernel, scene by scene.
+#[cfg(feature = "neural-bvh")]
+fn neural_main(mut args: std::iter::Peekable<impl Iterator<Item = String>>) {
+    use crust_rt::{MASK_SHADOW, PROXY_DEFAULT_STEPS, ProxyCut, ProxyRequest};
+
+    // Above every fixture prototype (the `instances` sphere has 576
+    // triangles), so only the scenes measured hold a proxy and their
+    // `occluded_exact` stays exact all the way down.
+    let mut req = ProxyRequest::shadow(10_000);
+    req.steps = PROXY_DEFAULT_STEPS;
+    let mut large = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--cut" => {
+                req.cut = match args.next().as_deref() {
+                    Some("size") => ProxyCut::Size,
+                    Some("refined") => ProxyCut::Refined,
+                    other => panic!("--cut wants size|refined, got {other:?}"),
+                }
+            }
+            "--steps" => req.steps = args.next().and_then(|s| s.parse().ok()).expect("--steps N"),
+            "--large" => {
+                large = Some(
+                    args.next_if(|s| !s.starts_with("--"))
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(8.0),
+                )
+            }
+            other => panic!("unknown argument {other}"),
+        }
+    }
+    let proxied_with = |req: ProxyRequest| {
+        move |b: SceneBuilder| {
+            let mut o = CommitOptions::with_layout(*LAYOUT.get().unwrap_or(&PacketLayout::Auto));
+            o.occlusion_proxy = Some(req);
+            b.commit_with(o)
+        }
+    };
+    let proxied = proxied_with(req);
+    println!("proxy request: {req:?}");
+    let shadow = |rays: Vec<crust_rt::Ray>| -> Vec<crust_rt::Ray> {
+        rays.into_iter().map(|r| r.with_mask(MASK_SHADOW)).collect()
+    };
+    let one = |name: &str, scene: &Scene, extent: f32, n: usize, repeats: usize| {
+        let through = shadow(ray_batch(n, extent));
+        let surface = neural::surface_rays(scene, n, 0x5EED, 1 << 22);
+        neural::report_scene(
+            name,
+            scene,
+            &[("through", &through), ("surface", &surface)],
+            repeats,
+        );
+    };
+    one("tri_spheres", &triangle_scene(proxied), 6.0, RAYS, REPEATS);
+    one(
+        "sphere_grid",
+        &sphere_grid_scene(proxied),
+        14.0,
+        RAYS,
+        REPEATS,
+    );
+    one("instances", &instance_scene(proxied), 7.0, RAYS, REPEATS);
+    let Some(mtris) = large else { return };
+    let n = (mtris * 1e6) as usize;
+
+    let t = Instant::now();
+    let soup = soup_scene_with(n, proxied);
+    println!(
+        "soup: {} triangles, {:.0} MiB kernel, built and trained in {:.1} s",
+        soup.primitive_count(),
+        soup.memory_footprint().total() as f64 / (1 << 20) as f64,
+        t.elapsed().as_secs_f64()
+    );
+    one("soup", &soup, LARGE_HALF, LARGE_RAYS, LARGE_REPEATS);
+    drop(soup);
+
+    // The field's top level stays exact; each prototype holds a proxy, so
+    // the exact side is the same field committed without them.
+    let exact = instance_field_scene(n / 4);
+    // The field's prototypes are 2-4 k triangles: below the threshold above.
+    let field = instance_field_scene_with(
+        n / 4,
+        proxied_with(ProxyRequest {
+            min_triangles: 1,
+            ..req
+        }),
+    );
+    for proto in field.instanced_scenes().iter().take(1) {
+        if let Some(p) = proto.occlusion_proxy() {
+            neural::print_proxy("inst_proto", p);
+        }
+    }
+    let through = shadow(ray_batch(LARGE_RAYS, LARGE_HALF));
+    neural::print_set(
+        "inst_field",
+        "through",
+        &|r| exact.occluded(r, neural::SHADOW_T_MIN, f32::INFINITY),
+        &|r| field.occluded(r, neural::SHADOW_T_MIN, f32::INFINITY),
+        None,
+        &through,
+        LARGE_REPEATS,
+    );
 }

@@ -48,9 +48,10 @@ the kernel SHALL report that no proxy was built.
 
 ### Requirement: Proxied occlusion is approximate and falls back to exact
 
-On a proxied scene, an `occluded` query whose ray mask matches the mask the proxy was
-trained for SHALL be answered by the proxy. The answer is an approximation and MAY
-differ from the exact answer. Any query with another mask SHALL be answered exactly.
+On a proxied scene, an `occluded` query whose ray mask carries every bit of the mask
+the proxy was trained for, and sees exactly the geometry inside the scene that the
+trained mask sees, SHALL be answered by the proxy. The answer is an approximation and
+MAY differ from the exact answer. Any other query SHALL be answered exactly.
 The probe in the next requirement measures the approximation error, and no requirement
 bounds it.
 
@@ -58,6 +59,19 @@ bounds it.
 
 - **WHEN** a proxy trained for shadow rays is queried with `occluded` using a camera
   ray mask
+- **THEN** the answer is the exact kernel's answer for every ray
+
+#### Scenario: A mask that sees the same geometry uses the proxy
+
+- **WHEN** a proxy trained for shadow rays is queried with a shadow mask that also
+  carries other category bits (a shadow-linked light's class bits), on a scene whose
+  geometry those bits do not make visible or invisible
+- **THEN** the proxy answers, exactly as it answers the plain shadow mask
+
+#### Scenario: A mask that sees other geometry is exact
+
+- **WHEN** a proxied scene holds geometry visible to camera rays only, and is queried
+  with a mask carrying both the shadow and the camera bits
 - **THEN** the answer is the exact kernel's answer for every ray
 
 #### Scenario: A segment that misses the scene bounds

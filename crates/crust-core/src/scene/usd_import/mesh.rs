@@ -136,6 +136,9 @@ pub(super) struct MeshSlot {
     /// Set once some path needed this mesh as a real kernel scene — which
     /// prototypes always do, since an instance is the only way to place one.
     pub(super) committed: Option<Arc<RtScene>>,
+    /// Whether the slot's material lets shadow rays through (a cutout, or
+    /// straight transmission): such a mesh never gets an occlusion proxy.
+    pub(super) pass_through: bool,
     /// Instanceable direct placements recorded so far. World-space-baked
     /// placements (a non-invertible transform) are not counted: they never
     /// reference the slot again.
@@ -407,6 +410,7 @@ impl MeshArena {
             faces,
             uvs,
             committed: None,
+            pass_through: crate::passes_shadow_rays(&**material),
             n_place: 0,
         });
         self.by_key.insert(key, slot);
@@ -481,7 +485,7 @@ impl MeshArena {
             .local
             .take()
             .expect("a slot is either still local or already committed");
-        let scene = Arc::new(commit_mesh(geom));
+        let scene = Arc::new(commit_mesh(geom, s.pass_through));
         s.committed = Some(Arc::clone(&scene));
         scene
     }
@@ -513,6 +517,7 @@ impl MeshArena {
                 (k, geom)
             })
             .collect();
+        let pass_through: Vec<bool> = self.slots.iter().map(|s| s.pass_through).collect();
         // Built in batches of bounded total size rather than all at once. A
         // build's transient memory (references, binary nodes) is proportional
         // to its triangles, so an unbounded parallel map lets a prototype of
@@ -532,7 +537,7 @@ impl MeshArena {
             }
             let built: Vec<(u32, RtScene)> = batch
                 .into_par_iter()
-                .map(|(k, geom)| (k, commit_mesh(geom)))
+                .map(|(k, geom)| (k, commit_mesh(geom, pass_through[k as usize])))
                 .collect();
             for (k, scene) in built {
                 self.slots[k as usize].committed = Some(Arc::new(scene));
@@ -546,15 +551,16 @@ impl MeshArena {
 /// alone, as every mesh was before the builds went parallel.
 const PARALLEL_COMMIT_TRIS: usize = 2_000_000;
 
-/// A local-space mesh as a committed kernel scene.
-fn commit_mesh(geom: MeshGeom) -> RtScene {
+/// A local-space mesh as a committed kernel scene: an instanced prototype,
+/// so it may ask for an occlusion proxy ([`crate::prototype_commit_options`]).
+fn commit_mesh(geom: MeshGeom, pass_through: bool) -> RtScene {
     let mut b = RtSceneBuilder::new();
     b.attach(Geometry::TriangleMesh {
         vertices: geom.verts,
         indices: geom.tris,
         normals: geom.normals,
     });
-    b.commit_with(crate::commit_options())
+    b.commit_with(crate::prototype_commit_options(pass_through))
 }
 
 /// Reads a direct `UsdGeomMesh` prim placed at `world_xf` and places it

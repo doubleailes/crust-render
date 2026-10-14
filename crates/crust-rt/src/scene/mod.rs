@@ -52,12 +52,31 @@ pub enum PacketLayout {
 pub struct CommitOptions {
     /// The triangle packet layout.
     pub layout: PacketLayout,
+    /// Train a learned occlusion proxy for this scene, if it qualifies
+    /// (`neural-bvh` only): an approximation `occluded` consults for the
+    /// request's mask. `None`, the default, is the exact kernel.
+    #[cfg(feature = "neural-bvh")]
+    pub occlusion_proxy: Option<crate::ProxyRequest>,
+}
+
+impl CommitOptions {
+    /// The defaults with `layout` — what a caller that chooses only the
+    /// layout writes, whichever optional fields the build compiles in.
+    #[allow(clippy::needless_update)] // the update is needed with `neural-bvh`
+    pub fn with_layout(layout: PacketLayout) -> Self {
+        CommitOptions {
+            layout,
+            ..CommitOptions::default()
+        }
+    }
 }
 
 impl Default for CommitOptions {
     fn default() -> Self {
         CommitOptions {
             layout: PacketLayout::Auto,
+            #[cfg(feature = "neural-bvh")]
+            occlusion_proxy: None,
         }
     }
 }
@@ -102,6 +121,10 @@ pub struct MemoryFootprint {
     pub lanes: usize,
     /// Packet lanes holding a triangle; `lanes_filled / lanes` is the fill.
     pub lanes_filled: usize,
+    /// Learned occlusion proxies (`neural-bvh`): hash grid, MLP and cut,
+    /// once per distinct scene. Zero when none was built.
+    #[cfg(feature = "neural-bvh")]
+    pub occlusion_proxies: usize,
 }
 
 impl MemoryFootprint {
@@ -118,6 +141,17 @@ impl MemoryFootprint {
             + self.vertices
             + self.vertex_normals
             + self.geometry_tables
+            + self.proxy_bytes()
+    }
+
+    #[cfg(feature = "neural-bvh")]
+    fn proxy_bytes(&self) -> usize {
+        self.occlusion_proxies
+    }
+
+    #[cfg(not(feature = "neural-bvh"))]
+    fn proxy_bytes(&self) -> usize {
+        0
     }
 }
 
@@ -424,12 +458,20 @@ impl SceneBuilder {
             PacketLayout::Gathered | PacketLayout::Auto => crate::bvh::Layout::Gathered,
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
         };
-        Scene {
+        #[allow(unused_mut)]
+        let mut scene = Scene {
             bvh: Bvh::new(sink.input, layout),
             n_geoms,
             has_motion: sink.has_motion,
             max_hit_id: sink.max_hit_id,
+            #[cfg(feature = "neural-bvh")]
+            proxy: None,
+        };
+        #[cfg(feature = "neural-bvh")]
+        if let Some(req) = options.occlusion_proxy {
+            scene.proxy = crate::neural::build(&scene, &req).map(Box::new);
         }
+        scene
     }
 }
 
@@ -703,6 +745,29 @@ impl Expansion {
     }
 }
 
+#[cfg(feature = "neural-bvh")]
+thread_local! {
+    /// Set while this thread must see exact occlusion at every depth: a
+    /// proxy's training labels, and [`Scene::occluded_exact`]. Without it, a
+    /// scene whose instances hold proxies of their own would be labelled, or
+    /// measured, through those approximations.
+    static EXACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with every proxy on this thread bypassed, nested proxies
+/// included; restores the previous state after, a panic included.
+#[cfg(feature = "neural-bvh")]
+pub(crate) fn exact_occlusion<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXACT.set(self.0);
+        }
+    }
+    let _restore = Restore(EXACT.replace(true));
+    f()
+}
+
 /// A committed, immutable scene. Queries are `&self` and thread-safe.
 pub struct Scene {
     bvh: Bvh,
@@ -712,6 +777,9 @@ pub struct Scene {
     /// at commit, that lets an `Offset` label placing this scene be checked
     /// once instead of on every hit.
     max_hit_id: u32,
+    /// The learned occlusion proxy, when one was requested and built.
+    #[cfg(feature = "neural-bvh")]
+    proxy: Option<Box<crate::neural::OcclusionProxy>>,
 }
 
 impl Scene {
@@ -742,7 +810,159 @@ impl Scene {
     /// traversal — the shadow-ray fast path (Embree's `rtcOccluded1`).
     #[must_use]
     pub fn occluded(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        // The one branch the proxy costs an exact query: here, which is also
+        // where every instance descends (`InstancePrim::hit_any`). Everything
+        // else lives out of line, so this stays the function it was: with
+        // the proxy path inline, `hit_any` and its leaf test stopped being
+        // inlined here, +0.25% instructions on cornellbox with no proxy.
+        #[cfg(feature = "neural-bvh")]
+        if let Some(p) = &self.proxy {
+            return self.occluded_with_proxy(p, ray, t_min, t_max);
+        }
         self.bvh.hit_any(ray, t_min, t_max)
+    }
+
+    /// [`Scene::occluded`] on a scene holding a proxy: the proxy for its own
+    /// mask (unless [`exact_occlusion`] is in force), exact otherwise.
+    #[cfg(feature = "neural-bvh")]
+    #[cold]
+    #[inline(never)]
+    fn occluded_with_proxy(
+        &self,
+        p: &crate::neural::OcclusionProxy,
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        if p.answers(ray.mask) && !EXACT.get() {
+            self.occluded_proxied(p, ray, t_min, t_max, 0.0)
+        } else {
+            self.bvh.hit_any(ray, t_min, t_max)
+        }
+    }
+
+    /// Occlusion through `p`, a proxy of this scene, at logit threshold `z`.
+    #[cfg(feature = "neural-bvh")]
+    #[inline]
+    fn occluded_proxied(
+        &self,
+        p: &crate::neural::OcclusionProxy,
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+        z: f32,
+    ) -> bool {
+        self.bvh
+            .hit_any_cut(ray, t_min, t_max, &p.cut, |t0, t1, b| {
+                p.occludes(ray, t0, t1, b, z)
+            })
+    }
+
+    /// Trains a proxy for this scene, as a commit asking for `req` would,
+    /// and hands it to the caller rather than keeping it: for measuring
+    /// proxies of scenes already committed and shared (a prototype behind
+    /// its instances). `None` when the scene does not qualify.
+    #[cfg(feature = "neural-bvh")]
+    pub fn train_occlusion_proxy(
+        &self,
+        req: &crate::ProxyRequest,
+    ) -> Option<crate::OcclusionProxy> {
+        crate::neural::build(self, req)
+    }
+
+    /// [`Scene::occluded`] answered through `proxy` at threshold `tau` (the
+    /// probability above which a segment counts as occluded; 0.5 is the
+    /// default), for a ray of the proxy's mask; any other ray is exact.
+    ///
+    /// # Panics
+    /// If `proxy` was trained on a different tree.
+    #[cfg(feature = "neural-bvh")]
+    pub fn occluded_by(
+        &self,
+        proxy: &crate::OcclusionProxy,
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+        tau: f32,
+    ) -> bool {
+        assert_eq!(
+            proxy.nodes,
+            self.bvh.node_count(),
+            "a proxy of another scene"
+        );
+        if !proxy.answers(ray.mask) {
+            return self.occluded(ray, t_min, t_max);
+        }
+        self.occluded_proxied(proxy, ray, t_min, t_max, (tau / (1.0 - tau)).ln())
+    }
+
+    /// [`Scene::occluded`] with the proxy's decision threshold `tau` (the
+    /// probability above which a segment counts as occluded; `occluded`
+    /// uses 0.5). For sweeping the threshold in a probe: on a scene without
+    /// a proxy, or a ray of another mask, it is `occluded`.
+    #[cfg(feature = "neural-bvh")]
+    pub fn occluded_with_threshold(&self, ray: &Ray, t_min: f32, t_max: f32, tau: f32) -> bool {
+        match &self.proxy {
+            Some(p) => self.occluded_by(p, ray, t_min, t_max, tau),
+            None => self.occluded(ray, t_min, t_max),
+        }
+    }
+
+    /// The exact answer to [`Scene::occluded`], whatever proxies the scene
+    /// or anything it instances holds — for measuring a proxy against.
+    #[cfg(feature = "neural-bvh")]
+    pub fn occluded_exact(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        exact_occlusion(|| self.bvh.hit_any(ray, t_min, t_max))
+    }
+
+    /// Whether this scene answers `occluded` through a learned proxy.
+    #[cfg(feature = "neural-bvh")]
+    pub fn has_occlusion_proxy(&self) -> bool {
+        self.proxy.is_some()
+    }
+
+    /// The proxy's own report — size, training time, validation error —
+    /// when one was built.
+    #[cfg(feature = "neural-bvh")]
+    pub fn occlusion_proxy(&self) -> Option<&crate::ProxyReport> {
+        self.proxy.as_ref().map(|p| &p.report)
+    }
+
+    /// Every distinct scene this one instances, at any depth, each once,
+    /// in first-placement order. For finding the prototypes a proxy could
+    /// be trained for.
+    #[cfg(feature = "neural-bvh")]
+    pub fn instanced_scenes(&self) -> Vec<Arc<Scene>> {
+        fn walk(s: &Scene, seen: &mut std::collections::HashSet<usize>, out: &mut Vec<Arc<Scene>>) {
+            for inner in s.bvh.instance_scenes() {
+                if seen.insert(Arc::as_ptr(inner) as usize) {
+                    out.push(Arc::clone(inner));
+                    walk(inner, seen, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut std::collections::HashSet::new(), &mut out);
+        out
+    }
+
+    /// Triangles this scene holds through every placement, when it is made
+    /// of triangles only (directly or through static instances) — what a
+    /// [`crate::ProxyRequest`]'s threshold is compared with. `None` for any
+    /// other scene, which never gets a proxy.
+    #[cfg(feature = "neural-bvh")]
+    pub fn proxy_triangle_count(&self) -> Option<usize> {
+        crate::neural::instanced_triangles(self)
+    }
+
+    #[cfg(all(feature = "neural-bvh", test))]
+    pub(crate) fn proxy(&self) -> Option<&crate::neural::OcclusionProxy> {
+        self.proxy.as_deref()
+    }
+
+    #[cfg(feature = "neural-bvh")]
+    pub(crate) fn bvh(&self) -> &Bvh {
+        &self.bvh
     }
 
     /// What the top-level instances `ids` are: `(geom_id, world bounds,
@@ -920,6 +1140,10 @@ impl Scene {
         acc: &mut MemoryFootprint,
     ) {
         self.bvh.accumulate_footprint(visited, acc);
+        #[cfg(feature = "neural-bvh")]
+        if let Some(p) = &self.proxy {
+            acc.occlusion_proxies += p.bytes();
+        }
     }
 
     /// Internal closest-hit that keeps the *outward* (unoriented) normal,
