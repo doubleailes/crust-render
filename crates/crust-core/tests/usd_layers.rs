@@ -40,10 +40,7 @@ def Mesh "{name}"
 fn stage(dir: &Path, subtrees: usize) -> (PathBuf, Vec<PathBuf>) {
     write(&dir.join("ref.usda"), &quad("Ref"));
     write(&dir.join("pay.usda"), &quad("Pay"));
-    write(
-        &dir.join("sub.usda"),
-        "#usda 1.0\n\nover \"World\"\n{\n}\n",
-    );
+    write(&dir.join("sub.usda"), "#usda 1.0\n\nover \"World\"\n{\n}\n");
     let mut children = String::new();
     for n in 0..subtrees {
         let arc = if n == 0 {

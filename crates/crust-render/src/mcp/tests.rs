@@ -972,7 +972,8 @@ fn a_session_watches_every_layer_its_import_composed() {
 #[test]
 fn a_rewritten_sublayer_makes_the_next_edit_full() {
     let (mut state, dir) = sourced_session("sources_sublayer_edit");
-    let tint = |c: &str| format!(r#"over "World" {{ over "Key" {{ color3f inputs:color = {c} }} }}"#);
+    let tint =
+        |c: &str| format!(r#"over "World" {{ over "Key" {{ color3f inputs:color = {c} }} }}"#);
     assert_eq!(author(&mut state, &tint("(1, 0.9, 0.8)")), "lights");
     rewrite(&dir.join("lights.usda"), &lights_layer(3.0));
     let result = state
@@ -981,7 +982,10 @@ fn a_rewritten_sublayer_makes_the_next_edit_full() {
         .author_usda(&tint("(1, 0.8, 0.7)"))
         .expect("authored");
     assert_eq!(result["applied"], "full", "{result:#}");
-    assert_eq!(changed(&result), [dir.join("lights.usda").display().to_string()]);
+    assert_eq!(
+        changed(&result),
+        [dir.join("lights.usda").display().to_string()]
+    );
     same_as_full_import(&mut state, &dir, "sublayer rewritten");
     // Seen once: the next edit applies in place again.
     assert_eq!(author(&mut state, &tint("(1, 1, 1)")), "lights");
@@ -993,8 +997,7 @@ fn a_query_after_a_referenced_layer_changed_answers_the_new_value() {
     let open = state.session().unwrap();
     let ask = |open: &mut super::session::Open| {
         open.refresh().expect("refreshed");
-        super::query::query(&open.stage, "/World/Prop.xformOp:translate").expect("queried")
-            ["value"]
+        super::query::query(&open.stage, "/World/Prop.xformOp:translate").expect("queried")["value"]
             .clone()
     };
     assert_eq!(ask(open), json!([0.0, 0.0, 0.0]));
@@ -1076,7 +1079,10 @@ fn reload_names_what_changed_and_imports_even_when_nothing_did() {
 
     rewrite(&dir.join("lights.usda"), &lights_layer(2.0));
     let result = state.session().unwrap().reload().expect("reloaded");
-    assert_eq!(changed(&result), [dir.join("lights.usda").display().to_string()]);
+    assert_eq!(
+        changed(&result),
+        [dir.join("lights.usda").display().to_string()]
+    );
     same_as_full_import(&mut state, &dir, "reloaded");
 }
 
