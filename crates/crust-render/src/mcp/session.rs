@@ -17,6 +17,7 @@ use super::layer::{absolute, new_layer_text, same_file};
 use super::query::{prim_at, variant_sets};
 use super::render::{Job, Renders};
 use super::scene::{Imported, import};
+use super::sources::Sources;
 use crate::{Cli, Command, RenderRun, render_and_write};
 use clap::Parser;
 use crust_assets::FileAssets;
@@ -59,6 +60,14 @@ pub struct Open {
     /// its decodes; `None` under `CRUST_SCENE_DELTAS=0`, where each import
     /// gets a fresh one.
     pub(super) assets: Option<Arc<FileAssets>>,
+    /// The layers the last import composed, other than the override layer,
+    /// stamped (`live-session-source-reload` D2).
+    pub(super) sources: Sources,
+    /// `Some` when the scene no longer shows the sources on disk: the layers
+    /// that changed since the last import (empty for a `reload`, which
+    /// imports whether or not one did). The next import is full; `None`
+    /// once one succeeds (D3).
+    pub(super) stale: Option<Vec<PathBuf>>,
 }
 
 /// The loader for the session's next import or update: the session's own,
@@ -114,6 +123,15 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })
 }
 
+/// `paths`, comma-separated, for a message.
+fn names(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The sublayers `stage`'s root layer authors, as written.
 fn authored_sublayers(stage: &Stage) -> Vec<String> {
     let root = stage.root_layer();
@@ -133,6 +151,7 @@ impl Open {
     /// the saved file. When the save or the import fails, the layer goes back
     /// to its bytes before the batch, and the batch is refused.
     pub fn edit(&mut self, snippet: &Snippet) -> Result<serde_json::Value, String> {
+        self.refresh()?;
         // Before the import: a render must not outlive the scene it renders.
         let cancelled = self.renders.stop();
         let before =
@@ -179,6 +198,7 @@ impl Open {
                     .to_owned(),
             );
         };
+        self.refresh()?;
         let cancelled = self.renders.stop();
         let current =
             std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
@@ -207,6 +227,9 @@ impl Open {
     /// paths resolve against the layer's directory; a stage without products
     /// writes `<output stem>.exr` and its PNG beside the layer.
     pub fn render_final(&mut self) -> Result<serde_json::Value, String> {
+        // It imports the saved layer from disk itself; this keeps the
+        // authoring stage up to date with what it renders.
+        self.refresh()?;
         let cancelled = self.renders.stop();
         let layer = self.output.to_str().ok_or("the layer path is not UTF-8")?;
         let args = match Cli::try_parse_from(["crust", "render", "-i", layer]) {
@@ -249,6 +272,7 @@ impl Open {
         region: Option<[usize; 4]>,
         spp: Option<u32>,
     ) -> Result<(Arc<Job>, Vec<u64>), String> {
+        self.bring_current()?;
         let mut settings = self.scene.settings;
         if let Some(spp) = spp {
             if spp == 0 {
@@ -280,13 +304,15 @@ impl Open {
         )
     }
 
-    /// A hash of the saved layer's bytes: which layer a render rendered.
+    /// A hash of the saved layer's bytes and of the sources' stamps as they
+    /// are on disk now: which layers a render rendered (design D5).
     fn layer_hash(&self) -> Result<u64, String> {
         use std::hash::{Hash, Hasher};
         let bytes =
             std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
         let mut hasher = std::hash::DefaultHasher::new();
         bytes.hash(&mut hasher);
+        self.sources.hash_now(&mut hasher);
         Ok(hasher.finish())
     }
 
@@ -302,6 +328,7 @@ impl Open {
         group_by: GroupBy,
         top: usize,
     ) -> Result<serde_json::Value, String> {
+        self.refresh()?;
         let job = self.renders.get(render_id)?;
         if job.finished().map(|f| f.outcome) != Some(RenderOutcome::Completed) {
             return Err(format!(
@@ -312,8 +339,9 @@ impl Open {
         }
         if self.layer_hash()? != job.layer {
             return Err(format!(
-                "the session changed since render {render_id}: its layer is not the one that \
-                 render used. Render again and inspect the new render (or undo back to it)"
+                "the session changed since render {render_id}: its layer, or a source layer on \
+                 disk, is not the one that render used. Render again and inspect the new render \
+                 (or undo back to it)"
             ));
         }
         let [x0, y0, x1, y1] = region;
@@ -356,6 +384,73 @@ impl Open {
         serde_json::to_value(report).map_err(|e| e.to_string())
     }
 
+    /// Looks at the sources on disk (`live-session-source-reload` D3): when a
+    /// layer the last import composed changed, reopens the authoring stage,
+    /// so queries and edits see the new composition, and marks the scene
+    /// stale, so the next import is full. Imports nothing itself.
+    pub fn refresh(&mut self) -> Result<(), String> {
+        let changed = self.sources.changed();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        debug!(
+            "{} source layer(s) changed on disk; the stage is composed again",
+            changed.len()
+        );
+        self.stage = open_stage(&self.output)?;
+        let stale = self.stale.get_or_insert_with(Vec::new);
+        for path in changed {
+            if !stale.contains(&path) {
+                stale.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Open::refresh`], then, when the scene is stale, the saved layer
+    /// imported over the sources as they are now (after stopping the
+    /// running render): what a call that renders or reports the scene needs.
+    /// The layers that changed; empty when the scene was current. A failed
+    /// import keeps the scene stale, so the next call tries again.
+    pub fn bring_current(&mut self) -> Result<Vec<PathBuf>, String> {
+        self.refresh()?;
+        let Some(changed) = self.stale.clone() else {
+            return Ok(Vec::new());
+        };
+        self.renders.stop();
+        let current =
+            std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
+        self.sync(&current).map_err(|e| {
+            format!(
+                "the sources changed on disk ({}) and the stage no longer imports: {e}",
+                names(&changed)
+            )
+        })?;
+        Ok(changed)
+    }
+
+    /// `reload` (D4): the stage composed again and the saved layer imported
+    /// whole, whether or not a source changed, after stopping the running
+    /// render. The undo history stays: it holds the override layer's bytes,
+    /// which compose over the sources as they are now.
+    pub fn reload(&mut self) -> Result<serde_json::Value, String> {
+        let cancelled = self.renders.stop();
+        let changed = self.sources.changed();
+        let stale = self.stale.get_or_insert_with(Vec::new);
+        for path in changed {
+            if !stale.contains(&path) {
+                stale.push(path);
+            }
+        }
+        self.stage = open_stage(&self.output)?;
+        let current =
+            std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
+        let mut result = self.sync(&current)?;
+        result["undo_depth"] = self.undo.len().into();
+        result["cancelled_render"] = cancelled.into();
+        Ok(result)
+    }
+
     /// Writes `bytes` as the layer and reopens the authoring stage on it.
     fn restore(&mut self, bytes: &[u8]) -> Result<(), String> {
         replace_file(&self.output, bytes).map_err(|e| format!("{}: {e}", self.output.display()))?;
@@ -370,6 +465,7 @@ impl Open {
     /// scene is unchanged when this fails.
     fn sync(&mut self, before: &[u8]) -> Result<serde_json::Value, String> {
         let old: Vec<&'static str> = self.scene.warning_codes();
+        let sources_changed = self.stale.clone().unwrap_or_default();
         self.apply_change(before)?;
         let new = self.scene.warning_codes();
         let gained: Vec<&str> = new.iter().filter(|c| !old.contains(c)).copied().collect();
@@ -381,6 +477,7 @@ impl Open {
             "warnings": self.scene.report.warnings.len(),
             "warnings_gained": gained,
             "warnings_lost": lost,
+            "sources_changed": sources_changed,
         }))
     }
 
@@ -396,6 +493,11 @@ impl Open {
         let (assets, changed_on_disk) = loader(self.assets.as_ref());
         if changed_on_disk > 0 {
             debug!("Edit applied as full: {changed_on_disk} asset file(s) changed on disk");
+        } else if let Some(changed) = &self.stale {
+            debug!(
+                "Applied as full: the sources changed on disk ({} layer(s)), or a reload",
+                changed.len()
+            );
         } else if self.assets.is_some()
             && let Some((applied, change)) = self.classify(before)
         {
@@ -406,6 +508,8 @@ impl Open {
             }
         }
         self.scene = import_kept(&self.output, assets)?;
+        self.sources = Sources::of(&self.scene.layers, &self.output);
+        self.stale = None;
         Ok(())
     }
 
@@ -456,6 +560,7 @@ impl Open {
         value: &serde_json::Value,
         ty: Option<&str>,
     ) -> Result<serde_json::Value, String> {
+        self.refresh()?;
         let attr_path =
             sdf::Path::new(path).map_err(|e| format!("{path:?} is not a USD path: {e}"))?;
         if !attr_path.is_property_path() {
@@ -499,6 +604,7 @@ impl Open {
         set: &str,
         variant: &str,
     ) -> Result<serde_json::Value, String> {
+        self.refresh()?;
         let path = self.editable_prim(prim)?;
         let sets = variant_sets(&self.stage, &prim_at(&self.stage, &path)?);
         let Some(known) = sets.get(set) else {
@@ -518,6 +624,7 @@ impl Open {
 
     /// `set_active`: `active` metadata on `prim`.
     pub fn set_active(&mut self, prim: &str, active: bool) -> Result<serde_json::Value, String> {
+        self.refresh()?;
         let path = self.editable_prim(prim)?;
         self.edit(&Snippet::parse(&active_snippet(&path, active)?)?)
     }
@@ -529,6 +636,7 @@ impl Open {
         prim: &str,
         material: &str,
     ) -> Result<serde_json::Value, String> {
+        self.refresh()?;
         let path = self.editable_prim(prim)?;
         let mat =
             sdf::Path::new(material).map_err(|e| format!("{material:?} is not a USD path: {e}"))?;
@@ -649,6 +757,7 @@ impl State {
             input.display()
         );
         self.close();
+        let sources = Sources::of(&scene.layers, &output);
         self.open = Some(Open {
             input,
             output,
@@ -657,6 +766,8 @@ impl State {
             undo: Vec::new(),
             renders: Renders::default(),
             assets,
+            sources,
+            stale: None,
         });
         Ok(result)
     }

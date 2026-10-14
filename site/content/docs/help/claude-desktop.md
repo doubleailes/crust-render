@@ -109,6 +109,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | `bind_material(prim, material)` | binds a Material to a prim |
 | `author_usda(text)` | merges a USDA snippet of `over`, `def` and `class` specs into the layer, as one edit |
 | `undo()` | the layer as it was before the last edit |
+| `reload()` | composes the stage again and imports the layer whole, whether or not a source changed; lists the source layers that did |
 | `render(region?, spp?, budget_s?, wait?)` | starts a progressive render and answers with the image so far: at 4 samples per pixel by default, at completion with `wait="done"`, within `budget_s` (default 10) either way |
 | `snapshot(render_id, budget_s?)` | the render's latest image and progress, at once, or after waiting at most `budget_s` for the render to finish |
 | `cancel(render_id)` | stops a render, keeping what it traced |
@@ -172,6 +173,36 @@ to import every edit whole with nothing kept, as earlier versions did.
 - **`undo` lasts for the server process.** It restores the layer's exact bytes before the
   last edit. A resumed session starts with no history.
 
+### When another program changes the stage
+
+The session watches every USD layer its import composed: the input, its sublayers, and the
+layers behind references and payloads. Another program can rewrite them while the session
+is open, such as a scene-assembly agent running as a second MCP server in the same client.
+Before each `query`, `check`, edit, `undo`, `render` and `light_paths`, the session checks
+the length and modification time of each of those files:
+
+- When one changed, `query` and the next edit read the new composition.
+- The next edit, `undo`, `render` or `check` imports the stage whole (`applied` `full`),
+  and its result lists the layers in `sources_changed`. An edit is never applied in place
+  over a scene imported from a layer that has since changed.
+- A source that no longer imports (a half-written file, a syntax error) fails the call,
+  naming the layers that changed. The scene is not rendered stale: the next call tries the
+  import again.
+- `light_paths` refuses a render made before a source changed, as it refuses one made
+  before an edit.
+
+`reload()` does the same on demand, and imports even when no USD layer changed. Use it
+after changing a file the session does not watch: a MaterialX document a material
+reads, or a USD layer rewritten with exactly the same length and modification time. The
+undo history stays: `undo` puts back the layer's bytes, composed over the sources as they
+are now.
+
+The session never writes those layers. Write them by replacing the file (save to a
+temporary file, then rename over the original), as USD's own `Save` does. A file rewritten
+in place *while* the session imports it can crash the server when the build reads USD
+through memory mappings
+([`CRUST_USD_MMAP`](@/docs/reference/environment-variables.md#crust-usd-mmap)).
+
 ### Rendering
 
 - **`render` answers at the first image.** As soon as every pixel has 4 samples, it
@@ -188,8 +219,8 @@ to import every edit whole with nothing kept, as earlier versions did.
   (`crust:pathGuiding`) it counts the final pass only and stays at 0 while guiding
   trains, as `crust render`'s bar does. `spp_reached` (each pass's completed stage) and
   `generation` (bumped with every image update) move through training too.
-- **One render at a time.** A new render, an edit, `undo` or `open_session` cancels the
-  one running, and the cancelled render's id is in the result.
+- **One render at a time.** A new render, an edit, `undo`, `reload` or `open_session`
+  cancels the one running, and the cancelled render's id is in the result.
 - **The render settings are opinions.** `render` takes only a region and a sample count;
   everything else that shapes the render is the stage's `RenderSettings`, so `render_final`
   needs no flag to reproduce it. Change them with `set_attribute` or `author_usda`.
@@ -200,7 +231,7 @@ to import every edit whole with nothing kept, as earlier versions did.
 - **`light_paths` inspects the render as it was.** It renders the region again with the
   render's settings and samples, so its pixels are the render's — on the layer that
   render used. It is refused once an edit changed the layer (an `undo` back to it is
-  fine), for a render that did not complete, while another render runs, and for a region
+  fine) or a source layer changed on disk, for a render that did not complete, while another render runs, and for a region
   outside the render's or over 100 pixels.
 - **`diff` compares like with like.** It refuses two renders with different sample counts
   or regions, and a render still running.

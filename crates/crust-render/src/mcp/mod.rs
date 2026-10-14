@@ -14,6 +14,7 @@ mod query;
 mod render;
 mod scene;
 mod session;
+mod sources;
 #[cfg(test)]
 mod tests;
 
@@ -248,7 +249,11 @@ impl Server {
     async fn query(&self, Parameters(p): Parameters<Query>) -> Result<CallToolResult, ErrorData> {
         reply(
             self.session
-                .call(move |state| query::query(&state.session()?.stage, &p.path))
+                .call(move |state| {
+                    let open = state.session()?;
+                    open.refresh()?;
+                    query::query(&open.stage, &p.path)
+                })
                 .await,
         )
     }
@@ -345,6 +350,18 @@ impl Server {
         reply(self.session.call(|state| state.session()?.undo()).await)
     }
 
+    /// Composes the stage again and re-imports the saved override layer, as
+    /// after an edit, whether or not anything changed. Use it after another
+    /// program rewrote a layer the stage reads, or a file the session does
+    /// not watch (a `.mtlx`). Changed USD layers are also picked up by the
+    /// next query, edit or render on their own. The result lists the source
+    /// layers that changed and the warning codes gained or lost; the undo
+    /// history stays.
+    #[tool]
+    async fn reload(&self) -> Result<CallToolResult, ErrorData> {
+        reply(self.session.call(|state| state.session()?.reload()).await)
+    }
+
     /// Starts a progressive render of the session's scene and returns with
     /// the latest image (PNG, at most 1024 pixels on its long side,
     /// tone-mapped as `crust render`'s preview), the samples per pixel
@@ -371,10 +388,15 @@ impl Server {
         let wait = p.wait;
         let started = self
             .session
-            .call(move |state| state.session()?.start_render(p.region, p.spp))
+            .call(move |state| {
+                let open = state.session()?;
+                let changed = open.bring_current()?;
+                let (job, evicted) = open.start_render(p.region, p.spp)?;
+                Ok::<_, String>((job, evicted, changed))
+            })
             .await;
         match started {
-            Ok(Ok((job, evicted))) => {
+            Ok(Ok((job, evicted, sources_changed))) => {
                 let left = budget.saturating_sub(asked.elapsed());
                 match wait {
                     Wait::Image => job.wait_for_image(left).await,
@@ -382,7 +404,10 @@ impl Server {
                 }
                 Ok(render::answer(
                     &job,
-                    serde_json::json!({ "evicted": evicted }),
+                    serde_json::json!({
+                        "evicted": evicted,
+                        "sources_changed": sources_changed,
+                    }),
                 ))
             }
             Ok(Err(message)) => Ok(CallToolResult::error(vec![ContentBlock::text(message)])),
@@ -530,7 +555,9 @@ impl Server {
         reply(
             self.session
                 .call(|state| {
-                    let json = state.session()?.scene.report.to_json();
+                    let open = state.session()?;
+                    open.bring_current()?;
+                    let json = open.scene.report.to_json();
                     serde_json::from_str(&json).map_err(|e| e.to_string())
                 })
                 .await,

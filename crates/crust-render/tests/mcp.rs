@@ -177,6 +177,7 @@ const TOOLS: &[&str] = &[
     "bind_material",
     "author_usda",
     "undo",
+    "reload",
     "render",
     "snapshot",
     "cancel",
