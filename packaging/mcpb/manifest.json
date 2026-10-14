@@ -40,6 +40,7 @@
     { "name": "bind_material", "description": "Bind a material to a prim." },
     { "name": "author_usda", "description": "Merge a USDA snippet into the override layer as one edit." },
     { "name": "undo", "description": "Restore the layer as it was before the last edit." },
+    { "name": "reload", "description": "Compose the stage again and re-import the layer, after another program changed a file it reads." },
     { "name": "render", "description": "Start a progressive render and return within a time budget with the image so far." },
     { "name": "snapshot", "description": "A render's latest image and progress." },
     { "name": "cancel", "description": "Stop a render, keeping what it traced." },
