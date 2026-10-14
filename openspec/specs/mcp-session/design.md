@@ -528,6 +528,14 @@ would otherwise run its own surface queries against geometry that is not what re
 - **Alignment** turns the prim about the bottom centre of its footprint, by the shortest
   arc from up to the geometric normal under the footprint's centre, then drops the turned
   vertices along the stage's down axis.
+  - *Trap:* the kernel's hit normal is the interpolated *vertex* normal on a mesh that
+    authors normals, a shading normal.
+  - The face normal is found by visiting the hit geometry's provenance run for the
+    triangle the hit point lies on (`face_normal_at`). This is one scan per aligned prim,
+    off the kernel's hot path. Pinned by `an_aligned_drop_follows_the_face_not_authored_normals`.
+- **A prim and its ancestor in one call are refused.** Each move is computed against the
+  scene before the call, so the descendant would take the ancestor's move on top of its
+  own.
 
 **The authored op.** The world-space move Δ becomes one `matrix4d`,
 `xformOp:transform:crustPlace = P⁻¹ · Δ · P · C`. Here `P` is the parent's local-to-world
@@ -548,10 +556,14 @@ alone with `sdf::Layer::open`, then falls back to Y.
 1. **Triangles.** The target's visible triangles, in `visit`'s fixed order, filtered by
    `max_slope` on their geometric normal (from the winding as it renders), become an area
    CDF.
-2. **Draws.** Instance `i` draws from `PathSampler::new(0, 0, seed, i)`:
+2. **Draws.** Instance `i` draws from `PathSampler::new(0, 0, 0, i).new_domain(seed)`:
    - domain 0 (4D): the triangle, two numbers for the square-root triangle warp
      (`utils::uniform_triangle`), and the prototype;
    - domain 1 (2D): the turn about up and the scale.
+
+   *Trap:* the seed keys a domain, not openqmc's `frame`. `State64Bit::new` adds the
+   index's high bits to the frame unchecked, so seed `i32::MAX` past 65 536 instances
+   panicked in debug builds. `new_domain` wraps.
 
    The sampler is always the Sobol one, whatever `crust:sampler` says. So an instance
    depends on the seed, `i` and the triangle list alone, and Sobol over `i` stratifies
@@ -562,6 +574,10 @@ alone with `sdf::Layer::open`, then falls back to Y.
    rotates with non-uniform scale shears the instance, which the arrays cannot express.
 4. **Prototypes.** Each is a **typeless** `def` under `<instancer>/Prototypes` that
    references the prim or the asset, with an empty `xformOpOrder`.
+   - An asset must be a USD file (`.usd`, `.usda`, `.usdc`, `.usdz`), since scenes come
+     from USD alone. An absolute path that names a file is an asset, not a prim path.
+   - The instancer's parent may not be an instance or inside one: USD reads nothing
+     authored there, and the edit would save, report and render nothing.
    - *Trap:* a `def Xform` would win over the referenced `Mesh`'s type and author an empty
      Xform.
    - The empty op order drops the source's own placement for any reader. crust skips a

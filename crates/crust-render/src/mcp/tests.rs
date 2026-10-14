@@ -2073,3 +2073,73 @@ fn a_scatter_takes_a_density_a_slope_and_a_prototype_from_the_stage() {
         "none on the vertical face"
     );
 }
+
+#[test]
+fn a_drop_refuses_a_prim_with_its_ancestor() {
+    let (mut state, _dir) = placement_session("drop_overlap");
+    let layer = state.session().unwrap().output.clone();
+    let bytes = std::fs::read(&layer).unwrap();
+    let e = state
+        .session()
+        .unwrap()
+        .drop_to_surface(
+            &["/World/vase".into(), "/World/vase/geo".into()],
+            None,
+            false,
+        )
+        .expect_err("a prim and its ancestor");
+    assert!(
+        e.contains("/World/vase/geo") && e.contains("/World/vase"),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&layer).unwrap(), bytes, "nothing authored");
+}
+
+#[test]
+fn a_scatter_takes_usd_prototypes_only_and_absolute_ones_too() {
+    let (mut state, dir) = placement_session("scatter_prototypes");
+    let layer = state.session().unwrap().output.clone();
+    std::fs::write(dir.join("rock.obj"), "v 0 0 0\n").unwrap();
+    let bytes = std::fs::read(&layer).unwrap();
+    let e = state
+        .session()
+        .unwrap()
+        .scatter_on_surface(&scatter_args(
+            "/World/field",
+            &["rock.obj"],
+            "/World/objs",
+            1,
+        ))
+        .expect_err("not a USD file");
+    assert!(
+        e.contains("rock.obj") && e.contains("not a USD file"),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&layer).unwrap(), bytes, "nothing authored");
+
+    // An absolute path to a file is an asset, not a prim path.
+    let absolute = dir.join("stone_a.usda");
+    let absolute = absolute.to_str().unwrap();
+    let result = scatter(
+        &mut state,
+        &scatter_args("/World/field", &[absolute], "/World/abs", 2),
+    );
+    assert_eq!(result["count"], 500, "{result:#}");
+    assert_eq!(result["prototypes"][0], "/World/abs/Prototypes/stone_a");
+}
+
+#[test]
+fn a_scatter_under_an_instance_is_refused() {
+    let (mut state, _dir) = placement_session("scatter_instance");
+    let layer = state.session().unwrap().output.clone();
+    let bytes = std::fs::read(&layer).unwrap();
+    for path in ["/World/inst/scatter", "/World/inst/body/scatter"] {
+        let e = state
+            .session()
+            .unwrap()
+            .scatter_on_surface(&scatter_args("/World/field", &["stone_a.usda"], path, 1))
+            .expect_err("under an instance");
+        assert!(e.contains("/World/inst"), "{path}: {e}");
+    }
+    assert_eq!(std::fs::read(&layer).unwrap(), bytes, "nothing authored");
+}

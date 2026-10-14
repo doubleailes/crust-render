@@ -28,6 +28,9 @@ pub struct ScatterArgs {
     pub scale: Option<[f64; 2]>,
 }
 
+/// The files a prototype asset may be: USD layers and packages.
+const USD_EXTENSIONS: &[&str] = &["usd", "usda", "usdc", "usdz"];
+
 fn vec3(v: DVec3) -> [f64; 3] {
     v.to_array()
 }
@@ -103,6 +106,16 @@ impl Open {
         let paths = prims_of(self, prims, "prims")?;
         for p in &paths {
             self.editable_prim(&p.to_string())?;
+        }
+        // Each move is computed against the scene before the call: a prim
+        // dropped with its ancestor would take the ancestor's move on top of
+        // its own.
+        for a in &paths {
+            if let Some(b) = paths.iter().find(|b| *b != a && b.has_prefix(a)) {
+                return Err(format!(
+                    "{b} is under {a}, which this call drops too: drop them in separate calls"
+                ));
+            }
         }
         if let Some(target) = target {
             prims_of(self, target, "target")?;
@@ -206,6 +219,17 @@ impl Open {
         if parent != sdf::Path::abs_root() {
             prim_at(&self.stage, &parent)
                 .map_err(|_| format!("{path}'s parent {parent} is not a prim of the stage"))?;
+            // USD reads nothing authored under an instance or inside one.
+            self.editable_prim(&parent.to_string())?;
+            if prim_at(&self.stage, &parent)?
+                .is_instance()
+                .unwrap_or(false)
+            {
+                return Err(format!(
+                    "{parent} is an instance: USD ignores prims authored under it; scatter \
+                     under a prim that is not instanceable"
+                ));
+            }
         }
         let prototypes = self.prototypes(&args.prototypes)?;
         let sources_changed = self.bring_current()?;
@@ -266,7 +290,9 @@ impl Open {
         let (input_dir, layer_dir) = (self.input_dir(), self.layer_dir());
         let mut out: Vec<Prototype> = Vec::new();
         for g in given {
-            let (stem, source) = if g.starts_with('/') {
+            // An absolute path that names a file is an asset, not a prim.
+            let is_prim = g.starts_with('/') && !Path::new(g).is_file();
+            let (stem, source) = if is_prim {
                 let prim = sdf::Path::new(g)
                     .ok()
                     .filter(sdf::Path::is_prim_path)
@@ -287,6 +313,18 @@ impl Open {
                     return Err(format!(
                         "prototype {g} is neither a prim path nor a file ({} does not exist)",
                         file.display()
+                    ));
+                }
+                // Scenes come from USD alone: a reference to any other file
+                // would not compose.
+                let usd = file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| USD_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+                if !usd {
+                    return Err(format!(
+                        "prototype {g} is not a USD file: a prototype is a prim of the stage or \
+                         a .usd, .usda, .usdc or .usdz asset"
                     ));
                 }
                 let stem = file
