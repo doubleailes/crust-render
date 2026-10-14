@@ -46,6 +46,9 @@ crust-core = { path = "../crust-core" }
 # Everything that decodes a file lives in crust-assets; this binary only
 # writes: `exr` for the linear EXR, `image` for the tone-mapped PNG.
 crust-assets = { path = "../crust-assets" }
+# `mcp`'s placement tools turn world-space moves into `matrix4d` opinions,
+# in f64 as USD stores them.
+glam.workspace = true
 clap = { version = "4.5.48", features = ["derive"] }
 image.workspace = true
 indicatif = "0.18.0"

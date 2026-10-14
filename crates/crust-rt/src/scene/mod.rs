@@ -241,6 +241,15 @@ pub struct RayHit {
     pub prim_id: u32,
 }
 
+/// A piece of attached geometry, as [`Scene::visit`] hands it out.
+#[derive(Clone, Copy, Debug)]
+pub enum Piece {
+    /// A triangle's vertices, in winding order.
+    Triangle([Vec3A; 3]),
+    /// The bounds of a primitive that is not a triangle.
+    Bounds(AABB),
+}
+
 /// Which `geom_id` a hit found inside an [`Geometry::Instance`] reports.
 ///
 /// By default an instance reports its *own* id and the inner ids are lost,
@@ -871,6 +880,29 @@ impl Scene {
     /// storing them per triangle.
     pub fn triangle_vertices(&self, geom_id: u32, prim_id: u32) -> Option<[Vec3A; 3]> {
         self.bvh.triangle_vertices(geom_id, prim_id)
+    }
+
+    /// Hands `f` the pieces of the geometries attached as `ids` that a ray
+    /// of `mask` sees, in this scene's space at shutter open (an instance at
+    /// its first placement, through nested instances): each triangle's
+    /// vertices in winding order, and for every other primitive — sphere,
+    /// disk, cylinder, curve segment or span — its bounds. `f` also gets the
+    /// attach id of the top-level geometry each piece belongs to.
+    ///
+    /// The order is fixed for a committed scene: triangles by geometry then
+    /// primitive, then analytic primitives, curve spans and instances in
+    /// attach order. Ids that name no geometry (past the end, or the
+    /// reserved slots an [`InstanceHitId::Offset`] reports) give nothing.
+    ///
+    /// A scan of the scene's tables, nothing kept: what lets a host measure
+    /// or sample the geometry it attached in world space without a copy.
+    pub fn visit(&self, ids: std::ops::Range<u32>, mask: RayMask, mut f: impl FnMut(u32, Piece)) {
+        self.bvh.visit(ids, mask, None, &mut f);
+    }
+
+    /// Every piece of this scene, placed by `l2w`: an instance's contents.
+    pub(crate) fn visit_inner(&self, mask: RayMask, l2w: &Affine3A, f: &mut dyn FnMut(u32, Piece)) {
+        self.bvh.visit(0..u32::MAX, mask, Some(l2w), f);
     }
 
     /// Exact resident bytes of this scene and every distinct scene it

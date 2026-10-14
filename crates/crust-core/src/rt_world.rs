@@ -1149,6 +1149,29 @@ impl World {
         self.boundaries
     }
 
+    /// The kernel's own closest hit — geometric normal (turned against the
+    /// ray), `geom_id`, `prim_id`, no material, texture or opacity — for a
+    /// host measuring the geometry rather than shading it (placement). The
+    /// ray's own mask and time decide what it sees. It asks for
+    /// `(TRACE_T_MIN, ∞)`, as every intersection does: a ray that must start
+    /// elsewhere moves its origin (see [`crate::TRACE_T_MIN`]).
+    #[must_use]
+    pub fn intersect_geometry(&self, ray: &crust_rt::Ray) -> Option<crust_rt::RayHit> {
+        self.scene
+            .intersect(ray, crate::ray::TRACE_T_MIN, f32::INFINITY)
+    }
+
+    /// Every piece of the geometries `ids` a ray of `mask` sees, in world
+    /// space at shutter open ([`crust_rt::Scene::visit`]).
+    pub fn visit(
+        &self,
+        ids: std::ops::Range<u32>,
+        mask: crust_rt::RayMask,
+        f: impl FnMut(u32, crust_rt::Piece),
+    ) {
+        self.scene.visit(ids, mask, f);
+    }
+
     /// World bounds of all geometry; `None` for an empty world.
     pub fn bounds(&self) -> Option<AABB> {
         self.scene.bounds()

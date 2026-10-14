@@ -18,10 +18,10 @@ stale scene.
 ## What Changes
 
 - **`drop_to_surface(prims, target?, align_to_normal?)`**:
-  - Casts rays along the stage's down axis (from `upAxis`) from each prim's world-space
-    footprint against the session's scene, or against the `target` prims only.
-  - Authors a translate opinion in the override layer that rests each prim's lowest
-    point on the highest hit; optionally also authors a rotation to the hit normal.
+  - Casts rays along the stage's down axis (from `upAxis`) under each prim's geometry
+    against the session's scene, or against the `target` prims only.
+  - Authors a transform opinion in the override layer that rests each prim's geometry
+    on the highest surface beneath it; optionally also turns it to the surface normal.
   - Prims that hit nothing are reported and left unchanged.
 - **`scatter_on_surface(target, prototypes, count | density, seed, ...)`**:
   - Samples points on the target prims' triangles by area, with the session's `openqmc`
@@ -64,7 +64,10 @@ None.
   - provenance from a prim to its geometry runs (or bounds), kept in proportion to the
     prim count, nothing per triangle;
   - a ray query on the committed world;
-  - area-weighted triangle sampling, shared with mesh area lights rather than copied.
+  - area-weighted triangle sampling, through the environment map's CDF lifted into a
+    shared type rather than copied (crust has no mesh area lights to share with);
+  - world-space geometry queries in `crust-rt` (a geometry's triangles and its extent
+    along a direction, through instances).
 - Performance: no render-path change. Callgrind on the Cornell box must show no render
   function's count moving.
 - Docs:

@@ -989,3 +989,157 @@ fn instance_hits_report_instance_geom_id_and_inner_prim_id() {
     assert_eq!(hit.geom_id, inst);
     assert_eq!(hit.prim_id, 1);
 }
+
+/// A unit quad in the z = 0 plane, as two triangles.
+fn quad_mesh() -> Geometry {
+    Geometry::TriangleMesh {
+        vertices: vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        indices: vec![[0, 1, 2], [0, 2, 3]],
+        normals: None,
+    }
+}
+
+/// `visit` hands out, in world space at shutter open, exactly the triangles
+/// rays hit at time 0 — top level, through an instance, through nested
+/// instances, and through a moving one — with the attach id of the
+/// top-level geometry they belong to; analytic primitives as bounds; and
+/// nothing a ray of the mask cannot see, nor for ids that name no geometry.
+#[test]
+fn visit_hands_out_the_world_space_geometry_rays_hit() {
+    let quad = {
+        let mut b = SceneBuilder::new();
+        b.attach(quad_mesh());
+        Arc::new(b.commit())
+    };
+    let nested = {
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Instance {
+            scene: Arc::clone(&quad),
+            transform: Affine3A::from_translation(glam::Vec3::new(0.0, 0.0, 1.0)),
+            transform_end: None,
+        });
+        Arc::new(b.commit())
+    };
+    let mut b = SceneBuilder::new();
+    let mesh = b.attach(quad_mesh());
+    let sphere = b.attach(Geometry::Sphere {
+        center: Vec3A::new(10.0, 0.0, 0.0),
+        radius: 1.0,
+    });
+    let placed = b.attach(Geometry::Instance {
+        scene: Arc::clone(&quad),
+        transform: Affine3A::from_scale_rotation_translation(
+            glam::Vec3::splat(2.0),
+            glam::Quat::from_rotation_z(0.5),
+            glam::Vec3::new(5.0, 5.0, 0.0),
+        ),
+        transform_end: None,
+    });
+    let deep = b.attach(Geometry::Instance {
+        scene: Arc::clone(&nested),
+        transform: Affine3A::from_translation(glam::Vec3::new(-5.0, 0.0, 0.0)),
+        transform_end: None,
+    });
+    let moving = b.attach(Geometry::Instance {
+        scene: Arc::clone(&quad),
+        transform: Affine3A::from_translation(glam::Vec3::new(0.0, -5.0, 0.0)),
+        transform_end: Some(Box::new(Affine3A::from_translation(glam::Vec3::new(
+            3.0, -5.0, 0.0,
+        )))),
+    });
+    let hidden = b.attach_masked(quad_mesh(), MASK_SHADOW);
+    let scene = b.commit();
+
+    let mut pieces = Vec::new();
+    scene.visit(0..u32::MAX, MASK_CAMERA, |id, p| pieces.push((id, p)));
+
+    let mut triangles = std::collections::BTreeMap::<u32, usize>::new();
+    for (id, piece) in &pieces {
+        match piece {
+            Piece::Triangle([a, b, c]) => {
+                *triangles.entry(*id).or_default() += 1;
+                // A ray down onto the centroid, at shutter open, hits this
+                // geometry there.
+                let centroid = (*a + *b + *c) / 3.0;
+                let ray = Ray::new(centroid + Vec3A::Z * 3.0, -Vec3A::Z)
+                    .with_time(0.0)
+                    .with_mask(MASK_CAMERA);
+                let hit = scene
+                    .intersect(&ray, 0.0, f32::INFINITY)
+                    .unwrap_or_else(|| panic!("nothing under the centroid of {id}'s triangle"));
+                assert_eq!(hit.geom_id, *id);
+                assert!((hit.t - 3.0).abs() < 1e-4, "{id}: t = {}", hit.t);
+                let bounds = scene.bounds().expect("not empty");
+                for v in [a, b, c] {
+                    assert!(
+                        v.cmpge(bounds.minimum - 1e-4).all()
+                            && v.cmple(bounds.maximum + 1e-4).all()
+                    );
+                }
+            }
+            Piece::Bounds(bounds) => {
+                assert_eq!(*id, sphere);
+                assert!(
+                    bounds
+                        .minimum
+                        .abs_diff_eq(Vec3A::new(9.0, -1.0, -1.0), 1e-5)
+                );
+                assert!(bounds.maximum.abs_diff_eq(Vec3A::new(11.0, 1.0, 1.0), 1e-5));
+            }
+        }
+    }
+    let expected: std::collections::BTreeMap<u32, usize> =
+        [(mesh, 2), (placed, 2), (deep, 2), (moving, 2)].into();
+    assert_eq!(
+        triangles, expected,
+        "{hidden} is visible to shadow rays only"
+    );
+
+    // A range visits only its own geometries, and an id past the end none.
+    let mut only = Vec::new();
+    scene.visit(placed..placed + 1, MASK_CAMERA, |id, _| only.push(id));
+    assert_eq!(only, [placed, placed]);
+    let mut none = 0;
+    scene.visit(1000..2000, MASK_CAMERA, |_, _| none += 1);
+    assert_eq!(none, 0);
+    // The shadow mask sees the hidden quad.
+    let mut shadow = 0;
+    scene.visit(hidden..hidden + 1, MASK_SHADOW, |_, _| shadow += 1);
+    assert_eq!(shadow, 2);
+}
+
+/// An instance labelled `Offset(base)` is visited under its attach id; the
+/// ids it reserves for its inner hits name no geometry to `visit`.
+#[test]
+fn visit_skips_the_slots_an_offset_reserves() {
+    let parts = {
+        let mut b = SceneBuilder::new();
+        b.attach(quad_mesh());
+        b.attach(quad_mesh());
+        Arc::new(b.commit())
+    };
+    let mut b = SceneBuilder::new();
+    let base = b.count() as u32;
+    let inst = b.attach_labelled(
+        Geometry::Instance {
+            scene: Arc::clone(&parts),
+            transform: Affine3A::IDENTITY,
+            transform_end: None,
+        },
+        MASK_ALL,
+        InstanceHitId::Offset(base),
+    );
+    let reserved = b.attach(SceneBuilder::empty_geometry());
+    let scene = b.commit();
+    let mut ids = Vec::new();
+    scene.visit(0..u32::MAX, MASK_CAMERA, |id, _| ids.push(id));
+    assert_eq!(ids, [inst; 4]);
+    let mut none = 0;
+    scene.visit(reserved..reserved + 1, MASK_CAMERA, |_, _| none += 1);
+    assert_eq!(none, 0);
+}

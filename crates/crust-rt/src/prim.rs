@@ -618,6 +618,15 @@ impl InstancePrim {
         })
     }
 
+    /// Local-to-world at shutter open: exact for a moving instance, through
+    /// `w2l.inverse()` for a static one (a few ulps off what was attached).
+    pub(crate) fn l2w_at_open(&self) -> Affine3A {
+        match &self.motion {
+            Some(m) => m.l2w,
+            None => self.w2l.inverse(),
+        }
+    }
+
     fn to_local(&self, ray: &Ray, w2l: &Affine3A) -> Ray {
         Ray {
             origin: w2l.transform_point3a(ray.origin),
@@ -743,6 +752,16 @@ impl PrimNode {
             PrimNode::Disk(p) => p.bbox(),
             PrimNode::Cylinder(p) => p.bbox(),
             PrimNode::Curve(p) => p.bbox(),
+        }
+    }
+
+    /// The geometry this primitive was attached as, and its mask.
+    pub(crate) fn id_and_mask(&self) -> (u32, RayMask) {
+        match self {
+            PrimNode::Sphere(p) => (p.geom_id, p.mask),
+            PrimNode::Disk(p) => (p.geom_id, p.mask),
+            PrimNode::Cylinder(p) => (p.geom_id, p.mask),
+            PrimNode::Curve(p) => (p.geom_id, p.mask),
         }
     }
 

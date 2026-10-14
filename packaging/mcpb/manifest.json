@@ -39,6 +39,8 @@
     { "name": "set_active", "description": "Activate or deactivate a prim." },
     { "name": "bind_material", "description": "Bind a material to a prim." },
     { "name": "author_usda", "description": "Merge a USDA snippet into the override layer as one edit." },
+    { "name": "drop_to_surface", "description": "Move prims down until they rest on the rendered surface beneath them, as one edit." },
+    { "name": "scatter_on_surface", "description": "Scatter PointInstancer instances over a surface by area, from a seed, as one edit." },
     { "name": "undo", "description": "Restore the layer as it was before the last edit." },
     { "name": "reload", "description": "Compose the stage again and re-import the layer, after another program changed a file it reads." },
     { "name": "render", "description": "Start a progressive render and return within a time budget with the image so far." },

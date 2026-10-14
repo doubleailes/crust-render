@@ -10,6 +10,7 @@
 mod delta;
 mod edit;
 mod layer;
+mod place;
 mod query;
 mod render;
 mod scene;
@@ -134,6 +135,54 @@ struct AuthorUsda {
     /// layer's, sibling prims and properties are kept. The `#usda 1.0`
     /// header may be left out. `subLayers` is refused.
     text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DropToSurface {
+    /// The prims to drop (`/World/props/vase`), each moved along the stage's
+    /// down axis until its geometry rests on the highest surface beneath it.
+    prims: Vec<String>,
+    /// Land only on these prims' geometry (and their descendants'), passing
+    /// through anything else. Default: every other geometry of the scene.
+    #[serde(default)]
+    target: Option<Vec<String>>,
+    /// Also turn each prim so its up axis follows the surface normal below
+    /// the centre of its footprint (default false).
+    #[serde(default)]
+    align_to_normal: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ScatterOnSurface {
+    /// The prims whose triangles the instances are scattered over.
+    target: Vec<String>,
+    /// What to instance: prim paths of the stage (`/World/rock`) or asset
+    /// files (relative to the input stage's directory), each placed at its
+    /// own origin and chosen with equal probability.
+    prototypes: Vec<String>,
+    /// The new PointInstancer's path; its parent must exist, and nothing
+    /// may be there yet.
+    path: String,
+    /// The same seed over the same scene gives the same instances.
+    seed: u32,
+    /// How many instances (at most 100000). Give this or `density`.
+    #[serde(default)]
+    count: Option<u64>,
+    /// Instances per square stage unit of eligible surface. Give this or
+    /// `count`.
+    #[serde(default)]
+    density: Option<f64>,
+    /// Only triangles whose normal is within this many degrees of up.
+    #[serde(default)]
+    max_slope: Option<f64>,
+    /// Turn each instance about the up axis by an angle drawn from the seed
+    /// (default false: none).
+    #[serde(default)]
+    random_rotation: bool,
+    /// `[min, max]`: each instance's uniform scale is drawn from it
+    /// (default 1).
+    #[serde(default)]
+    scale: Option<[f64; 2]>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -338,6 +387,62 @@ impl Server {
         reply(
             self.session
                 .call(move |state| state.session()?.author_usda(&p.text))
+                .await,
+        )
+    }
+
+    /// Drops prims onto the surface below them, against the geometry the
+    /// session renders (subdivided, displaced, instanced): each moves along
+    /// the stage's down axis (from `upAxis`) until no point of it lies below
+    /// the highest surface beneath it and one rests on it, optionally turned
+    /// to that surface's normal. Authored as one transform op,
+    /// `xformOp:transform:crustPlace`, first in the prim's xformOpOrder;
+    /// dropping again folds into it. One edit: saved, re-imported, one undo
+    /// step. Each prim is reported `placed` (with its contact point),
+    /// `no geometry` or `nothing below`.
+    #[tool]
+    async fn drop_to_surface(
+        &self,
+        Parameters(p): Parameters<DropToSurface>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(
+            self.session
+                .call(move |state| {
+                    state.session()?.drop_to_surface(
+                        &p.prims,
+                        p.target.as_deref(),
+                        p.align_to_normal,
+                    )
+                })
+                .await,
+        )
+    }
+
+    /// Scatters instances over a surface: defines one PointInstancer at
+    /// `path` whose instances lie on `target`'s triangles in proportion to
+    /// area, each prototype's origin on the surface, upright about the
+    /// stage's up axis. The same seed over the same scene authors the same
+    /// bytes. One edit: saved, re-imported, one undo step (undo it to
+    /// scatter again with other settings).
+    #[tool]
+    async fn scatter_on_surface(
+        &self,
+        Parameters(p): Parameters<ScatterOnSurface>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let args = place::ScatterArgs {
+            target: p.target,
+            prototypes: p.prototypes,
+            path: p.path,
+            seed: p.seed,
+            count: p.count,
+            density: p.density,
+            max_slope: p.max_slope,
+            random_rotation: p.random_rotation,
+            scale: p.scale,
+        };
+        reply(
+            self.session
+                .call(move |state| state.session()?.scatter_on_surface(&args))
                 .await,
         )
     }

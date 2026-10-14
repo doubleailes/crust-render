@@ -53,9 +53,11 @@ pub struct Provenance {
     pub(crate) material_reads: Vec<(String, String)>,
     /// Light prim path → its place in the light list and its geometry.
     pub(crate) lights: HashMap<String, LightOrigin>,
-    /// `(first geom_id, prim path)` per prim that emitted geometry, in
-    /// traversal order: the prim owns every id up to the next run's.
-    pub(crate) geometry: Vec<(u32, String)>,
+    /// `(geom_ids, prim path)` per prim that emitted geometry, in traversal
+    /// order, so sorted by first id. [`Provenance::prim_of_geometry`] reads a
+    /// run as owning every id up to the next run's, as light linking does;
+    /// [`Provenance::geometry_of`] reads the ids the prim emitted.
+    pub(crate) geometry: Vec<(Range<u32>, String)>,
     /// What the import decided once for the whole stage.
     pub(crate) stage: StageFacts,
 }
@@ -156,8 +158,25 @@ impl Provenance {
     pub fn prim_of_geometry(&self, geom_id: u32) -> Option<&str> {
         let i = self
             .geometry
-            .partition_point(|(first, _)| *first <= geom_id);
+            .partition_point(|(ids, _)| ids.start <= geom_id);
         i.checked_sub(1).map(|i| self.geometry[i].1.as_str())
+    }
+
+    /// The geom_ids the prim at `path` and its descendants emitted, in id
+    /// order: a native instance's and a PointInstancer's under the instance
+    /// or instancer prim, nothing under a prototype's own path. A scan of the
+    /// runs, one per emitting prim; `path` matches by whole path components
+    /// (`/World/a` is not an ancestor of `/World/ab`).
+    pub fn geometry_of(&self, path: &str) -> Vec<Range<u32>> {
+        let path = path.trim_end_matches('/');
+        self.geometry
+            .iter()
+            .filter(|(_, prim)| {
+                prim.strip_prefix(path)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+            .map(|(ids, _)| ids.clone())
+            .collect()
     }
 
     /// The `RenderSettings` prim the import read, when one.
@@ -183,6 +202,42 @@ impl Provenance {
     ) -> Result<Update, Structural> {
         crate::scene::rebuild(self, layer, assets, warnings, change)
     }
+
+    /// Each prim of `paths` on the stage at `layer` as the import that built
+    /// this scene composed it (payloads loaded, at its time code), with the
+    /// composed value of the `matrix4d` attribute `place_op`. Refused when a
+    /// path is not a prim of the stage.
+    pub fn prim_frames(
+        &self,
+        layer: &std::path::Path,
+        paths: &[String],
+        place_op: &str,
+    ) -> Result<Vec<PrimFrame>, Structural> {
+        crate::scene::prim_frames(self, layer, paths, place_op)
+    }
+}
+
+/// A prim's place in the transform hierarchy, as the import composed it:
+/// what placement needs to turn a world-space move into an opinion on the
+/// prim ([`Provenance::prim_frames`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrimFrame {
+    pub path: String,
+    /// The parent's local-to-world, the import's own `f32` matrix: what the
+    /// renderer placed the prim's geometry under.
+    pub parent_to_world: glam::DMat4,
+    /// The prim's own local-to-world, likewise (the parent's when the prim
+    /// is not `Xformable`; its local alone after a `!resetXformStack!`).
+    pub local_to_world: glam::DMat4,
+    /// The composed `xformOpOrder`, payloads loaded; empty when none.
+    pub xform_op_order: Vec<String>,
+    /// Whether `xform_op_order` lists `!resetXformStack!`.
+    pub resets_xform_stack: bool,
+    /// Whether the prim's type is `Xformable`: only then are its ops read.
+    pub xformable: bool,
+    /// The composed default value of the op [`Provenance::prim_frames`] was
+    /// asked about, when the prim has one.
+    pub place_op: Option<glam::DMat4>,
 }
 
 /// What changed on the stage since the scene was imported, as far as an
