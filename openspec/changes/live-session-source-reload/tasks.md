@@ -21,7 +21,7 @@
 
 ## 5. Integration
 
-- [ ] 5.1 Run the CI set locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, and `scripts/check_images.sh` against goldens recorded before the change (no image changes). Verify all pass.
+- [x] 5.1 Run the CI set locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, and `scripts/check_images.sh` against goldens recorded before the change (no image changes). Verify all pass.
 
 ## Workflow follow-up
 
