@@ -264,9 +264,10 @@ def Scope "Render"
 }
 
 /// A curved implicit shape sized from the render camera moves with the
-/// camera and the resolution, so a settings change re-imports rather than
-/// leave it tessellated for the old view; a cube, which has no radial count,
-/// leaves the settings to update in place.
+/// camera and the resolution, so a settings change that moves the projection
+/// re-imports rather than leave it tessellated for the old view; one that
+/// leaves the projection as it was (an exposure) updates in place, and so
+/// does anything on a cube, which has no radial count.
 #[test]
 fn a_settings_change_reimports_shapes_sized_on_screen() {
     let change = crust_core::live::Change {
@@ -280,9 +281,20 @@ fn a_settings_change_reimports_shapes_sized_on_screen() {
             .map(|_| ())
     };
     let cylinder = shape_stage("live_cylinder", "Cylinder");
-    match rebuild(&cylinder) {
+    let scene = Scene::from_usd(&cylinder).expect("load");
+    let prov = scene.provenance.as_ref().expect("provenance");
+    // The same projection: in place.
+    assert_eq!(
+        prov.rebuild(&cylinder, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+    // The edit: another resolution, so another pixel rate.
+    let text = std::fs::read_to_string(&cylinder).expect("read stage");
+    std::fs::write(&cylinder, text.replace("(64, 32)", "(128, 64)")).expect("write stage");
+    match prov.rebuild(&cylinder, &crust_core::NoAssets, &scene.warnings, &change) {
         Err(crust_core::live::Structural(why)) => assert!(why.contains("implicit"), "{why}"),
-        Ok(()) => panic!("a cylinder sized on screen was updated in place"),
+        Ok(_) => panic!("a cylinder sized for another projection was updated in place"),
     }
     let cube = shape_stage("live_cube", "Cube");
     assert_eq!(rebuild(&cube), Ok(()));
@@ -318,4 +330,76 @@ fn naming_the_camera_reimports_shapes_sized_without_one() {
         Err(crust_core::live::Structural(why)) => assert!(why.contains("implicit"), "{why}"),
         Ok(_) => panic!("a cylinder sized without a camera was updated in place"),
     }
+}
+
+/// Light links take a light that illuminates nothing out of the list and
+/// renumber the rest: the provenance names each light by its index after
+/// that, and keeps none for the light taken out.
+#[test]
+fn light_indices_are_the_list_as_the_links_left_it() {
+    let dir = std::env::temp_dir().join("crust_live_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let demoting = dir.join("live_demoted_light.usda");
+    // `Dead` sits between two kept lights on either side, so whichever order
+    // the traversal meets them in, two kept lights come after it.
+    let light = |name: &str, x: f32, link: &str| {
+        format!(
+            r#"    def SphereLight "{name}"
+    {{
+        float inputs:radius = 0.2
+        float inputs:intensity = 10
+        double3 xformOp:translate = ({x}, 3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        {link}
+    }}
+"#
+        )
+    };
+    let nothing = "uniform bool collection:lightLink:includeRoot = 0";
+    let lights: String = [
+        light("K1", -2.0, ""),
+        light("K2", -1.0, ""),
+        light("Dead", 0.0, nothing),
+        light("K3", 1.0, ""),
+        light("K4", 2.0, ""),
+    ]
+    .concat();
+    std::fs::write(
+        &demoting,
+        format!(
+            r#"#usda 1.0
+def Xform "W"
+{{
+{lights}
+    def Mesh "Floor"
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, 0, 4), (4, 0, 4), (4, 0, -4), (-4, 0, -4)]
+    }}
+}}
+"#
+        ),
+    )
+    .expect("write stage");
+    for path in [sample("light_linking.usda"), demoting.clone()] {
+        let scene = Scene::from_usd(&path).expect("imports");
+        let prov = consistent(&scene);
+        let mut seen = 0;
+        for (prim, origin) in prov.lights() {
+            assert_eq!(
+                scene.lights.name(origin.index),
+                Some(prim),
+                "{}: light {}",
+                path.display(),
+                origin.index
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, scene.lights.count(), "{}", path.display());
+    }
+    let scene = Scene::from_usd(&demoting).expect("imports");
+    let prov = scene.provenance.as_ref().unwrap();
+    assert_eq!(scene.lights.count(), 4, "Dead illuminates nothing");
+    assert!(prov.light("/W/Dead").is_none());
 }

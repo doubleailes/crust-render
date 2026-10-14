@@ -1128,3 +1128,304 @@ fn reload_cancels_a_running_render() {
     assert_eq!(result["cancelled_render"], job.id, "{result:#}");
     assert_eq!(job.status(), "cancelled");
 }
+
+/// Opens a session on `stage`, written into a fresh work dir as `input.usda`.
+fn session_on(name: &str, stage: &str) -> (State, PathBuf) {
+    let dir = work_dir(name);
+    let input = dir.join("input.usda");
+    std::fs::write(&input, stage).expect("write the stage");
+    let layer = dir.join("edits.usda");
+    let mut state = State::default();
+    state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .expect("opened");
+    (state, dir)
+}
+
+/// Tessellation that reads the camera (adaptive subdivision, an implicit
+/// shape sized on screen) keeps a settings edit in place unless the
+/// projection it read moves: an exposure stays, a focal length does not.
+#[test]
+fn camera_tessellated_settings_edits_stay_in_place() {
+    let s = samples();
+    let s = s.display();
+    // The adaptive sample, at a test's resolution: its subdivision reads
+    // this projection.
+    let adaptive = format!(
+        r#"#usda 1.0
+(
+    subLayers = [@{s}/subdivision_adaptive.usda@]
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+over "Render" {{ over "settings" {{ int2 resolution = (48, 27) }} }}
+"#
+    );
+    let on_screen = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+    }
+
+    def Cylinder "Post"
+    {
+        double radius = 1
+        double height = 2
+    }
+}
+"#;
+    for (name, stage) in [("adaptive", adaptive.as_str()), ("on_screen", on_screen)] {
+        let (mut state, dir) = session_on(&format!("tessellated_{name}"), stage);
+        let exposure = r#"over "World" { over "Cam" { float exposure = 1 } }"#;
+        assert_eq!(author(&mut state, exposure), "settings", "{name}");
+        same_as_full_import(&mut state, &dir, &format!("{name} exposure"));
+        assert_eq!(undo(&mut state), "settings", "{name} undo");
+        same_as_full_import(&mut state, &dir, &format!("{name} undo exposure"));
+        // Without tessellation reading the camera, a lens is a settings edit:
+        // `full` here is the projection check at work.
+        let lens = r#"over "World" { over "Cam" { float focalLength = 35 } }"#;
+        assert_eq!(author(&mut state, lens), "full", "{name} focal length");
+    }
+}
+
+/// A light-linked scene keeps its resolved links through an in-place light
+/// edit: each linked light (shadow-linked, light-link excludes, include-only)
+/// dims and recolours in place as a full import of the same layer renders it.
+/// A light the links took out of the list is not a light to rebuild, and a
+/// light after it in the list is still the one an edit names.
+#[test]
+fn linked_light_edits_stay_in_place() {
+    let s = samples();
+    let s = s.display();
+    let linking = format!(
+        r#"#usda 1.0
+(
+    subLayers = [@{s}/light_linking.usda@]
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+over "Render" {{ over "settings" {{ int2 resolution = (48, 27) }} }}
+"#
+    );
+    let (mut state, dir) = session_on("linked", &linking);
+    let lights = ["Key", "Fill", "Rim"];
+    for name in lights {
+        let edit = format!(
+            r#"over "World" {{ over "{name}" {{ float inputs:intensity = 5
+                color3f inputs:color = (0.2, 0.9, 0.4) }} }}"#
+        );
+        assert_eq!(author(&mut state, &edit), "lights", "{name}");
+        same_as_full_import(&mut state, &dir, &format!("linked {name}"));
+    }
+    for name in lights.iter().rev() {
+        assert_eq!(undo(&mut state), "lights", "undo {name}");
+        same_as_full_import(&mut state, &dir, &format!("linked undo {name}"));
+    }
+
+    // `Dead` illuminates nothing and leaves the list between two kept lights
+    // on either side, so whichever order the traversal meets them in, two
+    // kept lights come after it.
+    let light = |name: &str, x: f32, link: &str| {
+        format!(
+            r#"    def SphereLight "{name}"
+    {{
+        float inputs:radius = 0.2
+        float inputs:intensity = 10
+        double3 xformOp:translate = ({x}, 3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        {link}
+    }}
+"#
+        )
+    };
+    let nothing = "uniform bool collection:lightLink:includeRoot = 0";
+    let lights: String = [
+        light("K1", -2.0, ""),
+        light("K2", -1.0, ""),
+        light("Dead", 0.0, nothing),
+        light("K3", 1.0, ""),
+        light("K4", 2.0, ""),
+    ]
+    .concat();
+    let demoting = format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 24
+        double3 xformOp:translate = (0, 1.5, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+{lights}
+    def Mesh "Floor"
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, 0, 4), (4, 0, 4), (4, 0, -4), (-4, 0, -4)]
+    }}
+}}
+"#
+    );
+    let (mut state, dir) = session_on("linked_demoted", &demoting);
+    let dead = r#"over "World" { over "Dead" { float inputs:intensity = 3 } }"#;
+    assert_eq!(
+        author(&mut state, dead),
+        "full",
+        "a light the links took out"
+    );
+    for name in ["K1", "K4"] {
+        let edit = format!(r#"over "World" {{ over "{name}" {{ float inputs:intensity = 2 }} }}"#);
+        assert_eq!(author(&mut state, &edit), "lights", "{name}");
+        same_as_full_import(&mut state, &dir, &format!("demoted {name}"));
+    }
+}
+
+/// A look a payload brings in is read through the session's authoring stage,
+/// which leaves payloads unloaded, so its shaders show there only as the
+/// edit's typeless `over`s: a shader input still applies in place, checked on
+/// the material's own stage, and an input on a prim that is not a shader
+/// does not.
+#[test]
+fn a_shader_behind_a_payload_edits_in_place() {
+    let dir = work_dir("payload_look");
+    std::fs::write(
+        dir.join("looks.usda"),
+        r#"#usda 1.0
+def Scope "Looks"
+{
+    def Material "Clay"
+    {
+        token outputs:surface.connect = </Looks/Clay/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.7, 0.4, 0.3)
+            float inputs:roughness = 0.6
+            token outputs:surface
+        }
+
+        def NodeGraph "Graph"
+        {
+            float inputs:gain = 1
+        }
+    }
+}
+"#,
+    )
+    .expect("write the look");
+    let input = dir.join("input.usda");
+    std::fs::write(
+        &input,
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 1, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        float3 xformOp:rotateXYZ = (-50, 20, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Scope "Looks" (
+        prepend payload = @looks.usda@</Looks>
+    )
+    {
+    }
+
+    def Sphere "Ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 1
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Looks/Clay>
+    }
+}
+"#,
+    )
+    .expect("write the stage");
+    let layer = dir.join("edits.usda");
+    let mut state = State::default();
+    state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .expect("opened");
+    let roughness = r#"over "World" { over "Looks" { over "Clay" { over "Surface" {
+        float inputs:roughness = 0.15 } } } }"#;
+    assert_eq!(author(&mut state, roughness), "materials");
+    same_as_full_import(&mut state, &dir, "payload roughness");
+    assert_eq!(undo(&mut state), "materials", "undo");
+    same_as_full_import(&mut state, &dir, "payload undo roughness");
+    let graph = r#"over "World" { over "Looks" { over "Clay" { over "Graph" {
+        float inputs:gain = 2 } } } }"#;
+    assert_eq!(
+        author(&mut state, graph),
+        "full",
+        "a node graph is not a shader"
+    );
+}

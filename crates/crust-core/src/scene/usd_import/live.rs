@@ -72,7 +72,9 @@ pub(crate) fn rebuild(
         warnings,
     };
     for path in &change.materials {
-        update.materials.push(rebuilding.material(path)?);
+        update
+            .materials
+            .push(rebuilding.material(path, &change.shaders)?);
     }
     for path in &change.lights {
         update.lights.push(rebuilding.light(path)?);
@@ -149,6 +151,15 @@ fn closed_network(stage: &Stage, root: &sdf::Path) -> Result<(), Structural> {
     Ok(())
 }
 
+/// Whether `path` is a `Shader` prim on `stage`.
+fn is_shader(stage: &Stage, path: &sdf::Path) -> bool {
+    stage
+        .prim(path.clone())
+        .ok()
+        .and_then(|p| p.type_name().ok().flatten())
+        .is_some_and(|t| t.as_str() == "Shader")
+}
+
 struct Rebuilding<'a> {
     prov: &'a Provenance,
     layer: &'a Path,
@@ -174,8 +185,15 @@ impl Rebuilding<'_> {
     }
 
     /// The material at `path`, resolved as the traversal's first binding to
-    /// it resolved it, into the slots it fills.
-    fn material(&self, path: &str) -> Result<(Vec<u32>, Arc<dyn Material>), Structural> {
+    /// it resolved it, into the slots it fills. Each of `shaders` under it
+    /// must be a `Shader` on the material's stage ([`Change::shaders`]).
+    ///
+    /// [`Change::shaders`]: crate::live::Change::shaders
+    fn material(
+        &self,
+        path: &str,
+        shaders: &[String],
+    ) -> Result<(Vec<u32>, Arc<dyn Material>), Structural> {
         let origin = self
             .prov
             .material(path)
@@ -189,6 +207,12 @@ impl Rebuilding<'_> {
         let built = (|| {
             let stage = self.masked(&mat_path)?;
             closed_network(&stage, &mat_path)?;
+            for shader in shaders {
+                let shader = prim_path(shader)?;
+                if shader.has_prefix(&mat_path) && !is_shader(&stage, &shader) {
+                    return Err(Structural(format!("{shader} is not a shader of {path}")));
+                }
+            }
             let mut caches = self.caches();
             let (material, mtlx) = resolve_fresh(&stage, &mat_path, &mut caches);
             let displaces = crate::config().displace
@@ -207,9 +231,6 @@ impl Rebuilding<'_> {
     /// The light at `path`, emitted as the traversal emitted it, its
     /// geometry ids the ones it had.
     fn light(&self, path: &str) -> Result<LightUpdate, Structural> {
-        if self.prov.stage.linked {
-            return Err(Structural("the scene's lights author links".into()));
-        }
         let origin = self
             .prov
             .light(path)
@@ -296,14 +317,6 @@ fn refresh_settings(
             w.code.as_str()
         )));
     }
-    if facts.adaptive {
-        return Err(Structural("adaptive subdivision reads the camera".into()));
-    }
-    if facts.on_screen_shapes {
-        return Err(Structural(
-            "implicit shapes are tessellated for their size on screen".into(),
-        ));
-    }
     let Some(camera) = facts.camera.as_deref() else {
         return Err(Structural("the scene renders the procedural camera".into()));
     };
@@ -321,8 +334,23 @@ fn refresh_settings(
         if Some(read.working) != facts.working {
             return Err(Structural("the working colour space changed".into()));
         }
-        if read.subdiv.level != facts.subdiv_level || read.subdiv.adaptive.is_some() {
-            return Err(Structural("the subdivision changed".into()));
+        if read.subdiv.level != facts.subdiv_level {
+            return Err(Structural("the subdivision level changed".into()));
+        }
+        // Tessellation that reads the camera stands only when what it read is
+        // what it would read now, bit for bit: an exposure keeps it, a move,
+        // a lens or a resolution does not.
+        if read.subdiv.adaptive.map(|r| r.key()) != facts.adaptive {
+            return Err(Structural(
+                "adaptive subdivision would read another camera projection".into(),
+            ));
+        }
+        if facts.on_screen_shapes.is_some()
+            && read.projection.map(|p| p.key()) != facts.on_screen_shapes
+        {
+            return Err(Structural(
+                "implicit shapes would be sized for another camera projection".into(),
+            ));
         }
         if facts.unsized_shapes && read.projection.is_some() {
             return Err(Structural(

@@ -15,11 +15,12 @@
 //!   UV or per-face tables, a displacement), or whose network reaches outside
 //!   its own prim;
 //! - a light whose rebuild would add or drop a light, change how many
-//!   geometries it owns, move it to or from infinity, or whose scene has
-//!   light links (they renumber the list);
+//!   geometries it owns, or move it to or from infinity, and a light the
+//!   scene's light links took out of the list (it is no longer one);
 //! - a settings change that would move the working colour space, the
-//!   subdivision level, adaptive subdivision, the dome's camera visibility or
-//!   the render camera;
+//!   subdivision level, what tessellation read from the camera (adaptive
+//!   subdivision, implicit shapes sized on screen), the dome's camera
+//!   visibility or the render camera;
 //! - any rebuild that raises a warning about the rebuilt prim, or a scene
 //!   whose warnings already name it: the warnings list must stay the one a
 //!   fresh import reports.
@@ -88,20 +89,26 @@ pub(crate) struct StageFacts {
     /// The `RenderSettings` prim the import read, when one.
     pub(crate) render_settings: Option<String>,
     pub(crate) subdiv_level: u32,
-    pub(crate) adaptive: bool,
+    /// What adaptive subdivision read from the render camera (its projection,
+    /// target and ceiling), as bits; `None` for uniform subdivision.
+    pub(crate) adaptive: Option<ScreenKey>,
     pub(crate) domes_seen_by_camera: bool,
     pub(crate) working: Option<crate::color::Space>,
-    /// Whether any light authors a link: links renumber the list.
-    pub(crate) linked: bool,
     /// The camera rendered through, `None` for the procedural one.
     pub(crate) camera: Option<String>,
-    /// Whether an implicit shape took its radial count from the camera's
-    /// projection: a change of camera or resolution then moves geometry.
-    pub(crate) on_screen_shapes: bool,
+    /// The camera projection an implicit shape took its radial count from,
+    /// as bits; `None` when no count came from it.
+    pub(crate) on_screen_shapes: Option<ScreenKey>,
     /// Whether an unshared curved implicit shape took the fixed radial count
     /// because no camera was named: naming one then moves geometry.
     pub(crate) unsized_shapes: bool,
 }
+
+/// A value the import's tessellation read from the render camera, as the
+/// bits of every number in it: two keys are equal exactly when the
+/// tessellation would come out the same, `-0.0` and `NaN` included.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScreenKey(pub(crate) Vec<u32>);
 
 impl Provenance {
     /// The material prims the scene uses, and the slots each fills.
@@ -186,6 +193,11 @@ pub struct Change {
     pub settings: bool,
     /// Material prims whose inputs changed.
     pub materials: Vec<String>,
+    /// Prims under one of [`Change::materials`] whose inputs changed but whose
+    /// type the host could not read (a payload it leaves unloaded): the
+    /// rebuild applies the change only if each is a `Shader` of that
+    /// material's network on the material's own, payload-loaded stage.
+    pub shaders: Vec<String>,
     /// Light prims whose inputs changed.
     pub lights: Vec<String>,
 }
