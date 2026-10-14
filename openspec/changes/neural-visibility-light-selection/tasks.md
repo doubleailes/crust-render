@@ -52,10 +52,12 @@
   - If any site differs, fix it so both sides store one value, and confirm `power` / `learned` stay bit-identical with `check_images.sh`.
 - [ ] 3.2 Add `crates/crust-render/examples/nvc_bench.rs`. It trains on a scene and times one `(pmf, cdf)` evaluation, one shadow ray, and one `learned` lookup over the same receivers, printing min-of-N wall time:
   - Verify it runs on `samples/usdlux.usda` and on ALab.
+  - Status: runs on `usdlux`, `veach_mis`, `domelight` and `materialx_basic`; ALab was not available where this was implemented.
 - [ ] 3.3 Count the same three costs with callgrind, using the CLAUDE.md recipe, on `usdlux` and ALab.
   - Record wall time and instructions in a new `docs/light_sampling.md` § "Neural visibility cache".
   - Write the go/no-go decision there per D9.
   - If no-go: shrink D3 once and re-measure. If it is still no-go, stop here, keep the recorded result, and update proposal.md and design.md to say so.
+  - Status: counted and recorded on `usdlux` (docs/light_sampling.md §3.14): D3 no-go on the samples (4.8–13.8×), shrunk once marginal (2.9–7.4×). ALab not measured; D3 kept as designed by decision, and groups 5–6 run on the samples.
 - [x] 3.4 Add the `nvc_bench` recipe to the command cookbook in `openspec/specs/cli/design.md`:
   - Verify that the documented command runs as written.
 
@@ -84,28 +86,31 @@
 
 ## 5. Unbiasedness and MIS checks (spec: `lighting`)
 
-- [ ] 5.1 "Converges to the power reference": render `usdlux` under `neural` at 16, 64 and 256 spp with `--indirect-clamp 0` against a 1024 spp `power` reference, using `crust diff`:
+- [x] 5.1 "Converges to the power reference": render `usdlux` under `neural` at 16, 64 and 256 spp with `--indirect-clamp 0` against a 1024 spp `power` reference, using `crust diff`:
   - Verify relMSE falls as roughly 1/N (record the three values in `docs/light_sampling.md`).
-- [ ] 5.2 "Emission is not double-counted": render `veach_mis` at 1024 spp under `neural` and `power`, `--indirect-clamp 0`:
+- [x] 5.2 "Emission is not double-counted": render `veach_mis` at 1024 spp under `neural` and `power`, `--indirect-clamp 0`:
   - Verify the image means agree within the noise (report both, and the per-seed spread over `-f 1..4`).
 
 ## 6. The equal-time verdict (design Goals, D9)
 
 - [ ] 6.1 relMSE at 16 spp (full and trimmed, `--indirect-clamp 0`, against 1024 spp `power` references) for ALab direct lighting, ALab full, `usdlux` (4 seeds), `veach_mis` (4), `domelight` (4) and `materialx_basic`, under `power` / `learned` / `neural`:
   - Verify that the table is in `docs/light_sampling.md`, in the same shape as §3.12's.
+  - Status: every row but ALab's measured and recorded in §3.14; the ALab rows read "not measured".
 - [ ] 6.2 `scripts/bench_ab.sh` `learned` against `neural` on ALab and `usdlux` at 128 spp; report min and mean:
   - Verify that the equal-time gains are computed and recorded beside 6.1, with the verdict: keep opt-in, propose D2's contribution variant, or retire.
+  - Status: measured on `usdlux`, `veach_mis`, `domelight` and `materialx_basic` (and `power` against `learned`); verdict on the samples: retire. ALab not measured.
 - [ ] 6.3 Measure whether `D` can fall below 0.3 under `neural` (0.2, 0.1) on `domelight` and ALab:
   - Verify that the result and the chosen value are recorded beside the `DEFENSIVE` constant's comment.
+  - Status: measured on `domelight` and `usdlux` and recorded beside `DEFENSIVE`: no gain below 0.3, kept. ALab not measured.
 
 ## 7. Integration checks
 
-- [ ] 7.1 Run the four CI jobs locally and confirm each is clean:
+- [x] 7.1 Run the four CI jobs locally and confirm each is clean:
   - `cargo fmt --all -- --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --no-fail-fast`
   - `cargo deny --locked check`
-- [ ] 7.2 Run the pinned nightly leg (`cargo +nightly-2026-09-26 clippy --workspace --all-targets -- -D warnings` and its tests) and confirm it is clean.
+- [x] 7.2 Run the pinned nightly leg (`cargo +nightly-2026-09-26 clippy --workspace --all-targets -- -D warnings` and its tests) and confirm it is clean.
 
 ## Workflow follow-up
 

@@ -72,6 +72,14 @@ const LIGHT_SAMPLES: usize = 2;
 /// Mixing with the *power* table instead of uniform was measured too, and
 /// lost. On ALab power is the problem: it gives the two hidden lights half the
 /// picks.
+///
+/// `neural` shares it (`light_visibility.rs`). Measured there at 0.2 and 0.1
+/// as well (16 spp, `--indirect-clamp 0`, mean of four frames): relMSE moved by
+/// at most 2.5%, inside the noise, on `domelight` (0.291 / 0.283 / 0.285 at
+/// 0.3 / 0.2 / 0.1) and `usdlux` (0.0646 / 0.0635 / 0.0640). No firefly came
+/// with the lower shares, as a continuous visibility does not straddle the
+/// sun's shadow the way a cell does, but nothing was gained either, so it
+/// stays 0.3 for both. ALab was not measured.
 pub const DEFENSIVE: f32 = 0.3;
 /// Receivers a cell needs before its own distribution is trusted.
 const MIN_RECEIVERS: u32 = 2;
@@ -476,12 +484,13 @@ pub(crate) fn robust_bounds(receivers: &[Receiver]) -> Option<(Vec3A, Vec3A)> {
 fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize) -> (Vec<f32>, Vec<f32>) {
     let mut cdf = vec![0.0; sum.len()];
     let mut pmf = vec![0.0; sum.len()];
-    defensive_table(sum, total, live, n_live, &mut cdf, &mut pmf);
+    defensive_table(sum, total, live, n_live, DEFENSIVE, &mut cdf, &mut pmf);
     (cdf, pmf)
 }
 
 /// A learned pick distribution into `cdf` and `pmf`: each live light gets
-/// `(1 - DEFENSIVE) * w/total + DEFENSIVE / n_live`, a dead one nothing.
+/// `(1 - d) * w/total + d / n_live`, a dead one nothing, for a defensive
+/// share `d` (`DEFENSIVE`, for both learned selections today).
 /// `learned`'s cells weigh by contribution, `neural`'s vertices by power
 /// times predicted visibility; both build their tables here.
 ///
@@ -496,6 +505,7 @@ pub(crate) fn defensive_table(
     total: f64,
     live: &[bool],
     n_live: usize,
+    d: f32,
     cdf: &mut [f32],
     pmf: &mut [f32],
 ) {
@@ -504,7 +514,7 @@ pub(crate) fn defensive_table(
     for (k, (&e, c)) in w.iter().zip(cdf.iter_mut()).enumerate() {
         let p = if live[k] {
             last_live = Some(k);
-            (1.0 - DEFENSIVE as f64) * e / total + DEFENSIVE as f64 / n_live as f64
+            (1.0 - d as f64) * e / total + d as f64 / n_live as f64
         } else {
             0.0
         };
