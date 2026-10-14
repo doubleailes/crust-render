@@ -68,6 +68,9 @@ pub struct Open {
     /// imports whether or not one did). The next import is full; `None`
     /// once one succeeds (D3).
     pub(super) stale: Option<Vec<PathBuf>>,
+    /// Whether the authoring stage must be composed again: a source changed
+    /// and reopening the stage has not succeeded since.
+    pub(super) restage: bool,
 }
 
 /// The loader for the session's next import or update: the session's own,
@@ -121,6 +124,15 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&staged, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&staged);
     })
+}
+
+/// `stage`'s composition errors, as messages.
+fn composition_errors(stage: &Stage) -> Vec<String> {
+    stage
+        .composition_errors()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// `paths`, comma-separated, for a message.
@@ -312,7 +324,7 @@ impl Open {
             std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
         let mut hasher = std::hash::DefaultHasher::new();
         bytes.hash(&mut hasher);
-        self.sources.hash_now(&mut hasher);
+        self.sources.hash(&mut hasher);
         Ok(hasher.finish())
     }
 
@@ -388,23 +400,52 @@ impl Open {
     /// layer the last import composed changed, reopens the authoring stage,
     /// so queries and edits see the new composition, and marks the scene
     /// stale, so the next import is full. Imports nothing itself.
+    ///
+    /// The change is recorded before the stage is reopened: when the new
+    /// sources do not compose, the call fails naming them, and the next one
+    /// tries again rather than reading the old stage or scene.
     pub fn refresh(&mut self) -> Result<(), String> {
         let changed = self.sources.changed();
-        if changed.is_empty() {
-            return Ok(());
+        if !changed.is_empty() {
+            debug!(
+                "{} source layer(s) changed on disk; the stage is composed again",
+                changed.len()
+            );
+            self.mark_stale(changed);
+            self.restage = true;
         }
-        debug!(
-            "{} source layer(s) changed on disk; the stage is composed again",
-            changed.len()
-        );
-        self.stage = open_stage(&self.output)?;
+        if self.restage {
+            let changed = names(self.stale.as_deref().unwrap_or_default());
+            let stage = open_stage(&self.output)
+                .map_err(|e| format!("the sources changed on disk ({changed}): {e}"))?;
+            // A layer that no longer parses composes as if it were absent; a
+            // writer caught mid-write looks the same. Refused while the
+            // change brings a composition error the stage did not have.
+            let had: Vec<String> = composition_errors(&self.stage);
+            let new: Vec<String> = composition_errors(&stage)
+                .into_iter()
+                .filter(|e| !had.contains(e))
+                .collect();
+            if !new.is_empty() {
+                return Err(format!(
+                    "the sources changed on disk ({changed}) and no longer compose: {}",
+                    new.join("; ")
+                ));
+            }
+            self.stage = stage;
+            self.restage = false;
+        }
+        Ok(())
+    }
+
+    /// Adds `changed` to the layers the scene no longer shows.
+    fn mark_stale(&mut self, changed: Vec<PathBuf>) {
         let stale = self.stale.get_or_insert_with(Vec::new);
         for path in changed {
             if !stale.contains(&path) {
                 stale.push(path);
             }
         }
-        Ok(())
     }
 
     /// [`Open::refresh`], then, when the scene is stale, the saved layer
@@ -436,13 +477,9 @@ impl Open {
     pub fn reload(&mut self) -> Result<serde_json::Value, String> {
         let cancelled = self.renders.stop();
         let changed = self.sources.changed();
-        let stale = self.stale.get_or_insert_with(Vec::new);
-        for path in changed {
-            if !stale.contains(&path) {
-                stale.push(path);
-            }
-        }
-        self.stage = open_stage(&self.output)?;
+        self.mark_stale(changed);
+        self.restage = true;
+        self.refresh()?;
         let current =
             std::fs::read(&self.output).map_err(|e| format!("{}: {e}", self.output.display()))?;
         let mut result = self.sync(&current)?;
@@ -507,8 +544,9 @@ impl Open {
                 Err(why) => debug!("{applied} edit applied as full instead: {why}"),
             }
         }
+        let before = self.sources.now();
         self.scene = import_kept(&self.output, assets)?;
-        self.sources = Sources::of(&self.scene.layers, &self.output);
+        self.sources = Sources::of(&self.scene.layers, &self.output, &before);
         self.stale = None;
         Ok(())
     }
@@ -757,7 +795,7 @@ impl State {
             input.display()
         );
         self.close();
-        let sources = Sources::of(&scene.layers, &output);
+        let sources = Sources::of(&scene.layers, &output, &Sources::default());
         self.open = Some(Open {
             input,
             output,
@@ -768,6 +806,7 @@ impl State {
             assets,
             sources,
             stale: None,
+            restage: false,
         });
         Ok(result)
     }

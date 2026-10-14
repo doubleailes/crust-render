@@ -26,12 +26,32 @@ pub struct Sources {
 
 impl Sources {
     /// `layers` (an import's [`crust_core::Scene::layers`]) without the
-    /// override layer `output`, stamped as they are now.
-    pub fn of(layers: &[PathBuf], output: &Path) -> Sources {
+    /// override layer `output`, each stamped as `before` saw it when it is
+    /// there, else as it is now. `before` is [`Sources::now`] taken before
+    /// the import: a layer written while the import read it then still
+    /// differs from its stamp, and the next call sees the change.
+    pub fn of(layers: &[PathBuf], output: &Path, before: &Sources) -> Sources {
         let stamps = layers
             .iter()
             .filter(|layer| !same_file(layer, output))
-            .map(|layer| (layer.clone(), meta(layer)))
+            .map(|layer| {
+                let seen = before
+                    .stamps
+                    .iter()
+                    .find(|(p, _)| p == layer)
+                    .map_or_else(|| meta(layer), |(_, m)| *m);
+                (layer.clone(), seen)
+            })
+            .collect();
+        Sources { stamps }
+    }
+
+    /// The same layers, stamped as they are on disk now.
+    pub fn now(&self) -> Sources {
+        let stamps = self
+            .stamps
+            .iter()
+            .map(|(path, _)| (path.clone(), meta(path)))
             .collect();
         Sources { stamps }
     }
@@ -50,13 +70,11 @@ impl Sources {
         moved
     }
 
-    /// Feeds the layers' stamps as they are on disk now into `hasher`: what
-    /// a render rendered, beside the override layer's bytes (design D5).
-    pub fn hash_now(&self, hasher: &mut impl Hasher) {
-        for (path, _) in &self.stamps {
-            path.hash(hasher);
-            meta(path).hash(hasher);
-        }
+    /// Feeds the layers' stamps as last seen into `hasher`: beside the
+    /// override layer's bytes, which sources a render rendered (design D5).
+    /// [`Sources::now`]'s hash is what is on disk now.
+    pub fn hash(&self, hasher: &mut impl Hasher) {
+        self.stamps.hash(hasher);
     }
 }
 
@@ -90,7 +108,11 @@ mod tests {
         for f in [&output, &sub, &other] {
             std::fs::write(f, "#usda 1.0\n").unwrap();
         }
-        let mut sources = Sources::of(&[output.clone(), sub.clone(), other.clone()], &output);
+        let mut sources = Sources::of(
+            &[output.clone(), sub.clone(), other.clone()],
+            &output,
+            &Sources::default(),
+        );
         assert!(sources.changed().is_empty());
         rewrite(&sub, "#usda 1.0\n");
         assert_eq!(sources.changed(), vec![sub.clone()]);
@@ -109,15 +131,33 @@ mod tests {
         for f in [&output, &sub] {
             std::fs::write(f, "#usda 1.0\n").unwrap();
         }
-        let sources = Sources::of(&[output.clone(), sub.clone()], &output);
-        let hash = || {
+        let sources = Sources::of(&[output.clone(), sub.clone()], &output, &Sources::default());
+        let hash = |s: &Sources| {
             let mut h = std::hash::DefaultHasher::new();
-            sources.hash_now(&mut h);
+            s.hash(&mut h);
             h.finish()
         };
-        let before = hash();
-        assert_eq!(hash(), before);
+        let seen = hash(&sources);
+        assert_eq!(hash(&sources.now()), seen);
         rewrite(&sub, "#usda 1.0\n# changed\n");
-        assert_ne!(hash(), before);
+        assert_ne!(hash(&sources.now()), seen);
+        assert_eq!(hash(&sources), seen, "as seen, not as on disk");
+    }
+
+    /// A layer rewritten while an import read it keeps the stamp taken
+    /// before the import, so the next look reports it.
+    #[test]
+    fn a_write_during_an_import_is_seen_afterwards() {
+        let dir = work_dir("during");
+        let (output, sub) = (dir.join("out.usda"), dir.join("a.usda"));
+        for f in [&output, &sub] {
+            std::fs::write(f, "#usda 1.0\n").unwrap();
+        }
+        let layers = [output.clone(), sub.clone()];
+        let old = Sources::of(&layers, &output, &Sources::default());
+        let before = old.now();
+        rewrite(&sub, "#usda 1.0\n# written mid-import\n");
+        let mut after = Sources::of(&layers, &output, &before);
+        assert_eq!(after.changed(), vec![sub]);
     }
 }

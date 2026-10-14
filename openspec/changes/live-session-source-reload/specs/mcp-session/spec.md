@@ -71,12 +71,12 @@ be applied in place over a scene imported from a changed source.
 - **THEN** the render shows the rewritten layer, and its result names the changed
   layer
 
-#### Scenario: A changed source that no longer imports
+#### Scenario: A changed source that no longer composes
 
 - **WHEN** another program rewrites a source layer so that it no longer parses, and
   the agent calls `render`
-- **THEN** the call fails, saying the import failed and naming the layer, and
-  the next tool call that reads the scene tries the import again
+- **THEN** the call fails, naming the changed layer and the composition error, nothing
+  is rendered, and the next tool call that reads the stage or the scene tries again
 
 #### Scenario: A layer behind a payload
 

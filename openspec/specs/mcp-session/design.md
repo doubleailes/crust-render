@@ -352,13 +352,25 @@ Before this change the session saw none of it:
 ### How a change is seen and applied
 
 - **Stamps.** `mcp/sources.rs` stamps each watched layer, other than the override layer,
-  with its length and modification time after each import, as `kept.rs` stamps decodes.
+  with its length and modification time, as `kept.rs` stamps decodes.
   `Sources::changed()` re-stats every layer and re-stamps the ones that moved, so each
   change is reported once.
+  - The stamps are taken *before* the import (`Sources::now`), so a layer written while
+    the import read it still differs from its stamp, and the next call imports again
+    (`a_write_during_an_import_is_seen_afterwards`).
+  - *Gap:* a layer the previous import did not compose is stamped after the import.
 - **`Open::refresh()`.** Every tool that reads the stage or the scene calls it first:
   `query`, `check`, `render`, the edit tools, `undo`, `light_paths`, `render_final`. On a
-  change it reopens the authoring stage and sets `stale` to the changed layers. It
+  change it records the changed layers in `stale`, then reopens the authoring stage. It
   imports nothing.
+  - The change is recorded before the reopen, and the reopen is retried (`restage`)
+    until it succeeds. *Trap:* the first version re-stamped and then failed to reopen,
+    so the change was forgotten and the old scene rendered.
+  - A change that brings a composition error the stage did not have is refused, naming
+    the changed layers. openusd composes a layer that no longer parses as if it were
+    absent (`MalformedSublayer`), and so does `crust render`. A writer caught mid-write
+    looks the same, so the session waits for the layer to compose instead of rendering
+    the scene without it. Errors the stage already had are not refused.
 - **The import is lazy.**
   - An edit or `undo` while `stale` is set goes `full` without classifying, so one import
     serves both the external change and the edit.
@@ -373,8 +385,22 @@ Before this change the session saw none of it:
   hatch for what stamps cannot see. It leaves the undo stack alone: the stack holds
   override-layer bytes, which compose over the sources as they are now.
 - **A render's identity is its layer and its sources.** The job's hash covers the override
-  layer's bytes and the sources' stamps at render start, so `light_paths` refuses a render
-  made before a rewrite, as it refuses one made before an edit.
+  layer's bytes and the sources' stamps as `bring_current` last checked them, not a
+  fresh read. `light_paths` refreshes first, which moves the stamps to what is on disk,
+  so it refuses a render made before a rewrite, as it refuses one made before an edit.
+
+**Measured.** The check costs one `stat` per watched layer on every tool call that reads
+the stage or the scene:
+- the checked-in samples compose at most three layers;
+- 5 000 stats of local files take 11.7 ms (best of 10, from Python's `os.stat`, an upper
+  bound on Rust's), against seconds for an import of a stage that size.
+- Not measured: ALab, which composes thousands of layers and is not in the checkout.
+
+The render path does not move. Callgrind on `crust render` of the Cornell box at `-s 2`,
+one thread, before and after the change:
+- every render function's count is identical, and the images are bit-identical;
+- the total moved by 118 380 instructions (−0.003%), all of it in libc `memcpy` and
+  `malloc`, consistent with the two binaries' output paths differing in length.
 
 The tests that pin these behaviours are in `crust-render/src/mcp/tests.rs`, section
 "Sources on disk":
@@ -382,7 +408,7 @@ The tests that pin these behaviours are in `crust-render/src/mcp/tests.rs`, sect
   fresh session;
 - a query after a referenced layer's rewrite answers the new value;
 - a render after a payload layer's rewrite shows it;
-- a broken source fails `render` until it is fixed;
+- a source that no longer composes fails `render` until it is fixed;
 - `light_paths` refuses a render from before a rewrite;
 - the `reload` cases.
 
