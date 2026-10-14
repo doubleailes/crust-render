@@ -1429,3 +1429,647 @@ def Xform "World"
         "a node graph is not a shader"
     );
 }
+
+// --- Placement (`session-placement-tools`) ---
+
+use super::edit::PLACE_OP;
+use super::place::ScatterArgs;
+use crust_core::rt::{Piece, RayMask};
+use glam::{DMat4, DVec3};
+
+/// A mesh prim from points and faces, under an Xform `name` translated by
+/// `at`, at `indent` levels.
+fn mesh_prim(name: &str, at: [f64; 3], points: &[[f64; 3]], faces: &[&[u32]]) -> String {
+    let pts: Vec<String> = points
+        .iter()
+        .map(|p| format!("({}, {}, {})", p[0], p[1], p[2]))
+        .collect();
+    let counts: Vec<String> = faces.iter().map(|f| f.len().to_string()).collect();
+    let idx: Vec<String> = faces
+        .iter()
+        .flat_map(|f| f.iter().map(|i| i.to_string()))
+        .collect();
+    format!(
+        r#"
+    def Xform "{name}"
+    {{
+        double3 xformOp:translate = ({}, {}, {})
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Mesh "geo"
+        {{
+            int[] faceVertexCounts = [{}]
+            int[] faceVertexIndices = [{}]
+            point3f[] points = [{}]
+        }}
+    }}
+"#,
+        at[0],
+        at[1],
+        at[2],
+        counts.join(", "),
+        idx.join(", "),
+        pts.join(", ")
+    )
+}
+
+/// A cube of half-side `s` around its prim's origin, as points and faces.
+fn cube_mesh(s: f64) -> (Vec<[f64; 3]>, Vec<Vec<u32>>) {
+    let points = [
+        [-1., -1., -1.],
+        [1., -1., -1.],
+        [1., 1., -1.],
+        [-1., 1., -1.],
+        [-1., -1., 1.],
+        [1., -1., 1.],
+        [1., 1., 1.],
+        [-1., 1., 1.],
+    ]
+    .map(|p: [f64; 3]| p.map(|c| c * s))
+    .to_vec();
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![2, 3, 7, 6],
+        vec![1, 2, 6, 5],
+        vec![0, 4, 7, 3],
+    ];
+    (points, faces)
+}
+
+fn cube_prim(name: &str, at: [f64; 3], s: f64) -> String {
+    let (points, faces) = cube_mesh(s);
+    let faces: Vec<&[u32]> = faces.iter().map(Vec::as_slice).collect();
+    mesh_prim(name, at, &points, &faces)
+}
+
+/// A flat quad facing up (+Y), from `lo` to `hi` in x and z.
+fn plate_prim(name: &str, at: [f64; 3], lo: [f64; 2], hi: [f64; 2]) -> String {
+    let points = [
+        [lo[0], 0., lo[1]],
+        [lo[0], 0., hi[1]],
+        [hi[0], 0., hi[1]],
+        [hi[0], 0., lo[1]],
+    ];
+    mesh_prim(name, at, &points, &[&[0, 1, 2, 3]])
+}
+
+/// A cube asset layer, its root `name` (for a payload or a prototype file).
+fn cube_asset(name: &str, s: f64, ops: &str) -> String {
+    let (points, faces) = cube_mesh(s);
+    let pts: Vec<String> = points
+        .iter()
+        .map(|p| format!("({}, {}, {})", p[0], p[1], p[2]))
+        .collect();
+    let idx: Vec<String> = faces.iter().flatten().map(|i| i.to_string()).collect();
+    format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "{name}"
+)
+
+def Xform "{name}"
+{{
+{ops}
+    def Mesh "geo"
+    {{
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [{}]
+        point3f[] points = [{}]
+    }}
+}}
+"#,
+        idx.join(", "),
+        pts.join(", ")
+    )
+}
+
+/// The table, in a sublayer another program may rewrite: a plate at
+/// `height`.
+fn table_layer(height: f64) -> String {
+    format!(
+        "#usda 1.0\n\nover \"World\"\n{{{}}}\n",
+        plate_prim("table", [0., height, 0.], [-1., -1.], [1., 1.])
+    )
+}
+
+/// The placement stage (Y up): a floor; a table (in `table.usda`) with a
+/// shelf above it; a bumpy terrain; a slope of 30° about X; a flat field of
+/// area 50 and steps with a vertical face to scatter over; a payload-placed
+/// crate whose ops the payload authors; a native instance; and prims to
+/// drop.
+fn placement_stage(dir: &Path) -> PathBuf {
+    std::fs::write(dir.join("table.usda"), table_layer(1.0)).unwrap();
+    let crate_ops = "    double3 xformOp:translate = (-3, 2, 5)\n    float xformOp:rotateY = 30\n    \
+                     uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateY\"]";
+    std::fs::write(dir.join("crate.usda"), cube_asset("Crate", 0.25, crate_ops)).unwrap();
+    std::fs::write(dir.join("stone_a.usda"), cube_asset("StoneA", 0.05, "")).unwrap();
+    std::fs::write(dir.join("stone_b.usda"), cube_asset("StoneB", 0.08, "")).unwrap();
+
+    let n = 8;
+    let mut terrain = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            let (x, z) = (4.0 * i as f64 / n as f64, 4.0 * j as f64 / n as f64 - 2.0);
+            terrain.push([x, 0.5 + 0.3 * (2.0 * x).sin() * (1.5 * z).cos(), z]);
+        }
+    }
+    let mut quads = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            let (k, w) = ((j * (n + 1) + i) as u32, (n + 1) as u32);
+            quads.push(vec![k, k + w, k + w + 1, k + 1]);
+        }
+    }
+    let quads: Vec<&[u32]> = quads.iter().map(Vec::as_slice).collect();
+    let (s, c) = (30f64.to_radians().sin(), 30f64.to_radians().cos());
+    let slope = [
+        [-2.0, 2.0 * s, -2.0 * c],
+        [-2.0, -2.0 * s, 2.0 * c],
+        [2.0, -2.0 * s, 2.0 * c],
+        [2.0, 2.0 * s, -2.0 * c],
+    ];
+    let steps = [
+        [0., 0., 0.],
+        [0., 0., 1.],
+        [1., 0., 1.],
+        [1., 0., 0.],
+        [1., 1., 0.],
+        [1., 1., 1.],
+    ];
+    let mut world = String::new();
+    world += &plate_prim("floor", [0., 0., 0.], [-20., -20.], [20., 20.]);
+    world += &plate_prim("shelf", [0., 2., 0.], [-0.5, -0.5], [0.5, 0.5]);
+    world += &mesh_prim("terrain", [6., 0., 0.], &terrain, &quads);
+    world += &mesh_prim("slope", [-8., 1., 0.], &slope, &[&[0, 1, 2, 3]]);
+    world += &plate_prim("field", [0., 0.5, -15.], [0., 0.], [10., 5.]);
+    world += &mesh_prim(
+        "steps",
+        [12., 0.5, -15.],
+        &steps,
+        &[&[0, 1, 2, 3], &[3, 2, 5, 4]],
+    );
+    world += &cube_prim("vase", [0., 3.1, 0.], 0.1);
+    world += &cube_prim("rock", [8., 3., 0.3], 0.3);
+    world += &cube_prim("sunk", [-3., 0., -5.], 0.25);
+    world += &cube_prim("box", [-8., 3., 0.], 0.25);
+    world += &cube_prim("away", [30., 3., 0.], 0.25);
+    world += &cube_prim("pebble", [10., 0.25, -8.], 0.25);
+    let stage = format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    subLayers = [@./table.usda@]
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 3
+    }}
+}}
+
+class Xform "_Cube"
+{{
+{}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 18
+        double3 xformOp:translate = (0, 4, 14)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+
+    def DomeLight "Sky"
+    {{
+        float inputs:intensity = 0.5
+    }}
+
+    def Xform "crate" (
+        prepend payload = @./crate.usda@
+    )
+    {{
+    }}
+
+    def Xform "inst" (
+        instanceable = true
+        references = </_Cube>
+    )
+    {{
+        double3 xformOp:translate = (12, 2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+{world}}}
+"#,
+        cube_prim("body", [0., 0., 0.], 0.25)
+    );
+    let path = dir.join("stage.usda");
+    std::fs::write(&path, stage).unwrap();
+    path
+}
+
+fn placement_session(name: &str) -> (State, PathBuf) {
+    let dir = work_dir(name).canonicalize().unwrap();
+    let input = placement_stage(&dir);
+    let layer = dir.join("placed.usda");
+    let mut state = State::default();
+    state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .expect("opened");
+    (state, dir)
+}
+
+/// The world-space vertices of `prim`'s geometry in the session's scene.
+fn session_vertices(state: &mut State, prim: &str) -> Vec<DVec3> {
+    let open = state.session().unwrap();
+    let prov = open.scene.provenance().expect("provenance");
+    let mut out = Vec::new();
+    for ids in prov.geometry_of(prim) {
+        open.scene
+            .renderer
+            .world
+            .visit(ids, RayMask::CAMERA, |_, piece| {
+                if let Piece::Triangle(vs) = piece {
+                    out.extend(vs.map(|v| v.as_dvec3()));
+                }
+            });
+    }
+    assert!(!out.is_empty(), "{prim} has no geometry");
+    out
+}
+
+fn lowest(vs: &[DVec3], up: DVec3) -> f64 {
+    vs.iter().map(|v| v.dot(up)).fold(f64::INFINITY, f64::min)
+}
+
+fn drop(state: &mut State, prims: &[&str], target: Option<&[&str]>, align: bool) -> Value {
+    let prims: Vec<String> = prims.iter().map(|s| s.to_string()).collect();
+    let target: Option<Vec<String>> = target.map(|t| t.iter().map(|s| s.to_string()).collect());
+    state
+        .session()
+        .unwrap()
+        .drop_to_surface(&prims, target.as_deref(), align)
+        .unwrap_or_else(|e| panic!("drop: {e}"))
+}
+
+/// A field of the saved override layer.
+fn layer_field(layer: &Path, path: &str, field: &str) -> Option<openusd::sdf::Value> {
+    use openusd::sdf::AbstractData;
+    let data = openusd::usda::parse(&std::fs::read_to_string(layer).unwrap()).unwrap();
+    data.try_field(&openusd::sdf::Path::new(path).unwrap(), field)
+        .unwrap()
+        .map(|v| v.as_ref().clone())
+}
+
+#[test]
+fn drops_rest_on_the_rendered_surface_and_undo_restores_them() {
+    let (mut state, _dir) = placement_session("drop_basic");
+    let layer = state.session().unwrap().output.clone();
+    let before_bytes = std::fs::read(&layer).unwrap();
+    let before_render = render_planes(&mut state);
+    let vase = session_vertices(&mut state, "/World/vase");
+
+    // Vase onto the shelf, the highest surface beneath it; the sunk cube up
+    // onto the floor; the cup-like vase passes nothing else.
+    let result = drop(&mut state, &["/World/vase", "/World/sunk"], None, false);
+    assert_eq!(result["applied"], "full", "{result:#}");
+    assert_eq!(result["undo_depth"], 1);
+    assert_eq!(result["prims"][0]["status"], "placed", "{result:#}");
+    let after = session_vertices(&mut state, "/World/vase");
+    assert!((lowest(&after, DVec3::Y) - 2.0).abs() < 1e-4, "{after:?}");
+    for (a, b) in vase.iter().zip(&after) {
+        assert!(
+            (a.x - b.x).abs() < 1e-5 && (a.z - b.z).abs() < 1e-5,
+            "moved across"
+        );
+    }
+    let sunk = session_vertices(&mut state, "/World/sunk");
+    assert!(
+        lowest(&sunk, DVec3::Y).abs() < 1e-4,
+        "raised onto the floor"
+    );
+    // One op, first, and the prim's own ops after it.
+    let order = layer_field(&layer, "/World/vase.xformOpOrder", "default");
+    let Some(openusd::sdf::Value::TokenVec(order)) = order else {
+        panic!("{order:?}")
+    };
+    let order: Vec<&str> = order.iter().map(|t| t.as_str()).collect();
+    assert_eq!(order, [PLACE_OP, "xformOp:translate"]);
+
+    // Undo: the layer's bytes, and the render, as before.
+    state.session().unwrap().undo().expect("undone");
+    assert_eq!(std::fs::read(&layer).unwrap(), before_bytes);
+    let undone = render_planes(&mut state);
+    for ((p, a), (_, b)) in before_render.iter().zip(&undone) {
+        let report = crust_core::compare::compare(a, b);
+        assert!(report.identical, "{p:?}: {}", report.to_text());
+    }
+}
+
+#[test]
+fn a_drop_lands_only_on_its_target_and_on_uneven_ground() {
+    let (mut state, _dir) = placement_session("drop_target");
+    drop(&mut state, &["/World/vase"], Some(&["/World/table"]), false);
+    let vase = session_vertices(&mut state, "/World/vase");
+    assert!(
+        (lowest(&vase, DVec3::Y) - 1.0).abs() < 1e-4,
+        "through the shelf"
+    );
+
+    drop(&mut state, &["/World/rock"], None, false);
+    let rock = session_vertices(&mut state, "/World/rock");
+    let open = state.session().unwrap();
+    let prov = open.scene.provenance().unwrap();
+    let terrain = prov.geometry_of("/World/terrain");
+    let world = &open.scene.renderer.world;
+    let gaps: Vec<f64> = rock
+        .iter()
+        .filter_map(|v| {
+            let origin = glam::Vec3A::new(v.x as f32, 50.0, v.z as f32);
+            let accept = |id: u32| terrain.iter().any(|r| r.contains(&id));
+            let below = crust_core::place::first_hit(world, origin, -glam::Vec3A::Y, &accept)?;
+            Some(v.y - below.point.y as f64)
+        })
+        .collect();
+    assert!(gaps.iter().all(|g| *g > -1e-4), "{gaps:?}");
+    assert!(
+        gaps.iter().cloned().fold(f64::INFINITY, f64::min) < 1e-4,
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn a_drop_reports_what_it_could_not_place_and_refuses_instance_proxies() {
+    let (mut state, _dir) = placement_session("drop_report");
+    let layer = state.session().unwrap().output.clone();
+    let result = drop(&mut state, &["/World/vase", "/World/away"], None, false);
+    assert_eq!(result["prims"][0]["status"], "placed");
+    assert_eq!(result["prims"][1]["status"], "nothing below", "{result:#}");
+    assert!(
+        layer_field(&layer, "/World/away", "specifier").is_none(),
+        "no opinion on the prim that stayed"
+    );
+
+    let bytes = std::fs::read(&layer).unwrap();
+    let e = state
+        .session()
+        .unwrap()
+        .drop_to_surface(&["/World/inst/body".into()], None, false)
+        .expect_err("inside an instance");
+    assert!(e.contains("/World/inst/body"), "{e}");
+    assert_eq!(std::fs::read(&layer).unwrap(), bytes, "nothing authored");
+}
+
+/// The crate's payload authors its ops: they are kept after the placement
+/// op, which a second drop folds into, and its rotation stays.
+#[test]
+fn a_drop_keeps_the_ops_a_payload_authors() {
+    let (mut state, dir) = placement_session("drop_payload");
+    let layer = state.session().unwrap().output.clone();
+    let frame = |state: &mut State| {
+        let open = state.session().unwrap();
+        open.scene
+            .provenance()
+            .unwrap()
+            .prim_frames(&open.output, &["/World/crate".into()], PLACE_OP)
+            .unwrap()
+            .remove(0)
+    };
+    let before = frame(&mut state).local_to_world;
+    drop(&mut state, &["/World/crate"], None, false);
+    drop(&mut state, &["/World/crate"], None, false);
+    let after = frame(&mut state);
+    assert_eq!(
+        after.xform_op_order,
+        [PLACE_OP, "xformOp:translate", "xformOp:rotateY"]
+    );
+    let lin = |m: DMat4| glam::DMat3::from_mat4(m);
+    assert!(
+        lin(after.local_to_world).abs_diff_eq(lin(before), 1e-5),
+        "rotation unchanged"
+    );
+    let crate_ = session_vertices(&mut state, "/World/crate");
+    assert!(lowest(&crate_, DVec3::Y).abs() < 1e-4);
+    let text = std::fs::read_to_string(&layer).unwrap();
+    assert_eq!(
+        text.matches("xformOp:transform:crustPlace =").count(),
+        1,
+        "{text}"
+    );
+    let _ = dir;
+}
+
+#[test]
+fn an_aligned_drop_follows_the_slope() {
+    let (mut state, _dir) = placement_session("drop_align");
+    let result = drop(&mut state, &["/World/box"], None, true);
+    let (s, c) = (30f64.to_radians().sin(), 30f64.to_radians().cos());
+    let n = DVec3::new(0.0, c, s);
+    let normal: Vec<f64> = serde_json::from_value(result["prims"][0]["normal"].clone()).unwrap();
+    assert!(
+        DVec3::from_slice(&normal).abs_diff_eq(n, 1e-4),
+        "{normal:?}"
+    );
+    let open = state.session().unwrap();
+    let frame = open
+        .scene
+        .provenance()
+        .unwrap()
+        .prim_frames(&open.output, &["/World/box".into()], PLACE_OP)
+        .unwrap()
+        .remove(0);
+    let up = frame.local_to_world.transform_vector3(DVec3::Y).normalize();
+    assert!(up.abs_diff_eq(n, 1e-4), "{up:?}");
+    let centre = DVec3::new(-8.0, 1.0, 0.0);
+    let heights: Vec<f64> = session_vertices(&mut state, "/World/box")
+        .iter()
+        .map(|v| (*v - centre).dot(n))
+        .collect();
+    let min = heights.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(min.abs() < 1e-4, "{heights:?}");
+}
+
+#[test]
+fn placement_reads_the_sources_as_they_are_on_disk() {
+    let (mut state, dir) = placement_session("drop_rewritten");
+    rewrite(&dir.join("table.usda"), &table_layer(1.5));
+    let result = drop(&mut state, &["/World/vase"], Some(&["/World/table"]), false);
+    assert_eq!(changed(&result), [dir.join("table.usda").to_str().unwrap()]);
+    let vase = session_vertices(&mut state, "/World/vase");
+    assert!(
+        (lowest(&vase, DVec3::Y) - 1.5).abs() < 1e-4,
+        "the rewritten table's height"
+    );
+}
+
+#[test]
+fn a_z_up_stage_drops_along_z() {
+    let stage = format!(
+        r#"#usda 1.0
+(
+    upAxis = "Z"
+)
+
+def Xform "World"
+{{{}{}}}
+"#,
+        mesh_prim(
+            "floor",
+            [0., 0., 0.],
+            &[[-5., -5., 0.], [5., -5., 0.], [5., 5., 0.], [-5., 5., 0.]],
+            &[&[0, 1, 2, 3]]
+        ),
+        cube_prim("cube", [1., 2., 3.], 0.25)
+    );
+    let (mut state, _dir) = session_on("drop_z_up", &stage);
+    let result = drop(&mut state, &["/World/cube"], None, false);
+    let moved: Vec<f64> =
+        serde_json::from_value(result["prims"][0]["origin_moved_by"].clone()).unwrap();
+    assert!(moved[0].abs() < 1e-9 && moved[1].abs() < 1e-9, "{moved:?}");
+    assert!((moved[2] + 2.75).abs() < 1e-4, "{moved:?}");
+    let cube = session_vertices(&mut state, "/World/cube");
+    assert!(lowest(&cube, DVec3::Z).abs() < 1e-4);
+}
+
+fn scatter_args(target: &str, prototypes: &[&str], path: &str, seed: u32) -> ScatterArgs {
+    ScatterArgs {
+        target: vec![target.into()],
+        prototypes: prototypes.iter().map(|s| s.to_string()).collect(),
+        path: path.into(),
+        seed,
+        count: Some(500),
+        density: None,
+        max_slope: None,
+        random_rotation: true,
+        scale: Some([0.8, 1.2]),
+    }
+}
+
+fn scatter(state: &mut State, args: &ScatterArgs) -> Value {
+    state
+        .session()
+        .unwrap()
+        .scatter_on_surface(args)
+        .unwrap_or_else(|e| panic!("scatter: {e}"))
+}
+
+#[test]
+fn a_scatter_authors_an_instancer_on_the_surface_that_renders_as_imported() {
+    let (mut state, dir) = placement_session("scatter_stones");
+    let layer = state.session().unwrap().output.clone();
+    let args = scatter_args(
+        "/World/field",
+        &["stone_a.usda", "stone_b.usda"],
+        "/World/stones",
+        7,
+    );
+    let result = scatter(&mut state, &args);
+    assert_eq!(result["count"], 500, "{result:#}");
+    assert_eq!(result["applied"], "full");
+    let Some(openusd::sdf::Value::Vec3fVec(positions)) =
+        layer_field(&layer, "/World/stones.positions", "default")
+    else {
+        panic!("positions")
+    };
+    assert_eq!(positions.len(), 500);
+    for p in &positions {
+        assert!((p.y - 0.5).abs() < 1e-4, "on the field: {p:?}");
+        assert!((-1e-4..=10.0001).contains(&p.x) && (-15.0001..=-9.9999).contains(&p.z));
+    }
+    let Some(openusd::sdf::Value::IntVec(indices)) =
+        layer_field(&layer, "/World/stones.protoIndices", "default")
+    else {
+        panic!("protoIndices")
+    };
+    assert!(indices.contains(&0) && indices.contains(&1));
+    same_as_full_import(&mut state, &dir, "scatter");
+
+    // The same seed, after an undo, authors the same bytes; another differs.
+    let first = std::fs::read(&layer).unwrap();
+    state.session().unwrap().undo().expect("undone");
+    scatter(&mut state, &args);
+    assert_eq!(std::fs::read(&layer).unwrap(), first, "byte-identical");
+    state.session().unwrap().undo().expect("undone");
+    scatter(
+        &mut state,
+        &ScatterArgs {
+            seed: 8,
+            ..scatter_args(
+                "/World/field",
+                &["stone_a.usda", "stone_b.usda"],
+                "/World/stones",
+                8,
+            )
+        },
+    );
+    let Some(openusd::sdf::Value::Vec3fVec(other)) =
+        layer_field(&layer, "/World/stones.positions", "default")
+    else {
+        panic!("positions")
+    };
+    assert_ne!(other, positions);
+
+    // The path now names a prim: refused, nothing authored.
+    let bytes = std::fs::read(&layer).unwrap();
+    let e = state
+        .session()
+        .unwrap()
+        .scatter_on_surface(&args)
+        .expect_err("an existing path");
+    assert!(e.contains("/World/stones"), "{e}");
+    assert_eq!(std::fs::read(&layer).unwrap(), bytes);
+}
+
+#[test]
+fn a_scatter_takes_a_density_a_slope_and_a_prototype_from_the_stage() {
+    let (mut state, _dir) = placement_session("scatter_options");
+    let layer = state.session().unwrap().output.clone();
+    let mut by_density = scatter_args("/World/field", &["/World/pebble"], "/World/dense", 1);
+    by_density.count = None;
+    by_density.density = Some(2.0);
+    let result = scatter(&mut state, &by_density);
+    assert_eq!(result["count"], 100, "{result:#}");
+    assert!((result["area"].as_f64().unwrap() - 50.0).abs() < 1e-3);
+
+    // The pebble is defined at (10, 0.25, -8): each instance places its
+    // geometry at the instance, not 10 units away, and the pebble itself
+    // still renders where it was.
+    let Some(openusd::sdf::Value::Vec3fVec(positions)) =
+        layer_field(&layer, "/World/dense.positions", "default")
+    else {
+        panic!("positions")
+    };
+    let instanced = session_vertices(&mut state, "/World/dense");
+    for v in &instanced {
+        let near = positions.iter().any(|p| {
+            DVec3::new(p.x as f64, p.y as f64, p.z as f64).distance(*v)
+                < 0.25 * 1.2 * 3f64.sqrt() + 1e-3
+        });
+        assert!(near, "{v:?} is no instance's");
+    }
+    let pebble = session_vertices(&mut state, "/World/pebble");
+    assert!(
+        pebble.iter().all(|v| (v.x - 10.0).abs() < 0.3),
+        "the pebble stays"
+    );
+
+    let mut steep = scatter_args("/World/steps", &["stone_a.usda"], "/World/flat", 3);
+    steep.max_slope = Some(30.0);
+    scatter(&mut state, &steep);
+    let Some(openusd::sdf::Value::Vec3fVec(flat)) =
+        layer_field(&layer, "/World/flat.positions", "default")
+    else {
+        panic!("positions")
+    };
+    assert!(
+        flat.iter().all(|p| (p.y - 0.5).abs() < 1e-4),
+        "none on the vertical face"
+    );
+}

@@ -647,6 +647,7 @@ dependencies = [
  "crust-core",
  "ctrlc",
  "exr",
+ "glam",
  "image",
  "indicatif",
  "openusd",

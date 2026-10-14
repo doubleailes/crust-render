@@ -459,3 +459,172 @@ reference and the payload reached from different chunks), and a `.usdz`.
   such as openusd's `Layer::save` and USD's `SdfLayer::Save`, are safe.
 - **No filesystem notification.** A change is seen when the next tool call looks; the
   agent is not told between calls.
+
+## Placement (`session-placement-tools`)
+
+`drop_to_surface` and `scatter_on_surface` compute placement against the scene the session
+renders and author it as one edit (`mcp/place.rs`, through `Open::edit`). They exist
+because placement through `author_usda` means guessing heights. A scene-assembly agent
+would otherwise run its own surface queries against geometry that is not what renders.
+
+### Where it is computed
+
+- **`crust-rt`: `Scene::visit(ids, mask, f)`** hands out the pieces of the top-level
+  geometries `ids` in world space, at shutter open:
+  - a triangle's vertices in winding order, or the bounds of any other primitive;
+  - recursing through instances (each at its `transform`, not `transform_end`);
+  - each piece tagged with the top-level attach id.
+
+  Instances match on their attach id (`placement - 1`), never on a label, so the reserved
+  slots of an `InstanceHitId::Offset` give nothing. It scans the tables and keeps nothing.
+  *Alternative rejected:* reading geometry back through `World::world_vertices`, which is
+  private and gives up on PointInstancer slots and moving instances.
+- **`crust-core::place`** turns the world and the provenance into numbers (moves,
+  instances). It reads no USD and authors nothing. `World::intersect_geometry` is the
+  kernel's own hit (geometric normal, no material, no opacity) over
+  `(TRACE_T_MIN, ∞)` only.
+- **`Provenance::geometry_of(path)`** is the reverse of `prim_of_geometry`. It scans the
+  runs (one per emitting prim) by whole path components. The import now records each
+  run's end beside its start. `prim_of_geometry` and light linking still read a run as
+  ending where the next begins, so neither moves.
+- **`Provenance::prim_frames(layer, paths, op)`** opens a stage masked to the paths with
+  payloads loaded, at the scene's time code, and folds the traversal's own
+  `compose_with_parent`. It returns the parent's and the prim's local-to-world (the
+  import's `f32` matrices, promoted), the composed `xformOpOrder`, and whether the prim is
+  `Xformable`.
+  - *Why not the authoring stage:* it leaves payloads unloaded, and the opinions an
+    asset's payload authors on its root, often its whole op stack, are not there.
+- **`Distribution1D`** moved from `environment.rs` to `distribution.rs` unchanged, shared
+  by the environment map and the scatter. Every golden, domes included, is bit-identical.
+
+### Dropping
+
+1. **Columns.** One ray per distinct vertex of the prim's triangles (deduplicated by bit
+   pattern: a mesh vertex is a corner of about six triangles), plus a 9 × 9 grid on the
+   bottom face of any other primitive's bounds.
+2. **Rays.** Each goes down from the prim's top, straight above its vertex.
+3. **The surface.** A ray takes the first hit that is not the prim's own and, with
+   `target`, is the target's. The kernel has no per-ray id filter (mask bits 3–31 are
+   light-link classes), so a ray skips a hit by re-intersecting past it.
+4. **The drop.** The move is the least height of a vertex above its hit, so the vertex
+   that sets it lands exactly on the surface. A negative least height raises the prim.
+   The reduction is a `min` with ties broken by column, so the result is the same on any
+   number of threads.
+
+- *Why vertices, not a footprint grid:* a grid over the bounding box rests the box on the
+  highest hit under it, which floats a rock on uneven ground.
+- *Trap (twice):* stepping past a hit by raising `t_min`.
+  - First it hung. The kernel range-tests a hit before dividing by the determinant, so a
+    hit can come back at or a hair below the `t_min` it was given, and resuming at
+    `t.next_up()` found the same hit forever.
+  - Then it cost every render. Every intersection in the program asks for
+    `(TRACE_T_MIN, ∞)`, and fat LTO propagates those constants into `Bvh::hit`. A second
+    caller passing a variable `t_min` cost the Cornell box 5.1 M more instructions in
+    `Bvh::hit` (+0.6%, an extra spill in its prologue) with identical images, which is
+    the `TRACE_T_MIN` comment's own story.
+  - `place::first_hit` now restarts the ray at the skipped hit (`World::intersect_geometry`
+    takes no bounds), as the tracer's `restarted` does. A surface within `TRACE_T_MIN`
+    behind a skipped one is skipped with it.
+- **Alignment** turns the prim about the bottom centre of its footprint, by the shortest
+  arc from up to the geometric normal under the footprint's centre, then drops the turned
+  vertices along the stage's down axis.
+
+**The authored op.** The world-space move Δ becomes one `matrix4d`,
+`xformOp:transform:crustPlace = P⁻¹ · Δ · P · C`. Here `P` is the parent's local-to-world
+(the world after a `!resetXformStack!`) and `C` is the op's composed value, or identity.
+- It is listed after the last reset, else first, and the composed ops follow in order.
+  Again: a reset in the middle of the stack would otherwise discard the op.
+- A second drop folds into the op, so a prim keeps one.
+- One matrix covers a turn under any parent, sheared or not. A `translate` + `orient`
+  pair cannot.
+- `xformOpOrder` is authored whole, which shadows later source changes to it (Known gaps).
+
+**Up axis.** Stage metadata is the root layer's, and the override layer authors no
+`upAxis`. So placement reads the override layer's `upAxis`, then the input's root layer's,
+alone with `sdf::Layer::open`, then falls back to Y.
+
+### Scattering
+
+1. **Triangles.** The target's visible triangles, in `visit`'s fixed order, filtered by
+   `max_slope` on their geometric normal (from the winding as it renders), become an area
+   CDF.
+2. **Draws.** Instance `i` draws from `PathSampler::new(0, 0, seed, i)`:
+   - domain 0 (4D): the triangle, two numbers for the square-root triangle warp
+     (`utils::uniform_triangle`), and the prototype;
+   - domain 1 (2D): the turn about up and the scale.
+
+   The sampler is always the Sobol one, whatever `crust:sampler` says. So an instance
+   depends on the seed, `i` and the triangle list alone, and Sobol over `i` stratifies
+   the area draw.
+3. **The instancer.** Each instance's world matrix `T(p)·R_up(θ)·S(s)` is taken into the
+   parent's space and decomposed into `positions`, `orientations` (`quath`, which every
+   USD reader knows) and `scales`. A residual above 1e-5 refuses the call: a parent that
+   rotates with non-uniform scale shears the instance, which the arrays cannot express.
+4. **Prototypes.** Each is a **typeless** `def` under `<instancer>/Prototypes` that
+   references the prim or the asset, with an empty `xformOpOrder`.
+   - *Trap:* a `def Xform` would win over the referenced `Mesh`'s type and author an empty
+     Xform.
+   - The empty op order drops the source's own placement for any reader. crust skips a
+     prototype root's transform already.
+
+A scatter defines a new prim, so it is `full`. A path the stage already composes is
+refused: the merge cannot remove the previous prototypes' specs, so a re-scatter is
+`undo` then scatter.
+
+### Freshness
+
+Both tools run `refresh`, then `bring_current` (which imports when a source changed), then
+compute, then `edit`. So a rewrite costs one import before the placement and one after it.
+A call that places nothing authors nothing and adds no undo step. The result carries the
+edit's fields, `place_s`, and the `sources_changed` that `bring_current` imported.
+
+### Measured
+
+Release build, one machine, the largest prim of each sample:
+
+| prim | triangles | drop, 1 thread | drop, 8 threads | scatter of 100 000, 8 threads |
+|---|---|---|---|---|
+| `materialx_lion` statue | 980 266 | 1.62 s | 0.41 s | 0.044 s |
+| `materialx_teapot` body | 176 148 | 0.38 s | 0.08 s | 0.012 s |
+
+Deduplicating the columns halved the lion's drop (0.92 s before, at 8 threads).
+
+The render path does not move. Callgrind on `crust render` of the Cornell box at `-s 2`,
+one thread, before and after the change:
+- 4 250 609 068 instructions before and 4 250 526 128 after (−82 940), all of it in the
+  import (`sdf` path ordering, `memcpy`, `malloc`);
+- every render function's count is identical but `render_pass`'s, by +15 of 27 million;
+- every checked-in sample renders bit-identical to goldens recorded before the change
+  (`scripts/check_images.sh`).
+
+The first version, which raised `t_min` (above), cost +5.1 M in `Bvh::hit`.
+
+The tests live in two places:
+- `crust-core/tests/place.rs`: the visitor against the shading hit, `geometry_of`,
+  `prim_frames` against the rendered geometry, every drop case, and the scatter's area
+  split, seed and slope;
+- `crust-render/src/mcp/tests.rs`, section "Placement": every scenario of the spec, the
+  scatter rendering bitwise as a fresh session of its saved layer included.
+
+### Known gaps
+
+- **Contact is vertex-to-face.** A sharp feature of the surface between two of the prim's
+  vertices can poke through a face. A curve or implicit shape rests on its bounds.
+- **Prims in one call are placed against the scene before it.** They do not land on each
+  other. Call twice to stack.
+- **One frame, shutter open.** An animated parent makes an aligned move differ at other
+  frames. The op is a default value, not a time sample.
+- **Placement follows the import's settings.** A later subdivision-level or displacement
+  change moves the surface away from what was placed on it.
+- **Opacity cutouts are solid** to the rays, as to `probe`'s.
+- **`xformOpOrder` shadowing.** The override authors the whole list, so a source that
+  later adds an op is hidden until the prim is dropped again after an `undo`.
+- **CDF resolution.** The CDF is stored in f32, as fine as the sampler's numbers: a
+  triangle under ~1e-7 of the target's area can be over- or under-drawn.
+- **Instances stand upright.** They are not aligned to the surface normal.
+- **The override layer carries no `upAxis`.** Found while writing the up-axis read: a
+  session's composed stage is Y-up whatever the input says. Placement reads the input's
+  root layer to compensate. Where the render reads the stage's up axis (a `DomeLight_1`
+  with `poleAxis = "scene"`), a session over a Z-up input renders the dome as Y-up, unlike
+  `crust render` of the input. `open_session` should copy the input's `upAxis` (and
+  `metersPerUnit`) into the layer it creates.

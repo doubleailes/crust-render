@@ -102,7 +102,7 @@ use lights::{
     emit_rect_light, emit_sphere_light,
 };
 pub(crate) use listing::{list_prims, list_records};
-pub(crate) use live::rebuild;
+pub(crate) use live::{prim_frames, rebuild};
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{
     MeshArena, MeshPlace, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes, place_mesh_source,
@@ -650,8 +650,23 @@ fn mapping_resolver() -> DefaultResolver {
 
 /// Opens the stage with payloads loaded, optionally masked to one subtree.
 fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<Stage, crate::Error> {
+    open_stage_masked(path, path_str, mask.map(|p| vec![p]))
+}
+
+/// [`open_stage`] population-masked to every path of `mask` (and their
+/// ancestors and descendants), payloads loaded.
+fn open_stage_masked(
+    path: &Path,
+    path_str: &str,
+    mask: Option<Vec<sdf::Path>>,
+) -> Result<Stage, crate::Error> {
     let started = Instant::now();
-    let masked = mask.as_ref().map(|p| p.to_string());
+    let masked = mask.as_ref().map(|ps| {
+        ps.iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
     let mut builder = stage_builder().load(InitialLoadSet::LoadAll);
     if let Some(p) = mask {
         // Fallible since openusd 0.7: a mask path must be an absolute prim
@@ -659,7 +674,7 @@ fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<St
         // top-level prim paths, so a failure here is a bug rather than bad
         // input — but it is reported rather than panicked on, like every
         // other way opening a stage can fail.
-        let mask = StagePopulationMask::new([p]).map_err(|e| crate::Error::UsdOpen {
+        let mask = StagePopulationMask::new(p).map_err(|e| crate::Error::UsdOpen {
             path: path.to_path_buf(),
             source: e.into(),
         })?;

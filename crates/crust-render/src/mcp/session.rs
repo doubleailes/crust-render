@@ -573,7 +573,7 @@ impl Open {
 
     /// `path`, an existing prim of the stage, which an edit may target: not
     /// an instance proxy, whose opinions USD reads from its prototype only.
-    fn editable_prim(&self, path: &str) -> Result<sdf::Path, String> {
+    pub(super) fn editable_prim(&self, path: &str) -> Result<sdf::Path, String> {
         let path = sdf::Path::new(path).map_err(|e| format!("{path:?} is not a USD path: {e}"))?;
         if path.is_property_path() {
             return Err(format!(
@@ -691,14 +691,14 @@ impl Open {
         self.edit(&Snippet::parse(text)?)
     }
 
-    fn input_dir(&self) -> PathBuf {
+    pub(super) fn input_dir(&self) -> PathBuf {
         self.input
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default()
     }
 
-    fn layer_dir(&self) -> PathBuf {
+    pub(super) fn layer_dir(&self) -> PathBuf {
         self.output
             .parent()
             .map(Path::to_path_buf)

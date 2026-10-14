@@ -25,6 +25,7 @@ pub mod color;
 pub mod compare;
 pub mod config;
 pub mod diagnostic;
+mod distribution;
 mod environment;
 mod error;
 mod filter;
@@ -42,6 +43,7 @@ mod material;
 mod medium;
 pub mod names;
 mod pdf;
+pub mod place;
 /// The opt-in render profile (`--profile`): per-section thread time inside
 /// the render, after Guerilla Render's "Render Profile".
 pub mod profile;

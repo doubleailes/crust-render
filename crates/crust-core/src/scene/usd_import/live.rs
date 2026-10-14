@@ -16,7 +16,7 @@ use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Prim, Stage};
 
 use crate::light::LightList;
-use crate::live::{LightUpdate, Provenance, SettingsUpdate, Structural, Update};
+use crate::live::{LightUpdate, PrimFrame, Provenance, SettingsUpdate, Structural, Update};
 use crate::material::Material;
 use crate::rt_world::WorldBuilder;
 use crate::{AssetLoader, Warning};
@@ -26,9 +26,10 @@ use super::light_links::LightLinks;
 use super::materials::{resolve_displacement, resolve_fresh};
 use super::mesh::SubdivPolicy;
 use super::time::EvalTimeScope;
+use super::xform::compose_with_parent;
 use super::{
-    ImportCaches, ImportCtx, ValidOptions, apply_exposure, emit_light, open_stage, prim_at,
-    read_index, stage_builder,
+    ImportCaches, ImportCtx, ValidOptions, apply_exposure, emit_light, open_stage,
+    open_stage_masked, prim_at, read_index, stage_builder,
 };
 
 /// Warning codes a settings change can move, by family: the settings, the
@@ -394,4 +395,66 @@ fn refresh_settings(
         )));
     }
     Ok(update)
+}
+
+/// Each of `paths` as the import composes it: on a stage masked to them with
+/// payloads loaded (so ops a payload authors count), at the import's time
+/// code, through the traversal's own [`compose_with_parent`].
+pub(crate) fn prim_frames(
+    prov: &Provenance,
+    layer: &Path,
+    paths: &[String],
+    place_op: &str,
+) -> Result<Vec<PrimFrame>, Structural> {
+    let path_str = layer
+        .to_str()
+        .ok_or_else(|| Structural("the layer path is not UTF-8".into()))?;
+    let _time = EvalTimeScope::enter(prov.stage.options.frame);
+    let prims = paths
+        .iter()
+        .map(|p| prim_path(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let stage = open_stage_masked(layer, path_str, Some(prims.clone()))
+        .map_err(|e| Structural(format!("cannot open the stage: {e}")))?;
+    // Warnings the walk raises are the import's to report, not placement's.
+    let _scope = crate::WarningScope::enter();
+    prims
+        .iter()
+        .map(|path| {
+            let prim = stage
+                .prim(path.clone())
+                .ok()
+                .filter(|p| p.is_valid().unwrap_or(false))
+                .ok_or_else(|| Structural(format!("{path} is not a prim of the stage")))?;
+            use openusd_schemas::geom::XformableSchema;
+            let xf = openusd_schemas::geom::Xformable::from_prim(prim.clone())
+                .ok()
+                .flatten();
+            let order: Vec<String> = xf
+                .as_ref()
+                .and_then(|xf| xf.xform_op_order().ok().flatten())
+                .map(|o| o.iter().map(|t| t.as_str().to_string()).collect())
+                .unwrap_or_default();
+            let parent = path
+                .parent()
+                .map(|p| local_to_world(&stage, &prim_at(&stage, p)))
+                .unwrap_or(glam::Mat4::IDENTITY);
+            let world = compose_with_parent(&prim, parent);
+            let place = prim
+                .attribute(place_op)
+                .get::<openusd::gf::Matrix4d>()
+                .ok()
+                .flatten()
+                .map(|m| glam::DMat4::from_cols_array(&m.0));
+            Ok(PrimFrame {
+                path: path.to_string(),
+                xformable: xf.is_some(),
+                resets_xform_stack: order.iter().any(|e| e == "!resetXformStack!"),
+                parent_to_world: parent.as_dmat4(),
+                local_to_world: world.as_dmat4(),
+                xform_op_order: order,
+                place_op: place,
+            })
+        })
+        .collect()
 }

@@ -170,23 +170,28 @@ pub(super) struct LightLinks {
     /// `(first geom_id, path)` per emitting prim, in traversal order: the
     /// prim owns every id up to the next entry's.
     runs: Vec<(u32, u32)>,
+    /// One past the last geom_id of `runs[k]`, as the prim emitted it: what
+    /// the provenance's reverse lookup reads (the links keep reading a run as
+    /// ending where the next begins).
+    run_ends: Vec<u32>,
     /// `(volume index, path)` per volume-region prim.
     volumes: Vec<(u32, u32)>,
     pending: Vec<Pending>,
 }
 
 impl LightLinks {
-    /// `(first geom_id, prim path)` per prim that emitted geometry, in
-    /// traversal order: the runs [`LightLinks::resolve`] judges receivers by,
+    /// `(geom_ids, prim path)` per prim that emitted geometry, in traversal
+    /// order: the runs [`LightLinks::resolve`] judges receivers by,
     /// kept for [`crate::live::Provenance`].
-    pub(super) fn geometry_runs(&self) -> Vec<(u32, String)> {
+    pub(super) fn geometry_runs(&self) -> Vec<(std::ops::Range<u32>, String)> {
         let mut by_id: Vec<Option<&sdf::Path>> = vec![None; self.paths.len()];
         for (p, &id) in &self.paths {
             by_id[id as usize] = Some(p);
         }
         self.runs
             .iter()
-            .filter_map(|&(first, id)| Some((first, by_id[id as usize]?.to_string())))
+            .zip(&self.run_ends)
+            .filter_map(|(&(first, id), &end)| Some((first..end, by_id[id as usize]?.to_string())))
             .collect()
     }
 
@@ -214,6 +219,7 @@ impl LightLinks {
         let id = self.intern(path);
         if !geoms.is_empty() {
             self.runs.push((geoms.start as u32, id));
+            self.run_ends.push(geoms.end as u32);
         }
         for v in vols {
             self.volumes.push((v as u32, id));

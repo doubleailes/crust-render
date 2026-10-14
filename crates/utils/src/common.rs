@@ -95,6 +95,16 @@ pub fn uniform_ball(uvw: [f32; 3]) -> Vec3A {
     dir * r
 }
 
+/// Uniform triangle sample from an explicit 2D uniform pair: barycentric
+/// weights `[b0, b1, b2]` (summing to 1) of the triangle's three corners,
+/// uniform over its area (the square-root warp, PBRT's `SampleUniformTriangle`).
+pub fn uniform_triangle(uv: [f32; 2]) -> [f32; 3] {
+    let su = uv[0].max(0.0).sqrt();
+    let b0 = 1.0 - su;
+    let b1 = uv[1] * su;
+    [b0, b1, (1.0 - b0 - b1).max(0.0)]
+}
+
 /// Concentric-disk warp (Shirley 1997) from an explicit 2D uniform pair.
 /// Returns an xy-point in the unit disk, `z = 0`.
 pub fn concentric_disk(uv: [f32; 2]) -> Vec3A {
@@ -127,4 +137,36 @@ pub fn align_to_normal(local: Vec3A, normal: Vec3A) -> Vec3A {
     let bitangent = normal.cross(tangent);
 
     local.x * tangent + local.y * bitangent + local.z * normal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Points land inside the triangle, and each of its four midpoint
+    /// sub-triangles (a quarter of the area each) gets a quarter of them.
+    #[test]
+    fn uniform_triangle_is_uniform_over_the_area() {
+        let n = 64u32;
+        let mut counts = [0u32; 4];
+        for i in 0..n {
+            for j in 0..n {
+                let uv = [(i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32];
+                let b = uniform_triangle(uv);
+                assert!(b.iter().all(|&w| (0.0..=1.0).contains(&w)), "{b:?}");
+                assert!((b.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+                // Corner sub-triangle k holds the points with b[k] > 1/2; the
+                // middle one holds the rest.
+                let k = b.iter().position(|&w| w > 0.5).unwrap_or(3);
+                counts[k] += 1;
+            }
+        }
+        let expected = (n * n) as f64 / 4.0;
+        let chi2: f64 = counts
+            .iter()
+            .map(|&c| (c as f64 - expected).powi(2) / expected)
+            .sum();
+        // 3 degrees of freedom: 16.27 is the 0.1% critical value.
+        assert!(chi2 < 16.27, "counts {counts:?}, chi-square {chi2}");
+    }
 }

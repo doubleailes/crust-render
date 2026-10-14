@@ -391,6 +391,198 @@ pub fn binding_snippet(prim: &sdf::Path, material: &sdf::Path) -> Result<String,
     )
 }
 
+/// The op placement authors on a prim (`drop_to_surface`): one `matrix4d`,
+/// first in the prim's `xformOpOrder` after any `!resetXformStack!`.
+pub const PLACE_OP: &str = "xformOp:transform:crustPlace";
+
+/// Opinions on several prims as one snippet: each `(prim, body)`'s body
+/// inside nested `over`s down to its prim, the prims' common ancestors
+/// written once. A body at the pseudo-root (`/`) is written at the top.
+pub fn overs_tree(entries: &[(sdf::Path, String)]) -> Result<String, String> {
+    #[derive(Default)]
+    struct Node {
+        body: String,
+        children: Vec<(String, Node)>,
+    }
+    let mut root = Node::default();
+    for (prim, body) in entries {
+        let text = prim.to_string();
+        if text.contains('{') || !prim.is_abs() || prim.is_property_path() {
+            return Err(format!("{prim} is not a prim path on the stage"));
+        }
+        let mut node = &mut root;
+        for name in text.split('/').filter(|n| !n.is_empty()) {
+            let i = match node.children.iter().position(|(n, _)| n == name) {
+                Some(i) => i,
+                None => {
+                    node.children.push((name.to_owned(), Node::default()));
+                    node.children.len() - 1
+                }
+            };
+            node = &mut node.children[i].1;
+        }
+        node.body.push_str(body);
+        if !body.ends_with('\n') {
+            node.body.push('\n');
+        }
+    }
+    fn emit(node: &Node, depth: usize, out: &mut String) {
+        let pad = "    ".repeat(depth);
+        for line in node.body.lines() {
+            out.push_str(&format!("{pad}{line}\n"));
+        }
+        for (name, child) in &node.children {
+            out.push_str(&format!("{pad}over \"{name}\"\n{pad}{{\n"));
+            emit(child, depth + 1, out);
+            out.push_str(&format!("{pad}}}\n"));
+        }
+    }
+    let mut out = String::new();
+    emit(&root, 0, &mut out);
+    Ok(out)
+}
+
+/// A `matrix4d` literal: glam's column-major array is USD's row-major one
+/// (row vectors, translation in the last row).
+fn matrix_literal(m: &glam::DMat4) -> String {
+    let a = m.to_cols_array();
+    let rows: Vec<String> = a
+        .chunks(4)
+        .map(|r| format!("({}, {}, {}, {})", r[0], r[1], r[2], r[3]))
+        .collect();
+    format!("( {} )", rows.join(", "))
+}
+
+/// The opinions that move the prim of `frame` by `delta` in world space,
+/// applied after its current world transform: the [`PLACE_OP`] it composes
+/// (identity when it has none) folded with `delta` conjugated into its
+/// parent's space, so the prim's world transform becomes `delta · world`.
+/// The op is listed after the last `!resetXformStack!` (whose parent space
+/// is the world), else first, and the prim's composed ops keep their order.
+pub fn placement_body(frame: &crust_core::live::PrimFrame, delta: &glam::DMat4) -> String {
+    let parent = if frame.resets_xform_stack {
+        glam::DMat4::IDENTITY
+    } else {
+        frame.parent_to_world
+    };
+    let mut order = frame.xform_op_order.clone();
+    let listed = order.iter().any(|e| e == PLACE_OP);
+    let current = match frame.place_op {
+        Some(m) if listed => m,
+        _ => glam::DMat4::IDENTITY,
+    };
+    let op = parent.inverse() * *delta * parent * current;
+    if !listed {
+        let at = order
+            .iter()
+            .rposition(|e| e == "!resetXformStack!")
+            .map_or(0, |i| i + 1);
+        order.insert(at, PLACE_OP.to_owned());
+    }
+    let order: Vec<String> = order.iter().map(|e| quoted(e)).collect();
+    format!(
+        "matrix4d {PLACE_OP} = {}\nuniform token[] xformOpOrder = [{}]",
+        matrix_literal(&op),
+        order.join(", ")
+    )
+}
+
+/// Where a scattered prototype comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProtoSource {
+    /// A prim of the stage, referenced internally.
+    Prim(sdf::Path),
+    /// An asset, its path already written for the layer ([`reanchor`]).
+    Asset(String),
+}
+
+/// One prototype of a scatter: its child's name under `Prototypes`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prototype {
+    pub name: String,
+    pub source: ProtoSource,
+}
+
+/// The `def PointInstancer` a scatter authors, named `name`, whose parent's
+/// local-to-world is `parent`: each instance's world placement (its
+/// prototype's origin at `position`, turned `angle` about `up`, scaled
+/// uniformly) as `positions`, `orientations`, `scales` and `protoIndices`
+/// in the parent's space, and one typeless child per prototype under
+/// `Prototypes` referencing its source with an empty `xformOpOrder`, so it is
+/// instanced at its own origin. Refused when the parent's space would shear
+/// an instance, which the arrays cannot express.
+pub fn instancer_body(
+    name: &str,
+    path: &sdf::Path,
+    parent: &glam::DMat4,
+    up: glam::DVec3,
+    instances: &[crust_core::place::Instance],
+    prototypes: &[Prototype],
+) -> Result<String, String> {
+    let to_parent = parent.inverse();
+    let mut positions = Vec::with_capacity(instances.len());
+    let mut orientations = Vec::with_capacity(instances.len());
+    let mut scales = Vec::with_capacity(instances.len());
+    let mut indices = Vec::with_capacity(instances.len());
+    for i in instances {
+        let world = glam::DMat4::from_scale_rotation_translation(
+            glam::DVec3::splat(i.scale),
+            glam::DQuat::from_axis_angle(up, i.angle),
+            i.position,
+        );
+        let local = to_parent * world;
+        let (s, r, t) = local.to_scale_rotation_translation();
+        let back = glam::DMat4::from_scale_rotation_translation(s, r, t);
+        let size = local
+            .to_cols_array()
+            .iter()
+            .fold(1f64, |m, v| m.max(v.abs()));
+        let off = (local - back)
+            .to_cols_array()
+            .iter()
+            .fold(0f64, |m, v| m.max(v.abs()));
+        if off > 1e-5 * size {
+            return Err(format!(
+                "{path}'s parent space shears an instance turned about the up axis (a rotation \
+                 with a non-uniform scale): put the instancer under a prim without one"
+            ));
+        }
+        let (s, r, t) = (s.as_vec3(), r.as_quat(), t.as_vec3());
+        positions.push(format!("({}, {}, {})", t.x, t.y, t.z));
+        orientations.push(format!("({}, {}, {}, {})", r.w, r.x, r.y, r.z));
+        scales.push(format!("({}, {}, {})", s.x, s.y, s.z));
+        indices.push(i.prototype.to_string());
+    }
+    let targets: Vec<String> = prototypes
+        .iter()
+        .map(|p| format!("<{path}/Prototypes/{}>", p.name))
+        .collect();
+    let mut protos = String::new();
+    for p in prototypes {
+        let reference = match &p.source {
+            ProtoSource::Prim(prim) => format!("<{prim}>"),
+            ProtoSource::Asset(asset) => format!("@{asset}@"),
+        };
+        // Typeless: a `def Xform` would win over the referenced prim's type.
+        protos.push_str(&format!(
+            "    def {} (\n        prepend references = {reference}\n    )\n    {{\n        \
+             uniform token[] xformOpOrder = []\n    }}\n",
+            quoted(&p.name)
+        ));
+    }
+    Ok(format!(
+        "def PointInstancer {}\n{{\n    point3f[] positions = [{}]\n    quath[] orientations = \
+         [{}]\n    float3[] scales = [{}]\n    int[] protoIndices = [{}]\n    rel prototypes = \
+         [{}]\n\n    def Scope \"Prototypes\"\n    {{\n{protos}    }}\n}}\n",
+        quoted(name),
+        positions.join(", "),
+        orientations.join(", "),
+        scales.join(", "),
+        indices.join(", "),
+        targets.join(", ")
+    ))
+}
+
 /// An asset path as given to an edit tool, written for the override layer
 /// (design D5): a relative path is read against the input stage's directory
 /// — how `query` shows the input's own paths — and rewritten against the
@@ -502,5 +694,185 @@ mod tests {
         assert_eq!(reanchor("./t.png", &p("w"), &p("w")), "./t.png");
         let abs = p("x/t.png").to_string_lossy().into_owned();
         assert_eq!(reanchor(&abs, &p("shots"), &p("work")), abs);
+    }
+
+    /// A frame whose parent rotates and scales non-uniformly, listing ops of
+    /// its own.
+    fn frame(order: &[&str], place_op: Option<glam::DMat4>) -> crust_core::live::PrimFrame {
+        let parent = glam::DMat4::from_scale_rotation_translation(
+            glam::DVec3::new(2.0, 0.5, 3.0),
+            glam::DQuat::from_euler(glam::EulerRot::XYZ, 0.3, -0.7, 1.1),
+            glam::DVec3::new(10.0, -4.0, 2.5),
+        );
+        crust_core::live::PrimFrame {
+            path: "/World/a/b".into(),
+            parent_to_world: parent,
+            local_to_world: parent,
+            xform_op_order: order.iter().map(|s| s.to_string()).collect(),
+            resets_xform_stack: order.contains(&"!resetXformStack!"),
+            xformable: true,
+            place_op,
+        }
+    }
+
+    /// The op and the order `placement_body` authors on `/World/a/b`, read
+    /// back through the USDA parser.
+    fn authored(body: &str) -> (glam::DMat4, Vec<String>) {
+        let prim = sdf::Path::new("/World/a/b").unwrap();
+        let text = overs_tree(&[(prim, body.to_owned())]).unwrap();
+        let snippet = Snippet::parse(&text).expect("parses");
+        let field = |name: &str| {
+            let path = sdf::Path::new(&format!("/World/a/b.{name}")).unwrap();
+            snippet.data.try_field(&path, "default").unwrap().unwrap()
+        };
+        let op = match field(PLACE_OP).as_ref() {
+            Value::Matrix4d(m) => glam::DMat4::from_cols_array(&m.0),
+            v => panic!("{v:?}"),
+        };
+        let order = match field("xformOpOrder").as_ref() {
+            Value::TokenVec(o) => o.iter().map(|t| t.as_str().to_owned()).collect(),
+            v => panic!("{v:?}"),
+        };
+        (op, order)
+    }
+
+    /// The authored op moves the prim by exactly `delta` in world space,
+    /// whatever its parent's rotation and scale; it goes first, after a
+    /// reset, keeping the prim's ops; a second drop folds into it.
+    #[test]
+    fn a_placement_moves_the_prim_by_delta_in_world_space() {
+        let delta = glam::DMat4::from_translation(glam::DVec3::new(0.0, -1.25, 0.0))
+            * glam::DMat4::from_rotation_z(0.2);
+        let f = frame(&["xformOp:translate", "xformOp:rotateY"], None);
+        let (op, order) = authored(&placement_body(&f, &delta));
+        assert_eq!(order, [PLACE_OP, "xformOp:translate", "xformOp:rotateY"]);
+        // World' = P · op · L = Δ · P · L.
+        let p = f.parent_to_world;
+        assert!((p * op * p.inverse()).abs_diff_eq(delta, 1e-9));
+
+        // Again: the op folds, listed once.
+        let f2 = frame(
+            &order.iter().map(String::as_str).collect::<Vec<_>>(),
+            Some(op),
+        );
+        let (op2, order2) = authored(&placement_body(&f2, &delta));
+        assert_eq!(order2, order);
+        assert!((p * op2 * p.inverse()).abs_diff_eq(delta * delta, 1e-9));
+
+        // After a reset, the parent space is the world's.
+        let f3 = frame(
+            &["xformOp:scale", "!resetXformStack!", "xformOp:translate"],
+            None,
+        );
+        let (op3, order3) = authored(&placement_body(&f3, &delta));
+        assert_eq!(
+            order3,
+            [
+                "xformOp:scale",
+                "!resetXformStack!",
+                PLACE_OP,
+                "xformOp:translate"
+            ]
+        );
+        assert!(op3.abs_diff_eq(delta, 1e-12));
+    }
+
+    /// Instances land where they were placed in world space, under a parent
+    /// that rotates and scales uniformly; a shearing parent is refused.
+    #[test]
+    fn an_instancer_places_its_instances_in_its_parents_space() {
+        use crust_core::place::Instance;
+        let up = glam::DVec3::Y;
+        let instances = [
+            Instance {
+                position: glam::DVec3::new(1.0, 2.0, 3.0),
+                angle: 0.7,
+                scale: 1.5,
+                prototype: 1,
+            },
+            Instance {
+                position: glam::DVec3::new(-4.0, 0.0, 0.5),
+                angle: 0.0,
+                scale: 0.5,
+                prototype: 0,
+            },
+        ];
+        let protos = [
+            Prototype {
+                name: "rock".into(),
+                source: ProtoSource::Prim(sdf::Path::new("/World/rock").unwrap()),
+            },
+            Prototype {
+                name: "stone".into(),
+                source: ProtoSource::Asset("./stone.usda".into()),
+            },
+        ];
+        let parent = glam::DMat4::from_scale_rotation_translation(
+            glam::DVec3::splat(2.0),
+            glam::DQuat::from_rotation_x(0.4),
+            glam::DVec3::new(5.0, 0.0, 0.0),
+        );
+        let path = sdf::Path::new("/World/scatter").unwrap();
+        let body = instancer_body("scatter", &path, &parent, up, &instances, &protos).unwrap();
+        let text = overs_tree(&[(sdf::Path::new("/World").unwrap(), body)]).unwrap();
+        let snippet = Snippet::parse(&text).expect("parses");
+        let field = |name: &str| {
+            let p = sdf::Path::new(&format!("/World/scatter.{name}")).unwrap();
+            snippet.data.try_field(&p, "default").unwrap().unwrap()
+        };
+        let Value::Vec3fVec(pos) = field("positions").as_ref().clone() else {
+            panic!("positions")
+        };
+        let Value::QuathVec(rot) = field("orientations").as_ref().clone() else {
+            panic!("orientations")
+        };
+        let Value::Vec3fVec(scl) = field("scales").as_ref().clone() else {
+            panic!("scales")
+        };
+        let Value::IntVec(idx) = field("protoIndices").as_ref().clone() else {
+            panic!("protoIndices")
+        };
+        assert_eq!(idx, [1, 0]);
+        for (k, i) in instances.iter().enumerate() {
+            let (q, s, p) = (rot[k], scl[k], pos[k]);
+            let local = glam::DMat4::from_scale_rotation_translation(
+                glam::DVec3::new(s.x as f64, s.y as f64, s.z as f64),
+                glam::DQuat::from_xyzw(q.x.to_f64(), q.y.to_f64(), q.z.to_f64(), q.w.to_f64())
+                    .normalize(),
+                glam::DVec3::new(p.x as f64, p.y as f64, p.z as f64),
+            );
+            let world = glam::DMat4::from_scale_rotation_translation(
+                glam::DVec3::splat(i.scale),
+                glam::DQuat::from_axis_angle(up, i.angle),
+                i.position,
+            );
+            // Half-precision orientations: a few thousandths.
+            assert!((parent * local).abs_diff_eq(world, 5e-3), "instance {k}");
+        }
+        let proto =
+            |name: &str| sdf::Path::new(&format!("/World/scatter/Prototypes/{name}")).unwrap();
+        assert!(
+            snippet
+                .data
+                .try_field(&proto("rock"), "typeName")
+                .unwrap()
+                .is_none(),
+            "typeless"
+        );
+        assert!(
+            snippet
+                .data
+                .try_field(&proto("stone"), "references")
+                .unwrap()
+                .is_some()
+        );
+
+        let shear = glam::DMat4::from_scale_rotation_translation(
+            glam::DVec3::new(1.0, 3.0, 1.0),
+            glam::DQuat::from_rotation_x(0.4),
+            glam::DVec3::ZERO,
+        );
+        let e = instancer_body("scatter", &path, &shear, up, &instances, &protos).unwrap_err();
+        assert!(e.contains("shears"), "{e}");
     }
 }

@@ -33,12 +33,13 @@ use crate::prim::{
     CubicCurvePrim, GeomTable, InstancePrim, NO_NORMALS, Prim, PrimHit, PrimNode, TriangleRecord,
     clip_box, triangle_hit_from_barycentric,
 };
-use crate::ray::Ray;
+use crate::ray::{Ray, RayMask};
+use crate::scene::Piece;
 use crate::scene::PrimitiveBreakdown;
 use crate::triangle::{
     Hit4, RayShear, Tri4, Tri4i, clip_triangle_aabb, triangle_intersect_sheared,
 };
-use glam::Vec3A;
+use glam::{Affine3A, Vec3A};
 
 /// Diagnostic traversal counters, compiled out unless the
 /// `traversal-stats` feature is on — they sit in the innermost loop.
@@ -624,6 +625,62 @@ impl Bvh {
             return None;
         }
         Some(self.tri_verts(rec))
+    }
+
+    /// Hands `f` every piece of the geometries attached as `ids` that a ray
+    /// of `mask` can see, in `to_world`'s space, at shutter open: triangles
+    /// (in winding order, degenerate records skipped), then the bounds of
+    /// analytic primitives, curve segments and spans, then every piece of
+    /// each instance's scene, through its placement. `f` gets the attach id
+    /// of the top-level geometry the piece belongs to.
+    pub(crate) fn visit(
+        &self,
+        ids: std::ops::Range<u32>,
+        mask: RayMask,
+        to_world: Option<&Affine3A>,
+        f: &mut dyn FnMut(u32, Piece),
+    ) {
+        let point = |p: Vec3A| to_world.map_or(p, |m| m.transform_point3a(p));
+        let n = self.geoms.len() as u32;
+        for id in ids.start.min(n)..ids.end.min(n) {
+            let first = self.geoms[id as usize].tri_base as usize;
+            for rec in self.tris[first.min(self.tris.len())..]
+                .iter()
+                .take_while(|r| r.geom_id == id)
+            {
+                if rec.is_degenerate() || !mask.sees(rec.mask) {
+                    continue;
+                }
+                let [a, b, c] = self.tri_verts(rec);
+                f(id, Piece::Triangle([point(a), point(b), point(c)]));
+            }
+        }
+        let bounds = |b: AABB| match to_world {
+            Some(m) => crate::prim::transformed_aabb(&b, m),
+            None => b,
+        };
+        for p in &self.prims {
+            let (id, m) = p.id_and_mask();
+            if ids.contains(&id) && mask.sees(m) {
+                f(id, Piece::Bounds(bounds(p.bbox())));
+            }
+        }
+        for p in &self.cubics {
+            if ids.contains(&p.geom_id) && mask.sees(p.mask) {
+                f(p.geom_id, Piece::Bounds(bounds(p.bbox())));
+            }
+        }
+        for inst in self.instances.iter() {
+            // The attach id: `geom_id` may be a label (`InstanceHitId::As`).
+            let id = inst.placement - 1;
+            if !ids.contains(&id) || !mask.sees(inst.mask) {
+                continue;
+            }
+            let l2w = inst.l2w_at_open();
+            let l2w = to_world.map_or(l2w, |m| *m * l2w);
+            inst.scene
+                .visit_inner(mask, &l2w, &mut |_, piece| f(id, piece));
+        }
     }
 
     pub(crate) fn prim_count(&self) -> usize {

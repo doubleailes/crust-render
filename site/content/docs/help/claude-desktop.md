@@ -108,6 +108,8 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 | `set_active(prim, active)` | activates or deactivates a prim |
 | `bind_material(prim, material)` | binds a Material to a prim |
 | `author_usda(text)` | merges a USDA snippet of `over`, `def` and `class` specs into the layer, as one edit |
+| `drop_to_surface(prims, target?, align_to_normal?)` | moves each prim down until it rests on the surface beneath it, optionally turned to that surface's normal; one edit |
+| `scatter_on_surface(target, prototypes, path, seed, count \| density, max_slope?, random_rotation?, scale?)` | defines a `PointInstancer` whose instances lie on the target's surface, by area, from the seed; one edit |
 | `undo()` | the layer as it was before the last edit |
 | `reload()` | composes the stage again and imports the layer whole, whether or not a source changed; lists the source layers that did |
 | `render(region?, spp?, budget_s?, wait?)` | starts a progressive render and answers with the image so far: at 4 samples per pixel by default, at completion with `wait="done"`, within `budget_s` (default 10) either way |
@@ -221,6 +223,50 @@ in place *while* the session imports it can crash the server when the build read
 through memory mappings
 ([`CRUST_USD_MMAP`](@/docs/reference/environment-variables.md#crust-usd-mmap)).
 
+### Placing things on surfaces
+
+`drop_to_surface` and `scatter_on_surface` compute placement against the geometry the
+session renders: subdivided, displaced and instanced as the render sees it, at the
+session's frame. Only geometry the camera sees counts. "Up" is the stage's `upAxis` (Y
+when the stage authors none). When a source layer changed on disk, the session imports
+it before placing anything, so nothing lands on a surface that has since moved. Each call
+is one edit: saved, imported, one `undo` step, with the usual `applied`, `import_s` and
+warnings, plus `place_s`, the time the placement itself took.
+
+- **`drop_to_surface(prims, target?, align_to_normal?)`** moves each prim along the down
+  axis until no point of its geometry lies below the highest surface beneath it, and one
+  rests on it. A prim already sunk into the surface is raised. With `target`, only those
+  prims' geometry counts, so a cup can drop through a shelf onto the table below. A prim's
+  own geometry never counts.
+  - With `align_to_normal`, the prim is first turned so its up axis follows the surface
+    normal under the centre of its footprint.
+  - The move is one op, `xformOp:transform:crustPlace`, first in the prim's
+    `xformOpOrder`, after a `!resetXformStack!` if there is one. The prim's own ops,
+    including ones a payload authors, follow it unchanged. Dropping again folds into the
+    same op.
+  - Each prim is reported `placed` (with its contact point and how far its origin
+    moved), `no geometry`, or `nothing below`. A prim that is not placed gets no opinion.
+  - A path inside an instance, or one that cannot hold a transform (a `Scope`, an
+    untyped prim), refuses the whole call.
+- **`scatter_on_surface(...)`** defines a new `PointInstancer` at `path`. Its instances lie
+  on `target`'s triangles in proportion to their area, each prototype's origin on the
+  surface, standing upright about the up axis.
+  - **Prototypes** are prim paths of the stage, or asset files relative to the input
+    stage's directory. Each becomes a child of the instancer's `Prototypes` scope that
+    references it and drops its own placement, so it is instanced at its own origin. The
+    prim it references still renders where it is: deactivate it with `set_active` if it
+    should not.
+  - **How many:** `count` instances, or `density` instances per square stage unit of
+    eligible surface, at most 100 000.
+  - **Options:**
+    - `max_slope` leaves faces steeper than that many degrees bare;
+    - `random_rotation` turns each instance about the up axis;
+    - `scale: [min, max]` draws each instance's uniform scale.
+  - **The same seed over the same scene authors the same bytes**, whatever the machine's
+    thread count and the stage's sampler setting. To try other settings, `undo` and
+    scatter again: a path that already names a prim is refused.
+  - Curves and implicit shapes in the target are skipped and listed in `skipped`.
+
 ### Rendering
 
 - **`render` answers at the first image.** As soon as every pixel has 4 samples, it
@@ -317,4 +363,13 @@ and any USD tool opens it.
   an unauthored attribute, the render uses it, not the fallback `query` shows: a
   DistantLight with no `inputs:intensity` queries as `50000` and renders as `1`, and a
   camera with no `verticalAperture` queries as `15.2908` but follows the image's aspect.
+- **Placement is geometric, not physical.** A drop rests a prim on the surface where its
+  vertices meet it: a sharp bump between two vertices can poke through a face, prims
+  dropped in one call do not land on each other, and opacity cutouts count as solid. The
+  placement is right at the session's frame and subdivision level; an animated parent,
+  or a later change to the subdivision, can move the surface away from it. Scattered
+  instances stand upright; they are not turned to the surface normal.
+- **A placed prim's `xformOpOrder` is the layer's.** The override layer authors the whole
+  list, so a later change to the list in a source layer is hidden behind it. `undo` the
+  drop and drop again to pick it up.
 - **`render_final` blocks the session** until it has written its files.

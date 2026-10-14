@@ -176,6 +176,8 @@ const TOOLS: &[&str] = &[
     "set_active",
     "bind_material",
     "author_usda",
+    "drop_to_surface",
+    "scatter_on_surface",
     "undo",
     "reload",
     "render",
