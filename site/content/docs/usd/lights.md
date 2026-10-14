@@ -79,6 +79,12 @@ Area lights also read `ShapingAPI`: the cone (`inputs:shaping:cone:angle`,
 Light linking and shadow linking use the standard `collection:lightLink` and
 `collection:shadowLink` collections. See `samples/light_linking.usda`.
 
+Geometry that a light's `collection:shadowLink` leaves out casts no shadow from that
+light, and it doesn't pass the light on through refraction either. Light from that
+light passes the geometry as if it weren't there, and is counted once. A window
+excluded from a sun's shadows lets the sun in once, rather than once straight and
+once more refracted through the glass.
+
 Not supported: mesh lights (`MeshLightAPI`), portal lights, light filters, and shaping on
 distant and dome lights. `inputs:diffuse` and `inputs:specular` are ignored with a
 warning.

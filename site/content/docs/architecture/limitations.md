@@ -130,6 +130,9 @@ render.
     (see [`CRUST_LINK_TWIN`](@/docs/reference/environment-variables.md#crust-link-twin)).
   - Seen in a mirror or through clear glass, a shadow-linked light casts the shadows of
     every occluder, including the ones its `collection:shadowLink` leaves out.
+  - Seen straight from the camera through thick glass that its `collection:shadowLink`
+    leaves out, a light is estimated at each face of the glass, so it can appear twice.
+    Only light that reaches a surface first, then crosses the glass, is counted once.
 
 ## Path guiding
 

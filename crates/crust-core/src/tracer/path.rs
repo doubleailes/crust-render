@@ -554,6 +554,20 @@ pub(super) struct PrevBounce<'a> {
     /// against all of them (multi-sample MIS), so the light density it is
     /// weighted against is this many times the per-sample density.
     pub(super) nee_count: u32,
+    /// The transmission chain this bounce hands on (`None` in a scene
+    /// without shadow links). A bounce that crossed its surface by transmission
+    /// carries the masks of the surfaces crossed since the chain's
+    /// *owner*, this one included, or `None` when the chain has no owner. A
+    /// continuous bounce that reflects is an owner itself: `Some(NONE)`. A
+    /// delta reflection ends any chain: `None`.
+    ///
+    /// The owner ran NEE and its link twin along the line the chain follows,
+    /// and their shadow rays passed every surface a shadow-linked light
+    /// ignores. So that light, reached through a further transmission of
+    /// such surfaces, is a second count of what the owner took: excluded
+    /// glass transmits nothing more from the light (`LightList::drops_through`;
+    /// design record § Shadow linking).
+    pub(super) through: Option<RayMask>,
     /// What a fresh `eval` would be asked, kept only to check the claim
     /// above in debug builds.
     #[cfg(debug_assertions)]
@@ -597,6 +611,42 @@ pub(super) enum PrevVertex<'a> {
         /// The light samples `volume_nee` took there (see `PrevBounce`).
         nee_count: u32,
     },
+}
+
+impl PrevVertex<'_> {
+    /// The transmission chain the vertex this ray reaches inherits
+    /// ([`PrevBounce::through`]): a phase scatter is an owner (it ran NEE and
+    /// its twin), with nothing crossed yet.
+    pub(super) fn through(&self) -> Option<RayMask> {
+        match self {
+            PrevVertex::Surface(p) => p.through,
+            PrevVertex::Phase { .. } => Some(RayMask::NONE),
+        }
+    }
+
+    /// Whether light `index`, reached by a ray leaving this *delta* vertex,
+    /// is the chain owner's: the bounce crossed this vertex's surface by
+    /// transmission, every surface since the owner is one the light's shadow
+    /// rays ignore, and the owner's link twin (or its NEE, for a NEE-only
+    /// light while the strategy samples lights) took the light along this
+    /// line with them absent. After a continuous vertex `bounce_skips`
+    /// answers instead, and the vertex's own twin drops what this would.
+    #[inline]
+    pub(super) fn owned_after_delta(
+        &self,
+        lights: &LightList,
+        index: usize,
+        strategy: SamplingStrategy,
+    ) -> bool {
+        match self {
+            PrevVertex::Surface(p) => p.through.is_some_and(|crossed| {
+                crossed != RayMask::NONE
+                    && lights.drops_through(index, crossed)
+                    && lights.bounce_skips(index, strategy.samples_lights())
+            }),
+            PrevVertex::Phase { .. } => false,
+        }
+    }
 }
 
 /// MIS weight for emission reached by the previous vertex's bounce ray.
@@ -657,6 +707,9 @@ fn bounce_emission_weight_at(
         return 0.0;
     }
     let Some(bounce_pdf) = competing else {
+        if prev.owned_after_delta(lights, index, strategy) {
+            return 0.0;
+        }
         return strategy.unopposed_weight();
     };
     // A shadow-linked light is never this ray's at a continuous vertex: the
@@ -750,7 +803,14 @@ pub(super) fn escaped_emission(
         }
         // The link twin's, or NEE's alone, at a continuous vertex (see
         // `bounce_emission_weight`).
-        if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
+        // After a delta chain, the last NEE vertex's when the chain only
+        // passed what the light's shadow rays ignore.
+        let owned = match (competing, prev) {
+            (Some(_), _) => lights.bounce_skips(index, strategy.samples_lights()),
+            (None, Some(p)) => p.owned_after_delta(lights, index, strategy),
+            (None, None) => false,
+        };
+        if owned {
             continue;
         }
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
@@ -816,7 +876,14 @@ fn escaped_split(
         if !lights.illuminates(index, class) {
             continue;
         }
-        if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
+        // After a delta chain, the last NEE vertex's when the chain only
+        // passed what the light's shadow rays ignore.
+        let owned = match (competing, prev) {
+            (Some(_), _) => lights.bounce_skips(index, strategy.samples_lights()),
+            (None, Some(p)) => p.owned_after_delta(lights, index, strategy),
+            (None, None) => false,
+        };
+        if owned {
             continue;
         }
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
@@ -1931,6 +1998,7 @@ fn link_twin<const PROFILE: bool, const MEDIA: bool>(
     dir: Vec3A,
     bounce_pdf: PdfSolidAngle,
     class: u16,
+    chain: RayMask,
     nee_count: u32,
     inside: Option<&Enclosure>,
     curve_exits_ignored: bool,
@@ -1949,6 +2017,12 @@ fn link_twin<const PROFILE: bool, const MEDIA: bool>(
     for &index in lights.twinned_lights() {
         let index = index as usize;
         if !lights.illuminates(index, class) {
+            continue;
+        }
+        // The bounce crosses a surface the light's shadow rays pass, on a
+        // chain whose owner took the light along this line already: NEE's
+        // `drops_through` test, for the sampled direction.
+        if chain != RayMask::NONE && lights.drops_through(index, chain) {
             continue;
         }
         let light = lights.light(index);
@@ -2107,10 +2181,20 @@ fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
     total
 }
 
+/// Whether `dir` leaves `rec`'s surface on the far side from the ray that
+/// arrived: a transmission, whatever lobe made it. The ray-facing normal
+/// faces against the arriving ray, so a direction that also faces against it
+/// crossed.
+#[inline(always)]
+fn transmits(rec: &HitRecord, ray: &Ray, dir: Vec3A) -> bool {
+    rec.normal.dot(dir) * rec.normal.dot(ray.direction()) > 0.0
+}
+
 /// One light sample at a surface vertex, drawn from `nee_v` with its pick
 /// coordinate `pick_u`: the sample's share of the vertex's NEE term, and its
 /// `L` event when routed. `nee_count` is the vertex's light sample count
 /// (the MIS density's factor), `class_here` the receiver's light-link class,
+/// `chain` the transmission chain the vertex is on (`PrevBounce::through`),
 /// `exiting` a subsurface walk's exit (no lobe event of its own).
 ///
 /// `inline(always)`: the vertex's first sample is this block as it stood
@@ -2133,6 +2217,7 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
     rec: &HitRecord,
     sp: &ShadingPoint<'_>,
     class_here: u16,
+    chain: RayMask,
     guiding_here: Option<&GuidingContext<'_>>,
     nee_count: u32,
     exiting: bool,
@@ -2167,6 +2252,13 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
         stats.light_samples += 1;
         let light_dir_unit = ls.direction;
 
+        // Excluded glass transmits nothing more from a shadow-linked light
+        // whose chain owner took it already (`LightList::drops_through`): the
+        // twin's test, for this direction, so both MIS sides drop alike.
+        let dropped = chain != RayMask::NONE
+            && transmits(rec, ray, light_dir_unit)
+            && lights.drops_through(light_index, chain);
+
         // A connection carries light only if the light's radiance, the
         // BSDF and the visibility toward it are all non-zero, and the
         // three tests run cheapest first. Radiance is free (a shaped
@@ -2182,6 +2274,7 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
         // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
         // which nothing else reads.
         let connection = if ls.radiance != Vec3A::ZERO
+            && !dropped
             && let Some((f, pdf)) = sp.eval(ray, light_dir_unit)
             && ls.radiance * f != Vec3A::ZERO
         {
@@ -2301,6 +2394,7 @@ fn extra_surface_light_samples<const PROFILE: bool, const MEDIA: bool>(
     rec: &HitRecord,
     sp: &ShadingPoint<'_>,
     class_here: u16,
+    chain: RayMask,
     guiding_here: Option<&GuidingContext<'_>>,
     nee_count: u32,
     exiting: bool,
@@ -2325,6 +2419,7 @@ fn extra_surface_light_samples<const PROFILE: bool, const MEDIA: bool>(
             rec,
             sp,
             class_here,
+            chain,
             guiding_here,
             nee_count,
             exiting,
@@ -2493,7 +2588,7 @@ pub(super) fn trace_path<
     const PROFILE: bool,
     const AOV: bool,
     const MEDIA: bool,
-    const TWINS: bool,
+    const LINKED: bool,
 >(
     r: &Ray,
     cx: &PathContext<'_>,
@@ -2573,11 +2668,13 @@ pub(super) fn trace_path<
     // which none of them exists: guarded at run time instead, cornellbox ran
     // 0.7% more instructions.
     debug_assert_eq!(MEDIA, world.has_medium_boundaries());
-    // `TWINS` likewise: a scene with a shadow-linked light that is not
-    // NEE-only runs a `link_twin` at continuous vertices; any other scene runs
-    // an instantiation without the call sites. Guarded at run time instead,
-    // cornellbox ran 0.22% more instructions (callgrind, 2 spp).
-    debug_assert_eq!(TWINS, !lights.twinned_lights().is_empty());
+    // `LINKED` likewise: a scene with a shadow-linked light runs a
+    // `link_twin` at continuous vertices (a NEE-only light has none, so its
+    // loop is empty) and follows transmission chains (`PrevBounce::through`);
+    // any other scene runs an instantiation without either. Guarded at run
+    // time instead, cornellbox ran 0.22% more instructions for the twin
+    // (callgrind, 2 spp), and 0.59% for the twin and the chain.
+    debug_assert_eq!(LINKED, lights.shadow_linked());
     let boundaries = MEDIA;
     let mut enclosure: Option<Enclosure> = None;
     let mut carry: Option<(Vec3A, Vec3A)> = None;
@@ -2866,12 +2963,14 @@ pub(super) fn trace_path<
                     break;
                 }
                 let phase_pdf = PdfSolidAngle::from_measure(phase_pdf);
-                if TWINS {
+                if LINKED {
                     let (w, raw) = link_twin::<PROFILE, MEDIA>(
                         p,
                         dir,
                         phase_pdf,
                         class,
+                        // A phase scatter is an owner, on no chain.
+                        RayMask::NONE,
                         nee_count,
                         enclosure.as_ref(),
                         false,
@@ -3018,13 +3117,15 @@ pub(super) fn trace_path<
             }
             let phase_pdf = PdfSolidAngle::from_measure(hg_phase(wi.dot(dir), medium.g).max(1e-6));
             if let Some(e) = &enclosed
-                && TWINS
+                && LINKED
             {
                 let (w, raw) = link_twin::<PROFILE, MEDIA>(
                     pos,
                     dir,
                     phase_pdf,
                     e.class,
+                    // A phase scatter is an owner, on no chain.
+                    RayMask::NONE,
                     nee_count,
                     Some(e),
                     false,
@@ -3155,6 +3256,13 @@ pub(super) fn trace_path<
         // The receiver's light-link class, for NEE here and for whatever the
         // bounce leaving this vertex collects.
         let class_here = world.light_class(hit.geom_id);
+        // The transmission chain this vertex is on (`PrevBounce::through`),
+        // its own surface included; `NONE` when it has no owner, and in a
+        // scene without shadow links.
+        let chain_here = match prev.as_ref().and_then(PrevVertex::through) {
+            Some(crossed) if LINKED => crossed | world.mask(hit.geom_id),
+            _ => RayMask::NONE,
+        };
         // The material's per-hit work (pattern network, textures), done once
         // for every query at this vertex: the emission here, NEE's `eval`, the
         // scatter, and guiding's `eval` / `make_ray`. Every surface vertex
@@ -3258,6 +3366,7 @@ pub(super) fn trace_path<
             &rec,
             &sp,
             class_here,
+            chain_here,
             guiding_here,
             nee_count,
             exiting,
@@ -3280,6 +3389,7 @@ pub(super) fn trace_path<
                 &rec,
                 &sp,
                 class_here,
+                chain_here,
                 guiding_here,
                 nee_count,
                 exiting,
@@ -3429,12 +3539,18 @@ pub(super) fn trace_path<
                 }
                 // A BSDF (or guide-mixture) pdf, in solid angle.
                 let bounce_pdf = PdfSolidAngle::from_measure(sample.pdf);
-                if TWINS && !sample.delta {
+                // Whether the bounce crosses this vertex's surface: the side
+                // test `transmits` NEE makes, for the sampled direction.
+                let crosses = LINKED && transmits(&rec, &ray, dir);
+                if LINKED && !sample.delta {
                     let (w, raw) = link_twin::<PROFILE, MEDIA>(
                         rec.p,
                         dir,
                         bounce_pdf,
                         class_here,
+                        // The chain the twin's lights are dropped by, when
+                        // the bounce crosses this surface.
+                        if crosses { chain_here } else { RayMask::NONE },
                         nee_count,
                         enclosure.as_ref(),
                         // The bounce ray's own: whether the lobe it left
@@ -3454,12 +3570,26 @@ pub(super) fn trace_path<
                     vrec.crossed += w;
                     vrec.crossed_raw += raw;
                 }
+                // What the vertex this bounce reaches inherits (see
+                // `PrevBounce::through`): a crossing extends this vertex's
+                // chain, a continuous reflection makes it the owner, and a
+                // delta reflection ends the chain.
+                let through = if !LINKED {
+                    None
+                } else if crosses {
+                    (chain_here != RayMask::NONE).then_some(chain_here)
+                } else if !sample.delta {
+                    Some(RayMask::NONE)
+                } else {
+                    None
+                };
                 prev = Some(PrevVertex::Surface(PrevBounce {
                     pos: rec.p,
                     pdf: bounce_pdf,
                     delta: sample.delta,
                     class: class_here,
                     nee_count,
+                    through,
                     #[cfg(debug_assertions)]
                     check: (ray.clone(), rec, mat, dir),
                     #[cfg(not(debug_assertions))]
