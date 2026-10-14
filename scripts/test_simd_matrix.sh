@@ -12,6 +12,10 @@
 # changes quietly with a toolchain bump.
 #
 # Usage: scripts/test_simd_matrix.sh [extra cargo test args...]
+#
+# The codegen check at the end reads the IR of the crate a `-p <crate>` among
+# the arguments names (crust-rt without one): `-p crust-nn` checks the
+# network kit, whose bit-determinism rests on the same no-contraction rule.
 
 set -euo pipefail
 
@@ -51,19 +55,33 @@ run "target-cpu=native" "-C target-cpu=native" "$@"
 # Machine code cannot answer it — glam fuses `cross` on purpose under FMA
 # (explicit `llvm.fma`), so `vfmadd` appears either way — but the IR can:
 # contraction needs a `contract` / fast-math flag or `llvm.fmuladd`.
+#
+# For crust-nn the lib's IR holds `Adam::step` and the `f64` instantiation
+# `grad_check` makes of the network; its `f32` one is the same generic source,
+# and whether the compiler contracts is a property of the source, not of the
+# type.
+crate=crust-rt
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+        -p | --package) crate="${args[i + 1]:-crust-rt}" ;;
+        -p* ) crate="${args[i]#-p}" ;;
+        --package=*) crate="${args[i]#--package=}" ;;
+    esac
+done
 echo
-echo "=== codegen: no FMA contraction in crust-rt (IR, +avx2,+fma)"
+echo "=== codegen: no FMA contraction in $crate (IR, +avx2,+fma)"
 ir_dir="${CARGO_TARGET_DIR:-target}/simd-matrix-ir"
 RUSTFLAGS="-C target-feature=+avx2,+fma" CARGO_TARGET_DIR="$ir_dir" \
-    cargo rustc -q --release -p crust-rt --lib -- --emit=llvm-ir
-ir=$(ls -t "$ir_dir"/release/deps/crust_rt-*.ll | head -n 1)
+    cargo rustc -q --release -p "$crate" --lib -- --emit=llvm-ir
+ir=$(ls -t "$ir_dir"/release/deps/"${crate//-/_}"-*.ll | head -n 1)
 # An instruction carrying a fusing fast-math flag, e.g. `fmul contract float`.
 flagged='= (fadd|fsub|fmul|fdiv|fneg|frem|call)( [a-z]+)* (contract|fast|reassoc)\b'
 contracted=$(grep -cE "$flagged|llvm\.fmuladd" "$ir" || true)
 explicit=$(grep -c "call .*@llvm\.fma" "$ir" || true)
 echo "    contraction-eligible: $contracted; explicit llvm.fma (glam intrinsics): $explicit"
 if [ "$contracted" != 0 ]; then
-    echo "    FAILED: the compiler may fuse crust-rt arithmetic ($ir)"
+    echo "    FAILED: the compiler may fuse $crate arithmetic ($ir)"
     exit 1
 fi
 

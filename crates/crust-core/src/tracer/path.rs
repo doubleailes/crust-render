@@ -93,6 +93,53 @@ pub(super) fn stratified_pick(u: f32, count: u32, index: u32) -> f32 {
 /// The largest `f32` below 1: `1 − 2⁻²⁴`.
 const BELOW_ONE: f32 = 1.0 - f32::EPSILON / 2.0;
 
+// Debug builds check that NEE and the bounce side read the light selection
+// at the same position, to the bit. Every `*_at` lookup takes the vertex NEE
+// sampled from, and the bounce side passes `prev.pos`; `learned`'s grid
+// forgave an ulp between the two, a continuous selection (`neural`) would
+// turn one into an MIS mismatch, a silent bias. Today both sides read one
+// binding at every site; this keeps it so.
+#[cfg(debug_assertions)]
+thread_local! {
+    /// The position this thread's NEE last picked a light from, until the
+    /// vertex's bounce side is set up.
+    static NEE_FROM: std::cell::Cell<Option<[u32; 3]>> = const { std::cell::Cell::new(None) };
+}
+
+/// Records that NEE picks a light from `p` (debug builds; nothing otherwise).
+#[inline(always)]
+fn nee_picks_from(p: Vec3A) {
+    #[cfg(debug_assertions)]
+    NEE_FROM.with(|c| c.set(Some(p.to_array().map(f32::to_bits))));
+    #[cfg(not(debug_assertions))]
+    let _ = p;
+}
+
+/// Asserts that the vertex the bounce side weighs from, `pos`, is the one
+/// NEE last picked from, bit for bit, when NEE ran there; `forget` ends the
+/// vertex (debug builds; nothing otherwise).
+#[inline(always)]
+fn bounce_weighs_from(pos: Option<Vec3A>, forget: bool) {
+    #[cfg(debug_assertions)]
+    NEE_FROM.with(|c| {
+        if let (Some(at), Some(pos)) = (c.get(), pos) {
+            let pos = pos.to_array().map(f32::to_bits);
+            debug_assert_eq!(
+                at,
+                pos,
+                "NEE picked from {:?}, the bounce side weighs from {:?}",
+                at.map(f32::from_bits),
+                pos.map(f32::from_bits)
+            );
+        }
+        if forget {
+            c.set(None);
+        }
+    });
+    #[cfg(not(debug_assertions))]
+    let _ = (pos, forget);
+}
+
 /// The white Lambertian every random walk exits through.
 static SSS_EXIT: ExitLambertian = ExitLambertian;
 
@@ -1961,6 +2008,7 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         if !escapes && light.at_infinity() {
             continue;
         }
+        bounce_weighs_from(Some(from), false);
         let pmf = lights.pmf_at(from, index);
         let domain = vertex.new_domain(K_LINK_TWIN).new_domain(index as i32);
         light.found_along(from, dir, |found| {
@@ -2052,6 +2100,7 @@ fn volume_nee<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         let nee = sampler.new_domain(K_NEE).draw_sample_f32::<4>();
         // As at a surface: a light that does not illuminate this region gives
         // nothing, and its pick probability stays what it was.
+        nee_picks_from(p);
         let Some((index, pmf)) = lights.pick_index_at(p, stratified_pick(nee[0], count, i)) else {
             continue;
         };
@@ -2160,6 +2209,9 @@ fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     // closure with two call sites is one LLVM no longer inlines — the pick
     // and the visibility test below each became an out-of-line call per
     // sample, 0.65% of cornellbox's instructions apiece (callgrind, 2 spp).
+    if strategy.samples_lights() {
+        nee_picks_from(rec.p);
+    }
     if strategy.samples_lights()
         && let Some((light_index, pmf)) = lights.pick_index_at(rec.p, pick_u)
         && lights.illuminates(light_index, class_here)
@@ -2531,6 +2583,7 @@ pub(super) fn trace_path<
     // at the primary vertex and after carried-medium (subsurface)
     // scatters, where the next vertex's emission counts fully.
     let mut prev: Option<PrevVertex> = None;
+    bounce_weighs_from(None, true);
     // Running throughput. Only drives the roulette survival probability —
     // the estimate itself is rebuilt by the backward gather.
     let mut beta = Vec3A::ONE;
@@ -2893,6 +2946,7 @@ pub(super) fn trace_path<
                     vrec.crossed += w;
                     vrec.crossed_raw += raw;
                 }
+                bounce_weighs_from(Some(p), true);
                 prev = Some(PrevVertex::Phase {
                     pos: p,
                     pdf: phase_pdf,
@@ -3057,6 +3111,7 @@ pub(super) fn trace_path<
                 .with_mask(crate::ray::MASK_INDIRECT)
                 .with_cone(cone);
             remaining -= 1;
+            bounce_weighs_from(enclosed.is_some().then_some(pos), true);
             prev = enclosed.map(|e| PrevVertex::Phase {
                 pos,
                 pdf: phase_pdf,
@@ -3418,6 +3473,7 @@ pub(super) fn trace_path<
                     // the object, so nothing is owed to this record.
                     stats.vertices += 1;
                     records.push(vrec);
+                    bounce_weighs_from(None, true);
                     prev = None;
                     ray = Ray::new(exit.rec.p, -exit.dir)
                         .with_time(ray.time())
@@ -3458,6 +3514,7 @@ pub(super) fn trace_path<
                     vrec.crossed += w;
                     vrec.crossed_raw += raw;
                 }
+                bounce_weighs_from(Some(rec.p), true);
                 prev = Some(PrevVertex::Surface(PrevBounce {
                     pos: rec.p,
                     pdf: bounce_pdf,

@@ -2,7 +2,7 @@
 title = "Command line"
 description = "Every crust command and flag."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-13T08:00:00+00:00
+updated = 2026-10-14T08:00:00+00:00
 draft = false
 weight = 10
 sort_by = "weight"
@@ -310,9 +310,14 @@ How light sampling picks which light to sample at each vertex. Overrides
 | `power` | by emitted power, defensively: half the shadow rays are shared evenly among the finite lights, and lights at infinity keep their uniform share. **Default.** |
 | `uniform` | every light is equally likely, whatever it emits |
 | `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
+| `neural` | visibility-aware, experimental: the same pre-pass trains a small network that predicts, at any point, which lights reach it; picks by power weighted by that prediction |
 
 `learned` helps scenes with many lights where the brightest ones are often hidden, for
-example a room lit through its windows.
+example a room lit through its windows. `neural` is an experiment against `learned`: it
+stores the same knowledge as a continuous function rather than a grid of regions. It
+supports up to 64 lights (past that, or with a single light, it picks by power), and its
+pre-pass costs more than `learned`'s. Both stay unbiased: every light keeps a share of the
+light samples wherever it is predicted hidden.
 
 ### light-samples
 

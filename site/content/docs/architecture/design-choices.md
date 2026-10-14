@@ -2,7 +2,7 @@
 title = "Design choices"
 description = "The architectural decisions behind Crust Render, why each was made, and what it costs."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-14T08:00:00+00:00
 draft = false
 weight = 20
 sort_by = "weight"
@@ -166,7 +166,8 @@ is the only biased default. Set it to 0 for reference renders.
 (*Practical Path Guiding*, Müller et al. 2017, reimplemented in Rust) is opt-in. On the
 bundled `cornellbox_guided.usda`, where all light arrives indirectly, guiding cuts the
 error by about 20% at the same sample count. Light selection can learn which lights reach
-each region of the scene (`learned`).
+each region of the scene (`learned`), or, as an experiment, predict it at any point with a
+small neural network (`neural`).
 
 ## The engine decodes no files
 

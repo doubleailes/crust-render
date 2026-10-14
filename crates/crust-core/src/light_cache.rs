@@ -46,9 +46,9 @@ use rayon::prelude::*;
 
 /// One training path per `TRAIN_STRIDE` x `TRAIN_STRIDE` pixels, at least.
 const TRAIN_STRIDE: usize = 4;
-/// Receiver-light pairs the pre-pass may estimate, and so retain as `f32`s
-/// until the reduction: 32 MiB of contributions, `LIGHT_SAMPLES` times as many
-/// light evaluations. The stride grows past `TRAIN_STRIDE` to stay inside it.
+/// Receiver-light pairs the pre-pass may estimate, and so retain until the
+/// reduction: 32 MiB of `f32` contributions and 8 MiB of delivered counts,
+/// `LIGHT_SAMPLES` times as many light evaluations. The stride grows past `TRAIN_STRIDE` to stay inside it.
 /// Resolution times light count is what scales, and unbounded, 3840x2160 at
 /// the `MAX_LIGHTS` limit would hold ~2 GiB and evaluate over a billion light
 /// samples before the first pass. ALab (47 lights, 640x360) uses 2.0 M.
@@ -127,10 +127,48 @@ impl LightCache {
     }
 }
 
-/// Every light's estimated NEE contribution at one receiver.
-struct Receiver {
-    p: Vec3A,
-    contrib: Vec<f32>,
+/// One receiver of the training walk ([`walk`]): where it is, and what NEE's
+/// own estimate found there for each light.
+pub(crate) struct Receiver {
+    pub(crate) p: Vec3A,
+    /// Per light, the mean estimated NEE contribution, `luminance(L·f)·V/p`
+    /// over `LIGHT_SAMPLES` samples: what `learned` sums per cell.
+    pub(crate) contrib: Vec<f32>,
+    /// Per light, how many of its `LIGHT_SAMPLES` samples **delivered
+    /// light**: nonzero radiance toward the receiver (not backfacing), above
+    /// its horizon (a nonzero BSDF), and a shadow ray at least partly clear.
+    /// What `neural` learns as the light's visibility from here
+    /// ([`Receiver::delivered`]).
+    pub(crate) delivered: Vec<u8>,
+}
+
+impl Receiver {
+    /// The fraction of light `k`'s samples that delivered light, in `[0, 1]`.
+    pub(crate) fn delivered(&self, k: usize) -> f32 {
+        self.delivered[k] as f32 / LIGHT_SAMPLES as f32
+    }
+}
+
+/// Whether a learned selection can be trained over `lights` at all: two
+/// lights or more, over a power table, and at most `limit`. Past the limit it
+/// says so once, at `WARN`, naming `mode` (`learned`, `neural`); the other
+/// refusals are silent.
+pub(crate) fn trainable(lights: &LightList, limit: usize, mode: &str) -> bool {
+    let n = lights.count();
+    // Only over a power table: with none, `LightList::density` divides by
+    // `n` instead of multiplying by the pmf, and would not describe the
+    // per-vertex distribution NEE picks with.
+    if n < 2 || lights.selection() != crate::LightSelection::Power {
+        return false;
+    }
+    if n > limit {
+        tracing::warn!(
+            "crust:lightSelection {mode}: {n} lights is past the {limit} it supports — \
+             picking by power instead"
+        );
+        return false;
+    }
+    true
 }
 
 /// Runs the training pre-pass and builds the cache, or `None` when there is
@@ -146,20 +184,109 @@ pub(crate) fn train(
     height: usize,
     frame: isize,
 ) -> Option<LightCache> {
+    if !trainable(lights, MAX_LIGHTS, "learned") {
+        return None;
+    }
     let n = lights.count();
-    // Only over a power table: with none, `LightList::density` divides by
-    // `n` instead of multiplying by the pmf, and would not describe the
-    // per-cell distribution NEE picks with.
-    if n < 2 || lights.selection() != crate::LightSelection::Power {
+    let receivers = walk(world, camera, lights, width, height, frame);
+    if receivers.is_empty() {
         return None;
     }
-    if n > MAX_LIGHTS {
-        tracing::warn!(
-            "crust:lightSelection learned: {n} lights is past the {MAX_LIGHTS} it supports — \
-             picking by power instead"
-        );
+    let (lo, hi) = robust_bounds(&receivers)?;
+    let extent = (hi - lo).max_element().max(1e-6);
+    let res =
+        ((receivers.len() as f64 / RECEIVERS_PER_CELL).sqrt() as usize).clamp(1, MAX_RESOLUTION);
+    let cell = extent / res as f32;
+    // Pad by half a cell so points on the boundary land inside.
+    let origin = lo - Vec3A::splat(cell * 0.5);
+    let inv_cell = 1.0 / cell;
+    let dim = |a: f32| (((a + cell) * inv_cell).ceil() as usize).max(1);
+    let size = hi - lo;
+    let dims = [dim(size.x), dim(size.y), dim(size.z)];
+
+    // Sequential reduction in receiver order: deterministic.
+    let mut sums: std::collections::HashMap<usize, (u32, Vec<f64>)> =
+        std::collections::HashMap::new();
+    let cell_of = |p: Vec3A| {
+        let c = (p - origin) * inv_cell;
+        let (x, y, z) = (c.x as usize, c.y as usize, c.z as usize);
+        (x < dims[0] && y < dims[1] && z < dims[2]).then(|| (z * dims[1] + y) * dims[0] + x)
+    };
+    let mut order = Vec::new();
+    for r in &receivers {
+        let Some(c) = r.p.is_finite().then(|| cell_of(r.p)).flatten() else {
+            continue;
+        };
+        let e = sums.entry(c).or_insert_with(|| {
+            order.push(c);
+            (0, vec![0.0; n])
+        });
+        e.0 += 1;
+        for (acc, &v) in e.1.iter_mut().zip(&r.contrib) {
+            *acc += v as f64;
+        }
+    }
+
+    let (live, n_live) = live_lights(lights);
+
+    let mut slot = vec![u32::MAX; dims[0] * dims[1] * dims[2]];
+    let (mut pmf, mut cdf) = (Vec::new(), Vec::new());
+    let mut trained = 0usize;
+    for c in order {
+        let (count, sum) = &sums[&c];
+        let total: f64 = sum.iter().sum();
+        if *count < MIN_RECEIVERS || !(total > 0.0 && total.is_finite()) {
+            // Too few receivers, or no light seen from any of them: the
+            // global distribution is at least no worse than guessing.
+            continue;
+        }
+        slot[c] = trained as u32;
+        trained += 1;
+        let (cell_cdf, cell_pmf) = cell_table(sum, total, &live, n_live);
+        cdf.extend(cell_cdf);
+        pmf.extend(cell_pmf);
+    }
+    if trained == 0 {
         return None;
     }
+    Some(LightCache {
+        origin,
+        inv_cell,
+        dims,
+        slot,
+        lights: n,
+        pmf,
+        cdf,
+        receivers: receivers.len(),
+        trained_cells: trained,
+    })
+}
+
+/// The lights that can emit at all — the global selection gives them a
+/// nonzero pick — and how many: only these share a defensive part.
+pub(crate) fn live_lights(lights: &LightList) -> (Vec<bool>, usize) {
+    let live: Vec<bool> = (0..lights.count()).map(|k| lights.pmf(k) > 0.0).collect();
+    let n_live = live.iter().filter(|&&l| l).count().max(1);
+    (live, n_live)
+}
+
+/// The training walk both learned selections share. Coarse camera paths,
+/// one per `TRAIN_STRIDE`² pixels (more past `MAX_PAIRS`) and
+/// `TRAIN_BOUNCES` BSDF bounces each, and at every vertex every light
+/// estimated through the same `sample_li`, BSDF `eval` and shadow-ray query
+/// NEE uses, `LIGHT_SAMPLES` times.
+///
+/// The receivers come back in row order then path order, whatever the
+/// thread count: rows run in parallel and are collected in order.
+pub(crate) fn walk(
+    world: &World,
+    camera: &Camera,
+    lights: &LightList,
+    width: usize,
+    height: usize,
+    frame: isize,
+) -> Vec<Receiver> {
+    let n = lights.count();
     // Vertices per path, times lights, times paths, within `MAX_PAIRS`.
     let per_path = (1 + TRAIN_BOUNCES) * n;
     let stride = TRAIN_STRIDE.max(
@@ -170,8 +297,8 @@ pub(crate) fn train(
     let (gw, gh) = (width.div_ceil(stride), height.div_ceil(stride));
     let list = lights.lights();
 
-    // Parallel over rows, collected in row order: the reduction below is then
-    // sequential and the cache the same whatever the thread count.
+    // Parallel over rows, collected in row order: a caller's reduction is then
+    // sequential and what it learns the same whatever the thread count.
     let rows: Vec<Vec<Receiver>> = (0..gh)
         .into_par_iter()
         .map(|j| {
@@ -215,14 +342,12 @@ pub(crate) fn train(
                     // Trained through the same links NEE applies, or the
                     // cell tables would favour lights this receiver cannot use.
                     let class = world.light_class(hit.geom_id);
-                    let contrib = list
-                        .iter()
-                        .enumerate()
-                        .map(|(k, light)| {
-                            let mut sum = 0.0f32;
-                            if !lights.illuminates(k, class) {
-                                return sum;
-                            }
+                    let mut contrib = Vec::with_capacity(n);
+                    let mut delivered = Vec::with_capacity(n);
+                    for (k, light) in list.iter().enumerate() {
+                        let mut sum = 0.0f32;
+                        let mut count = 0u8;
+                        if lights.illuminates(k, class) {
                             for s in 0..LIGHT_SAMPLES {
                                 let d = vertex
                                     .new_domain(8 + (k * LIGHT_SAMPLES + s) as i32)
@@ -273,12 +398,18 @@ pub(crate) fn train(
                                 let e = through * lights.luma().of(c) / ls.pdf.get();
                                 if e.is_finite() {
                                     sum += e;
+                                    count += (e > 0.0) as u8;
                                 }
                             }
-                            sum / LIGHT_SAMPLES as f32
-                        })
-                        .collect();
-                    out.push(Receiver { p, contrib });
+                        }
+                        contrib.push(sum / LIGHT_SAMPLES as f32);
+                        delivered.push(count);
+                    }
+                    out.push(Receiver {
+                        p,
+                        contrib,
+                        delivered,
+                    });
                     let bsdf_dom = vertex.new_domain(2);
                     let Some(sample) =
                         sp.scatter_importance(&ray, || bsdf_dom.draw_sample_f32::<4>())
@@ -299,18 +430,21 @@ pub(crate) fn train(
             out
         })
         .collect();
-    let receivers: Vec<Receiver> = rows.into_iter().flatten().collect();
-    if receivers.is_empty() {
-        return None;
-    }
+    rows.into_iter().flatten().collect()
+}
 
-    // The grid spans the receivers' **robust** bounds: per axis, the
-    // `OUTLIER` to `1 - OUTLIER` quantiles. The full bounds let a few bounce
-    // vertices far outside the set (ALab's exterior) stretch the grid until
-    // four cells covered the whole frame. Receivers outside are not trained,
-    // and points outside read the global table. Cells are cubic, sized for
-    // about `RECEIVERS_PER_CELL` receivers per occupied cell. Receivers lie
-    // on surfaces, so occupied cells grow as the resolution squared.
+/// The receivers' **robust** bounds: per axis, the `OUTLIER` to
+/// `1 - OUTLIER` quantiles, or `None` when no receiver is finite. The full
+/// bounds let a few bounce vertices far outside the set (ALab's exterior)
+/// stretch `learned`'s grid until four cells covered the whole frame.
+/// Receivers outside are not trained, and points outside read the global
+/// table.
+///
+/// `learned` then cuts them into cubic cells, sized for about
+/// `RECEIVERS_PER_CELL` receivers per occupied cell (receivers lie on
+/// surfaces, so occupied cells grow as the resolution squared); `neural`
+/// maps them into its network's unit cube.
+pub(crate) fn robust_bounds(receivers: &[Receiver]) -> Option<(Vec3A, Vec3A)> {
     let finite: Vec<Vec3A> = receivers
         .iter()
         .map(|r| r.p)
@@ -334,91 +468,40 @@ pub(crate) fn train(
         quantile(1, 1.0 - OUTLIER),
         quantile(2, 1.0 - OUTLIER),
     );
-    let extent = (hi - lo).max_element().max(1e-6);
-    let res =
-        ((receivers.len() as f64 / RECEIVERS_PER_CELL).sqrt() as usize).clamp(1, MAX_RESOLUTION);
-    let cell = extent / res as f32;
-    // Pad by half a cell so points on the boundary land inside.
-    let origin = lo - Vec3A::splat(cell * 0.5);
-    let inv_cell = 1.0 / cell;
-    let dim = |a: f32| (((a + cell) * inv_cell).ceil() as usize).max(1);
-    let size = hi - lo;
-    let dims = [dim(size.x), dim(size.y), dim(size.z)];
-
-    // Sequential reduction in receiver order: deterministic.
-    let mut sums: std::collections::HashMap<usize, (u32, Vec<f64>)> =
-        std::collections::HashMap::new();
-    let cell_of = |p: Vec3A| {
-        let c = (p - origin) * inv_cell;
-        let (x, y, z) = (c.x as usize, c.y as usize, c.z as usize);
-        (x < dims[0] && y < dims[1] && z < dims[2]).then(|| (z * dims[1] + y) * dims[0] + x)
-    };
-    let mut order = Vec::new();
-    for r in &receivers {
-        let Some(c) = r.p.is_finite().then(|| cell_of(r.p)).flatten() else {
-            continue;
-        };
-        let e = sums.entry(c).or_insert_with(|| {
-            order.push(c);
-            (0, vec![0.0; n])
-        });
-        e.0 += 1;
-        for (acc, &v) in e.1.iter_mut().zip(&r.contrib) {
-            *acc += v as f64;
-        }
-    }
-
-    // Lights that can emit at all: the global selection gives them a nonzero
-    // pick. Only these share the defensive part.
-    let live: Vec<bool> = (0..n).map(|k| lights.pmf(k) > 0.0).collect();
-    let n_live = live.iter().filter(|&&l| l).count().max(1);
-
-    let mut slot = vec![u32::MAX; dims[0] * dims[1] * dims[2]];
-    let (mut pmf, mut cdf) = (Vec::new(), Vec::new());
-    let mut trained = 0usize;
-    for c in order {
-        let (count, sum) = &sums[&c];
-        let total: f64 = sum.iter().sum();
-        if *count < MIN_RECEIVERS || !(total > 0.0 && total.is_finite()) {
-            // Too few receivers, or no light seen from any of them: the
-            // global distribution is at least no worse than guessing.
-            continue;
-        }
-        slot[c] = trained as u32;
-        trained += 1;
-        let (cell_cdf, cell_pmf) = cell_table(sum, total, &live, n_live);
-        cdf.extend(cell_cdf);
-        pmf.extend(cell_pmf);
-    }
-    if trained == 0 {
-        return None;
-    }
-    Some(LightCache {
-        origin,
-        inv_cell,
-        dims,
-        slot,
-        lights: n,
-        pmf,
-        cdf,
-        receivers: receivers.len(),
-        trained_cells: trained,
-    })
+    Some((lo, hi))
 }
 
 /// One trained cell's `(cdf, pmf)`: `(1 - DEFENSIVE) * E/ΣE` plus the
-/// defensive share spread over the live lights.
+/// defensive share spread over the live lights ([`defensive_table`]).
+fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut cdf = vec![0.0; sum.len()];
+    let mut pmf = vec![0.0; sum.len()];
+    defensive_table(sum, total, live, n_live, &mut cdf, &mut pmf);
+    (cdf, pmf)
+}
+
+/// A learned pick distribution into `cdf` and `pmf`: each live light gets
+/// `(1 - DEFENSIVE) * w/total + DEFENSIVE / n_live`, a dead one nothing.
+/// `learned`'s cells weigh by contribution, `neural`'s vertices by power
+/// times predicted visibility; both build their tables here.
 ///
 /// The CDF is finalised first, in f32, and each pmf is then the width of its
 /// own interval, `cdf[k] - cdf[k-1]`. So the probability NEE divides by, and
 /// the bounce side weights with, is the one the pick actually lands with.
 /// Rounding `p` and the running sum separately could let the two differ, and
 /// the forced final 1.0 could make them differ by more.
-fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize) -> (Vec<f32>, Vec<f32>) {
+#[inline]
+pub(crate) fn defensive_table(
+    w: &[f64],
+    total: f64,
+    live: &[bool],
+    n_live: usize,
+    cdf: &mut [f32],
+    pmf: &mut [f32],
+) {
     let mut running = 0.0f64;
-    let mut cdf = Vec::with_capacity(sum.len());
     let mut last_live = None;
-    for (k, &e) in sum.iter().enumerate() {
+    for (k, (&e, c)) in w.iter().zip(cdf.iter_mut()).enumerate() {
         let p = if live[k] {
             last_live = Some(k);
             (1.0 - DEFENSIVE as f64) * e / total + DEFENSIVE as f64 / n_live as f64
@@ -426,7 +509,7 @@ fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize) -> (Vec<f32
             0.0
         };
         running += p;
-        cdf.push(running as f32);
+        *c = running as f32;
     }
     // As in `LightList::select_by`: the last pickable light ends the CDF at
     // exactly one, so no `u` below one falls past it.
@@ -436,15 +519,10 @@ fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize) -> (Vec<f32
         }
     }
     let mut prev = 0.0f32;
-    let pmf = cdf
-        .iter()
-        .map(|&c| {
-            let p = c - prev;
-            prev = c;
-            p
-        })
-        .collect();
-    (cdf, pmf)
+    for (p, &c) in pmf.iter_mut().zip(cdf.iter()) {
+        *p = c - prev;
+        prev = c;
+    }
 }
 
 #[cfg(test)]

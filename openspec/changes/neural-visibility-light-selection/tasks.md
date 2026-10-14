@@ -2,24 +2,24 @@
 
 ## 1. `crust-nn`: the tiny-network kit (design D1, D3, D5)
 
-- [ ] 1.1 Scaffold `crates/crust-nn` and add it to the workspace:
+- [x] 1.1 Scaffold `crates/crust-nn` and add it to the workspace:
   - `#![forbid(unsafe_code)]`, no dependencies, edition 2024.
   - Verify with `cargo build -p crust-nn`, and with `cargo deny --locked check` passing unchanged.
-- [ ] 1.2 Implement `Dense` (forward and backward), ReLU, sigmoid and `bce_with_logits`:
+- [x] 1.2 Implement `Dense` (forward and backward), ReLU, sigmoid and `bce_with_logits`:
   - plain `f32`, fixed loop order, no `mul_add`;
   - verify that unit tests match hand-computed values for a 2→2 layer.
-- [ ] 1.3 Implement `HashGrid` (L levels, F features, T entries, base resolution, growth; trilinear forward, backward that scatters into the table):
+- [x] 1.3 Implement `HashGrid` (L levels, F features, T entries, base resolution, growth; trilinear forward, backward that scatters into the table):
   - Verify with unit tests: interpolation is exact at grid corners, and continuous across a cell face.
-- [ ] 1.4 Implement `Network` (encoding → dense stack → logits) and `grad_check` (central finite differences):
+- [x] 1.4 Implement `Network` (encoding → dense stack → logits) and `grad_check` (central finite differences):
   - Verify a test asserting relative gradient error < 1e-3 on random inputs, for every parameter group.
-- [ ] 1.5 Implement `Adam`, with per-group learning rates:
+- [x] 1.5 Implement `Adam`, with per-group learning rates:
   - Verify that a test fits a 1D step function (a "wall") to BCE < 0.05 in a fixed number of steps.
-- [ ] 1.6 Make initialisation take its random numbers from a caller-supplied `FnMut() -> f32`, so crust-core can feed it `openqmc`:
+- [x] 1.6 Make initialisation take its random numbers from a caller-supplied `FnMut() -> f32`, so crust-core can feed it `openqmc`:
   - Verify that a test shows the same draws give bitwise-identical networks.
-- [ ] 1.7 Add deterministic batched gradients (fixed chunks, summed in chunk order):
+- [x] 1.7 Add deterministic batched gradients (fixed chunks, summed in chunk order):
   - Verify that a test gives bitwise-equal gradients at 1 and at 8 rayon threads.
   - Run `scripts/test_simd_matrix.sh -p crust-nn` and confirm it passes (extend the script to accept the crate if needed).
-- [ ] 1.8 Document the eighth crate:
+- [x] 1.8 Document the eighth crate:
   - its row in `docs/architecture.md`'s crate table;
   - CLAUDE.md § Workspace ("Eight crates", plus its `forbid(unsafe_code)` line);
   - `site/content/docs/architecture/overview.md`.
@@ -27,19 +27,19 @@
 
 ## 2. Labels and training in crust-core (design D2, D4, D5)
 
-- [ ] 2.1 Split the receiver walk out of `light_cache::train`, so it reports per receiver per light both the contribution estimate and the "delivered light" fraction:
+- [x] 2.1 Split the receiver walk out of `light_cache::train`, so it reports per receiver per light both the contribution estimate and the "delivered light" fraction:
   - Verify that `cargo test -p crust-core --test learned_selection` passes.
   - Verify that `scripts/check_images.sh check` against goldens recorded before the split shows 0 differing pixels under `--light-selection learned`.
-- [ ] 2.2 Add `crates/crust-core/src/light_visibility.rs`. It holds:
+- [x] 2.2 Add `crates/crust-core/src/light_visibility.rs`. It holds:
   - the bounds (reuse `learned`'s quantile bounds);
   - the network built per D3;
   - training per D5, under a new `K_NVC` openqmc key;
   - the `p ↦ (pmf, cdf)` function per D2, sharing `light_cache::DEFENSIVE`;
   - a `DEBUG` line with receivers, lights, epochs, final loss and time.
   - Verify that a unit test on a synthetic two-room scene (one light per room, wall between) predicts V̂ < 0.1 for the far room's light and > 0.9 for the near one's.
-- [ ] 2.3 Pin training determinism:
+- [x] 2.3 Pin training determinism:
   - Verify that a test trains twice, at 1 and at the default rayon thread count, and asserts the weights are bitwise equal.
-- [ ] 2.4 Pin the D2 formula's edge cases:
+- [x] 2.4 Pin the D2 formula's edge cases:
   - Verify unit tests asserting every emitting light gets ≥ `D / n_live`;
   - that pmfs sum to 1 within 1e-6;
   - that `cdf` brackets `pmf`, as `light_cache`'s `each_pmf_is_exactly_its_cdf_interval` does;
@@ -47,7 +47,7 @@
 
 ## 3. Go/no-go gate on inference cost (design D6 prerequisite, D9)
 
-- [ ] 3.1 Assert that NEE's sampling position and the bounce side's `prev.pos` are the same `Vec3A` bits, at every NEE site (surface and volume / phase), behind `debug_assert!`:
+- [x] 3.1 Assert that NEE's sampling position and the bounce side's `prev.pos` are the same `Vec3A` bits, at every NEE site (surface and volume / phase), behind `debug_assert!`:
   - Verify with `cargo test --workspace` (debug) passing over every sample.
   - If any site differs, fix it so both sides store one value, and confirm `power` / `learned` stay bit-identical with `check_images.sh`.
 - [ ] 3.2 Add `crates/crust-render/examples/nvc_bench.rs`. It trains on a scene and times one `(pmf, cdf)` evaluation, one shadow ray, and one `learned` lookup over the same receivers, printing min-of-N wall time:
@@ -56,27 +56,27 @@
   - Record wall time and instructions in a new `docs/light_sampling.md` § "Neural visibility cache".
   - Write the go/no-go decision there per D9.
   - If no-go: shrink D3 once and re-measure. If it is still no-go, stop here, keep the recorded result, and update proposal.md and design.md to say so.
-- [ ] 3.4 Add the `nvc_bench` recipe to the command cookbook in `openspec/specs/cli/design.md`:
+- [x] 3.4 Add the `nvc_bench` recipe to the command cookbook in `openspec/specs/cli/design.md`:
   - Verify that the documented command runs as written.
 
 ## 4. The `neural` selection mode (spec: `lighting`; design D2, D6, D7)
 
-- [ ] 4.1 Add `LightSelection::Neural` and its `named!` row, with a one-line description:
+- [x] 4.1 Add `LightSelection::Neural` and its `named!` row, with a one-line description:
   - Verify that `names.rs`'s round-trip test passes, and that `crust render --help` lists `neural`.
-- [ ] 4.2 Route `pick_index_at` / `pmf_at` / `find_index_by_geom_at` / `infinite_at` through the network when it is installed, with the D6 single-entry thread-local memo:
+- [x] 4.2 Route `pick_index_at` / `pmf_at` / `find_index_by_geom_at` / `infinite_at` through the network when it is installed, with the D6 single-entry thread-local memo:
   - Verify a unit test that NEE's `pmf` for a light equals, bitwise, what `find_index_by_geom_at` and `infinite_at` return at the same `p`, with the memo both hit and cold.
-- [ ] 4.3 Train in `Renderer::new` beside `learned`, installing over a power table, with the fallbacks from the spec:
+- [x] 4.3 Train in `Renderer::new` beside `learned`, installing over a power table, with the fallbacks from the spec:
   - < 2 lights or no receivers → silent;
   - > 64 lights → one `WARN`.
   - Verify the spec scenarios "Too many lights" and "One light" as integration tests (bit-identical to `power`; `WARN` count).
-- [ ] 4.4 Accept `crust:lightSelection = "neural"` in `usd_import/settings.rs`, and update its comment:
+- [x] 4.4 Accept `crust:lightSelection = "neural"` in `usd_import/settings.rs`, and update its comment:
   - Verify with a test that loads a `.usda` authoring it and asserts the selection.
-- [ ] 4.5 Pin the spec's determinism scenarios:
+- [x] 4.5 Pin the spec's determinism scenarios:
   - Verify an integration test rendering a sample under `neural` tiled and scanline, and at 1 and N threads, asserting bit-identity (extend `tests/learned_selection.rs`, or add `tests/neural_selection.rs`).
-- [ ] 4.6 Pin "Existing modes are unchanged":
+- [x] 4.6 Pin "Existing modes are unchanged":
   - Verify `scripts/check_images.sh check` against goldens recorded on the base commit shows 0 differing pixels under `power`, `uniform` and `learned`.
-- [ ] 4.7 Update the `lighting` design record (`openspec/specs/lighting/design.md`, the light-selection section) with `neural`'s load-bearing details: D2, D6, D7.
-- [ ] 4.8 Update user docs:
+- [x] 4.7 Update the `lighting` design record (`openspec/specs/lighting/design.md`, the light-selection section) with `neural`'s load-bearing details: D2, D6, D7.
+- [x] 4.8 Update user docs:
   - `site/content/docs/reference/command-line.md` (`--light-selection neural`);
   - `site/content/docs/usd/render-settings.md` (`crust:lightSelection`);
   - `site/content/docs/help/faq.md`, where it lists the selection modes.

@@ -54,6 +54,9 @@ opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", tag = "0
 # The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
 # graphs onto `Material` / `OpenPBR`.
 crust-mtlx = { path = "../crust-mtlx" }
+# The tiny-network kit `neural` light selection learns visibility with
+# (`light_visibility.rs`): no dependencies, `forbid(unsafe_code)`.
+crust-nn = { path = "../crust-nn" }
 ocio.workspace = true
 crust-jit = { path = "../crust-jit", optional = true }
 # The `crust diagnostic` report (`diagnostic/report.rs`): written as JSON

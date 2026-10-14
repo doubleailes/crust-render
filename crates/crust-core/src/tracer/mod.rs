@@ -332,7 +332,7 @@ impl Renderer {
     }
 
     /// Builds the light selection the settings ask for (training the
-    /// `learned` one), returning how long it took.
+    /// `learned` or `neural` one), returning how long it took.
     fn select_lights(&mut self) -> std::time::Duration {
         let started = std::time::Instant::now();
         let settings = self.settings;
@@ -356,6 +356,19 @@ impl Renderer {
                     self.lights.set_cache(cache);
                 }
                 None => debug!("learned light selection: nothing to learn, picking by power"),
+            }
+        }
+        if settings.light_selection() == LightSelection::Neural {
+            match crate::light_visibility::train(
+                &self.world,
+                &self.camera,
+                &self.lights,
+                settings.width,
+                settings.height,
+                settings.frame,
+            ) {
+                Some(cache) => self.lights.set_visibility(cache),
+                None => debug!("neural light selection: nothing to learn, picking by power"),
             }
         }
         debug!(

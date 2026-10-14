@@ -13,15 +13,20 @@
 # Usage:
 #   scripts/check_images.sh record <dir>    # render the goldens
 #   scripts/check_images.sh check  <dir>    # re-render and diff against them
+#
+# Arguments after <dir> go to every render, on both sides: e.g.
+# `record <dir> --light-selection learned` pins a mode the scenes do not
+# author. Give `check` the same ones `record` was given.
 
 set -euo pipefail
 
 MODE="${1:-}"
 DIR="${2:-}"
 SPP=16
+EXTRA=("${@:3}")
 
 if [ "$MODE" != record ] && [ "$MODE" != check ]; then
-    sed -n '2,16p' "$0"
+    sed -n '2,20p' "$0"
     exit 2
 fi
 if [ -z "$DIR" ]; then
@@ -52,7 +57,7 @@ scene_paths() {
 if [ "$MODE" = record ]; then
     mkdir -p "$DIR"
     while IFS=$'\t' read -r name path; do
-        "$BIN" render -i "$path" -o "$DIR/$name.exr" -s "$SPP" -l error >/dev/null 2>&1 \
+        "$BIN" render -i "$path" -o "$DIR/$name.exr" -s "$SPP" "${EXTRA[@]}" -l error >/dev/null 2>&1 \
             && echo "recorded $name" || echo "FAILED   $name"
     done < <(scene_paths)
     exit 0
@@ -68,7 +73,7 @@ while IFS=$'\t' read -r name path; do
         printf '%-22s %s\n' "$name" "NO GOLDEN"
         continue
     fi
-    if ! "$BIN" render -i "$path" -o "$WORK/$name.exr" -s "$SPP" -l error >/dev/null 2>&1; then
+    if ! "$BIN" render -i "$path" -o "$WORK/$name.exr" -s "$SPP" "${EXTRA[@]}" -l error >/dev/null 2>&1; then
         printf '%-22s %s\n' "$name" "RENDER FAILED"
         fail=1
         continue
