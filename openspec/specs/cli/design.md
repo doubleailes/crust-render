@@ -173,6 +173,20 @@ cargo run --release -p crust-jit --example jit_bench -- lion_ldX.mtlx      # ...
 cargo run --release -p crust-render --example light_occlusion -- \
     samples/ALab/entry.usda --frame 1004 --camera /path/to/cam
 
+# What does `neural` light selection cost per NEE vertex? One network
+# evaluation (a `pick_index_at` at a new position, so the memo misses) against
+# one shadow ray, one `learned` and one `power` pick, on the same receivers:
+# ns per call, min / mean over --repeat, one thread, and the go/no-go ratio of
+# design D9 (docs/light_sampling.md, "Neural visibility cache").
+cargo run --release -p crust-render --example nvc_bench -- samples/usdlux.usda
+# ...its instructions per call. valgrind reads no symbols from the example, so
+# count the whole program with --only one phase (power, learned, neural or
+# shadow) at two --repeats; the import and both pre-passes run once either way,
+# so (second − first) / (2 × the calls it prints) is the phase's count.
+for r in 1 3; do RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no \
+    --branch-sim=no target/release/examples/nvc_bench samples/usdlux.usda \
+    --only neural --repeat $r 2>&1 | grep -E 'Collected|receivers'; done
+
 # Placing a camera in a downloaded production asset, and settling whether a
 # texture is display-encoded or linear (see "Ptex" under USD import).
 cargo run --release -p crust-render --example scene_bounds -- scene.usda

@@ -469,7 +469,7 @@ cargo run --release -- render -i scene.usda   # input USD scene (.usda/.usdc/.us
     --strategy power                          # power | balance | light | bsdf
     --filter gaussian                         # box | triangle | gaussian | blackman | mitchell
     --filter-radius 1.5                       # filter radius in pixels
-    --light-selection power                   # uniform | power | learned
+    --light-selection power                   # uniform | power | learned | neural
     --indirect-clamp 10                       # firefly clamp on indirect light (0 = off, unbiased)
     --camera /path/to/cam                     # render through this camera prim
     --scanline                                # row order instead of the default 16×16 tiles

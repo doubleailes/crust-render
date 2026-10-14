@@ -18,11 +18,13 @@ context: |
     (OpenUSD scene model, OpenPBR shading) over breadth of one-off features.
 
   Tech stack:
-  - Rust 2024, Cargo workspace with seven crates under crates/:
+  - Rust 2024, Cargo workspace with eight crates under crates/:
     - crust-rt: the intersection kernel (Embree-shaped API, SBVH → BVH4), no crust deps.
     - crust-mtlx: the MaterialX .mtlx reader (parse → compiled program → flattened
       BSDF lobes), no crust deps; crust-core re-exports its `Texture` trait as `Texture2D`.
     - crust-jit: Cranelift JIT for crust-mtlx programs, bit-identical to the interpreter.
+    - crust-nn: tiny bit-deterministic networks (hash grid, dense layers, Adam) for
+      `neural` light selection; no dependencies, no crust deps.
     - crust-core: the whole engine as a library (renderer, integrator, materials incl.
       the MaterialX→OpenPBR adapter, lights, volumes, path guiding, USD import).
     - crust-assets: host-side decoders implementing crust_core::AssetLoader

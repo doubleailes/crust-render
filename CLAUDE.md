@@ -95,9 +95,11 @@ verifies shading **in numbers, not by eye**.
 
 ## Workspace
 
-Seven crates under `crates/` (ownership table in `docs/architecture.md`):
+Eight crates under `crates/` (ownership table in `docs/architecture.md`):
 `crust-rt` (intersection kernel, no crust deps), `crust-mtlx` (MaterialX reader, no crust
-deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-core`
+deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-nn`
+(tiny bit-deterministic networks — hash grid, dense layers, Adam — for `neural` light
+selection; no dependencies at all, the caller brings threads and random numbers), `crust-core`
 (the engine library: import, integrator, materials, lights, volumes, guiding, stats),
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
 `crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
@@ -111,13 +113,13 @@ re-exports the public surface.
 
 **Code shape**
 
-- Safe Rust everywhere: crates are `forbid(unsafe_code)` except `crust-core` (`deny`, one
+- Safe Rust everywhere: crates are `forbid(unsafe_code)` (`crust-nn` included) except `crust-core` (`deny`, one
   test-only `GlobalAlloc` and, behind the `mmap` feature, the import's memory-mapped USD
   reads, `mapping_resolver` in `usd_import/mod.rs`) and `crust-jit` (`deny`, five audited blocks). Adding `unsafe`,
   or a dependency that carries it on the hot path, is a project decision, not a local one.
 - **crust-core decodes no assets.** Every image, Ptex or IES byte crosses `AssetLoader`
   into `crust-assets`; a loader returning `None` means "fall back", never an error.
-- `crust-rt` and `crust-mtlx` stay free of crust types. crust-core adopts their
+- `crust-rt`, `crust-mtlx` and `crust-nn` stay free of crust types. crust-core adopts their
   vocabulary (`crust_rt::Geometry`, `Texture2D = crust_mtlx::Texture`) instead of wrapping
   it — a wrapper adds a vtable hop per texel fetch that LTO cannot remove.
 - `scene/usd_import/` siblings share through `pub(super)` and import each other

@@ -2,7 +2,7 @@
 title = "Render settings"
 description = "The crust:* attributes of the RenderSettings prim."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-14T08:00:00+00:00
 draft = false
 weight = 20
 sort_by = "weight"
@@ -244,6 +244,7 @@ How light sampling picks which light to sample.
 | `power` | by emitted power, defensively: half the shadow rays are shared evenly among the finite lights, and lights at infinity keep their uniform share |
 | `uniform` | every light is equally likely |
 | `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
+| `neural` | visibility-aware, experimental: the same pre-pass trains a small network that predicts, at any point, which lights reach it; picks by power weighted by that prediction. Up to 64 lights; past that, or with a single light, it picks by power |
 
 An unknown name logs a warning and uses `power`.
 
@@ -323,8 +324,8 @@ before changing a final render's sampler.
 The sampler is recorded in every EXR as `crust:sampler`, and
 [`crust diff`](@/docs/reference/command-line.md#diff) warns when two images were sampled
 differently: their pixels then differ by noise even where both converge to the same image.
-The pre-pass that trains `crust:lightSelection = "learned"` always draws from `sobol`, so
-the learned table is the same under every sampler and a comparison measures the sampler
+The pre-pass that trains `crust:lightSelection = "learned"` (or `"neural"`) always draws
+from `sobol`, so the learned table is the same under every sampler and a comparison measures the sampler
 alone.
 
 An unknown name logs a warning and uses `sobol`.

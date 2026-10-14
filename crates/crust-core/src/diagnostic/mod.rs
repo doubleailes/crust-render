@@ -287,11 +287,14 @@ impl Shot {
     }
 }
 
-/// A render's setup, `(selection, training)`: the `learned` pre-pass and
-/// guiding's training passes. Every other selection is built in next to
-/// no time, and counts as none — so a trial without setup has none.
+/// A render's setup, `(selection, training)`: the `learned` or `neural`
+/// pre-pass and guiding's training passes. Every other selection is built in
+/// next to no time, and counts as none — so a trial without setup has none.
 fn setup_parts(settings: RenderSettings, selection: Duration, m: &Measured) -> (f64, f64) {
-    let selection_s = if settings.light_selection() == LightSelection::Learned {
+    let selection_s = if matches!(
+        settings.light_selection(),
+        LightSelection::Learned | LightSelection::Neural
+    ) {
         selection.as_secs_f64()
     } else {
         0.0

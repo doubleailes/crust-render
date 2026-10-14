@@ -4,18 +4,44 @@
 
 ### Requirement: Light selection
 
-NEE SHALL sample one light per vertex, chosen by `crust:lightSelection` /
-`--light-selection`: `power` (default; infinite lights keep a uniform share, the
-finite lights split the rest half evenly and half by flux), `uniform`
-(bit-identical to the historical renderer), `learned` (a visibility-aware
-per-cell table trained by a deterministic pre-pass, over the power table), or
-`neural` (the power table weighted by each light's visibility, predicted by a
-small network that a deterministic pre-pass trains).
+NEE SHALL take `crust:lightSamples` / `--light-samples` light samples at the
+camera vertex and `crust:lightSamplesIndirect` / `--light-samples-indirect` at
+every later surface and volume vertex (each default 1, from 1 to 1024; a stage
+value outside that range is clamped with a warning, a command-line one refused).
+The light
+of each sample SHALL be chosen by `crust:lightSelection` / `--light-selection`:
+`power` (default; infinite lights keep a uniform share, the finite lights split
+the rest half evenly and half by flux), `uniform` (bit-identical to the
+historical renderer), `learned` (a visibility-aware per-cell table trained by
+a deterministic pre-pass, over the power table), or `neural` (the power table
+weighted by each light's visibility, predicted by a small network that a
+deterministic pre-pass trains). The samples at one vertex SHALL
+be stratified, so that each light is chosen close to the count times its
+selection probability.
 
 #### Scenario: Uniform selection
 
 - **WHEN** a render runs with `--light-selection uniform`
 - **THEN** each of N lights is picked with probability 1/N
+
+#### Scenario: One sample per vertex is unchanged
+
+- **WHEN** a render runs with both sample counts at 1, given or by default
+- **THEN** the image is bit-identical to the renderer before sample counts
+  existed
+
+#### Scenario: Stratified picks
+
+- **WHEN** a vertex takes 4 light samples among three lights whose selection
+  probabilities are 0.5, 0.25 and 0.25
+- **THEN** the first light is sampled twice and each other light once
+
+#### Scenario: More samples, same image
+
+- **WHEN** a scene is rendered with `--light-samples 4` and with the default,
+  at increasing sample counts with the indirect clamp off
+- **THEN** the difference between the two falls as 1/√N, and the direct-light
+  noise per pixel sample is lower with 4
 
 #### Scenario: Neural selection is accepted
 

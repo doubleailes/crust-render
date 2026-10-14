@@ -18,6 +18,7 @@ graph TD
     rt["crust-rt<br/><i>intersection kernel</i>"]
     mtlx["crust-mtlx<br/><i>MaterialX reader + interpreter</i>"]
     jit["crust-jit<br/><i>Cranelift JIT for crust-mtlx programs</i>"]
+    nn["crust-nn<br/><i>tiny networks: hash grid, MLP, Adam</i>"]
     utils["utils<br/><i>sampling warps, MIS heuristics</i>"]
     oqmc["openqmc-rs<br/><i>QMC samplers (crates.io)</i>"]
     usd["openusd + openusd-schemas"]
@@ -31,6 +32,7 @@ graph TD
     assets --> ptex
     core --> rt
     core --> mtlx
+    core --> nn
     core -. "feature jit" .-> jit
     jit --> mtlx
     core --> utils
@@ -45,6 +47,7 @@ graph TD
 | `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
+| `crust-nn` | tiny, bit-deterministic networks: the multi-resolution hash grid, dense layers, sigmoid cross-entropy, Adam, gradient checking (what `neural` light selection learns visibility with) | crust types, threads (the caller maps a batch's chunks) and random numbers (the caller draws them) |
 | `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown), the light path inspector (`inspect/`: the `crust-light-paths/1` report) | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
 | `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's and the light path inspector's reports; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
@@ -57,8 +60,8 @@ Two properties of this graph are deliberate and worth keeping:
   `AssetLoader` seam (below) into `crust-assets`. That is why the
   engine library has no codec dependencies and why the probe examples in
   `crust-render/examples/` decode exactly the way the renderer does.
-- **The two leaf libraries have no crust dependency.** `crust-rt` and
-  `crust-mtlx` are shaped to be extracted the way `openqmc-rs` already was.
+- **The leaf libraries have no crust dependency.** `crust-rt`, `crust-mtlx`
+  and `crust-nn` are shaped to be extracted the way `openqmc-rs` already was.
   `crust-core` adopts their vocabulary (`crust_rt::Geometry`,
   `crust_mtlx::Texture` re-exported as `Texture2D`) instead of wrapping it in
   adapter traits: a wrapper would add a vtable hop per texel fetch that LTO
@@ -80,7 +83,7 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
  │       │     assets decode through AssetLoader (timed as "Load assets")
  │       ├─ mesh::flush_meshes               bake-once vs instance, now that counts are final
  │       └─ WorldBuilder::commit             top-level SBVH (crust-rt)
- ├─ Renderer::new(scene)                     light selection table, optional learned light cache
+ ├─ Renderer::new(scene)                     light selection table, optional learned cache or visibility network
  ├─ Renderer::render_with_control(tiled, progress, aovs, &control)
  │  (the CLI's call; render_with_stats / render_with_aovs are the same render without a control)
  │   ├─ first sweep in stages 1, 2, 4, … spp, then adaptive rounds; each unit publishes
@@ -178,7 +181,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
-| lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
+| lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection, and the pre-pass walk both learned selections share), `light_visibility.rs` (neural selection over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
@@ -210,13 +213,13 @@ other. The pairs:
   `edits_in_place_render_as_a_full_import` (`crust-render/src/mcp/tests.rs`).
 - **`Renderer::new` ↔ `Renderer::reconfigure`.** `new` is `reconfigure` on a
   fresh renderer, and `reconfigure` rebuilds everything that depends on the
-  settings (the light selection, the `learned` pre-pass); every other setting
+  settings (the light selection, the `learned` or `neural` pre-pass); every other setting
   is read per pass. A setting cached at construction must be rebuilt there too,
   or the diagnostic's trials measure the wrong renderer —
   `reconfigure_renders_what_new_renders` pins every varied setting bitwise.
   `Renderer::retune` (an MCP session's renders) is `reconfigure` keeping the
   light selection when its inputs — the strategy, the resolution, the frame —
-  are unchanged: a new input to the `learned` pre-pass belongs in its key, or a
+  are unchanged: a new input to the `learned` or `neural` pre-pass belongs in its key, or a
   session renders with a stale selection (`retune_renders_what_new_renders`).
 - **The clamp and its counter.** The clamp counter (`PathContext::measure_clamp`)
   returns the *unclamped* radiance through a copy of the ordinary expression

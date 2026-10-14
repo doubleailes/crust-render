@@ -830,6 +830,65 @@ sampling.)
   sample without a tube or disk light is bit-identical at 16 spp, and `usdlux` at 16,
   64 and 256 spp falls toward the reference without a floor.
 
+### 3.14 Neural visibility cache (`neural-visibility-light-selection`)
+
+**Why.** `learned` (§3.12) stores visibility in a uniform grid of per-cell
+tables, and a grid has two measured weaknesses: a cell straddling a shadow
+boundary averages visibility across it (why its defensive share had to rise to
+0.3, or `domelight` fireflied), and its resolution is set by the receiver count,
+not by where visibility changes. Bokšanský & Meister (JCGT 2025; §6.5) store the
+same knowledge as a continuous function: a multi-resolution hash grid feeding a
+small MLP. The experiment asks one question in numbers: on a CPU, does a neural
+visibility cache beat the `learned` grid **at equal time**?
+
+**The change.** `crust:lightSelection = "neural"` / `--light-selection neural`
+(`light_visibility.rs`, over the new dependency-free `crust-nn` crate):
+- **Labels.** `learned`'s pre-pass walk, shared rather than copied
+  (`light_cache::walk`), reports per receiver per light the fraction of its 2
+  samples that delivered light: nonzero radiance, above the horizon, a clear
+  shadow ray. Backfacing and below-horizon count as not delivered, so the
+  network learns them too.
+- **Network** (design D3): an 8-level hash grid (2 features, 4 to 107 cells per
+  axis, tables of 2¹⁴ vertices) → 16 → 32 → 32 → one logit per light, ReLU
+  between, sigmoid out. 8 epochs of 256-receiver batches, Adam (1e-2 on the
+  table, 1e-3 on the layers), then frozen. Deterministic at any thread count.
+- **Pick** (D2): `(1 − D) · πℓ V̂ℓ(x) / Σ πV̂ + D / n_live` over the power
+  table, with `learned`'s `D = 0.3`; the power table outside the receivers'
+  bounds or where every light is predicted hidden. Both MIS sides read one pure
+  function of the vertex's bits, memoised per thread.
+
+**The gate (design D9), measured before anything else was tuned.**
+`examples/nvc_bench` times, on one thread, one network evaluation (a cold
+`pick_index_at`) against one shadow ray from the same receivers, on a 160×90
+grid of first hits; min of 7 runs, and instructions per call from callgrind
+(`openspec/specs/cli/design.md`, command cookbook). Measured 2026-10-14 on a
+4-vCPU VM, against D3 as designed ("full") and once shrunk as D9 prescribes
+(4 levels, growth 3.0 so the finest level stays 108 cells, hidden 16 → 16:
+"small"):
+
+| scene (lights) | shadow ray | `power` / `learned` pick | full: ns, × a ray | small: ns, × a ray |
+|---|---|---|---|---|
+| `usdlux` (7) | 77 ns, 547 Ir | 4.8 / 15.5 ns, 47 / 173 Ir | 599–609 ns, **7.8×**; 6 045 Ir, 11× | 314 ns, **4.1×**; 3 562 Ir, 6.5× |
+| `veach_mis` (4) | 96–102 ns | | 490 ns, 4.8× | 277 ns, 2.9× |
+| `domelight` (2) | 41–47 ns | | 456 ns, 9.7× | 235 ns, 5.8× |
+| `materialx_basic` (2) | 33 ns | | 456 ns, 13.8× | 249 ns, 7.4× |
+
+- Two bit-identical passes over `crust-nn` came first: per axis rather than per
+  corner in the hash grid (no `floorf` call), and the dense layers' accumulator
+  kept in registers. They took the full network from ~820 ns (9 420 Ir) to the
+  ~600 ns above. What is left is the arithmetic: ~1 800 multiply-adds and 64
+  table reads per evaluation at 7 lights.
+- The cost is per NEE vertex whatever the scene, while a shadow ray's cost grows
+  with the BVH: these samples are small scenes with cheap rays. **D9's gate is
+  defined on ALab** (go at ≤ ~2 rays, stop at > ~5), whose rays cost several
+  times more but whose 47 lights add ~1 300 multiply-adds to the output layer.
+  ALab was not available where this was measured, so the gate's own verdict is
+  open. On the samples, D3 as designed is no-go (4.8–13.8×) and the small
+  network marginal on two scenes and no-go on two (2.9–7.4×).
+- The small network trains to a higher loss (`usdlux` 0.152 against 0.118) and
+  costs half the pre-pass (`usdlux` 0.26 s against 0.42 s; `learned`'s is
+  0.03 s).
+
 ## 4. The anatomy of the direct-lighting estimator
 
 One NEE sample at a shading point *x* estimates

@@ -135,6 +135,49 @@
     - **Power table underneath.** The cache only installs over a power table:
       with none, `density` divides by `n` and would disagree with the per-cell
       pmf.
+  - **`neural`** (opt-in and experimental, `light_visibility.rs` over the
+    `crust-nn` crate; `docs/light_sampling.md` § "Neural visibility cache") is
+    `learned`'s knowledge stored as a continuous function instead of a grid,
+    after Bokšanský & Meister's *Neural Visibility Cache* (JCGT 2025). The
+    same pre-pass walk (`light_cache::walk`) labels each receiver with the
+    fraction of each light's samples that **delivered light** — backfacing,
+    below the horizon and occluded all count as not — and a small network
+    learns each light's visibility `V̂ℓ(x)` from position: an 8-level hash grid
+    (4 to 107 cells per axis, tables of 2¹⁴ vertices) feeding 16 → 32 → 32 → N,
+    trained for a fixed 8 epochs of 256-receiver batches with Adam, then
+    frozen. Three details are load-bearing:
+    - **The pick (D2)** is `(1 − D) · πℓ V̂ℓ(x) / Σ πV̂ + D / n_live` over the
+      power table `π`, with `learned`'s `DEFENSIVE` as `D` (shared, not
+      copied) and the table built by the same `light_cache::defensive_table`,
+      CDF first. Where every prediction is hidden (`Σ πV̂ ≤ 1e-6`) or the
+      vertex is outside the receivers' 2–98% bounds, the power table answers.
+      The network learns visibility only; distance and power stay analytic.
+    - **One pure function on both MIS sides (D6).** The `*_at` lookups call
+      `VisibilityCache::with_table(p)`, a function of `p`'s bits alone, so the
+      bounce side, recomputing at `prev.pos`, reads the bits NEE picked with. A
+      grid forgave an ulp between the two positions; a continuous function
+      would make it an MIS mismatch. So debug builds assert, at every NEE site
+      and every bounce-side setup, that they are the same `Vec3A` bits
+      (`nee_picks_from` / `bounce_weighs_from` in `tracer/path.rs`). A
+      one-entry thread-local memo, keyed by the cache and `p`'s bits, serves
+      the bounce side's lookup right after NEE's for free; a miss recomputes
+      the same bits (`tests/neural_selection.rs` pins both). The neural arms of
+      the `*_at` methods are out of line, so the other selections' code is
+      unchanged.
+    - **At most 64 lights (D7)**, one output unit each. Past that, and below
+      two lights or with no receiver, it falls back to power — with one `WARN`
+      naming the limit past 64, silently otherwise — as `learned` does past
+      its 1024.
+
+    Training is a function of the scene alone: initialisation and each
+    epoch's shuffle draw from `openqmc` under `K_NVC`, and a batch's gradient
+    is summed in fixed 32-receiver chunks in chunk order however many threads
+    ran them (`crust_nn::Network::batch_gradient`). Plain `f32` in a fixed loop
+    order, no `mul_add`: `scripts/test_simd_matrix.sh -p crust-nn` pins the
+    bits under every codegen. **A trap:** the epoch count is fixed, so the
+    number of Adam steps scales with the receivers. A 64 × 36 frame trains on
+    ~300 receivers, 16 steps, and every prediction is still near ½ — which
+    degrades the pick towards power, never below the defensive floor.
 
   **Both halves of the design were forced by measurement** (`docs/light_sampling.md`
   §3.8):
