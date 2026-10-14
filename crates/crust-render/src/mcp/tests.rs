@@ -847,13 +847,18 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    def Xform "Prop" (
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.5
+    }
+
+    def "Prop" (
         prepend references = @./prop.usda@
     )
     {
     }
 
-    def Xform "Heavy" (
+    def "Heavy" (
         prepend payload = @./pay.usda@
     )
     {
@@ -967,6 +972,16 @@ fn a_session_watches_every_layer_its_import_composed() {
 #[test]
 fn a_rewritten_sublayer_makes_the_next_edit_full() {
     let (mut state, dir) = sourced_session("sources_sublayer_edit");
+    // The key's intensity shows, so a scene still at the old intensity
+    // would not render as the fresh session does.
+    let lit = render_planes(&mut state);
+    author(
+        &mut state,
+        r#"over "World" { over "Key" { float inputs:intensity = 3 } }"#,
+    );
+    let dimmer = render_planes(&mut state);
+    assert!(!crust_core::compare::compare(&lit[0].1, &dimmer[0].1).identical);
+    undo(&mut state);
     let tint =
         |c: &str| format!(r#"over "World" {{ over "Key" {{ color3f inputs:color = {c} }} }}"#);
     assert_eq!(author(&mut state, &tint("(1, 0.9, 0.8)")), "lights");

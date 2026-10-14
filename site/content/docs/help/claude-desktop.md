@@ -182,8 +182,9 @@ Before each `query`, `check`, edit, `undo`, `render` and `light_paths`, the sess
 the length and modification time of each of those files:
 
 - When one changed, `query` and the next edit read the new composition.
-- The next edit, `undo`, `render` or `check` imports the stage whole (`applied` `full`),
-  and its result lists the layers in `sources_changed`. An edit is never applied in place
+- The next edit, `undo`, `render` or `check` imports the stage whole (`applied` `full`).
+  An edit's, `undo`'s and `render`'s result lists the layers in `sources_changed`;
+  `check` answers its usual `crust-check/2` report of the new import. An edit is never applied in place
   over a scene imported from a layer that has since changed.
 - A source that no longer imports (a half-written file, a syntax error) fails the call,
   naming the layers that changed. The scene is not rendered stale: the next call tries the

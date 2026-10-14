@@ -92,7 +92,9 @@ moving.
 
 `Open` gains `sources: Sources`. This holds `(PathBuf, Option<(u64, SystemTime)>)` per
 layer in `Imported::scene.layers`, minus the override layer itself. It is the same stamp
-as `kept.rs`'s, taken right after each import. `Sources::changed()` re-stats every entry
+as `kept.rs`'s, taken just before each import for every layer already known, so a write
+during the import is seen afterwards. A layer the import composes for the first time is
+stamped after it. `Sources::changed()` re-stats every entry
 and returns the paths whose stamp moved.
 
 - *Why length and mtime:* this matches the kept decodes, and the accepted gap is the
@@ -107,9 +109,13 @@ are `query`, `check`, `render`, every edit tool, `undo`, `light_paths` and
 `render_final`, which already imports from disk itself. When `Sources::changed()` is
 non-empty, `refresh()`:
 
-1. reopens the authoring stage (`open_stage`), so `query` and the next edit's type
-   lookups see the new composition;
-2. sets `Open::stale = Some(changed paths)`.
+1. adds the changed paths to `Open::stale` (first, so a failure below cannot lose them);
+2. reopens the authoring stage (`open_stage`), so `query` and the next edit's type
+   lookups see the new composition, retrying on later calls until it succeeds;
+3. refuses the call when the change brings a composition error the old stage did not
+   have, such as a layer that no longer parses. openusd composes such a layer as if it
+   were absent, so without this the session would render a scene missing a half-written
+   layer.
 
 The scene is imported only where it is needed:
 
@@ -158,8 +164,8 @@ replaced the geometry (`Imported::geometry`), so it needs no change.
   stale again. Either way the scene converges once the writer is done.
 - **The stat cost on very large stages.** ALab composes on the order of thousands of
   layers. A few thousand `stat`s per tool call is milliseconds, against seconds for an
-  edit. → Measure on the largest checked-in stage and record the number in the design
-  record.
+  edit. Measured: 5 000 stats take 11.7 ms. The checked-in samples compose at most three
+  layers, so the number is recorded in the design record from a synthetic set.
 - **Unwatched files** (`.mtlx`, files read outside `AssetLoader`). → `reload`, and a
   Known-gaps entry.
 
