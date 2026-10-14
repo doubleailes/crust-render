@@ -307,6 +307,14 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   changed subtree, and BVH refit, are not done: a refit tree is not the tree a fresh
   build gives. A light with no geometry (distant, dome) could move without touching the
   BVH; it is `full` until the simpler classes have proved themselves.
+- **ALab applies nothing in place.** Measured on frame 1004 (`live-stage-scene-deltas`
+  `notes.md`), every edit is `full` (~105 s), one deliberate refusal per class:
+  adaptive subdivision refuses any camera change, exposure included, though only the
+  camera's placement and projection move the tessellation; light links refuse every
+  light rebuild; and the classifier reads prim types from the authoring stage, whose
+  payloads are unloaded, so a shader delivered by a payload (the stoat's looks) is not
+  seen as one. Production stages author all three, so the in-place path pays off today
+  on look-development stages (the DPEL teapot: 22.6 s per edit to ~1 ms), not on shots.
 - **Kept decodes are let go only by a full import.** A run of in-place edits that stops
   using a texture keeps it until the next `full` edit sweeps.
 - **Environment maps are decoded again** by every import and dome rebuild.

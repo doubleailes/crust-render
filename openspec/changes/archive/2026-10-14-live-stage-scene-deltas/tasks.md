@@ -20,12 +20,13 @@
       dropped. Done when a test over `samples/cornellbox.usda` and an instanced sample
       maps every material and light slot to its prim path, and a streamed import with
       several epochs maps every `Arc` of a shared material.
-- [ ] 2.2 Check the cost: a callgrind instruction count of `crust render` on the
+- [x] 2.2 Check the cost: a callgrind instruction count of `crust render` on the
       cornell box at `-s 2`, before and after, differs only by the table's
       construction. `--stats` peak memory on ALab and Moana is recorded in the
       change's notes.
-      *Callgrind done (+169 869 instructions, 0.004%, all import-time; `notes.md`).
-      ALab and Moana peak memory not measured: neither stage is in this checkout.*
+      *+169 869 instructions (0.004%, all import-time). Peak memory: ALab
+      13.22 → 13.18 GiB, Moana 23.84 → 24.07 GiB, both within run-to-run spread
+      (`notes.md`).*
 
 ## 3. In-place entry points (crust-core)
 
@@ -75,12 +76,12 @@
       `RectLight`'s intensity and colour, and a dome light's texture file (`lights`); a
       base colour, a roughness and a texture-file input (`materials`); and an undo of
       each.
-- [ ] 5.2 Measure the edit latency (`import_s`) for one edit of each class on the
+- [x] 5.2 Measure the edit latency (`import_s`) for one edit of each class on the
       cornell box, the DPEL teapot and ALab, with `CRUST_SCENE_DELTAS` on and off, and
       record min and mean in the change's notes.
-      *Measured on a synthetic textured stage, `usdpreview_textured` and
-      `PointInstancedMedCity` instead (`notes.md`); the DPEL teapot's asset and ALab
-      are not in this checkout.*
+      *Measured on all three (`notes.md`): the teapot goes from 22.6 s to ~1 ms in
+      place. ALab applies every edit as `full`: adaptive subdivision, light links and
+      payload-delivered looks each refuse one class.*
 
 ## 6. Documentation and CI
 
