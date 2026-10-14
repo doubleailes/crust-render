@@ -63,6 +63,8 @@ pub struct SamplingStamp {
     pub light_selection: String,
     pub pixel_filter: String,
     pub pixel_filter_radius: f32,
+    /// The QMC sampler every pass drew from (`crust:sampler`).
+    pub sampler: String,
     /// The time code the stage was evaluated at; `None` without one.
     pub frame: Option<f64>,
     /// The camera prim rendered through; `None` for the procedural camera.
@@ -105,6 +107,7 @@ impl SamplingStamp {
             light_selection: settings.light_selection().to_string(),
             pixel_filter: filter.name().to_owned(),
             pixel_filter_radius: filter.radius(),
+            sampler: settings.sampler().name().to_owned(),
             frame: time,
             camera: camera_path.map(str::to_owned),
             version: crate::report::CRUST_VERSION.to_owned(),
@@ -145,6 +148,7 @@ impl SamplingStamp {
             ("crust:lightSelection", Text(self.light_selection.clone())),
             ("crust:pixelFilter", Text(self.pixel_filter.clone())),
             ("crust:pixelFilterRadius", Float(self.pixel_filter_radius)),
+            ("crust:sampler", Text(self.sampler.clone())),
         ];
         if let Some(t) = self.frame {
             out.push(("crust:frame", Double(t)));
@@ -284,6 +288,22 @@ mod tests {
         assert_eq!(
             get(&attrs, "crust:pixelFilterRadius"),
             Some(&StampValue::Float(1.5))
+        );
+    }
+
+    /// The sampler is stamped by its token, `sobol` when nothing chose one.
+    #[test]
+    fn the_sampler_is_stamped_by_its_token() {
+        let attrs = SamplingStamp::new(&settings(), &RayStats::default(), None, None).attributes();
+        assert_eq!(
+            get(&attrs, "crust:sampler"),
+            Some(&StampValue::Text("sobol".into()))
+        );
+        let bn = settings().with_sampler(crate::SamplerKind::LatticeBn);
+        let attrs = SamplingStamp::new(&bn, &RayStats::default(), None, None).attributes();
+        assert_eq!(
+            get(&attrs, "crust:sampler"),
+            Some(&StampValue::Text("latticeBn".into()))
         );
     }
 

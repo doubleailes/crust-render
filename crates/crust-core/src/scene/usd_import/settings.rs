@@ -10,6 +10,7 @@ use tracing::debug;
 use crate::color::Space;
 use crate::filter::PixelFilter;
 use crate::light::LightSelection;
+use crate::sampler::SamplerKind;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 
 use super::attrs::{custom_bool, custom_f32, custom_i32, custom_token, value_at};
@@ -292,6 +293,19 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     if let Some(radius) = custom_f32(&prim, "crust:pixelFilterRadius") {
         filter = filter.with_radius(radius);
     }
+    // The QMC sampler: `sobol` (default) | `sobolBn` | `lattice` |
+    // `latticeBn` | `pmj` | `pmjBn`.
+    let sampler = match custom_token(&prim, "crust:sampler") {
+        None => SamplerKind::default(),
+        Some(name) => name.parse().unwrap_or_else(|e| {
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
+                "crust:sampler: {e} — using sobol"
+            );
+            SamplerKind::default()
+        }),
+    };
     // Firefly clamp on indirect light, in the film's linear units (the
     // largest channel of one sample's indirect radiance). Unauthored takes
     // the engine default; an authored 0 leaves the estimator unbiased.
@@ -353,6 +367,7 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         .with_sampling_strategy(strategy)
         .with_light_selection(light_selection)
         .with_pixel_filter(filter)
+        .with_sampler(sampler)
         .with_indirect_clamp(indirect_clamp)
         .with_adaptive_neighbour_tolerance(neighbour_tolerance)
         .with_light_samples(light_samples, light_samples_indirect)

@@ -27,10 +27,9 @@
 //! [`crate::AssetLoader`] seam and comes back as a [`crate::Texture2D`]
 //! sampler.
 
-use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure, volume_medium};
-use crate::material::{Material, Resolution, ScatterSample};
+use crate::material::{BsdfDraw, Material, Resolution, ScatterSample};
 use crate::ray::Ray;
 use crust_mtlx::{Closures, Host, Program, ShadeCtx, Val};
 use glam::Vec3A;
@@ -356,9 +355,9 @@ impl Material for MtlxMaterial {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: BsdfDraw<'_>,
     ) -> Option<ScatterSample> {
-        self.resolved(r_in, rec).scatter(r_in, rec, sampler)
+        self.resolved(r_in, rec).scatter(r_in, rec, || draw.u())
     }
 
     fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {

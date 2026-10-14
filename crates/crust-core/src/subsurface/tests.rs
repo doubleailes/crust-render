@@ -1,4 +1,5 @@
 use super::*;
+use crate::PathSampler;
 use crate::rt_world::WorldBuilder;
 use crust_rt::Geometry;
 use std::sync::Arc;

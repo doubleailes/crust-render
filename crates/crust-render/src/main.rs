@@ -19,6 +19,7 @@ use crust_core::PixelFilter;
 use crust_core::PixelRect;
 use crust_core::RayStats;
 use crust_core::Renderer;
+use crust_core::SamplerKind;
 use crust_core::SamplingStrategy;
 use crust_core::Scene;
 use crust_core::check::{CheckReport, ProductInfo};
@@ -302,6 +303,10 @@ struct SceneArgs {
     /// blackman 1.5, mitchell 2). Overrides `crust:pixelFilterRadius`.
     #[arg(long, value_parser = parse_radius)]
     filter_radius: Option<f32>,
+    /// The QMC sampler every pass draws from. Overrides the scene's
+    /// `crust:sampler` when set.
+    #[arg(long, value_parser = choices(SamplerKind::CHOICES))]
+    sampler: Option<SamplerKind>,
     /// Firefly clamp: cap each sample's indirect light at this value in its
     /// largest channel (linear, hue kept). Biased, and 0 turns it off.
     /// Overrides the scene's `crust:indirectClamp`.
@@ -817,6 +822,10 @@ fn apply_scene_overrides(cli: &SceneArgs, mut settings: RenderSettings) -> Rende
     if let Some(radius) = cli.filter_radius {
         debug!("--filter-radius {radius} overrides the filter's own radius");
         settings = settings.with_pixel_filter(settings.pixel_filter().with_radius(radius));
+    }
+    if let Some(sampler) = cli.sampler {
+        debug!("--sampler {sampler} overrides the scene's crust:sampler");
+        settings = settings.with_sampler(sampler);
     }
     if let Some(limit) = cli.indirect_clamp {
         debug!("--indirect-clamp {limit} overrides the scene's crust:indirectClamp");
@@ -2149,6 +2158,9 @@ mod tests {
         for &(value, name, _) in PixelFilter::CHOICES {
             assert_eq!(parse("--filter", name).filter, Some(value));
         }
+        for &(value, name, _) in SamplerKind::CHOICES {
+            assert_eq!(parse("--sampler", name).sampler, Some(value));
+        }
         assert_eq!(
             parse("--strategy", "power").strategy,
             Some(SamplingStrategy::PowerMis)
@@ -2486,6 +2498,20 @@ mod tests {
     fn cli_rejects_unknown_enum_values() {
         assert!(render(["--strategy", "random"]).is_err());
         assert!(render(["--filter", "lanczos"]).is_err());
+        let halton = match render(["--sampler", "halton"]) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("halton is no sampler"),
+        };
+        for name in ["sobol", "sobolBn", "lattice", "latticeBn", "pmj", "pmjBn"] {
+            assert!(halton.contains(name), "{halton}");
+        }
+        assert!(
+            Cli::try_parse_from(["crust", "check", "-i", "s.usda", "--sampler", "halton"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["crust", "diagnostic", "-i", "s.usda", "--sampler", "pmj"])
+                .is_ok()
+        );
         assert!(render(["--light-selection", "bvh"]).is_err());
         assert!(render(["-l", "loud"]).is_err());
         assert!(Cli::try_parse_from(["crust", "render", "--camera"]).is_err());

@@ -13,9 +13,8 @@
 
 use glam::Vec3A;
 
-use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::{Material, OpenPBR, Resolution, ScatterSample};
+use crate::material::{BsdfDraw, Material, OpenPBR, Resolution, ScatterSample};
 use crate::ray::Ray;
 
 /// What a pattern material supplies; [`Material`] follows from it.
@@ -94,10 +93,10 @@ impl<T: PatternMaterial> Material for T {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: PathSampler,
+        draw: BsdfDraw<'_>,
     ) -> Option<ScatterSample> {
         let (params, rec) = self.run(r_in, rec);
-        params.scatter_importance(r_in, &rec, sampler)
+        params.scatter_importance(r_in, &rec, draw)
     }
 
     fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {

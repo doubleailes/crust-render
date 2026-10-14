@@ -20,7 +20,8 @@ use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{EVERY_CLASS, Light, LightList, PathSampler, profile};
+use crate::{EVERY_CLASS, Light, LightList, profile};
+use openqmc::{Sampler, SamplerImpl};
 
 use super::GuidingContext;
 use super::route::{Arrival, NO_EVENT, NO_LIGHT, Route, RouteCtx};
@@ -58,7 +59,7 @@ const K_LINK_TWIN: i32 = 14; // off vertex, per light index: a link twin's shado
 /// sample, so the samples' draws are independent of one another (the pick is
 /// then stratified by [`stratified_pick`]).
 #[inline(always)]
-pub(super) fn nee_sampler(vertex: PathSampler, index: u32) -> PathSampler {
+pub(super) fn nee_sampler<S: SamplerImpl>(vertex: Sampler<S>, index: u32) -> Sampler<S> {
     if index == 0 {
         vertex
     } else {
@@ -114,9 +115,9 @@ const RR_MIN_PROB: f32 = 0.05;
 /// untouched. The one roulette every vertex kind (surface bounce, region
 /// phase scatter, carried-medium scatter) applies.
 #[inline(always)]
-fn russian_roulette(
+fn russian_roulette<S: SamplerImpl>(
     depth: usize,
-    v: PathSampler,
+    v: Sampler<S>,
     beta: &mut Vec3A,
     factor: &mut Vec3A,
     stats: &mut RayStats,
@@ -175,14 +176,14 @@ pub(super) struct PathContext<'a> {
 
 /// One camera path's radiance, with one light sample per vertex — see
 /// [`ray_color_with_light_samples`].
-pub fn ray_color(
+pub fn ray_color<S: SamplerImpl>(
     r: &Ray,
     world: &World,
     lights: &LightList,
     volumes: &Volumes,
     depth: i32,
     strategy: SamplingStrategy,
-    sampler: PathSampler,
+    sampler: Sampler<S>,
 ) -> Vec3A {
     ray_color_with_light_samples(r, world, lights, volumes, depth, strategy, (1, 1), sampler)
 }
@@ -192,7 +193,7 @@ pub fn ray_color(
 /// as [`RenderSettings::with_light_samples`](super::RenderSettings::with_light_samples)
 /// takes them. Unclamped, unguided.
 #[allow(clippy::too_many_arguments)]
-pub fn ray_color_with_light_samples(
+pub fn ray_color_with_light_samples<S: SamplerImpl>(
     r: &Ray,
     world: &World,
     lights: &LightList,
@@ -200,7 +201,7 @@ pub fn ray_color_with_light_samples(
     depth: i32,
     strategy: SamplingStrategy,
     light_samples: (u32, u32),
-    sampler: PathSampler,
+    sampler: Sampler<S>,
 ) -> Vec3A {
     let mut no_training = Vec::new();
     let mut stats = RayStats::default();
@@ -225,16 +226,16 @@ pub fn ray_color_with_light_samples(
         !lights.twinned_lights().is_empty(),
     ) {
         (true, true) => {
-            trace_path::<false, false, true, true>(r, &cx, sampler, training, s, &mut stats)
+            trace_path::<S, false, false, true, true>(r, &cx, sampler, training, s, &mut stats)
         }
         (true, false) => {
-            trace_path::<false, false, true, false>(r, &cx, sampler, training, s, &mut stats)
+            trace_path::<S, false, false, true, false>(r, &cx, sampler, training, s, &mut stats)
         }
         (false, true) => {
-            trace_path::<false, false, false, true>(r, &cx, sampler, training, s, &mut stats)
+            trace_path::<S, false, false, false, true>(r, &cx, sampler, training, s, &mut stats)
         }
         (false, false) => {
-            trace_path::<false, false, false, false>(r, &cx, sampler, training, s, &mut stats)
+            trace_path::<S, false, false, false, false>(r, &cx, sampler, training, s, &mut stats)
         }
     }
 }
@@ -265,26 +266,27 @@ pub(super) fn ray_cones_enabled() -> bool {
 // profiler switch LLVM stopped inlining them into either copy — +1.1%
 // instructions on cornellbox with profiling off.
 #[inline(always)]
-fn sample_bounce_direction<const AOV: bool>(
+fn sample_bounce_direction<S: SamplerImpl, const AOV: bool>(
     r: &Ray,
     rec: &HitRecord,
     sp: &ShadingPoint,
     guiding: Option<&GuidingContext>,
-    sampler: PathSampler,
+    sampler: Sampler<S>,
     split: Option<&mut LobeSplit>,
 ) -> Option<ScatterSample> {
     // The material's own sample — split by lobe at the direction it drew
     // (see `ShadingPoint::scatter_split`) when light path expressions want
     // the split, which only the AOV instantiation can ask for.
     let mut split = if AOV { split } else { None };
-    let mut scatter = |dom| match split.as_deref_mut() {
-        Some(out) => sp.scatter_split(r, dom, out),
-        None => sp.scatter_importance(r, dom),
-    };
     // Distinct sub-domains: the BSDF scatter block, and the guide block whose
     // first dimension is the α-coin and whose incidental stream drives the
-    // quadtree descent.
+    // quadtree descent. The material is handed the numbers, not the domain:
+    // one 4D block, drawn only if it samples (`BsdfDraw`).
     let bsdf_dom = sampler.new_domain(K_BSDF);
+    let mut scatter = |dom: Sampler<S>| match split.as_deref_mut() {
+        Some(out) => sp.scatter_split(r, || dom.draw_sample_f32::<4>(), out),
+        None => sp.scatter_importance(r, || dom.draw_sample_f32::<4>()),
+    };
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
         _ => return scatter(bsdf_dom),
@@ -859,7 +861,7 @@ impl MixedHairNee {
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn mixed_hair_shadow<const PROFILE: bool, const MEDIA: bool>(
+fn mixed_hair_shadow<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     sp: &ShadingPoint,
     world: &World,
     volumes: &Volumes,
@@ -867,10 +869,10 @@ fn mixed_hair_shadow<const PROFILE: bool, const MEDIA: bool>(
     distance: f32,
     tr_pass: Vec3A,
     inside: Option<&Enclosure>,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> MixedHairNee {
-    let tr_wall = shadow_transmittance::<PROFILE, MEDIA>(
+    let tr_wall = shadow_transmittance::<S, PROFILE, MEDIA>(
         world, volumes, &ray, distance, inside, vertex, stats,
     );
     let (hair, other, hair_leaves) = sp.eval_hair_split(ray.direction());
@@ -893,13 +895,13 @@ fn mixed_hair_shadow<const PROFILE: bool, const MEDIA: bool>(
 /// starts in one, or is blocked in a world with medium boundaries, is walked
 /// hit by hit ([`medium_shadow`]). `MEDIA` is the integrator's: false in a
 /// world without boundaries, where none of that can happen.
-fn shadow_transmittance<const PROFILE: bool, const MEDIA: bool>(
+fn shadow_transmittance<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     world: &World,
     volumes: &Volumes,
     shadow_ray: &Ray,
     distance: f32,
     inside: Option<&Enclosure>,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Vec3A {
     // Dedicated occlusion query: any hit in range means full shadow, so the
@@ -939,11 +941,11 @@ fn shadow_transmittance<const PROFILE: bool, const MEDIA: bool>(
 /// ([`shadow_transmittance`]) and the learned light cache's training share:
 /// the cache must train on the visibility the integrator renders with.
 #[inline]
-pub(crate) fn surface_visibility(
+pub(crate) fn surface_visibility<S: SamplerImpl>(
     world: &World,
     ray: &Ray,
     distance: f32,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Vec3A {
     match visible(world, ray, distance, vertex, stats) {
@@ -967,11 +969,11 @@ pub(crate) fn surface_visibility(
 /// without comparing a colour (`Vec3A == ZERO` at every shadow ray was
 /// measurable in a world with no pass-through at all).
 #[inline(always)]
-fn visible(
+fn visible<S: SamplerImpl>(
     world: &World,
     ray: &Ray,
     distance: f32,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Option<Vec3A> {
     let t_max = shadow_t_max(distance);
@@ -992,11 +994,11 @@ fn visible(
 /// pass-throughs reaches it.
 #[cold]
 #[inline(never)]
-fn cutout_visibility(
+fn cutout_visibility<S: SamplerImpl>(
     world: &World,
     ray: &Ray,
     t_max: f32,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Vec3A {
     cutout_through(world, ray, t_max, vertex, stats)
@@ -1006,14 +1008,15 @@ fn cutout_visibility(
 /// through the [`ShadingPoint`] the hit resolves to, so it is the BSDF
 /// [`Material::resolve`] returns that answers — the one the vertex shades
 /// with when the path meets the surface instead.
-fn straight_transmittance(
+fn straight_transmittance<S: SamplerImpl>(
     mat: &dyn Material,
     ray: &Ray,
     rec: &HitRecord,
-    sampler: PathSampler,
+    sampler: Sampler<S>,
 ) -> Vec3A {
     let cos_o = ray.direction().normalize().dot(rec.normal).abs();
-    let t = ShadingPoint::new(mat, ray, rec, cos_o).straight_transmittance(ray, sampler);
+    let t = ShadingPoint::new(mat, ray, rec, cos_o)
+        .straight_transmittance(ray, || sampler.draw_sample_f32::<2>());
     if t.is_finite() { t } else { Vec3A::ZERO }
 }
 
@@ -1085,13 +1088,13 @@ fn cross_boundary(
 /// transmittance.
 #[cold]
 #[inline(never)]
-fn medium_shadow(
+fn medium_shadow<S: SamplerImpl>(
     world: &World,
     volumes: &Volumes,
     ray: &Ray,
     distance: f32,
     inside: Option<&Enclosure>,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Vec3A {
     let kept = through_boundaries(
@@ -1124,13 +1127,13 @@ fn medium_shadow(
 /// cutouts and thin walls against [`MAX_CUTOUT_CROSSINGS`], so a light any
 /// path can reach is never blocked by the shadow ray's budget alone.
 #[allow(clippy::too_many_arguments)]
-fn through_boundaries(
+fn through_boundaries<S: SamplerImpl>(
     world: &World,
     ray: &Ray,
     t_max: f32,
     inside: Option<&Enclosure>,
     attenuate: bool,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Vec3A {
     let mut inside = inside.copied();
@@ -1346,11 +1349,11 @@ fn shadow_t_max(distance: f32) -> f32 {
 /// is evaluated at the crossing, from `vertex` under [`K_NEE_THIN`].
 ///
 /// Reached through [`surface_visibility`].
-fn cutout_through(
+fn cutout_through<S: SamplerImpl>(
     world: &World,
     ray: &Ray,
     t_max: f32,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Vec3A {
     if world.has_straight_transmission() {
@@ -1392,11 +1395,11 @@ fn cutout_through(
 /// crossing's `P` coloured by the straight transmittance. Apart, so a world
 /// with cutouts alone walks exactly the loop it always did.
 #[inline(never)]
-fn walls_through(
+fn walls_through<S: SamplerImpl>(
     world: &World,
     ray: &Ray,
     t_max: f32,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     stats: &mut RayStats,
 ) -> Vec3A {
     let (mut t, mut segment) = (0.0, ray.clone());
@@ -1489,11 +1492,11 @@ fn point_sampled(rec: &HitRecord) -> HitRecord {
 /// Its shadow-side twin is [`cutout_through`].
 #[cold]
 #[inline(never)]
-fn pass_cutouts<'w>(
+fn pass_cutouts<'w, S: SamplerImpl>(
     world: &'w World,
     ray: &Ray,
     hit: &mut Option<WorldHit<'w>>,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     thin: &mut ThinWalls,
     stats: &mut RayStats,
 ) -> bool {
@@ -1564,11 +1567,11 @@ fn pass_cutouts<'w>(
 /// with cutouts alone runs exactly the loop it always did (folded into one,
 /// `materialx_cutout` ran 0.7% more instructions).
 #[inline(never)]
-fn pass_walls<'w>(
+fn pass_walls<'w, S: SamplerImpl>(
     world: &'w World,
     ray: &Ray,
     hit: &mut Option<WorldHit<'w>>,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     thin: &mut ThinWalls,
     stats: &mut RayStats,
 ) -> bool {
@@ -1698,13 +1701,13 @@ fn first_wall(
 /// vertex, which would cost every vertex of every scene a branch.
 #[cold]
 #[inline(never)]
-fn volume_event_past_walls(
+fn volume_event_past_walls<S: SamplerImpl>(
     volumes: &Volumes,
     ray: &Ray,
     t_surf: f32,
     t_med: f32,
     thin: &ThinWalls,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
 ) -> VolumeEvent {
     let t_lim = t_surf.min(t_med);
     let meet = if t_med < t_surf { 1.0 } else { thin.meet };
@@ -1764,14 +1767,14 @@ fn volume_event_past_walls(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn volume_event_crossing(
+fn volume_event_crossing<S: SamplerImpl>(
     volumes: &Volumes,
     ray: &Ray,
     t_surf: f32,
     t_med: f32,
     thin: &mut ThinWalls,
     walls: bool,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
 ) -> VolumeEvent {
     let t_lim = t_surf.min(t_med);
     let meet = if !walls || t_med < t_surf {
@@ -1926,7 +1929,7 @@ fn collect_crossings(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn link_twin<const PROFILE: bool, const MEDIA: bool>(
+fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     from: Vec3A,
     dir: Vec3A,
     bounce_pdf: PdfSolidAngle,
@@ -1940,7 +1943,7 @@ fn link_twin<const PROFILE: bool, const MEDIA: bool>(
     volumes: &Volumes,
     lights: &LightList,
     strategy: SamplingStrategy,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     routing: Option<&RouteCtx>,
     route: &mut Route,
     stats: &mut RayStats,
@@ -1978,7 +1981,7 @@ fn link_twin<const PROFILE: bool, const MEDIA: bool>(
                 .with_time(time)
                 .with_mask(lights.shadow_mask(index))
                 .with_curve_exits_ignored(curve_exits_ignored);
-            let tr = shadow_transmittance::<PROFILE, MEDIA>(
+            let tr = shadow_transmittance::<S, PROFILE, MEDIA>(
                 world,
                 volumes,
                 &shadow_ray,
@@ -2022,7 +2025,7 @@ fn link_twin<const PROFILE: bool, const MEDIA: bool>(
 /// enclosure's single Henyey–Greenstein lobe for `phase` — Typhoon's
 /// `_ComputeMediumDirectLighting` — through [`enclosure_nee`].
 #[allow(clippy::too_many_arguments)]
-fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
+fn volume_nee<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     p: Vec3A,
     wi: Vec3A,
     phase: Phase<'_>,
@@ -2033,7 +2036,7 @@ fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
     lights: &LightList,
     strategy: SamplingStrategy,
     count: u32,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     time: f32,
     routing: Option<&RouteCtx>,
     route: &mut Route,
@@ -2070,7 +2073,7 @@ fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
         let shadow_ray = Ray::new(p, s.direction)
             .with_time(time)
             .with_mask(lights.shadow_mask(index));
-        let tr = shadow_transmittance::<PROFILE, MEDIA>(
+        let tr = shadow_transmittance::<S, PROFILE, MEDIA>(
             world,
             volumes,
             &shadow_ray,
@@ -2124,7 +2127,7 @@ fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
 /// at every vertex, loop taken or not (+0.96%; by reference, +1.4%).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
+fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     world: &World,
     volumes: &Volumes,
     lights: &LightList,
@@ -2138,7 +2141,7 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
     exiting: bool,
     inside: Option<&Enclosure>,
     routing: Option<&RouteCtx>,
-    nee_v: PathSampler,
+    nee_v: Sampler<S>,
     pick_u: f32,
     nee_s: [f32; 4],
     route: &mut Route,
@@ -2189,7 +2192,7 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
                 .with_time(ray.time())
                 .with_mask(lights.shadow_mask(light_index))
                 .with_curve_exits_ignored(sp.passes_out_of_curves());
-            let tr = shadow_transmittance::<PROFILE, MEDIA>(
+            let tr = shadow_transmittance::<S, PROFILE, MEDIA>(
                 world,
                 volumes,
                 &shadow_ray,
@@ -2215,7 +2218,7 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
             // already stands or falls with it. Rare, so out of line — the
             // common path stays the expression it always was.
             let mixed = if sp.mixes_hair() && rec.normal.dot(light_dir_unit) < 0.0 {
-                Some(mixed_hair_shadow::<PROFILE, MEDIA>(
+                Some(mixed_hair_shadow::<S, PROFILE, MEDIA>(
                     sp,
                     world,
                     volumes,
@@ -2292,7 +2295,7 @@ fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn extra_surface_light_samples<const PROFILE: bool, const MEDIA: bool>(
+fn extra_surface_light_samples<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     world: &World,
     volumes: &Volumes,
     lights: &LightList,
@@ -2306,7 +2309,7 @@ fn extra_surface_light_samples<const PROFILE: bool, const MEDIA: bool>(
     exiting: bool,
     inside: Option<&Enclosure>,
     routing: Option<&RouteCtx>,
-    v: PathSampler,
+    v: Sampler<S>,
     route: &mut Route,
     split: &mut LobeSplit,
     stats: &mut RayStats,
@@ -2316,7 +2319,7 @@ fn extra_surface_light_samples<const PROFILE: bool, const MEDIA: bool>(
         let nee_v = nee_sampler(v, index);
         let nee_s = nee_v.new_domain(K_NEE).draw_sample_f32::<4>();
         let pick_u = stratified_pick(nee_s[0], nee_count, index);
-        total += surface_light_sample::<PROFILE, MEDIA>(
+        total += surface_light_sample::<S, PROFILE, MEDIA>(
             world,
             volumes,
             lights,
@@ -2370,7 +2373,7 @@ impl Phase<'_> {
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn enclosure_nee<const PROFILE: bool>(
+fn enclosure_nee<S: SamplerImpl, const PROFILE: bool>(
     p: Vec3A,
     wi: Vec3A,
     inside: &Enclosure,
@@ -2379,13 +2382,13 @@ fn enclosure_nee<const PROFILE: bool>(
     lights: &LightList,
     strategy: SamplingStrategy,
     count: u32,
-    vertex: PathSampler,
+    vertex: Sampler<S>,
     time: f32,
     routing: Option<&RouteCtx>,
     route: &mut Route,
     stats: &mut RayStats,
 ) -> Vec3A {
-    volume_nee::<PROFILE, true>(
+    volume_nee::<S, PROFILE, true>(
         p,
         wi,
         Phase::Hg(inside.medium.g),
@@ -2490,6 +2493,7 @@ pub(crate) fn past_medium_boundaries<'w>(
 /// function the beauty-only render has always run.
 #[inline(always)]
 pub(super) fn trace_path<
+    S: SamplerImpl,
     const PROFILE: bool,
     const AOV: bool,
     const MEDIA: bool,
@@ -2497,7 +2501,7 @@ pub(super) fn trace_path<
 >(
     r: &Ray,
     cx: &PathContext<'_>,
-    sampler: PathSampler,
+    sampler: Sampler<S>,
     train_out: &mut Vec<SampleData>,
     scratch: &mut PathScratch,
     stats: &mut RayStats,
@@ -2810,7 +2814,7 @@ pub(super) fn trace_path<
                 } else {
                     light_samples_indirect
                 };
-                let nee = volume_nee::<PROFILE, MEDIA>(
+                let nee = volume_nee::<S, PROFILE, MEDIA>(
                     p,
                     wi,
                     Phase::Mix(&phase),
@@ -2867,7 +2871,7 @@ pub(super) fn trace_path<
                 }
                 let phase_pdf = PdfSolidAngle::from_measure(phase_pdf);
                 if TWINS {
-                    let (w, raw) = link_twin::<PROFILE, MEDIA>(
+                    let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
                         p,
                         dir,
                         phase_pdf,
@@ -2968,7 +2972,7 @@ pub(super) fn trace_path<
             }
             let (atten, nee, factor) = match &enclosed {
                 Some(e) => {
-                    let nee = enclosure_nee::<PROFILE>(
+                    let nee = enclosure_nee::<S, PROFILE>(
                         pos,
                         wi,
                         e,
@@ -3020,7 +3024,7 @@ pub(super) fn trace_path<
             if let Some(e) = &enclosed
                 && TWINS
             {
-                let (w, raw) = link_twin::<PROFILE, MEDIA>(
+                let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
                     pos,
                     dir,
                     phase_pdf,
@@ -3249,7 +3253,7 @@ pub(super) fn trace_path<
         // always did; the others, when there are any, from their own
         // sub-domains in `extra_surface_light_samples`.
         let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
-        let mut nee = surface_light_sample::<PROFILE, MEDIA>(
+        let mut nee = surface_light_sample::<S, PROFILE, MEDIA>(
             world,
             volumes,
             lights,
@@ -3271,7 +3275,7 @@ pub(super) fn trace_path<
             stats,
         );
         if nee_count > 1 {
-            nee += extra_surface_light_samples::<PROFILE, MEDIA>(
+            nee += extra_surface_light_samples::<S, PROFILE, MEDIA>(
                 world,
                 volumes,
                 lights,
@@ -3309,7 +3313,7 @@ pub(super) fn trace_path<
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         let mut bounce = {
             let _p = profile::scope_if::<PROFILE>(Section::Bounce);
-            sample_bounce_direction::<AOV>(
+            sample_bounce_direction::<S, AOV>(
                 &ray,
                 &rec,
                 &sp,
@@ -3430,7 +3434,7 @@ pub(super) fn trace_path<
                 // A BSDF (or guide-mixture) pdf, in solid angle.
                 let bounce_pdf = PdfSolidAngle::from_measure(sample.pdf);
                 if TWINS && !sample.delta {
-                    let (w, raw) = link_twin::<PROFILE, MEDIA>(
+                    let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
                         rec.p,
                         dir,
                         bounce_pdf,
@@ -3622,13 +3626,13 @@ impl PendingExit {
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn walk_subsurface(
+fn walk_subsurface<S: SamplerImpl>(
     world: &World,
     hit: &WorldHit,
     ray: &Ray,
     sp: &ShadingPoint,
     mut sample: ScatterSample,
-    v: PathSampler,
+    v: Sampler<S>,
     sss_exit: &mut PendingExit,
     stats: &mut RayStats,
 ) -> Option<ScatterSample> {

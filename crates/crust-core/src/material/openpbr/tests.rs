@@ -4,7 +4,7 @@ use glam::Vec3A;
 
 use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::Material;
+use crate::material::{BsdfDraw, Material};
 use crate::medium::Medium;
 use crate::ray::Ray;
 
@@ -12,14 +12,23 @@ use super::lobes::*;
 use super::transmission::*;
 use super::*;
 
-/// A tiny test helper yielding a fresh QMC sampler domain per draw, so a
-/// loop of `scatter_importance` calls sees independent samples (the
-/// production integrator derives an analogous per-vertex domain).
+/// A tiny test helper yielding a fresh 4D block per draw, so a loop of
+/// `scatter_importance` calls sees independent samples: the numbers one
+/// Sobol sample index after another draws, as the integrator hands a
+/// material the block of its own per-vertex domain.
 struct S(i32);
 impl S {
-    fn next(&mut self) -> PathSampler {
+    /// The next block, as the closure a concrete scatter takes. `Copy`, so
+    /// one block can feed two scatters that must agree.
+    fn next(&mut self) -> impl Fn() -> [f32; 4] + Copy {
         self.0 += 1;
-        PathSampler::new(0, 0, 0, self.0)
+        let u = PathSampler::new(0, 0, 0, self.0).draw_sample_f32::<4>();
+        move || u
+    }
+
+    /// The next block, as the [`BsdfDraw`] a `dyn Material` takes.
+    fn draw(&mut self) -> BsdfDraw<'static> {
+        BsdfDraw::Fixed(self.next()())
     }
 }
 fn s() -> S {
@@ -41,7 +50,7 @@ fn eval_matches_scatter_importance() {
 
     let mut checked = 0;
     for _ in 0..128 {
-        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
+        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.draw()) {
             assert!(!sample.delta, "opaque OpenPBR has no delta lobe");
             let wi = sample.ray.direction().normalize();
             let (ev, epdf) = m
@@ -88,7 +97,7 @@ fn glass_transmission_is_continuous_and_eval_consistent() {
 
     let (mut transmitted, mut reflected) = (0, 0);
     for _ in 0..256 {
-        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
+        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.draw()) {
             assert!(
                 !sample.delta,
                 "thick non-dispersive glass has no delta lobe"
@@ -129,7 +138,7 @@ fn glass_transmission_is_continuous_and_eval_consistent() {
     // agree within a loose relative tolerance.
     let smooth = OpenPBR::glass(1.5);
     for _ in 0..128 {
-        if let Some(sample) = smooth.scatter_importance(&r_in, &rec, sampler.next()) {
+        if let Some(sample) = smooth.scatter_importance(&r_in, &rec, sampler.draw()) {
             let wi = sample.ray.direction().normalize();
             let (_, epdf) = smooth.eval(&r_in, &rec, wi).expect("evaluable");
             assert!(
@@ -160,7 +169,7 @@ fn near_smooth_refraction_matches_snell() {
 
     let mut checked = 0;
     for _ in 0..128 {
-        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
+        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.draw()) {
             let wi = sample.ray.direction().normalize();
             if wi.z < 0.0 {
                 assert!(
@@ -190,7 +199,7 @@ fn thin_walled_transmission_stays_delta() {
     );
     let mut deltas = 0;
     for _ in 0..128 {
-        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next())
+        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.draw())
             && sample.ray.direction().z < 0.0
         {
             assert!(sample.delta, "thin-walled transmission must stay delta");
@@ -609,7 +618,7 @@ fn coat_lobe_contributes_when_enabled() {
     let mut got_positive = false;
     let mut smp = s();
     for _ in 0..128 {
-        if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next())
+        if let Some(sample) = m.scatter_importance(&ray, &rec, smp.draw())
             && sample.value.length_squared() > 0.0
         {
             got_positive = true;
@@ -703,7 +712,7 @@ fn dispersive_glass_is_continuous_and_eval_consistent() {
 
     let mut transmitted = 0;
     for _ in 0..256 {
-        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
+        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.draw()) {
             assert!(!sample.delta, "dispersive thick glass has no delta lobe");
             let wi = sample.ray.direction().normalize();
             if wi.z < 0.0 {
@@ -1056,7 +1065,7 @@ fn sample_interior_medium(m: &OpenPBR) -> Option<Medium> {
         Vec3A::new(-0.3, 0.2, -1.0).normalize(),
     );
     for _ in 0..256 {
-        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next())
+        if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.draw())
             && sample.ray.direction().z < 0.0
         {
             return sample.ray.medium().copied();
@@ -1253,10 +1262,10 @@ fn subsurface_shifts_diffuse_color() {
     let n = 512;
     let mut smp = s();
     for _ in 0..n {
-        if let Some(sample) = m_sss.scatter_importance(&ray, &rec, smp.next()) {
+        if let Some(sample) = m_sss.scatter_importance(&ray, &rec, smp.draw()) {
             sum_sss += sample.value;
         }
-        if let Some(sample) = m_no_sss.scatter_importance(&ray, &rec, smp.next()) {
+        if let Some(sample) = m_no_sss.scatter_importance(&ray, &rec, smp.draw()) {
             sum_no += sample.value;
         }
     }
@@ -1308,7 +1317,7 @@ fn thin_walled_transmission_scatters_downward() {
     let mut got_downward = false;
     let mut smp = s();
     for _ in 0..64 {
-        if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next())
+        if let Some(sample) = m.scatter_importance(&ray, &rec, smp.draw())
             && sample.ray.direction().y < 0.0
         {
             assert!(sample.delta, "transmission must be flagged delta");
@@ -1339,7 +1348,7 @@ fn scatter_importance_finite() {
     // Run many samples: none should be NaN or negative.
     let mut smp = s();
     for _ in 0..64 {
-        if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next()) {
+        if let Some(sample) = m.scatter_importance(&ray, &rec, smp.draw()) {
             assert!(
                 sample.pdf.is_finite() && sample.pdf > 0.0,
                 "pdf = {}",
@@ -1437,6 +1446,65 @@ fn the_lobe_split_sums_to_eval_within_rounding() {
         (d - Vec3A::new(0.8, 0.3, 0.2)).abs().max_element() < 0.05,
         "{d}"
     );
+}
+
+/// A scatter is a function of the four numbers it is given: with the
+/// first in the coat's slice of the lobe pick, the sample is the coat's (a
+/// mirror at zero roughness), and the same numbers give the same sample,
+/// bit for bit, call after call (the `materials` spec, "Exact uniforms
+/// select a lobe").
+#[test]
+fn exact_uniforms_select_a_lobe() {
+    use crate::lpe::{LobeLabel, LobeSplit};
+    let m = OpenPBR {
+        coat_weight: 1.0,
+        coat_roughness: 0.0,
+        specular_roughness: 0.4,
+        ..OpenPBR::default()
+    };
+    let mut rec = HitRecord::new();
+    rec.normal = Vec3A::Z;
+    rec.front_face = true;
+    let v = Vec3A::new(0.3, -0.2, 1.0).normalize();
+    let r_in = Ray::new(v, -v);
+    // The coat's slice of the CDF `LobePmf::pick` runs over: its middle.
+    let pmf = LobePmf::selecting::<true>(&m, v.z);
+    let u0 = pmf[Lobe::Diffuse] + pmf[Lobe::Specular] + 0.5 * pmf[Lobe::Coat];
+    assert_eq!(pmf.pick(u0), Lobe::Coat);
+    let u = [u0, 0.37, 0.61, 0.5];
+    let mut split = LobeSplit::default();
+    let first = m
+        .scatter_split(&r_in, &rec, || u, &mut split)
+        .expect("the coat reflects");
+    // A zero-roughness coat is a mirror: the direction is `v` reflected
+    // about the normal, where the split's largest share is the coat's (the
+    // other lobes are evaluated toward that direction too, as the split
+    // always is).
+    let mirror = Vec3A::new(-v.x, -v.y, v.z);
+    assert!(
+        (first.ray.direction().normalize() - mirror).length() < 1e-3,
+        "not the coat's mirror direction: {:?}",
+        first.ray.direction()
+    );
+    let largest = split
+        .iter()
+        .max_by(|a, b| a.1.max_element().total_cmp(&b.1.max_element()))
+        .map(|(event, _)| event.label);
+    assert_eq!(largest, Some(LobeLabel::Coat), "the coat's share leads");
+    for _ in 0..3 {
+        let again = m
+            .scatter_resolved(&r_in, &rec, || u)
+            .expect("the coat reflects");
+        assert_eq!(
+            again.ray.direction().to_array().map(f32::to_bits),
+            first.ray.direction().to_array().map(f32::to_bits)
+        );
+        assert_eq!(
+            again.value.to_array().map(f32::to_bits),
+            first.value.to_array().map(f32::to_bits)
+        );
+        assert_eq!(again.pdf.to_bits(), first.pdf.to_bits());
+    }
 }
 
 #[test]
@@ -1595,7 +1663,7 @@ fn straight_transmittance_is_the_delta_samples_weight() {
             let mut sampler = s();
             let mut seen = 0;
             for _ in 0..256 {
-                if let Some(x) = m.scatter_importance(&r_in, &rec, sampler.next())
+                if let Some(x) = m.scatter_importance(&r_in, &rec, sampler.draw())
                     && x.delta
                 {
                     let w = x.value * p_select;
@@ -1631,7 +1699,7 @@ fn straight_transmittance_plus_the_rest_is_the_whole_bsdf() {
             let mut sampler = s();
             for _ in 0..n {
                 let k = sampler.next();
-                if let Some(x) = m.scatter_importance(&r_in, &rec, k) {
+                if let Some(x) = m.scatter_importance(&r_in, &rec, BsdfDraw::Fixed(k())) {
                     full += x.value / x.pdf;
                 }
                 if let Some(x) = rest.scatter(&r_in, &rec, k) {
@@ -1819,7 +1887,7 @@ fn fuzz_samples_weigh_its_albedo() {
             let (r_in, rec) = fuzz_hit(view_at(cos));
             let mut sampler = s();
             let mut weights: Vec<f32> = (0..256)
-                .filter_map(|_| m.scatter_importance(&r_in, &rec, sampler.next()))
+                .filter_map(|_| m.scatter_importance(&r_in, &rec, sampler.draw()))
                 .map(|x| x.value.x / x.pdf / m.fuzz_color.x)
                 .collect();
             weights.sort_by(f32::total_cmp);
@@ -1863,7 +1931,7 @@ fn a_fuzz_samples_with_the_density_it_reports() {
             let mut sampler = s();
             let mut landed = 0;
             for _ in 0..n {
-                if let Some(x) = m.scatter_importance(&r_in, &rec, sampler.next()) {
+                if let Some(x) = m.scatter_importance(&r_in, &rec, sampler.draw()) {
                     landed += 1;
                     let (_, p) = m
                         .eval(&r_in, &rec, x.ray.direction())

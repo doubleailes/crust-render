@@ -23,9 +23,10 @@ consumed as ordinary dependencies:
   independent 4D sub-patterns with `new_domain(key)` (padding), draw ≤4 dims per domain
   with `draw_sample*` (high-quality stratified) or `draw_rnd*` / `rng()` (a `pcg::Rng`
   stream for incidental/unbounded draws). Six samplers — Owen-scrambled `SobolSampler`
-  (the renderer's, aliased `crust_core::PathSampler`), `LatticeSampler`, `PmjSampler`, and
+  (the default, which `crust_core::PathSampler` names), `LatticeSampler`, `PmjSampler`, and
   their blue-noise variants `SobolBnSampler`/`LatticeBnSampler`/`PmjBnSampler` (optimised
-  tables bundled as LE binary blobs in `src/data/`). Depended on by `crust-core`
+  tables bundled as LE binary blobs in `src/data/`), any of which a render selects at run
+  time ("The QMC sampler is a render setting" below). Depended on by `crust-core`
   (materials, `guiding/`, `volume.rs`, `tracer/path.rs`) for every stochastic draw. Idiomatic
   divergences from the C++: the caller-allocated `void*` cache (a GPU concern) becomes a
   lazy process-global, keeping every `Sampler<T>` a small `Copy + Send` value.
@@ -645,8 +646,10 @@ sample (with an extra `new_domain(tile)` so images wider/taller than 256 stay de
 since OpenQMC's pixel decorrelation tiles at 256), draws the camera dims from a `K_CAMERA`
 domain, and hands the root to `trace_path`. Each path vertex derives `path.new_domain(depth)`
 and each sampling event a further keyed sub-domain (`K_NEE`, `K_BSDF`, `K_GUIDE`, `K_PHASE`,
-…, keys defined atop `tracer/path.rs`); materials draw one 4D block from the `SobolSampler` domain
-they are handed. With several light samples at a vertex (`crust:lightSamples` /
+…, keys defined atop `tracer/path.rs`); the material is handed no domain but a lazy draw of
+one 4D block from `K_BSDF` (`sp.scatter_importance(r, || bsdf_dom.draw_sample_f32::<4>())`,
+the `materials` record's scatter contract), so no material type names a sampler. With
+several light samples at a vertex (`crust:lightSamples` /
 `crust:lightSamplesIndirect`), the first sample draws its pick, point and shadow ray
 off `v` itself, as the one sample always did, and sample `i ≥ 1` off
 `v.new_domain(K_NEE_SAMPLES).new_domain(i)`; each pick coordinate is stratified by
@@ -657,6 +660,101 @@ light samples per vertex"). Unbounded/incidental draws — Russian roulette, vol
 carried-medium free flight, the guide's quadtree descent — use `draw_rnd` or a `pcg::Rng` seeded from a domain
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
 randomness use `openqmc::pcg::Rng`.
+
+## The QMC sampler is a render setting
+
+`crust:sampler` on the RenderSettings prim, overridden by `--sampler` on `render`, `check`
+and `diagnostic`, picks the OpenQMC sampler every pass draws from: `sobol` (default),
+`sobolBn`, `lattice`, `latticeBn`, `pmj`, `pmjBn` (`SamplerKind`, `sampler.rs`, with the
+`named!` table every other named setting has). An unknown token raises
+`SettingsInvalidValue` and renders with `sobol`. The value is stamped into every EXR as
+`crust:sampler`, `crust diff` warns when two stamps differ (an EXR without the key was
+written before the setting and reads as `sobol`), and `crust check` reports it in the
+effective settings. It is a user-facing quality setting, not a `CRUST_*` switch: those
+exist only to A/B an optimisation against the behaviour it replaced.
+
+**How the choice costs nothing per sample.** The integrator — every function of
+`tracer/path.rs` that takes a sampler, `subsurface::random_walk`, `advance_pixel` — is
+generic over `S: openqmc::SamplerImpl` (`Sampler<S>`), with the domain keys and the
+`new_domain(tile)` decorrelation unchanged. `Renderer::render_pass` is a sampler-agnostic
+shell that matches `SamplerKind` **once per pass** and calls the generic
+`render_pass_with::<S>()` holding the pass body, so the per-pixel `advance_dispatch` match on
+`(PROFILE, MEDIA, TWINS)` runs inside one instantiation and no sample, pixel or unit
+branches on the sequence. Materials never see `S`: they take the numbers (the `materials`
+record's scatter contract, `BsdfDraw`), which is what keeps `dyn Material` object-safe under
+a generic integrator. The alternatives measured or rejected: an enum wrapping the six
+samplers grows the by-value sampler from 8 to about 48 bytes through about 25 integrator
+functions and adds a branch per draw, which the default would pay for; a generic
+`Material<S>` is not object-safe and multiplies every material's code by six.
+
+**Tables are built before the pass timer.** `SamplerKind::warm_cache` runs in the shell
+before `render_pass_with` starts its timer (PMJ's 2^16-entry table takes 1.5 ms to build,
+the blue-noise rankings 0.2–0.3 ms, measured once per process), logged at DEBUG when it
+took anything, so `--stats` and `bench_ab.sh` never count a table build as sampling
+(`tests/sampler_warm.rs`).
+
+**The learned light-selection pre-pass stays on Sobol** whatever the setting
+(`light_cache.rs` keeps the concrete `PathSampler`). It is a training estimate, not an
+image sample; keeping it fixed makes the learned table, and with it every light pick, the
+same under every sampler (`learned_selection.rs::the_learned_table_is_the_same_under_every_sampler`),
+so a sampler comparison measures the sampler alone. Path-guiding training passes do draw
+from the selected sampler: they render image samples that blend into the final image.
+
+**The default is the renderer before the setting.** `sobol` is bit-identical to the
+renderer before the sampler became selectable, pinned three ways on the way in
+(`scripts/check_images.sh` goldens of the parent commit after each of the three steps —
+the material boundary, the generic integrator, the setting; callgrind on cornellbox at
+2 spp, one thread; `bench_ab.sh` against the parent's binary) and by
+`tests/sampler_setting.rs::explicit_and_implicit_default_agree`. Callgrind, cornellbox
+2 spp, one thread, PROGRAM TOTALS: parent 4,247,919,782; after the material boundary
+4,254,437,425 (+0.15%: `OpenPBR::scatter_resolved`, out of line before, now inlines into
+`sample_bounce_direction`'s scatter closure, itself out of line — the same work moved, +6.5M
+net); after the generic integrator 4,253,517,970 (+0.13%); after the setting
+4,253,798,990 (+0.14%; all within the 0.2% gate, none worth an inlining annotation).
+`bench_ab.sh`, parent vs the finished change, six interleaved reps, min / mean: cornellbox
++0.8% / +0.1%, veach_mis −0.4% / +3.4%, materialx_basic −2.0% / −2.2%, openpbr_showcase
++3.7% / +3.3% — inside the run-to-run spread, as a change callgrind puts at 0.14% must be.
+
+**Build cost, measured and gated.** Six samplers × up to 16 `(PROFILE, AOV, MEDIA, TWINS)`
+instantiations of `trace_path` is up to 96. The gate was +40% clean `cargo build --release`
+time and +25% `crust` binary size, with the fallback of shipping `sobol`, `sobolBn`,
+`lattice`, `pmj`; measured on the same four-core container, clean `cargo build --release` 5m42s → 6m47s
+(+19%), `crust` 25,159,504 → 30,978,096 bytes (+23%). Both inside the gate, so every
+sampler ships; the binary is the nearer limit, and the next sampler-indexed
+instantiation (a seventh sampler, or a fifth integrator flag) should re-measure it.
+
+**The spike's numbers**, which are why no sampler replaces Sobol (cornellbox and
+materialx_basic, unclamped, 8 seeds, reference from 64 × 16 spp):
+
+| vs Sobol | render instructions (cornellbox, 2 spp) | wall time (`bench_ab.sh`, min) | relMSE at 4 / 16 spp |
+|---|---|---|---|
+| Lattice | −3.1% | −1.1 to −7.3% | −9% on cornellbox, **+20% on materialx_basic** |
+| SobolBn | +3.7% | **+3.1 to +10.2%** | equal; after a 4×4 downsample −8 to −12% at 4 spp; the error only slightly blue (0.038–0.045 of its power below ¼ Nyquist vs 0.049 white) |
+
+So the user docs say: `sobol` by default; `lattice` depends on the scene; the `*Bn` variants
+are for low-spp previews, progressive renders and denoised output, at 3–10% time. Every
+sampler converges to the same image: `tests/sampler_setting.rs::every_sampler_converges_to_the_sobol_mean`
+renders a 12×8 cornellbox at 8 spp over 32 seeds per sampler and holds every pixel's mean
+within five standard errors of Sobol's with the frame's mean z² near one — 288 comparisons
+a sampler, where a flat three-standard-error bound fails one by chance (run it with
+`cargo test --release -p crust-core --test sampler_setting -- every_sampler_converges --nocapture`,
+which also prints each sampler's worst |z|). A `crust diagnostic` trial over samplers is the
+natural follow-up; this change only makes it possible.
+
+## Known gaps: the sampler setting
+
+- **Blue-noise seams at 256-pixel tiles.** `advance_pixel` derives `new_domain(tile)` per
+  256×256 tile so images wider than OpenQMC's decorrelation tile stay decorrelated; for the
+  `*Bn` samplers that shifts the blue-noise ranking table per tile, so the error's spatial
+  pattern may show a seam at tile boundaries. Not fixed here; the gain the `*Bn` variants
+  give is small either way (above).
+- **The blue-noise effect is weak** in this integrator: the spike measured the error only
+  slightly blue (0.038–0.045 of its power below ¼ Nyquist against 0.049 for white), likely
+  because most of a pixel's variance comes from dimensions past the first few the ranking
+  optimises. The 4×4-downsampled error does fall 8–12% at 4 spp, which is the preview and
+  denoiser case the docs recommend them for.
+- **No per-scene choice.** `lattice` wins on one scene and loses on another; nothing here
+  picks per scene. A `crust diagnostic` trial over samplers is the follow-up.
 
 ## Progressive output and cancellation
 

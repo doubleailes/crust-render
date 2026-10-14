@@ -160,7 +160,7 @@ fn thick_glass_reports_no_straight_transmittance() {
     let ray = Ray::new(Vec3A::new(0.0, 1.0, 0.0), -Vec3A::Y);
     let sp = ShadingPoint::new(&thick, &ray, &rec, 1.0);
     assert_eq!(
-        sp.straight_transmittance(&ray, PathSampler::new(0, 0, 0, 0)),
+        sp.straight_transmittance(&ray, || panic!("a thick surface drew a block")),
         Vec3A::ZERO
     );
 }

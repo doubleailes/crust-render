@@ -5,6 +5,7 @@ use super::PixelRect;
 use crate::LightSelection;
 use crate::filter::PixelFilter;
 use crate::pdf::PdfSolidAngle;
+use crate::sampler::SamplerKind;
 
 /// The indirect clamp a render gets unless the stage (`crust:indirectClamp`)
 /// or the host (`--indirect-clamp`) says otherwise — see
@@ -173,6 +174,11 @@ pub struct RenderSettings {
     // Pixel reconstruction filter (see `PixelFilter`; `crust:pixelFilter` /
     // `--filter`). Applied by filter importance sampling in `render_pixel`.
     pub(super) pixel_filter: PixelFilter,
+    // The QMC sampler every pass draws from (see `SamplerKind`;
+    // `crust:sampler` / `--sampler`). Chosen once per pass in
+    // `Renderer::render_pass`; the `learned` light-selection pre-pass stays
+    // on Sobol whatever this says.
+    pub(super) sampler: SamplerKind,
     // How NEE picks a light (see `LightSelection`; `crust:lightSelection` /
     // `--light-selection`). Applied once, in `Renderer::new`.
     pub(super) light_selection: LightSelection,
@@ -219,6 +225,7 @@ impl Default for RenderSettings {
             guiding_prob: 0.5,
             sampling_strategy: SamplingStrategy::default(),
             pixel_filter: PixelFilter::default(),
+            sampler: SamplerKind::default(),
             light_selection: LightSelection::default(),
             indirect_clamp: Some(DEFAULT_INDIRECT_CLAMP),
             light_samples: DEFAULT_LIGHT_SAMPLES,
@@ -360,6 +367,16 @@ impl RenderSettings {
 
     pub fn pixel_filter(&self) -> PixelFilter {
         self.pixel_filter
+    }
+
+    /// Select the QMC sampler every pass draws from — see [`SamplerKind`].
+    pub fn with_sampler(mut self, sampler: SamplerKind) -> Self {
+        self.sampler = sampler;
+        self
+    }
+
+    pub fn sampler(&self) -> SamplerKind {
+        self.sampler
     }
 
     /// Select how NEE picks a light — see [`LightSelection`].
