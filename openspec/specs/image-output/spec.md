@@ -207,8 +207,8 @@ took.
 - **THEN** it carries `crust:spp`, `crust:minSpp`, `crust:sppTaken`,
   `crust:varianceThreshold`, `crust:indirectClamp` (`0` when off),
   `crust:maxDepth`, `crust:lightSamples`, `crust:lightSamplesIndirect`,
-  `crust:samplingStrategy`, `crust:lightSelection`, `crust:pixelFilter` and
-  `crust:pixelFilterRadius`
+  `crust:samplingStrategy`, `crust:lightSelection`, `crust:pixelFilter`,
+  `crust:pixelFilterRadius` and `crust:sampler`
 
 #### Scenario: A fixed-budget render
 
@@ -222,6 +222,12 @@ took.
 - **WHEN** the render runs with `--filter gaussian --filter-radius 2`
 - **THEN** its EXR has `crust:pixelFilter = gaussian` and
   `crust:pixelFilterRadius = 2`
+
+#### Scenario: The sampler used
+
+- **WHEN** the render runs with `--sampler latticeBn`
+- **THEN** its EXR has `crust:sampler = latticeBn`; a render with no sampler setting has
+  `crust:sampler = sobol`
 
 #### Scenario: Every product is stamped
 

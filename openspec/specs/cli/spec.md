@@ -34,7 +34,7 @@ defaults:
 - `-i`, `-f`, `--camera`, `--region`;
 - `--strategy`, `--light-selection`, `--light-samples`,
   `--light-samples-indirect`;
-- `--indirect-clamp`, `--filter`, `--filter-radius`;
+- `--indirect-clamp`, `--filter`, `--filter-radius`, `--sampler`;
 - `--subdiv-level`, `--subdiv-edge-length`, `--auto-tx`.
 
 `light-paths` SHALL also accept `render`'s `-s`, so that it reproduces a render
@@ -60,6 +60,18 @@ where it could take a subcommand's name or a positional as that directory.
   `crust diagnostic -i scene.usda --light-selection learned`
 - **THEN** the report's effective settings show `light_selection = learned`,
   as a render with the same flag would use
+
+#### Scenario: The sampler is a shared flag
+
+- **WHEN** the user runs `crust check -i scene.usda --sampler sobolBn --json -`
+- **THEN** the report's effective settings show `sampler` as `sobolBn`, with flag
+  `--sampler` and attribute `crust:sampler`
+
+#### Scenario: An unknown sampler on the command line
+
+- **WHEN** the user runs `crust render -i scene.usda --sampler halton`
+- **THEN** the arguments are refused as a usage error listing the six accepted values, and
+  nothing is loaded
 
 #### Scenario: Comparing two images
 
