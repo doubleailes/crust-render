@@ -179,6 +179,16 @@
     ~300 receivers, 16 steps, and every prediction is still near ½ — which
     degrades the pick towards power, never below the defensive floor.
 
+    **Measured** (`docs/light_sampling.md` §3.14): unbiased (relMSE × spp
+    flat from 16 to 256 spp on `usdlux`) and MIS-consistent (`veach_mis`'s mean
+    within 2e-5 of power's at 1024 spp). But one evaluation costs ~600 ns,
+    ~6 000 instructions at 7 lights — 4.8–13.8 shadow rays on the samples,
+    after two bit-identical passes cut it from ~820 ns — and adds 40–100% to a
+    render, while visibility alone buys at most 1.2× per sample over power.
+    At equal time it loses to `learned` by 1.5–5.3× and to power by 1.4–1.9×
+    on every sample measured. The verdict there is retire; ALab, the scene it
+    was built for, is unmeasured.
+
   **Both halves of the design were forced by measurement** (`docs/light_sampling.md`
   §3.8):
   - **The fixed infinite share.** Pure power selection, pbrt-v4's `PowerLightSampler`
@@ -878,6 +888,14 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   domain, §3.11 there.)
   Measure changes with
   `crust diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
+- **`neural` selection loses at equal time** on every checked-in sample, and is
+  unmeasured where it might not: ALab, whose problem is visibility alone (the
+  lighting design above; `docs/light_sampling.md` §3.14). Its inputs are
+  position only, so it learns the local average of a normal-dependent horizon,
+  as `learned`'s grid does; it learns visibility only, leaving distance and
+  orientation to the power table, which is most of what `learned` exploits on
+  the samples; and with a fixed 8 epochs a small frame trains a few dozen Adam
+  steps and stays near V̂ = ½.
 - **The tube's density is cosine-blind.** It follows the `1/r²` along the wall but
   neither cosine, so a thick tube within a few radii of a receiver is still noisier
   than it need be. Gamito 2016 samples a finite-radius cylinder exactly in solid angle,

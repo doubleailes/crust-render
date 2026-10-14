@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::light_cache::DEFENSIVE;
 use crate::rt::Geometry;
 use crate::{AreaLight, Emissive, LightSelection, OpenPBR, SphereShape, WorldBuilder};
 

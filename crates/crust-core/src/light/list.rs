@@ -560,10 +560,9 @@ impl LightList {
     }
 
     /// [`LightList::pick_index_at`]'s neural arm. Cold, and out of line, so
-    /// that the other selections' code around every pick is what it was: the
-    /// arm inlined, or merely hot, made the default render 0.9% more
-    /// instructions (cornellbox, 2 spp). Under `neural` the inference it wraps
-    /// costs hundreds of nanoseconds; a cold call costs none of that.
+    /// that it is one call in the code every other selection runs around
+    /// each pick; under `neural` the inference it wraps costs hundreds of
+    /// nanoseconds, against which the call is nothing.
     #[cold]
     #[inline(never)]
     fn pick_index_neural(
@@ -623,11 +622,11 @@ impl LightList {
     /// nothing but the number of virtual calls.
     pub fn infinite_at(&self, p: Vec3A) -> impl Iterator<Item = (&LightKind, f32)> {
         // Each light's pmf through `pmf_at`, rather than a table looked up
-        // once and carried: a carried table big enough for the network's pmf
-        // made the iterator too big to inline, and the default render 0.8%
-        // more instructions (cornellbox, 2 spp). Under `power` this is the
-        // read it always was; under `neural` the first light fills the memo
-        // the others read.
+        // once and carried: a table that could hold the network's pmf made
+        // the iterator 270 bytes, paid for at every escaping ray (1.2% of the
+        // default render's instructions, cornellbox at 2 spp). Under `power`
+        // this is the read it always was; under `neural` the first light
+        // fills the memo the others read.
         self.infinite.iter().map(move |&index| {
             let index = index as usize;
             (&self.lights[index], self.pmf_at(p, index))

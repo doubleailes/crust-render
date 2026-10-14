@@ -889,6 +889,64 @@ grid of first hits; min of 7 runs, and instructions per call from callgrind
   costs half the pre-pass (`usdlux` 0.26 s against 0.42 s; `learned`'s is
   0.03 s).
 
+D3 was kept as designed for everything below, with the gate's own verdict
+left to ALab.
+
+**Measured, unbiasedness.** `usdlux` under `neural` against a 1024 spp `power`
+reference, `--indirect-clamp 0`, adaptive sampling off (an override layer
+raising `crust:minSamplesPerPixel`, so every pixel takes exactly N samples):
+relMSE × spp is 1.01, 0.94 and 1.08 at 16, 64 and 256 spp (power: 1.24, 1.15,
+1.27). It falls as 1/N; nothing plateaus. On `veach_mis` at 1024 spp, the mean
+luminance over four frames is 2.841088 under `neural` and 2.841069 under
+`power`, a per-frame spread of 0.00029 for each: emission is not
+double-counted.
+
+**Measured, noise.** relMSE at 16 spp, as in §3.12 (four frames where marked),
+but with adaptive sampling off on the 1024 spp references too:
+
+| scene | power full / trimmed | learned full / trimmed | neural full / trimmed | neural vs power | neural vs learned |
+|---|---|---|---|---|---|
+| ALab, direct lighting only | not measured | | | | |
+| ALab, full | not measured | | | | |
+| `usdlux` (4) | 0.0780 / 0.0641 | 0.0233 / 0.0191 | 0.0646 / 0.0536 | 1.21× / 1.20× | 0.36× / 0.36× |
+| `veach_mis` (4) | 0.0286 / 0.00682 | 0.0139 / 0.00363 | 0.0291 / 0.00675 | 0.98× / 1.01× | 0.48× / 0.54× |
+| `domelight` (4) | 0.335 / 0.0221 | 0.296 / 0.0179 | 0.291 / 0.0221 | 1.15× / 1.00× | 1.02× / 0.81× |
+| `materialx_basic` | 0.00259 / 0.00235 | 0.00209 / 0.00190 | 0.00260 / 0.00238 | 1.00× / 0.99× | 0.80× / 0.80× |
+
+Even per sample, visibility alone buys little here: in these scenes most
+lights are visible from most receivers, and what `learned` exploits is how much
+each light *contributes* — distance, orientation, the BSDF — which D2 leaves
+to the power table.
+
+**Measured, cost, and the equal-time verdict.** `scripts/bench_ab.sh` at 128
+spp, 6 interleaved reps, `Render` (pre-pass included), min:
+
+| scene | `neural` / `learned` time | `learned` / `power` time | equal time, `neural` vs `learned` | `neural` vs `power` |
+|---|---|---|---|---|
+| `usdlux` | 15.56 / 8.23 s, **1.89×** | 1.04× | 0.19× / 0.19× | 0.61× / 0.61× |
+| `veach_mis` | 31.63 / 17.67 s, **1.79×** | 1.04× | 0.27× / 0.30× | 0.53× / 0.54× |
+| `domelight` | 6.79 / 4.35 s, **1.56×** | 1.10× | 0.65× / 0.52× | 0.67× / 0.58× |
+| `materialx_basic` | 8.10 / 5.86 s, **1.38×** | 1.02× | 0.58× / 0.58× | 0.71× / 0.70× |
+
+(Equal time is relMSE × time, full / trimmed; the means agree with the mins
+within 1%. The `neural` pre-pass is part of it: 0.4 s on `usdlux` against
+`learned`'s 0.03 s.)
+
+**Verdict: retire.** At equal time `neural` loses to `learned` by 1.5–5.3× and
+to `power` by 1.4–1.9× on every scene measured. The inference adds 40–100% to
+a render where a shadow ray is cheap, and the visibility it predicts buys at
+most 1.2× per sample over power. D2's contribution variant is not proposed: it
+would add an O(N) `sample_li` per vertex to the same inference, and would have
+to beat `learned` by 2× per sample to break even. ALab, the scene the
+experiment was built for and the one where visibility is the whole problem
+(§3.12), is unmeasured; it is the one result that could reverse this, so it
+should be measured before the code goes.
+
+**`D` below 0.3.** `neural` at 0.2 and 0.1 moves relMSE by at most 2.5%
+(`domelight` 0.291 / 0.283 / 0.285, `usdlux` 0.0646 / 0.0635 / 0.0640, at
+0.3 / 0.2 / 0.1), inside the noise and without fireflies: kept at 0.3, shared
+with `learned` (`light_cache::DEFENSIVE`).
+
 ## 4. The anatomy of the direct-lighting estimator
 
 One NEE sample at a shading point *x* estimates

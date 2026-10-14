@@ -44,7 +44,7 @@ use rayon::prelude::*;
 
 use crate::camera::Camera;
 use crate::light::LightList;
-use crate::light_cache;
+use crate::light_cache::{self, DEFENSIVE};
 use crate::rt_world::World;
 use crate::{PathSampler, Vec3A};
 
@@ -180,7 +180,7 @@ impl VisibilityCache {
         if !(total > HIDDEN && total.is_finite()) {
             return false;
         }
-        light_cache::defensive_table(&w[..n], total, &self.live, self.n_live, cdf, pmf);
+        light_cache::defensive_table(&w[..n], total, &self.live, self.n_live, DEFENSIVE, cdf, pmf);
         true
     }
 

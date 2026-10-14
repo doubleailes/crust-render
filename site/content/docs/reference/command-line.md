@@ -316,8 +316,10 @@ How light sampling picks which light to sample at each vertex. Overrides
 example a room lit through its windows. `neural` is an experiment against `learned`: it
 stores the same knowledge as a continuous function rather than a grid of regions. It
 supports up to 64 lights (past that, or with a single light, it picks by power), and its
-pre-pass costs more than `learned`'s. Both stay unbiased: every light keeps a share of the
-light samples wherever it is predicted hidden.
+pre-pass costs more than `learned`'s. On the bundled samples it is slower than both
+`learned` and `power` for the same noise: evaluating the network at every bounce costs more
+than the shadow rays it saves. Both stay unbiased: every light keeps a share of the light
+samples wherever it is predicted hidden.
 
 ### light-samples
 
