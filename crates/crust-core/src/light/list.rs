@@ -234,8 +234,10 @@ impl LightList {
 
     /// Refuses replacing the light at `index` with `light` when the list was
     /// built on something it says differently: another kind of light, one
-    /// at or away from infinity, another geometry, or a list whose links
-    /// were resolved ([`crate::live`]).
+    /// at or away from infinity, or another geometry ([`crate::live`]).
+    /// Resolved links stay as they are: they are read from the lights'
+    /// collections alone, which an in-place edit never changes, and keyed by
+    /// index and `geom_id`, which a replacement keeps.
     pub fn check_replace(
         &self,
         index: usize,
@@ -245,9 +247,6 @@ impl LightList {
         let Some(old) = self.lights.get(index) else {
             return Err(Structural(format!("the light list has no light {index}")));
         };
-        if self.links.is_some() || !self.backdrops.is_empty() {
-            return Err(Structural("the lights author links".into()));
-        }
         if !crate::live::same_light_shape(old, light) {
             return Err(Structural(format!(
                 "light {index} would change kind, infinity or geometry"

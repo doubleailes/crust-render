@@ -92,6 +92,33 @@ impl Frustum {
     }
 }
 
+impl ScreenProjection {
+    /// Every number the tessellation reads from this projection, as bits:
+    /// the eye, the pixel rate and the frustum's planes when it has one.
+    pub(super) fn key(&self) -> crate::live::ScreenKey {
+        let mut bits = Vec::with_capacity(22);
+        bits.extend(self.eye.to_array().map(f32::to_bits));
+        bits.push(self.f_px.to_bits());
+        if let Some(f) = &self.frustum {
+            bits.extend(f.eye.to_array().map(f32::to_bits));
+            for n in &f.normals {
+                bits.extend(n.to_array().map(f32::to_bits));
+            }
+        }
+        crate::live::ScreenKey(bits)
+    }
+}
+
+impl ScreenRate {
+    /// [`ScreenProjection::key`], then the target and the ceiling.
+    pub(super) fn key(&self) -> crate::live::ScreenKey {
+        let mut key = self.projection.key();
+        key.0.push(self.target.to_bits());
+        key.0.push(self.max);
+        key
+    }
+}
+
 /// How a mesh's culling boxes account for displacement.
 ///
 /// A displaced point lies within its undisplaced local box grown by the
@@ -650,5 +677,63 @@ mod tests {
         assert_eq!(b.distance_to(Vec3::splat(0.5)), 0.0);
         assert!((b.distance_to(Vec3::new(3.0, 0.5, 0.5)) - 2.0).abs() < 1e-6);
         assert!((b.distance_to(Vec3::new(2.0, 2.0, 0.5)) - 2f32.sqrt()).abs() < 1e-6);
+    }
+
+    /// The key an in-place settings update compares (`live`): equal for
+    /// equal projections, different for a change of one ulp in any number
+    /// the tessellation reads, the frustum's included.
+    #[test]
+    fn a_screen_key_moves_with_every_number_the_tessellation_reads() {
+        let up = |x: f32| f32::from_bits(x.to_bits() + 1);
+        let projection = |eye: Vec3, f_px: f32, tan_v: f32| ScreenProjection {
+            eye,
+            f_px,
+            frustum: Some(Frustum::new(eye, Vec3::NEG_Z, Vec3::Y, tan_v, tan_v * 1.5)),
+        };
+        let rate = |p: ScreenProjection, target: f32, max: u32| ScreenRate {
+            projection: p,
+            target,
+            max,
+        };
+        let eye = Vec3::new(1.0, 2.0, 3.0);
+        let base = rate(projection(eye, 800.0, 0.4), 2.0, 4);
+        assert_eq!(base.key(), rate(projection(eye, 800.0, 0.4), 2.0, 4).key());
+        let moved = [
+            rate(projection(Vec3::new(up(1.0), 2.0, 3.0), 800.0, 0.4), 2.0, 4),
+            rate(projection(eye, up(800.0), 0.4), 2.0, 4),
+            rate(projection(eye, 800.0, up(0.4)), 2.0, 4),
+            rate(projection(eye, 800.0, 0.4), up(2.0), 4),
+            rate(projection(eye, 800.0, 0.4), 2.0, 5),
+        ];
+        for (k, m) in moved.iter().enumerate() {
+            assert_ne!(base.key(), m.key(), "change {k}");
+        }
+        // Without a frustum the orientation reaches no tessellation, so it
+        // reaches no key either.
+        let no_frustum = ScreenProjection {
+            frustum: None,
+            ..projection(eye, 800.0, 0.4)
+        };
+        assert_ne!(no_frustum.key(), projection(eye, 800.0, 0.4).key());
+        assert_eq!(
+            no_frustum.key(),
+            ScreenProjection {
+                frustum: None,
+                ..projection(eye, 800.0, up(0.4))
+            }
+            .key()
+        );
+        // Bits, not values: -0.0 is not 0.0.
+        let zero = ScreenProjection {
+            eye: Vec3::ZERO,
+            f_px: 1.0,
+            frustum: None,
+        };
+        let negative = ScreenProjection {
+            eye: Vec3::new(-0.0, 0.0, 0.0),
+            ..zero
+        };
+        assert_eq!(zero, negative);
+        assert_ne!(zero.key(), negative.key());
     }
 }

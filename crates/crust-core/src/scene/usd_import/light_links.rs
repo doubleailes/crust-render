@@ -190,12 +190,6 @@ impl LightLinks {
             .collect()
     }
 
-    /// Whether any light's link restricts it: resolving then renumbers the
-    /// light list and rewrites geometry masks.
-    pub(super) fn restricts(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
     fn intern(&mut self, path: &sdf::Path) -> u32 {
         if let Some(&id) = self.paths.get(path) {
             return id;
@@ -291,14 +285,19 @@ impl LightLinks {
 
     /// Installs the links once the last receiver has been traversed. Must
     /// run before the light list's selection and the world's commit.
+    ///
+    /// Returns where each light the list held went: its index after the
+    /// lights that illuminate nothing left the list, or `None` for one of
+    /// them ([`index_remap`]).
     pub(super) fn resolve(
         self,
         lights: &mut LightList,
         world: &mut WorldBuilder,
         volumes: &mut [VolumeRegion],
-    ) {
+    ) -> Vec<Option<usize>> {
+        let before = lights.count();
         if self.pending.is_empty() {
-            return;
+            return index_remap(before, &[]);
         }
         // The interned paths, by id.
         let mut by_id: Vec<Option<&sdf::Path>> = vec![None; self.paths.len()];
@@ -340,7 +339,8 @@ impl LightLinks {
             demote(lights, world, index, path);
         }
         // Indices of the lights that stay, after the removals above.
-        let shifted = |index: usize| index - nothing.iter().filter(|&&r| r < index).count();
+        let remap = index_remap(before, &nothing);
+        let shifted = |index: usize| remap[index].expect("a light that stays");
 
         let n = lights.count();
         let mut links = RuntimeLinks {
@@ -451,7 +451,24 @@ impl LightLinks {
         if any {
             lights.set_links(links);
         }
+        remap
     }
+}
+
+/// Where each of `n` lights goes when the ones at `removed` leave the list:
+/// its index among those that stay, or `None` for a removed one.
+fn index_remap(n: usize, removed: &[usize]) -> Vec<Option<usize>> {
+    let mut gone = 0;
+    (0..n)
+        .map(|i| {
+            if removed.contains(&i) {
+                gone += 1;
+                None
+            } else {
+                Some(i - gone)
+            }
+        })
+        .collect()
 }
 
 /// A bit vector over the linked lights: which of them a receiver is a
@@ -641,4 +658,21 @@ fn demote(lights: &mut LightList, world: &mut WorldBuilder, index: usize, path: 
         "dropped"
     };
     debug!("{path}: collection:lightLink includes no receiver — illuminates nothing, {role}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_remap;
+
+    #[test]
+    fn the_remap_shifts_each_light_past_the_removed_ones_before_it() {
+        // Removed: 1 (before the kept 2) and 3 (after it), in either order.
+        for removed in [[1, 3], [3, 1]] {
+            assert_eq!(
+                index_remap(5, &removed),
+                [Some(0), None, Some(1), None, Some(2)]
+            );
+        }
+        assert_eq!(index_remap(3, &[]), [Some(0), Some(1), Some(2)]);
+    }
 }

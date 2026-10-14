@@ -1054,8 +1054,18 @@ pub(crate) fn load_scene(
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
     let geometry_runs = ctx.links.geometry_runs();
-    let linked = ctx.links.restricts();
-    std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
+    let remap =
+        std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
+    // The provenance names each light by its place in the list as the links
+    // left it; a light they took out of the list is no longer one to rebuild.
+    ctx.light_origins
+        .retain_mut(|(_, origin)| match remap[origin.index] {
+            Some(index) => {
+                origin.index = index;
+                true
+            }
+            None => false,
+        });
     if let Some(index) = ctx.index.take() {
         ctx.layers.extend(index.layer_identifiers());
     }
@@ -1135,12 +1145,16 @@ pub(crate) fn load_scene(
             options: options.clone(),
             render_settings,
             subdiv_level: ctx.caches.meshes.subdiv.level,
-            adaptive: ctx.caches.meshes.subdiv.adaptive.is_some(),
+            adaptive: ctx.caches.meshes.subdiv.adaptive.map(|r| r.key()),
             domes_seen_by_camera,
             working: Some(working),
-            linked,
             camera: scene.camera_path.clone(),
-            on_screen_shapes: ctx.caches.implicit.on_screen,
+            on_screen_shapes: ctx
+                .caches
+                .implicit
+                .on_screen
+                .then(|| ctx.caches.implicit.projection.map(|p| p.key()))
+                .flatten(),
             unsized_shapes: ctx.caches.implicit.fixed_unshared,
         },
     });

@@ -194,12 +194,15 @@ pub fn classify(
                 change.lights.push(prim_str.to_owned());
             }
             applied = applied.max(Applied::Lights);
-        } else if let Some(material) = input
+        } else if let Some((material, typed)) = input
             .then(|| owning_material(stage, &prim, provenance))
             .flatten()
         {
             if let Some(reader) = provenance.other_readers(prim_str, &material).next() {
                 return full(format!("{attr} is also read by {reader}"));
+            }
+            if !typed && !change.shaders.iter().any(|s| s == prim_str) {
+                change.shaders.push(prim_str.to_owned());
             }
             if !change.materials.contains(&material) {
                 change.materials.push(material);
@@ -214,28 +217,36 @@ pub fn classify(
 
 /// The material an input at `prim` belongs to: `prim` itself when it is a
 /// material the scene uses (an interface input), else the nearest ancestor
-/// the scene uses when `prim` is a `Shader` in its network.
-fn owning_material(stage: &Stage, prim: &sdf::Path, provenance: &Provenance) -> Option<String> {
+/// the scene uses when `prim` is a `Shader` in its network. The flag says
+/// whether that type was read here: the authoring stage leaves payloads
+/// unloaded, so a shader a payload brings in composes only as the edit's
+/// typeless `over`, and the rebuild checks it on the material's own stage
+/// (`Change::shaders`).
+fn owning_material(
+    stage: &Stage,
+    prim: &sdf::Path,
+    provenance: &Provenance,
+) -> Option<(String, bool)> {
     if provenance.material(prim.as_str()).is_some() {
-        return Some(prim.as_str().to_owned());
+        return Some((prim.as_str().to_owned(), true));
     }
     let ty = stage
         .prim(prim.clone())
-        .ok()?
-        .type_name()
         .ok()
-        .flatten()
+        .and_then(|p| p.type_name().ok().flatten())
         .map(|t| t.to_string());
-    if ty.as_deref() != Some("Shader") {
-        return None;
-    }
+    let typed = match ty.as_deref() {
+        Some("Shader") => true,
+        None => false,
+        Some(_) => return None,
+    };
     let mut cur = prim.parent();
     while let Some(p) = cur {
         if p.is_abs_root() {
             return None;
         }
         if provenance.material(p.as_str()).is_some() {
-            return Some(p.as_str().to_owned());
+            return Some((p.as_str().to_owned(), typed));
         }
         cur = p.parent();
     }

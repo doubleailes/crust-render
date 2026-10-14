@@ -146,6 +146,14 @@ Composed prim types come from the session's authoring stage, so an opinion on an
 import's provenance (below), not the stage: a light the import skipped, or a material
 only a prototype uses, is `full`.
 
+*Trap:* the authoring stage leaves payloads unloaded, so a shader a payload brings in
+(ALab's looks) composes there only as the edit's own typeless `over`. A prim with *no*
+type under a material the scene uses still classifies `materials`, and is listed in
+`Change::shaders`. The rebuild then requires it to be a `Shader` on the material's own,
+payload-loaded stage, and anything else (a `NodeGraph`, a typo) falls back to `full`
+(`a_shader_behind_a_payload_edits_in_place`). A prim whose type the authoring stage
+does read and is not `Shader` is `full` at once, as before.
+
 *Alternative rejected:* classifying the parsed `Snippet`. An undo has no snippet, and
 merging can turn an authored spec into no change at all.
 
@@ -166,13 +174,17 @@ already builds:
 
 - material prim path → the `World` slots holding its `Arc` (`MaterialCache::origins`,
   by pointer, after commit), and whether a mesh was displaced by it;
-- light prim path → its index in the `LightList` and the `geom_id`s it emitted (an area
-  light's emitter);
+- light prim path → its index in the `LightList` *after* light-link resolution, and the
+  `geom_id`s it emitted (an area light's emitter). *Trap:* resolution takes a light whose
+  `lightLink` includes no receiver out of the list and shifts the later ones down, so the
+  index recorded at emission can name another light. `LightLinks::resolve` returns its
+  remap (`index_remap`), the import applies it, and a light taken out gets no entry, so
+  an edit to it is `full` (`light_indices_are_the_list_as_the_links_left_it`);
 - the `LightLinks` geometry runs (first `geom_id`, prim path), kept instead of dropped
   — `Provenance::prim_of_geometry`;
 - the stage-wide facts a settings change must not move: the host's import options, the
-  `RenderSettings` path, the subdivision level, adaptive subdivision, the dome's camera
-  visibility, the working space, whether any light authors a link, the render camera.
+  `RenderSettings` path, the subdivision level, what tessellation read from the camera
+  (below), the dome's camera visibility, the working space, the render camera.
 
 Memory is in proportion to the material, light and emitting-prim counts, nothing per
 triangle. *Trap:* `MaterialCache` keys a prototype-scoped path (`/__Prototype_N`) by
@@ -198,13 +210,27 @@ share them:
   (the traversal's own fold of `compose_with_parent`), and `emit_light`, the dispatch
   the traversal itself calls, into a scratch context whose `WorldBuilder` has the
   light's first `geom_id`s claimed first, so its emitter gets the id it had. Refused
-  when it would not emit exactly one light over the same geometry ids, or when the scene
-  has light links (resolving them renumbers the list and rewrites masks).
+  when it would not emit exactly one light over the same geometry ids. Light links do
+  not refuse it: resolution reads only the `collection:*` relationships, which an
+  in-place edit never changes, and everything it produced (per-light illuminated
+  classes, shadow masks, per-geometry light classes, shadow bits in the geometry masks,
+  backdrops) is keyed by index or `geom_id` and kept as resolution left it.
+  `emit_light` reads no link state, only the prim's own visibility
+  (`linked_light_edits_stay_in_place`).
 - **settings:** the index stage re-read by `read_index` — the function `load_scene`
   reads it with — then the camera rebuilt by `build_camera` on a stage masked to it and
   its exposure applied by `apply_exposure`. Refused when the working space, the
-  subdivision level, adaptive subdivision (which reads the camera), the dome's camera
-  visibility or the render camera would change.
+  subdivision level, the dome's camera visibility or the render camera would change, or
+  when tessellation that reads the camera would read something else. Adaptive
+  subdivision and implicit shapes sized on screen are handed one `ScreenProjection`
+  (eye, pixel rate, and the frustum when `CRUST_ADAPTIVE_FRUSTUM` builds one). The
+  import records it, and adaptive subdivision's target and ceiling, as a `ScreenKey`
+  (every number's `to_bits()`), and the refresh compares that key with the one
+  `read_index` gives now. So an exposure, an f-stop or a sampling setting stays in
+  place, while a move, a lens or a resolution re-imports
+  (`camera_tessellated_settings_edits_stay_in_place`). The key is what the tessellation
+  is handed, not the camera attributes, so it cannot go stale when `CameraFrame::read`
+  reads one more.
 
 **Warnings.** The update keeps the scene's warnings list, so it is refused whenever
 that list might not be what a fresh import reports: a material or light rebuild when
@@ -228,7 +254,7 @@ carries a warning of a family a setting can move (`settings.`, `product.`, `aov.
   a non-zero `emitted()`, and the MaterialX and pattern materials, which can emit
   through `emitted_at` alone, answer from their compiled emission.
 - `LightList::check_replace` refuses another light kind, a move to or from infinity,
-  another `geom_id`, or a linked list; `LightList::replace` keeps the light's name, LPE
+  or another `geom_id`; `LightList::replace` keeps the light's name, LPE
   tag, escape mask and geometry index and drops the selection back to uniform. An area
   light's new `Emissive` goes into its emitter's slot in the same update, so the light
   and its geometry keep one `Emissive` and `radiance_toward` stays one answer
@@ -307,14 +333,12 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   changed subtree, and BVH refit, are not done: a refit tree is not the tree a fresh
   build gives. A light with no geometry (distant, dome) could move without touching the
   BVH; it is `full` until the simpler classes have proved themselves.
-- **ALab applies nothing in place.** Measured on frame 1004 (`live-stage-scene-deltas`
-  `notes.md`), every edit is `full` (~105 s), one deliberate refusal per class:
-  adaptive subdivision refuses any camera change, exposure included, though only the
-  camera's placement and projection move the tessellation; light links refuse every
-  light rebuild; and the classifier reads prim types from the authoring stage, whose
-  payloads are unloaded, so a shader delivered by a payload (the stoat's looks) is not
-  seen as one. Production stages author all three, so the in-place path pays off today
-  on look-development stages (the DPEL teapot: 22.6 s per edit to ~1 ms), not on shots.
+- **On a production shot, only confined edits are cheap.** ALab frame 1004
+  (`in-place-edits-on-production-shots` `notes.md`): an exposure, a light's intensity and
+  a payload-delivered shader's roughness apply in place in 18–60 ms. Any transform,
+  binding or prim edit is a ~112 s re-import, since composition and traversal, not
+  decoding, are that stage's import (the kept assets save it 2–5 s). Where the in-place
+  milliseconds go on a large stage, against ~1 ms on the teapot, was not profiled.
 - **Kept decodes are let go only by a full import.** A run of in-place edits that stops
   using a texture keeps it until the next `full` edit sweeps.
 - **Environment maps are decoded again** by every import and dome rebuild.

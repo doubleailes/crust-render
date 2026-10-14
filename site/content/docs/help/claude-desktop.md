@@ -141,10 +141,27 @@ these:
 An edit with changes of several kinds is applied as the most expensive of them, in the
 order of the table. A change that turns out to need more is applied as `full`: a material
 that becomes a cutout, emissive or displaced, a light that stops emitting, a setting that
-changes the working colour space or the subdivision, or one whose rebuild would report a
+changes the working colour space or the subdivision level, a camera or resolution change
+on a scene whose tessellation is sized on screen (below), one whose rebuild would report a
 different warning, a shader another material also uses (through `inherits` or a
 connection), or any edit made after a texture file changed on disk. Either way the render is the same, bit for bit, as after a full import
 of the same layer. `undo` is applied the same way.
+
+Production shots usually have three things that look-dev stages lack. None of them, on
+its own, turns an edit into `full`:
+
+- **Tessellation sized on screen.** With adaptive subdivision
+  (`crust:subdivisionEdgeLength`), or cylinders, cones and capsules sized for the render
+  camera, a camera or settings edit stays in place when the view those shapes were
+  tessellated for is unchanged: exposure, f-stop, focus distance, samples, AOVs. Moving
+  the camera, changing its focal length or aperture, or changing the resolution
+  re-tessellates, so it is `full`.
+- **Light linking.** On a scene whose lights author `collection:lightLink` or
+  `collection:shadowLink`, a light's `inputs:*` edit is still `lights`, and the links stay
+  as they were. Editing a link itself is `full`, and so is editing a light whose
+  `lightLink` includes nothing (the render no longer counts it as a light).
+- **Looks brought in by payloads.** A shader input is `materials` whether the material is
+  defined in the stage or in a layer a payload loads.
 
 The decoded textures, Ptex files, light textures and IES profiles stay with the session,
 so even a `full` edit does not decode them again. A file that changes on disk (a texture
