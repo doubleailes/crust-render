@@ -1383,6 +1383,32 @@ fn render_final_resolves_products_against_the_layers_directory() {
     );
 }
 
+/// A frame variable in a product's name is expanded before the session
+/// anchors the path: the file lands under the layer's directory with the
+/// frame in its name (frame 1, as the session renders without `-f`).
+#[test]
+fn render_final_expands_a_frame_variable_before_anchoring() {
+    let dir = work_dir("render_final_frame_vars");
+    let input = samples().join("aovs.usda");
+    let output = dir.join("work").join("aovs_lookdev.usda");
+    let mut client = Client::start(&[]);
+    client
+        .call("open_session", json!({ "input": input, "output": output }))
+        .expect("opened");
+    client
+        .call(
+            "set_attribute",
+            json!({ "path": "/Render/Products/beauty.productName", "value": "final/beauty.$F4.exr" }),
+        )
+        .expect("renamed");
+    let done = client.call("render_final", json!({})).expect("rendered");
+    client.finish();
+    let work = dir.join("work").join("final");
+    for file in [work.join("beauty.0001.exr"), work.join("beauty.0001.png")] {
+        assert!(file.is_file(), "{} in {done:#}", file.display());
+    }
+}
+
 #[test]
 fn opening_another_stage_cancels_the_first_sessions_render() {
     let (mut client, _input, output) = cornellbox_session("switch_a", &[]);

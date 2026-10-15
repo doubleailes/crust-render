@@ -155,6 +155,124 @@ pub fn product_channels(product: &AovProduct) -> Vec<(&AovVar, Vec<String>)> {
     out
 }
 
+/// What [`expand_frame_vars`] saw in a path that its caller turns into a
+/// coded warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathIssue {
+    /// A `$NAME` / `${NAME}` that is not a frame variable, as written; it is
+    /// left in the path (`product.unknown_variable`).
+    Unknown(String),
+    /// An integer frame variable rounded a fractional frame
+    /// (`product.subframe_frame`).
+    Subframe,
+}
+
+/// A frame variable: `F`, `F2`–`F9` (zero-padded to that width) or `FF`.
+#[derive(Clone, Copy)]
+enum FrameVar {
+    Int(usize),
+    Float,
+}
+
+impl FrameVar {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "F" => Some(FrameVar::Int(0)),
+            "FF" => Some(FrameVar::Float),
+            _ => match name.as_bytes() {
+                [b'F', d @ b'2'..=b'9'] => Some(FrameVar::Int(usize::from(d - b'0'))),
+                _ => None,
+            },
+        }
+    }
+
+    /// The variable's text at `frame`, and whether it rounded a subframe.
+    fn format(self, frame: f64) -> (String, bool) {
+        match self {
+            // `round` takes halves away from zero, as Houdini's `round`;
+            // the width counts the sign (`-003`), as its `padzero`.
+            FrameVar::Int(width) => (
+                format!("{:0width$}", frame.round() as i64),
+                frame.fract() != 0.0,
+            ),
+            // The shortest round-trip form, with no trailing `.0`; `-0`
+            // reads as `0`.
+            FrameVar::Float if frame == 0.0 => ("0".to_owned(), false),
+            FrameVar::Float => (format!("{frame}"), false),
+        }
+    }
+}
+
+/// `path` with husk's frame variables expanded at `frame`
+/// (`output-path-frame-tokens` design D3, D4): `$F`, `$F2`–`$F9`, `$FF`,
+/// their braced forms `${F4}`, and their UDIM-style forms `<F4>`. `\$` is a
+/// literal `$`. Any other `$NAME` or `${NAME}` (longest name, as Houdini
+/// reads it) is kept as written and reported; any other `$` or `<…>` is
+/// literal and reported nothing. Pure, so that the caller decides which prim
+/// a warning names.
+pub fn expand_frame_vars(path: &str, frame: f64) -> (String, Vec<PathIssue>) {
+    let is_start = |c: u8| c.is_ascii_alphabetic() || c == b'_';
+    let is_name = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(path.len());
+    let mut issues = Vec::new();
+    let mut subframe = false;
+    let mut expand = |var: FrameVar, out: &mut String| {
+        let (text, rounded) = var.format(frame);
+        subframe |= rounded;
+        out.push_str(&text);
+    };
+    // Every token boundary below is an ASCII byte, so slicing there stays on
+    // a char boundary and non-ASCII text is copied through whole.
+    let mut i = 0;
+    let mut literal = 0;
+    while i < bytes.len() {
+        let token = match bytes[i] {
+            b'\\' if bytes.get(i + 1) == Some(&b'$') => Some((i + 2, "$".to_owned(), None)),
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                let inner = i + 2;
+                let len = bytes[inner..].iter().take_while(|&&c| is_name(c)).count();
+                let end = inner + len;
+                (len > 0 && is_start(bytes[inner]) && bytes.get(end) == Some(&b'}'))
+                    .then(|| (end + 1, path[inner..end].to_owned(), Some(&path[i..=end])))
+            }
+            b'$' if bytes.get(i + 1).is_some_and(|&c| is_start(c)) => {
+                let len = bytes[i + 1..].iter().take_while(|&&c| is_name(c)).count();
+                let end = i + 1 + len;
+                Some((end, path[i + 1..end].to_owned(), Some(&path[i..end])))
+            }
+            b'<' => bytes[i + 1..]
+                .iter()
+                .position(|&c| c == b'>')
+                .map(|n| (i + 2 + n, &path[i + 1..i + 1 + n]))
+                .filter(|(_, name)| FrameVar::parse(name).is_some())
+                .map(|(next, name)| (next, name.to_owned(), Some(&path[i..next]))),
+            _ => None,
+        };
+        let Some((next, name, written)) = token else {
+            i += 1;
+            continue;
+        };
+        out.push_str(&path[literal..i]);
+        match (written, FrameVar::parse(&name)) {
+            // `\$`: the literal dollar.
+            (None, _) => out.push_str(&name),
+            (Some(_), Some(var)) => expand(var, &mut out),
+            (Some(written), None) => {
+                out.push_str(written);
+                issues.push(PathIssue::Unknown(written.to_owned()));
+            }
+        }
+        i = next;
+        literal = next;
+    }
+    out.push_str(&path[literal..]);
+    if subframe {
+        issues.push(PathIssue::Subframe);
+    }
+    (out, issues)
+}
+
 /// Refuses (with a warning) every product whose path is one an earlier
 /// product already writes, keeping the first: the later write would replace
 /// the earlier file and silently lose its channels. Paths are compared
@@ -699,5 +817,135 @@ mod tests {
             samples(vec![-1.0, 7.0], Precision::Uint),
             FlatSamples::U32(v) if v == [0xFFFF_FFFF, 7]
         ));
+    }
+
+    fn expand(path: &str, frame: f64) -> (String, Vec<PathIssue>) {
+        expand_frame_vars(path, frame)
+    }
+
+    fn unknown(name: &str) -> PathIssue {
+        PathIssue::Unknown(name.to_owned())
+    }
+
+    #[test]
+    fn a_padded_frame() {
+        assert_eq!(
+            expand("renders/beauty.$F4.exr", 12.0),
+            ("renders/beauty.0012.exr".to_owned(), vec![])
+        );
+    }
+
+    #[test]
+    fn unpadded_float_and_braced_forms() {
+        assert_eq!(expand("a.$F.${F3}.$FF.exr", 12.0).0, "a.12.012.12.exr");
+    }
+
+    #[test]
+    fn udim_style_forms_are_the_same_variables() {
+        assert_eq!(
+            expand("renders/beauty.<F4>.exr", 12.0),
+            ("renders/beauty.0012.exr".to_owned(), vec![])
+        );
+        assert_eq!(expand("raw.<F>.<FF>.exr", 12.0).0, "raw.12.12.exr");
+    }
+
+    #[test]
+    fn other_angle_bracket_tokens_are_left_alone() {
+        assert_eq!(
+            expand("a.<UDIM>.<F4>.exr", 2.0),
+            ("a.<UDIM>.0002.exr".to_owned(), vec![])
+        );
+        assert_eq!(expand("a<F4.exr", 2.0), ("a<F4.exr".to_owned(), vec![]));
+        assert_eq!(expand("a.<F1>.exr", 2.0), ("a.<F1>.exr".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn a_negative_frame_counts_its_sign_in_the_width() {
+        assert_eq!(expand("a.$F4.exr", -3.0).0, "a.-003.exr");
+        assert_eq!(expand("a.$FF.exr", -3.0).0, "a.-3.exr");
+    }
+
+    #[test]
+    fn an_escaped_dollar() {
+        assert_eq!(
+            expand(r"cost\$F4.exr", 1.0),
+            ("cost$F4.exr".to_owned(), vec![])
+        );
+    }
+
+    #[test]
+    fn a_subframe_rounds_integer_variables_and_is_reported() {
+        assert_eq!(
+            expand("a.$F4.exr", 12.5),
+            ("a.0013.exr".to_owned(), vec![PathIssue::Subframe])
+        );
+        assert_eq!(
+            expand("a.<F4>.exr", 12.5),
+            ("a.0013.exr".to_owned(), vec![PathIssue::Subframe])
+        );
+        // Halves round away from zero on both sides.
+        assert_eq!(expand("a.$F.exr", -12.5).0, "a.-13.exr");
+        // Reported once per path, however many variables rounded.
+        assert_eq!(expand("$F.$F4", 1.5).1, vec![PathIssue::Subframe]);
+    }
+
+    #[test]
+    fn a_float_frame_keeps_its_fraction_silently() {
+        assert_eq!(expand("a.$FF.exr", 12.5), ("a.12.5.exr".to_owned(), vec![]));
+        assert_eq!(
+            expand("a.<FF>.exr", 12.5),
+            ("a.12.5.exr".to_owned(), vec![])
+        );
+        assert_eq!(expand("a.$FF.exr", -0.0).0, "a.0.exr");
+    }
+
+    #[test]
+    fn unknown_names_are_kept_as_written_and_reported() {
+        assert_eq!(
+            expand("$SHOT/beauty.$F4.exr", 2.0),
+            ("$SHOT/beauty.0002.exr".to_owned(), vec![unknown("$SHOT")])
+        );
+        assert_eq!(
+            expand("${HIP}/a.exr", 2.0),
+            ("${HIP}/a.exr".to_owned(), vec![unknown("${HIP}")])
+        );
+        // The longest name, as Houdini reads it: not `$F4` then `x`.
+        assert_eq!(
+            expand("a.$F4x.exr", 12.0),
+            ("a.$F4x.exr".to_owned(), vec![unknown("$F4x")])
+        );
+    }
+
+    #[test]
+    fn a_dollar_with_no_name_is_literal() {
+        assert_eq!(expand("price$.exr", 1.0), ("price$.exr".to_owned(), vec![]));
+        assert_eq!(expand("a$1.exr", 1.0), ("a$1.exr".to_owned(), vec![]));
+        assert_eq!(expand("a$", 1.0), ("a$".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn an_unclosed_brace_is_literal() {
+        assert_eq!(expand("a.${F4.exr", 1.0), ("a.${F4.exr".to_owned(), vec![]));
+        assert_eq!(expand("a.${}.exr", 1.0), ("a.${}.exr".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn a_windows_path_keeps_its_backslashes() {
+        assert_eq!(
+            expand(r"C:\renders\beauty.$F4.exr", 7.0).0,
+            r"C:\renders\beauty.0007.exr"
+        );
+    }
+
+    #[test]
+    fn a_path_without_variables_is_unchanged() {
+        for path in ["out.exr", "renders/é/beauty.0001.exr", "", "a\\b", "x>y"] {
+            assert_eq!(expand(path, 3.0), (path.to_owned(), vec![]), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn non_ascii_text_around_variables_survives() {
+        assert_eq!(expand("é.$F2.ü<F>.exr", 4.0).0, "é.04.ü4.exr");
     }
 }

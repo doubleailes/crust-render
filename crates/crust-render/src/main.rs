@@ -329,7 +329,12 @@ struct RenderArgs {
     /// is written here (default `output.exr`) and a tone-mapped sRGB PNG next
     /// to it (same path with a .png extension). When the stage authors
     /// RenderProducts, this replaces the first product's `productName`, as
-    /// husk's `-o` does; the other products keep theirs.
+    /// husk's `-o` does; the other products keep theirs. husk's frame
+    /// variables are expanded, here and in every `productName`: `$F`,
+    /// `$F2`-`$F9` (zero-padded), `$FF` (fraction kept), or `<F>`, `<F4>`,
+    /// `<FF>`; without -f the frame is 1, and a subframe rounds with a
+    /// warning. `\$` is a literal `$`. Single-quote it so the shell leaves
+    /// the `$` alone: -o 'out.$F4.exr'.
     #[arg(short, long)]
     output: Option<String>,
     /// Also write the log to a file named for the time the run started
@@ -730,9 +735,52 @@ fn write_beauty(
 }
 
 /// Where a render of a stage without RenderProducts writes its beauty EXR:
-/// `-o`, else `output.exr` — what `render` writes and `check` reports.
-fn beauty_output(output: Option<&str>) -> &str {
-    output.unwrap_or("output.exr")
+/// `-o` with its frame variables expanded at `frame`, else `output.exr` —
+/// what `render` writes and `check` reports.
+fn beauty_output(output: Option<&str>, frame: f64) -> String {
+    output.map_or_else(
+        || "output.exr".to_owned(),
+        |o| expand_output(o, frame, None),
+    )
+}
+
+/// `path` with its frame variables expanded at `frame`
+/// ([`products::expand_frame_vars`]), each issue raised as a coded warning
+/// naming the product prim `at`, or `-o` when there is none.
+fn expand_output(path: &str, frame: f64, at: Option<&str>) -> String {
+    let (expanded, issues) = products::expand_frame_vars(path, frame);
+    let whose = at.unwrap_or("-o");
+    // One warning per path and code, naming every unknown name in it.
+    let unknown: Vec<&str> = issues
+        .iter()
+        .filter_map(|i| match i {
+            products::PathIssue::Unknown(name) => Some(name.as_str()),
+            products::PathIssue::Subframe => None,
+        })
+        .collect();
+    if !unknown.is_empty() {
+        let names = unknown.join(", ");
+        let message =
+            format!("{whose}: {names} in {path:?} is not a frame variable; left as written");
+        match at {
+            Some(prim) => warning!(ProductUnknownVariable, at = prim, "{message}"),
+            None => warning!(ProductUnknownVariable, "{message}"),
+        }
+    }
+    if issues.contains(&products::PathIssue::Subframe) {
+        let message = format!(
+            "{whose}: frame {frame} rounded to {} in {path:?}; use $FF to keep the fraction",
+            frame.round()
+        );
+        match at {
+            Some(prim) => warning!(ProductSubframeFrame, at = prim, "{message}"),
+            None => warning!(ProductSubframeFrame, "{message}"),
+        }
+    }
+    if expanded != path {
+        debug!("{whose}: {path:?} expands to {expanded:?} at frame {frame}");
+    }
+    expanded
 }
 
 /// The scene to render: the USD stage `-i` names, imported under the CLI's
@@ -848,16 +896,21 @@ fn apply_scene_overrides(cli: &SceneArgs, mut settings: RenderSettings) -> Rende
 }
 
 /// The stage's RenderProducts that can be written, with `-o` replacing the
-/// first one's path; each refusal is a coded warning (`product.no_name`,
+/// first one's path and every path's frame variables expanded at `frame`;
+/// each refusal is a coded warning (`product.no_name`,
 /// `product.no_writable_vars`, `product.shared_path`), which `crust check`
-/// collects. Empty means the single beauty EXR at `-o`.
-fn select_products(aovs: &mut AovRequest, output: Option<&str>) {
+/// collects. Collisions are judged on the expanded paths. Empty means the
+/// single beauty EXR at `-o`.
+fn select_products(aovs: &mut AovRequest, output: Option<&str>, frame: f64) {
     if let (Some(first), Some(o)) = (aovs.products.first_mut(), output) {
         debug!(
             "-o {o} replaces {}'s productName {:?}",
             first.prim_path, first.name
         );
         first.name = o.to_owned();
+    }
+    for product in &mut aovs.products {
+        product.name = expand_output(&product.name, frame, Some(&product.prim_path));
     }
     if !aovs.products.is_empty() {
         aovs.products.retain(|p| {
@@ -1167,14 +1220,16 @@ fn check_scene(
     // What the render would write, resolved as it resolves it. The products
     // it refuses are the import's warnings too.
     let mut aovs = scene.aovs.clone();
+    // Without -f, frame variables expand as frame 1, husk's default.
+    let frame = args.scene.frame.unwrap_or(1.0);
     let selecting = WarningScope::enter();
-    select_products(&mut aovs, None);
+    select_products(&mut aovs, None, frame);
     let mut warnings = scene.warnings.clone();
     warnings.extend(selecting.finish());
     let products = if aovs.products.is_empty() {
         vec![ProductInfo {
             prim: None,
-            file: beauty_output(None).to_owned(),
+            file: beauty_output(None, frame),
             channels: ["R", "G", "B"].map(String::from).to_vec(),
         }]
     } else {
@@ -1755,7 +1810,9 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     // What to write: the stage's RenderProducts, with `-o` replacing the
     // first one's path; with none, the single beauty EXR at `-o`.
     let mut aovs = scene.aovs;
-    select_products(&mut aovs, output.as_deref());
+    // Without -f, frame variables expand as frame 1, husk's default.
+    let frame = cli.frame.unwrap_or(1.0);
+    select_products(&mut aovs, output.as_deref(), frame);
     if let Some(dir) = run.anchor {
         for product in &mut aovs.products {
             if Path::new(&product.name).is_relative() {
@@ -1763,10 +1820,14 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
             }
         }
     }
+    // Expanded only for a beauty-only render: with products, -o already
+    // named (and was expanded as) the first product's path.
     let beauty_path = match (output.as_deref(), run.beauty) {
-        (None, Some(beauty)) => beauty,
-        (output, _) => beauty_output(output),
+        (None, Some(beauty)) => beauty.to_owned(),
+        (output, _) if aovs.products.is_empty() => beauty_output(output, frame),
+        (output, _) => output.unwrap_or("output.exr").to_owned(),
     };
+    let beauty_path = beauty_path.as_str();
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;

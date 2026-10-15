@@ -551,3 +551,156 @@ fn the_sampler_is_a_shared_flag() {
     assert_eq!(row["flag"], "--sampler");
     assert_eq!(row["usd_attribute"], "crust:sampler");
 }
+
+/// A product's frame variables are expanded at the checked frame, and two
+/// products are judged to collide on their expanded paths.
+#[test]
+fn products_are_reported_with_their_frame_expanded() {
+    let dir = work_dir("frame_vars");
+    let root = r#"def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/main>, </Render/udim>, </Render/again>]
+        uniform int2 resolution = (32, 16)
+    }
+    def RenderProduct "main"
+    {
+        token productName = "renders/beauty.$F4.exr"
+        rel orderedVars = [</Render/color>]
+    }
+    def RenderProduct "udim"
+    {
+        token productName = "renders/raw.<F>.exr"
+        rel orderedVars = [</Render/color>]
+    }
+    def RenderProduct "again"
+    {
+        token productName = "renders/beauty.0005.exr"
+        rel orderedVars = [</Render/color>]
+    }
+    def RenderVar "color"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }
+}
+"#;
+    let path = stage(&dir, "", root);
+    let check = |frame: &str| {
+        let out = crust(
+            &dir,
+            &[
+                "check",
+                "-i",
+                path.to_str().unwrap(),
+                "-f",
+                frame,
+                "--json",
+                "-",
+            ],
+        );
+        assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+        parse(&out.stdout)
+    };
+    let codes = |v: &serde_json::Value| -> Vec<String> {
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let v = check("5");
+    let products = v["products"].as_array().unwrap();
+    let names: Vec<&str> = products
+        .iter()
+        .map(|p| p["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["renders/beauty.0005.exr", "renders/raw.5.exr"]);
+    let shared = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "product.shared_path")
+        .unwrap_or_else(|| panic!("no product.shared_path in {:#?}", v["warnings"]));
+    assert_eq!(shared["prims"], serde_json::json!(["/Render/again"]));
+    assert!(!codes(&v).contains(&"product.subframe_frame".to_owned()));
+
+    let v = check("5.5");
+    let names: Vec<&str> = v["products"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "renders/beauty.0006.exr",
+            "renders/raw.6.exr",
+            "renders/beauty.0005.exr"
+        ]
+    );
+    let subframe = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "product.subframe_frame")
+        .unwrap_or_else(|| panic!("no product.subframe_frame in {:#?}", v["warnings"]));
+    assert_eq!(
+        subframe["prims"],
+        serde_json::json!(["/Render/main", "/Render/udim"])
+    );
+    assert_eq!(files(&dir), ["stage.usda"], "nothing is written");
+}
+
+/// An unknown variable is left in the path as written and reported.
+#[test]
+fn an_unknown_path_variable_is_kept_and_reported() {
+    let dir = work_dir("unknown_var");
+    let root = r#"def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/main>]
+        uniform int2 resolution = (32, 16)
+    }
+    def RenderProduct "main"
+    {
+        token productName = "$SHOT/beauty.$F4.exr"
+        rel orderedVars = [</Render/color>]
+    }
+    def RenderVar "color"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }
+}
+"#;
+    let path = stage(&dir, "", root);
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            path.to_str().unwrap(),
+            "-f",
+            "2",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    assert_eq!(v["products"][0]["file"], "$SHOT/beauty.0002.exr");
+    let unknown = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "product.unknown_variable")
+        .unwrap_or_else(|| panic!("no product.unknown_variable in {:#?}", v["warnings"]));
+    assert_eq!(unknown["prims"], serde_json::json!(["/Render/main"]));
+    assert_eq!(unknown["kind"], "refused");
+}

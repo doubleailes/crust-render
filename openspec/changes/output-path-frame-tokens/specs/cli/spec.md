@@ -9,8 +9,9 @@
 - `-i/--input`: the USD scene path.
 - `-o/--output`: the output path. When the stage authors RenderProducts, this
   overrides the first product's path. Otherwise it is the single EXR's path,
-  default `output.exr`. Its frame variables (`$F`, `$F2`–`$F9`, `$FF`) are
-  expanded as `image-output` describes; quote it so the shell leaves them alone.
+  default `output.exr`. Its frame variables (`$F`, `$F2`–`$F9`, `$FF`, or
+  `<F>`, `<F2>`–`<F9>`, `<FF>`) are expanded as `image-output` describes; quote
+  it so the shell leaves them alone.
 - `-l/--level`: log verbosity, default `info`.
 - `--scanline`: row-order rendering instead of the default 16×16 tiles.
 - `-s/--samples`: override the scene's samples-per-pixel.
