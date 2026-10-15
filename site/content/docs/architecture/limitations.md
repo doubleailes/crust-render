@@ -128,7 +128,9 @@ render.
   distance, orientation and the surface's horizon, not by whether anything is in the way;
   `learned` is the visibility-aware selection. It treats the receiving surface as diffuse,
   so a glossy highlight from a dim light is not favoured, and lights at infinity (domes,
-  distant lights) keep a fixed share whatever they contribute.
+  distant lights) keep a fixed share whatever they contribute. A large light close to the
+  subject is picked often even where it faces away, so a studio rig of big softboxes can
+  render noisier under `tree` than under `power`; `tree` is opt-in for that reason.
 - **Light-linking gaps:**
   - A collection target inside an instance prototype can't tell instances apart.
   - `membershipExpression` is refused.

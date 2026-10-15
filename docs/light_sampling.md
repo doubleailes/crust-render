@@ -1078,12 +1078,58 @@ is 2.65425 under `power` and 2.65448 under `tree`, against a standard error of
 - **The tree costs 14–21% more instructions per sample.** Its walk evaluates
   two importances per level, at every NEE pick and every bounce-side weight.
   Against 1.86× (`usdlux`) and 11–22× (`many_lights`) lower relMSE that is
-  cheap. The gate below is at equal time.
+  cheap. The gate below weighs it.
 - **`power` pays about 0.6%** for the receiver every path vertex now carries
   (48 bytes instead of a 16-byte position) and its copies. Storing the
   normal unaligned (32 bytes) made it worse, through the conversions.
   Removing it entirely would need the integrator to be generic over whether
   the selection reads the receiver's surface, doubling its instantiations.
+
+**The equal-time gate (design D10).** On the 11 checked-in samples that build
+a tree (the other 28 have at most one finite light and render under `tree` bit
+for bit as under `power`). relMSE at 16 spp, 4 seeds, `--indirect-clamp 0`,
+against 1024 spp `power` references. Time is `bench_ab.sh`'s mean Render
+seconds at 16 spp, 8 interleaved reps. Equal-time efficiency is the relMSE
+ratio over the time ratio, `power` = 1. The pass bar is 0.95 on both measures.
+
+| scene | finite lights | per sample (full / trimmed) | time | equal time | |
+|---|---|---|---|---|---|
+| `many_lights` | 256 | 11.2× / 22.2× | 1.28× | **8.76× / 17.4×** | pass |
+| `usdlux` | 6 | 1.86× / 1.84× | 1.12× | **1.66× / 1.64×** | pass |
+| `hair` | 2 | 1.32× / 1.19× | 0.95× | 1.40× / 1.26× | pass |
+| `light_visibility` | 3 | 1.09× / 1.24× | 0.92× | 1.19× / 1.35× | pass |
+| `light_linking` | 3 | 1.61× / 1.58× | 1.57× | 1.03× / 1.01× | pass |
+| `openpbr_showcase` | 2 | 1.01× / 1.02× | 1.10× | 0.92× / 0.93× | fail |
+| `aovs_lpe` | 2 | 0.90× / 1.07× | 1.08× | 0.84× / 0.99× | fail |
+| `veach_mis` | 4 | 1.30× / 0.96× | 1.15× | 1.13× / 0.83× | fail |
+| `materialx_teapot` | 2 | 0.86× / 0.85× | 1.09× | 0.79× / 0.78× | fail |
+| `materialx_lion` | 2 | 0.88× / 0.87× | 1.08× | 0.81× / 0.80× | fail |
+| `materialx_showcase` | 4 | 0.69× / 0.69× | 1.13× | 0.61× / 0.61× | fail |
+
+- **`tree` stays opt-in.** It fails on 6 of 11 scenes, and ALab and the OpenPBR
+  Shader Playground were not measured.
+- **Where it loses, it loses to large lights near the set.** On
+  `materialx_showcase`, an 8 × 3 m backdrop panel faces away from the teapot and
+  delivers nothing there. Its box still subtends a 70° half-angle from the
+  teapot, which erases its orientation from the conservative bound. Being
+  twice as close as the other lights, it takes 28% of the tree's picks against
+  16% under `power`. Its importance against its actual share at the teapot:
+
+  | light | distance | `θb` | `power` pmf | `tree` pmf | actual share |
+  |---|---|---|---|---|---|
+  | Key | 9.9 | 18° | 0.377 | 0.394 | 0.544 |
+  | Fill | 9.9 | 18° | 0.256 | 0.142 | 0.139 |
+  | Top | 8.8 | 13° | 0.206 | 0.184 | 0.317 |
+  | Sweep | 4.6 | 70° | 0.161 | 0.280 | 0.000 |
+
+  The relMSE falls as the power share grows (0.00509 at `D = 0.1`, 0.00418 at
+  0.5, 0.00352 under `power`), which confirms a misranking, not noise. This
+  is the known weakness of Conty & Kulla's conservative bound, which pbrt-v4
+  shares. Cycles averages it with an optimistic "min" importance for this
+  reason. At a leaf the node holds one light, so its exact orientation could
+  replace the bound there. Either is the follow-up.
+- **The time cost is 8–28%** where a tree is walked, more on `light_linking`
+  (1.57×), whose renders are under 0.1 s and dominated by setup.
 
 ## 4. The anatomy of the direct-lighting estimator
 

@@ -329,6 +329,27 @@ Cycles. It is blind to occluders, which is `learned`'s half.
 - **Nothing to choose.** With at most one emitting finite light,
   `select_by(Tree)` builds no tree and the power table picks: such a scene
   renders under `tree` bit for bit as under `power`.
+- **Measured, and opt-in** (`docs/light_sampling.md` §3.15).
+  - `D = 0.1`, chosen from {0.1, 0.25, 0.5}: the lowest share won on every
+    scene measured.
+  - Per sample: 1.86× lower relMSE on `usdlux`, 11–22× on the 256-light
+    `many_lights`. It is unbiased (relMSE × spp flat to 256 spp; `veach_mis`'s
+    mean within 0.0002 of `power`'s on 2.65).
+  - It costs 14–21% more instructions per sample where a tree is walked, and
+    `power` about 0.6% for the receiver every vertex carries.
+  - The equal-time gate passes on 5 of the 11 samples that build a tree
+    (`many_lights` 8.8×, `usdlux` 1.66×, `hair`, `light_visibility`,
+    `light_linking`) and fails on 6. The worst are `materialx_showcase`
+    (0.61×), `materialx_teapot` and `materialx_lion` (≈ 0.8×). ALab and the
+    OpenPBR Shader Playground, the gate's other scenes, were not available.
+    So `power` stays the default.
+- **A trap: large lights near the set.** A receiver well inside a big panel's
+  subtended cone sees its box at a wide `θb`, which erases the panel's
+  orientation from the bound. On `materialx_showcase` an 8 × 3 m backdrop
+  light facing away from the teapot takes 28% of the tree's picks there and
+  delivers nothing. Raising `D` only dilutes the misranking. The fix is
+  Cycles' average of the conservative and an optimistic ("min") importance,
+  or the light's exact orientation at a leaf, where the node holds one light.
 
 ## Disk and tube lights
 
@@ -994,9 +1015,12 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   light behind a wall keeps its full rank: `learned`'s half of the problem, and
   52% of ALab's NEE waste (§3.12). Its importance treats the receiver as
   diffuse, so a glossy highlight from a small light is not favoured (the
-  trimmed relMSE on `veach_mis` is 4% worse per sample). Lights at infinity
-  keep their fixed `1/live` share. It stays opt-in until ALab and the OpenPBR
-  Shader Playground pass the equal-time gate (§3.15 there). `power` pays about
+  trimmed relMSE on `veach_mis` is 4% worse per sample). A large light near
+  the set loses its orientation in the conservative bound and is over-picked
+  where it faces away ("Light tree" above: 0.61× `power` at equal time on
+  `materialx_showcase`). Lights at infinity keep their fixed `1/live` share. It
+  stays opt-in: the equal-time gate fails on 6 of the 11 samples that build a
+  tree, and ALab and the OpenPBR Shader Playground are unmeasured (§3.15 there). `power` pays about
   0.6% more instructions for the receiver every vertex carries.
 - **`neural` selection loses at equal time** on every checked-in sample and on
   ALab, whose problem is visibility alone: 0.79× `learned` on its direct
