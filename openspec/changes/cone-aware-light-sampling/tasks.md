@@ -37,9 +37,9 @@
 
 ## 6. Defaults and records
 
-- [ ] 6.1 Apply the gate verdicts from 4.4 and 5.5. For each default that flips, change it in `config.rs`, the spec text in this change's delta, `docs/architecture.md` and `reference/environment-variables.md`, and re-record the goldens. Verify that `check_images.sh check` passes against the new goldens and that the old behaviour reproduces bit for bit with the old switch value.
-- [ ] 6.2 Write the "Cone-aware sampling" section of the `lighting` design record: the foot-point geometry, the traps (conservative cap, cancellation-free slice pdf), the measurements, and the verdicts. Update its "Known gaps" and the user limitations page to match the spec's narrowed gap. Verify that `zola build` passes and that the warnings/docs consistency tests pass.
-- [ ] 6.3 Run the full CI set locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, and `openspec validate cone-aware-light-sampling --strict`. Verify that all pass.
+- [x] 6.1 Apply the gate verdicts from 4.4 and 5.5. For each default that flips, change it in `config.rs`, the spec text in this change's delta, `docs/architecture.md` and `reference/environment-variables.md`, and re-record the goldens. Verify that `check_images.sh check` passes against the new goldens and that the old behaviour reproduces bit for bit with the old switch value.
+- [x] 6.2 Write the "Cone-aware sampling" section of the `lighting` design record: the foot-point geometry, the traps (conservative cap, cancellation-free slice pdf), the measurements, and the verdicts. Update its "Known gaps" and the user limitations page to match the spec's narrowed gap. Verify that `zola build` passes and that the warnings/docs consistency tests pass.
+- [x] 6.3 Run the full CI set locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, and `openspec validate cone-aware-light-sampling --strict`. Verify that all pass.
 
 ## Workflow follow-up
 

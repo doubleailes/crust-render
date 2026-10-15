@@ -434,3 +434,15 @@ The images are bit-identical before and after the restructure.
 `off` restores the previous sampling bit for bit), `docs/architecture.md` and
 `reference/environment-variables.md`. Goldens are re-recorded; `CRUST_CONE_CLIP=off`
 reproduces the old goldens bit for bit.
+
+### 6.1–6.3 Verification (final binary)
+
+- `CRUST_CONE_CLIP=off scripts/check_images.sh check` against the goldens of 1.4:
+  every sample is bit-identical.
+- Default (clip on) against those goldens: only `usdlux` differs. New goldens are
+  recorded (39 samples), and `check` against them is bit-identical.
+- `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D
+  warnings` are clean. `cargo test --workspace --no-fail-fast`: 2096 passed, 0 failed.
+- `openspec validate cone-aware-light-sampling --strict` passes. `zola build` (0.21)
+  checks 354 internal links.
+- `cargo deny` is not installed here. No manifest or lockfile changed.
