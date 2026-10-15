@@ -713,7 +713,12 @@ impl LightList {
 
     /// The probability [`LightList::pick_index_at`] at `r` picks light `index` —
     /// what the bounce side weights emission found from a vertex at `r` with.
-    #[inline]
+    ///
+    /// Forced inline, as `pick_index_at` is: the tree's arm grew it past
+    /// LLVM's own threshold, and an out-of-line call per bounce-side lookup
+    /// cost cornellbox 0.14% of its instructions under `power` (callgrind,
+    /// 2 spp). The tree's and the network's arms stay out of line.
+    #[inline(always)]
     pub fn pmf_at(&self, r: impl Into<Receiver>, index: usize) -> f32 {
         let r = r.into();
         match self.cache.as_deref() {
