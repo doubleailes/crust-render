@@ -1008,6 +1008,83 @@ frames 1004 and 1030):
   `domelight` (§3.12). Lowering it for `learned` would be a change of its own,
   measured on `domelight` again first.
 
+### 3.15 The light tree (`light-tree-selection`)
+
+**What it is.** `--light-selection tree` walks a light BVH over the finite
+lights from each receiver (§6.3, pbrt-v4's `BVHLightSampler`). Each node's
+children are weighed by Conty & Kulla's importance bound: flux, distance, the
+lights' emission cones and the receiver's normal. The receiver term is signed
+at an opaque receiver, so lights below its horizon drop out there. A
+defensive share `D` of every pick still goes by the power table, and lights at
+infinity keep their `1/live` share. The lighting design record's "Light tree"
+has the details, including why a shaped light is ranked by its peak flux
+rather than its power.
+
+**The defensive share.** Chosen from {0.1, 0.25, 0.5}: relMSE at 16 spp,
+`--indirect-clamp 0`, 4 seeds (`-f 1..4`), against a 1024 spp `power`
+reference from the unchanged binary. Full / trimmed, and the gain over
+`power`:
+
+| scene | `power` | `D` = 0.1 | `D` = 0.25 | `D` = 0.5 |
+|---|---|---|---|---|
+| `usdlux` | 0.0780 / 0.0641 | **1.86× / 1.84×** | 1.82× / 1.80× | 1.66× / 1.61× |
+| `veach_mis` | 0.0286 / 0.00682 | **1.30× / 0.96×** | 1.20× / 0.92× | 1.10× / 0.86× |
+| `domelight` | 0.335 / 0.0221 | 1.00× | 1.00× | 1.00× |
+| `many_lights` | 0.489 / 0.344 | **11.2× / 22.2×** | 9.5× / 17.7× | 7.6× / 10.6× |
+
+- **`D = 0.1` wins everywhere**, and is the constant
+  (`TREE_DEFENSIVE_SHARE`).
+- **`domelight` is unchanged.** It has one finite light (the dome and the sun
+  are at infinity), so no tree is built and `tree` renders it bit for bit as
+  `power` does.
+- **`many_lights`** (`samples/many_lights.usda`, 256 lights, written by
+  `scripts/many_lights.py`) is what the tree is for.
+- **`veach_mis` is the weak case.** Its trimmed relMSE is 4% worse at 0.1 and
+  8% at 0.25. Its glossy plates are lit by small lights whose highlights a
+  diffuse-receiver importance does not see (§6.3's "stated limits"; the
+  BSDF-aware trees of §6.5 are the fix).
+- **The first sweep was wrong in one way.** It ranked a shaped light by its
+  power, its cone-integrated flux. That penalised a 10° spot twice, since the
+  cone is also in the bounds' `θe`, and the spot pools fireflied. A shaped
+  light is now ranked by its peak flux, as pbrt-v4 ranks a spotlight.
+
+**Unbiased.** Against a 4096 spp `power` reference, one seed, relMSE × spp at
+16 / 64 / 256 spp. A bias would plateau; neither mode does. Above 32 spp both
+fall faster because these scenes sample adaptively.
+
+| scene | `power` | `tree` |
+|---|---|---|
+| `usdlux` | 1.22 / 1.08 / 0.96 | 0.66 / 0.54 / 0.50 |
+| `many_lights` | 7.38 / 5.10 / 2.97 | 0.58 / 0.54 / 0.57 |
+| `veach_mis` | 0.26 / 0.17 / 0.12 | 0.27 / 0.16 / 0.12 |
+
+`many_lights`' trimmed relMSE × spp under `tree` rises at 256 spp (0.18 →
+0.33). Its reference's own noise is about 7e-4 relMSE there, half the measured
+value, so that is the reference, not a plateau. `veach_mis`'s mean at 1024 spp
+is 2.65425 under `power` and 2.65448 under `tree`, against a standard error of
+0.041: MIS-consistent.
+
+**Cost.** Callgrind instructions, one thread, 2 spp:
+
+| scene | `main`, `power` | this change, `power` | this change, `tree` |
+|---|---|---|---|
+| `cornellbox` | 4.250 G | 4.274 G (+0.57%) | 4.279 G |
+| `usdlux` | 3.429 G | 3.467 G (+1.09%)† | 3.966 G (+14.4% over `power`) |
+| `many_lights` | 2.322 G | 2.341 G (+0.83%)† | 2.828 G (+20.8% over `power`) |
+
+† Measured before `pmf_at` was forced inline again, which recovered 0.12% on
+`cornellbox`.
+
+- **The tree costs 14–21% more instructions per sample.** Its walk evaluates
+  two importances per level, at every NEE pick and every bounce-side weight.
+  Against 1.86× (`usdlux`) and 11–22× (`many_lights`) lower relMSE that is
+  cheap. The gate below is at equal time.
+- **`power` pays about 0.6%** for the receiver every path vertex now carries
+  (48 bytes instead of a 16-byte position) and its copies. Storing the
+  normal unaligned (32 bytes) made it worse, through the conversions.
+  Removing it entirely would need the integrator to be generic over whether
+  the selection reads the receiver's surface, doubling its instantiations.
+
 ## 4. The anatomy of the direct-lighting estimator
 
 One NEE sample at a shading point *x* estimates
@@ -1525,8 +1602,8 @@ checking is *how much* noise, and proof that nothing *but* noise moved. On top o
    - `fog` (volumes: equiangular);
    - `cornellbox` (no light at all: §9.1).
 
-   `scripts/gen_stress_scene.py` is the model to follow for a many-lights stress
-   scene, which does not exist yet.
+   - `many_lights` (256 lights, written by `scripts/many_lights.py`: light
+     selection at scale, §3.15).
 
 ---
 
@@ -1637,10 +1714,13 @@ setting, applied at depth 0 only, MIS'd as in §7.4. **Done**, with
 **(l) Per-vertex RIS** over (j)'s source pdf, with the proxy-density MIS of §6.6.
 `crust:lightCandidates` (default 1 = off).
 
-**(m) A light BVH** (pbrt-v4's `BVHLightSampler` as the template) once crust
-imports scenes with hundreds of lights. That means mesh lights (`MeshLightAPI`),
-emissive curves and instances. The Moana island's light rig is small, so this is
-not urgent for it.
+**(m) A light BVH. ✅ Done as `--light-selection tree`; measured in §3.15.**
+pbrt-v4's `BVHLightSampler` in shape, over the finite UsdLux lights, with a
+signed horizon at opaque receivers and a 0.1 defensive share of the power table.
+1.86× lower relMSE on `usdlux` and 11–22× on the 256-light `many_lights`, a tie
+on `veach_mis`. Mesh lights (`MeshLightAPI`), emissive curves and instances
+would make its leaves triangles; the traversal and its MIS contract would not
+change.
 
 **(n) Visibility-aware selection. ✅ Done as an opt-in mode; measured in
 §3.12.** Learned by its own deterministic pre-pass rather than by guiding's

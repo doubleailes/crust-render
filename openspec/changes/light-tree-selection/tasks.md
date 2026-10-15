@@ -91,10 +91,10 @@
       reference, on `usdlux`, `veach_mis`, `domelight` and `many_lights`.
       Record the table in `docs/light_sampling.md` (a new §3.15). Verify:
       the constant matches the recorded choice.
-- [ ] 4.3 Measure cost: callgrind instruction counts at 2 spp on
+- [x] 4.3 Measure cost: callgrind instruction counts at 2 spp on
       `cornellbox`, `usdlux` and `many_lights`, `tree` against `power`.
       Record them in §3.15. Verify: the numbers are in the document.
-- [ ] 4.4 Verify unbiasedness: relMSE × spp stays flat from 16 to 256 spp
+- [x] 4.4 Verify unbiasedness: relMSE × spp stays flat from 16 to 256 spp
       under `tree` on `usdlux` and `many_lights`; `veach_mis`'s mean at
       1024 spp is within noise of `power`'s. Record in §3.15.
 
