@@ -174,9 +174,10 @@ at the scene's spp without one. Setups are at full-frame scale
 (`full_frame_setup`): the `learned` pre-pass as measured (it trains over the
 full frame whatever the crop), guiding's training × frame / crop pixels, median
 over crops — so a combined trial's is the sum of its factors' — and the
-baseline P1's own. A selection other than `learned` counts as no setup at all
-(`setup_parts`), so with none on either side the at-target value *is* the
-overall ΔEff, exactly. It can only veto a suggestion.
+baseline P1's own. `tree`'s build counts as measured too (about 6 µs a light:
+0.2 ms on ALab, 62 ms at 10 000 lights), though it is not measured before its
+first trial; `power` and `uniform` count as no setup at all (`setup_parts`), so
+with none on either side the at-target value *is* the overall ΔEff, exactly. It can only veto a suggestion.
 
 ## Verdicts (D5; hardened D7)
 
