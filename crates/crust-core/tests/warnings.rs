@@ -275,6 +275,52 @@ fn nurbs_curves_warnings() {
     assert_eq!(scene.world.count(), 1, "only the rational arc renders");
 }
 
+/// Malformed `NurbsCurves` never abort the load: a negative count is refused
+/// with `curves.invalid_knots` (it once passed the knot-total check and
+/// sliced past the knots), zero weights are ignored rather than collapsing
+/// the curve to the origin, and an authored empty `widths` takes the default
+/// (it once indexed the empty array) — on `BasisCurves` too.
+#[test]
+fn malformed_nurbs_curves_are_refused_not_panicked() {
+    let scene = load(
+        "nurbs_malformed",
+        r#"    def NurbsCurves "negative_count"
+    {
+        int[] curveVertexCounts = [-1, 3]
+        int[] order = [4, 2]
+        double[] knots = [0, 0, 1, 2, 3, 3, 4, 5]
+        point3f[] points = [(0, 0, 0), (0, 1, 0), (0, 2, 0)]
+    }
+    def NurbsCurves "zero_weights"
+    {
+        int[] curveVertexCounts = [2]
+        int[] order = [2]
+        double[] knots = [0, 0, 1, 1]
+        point3f[] points = [(5, 0, 0), (5, 1, 0)]
+        double[] pointWeights = [0, 0]
+        float[] widths = []
+    }
+    def BasisCurves "basis_no_widths"
+    {
+        uniform token type = "linear"
+        int[] curveVertexCounts = [2]
+        point3f[] points = [(5, 0, 0), (5, 1, 0)]
+        float[] widths = []
+    }
+"#,
+        "",
+    );
+    let knots = record(&scene, WarningCode::CurvesInvalidKnots);
+    assert_eq!(knots.prims, ["/World/negative_count"]);
+    let weights = record(&scene, WarningCode::CurvesRationalApproximated);
+    assert_eq!(weights.prims, ["/World/zero_weights"]);
+    assert_eq!(scene.world.count(), 2, "both well-formed strands render");
+    // Every strand stands at x = 5, not at the origin; width 1 is the default.
+    let b = scene.world.bounds().expect("bounds");
+    assert!((b.minimum.x - 4.5).abs() < 1e-3, "{b:?}");
+    assert!((b.maximum.x - 5.5).abs() < 1e-3, "{b:?}");
+}
+
 /// "Points prim": three `Points` and a `NurbsPatch` render nothing and raise
 /// `geom.unsupported_type` once per type, in first-seen order, each naming
 /// its type's first prim and carrying its count.

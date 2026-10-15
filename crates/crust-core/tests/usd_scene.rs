@@ -1129,6 +1129,10 @@ fn nurbs_curves_import_and_honour_ranges() {
     let b = half.world.bounds().expect("bounds");
     assert!((b.minimum.y + 1.05).abs() < 1e-3, "{b:?}");
     assert!((b.maximum.y - 0.05).abs() < 1e-3, "{b:?}");
+
+    // An empty interval renders nothing, not the whole strand.
+    let empty = nurbs("nurbs_empty", "double2[] ranges = [(0.5, 0.5)]");
+    assert_eq!(empty.world.count(), 0);
 }
 
 /// A leading `!resetXformStack!` drops the inherited transform on a light,

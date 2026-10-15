@@ -186,8 +186,10 @@ pub(super) fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Cur
     };
     let pts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
 
+    // An authored but empty array is no widths at all: the default.
     let widths: Vec<f32> = value_at(&curves.widths_attr())
         .and_then(decode_f32_array)
+        .filter(|w| !w.is_empty())
         .unwrap_or_else(|| vec![1.0]);
 
     // USD defaults: type = cubic, basis = bezier.
@@ -463,12 +465,15 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
         .zip(&orders)
         .map(|(&c, &o)| i64::from(c) + i64::from(o))
         .sum();
-    if orders.len() != n_curves || knots.len() as i64 != expected_knots {
+    // A negative count or order would make the signed sum above disagree
+    // with the lengths the loop slices, so it fails this check outright.
+    let negative = counts.iter().chain(&orders).any(|&v| v < 0);
+    if negative || orders.len() != n_curves || knots.len() as i64 != expected_knots {
         warning!(
             CurvesInvalidKnots,
             at = prim.path(),
-            "NurbsCurves at {}: {} curves need one order each and count + order knots each \
-             ({} orders, {} knots authored, {} expected) — skipped",
+            "NurbsCurves at {}: {} curves need one non-negative order each and count + order \
+             knots each ({} orders, {} knots authored, {} expected) — skipped",
             prim.path(),
             n_curves,
             orders.len(),
@@ -477,12 +482,30 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
         );
         return None;
     }
+    // An authored but empty array is no widths at all: the default.
     let widths: Vec<f32> = value_at(&curves.widths_attr())
         .and_then(decode_f32_array)
+        .filter(|w| !w.is_empty())
         .unwrap_or_else(|| vec![1.0]);
-    let weights = value_at(&curves.point_weights_attr())
+    let mut weights = value_at(&curves.point_weights_attr())
         .and_then(decode_f64_array)
         .filter(|w| w.len() == n_points);
+    // A zero, negative or non-finite weight has no projection back out of
+    // homogeneous space: the weights are dropped and the curves read as
+    // non-rational, which keeps them at their authored points.
+    if weights
+        .as_ref()
+        .is_some_and(|w| w.iter().any(|&w| !(w.is_finite() && w > 0.0)))
+    {
+        warning!(
+            CurvesRationalApproximated,
+            at = prim.path(),
+            "NurbsCurves at {}: pointWeights must be positive and finite — ignored, the curves \
+             are read as non-rational",
+            prim.path()
+        );
+        weights = None;
+    }
     let ranges = value_at(&curves.ranges_attr())
         .and_then(decode_ranges)
         .filter(|r| r.len() == n_curves);
@@ -504,8 +527,9 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
     let mut offset = 0usize;
     let mut knot_offset = 0usize;
     for (curve_idx, (&cnt, &order)) in counts.iter().zip(&orders).enumerate() {
-        let cnt = cnt.max(0) as usize;
-        let n_knots = cnt + order.max(0) as usize;
+        // Non-negative, and the knot total matches: checked above.
+        let cnt = cnt as usize;
+        let n_knots = cnt + order as usize;
         if offset + cnt > n_points {
             warning!(
                 CurvesInvalidCounts,
@@ -549,10 +573,11 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
             rational = true;
         }
         // The rendered interval: the curve's domain [u_p, u_n+1], narrowed
-        // by an authored range.
+        // by an authored range — an empty one, `(0.5, 0.5)`, to nothing.
         let (mut lo, mut hi) = (u[p], u[cnt]);
         if let Some(&(r0, r1)) = ranges.as_ref().map(|r| &r[curve_idx])
-            && r0 < r1
+            && r0.is_finite()
+            && r1.is_finite()
         {
             lo = lo.max(r0);
             hi = hi.min(r1);
@@ -560,13 +585,14 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
         for span in p..cnt {
             let s = u[span].max(lo);
             let e = u[span + 1].min(hi);
-            // Finite: the knots are, and a NaN range is never applied.
+            // Finite: the knots are, and so is any range applied.
             if e <= s {
                 continue;
             }
             let bez = nurbs_span_bezier(&ctrl[span - p..=span], u, span, p, s, e);
+            // Positive weights blend to a positive weight.
             let pos = |v: &NurbsVertex| -> Vec3A {
-                let w = if v[4] != 0.0 { v[4] } else { 1.0 };
+                let w = v[4];
                 Vec3A::new((v[0] / w) as f32, (v[1] / w) as f32, (v[2] / w) as f32)
             };
             let radius = |v: &NurbsVertex| 0.5 * (v[3] as f32).max(1e-6);
