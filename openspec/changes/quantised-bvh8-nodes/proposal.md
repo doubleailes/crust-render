@@ -60,10 +60,10 @@ scene whose big trees are out of cache and whose small ones are not.
 
 ### Modified Capabilities
 
-- `intersection-kernel`: gains requirements for per-tree node formats, for conservative
-  quantised bounds with unchanged hits, and for the node-bytes footprint.
-- `cli`: gains a requirement that `--stats` reports node bytes per format, and that
-  `CRUST_BVH_NODES` selects the format.
+- `intersection-kernel`: gains requirements for per-tree node formats and the
+  `CRUST_BVH_NODES` switch, for conservative quantised bounds with unchanged hits, and
+  for the node-bytes footprint.
+- `cli`: gains a requirement that `--stats` reports node bytes per format.
 
 ## Impact
 
