@@ -34,17 +34,16 @@ over `power`.
 - **A many-lights sample.** `samples/many_lights.usda` has hundreds of small
   lights, varied in distance, orientation and power. It is the scene where a
   light tree is expected to matter, and no checked-in sample is one today.
-- **The default becomes `tree`, if it passes a gate.** The gate is
-  equal-time relMSE against `power`, the same gate as
-  `learned-light-selection-by-default`'s D3 plus the new sample. If it
-  passes, a render with no `crust:lightSelection` uses `tree`. **BREAKING**
-  for noise patterns: every render with two or more finite lights gets a
-  different noise pattern, though the same expectation.
-  `--light-selection power` keeps today's images bit for bit. If any scene
-  fails the gate, `tree` ships opt-in and the design record names the
-  failing scenes.
-- `crust diagnostic` tries `tree` as one more light-selection trial. The
-  `many_lights_uniform` finding recommends the default rather than `power`.
+- **`tree` ships opt-in; the default stays `power`.** The gate that would
+  flip it (equal-time relMSE against `power`, the same gate as
+  `learned-light-selection-by-default`'s D3 plus the new sample) is run on
+  every checked-in sample and recorded. Two of its scenes, ALab and the
+  OpenPBR Shader Playground, are not available where this change was built,
+  and ALab is where the tree's case is weakest (most of its waste is
+  occlusion). So the flip is a follow-up, made once those two are measured.
+  It will be **BREAKING** for noise patterns, as `--light-selection power` is
+  today's image bit for bit.
+- `crust diagnostic` tries `tree` as one more light-selection trial.
 
 ## Capabilities
 
@@ -54,8 +53,8 @@ None.
 
 ### Modified Capabilities
 
-- `lighting`: "Light selection" gains `tree` and, if the gate passes, its new
-  default. New requirements state that tree selection is unbiased, that it
+- `lighting`: "Light selection" gains `tree`; `power` stays the default. New
+  requirements state that tree selection is unbiased, that it
   weights both MIS sides alike (at position *and* normal), and that it is
   deterministic.
 

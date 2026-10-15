@@ -102,27 +102,25 @@
 
 - [ ] 5.1 Measure equal-time relMSE, `tree` against `power`, full and
       trimmed, 4 seeds, `--indirect-clamp 0`, with `scripts/bench_ab.sh`
-      timing (one binary behind two wrapper scripts), on every checked-in
-      sample, `veach_mis`, the OpenPBR Shader Playground, ALab and
-      `many_lights`. Record the table in §3.15.
-- [ ] 5.2 If every scene passes, make `tree` the default in
-      `tracer/settings.rs`, the USD import fallback
-      (`scene/usd_import/settings.rs`) and the CLI help, and change
-      `diagnostic/checks.rs`'s `many_lights_uniform` to recommend the
-      default. Verify: a render with no `crust:lightSelection` uses `tree`;
-      `--light-selection power` is bit-identical to the `main` recording
-      from 3.4; the diagnostic tests pass.
-- [ ] 5.3 If any scene fails, keep `power` as the default. Revert the delta
-      spec's "Tree selection is the default" scenario and the default in its
-      `Light selection` text to `power`. List the failing scenes and their
-      numbers in the lighting design record. Verify: `openspec validate
-      light-tree-selection` passes.
+      timing (one binary behind two wrapper scripts), on the 11 checked-in
+      samples that build a tree (the other 28 render bit for bit as under
+      `power`). Record the table in §3.15. ALab and the OpenPBR Shader
+      Playground are not available here (design D10, amended).
+- [ ] 5.2 Keep `power` as the default (design D10, amended): the delta
+      spec's `Light selection` text and its "Tree selection is accepted"
+      scenario say so. Verify: a render with no `crust:lightSelection` reports
+      `crust:lightSelection = power` in its EXR stamp, and `openspec validate
+      light-tree-selection --strict` passes.
+- [ ] 5.3 List the gate's outcome in the lighting design record: every
+      measured scene's equal-time ratio, the scenes that fail, and ALab and
+      the Shader Playground as the scenes still owed before the default can
+      flip. Verify: the record's "Light tree" section carries the table.
 - [ ] 5.4 Update for the outcome: the lighting design record's "Known gaps:
       light sampling" (selection by importance; what the tree still cannot
       see: visibility, glossy lobes, infinite lights' share),
-      `docs/light_sampling.md` §9.3 m, the site pages from 3.6 (the default
-      and the `power` migration note) and `docs/architecture.md` if the
-      invariants list changes. Verify: `zola build` in `site/`.
+      `docs/light_sampling.md` §9.3 m, the site pages from 3.6 and
+      `docs/architecture.md` if the invariants list changes. Verify: `zola
+      build` in `site/`.
 - [ ] 5.5 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy
       --workspace --all-targets -- -D warnings`, `cargo test --workspace
       --no-fail-fast`, `scripts/test_simd_matrix.sh -p crust-core`. Verify:
@@ -132,6 +130,10 @@
 
 - Archive the change once reviewed; the `lighting` spec's "Light selection"
   then carries `tree`.
+- Measure ALab and the OpenPBR Shader Playground under the D10 gate, and flip
+  the default to `tree` in a change of its own if they pass (the settings
+  default, the USD import fallback, the CLI help, `diagnostic/checks.rs`'s
+  `many_lights_uniform` recommendation, and the site).
 - Resume `learned-light-selection-by-default` through `/opsx:update`, per the
   on-hold note in its proposal.
 - Add a note to `wavefront-integrator`'s design: `PrevBounce` now carries the
