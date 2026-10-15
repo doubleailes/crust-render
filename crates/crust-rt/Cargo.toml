@@ -23,7 +23,8 @@ traversal-stats = []
 # with E0554. An experiment, not a default — build with
 # `cargo +nightly ... --features bvh8`, ideally under
 # `RUSTFLAGS='-C target-cpu=x86-64-v3'` so an f32x8 is one AVX register rather
-# than two SSE halves. See docs/simd.md, "BVH8 on nightly".
+# than two SSE halves, which is how the nightly workflow's bvh8 job builds it.
+# See docs/simd.md, "BVH8 on nightly".
 bvh8 = []
 
 [dependencies]

@@ -445,7 +445,12 @@ with those, and on a traversal-bound workload, before revisiting the
 toolchain. The parallel nightly workflow (`.github/workflows/nightly.yml`)
 lints and tests the feature, and checks the renderer with it forwarded, on
 a pinned nightly (a failure there is this code's) and on the latest one
-(allowed to fail), so the experiment keeps compiling.
+(allowed to fail), so the experiment keeps compiling. That job builds at
+`-C target-cpu=x86-64-v3`, as every measurement above was, so what it tests
+is the 8-wide code the feature exists for: at baseline x86-64 an `f32x8`
+is two SSE halves. It checks first that the runner implements v3, rather than
+dying on `SIGILL`. The other nightly legs, the stable pipeline and every
+shipped binary stay baseline x86-64.
 
 ## Not done
 

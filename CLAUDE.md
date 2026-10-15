@@ -79,9 +79,11 @@ cargo test --workspace --no-fail-fast
 cargo deny --locked check                           # advisories, licences, sources (deny.toml)
 # ...and .github/workflows/nightly.yml in parallel: clippy + tests on a pinned nightly
 # (NIGHTLY_PINNED; red means this code) and on the latest one (allowed to fail, and
-# run daily), plus the nightly-only `bvh8` feature. Reproduce the pinned leg with:
+# run daily), plus the nightly-only `bvh8` feature, built at x86-64-v3 (AVX2). Reproduce
+# the pinned legs with:
 cargo +nightly-2026-09-26 clippy --workspace --all-targets -- -D warnings
-cargo +nightly-2026-09-26 test -p crust-rt --features bvh8
+RUSTFLAGS='-D warnings -C target-cpu=x86-64-v3' CARGO_TARGET_DIR=target/nightly-v3 \
+    cargo +nightly-2026-09-26 test -p crust-rt --features bvh8
 ```
 
 The probe examples (`mtlx_shade`, `tex_probe`, `ptex_verify`, `ptex_seams`,
