@@ -29,8 +29,8 @@ not change.
 **Goals:**
 - One expansion function that every output path goes through, in both commands, before collision
   detection.
-- Exactly husk's names for the frame variables, so a command line or stage written for husk names
-  the same file under crust.
+- Exactly husk's names for the frame variables, in both of husk's forms, so a command line or stage
+  written for husk names the same file under crust.
 
 **Non-Goals:**
 - No other variables: environment variables, `$HIP`/`$OS`-style Houdini variables, camera,
@@ -69,7 +69,15 @@ character, and an unknown one is kept as written.
 $ { NAME }  |  $ NAME   → variable, NAME = [A-Za-z_][A-Za-z0-9_]*  (longest match, as Houdini)
 $ anything else         → literal "$", no issue
 NAME = F | F2..F9 | FF  → expanded;  anything else → kept verbatim + unknown-variable issue
+< NAME >                → NAME = F | F2..F9 | FF expanded, exactly as $NAME
+< anything else >       → literal, no issue
 ```
+
+The `<F4>` form is husk's UDIM-style token. It matters more than `$F4` for stages: Houdini
+expands `$F4` when it writes the stage, so a Solaris-authored `productName` that varies per frame
+carries `<F4>`, never `$F4` (task 1.1). Any other `<…>` (`<UDIM>`, `<AOV>`) is left alone and
+raises nothing. Angle brackets are not a variable syntax anywhere else crust reads, so a warning
+would only be noise.
 
 Matching takes the longest name, as Houdini does, so `$F4x` is the unknown name `F4x`, not `$F4`
 followed by `x`. That is the safe failure: the file keeps a visible `$F4x` instead of silently
@@ -102,6 +110,25 @@ values the render did not read.
 
 Both are listed in `site/content/docs/reference/warnings.md`. The existing test that keeps the list
 and the reference in step enforces this. Adding codes bumps no report version.
+
+### D7. Sources for the husk rules (task 1.1)
+
+SideFX's documentation host is not reachable from the environment the change was implemented in,
+so the rules rest on these sources:
+
+- **`$F`, `$FF`, `$F4`, and `<F>`, `<FF>`, `<F4>` in husk's output path.** A SideFX forum reply
+  lists both forms for husk's `-o` (sidefx.com/forum/topic/79320). A SideFX staff reply in another
+  thread says a USD output path needs `<F4>` "in place of the `$F4`, which only works when
+  rendering frame-by-frame since the value of `$F4` is evaluated in Houdini before it makes into
+  the usd" (sidefx.com/forum/topic/74873).
+- **Padding counts the sign, and halves round away from zero.** These are Houdini's `padzero` and
+  `round` expression functions as documented (`padzero(4, -3)` gives `-003`). They are not
+  re-checked here.
+- **Default frame 1.** This is **unconfirmed**. The husk reference found only says
+  `hou.frame()` returns the first frame to be rendered, and a forum question about husk's
+  frameless default has no official answer. D5's reasons stand without it: crust renders the
+  stage's default values, and 1 names a frame rather than refusing. A difference found later is a
+  one-line change in `render_and_write` and `check`.
 
 ## Risks / Trade-offs
 

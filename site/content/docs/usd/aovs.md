@@ -88,12 +88,17 @@ what it authors itself, as `UsdRenderComputeSpec` does.
   still wins over both. A later product that resolves to another camera or resolution is
   skipped with a warning.
 - **`productName`** is read at the frame being rendered, so a time-sampled name gives one
-  file per frame. A relative path is relative to the working directory, and missing
+  file per frame. Its frame variables are then expanded, as `-o`'s are
+  ([frame variables](@/docs/reference/command-line.md#output)): `renders/beauty.<F4>.exr`,
+  as Solaris writes it, or `renders/beauty.$F4.exr`, names one file per frame without
+  time samples. A relative path is relative to the working directory, and missing
   directories are created.
 - **[`-o`](@/docs/reference/command-line.md#output)** replaces the first product's
   `productName`, as husk's `-o` does. The other products keep theirs.
 - **Two products with the same path** cannot both be written: the later one is skipped
-  with a warning. This includes a product whose path `-o` gives to the first.
+  with a warning. This includes a product whose path `-o` gives to the first. Paths are
+  compared once their frame variables are expanded, so `out.$F4.exr` and `out.0003.exr`
+  collide at frame 3.
 - **`productType`** must be `raster` (the default). A `deepRaster` product is skipped with
   a warning.
 - **The PNG preview** is made from the first product's beauty var and written beside that

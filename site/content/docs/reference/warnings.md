@@ -48,8 +48,9 @@ references, not of files. A texture that was never read — turned off with `CRU
 or an asset the host does not decode, which raises `asset.unsupported_by_host` — falls
 back the same way but is not counted as unreadable.
 
-The `product.no_name`, `product.no_writable_vars` and `product.shared_path` codes are
-raised when the render chooses which products to write, after the import. `crust check`
+The `product.no_name`, `product.no_writable_vars`, `product.shared_path`,
+`product.unknown_variable` and `product.subframe_frame` codes are raised when the render
+chooses which products to write, after the import. `crust check`
 makes that choice too and reports them with the import's records.
 
 ## Compatibility
@@ -100,6 +101,8 @@ plain text and are not counted.
 | `product.no_name` | skipped | A RenderProduct authors no productName; nothing is written for it. | Author `productName`, the file the product writes. |
 | `product.no_writable_vars` | skipped | A RenderProduct has no RenderVar crust can write; nothing is written for it. | Point `orderedVars` at RenderVars whose source crust produces; their own warnings say why each was dropped. |
 | `product.shared_path` | skipped | A RenderProduct writes the path an earlier one already writes; nothing is written for it. | Give each product its own `productName` (with `-o`, the first product's path is the one given). |
+| `product.unknown_variable` | refused | An output path names a variable crust does not expand; it is left in the path as written. | Use the frame variables `$F`, `$F2`–`$F9`, `$FF` (or `<F>`, `<F4>`, `<FF>`), or write `\$` for a literal `$`. |
+| `product.subframe_frame` | approximated | An output path's integer frame variable rounded a fractional frame to the nearest one. | Use `$FF` (or `<FF>`) to keep the fraction, so two subframes never write one file. |
 | `product.unhonoured_attribute` | approximated | A product authors a setting crust does not honour; it renders without it. | Remove the attribute, or accept that it is ignored. |
 | `product.invalid_data_window` | refused | dataWindowNDC is not finite or selects no pixel; the full frame is rendered. | Author a finite window that covers at least one pixel. |
 | `product.data_window_clipped` | approximated | dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped. | Keep `dataWindowNDC` inside 0..1. |
