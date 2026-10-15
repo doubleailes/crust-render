@@ -54,7 +54,7 @@
       `OpenPBR::default()` is opaque, one with `transmission_weight = 1` or
       thin-walled subsurface is not, and a MaterialX `dielectric_bsdf` in `T`
       mode is not.
-- [ ] 3.3 Pass the receiver at every call site: surface NEE (`rec.normal`, opaque by `transmits()`),
+- [x] 3.3 Pass the receiver at every call site: surface NEE (`rec.normal`, opaque by `transmits()`),
       volume NEE (zero), the shadow-link twins, `bounce_emission_weight` and
       `escaped_emission`. Add `normal` to `PrevBounce`, set from the same
       value NEE used, and pass zero for `PrevVertex::Phase`. Extend
@@ -67,7 +67,7 @@
       `neural`, with 0 differing pixels on every sample. Also check a
       one-rect-light-plus-dome scene under `tree` against `power`, bit for
       bit (spec "matches power").
-- [ ] 3.5 Add `crates/crust-core/tests/tree_selection.rs`: tiled ↔ scanline
+- [x] 3.5 Add `crates/crust-core/tests/tree_selection.rs`: tiled ↔ scanline
       and `RAYON_NUM_THREADS=1` ↔ default bit-identity under `tree`, and
       the light-only / BSDF-only / MIS agreement on a floor lit by sphere
       lights, rect lights and a dome. Verify: the tests pass.
