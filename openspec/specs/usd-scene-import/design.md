@@ -842,7 +842,8 @@ Note: `openusd` is a hard dependency and USD is always compiled in — there is 
 feature flag.
 
 **`openusd` tracks its GitHub `main`**, through a `[patch.crates-io]` in the workspace
-`Cargo.toml` (the three manifests ask for `0.8`; `Cargo.lock` pins the commit, and
+`Cargo.toml` (`[workspace.dependencies]` asks for `0.8` and the crates inherit it;
+`Cargo.lock` pins the commit, and
 `cargo update -p openusd -p openusd-schemas` moves it). `main` carries the stage-open,
 traversal and shared-asset-bytes work of mxpv/openusd#106 — #142 measured the full Moana
 island at 22.3 s → 14.3 s and 5.32 → 3.58 GiB peak in openusd alone — which no release
