@@ -4,15 +4,15 @@
 //! Stable Rust, safe code: the byte→float conversion is plain `as f32`,
 //! tested four lanes at a time on glam's `Vec4`.
 //!
-//! **A prototype of step 1 of the compression experiment**: the tree is
-//! built and collapsed exactly as the `f32` 8-wide tree is (so topology,
-//! leaves and packets are identical to `bvh8`), then [`finish`] converts
-//! each [`WideNode`] into a [`QNode`] and renumbers the nodes breadth-first
+//! The tree is built and collapsed exactly as an `f32` 8-wide tree is (so
+//! topology, leaves and packets are identical to `bvh8`), then
+//! [`quantise_tree`] converts each [`BuildNode8`] into a [`QNode`] and
+//! renumbers the nodes breadth-first
 //! so a node's internal children, and its leaf children's `leaves` entries,
 //! are contiguous. That is what lets a lane's child index be derived
 //! (`base + popcount`) instead of stored, which is where most of the bytes
 //! go. Only the node's *size and arithmetic* differ from `bvh8`, so the
-//! two are an A/B of quantisation alone.
+//! two are an A/B of quantisation alone (design D1–D3).
 //!
 //! A child box is `p + q·2^(e-127)` per axis, rounded outward (floor for
 //! min, ceil for max), so a quantised box contains the exact one: the test
@@ -23,18 +23,18 @@ use glam::{Vec3A, Vec4};
 
 use crate::ray::Ray;
 
-use super::{Leaf, WideNode, safe_inv3};
+use super::node::{NodeFormat, f32_node};
+use super::{Leaf, safe_inv3};
 
-/// Children per node.
-pub(super) const LANES: usize = 8;
+fn splat8(v: f32) -> [f32; 8] {
+    [v; 8]
+}
 
-/// Build-time lane vector: the collapse fills a plain `f32` array per
-/// coordinate. Never touched during traversal.
-pub(super) type Lanes = [f32; LANES];
-
-#[inline]
-pub(super) fn splat(v: f32) -> Lanes {
-    [v; LANES]
+f32_node! {
+    /// The collapse's output for a quantised tree: plain `f32` arrays,
+    /// converted to [`QNode`]s by [`quantise_tree`] and dropped. Never
+    /// touched during traversal.
+    BuildNode8, [f32; 8], 8, splat8
 }
 
 /// Grid resolution: 8-bit cells, so a node spans at most 255 of them.
@@ -58,29 +58,11 @@ pub(super) struct QNode {
     leaf_base: u32,
     /// Bit `l` set: lane `l` holds a real child.
     valid: u8,
-    qmin: [[u8; LANES]; 3],
-    qmax: [[u8; LANES]; 3],
+    qmin: [[u8; 8]; 3],
+    qmax: [[u8; 8]; 3],
 }
 
 impl QNode {
-    #[inline]
-    pub(super) fn is_leaf(&self, lane: usize) -> bool {
-        (self.valid & !self.imask) & (1 << lane) != 0
-    }
-
-    /// Index of the child in lane `lane`: into the node array for an
-    /// internal child, into `leaves` for a leaf.
-    #[inline]
-    pub(super) fn child_at(&self, lane: usize) -> u32 {
-        let below = (1u32 << lane) - 1;
-        if self.is_leaf(lane) {
-            let leaf_mask = (self.valid & !self.imask) as u32;
-            self.leaf_base + (leaf_mask & below).count_ones()
-        } else {
-            self.child_base + (self.imask as u32 & below).count_ones()
-        }
-    }
-
     /// Dequantised box of lane `lane` (exact arithmetic, for tests).
     #[cfg(test)]
     pub(super) fn child_box(&self, lane: usize) -> ([f32; 3], [f32; 3]) {
@@ -112,11 +94,11 @@ fn cell_exponent(extent: f32) -> u8 {
     e.clamp(1, 254) as u8
 }
 
-fn quantise(w: &WideNode, imask: u8, child_base: u32, leaf_base: u32) -> QNode {
-    let valid = (w.flags & super::VALID_MASK) as u8;
+fn quantise(w: &BuildNode8, imask: u8, child_base: u32, leaf_base: u32) -> QNode {
+    let valid = (w.flags & BuildNode8::VALID_MASK) as u8;
     let lo = [&w.bmin_x, &w.bmin_y, &w.bmin_z];
     let hi = [&w.bmax_x, &w.bmax_y, &w.bmax_z];
-    let lanes = || (0..LANES).filter(|&l| valid & (1 << l) != 0);
+    let lanes = || (0..8).filter(|&l| valid & (1 << l) != 0);
 
     let mut p = [0.0f32; 3];
     let mut e = [1u8; 3];
@@ -130,8 +112,8 @@ fn quantise(w: &WideNode, imask: u8, child_base: u32, leaf_base: u32) -> QNode {
     }
 
     // Unused lanes get an inverted box; `valid` masks them regardless.
-    let mut qmin = [[255u8; LANES]; 3];
-    let mut qmax = [[0u8; LANES]; 3];
+    let mut qmin = [[255u8; 8]; 3];
+    let mut qmax = [[0u8; 8]; 3];
     for l in lanes() {
         for a in 0..3 {
             let mut q0 = ((lo[a][l] - p[a]) / cell[a]).floor().clamp(0.0, 255.0) as u8;
@@ -164,7 +146,7 @@ fn quantise(w: &WideNode, imask: u8, child_base: u32, leaf_base: u32) -> QNode {
 /// breadth-first with the root at 0. Children of a node are consecutive, as
 /// are the `leaves` entries of its leaf lanes; the leaves' packet ranges are
 /// untouched.
-pub(super) fn finish(wide: Vec<WideNode>, leaves: Vec<Leaf>) -> (Vec<QNode>, Vec<Leaf>) {
+pub(super) fn quantise_tree(wide: Vec<BuildNode8>, leaves: Vec<Leaf>) -> (Vec<QNode>, Vec<Leaf>) {
     if wide.is_empty() {
         return (Vec::new(), leaves);
     }
@@ -178,11 +160,11 @@ pub(super) fn finish(wide: Vec<WideNode>, leaves: Vec<Leaf>) -> (Vec<QNode>, Vec
         let child_base = order.len() as u32;
         let leaf_base = new_leaves.len() as u32;
         let mut imask = 0u8;
-        for l in 0..LANES {
+        for l in 0..8 {
             if w.flags & (1 << l) == 0 {
                 continue;
             }
-            if w.is_leaf(l) {
+            if w.leaf_bit(l) {
                 new_leaves.push(leaves[w.child[l] as usize]);
             } else {
                 imask |= 1 << l;
@@ -200,42 +182,62 @@ pub(super) fn finish(wide: Vec<WideNode>, leaves: Vec<Leaf>) -> (Vec<QNode>, Vec
 /// The ray, kept as scalars: each node folds its own origin and cell size
 /// into two per-axis constants, so a child's slab distance is one
 /// multiply-add on the byte converted to `f32`.
-pub(super) struct RaySlab {
+pub(super) struct RaySlabQ {
     o: Vec3A,
     inv: Vec3A,
     t_min: f32,
 }
 
-impl RaySlab {
+impl NodeFormat<8> for QNode {
+    type Ray = RaySlabQ;
+
     #[inline]
-    pub(super) fn new(ray: &Ray, t_min: f32) -> Self {
-        RaySlab {
+    fn prepare(ray: &Ray, t_min: f32) -> RaySlabQ {
+        RaySlabQ {
             o: ray.origin,
             inv: safe_inv3(ray.dir),
             t_min,
         }
     }
 
-    /// Slab test of all eight quantised boxes: as the `f32` test, with
-    /// `t = q · (cell · inv) + (p − o) · inv`. `safe_inv3` bounds `inv` by
-    /// 1e20, so for any scene this side of 1e18 units nothing overflows to
-    /// the `0·∞ = NaN` that would poison `min`/`max`.
     #[inline]
-    pub(super) fn slab(&self, node: &QNode, t_max: f32) -> (u32, [f32; LANES]) {
+    fn is_leaf(&self, lane: usize) -> bool {
+        (self.valid & !self.imask) & (1 << lane) != 0
+    }
+
+    /// Index of the child in lane `lane`: into the node array for an
+    /// internal child, into `leaves` for a leaf.
+    #[inline]
+    fn child_at(&self, lane: usize) -> u32 {
+        let below = (1u32 << lane) - 1;
+        if self.is_leaf(lane) {
+            let leaf_mask = (self.valid & !self.imask) as u32;
+            self.leaf_base + (leaf_mask & below).count_ones()
+        } else {
+            self.child_base + (self.imask as u32 & below).count_ones()
+        }
+    }
+
+    /// Slab test of all eight quantised boxes: as the `f32` test, with
+    /// `t = q * (cell * inv) + (p - o) * inv`. `safe_inv3` bounds `inv` by
+    /// 1e20, so for any scene this side of 1e18 units nothing overflows to
+    /// the `0 * inf = NaN` that would poison `min`/`max`.
+    #[inline]
+    fn slab(rs: &RaySlabQ, node: &QNode, t_max: f32) -> (u32, [f32; 8]) {
         let cell = Vec3A::new(
             f32::from_bits((node.e[0] as u32) << 23),
             f32::from_bits((node.e[1] as u32) << 23),
             f32::from_bits((node.e[2] as u32) << 23),
         );
-        let ae = cell * self.inv;
-        let ao = (Vec3A::from_array(node.p) - self.o) * self.inv;
-        let tmin = Vec4::splat(self.t_min);
+        let ae = cell * rs.inv;
+        let ao = (Vec3A::from_array(node.p) - rs.o) * rs.inv;
+        let tmin = Vec4::splat(rs.t_min);
         let tmax = Vec4::splat(t_max);
 
         let mut mask = 0u32;
-        let mut tn = [0.0f32; LANES];
+        let mut tn = [0.0f32; 8];
         for h in 0..2 {
-            let t = |q: &[u8; LANES], a: usize| -> Vec4 {
+            let t = |q: &[u8; 8], a: usize| -> Vec4 {
                 let b = h * 4;
                 let qf = Vec4::new(
                     q[b] as f32,
@@ -251,16 +253,8 @@ impl RaySlab {
             let t1y = t(&node.qmax[1], 1);
             let t0z = t(&node.qmin[2], 2);
             let t1z = t(&node.qmax[2], 2);
-            let tnear = t0x
-                .min(t1x)
-                .max(t0y.min(t1y))
-                .max(t0z.min(t1z))
-                .max(tmin);
-            let tfar = t0x
-                .max(t1x)
-                .min(t0y.max(t1y))
-                .min(t0z.max(t1z))
-                .min(tmax);
+            let tnear = t0x.min(t1x).max(t0y.min(t1y)).max(t0z.min(t1z)).max(tmin);
+            let tfar = t0x.max(t1x).min(t0y.max(t1y)).min(t0z.max(t1z)).min(tmax);
             mask |= tnear.cmple(tfar).bitmask() << (h * 4);
             tn[h * 4..h * 4 + 4].copy_from_slice(&tnear.to_array());
         }

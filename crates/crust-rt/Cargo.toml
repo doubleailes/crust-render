@@ -26,14 +26,14 @@ traversal-stats = []
 # than two SSE halves, which is how the nightly workflow's bvh8 job builds it.
 # See docs/simd.md, "BVH8 on nightly".
 bvh8 = []
-# 8-wide BVH nodes with child bounds quantised to bytes (Ylitie et al. 2017;
-# obvhs's `CwBvh`), on stable. Prototype: the f32 8-wide build converted at
-# commit, to A/B quantisation against `bvh8` alone. Exclusive with `bvh8`.
-bvh8q = []
-# Control for the `bvh8q` A/B: the same quantised node padded to 128 bytes
-# (two aligned cache lines), to tell whether node *bytes* or the node
-# *arithmetic* is what the traversal is paying for.
-bvh8q-pad = ["bvh8q"]
+# Padding control for the quantised node: pads it to 128 bytes (two aligned
+# cache lines), to tell whether node *bytes* or node *arithmetic* is what a
+# traversal pays for. An experiment knob, not a default.
+bvh8q-pad = []
+# Lets `CRUST_RT_NODES` (`wide` | `quant`) pick the node format of every
+# commit that does not name one, so the kernel's whole test suite can run
+# under each format. Test and diagnostic use only.
+test-node-env = []
 
 [dependencies]
 glam.workspace = true

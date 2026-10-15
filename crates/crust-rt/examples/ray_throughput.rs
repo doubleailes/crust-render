@@ -10,11 +10,16 @@
 //! cargo run --release -p crust-rt --example ray_throughput
 //! cargo run --release -p crust-rt --example ray_throughput -- --large [MTRIS]
 //! cargo run --release -p crust-rt --example ray_throughput -- --layout indexed [--large [MTRIS]]
+//! cargo run --release -p crust-rt --example ray_throughput -- --nodes quant [--large [MTRIS]]
 //! ```
 //!
 //! `--layout gathered|indexed|auto` commits every scene with that triangle
 //! packet layout (default `auto`), which is how the two are A/B'd per tree
 //! size.
+//!
+//! `--nodes wide|quant|auto` commits every scene with that BVH node format
+//! (default `auto`), which is how the 4-wide `f32` node and the quantised
+//! 8-wide node are A/B'd in one binary.
 //!
 //! The default scenes are small enough that their whole BVH stays in cache,
 //! so they measure the node test's arithmetic. `--large` adds two scenes
@@ -29,7 +34,7 @@
 #[path = "../fixtures/mod.rs"]
 mod fixtures;
 
-use crust_rt::{CommitOptions, Geometry, PacketLayout, Scene, SceneBuilder};
+use crust_rt::{CommitOptions, Geometry, NodeFormatChoice, PacketLayout, Scene, SceneBuilder};
 use fixtures::{
     T_MIN, in_cube, instance_scene, ray_batch, sphere_grid_scene, triangle_scene, uv_sphere,
 };
@@ -173,9 +178,13 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
 /// The packet layout every scene below commits with (`--layout`).
 static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
 
+/// The node format every scene below commits with (`--nodes`).
+static NODES: std::sync::OnceLock<NodeFormatChoice> = std::sync::OnceLock::new();
+
 fn commit(b: SceneBuilder) -> Scene {
     b.commit_with(CommitOptions {
         layout: *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
+        nodes: *NODES.get().unwrap_or(&NodeFormatChoice::Auto),
     })
 }
 
@@ -183,15 +192,30 @@ fn main() {
     // `--layout` is read before any scene is built, so the default scenes
     // commit with it too.
     let mut args = std::env::args().skip(1).peekable();
-    if args.peek().map(String::as_str) == Some("--layout") {
-        args.next();
-        let layout = match args.next().as_deref() {
-            Some("gathered") => PacketLayout::Gathered,
-            Some("indexed") => PacketLayout::Indexed,
-            Some("auto") => PacketLayout::Auto,
-            other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
-        };
-        LAYOUT.set(layout).expect("set once");
+    while let Some(flag) = args.peek().cloned() {
+        match flag.as_str() {
+            "--layout" => {
+                args.next();
+                let layout = match args.next().as_deref() {
+                    Some("gathered") => PacketLayout::Gathered,
+                    Some("indexed") => PacketLayout::Indexed,
+                    Some("auto") => PacketLayout::Auto,
+                    other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
+                };
+                LAYOUT.set(layout).expect("set once");
+            }
+            "--nodes" => {
+                args.next();
+                let nodes = match args.next().as_deref() {
+                    Some("wide") => NodeFormatChoice::Wide,
+                    Some("quant") => NodeFormatChoice::Quantised,
+                    Some("auto") => NodeFormatChoice::Auto,
+                    other => panic!("--nodes wants wide|quant|auto, got {other:?}"),
+                };
+                NODES.set(nodes).expect("set once");
+            }
+            _ => break,
+        }
     }
 
     let tri = triangle_scene(commit);

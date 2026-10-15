@@ -99,6 +99,7 @@ pub use config::{
 pub(crate) fn commit_options() -> crust_rt::CommitOptions {
     crust_rt::CommitOptions {
         layout: config().tri_packets.into(),
+        ..Default::default()
     }
 }
 pub use environment::EnvironmentMap;

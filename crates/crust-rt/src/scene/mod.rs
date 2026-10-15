@@ -47,17 +47,54 @@ pub enum PacketLayout {
     Auto,
 }
 
+/// Which node format a tree's BVH uses.
+///
+/// Two formats exist: the `f32` node (4 children, or 8 under the nightly
+/// `bvh8` feature), and an 8-wide node whose child bounds are quantised to
+/// bytes on a per-node grid, rounded outward. The quantised node is smaller
+/// (76 bytes against 128) and measured faster on trees too large for the
+/// cache, and slower on trees that fit in it, so the format is chosen per
+/// tree. Both answer every query identically, up to exact distance ties.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeFormatChoice {
+    /// The kernel chooses by the tree's size. Provisionally this is always
+    /// the `f32` node: no size qualifies until the crossover is measured.
+    Auto,
+    /// The `f32` node on every tree.
+    Wide,
+    /// The quantised 8-wide node on every tree.
+    Quantised,
+}
+
+impl Default for NodeFormatChoice {
+    /// `Auto`. With the `test-node-env` feature, `CRUST_RT_NODES` (`wide` |
+    /// `quant`) overrides it, so the kernel's whole test suite can run under
+    /// each format.
+    fn default() -> Self {
+        #[cfg(feature = "test-node-env")]
+        match std::env::var("CRUST_RT_NODES").as_deref() {
+            Ok("wide") => return NodeFormatChoice::Wide,
+            Ok("quant") => return NodeFormatChoice::Quantised,
+            _ => {}
+        }
+        NodeFormatChoice::Auto
+    }
+}
+
 /// What [`SceneBuilder::commit_with`] lets a caller choose about the build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitOptions {
     /// The triangle packet layout.
     pub layout: PacketLayout,
+    /// The BVH node format.
+    pub nodes: NodeFormatChoice,
 }
 
 impl Default for CommitOptions {
     fn default() -> Self {
         CommitOptions {
             layout: PacketLayout::Auto,
+            nodes: NodeFormatChoice::default(),
         }
     }
 }
@@ -425,7 +462,7 @@ impl SceneBuilder {
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
         };
         Scene {
-            bvh: Bvh::new(sink.input, layout),
+            bvh: Bvh::with_nodes(sink.input, layout, options.nodes),
             n_geoms,
             has_motion: sink.has_motion,
             max_hit_id: sink.max_hit_id,

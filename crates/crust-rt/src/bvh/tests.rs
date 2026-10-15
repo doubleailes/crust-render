@@ -381,10 +381,10 @@ fn hit_any_matches_hit() {
 /// was moved into a side table precisely so the node still fits two
 /// cache lines. Growing it would silently cost traversal bandwidth.
 #[test]
-#[cfg(not(any(feature = "bvh8", feature = "bvh8q")))]
+#[cfg(not(feature = "bvh8"))]
 fn wide_node_is_two_cache_lines() {
-    assert_eq!(std::mem::size_of::<WideNode>(), 128);
-    assert_eq!(std::mem::align_of::<WideNode>(), 16);
+    assert_eq!(std::mem::size_of::<FNode>(), 128);
+    assert_eq!(std::mem::align_of::<FNode>(), 16);
 }
 
 /// A triangle is three vertex indices, two ids and a mask — 24 bytes — with
@@ -435,38 +435,64 @@ fn a_primitive_hit_is_64_bytes() {
 #[test]
 #[cfg(feature = "bvh8")]
 fn wide8_node_is_four_cache_lines() {
-    assert_eq!(std::mem::size_of::<WideNode>(), 256);
-    assert_eq!(std::mem::align_of::<WideNode>(), 32);
+    assert_eq!(std::mem::size_of::<FNode>(), 256);
+    assert_eq!(std::mem::align_of::<FNode>(), 32);
 }
 
 /// Parallel subtree builds must not change the tree: the same input
-/// always produces byte-identical topology.
+/// always produces byte-identical topology, in either node format.
 #[test]
 fn build_is_deterministic() {
-    let a = Bvh::new(sphere_grid(6), Layout::Gathered);
-    let b = Bvh::new(sphere_grid(6), Layout::Gathered);
-    assert_eq!(a.wide.len(), b.wide.len());
-    assert_eq!(a.indices, b.indices);
-    assert_eq!(a.packets.len(), b.packets.len());
-    assert_eq!(a.leaves.len(), b.leaves.len());
-    for (x, y) in a.leaves.iter().zip(&b.leaves) {
-        assert_eq!((x.pkt_first, x.pkt_count), (y.pkt_first, y.pkt_count));
-        assert_eq!((x.idx_first, x.idx_count), (y.idx_first, y.idx_count));
-    }
-    #[cfg(feature = "bvh8q")]
-    for (x, y) in a.wide.iter().zip(&b.wide) {
-        assert_eq!(x.valid_mask(), y.valid_mask());
-        for l in 0..LANES {
-            assert_eq!(x.child_box(l), y.child_box(l));
-            assert_eq!(x.child_at(l), y.child_at(l));
+    for choice in [NodeChoice::Wide, NodeChoice::Quantised] {
+        let a = Bvh::with_nodes(sphere_grid(6), Layout::Gathered, choice);
+        let b = Bvh::with_nodes(sphere_grid(6), Layout::Gathered, choice);
+        assert_eq!(a.indices, b.indices);
+        assert_eq!(a.packets.len(), b.packets.len());
+        assert_eq!(a.leaves.len(), b.leaves.len());
+        for (x, y) in a.leaves.iter().zip(&b.leaves) {
+            assert_eq!((x.pkt_first, x.pkt_count), (y.pkt_first, y.pkt_count));
+            assert_eq!((x.idx_first, x.idx_count), (y.idx_first, y.idx_count));
+        }
+        match (&a.nodes, &b.nodes) {
+            (Nodes::Wide(x), Nodes::Wide(y)) => {
+                assert_eq!(x.len(), y.len());
+                for (x, y) in x.iter().zip(y.iter()) {
+                    assert_eq!(x.child, y.child);
+                    assert_eq!(x.flags, y.flags);
+                    assert_eq!(x.bmin_x, y.bmin_x);
+                    assert_eq!(x.bmax_z, y.bmax_z);
+                }
+            }
+            (Nodes::Quant(x), Nodes::Quant(y)) => {
+                assert_eq!(x.len(), y.len());
+                for (x, y) in x.iter().zip(y.iter()) {
+                    assert_eq!(x.valid_mask(), y.valid_mask());
+                    for l in 0..Q_WIDTH {
+                        assert_eq!(x.child_box(l), y.child_box(l));
+                        assert_eq!(x.child_at(l), y.child_at(l));
+                    }
+                }
+            }
+            _ => panic!("the same choice built two formats"),
         }
     }
-    #[cfg(not(feature = "bvh8q"))]
-    for (x, y) in a.wide.iter().zip(&b.wide) {
-        assert_eq!(x.child, y.child);
-        assert_eq!(x.flags, y.flags);
-        assert_eq!(x.bmin_x, y.bmin_x);
-        assert_eq!(x.bmax_z, y.bmax_z);
+}
+
+/// The node count and the number of leaf lanes of a tree, in either format.
+fn node_and_leaf_counts(bvh: &Bvh) -> (usize, usize) {
+    match &bvh.nodes {
+        Nodes::Wide(n) => (
+            n.len(),
+            n.iter()
+                .map(|w| (0..F_WIDTH).filter(|&l| w.is_leaf(l)).count())
+                .sum(),
+        ),
+        Nodes::Quant(n) => (
+            n.len(),
+            n.iter()
+                .map(|w| (0..Q_WIDTH).filter(|&l| w.is_leaf(l)).count())
+                .sum(),
+        ),
     }
 }
 
@@ -474,22 +500,18 @@ fn build_is_deterministic() {
 /// fewer wide nodes than a binary tree would need.
 #[test]
 fn collapse_widens_the_tree() {
-    let bvh = Bvh::new(sphere_grid(6), Layout::Gathered); // 216 prims
-    let n_leaf_slots: usize = bvh
-        .wide
-        .iter()
-        .map(|w| (0..LANES).filter(|&l| w.is_leaf(l)).count())
-        .sum();
-    assert!(n_leaf_slots > 0);
-    assert_eq!(n_leaf_slots, bvh.leaves.len());
-    // A binary tree over L leaves has L-1 internal nodes; BVH4 should
-    // need roughly a third of that.
-    assert!(
-        bvh.wide.len() * 2 < n_leaf_slots.max(2) * 2 - 1,
-        "{} wide nodes for {} leaves",
-        bvh.wide.len(),
-        n_leaf_slots
-    );
+    for choice in [NodeChoice::Wide, NodeChoice::Quantised] {
+        let bvh = Bvh::with_nodes(sphere_grid(6), Layout::Gathered, choice); // 216 prims
+        let (n_nodes, n_leaf_slots) = node_and_leaf_counts(&bvh);
+        assert!(n_leaf_slots > 0);
+        assert_eq!(n_leaf_slots, bvh.leaves.len());
+        // A binary tree over L leaves has L-1 internal nodes; BVH4 should
+        // need roughly a third of that.
+        assert!(
+            n_nodes * 2 < n_leaf_slots.max(2) * 2 - 1,
+            "{n_nodes} wide nodes for {n_leaf_slots} leaves"
+        );
+    }
 }
 
 /// The finished tree's tables live as long as the scene, and the memory
@@ -509,7 +531,7 @@ fn collapsed_tables_hold_no_spare_capacity() {
         let root = union_all(&refs);
         let subtree = build_subtree(&prims, refs, 0, surface_area(&root));
         let (wide, collected) =
-            collapse(&subtree.nodes, &subtree.indices, &prims, Layout::Gathered);
+            collapse::<FNode, F_WIDTH>(&subtree.nodes, &subtree.indices, &prims, Layout::Gathered);
         assert_eq!(wide.capacity(), wide.len());
         assert_eq!(collected.leaves.capacity(), collected.leaves.len());
         assert_eq!(collected.packets.capacity(), collected.packets.len());
@@ -536,7 +558,6 @@ fn bounds_cover_all_prims() {
 /// The `bvh8q` node: one cache line plus change, against the `f32`
 /// 8-wide node's four.
 #[test]
-#[cfg(feature = "bvh8q")]
 fn quantised_node_is_76_bytes() {
     let want = if cfg!(feature = "bvh8q-pad") { 128 } else { 76 };
     assert_eq!(std::mem::size_of::<QNode>(), want);
@@ -547,29 +568,29 @@ fn quantised_node_is_76_bytes() {
 /// hits exact), and the breadth-first renumbering keeps every lane pointing
 /// at the same child it did before.
 #[test]
-#[cfg(feature = "bvh8q")]
 fn quantised_boxes_contain_the_exact_ones() {
-    use crate::bvh::lanesq::finish;
     let prims = super::lane_width::uv_sphere_prims(80, 40);
     let refs: Vec<PrimRef> = (0..prims.len() as u32)
         .filter_map(|i| prims.bbox(i).map(|b| PrimRef::new(b, i)))
         .collect();
     let root = union_all(&refs);
     let sub = build_subtree(&prims, refs, 0, surface_area(&root));
-    let (wide, data) = collapse(&sub.nodes, &sub.indices, &prims, Layout::Gathered);
+    let (wide, data) =
+        collapse::<BuildNode8, Q_WIDTH>(&sub.nodes, &sub.indices, &prims, Layout::Gathered);
     // The build is deterministic, so a second collapse is the same tree,
-    // and `finish` can consume it while the first stays for comparison.
-    let (wide2, data2) = collapse(&sub.nodes, &sub.indices, &prims, Layout::Gathered);
+    // and `quantise_tree` can consume it while the first stays for comparison.
+    let (wide2, data2) =
+        collapse::<BuildNode8, Q_WIDTH>(&sub.nodes, &sub.indices, &prims, Layout::Gathered);
     let n_leaves = data.leaves.len();
-    let (q, leaves) = finish(wide2, data2.leaves);
+    let (q, leaves) = quantise_tree(wide2, data2.leaves);
     assert_eq!(q.len(), wide.len());
     assert_eq!(leaves.len(), n_leaves);
     // Walk both trees in lock step from the roots.
     let mut stack = vec![(0usize, 0usize)];
     while let Some((o, n)) = stack.pop() {
         let (w, qn) = (&wide[o], &q[n]);
-        assert_eq!(w.flags & VALID_MASK, qn.valid_mask() as u32);
-        for l in 0..LANES {
+        assert_eq!(w.flags & BuildNode8::VALID_MASK, qn.valid_mask() as u32);
+        for l in 0..Q_WIDTH {
             if w.flags & (1 << l) == 0 {
                 continue;
             }
@@ -577,11 +598,21 @@ fn quantised_boxes_contain_the_exact_ones() {
             let exact_lo = [w.bmin_x[l], w.bmin_y[l], w.bmin_z[l]];
             let exact_hi = [w.bmax_x[l], w.bmax_y[l], w.bmax_z[l]];
             for a in 0..3 {
-                assert!(lo[a] <= exact_lo[a], "min axis {a}: {} > {}", lo[a], exact_lo[a]);
-                assert!(hi[a] >= exact_hi[a], "max axis {a}: {} < {}", hi[a], exact_hi[a]);
+                assert!(
+                    lo[a] <= exact_lo[a],
+                    "min axis {a}: {} > {}",
+                    lo[a],
+                    exact_lo[a]
+                );
+                assert!(
+                    hi[a] >= exact_hi[a],
+                    "max axis {a}: {} < {}",
+                    hi[a],
+                    exact_hi[a]
+                );
             }
-            assert_eq!(w.is_leaf(l), qn.is_leaf(l));
-            if w.is_leaf(l) {
+            assert_eq!(w.leaf_bit(l), qn.is_leaf(l));
+            if w.leaf_bit(l) {
                 let a = &data.leaves[w.child[l] as usize];
                 let b = &leaves[qn.child_at(l) as usize];
                 assert_eq!((a.pkt_first, a.pkt_count), (b.pkt_first, b.pkt_count));
