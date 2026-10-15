@@ -279,7 +279,7 @@ warning_codes! {
     CurvesInvalidKnots => "curves.invalid_knots", Skipped, Each,
         "NurbsCurves whose order or knots do not match their points; the curves are skipped.";
     CurvesRationalApproximated => "curves.rational_approximated", Approximated, Each,
-        "NurbsCurves with unequal pointWeights; the rational curves are approximated by polynomial spans.";
+        "NurbsCurves with unequal pointWeights are approximated by polynomial spans; non-positive or non-finite weights are ignored.";
     VolumeUnknownType => "volume.unknown_type", Skipped, Each,
         "crust:volume:type is not homogeneous, smoke or grid.";
     VolumeInvalidGrid => "volume.invalid_grid", Skipped, Each,
