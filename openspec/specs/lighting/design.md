@@ -965,9 +965,11 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
 - **Light sampling is the main source of 16 spp noise**, and `docs/light_sampling.md`
   is the survey of the state of the art (SIGGRAPH/EGSR/HPG, pbrt-v4, Cycles,
   RenderMan, Arnold, Hyperion) with a ranked roadmap and a measured baseline. In
-  short: the light pick is by power, defensively (4.6× lower relMSE on a key among dim
-  fills, 6% higher on `veach_mis`, §3.8 there; `--light-selection uniform` is the
-  bit-identical A/B); several light samples per vertex are a setting, not the default
+  short: the light pick is by power, defensively, by default (4.6× lower relMSE on a key
+  among dim fills, 6% higher on `veach_mis`, §3.8 there; `--light-selection uniform` is
+  the bit-identical A/B), with the light tree opt-in (`--light-selection tree`: 1.86×
+  lower on `usdlux`, 11–22× on `many_lights`, a tie on `veach_mis`, §3.15 there; see
+  the next gap); several light samples per vertex are a setting, not the default
   (`crust:lightSamples`, "Several light samples per vertex" above: 1.46–1.59× at equal
   time on ALab and `veach_mis`, a loss on dome-lit, glossy and volume scenes);
   sphere lights now sample their visible cone
@@ -987,6 +989,15 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   domain, §3.11 there.)
   Measure changes with
   `crust diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
+- **The light tree is opt-in, and sees no occluders.** It ranks lights by flux,
+  distance, emission cone and the receiver's horizon ("Light tree" above), so a
+  light behind a wall keeps its full rank: `learned`'s half of the problem, and
+  52% of ALab's NEE waste (§3.12). Its importance treats the receiver as
+  diffuse, so a glossy highlight from a small light is not favoured (the
+  trimmed relMSE on `veach_mis` is 4% worse per sample). Lights at infinity
+  keep their fixed `1/live` share. It stays opt-in until ALab and the OpenPBR
+  Shader Playground pass the equal-time gate (§3.15 there). `power` pays about
+  0.6% more instructions for the receiver every vertex carries.
 - **`neural` selection loses at equal time** on every checked-in sample and on
   ALab, whose problem is visibility alone: 0.79× `learned` on its direct
   lighting, 0.69× on its full image (the lighting design above;
@@ -1031,8 +1042,9 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   squashed sphere samples its visible cone. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
   than `latlong` are refused rather than mapped wrongly (so a `DomeLight_1`'s pole only
-  matters for a lat-long map); and light-list picking by
+  matters for a lat-long map); and the default light-list picking by
   power is blind to position, orientation and visibility, so a far light gets as many
-  shadow rays as an equally powerful near one, and a dome or sun only its uniform share
-  however much it lights (a light BVH, `docs/light_sampling.md` §6.3, is the fix). Neither infinite light
+  shadow rays as an equally powerful near one (`--light-selection tree` sees position
+  and orientation, and `learned` visibility), and a dome or sun only its uniform share
+  however much it lights, under every selection. Neither infinite light
   is visible to the guiding field's spatial structure (they have no position).
