@@ -417,9 +417,9 @@ Schema mapping:
   `tangent_frame(n)`'s arbitrary one: an isotropic lobe changes only its sample pattern,
   and an anisotropic one stretches along the strand. `normals` (ribbons), `wrap` and
   curve primvars are not read.
-- `UsdGeomNurbsCurves` → the same two batches (`nurbs_curve_segments`). openusd-schemas
-  has no typed schema for it, so the prim is recognised by type name and its attributes
-  read raw. Each knot interval `[u_i, u_i+1]` inside the domain `[u_p, u_n+1]` (narrowed
+- `UsdGeomNurbsCurves` → the same two batches (`nurbs_curve_segments`), read through
+  openusd-schemas' typed `NurbsCurves` (generated from its vendored `usdGeom` schema, so
+  absent from the crate's hand-written `src/`). Each knot interval `[u_i, u_i+1]` inside the domain `[u_p, u_n+1]` (narrowed
   by `ranges`) becomes one Bézier span by **blossoming**: the span's `j`th Bézier point is
   de Boor's recurrence with `p − j` levels at the interval's start and `j` at its end.
   No knot insertion, so clamped and unclamped (uniform, periodic-style) knot vectors take

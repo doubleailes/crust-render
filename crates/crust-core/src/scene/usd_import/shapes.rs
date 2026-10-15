@@ -9,8 +9,8 @@ use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::sdf;
 use openusd::usd::Prim;
 use openusd_schemas::geom::{
-    BasisCurves as UsdBasisCurves, CurvesSchema, PointBasedSchema, Sphere as UsdSphere,
-    SphereSchema,
+    BasisCurves as UsdBasisCurves, CurvesSchema, NurbsCurves as UsdNurbsCurves, NurbsCurvesSchema,
+    PointBasedSchema, Sphere as UsdSphere, SphereSchema,
 };
 use tracing::debug;
 
@@ -19,7 +19,7 @@ use crate::rt_world::WorldBuilder;
 
 use super::attrs::{
     attr_f32, custom_token, decode_f32_array, decode_f64_array, decode_i32_array,
-    decode_vec3f_array, prim_motion_translate, prim_ray_mask, prim_value, value_at,
+    decode_vec3f_array, prim_motion_translate, prim_ray_mask, value_at,
 };
 
 // -----------------------------------------------------------------------
@@ -352,13 +352,6 @@ pub(super) fn emit_curves(
 // NURBS curves
 // -----------------------------------------------------------------------
 
-/// Whether `prim` is a `UsdGeomNurbsCurves`. openusd-schemas has no typed
-/// schema for it, so the prim is recognised by its type name and read
-/// through raw attributes.
-pub(super) fn is_nurbs_curves(prim: &Prim) -> bool {
-    matches!(prim.type_name(), Ok(Some(t)) if t.as_str() == "NurbsCurves")
-}
-
 /// A NURBS control point carried through the blossom: the homogeneous
 /// position `(w·x, w·y, w·z)`, the width (a primvar, so not weighted) and the
 /// weight `w`. Every channel is affine in the control points, so one
@@ -444,9 +437,9 @@ fn decode_ranges(v: sdf::Value) -> Option<Vec<(f64, f64)>> {
 /// each span's Bézier control points are projected out of homogeneous
 /// space, which keeps the span's ends and end tangents' directions but not
 /// its exact shape (`curves.rational_approximated`).
-pub(super) fn nurbs_curve_segments(prim: &Prim) -> Option<CurveBatches> {
-    let points = prim_value(prim, "points").and_then(decode_vec3f_array);
-    let counts = prim_value(prim, "curveVertexCounts").and_then(decode_i32_array);
+pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Option<CurveBatches> {
+    let points = value_at(&curves.points_attr()).and_then(decode_vec3f_array);
+    let counts = value_at(&curves.curve_vertex_counts_attr()).and_then(decode_i32_array);
     let (points, counts) = match (points, counts) {
         (Some(p), Some(c)) => (p, c),
         _ => {
@@ -459,10 +452,10 @@ pub(super) fn nurbs_curve_segments(prim: &Prim) -> Option<CurveBatches> {
     };
     let n_points = points.len();
     let n_curves = counts.len();
-    let orders = prim_value(prim, "order")
+    let orders = value_at(&curves.order_attr())
         .and_then(decode_i32_array)
         .unwrap_or_default();
-    let knots = prim_value(prim, "knots")
+    let knots = value_at(&curves.knots_attr())
         .and_then(decode_f64_array)
         .unwrap_or_default();
     let expected_knots: i64 = counts
@@ -484,13 +477,13 @@ pub(super) fn nurbs_curve_segments(prim: &Prim) -> Option<CurveBatches> {
         );
         return None;
     }
-    let widths: Vec<f32> = prim_value(prim, "widths")
+    let widths: Vec<f32> = value_at(&curves.widths_attr())
         .and_then(decode_f32_array)
         .unwrap_or_else(|| vec![1.0]);
-    let weights = prim_value(prim, "pointWeights")
+    let weights = value_at(&curves.point_weights_attr())
         .and_then(decode_f64_array)
         .filter(|w| w.len() == n_points);
-    let ranges = prim_value(prim, "ranges")
+    let ranges = value_at(&curves.ranges_attr())
         .and_then(decode_ranges)
         .filter(|r| r.len() == n_curves);
     let width_of = |global_idx: usize, curve_idx: usize| -> f64 {

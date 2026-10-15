@@ -59,8 +59,8 @@ use openusd::usd::{
     InitialLoadSet, Prim, SchemaRegistry, Stage, StageBuilder, StagePopulationMask,
 };
 use openusd_schemas::geom::{
-    BasisCurves as UsdBasisCurves, Camera as UsdCamera, Mesh as UsdMesh, PointInstancer,
-    Sphere as UsdSphere,
+    BasisCurves as UsdBasisCurves, Camera as UsdCamera, Mesh as UsdMesh,
+    NurbsCurves as UsdNurbsCurves, PointInstancer, Sphere as UsdSphere,
 };
 use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, DomeLight_1, RectLight,
@@ -113,7 +113,7 @@ use settings::{
     enable_exposure_compensation, import_render_settings, pick_camera, render_settings_color_space,
     render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
-use shapes::{curve_segments, emit_curves, emit_sphere, is_nurbs_curves, nurbs_curve_segments};
+use shapes::{curve_segments, emit_curves, emit_sphere, nurbs_curve_segments};
 use time::EvalTimeScope;
 use volume::emit_volume;
 use xform::compose_with_parent;
@@ -396,9 +396,9 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             let batches = curve_segments(&prim, &curves);
             emit_curves(&mut ctx.world, &prim, batches, this_world, mat);
-        } else if is_nurbs_curves(&prim) {
+        } else if let Ok(Some(curves)) = UsdNurbsCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let batches = nurbs_curve_segments(&prim);
+            let batches = nurbs_curve_segments(&prim, &curves);
             emit_curves(&mut ctx.world, &prim, batches, this_world, mat);
         } else if let Some(shape) = Shape::read(&prim) {
             let bound = undisplaced(&prim, resolve_bound(stage, &prim, &mut ctx.caches));
