@@ -79,7 +79,9 @@ render.
   MaterialX's reference implementation does, so hair cannot be rougher than an artist
   roughness of about 0.6.
 - **Curves are round, open tubes.** `BasisCurves` `normals` (ribbons) and `wrap`
-  (periodic curves) are not read, and curve primvars don't reach materials.
+  (periodic curves) are not read, and curve primvars don't reach materials. Rational
+  `NurbsCurves` (unequal `pointWeights`) are approximated by polynomial spans, and
+  NURBS curves above order 4 are skipped.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
   Zeltner sheen uses the table Adobe's reference uses rather than MaterialX's own curve

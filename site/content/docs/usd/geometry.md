@@ -20,11 +20,11 @@ top = false
 |------|------------|
 | `Mesh` | triangles; a subdivision surface unless `subdivisionScheme = "none"` (see [standard attributes](#standard-geometry-attributes)) |
 | `Sphere` | an exact sphere |
-| `BasisCurves` | round tubes |
+| `BasisCurves`, `NurbsCurves` | round tubes |
 | `Cube`, `Plane`, `Cylinder`, `Cylinder_1`, `Cone`, `Capsule`, `Capsule_1` | triangles, tessellated as usdview draws them (below) |
 | `PointInstancer`, `instanceable` prims | their prototypes, stored once and placed per instance |
 
-Any other geometry type (`Points`, `NurbsPatch`, `NurbsCurves`, `HermiteCurves`,
+Any other geometry type (`Points`, `NurbsPatch`, `HermiteCurves`,
 `TetMesh`, and a UsdVol `Volume`, whose fields Crust Render does not read: author
 [`crust:volume:*`](@/docs/usd/volumes.md) instead) renders nothing. It is reported with one
 [`geom.unsupported_type`](@/docs/reference/warnings.md#geometry-types) warning per type,
@@ -108,7 +108,7 @@ Common values:
 | `1` | seen by the camera only: no shadows, not in reflections |
 | `0` | invisible to every ray |
 
-Read on `Mesh`, `Sphere`, `BasisCurves` and the [implicit shapes](#implicit-shapes),
+Read on `Mesh`, `Sphere`, `BasisCurves`, `NurbsCurves` and the [implicit shapes](#implicit-shapes),
 including prims inside instance prototypes. On a light, it replaces the light's default visibility; see
 [Lights](@/docs/usd/lights.md#crust-raymask-on-a-light).
 
@@ -196,3 +196,4 @@ Crust Render reads these standard `UsdGeom` attributes without any `crust:` attr
 | `PointInstancer` and native instancing | prototypes are stored once and placed per instance. Both nest: a `PointInstancer` or an `instanceable` prim inside a prototype is imported too, its prototype still stored once. |
 | `xformOp:*`, `xformOpOrder` | every `UsdGeomXformOp` kind composes (single- and three-axis rotations, `translateX`-style single-axis ops, `orient`, `transform`, `!invert!`, `:suffix` ops), on any `Xformable` prim type, as in USD itself: `!resetXformStack!` drops the parent's transform and every op listed before it, and ops authored on a prim that is not `Xformable` (an untyped prim, a `Scope`) are ignored. Every `Xformable` type composes its ops, including the ones of families Crust Render does not otherwise read (`SkelRoot`, `Skeleton`, `Volume` and its fields, `GenerativeProcedural`, `SpatialAudio`). A prim of a type Crust Render does not know (a plugin or studio schema) is not `Xformable` either: its ops are ignored, with an `xform.unknown_type` warning. An op name that is not a `UsdGeomXformOp` kind is read as identity, with a warning. |
 | `BasisCurves` | round tubes of the authored `widths`: `linear`, or `cubic` with a `bezier`, `bspline` or `catmullRom` basis. Per-vertex widths follow the basis; per-curve and constant widths are read too. A hit on a curve shades along the strand, so a [hair material](@/docs/usd/materials.md#hair) sees its direction at every placement. `normals` (ribbons) and `wrap` (periodic curves) are not read: every curve is a round, open tube. |
+| `NurbsCurves` | round tubes, read like `BasisCurves`: `points`, `curveVertexCounts`, `widths` (per-vertex widths follow the curve), one `order` per curve, and `count + order` `knots` per curve, clamped or not. Order 4 (cubic), 3 (quadratic) and 2 (linear) are read; a higher order is skipped with [`curves.unsupported_order`](@/docs/reference/warnings.md#curves-and-volumes). `ranges` trims each curve to its parameter interval. Unequal `pointWeights` (rational curves) are approximated by polynomial spans that keep each span's ends, with `curves.rational_approximated`. |

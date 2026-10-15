@@ -212,6 +212,69 @@ fn transform_curves_and_volume_warnings() {
     assert_eq!(op.prims, ["/World/odd"]);
 }
 
+/// `NurbsCurves` are read: a cubic curve imports with no record at all, and
+/// each way one can be refused or approximated has its own code.
+#[test]
+fn nurbs_curves_warnings() {
+    let clean = load(
+        "nurbs_clean",
+        r#"    def NurbsCurves "whisker"
+    {
+        int[] curveVertexCounts = [5]
+        int[] order = [4]
+        double[] knots = [0, 0, 0, 0, 0.5, 1, 1, 1, 1]
+        point3f[] points = [(0, 0, 0), (0, 1, 0), (1, 2, 0), (1, 3, 0), (2, 4, 0)]
+        float[] widths = [0.02, 0.02, 0.015, 0.01, 0.005] (interpolation = "vertex")
+    }
+"#,
+        "",
+    );
+    assert!(clean.warnings.is_empty(), "{:#?}", clean.warnings);
+    assert_eq!(clean.world.count(), 1);
+
+    let scene = load(
+        "nurbs_refused",
+        r#"    def NurbsCurves "quintic"
+    {
+        int[] curveVertexCounts = [5]
+        int[] order = [5]
+        double[] knots = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+        point3f[] points = [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 3, 0), (0, 4, 0)]
+    }
+    def NurbsCurves "short_knots"
+    {
+        int[] curveVertexCounts = [4]
+        int[] order = [4]
+        double[] knots = [0, 0, 0, 1, 1, 1]
+        point3f[] points = [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 3, 0)]
+    }
+    def NurbsCurves "rational"
+    {
+        int[] curveVertexCounts = [3]
+        int[] order = [3]
+        double[] knots = [0, 0, 0, 1, 1, 1]
+        point3f[] points = [(1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        double[] pointWeights = [1, 0.7071068, 1]
+    }
+"#,
+        "",
+    );
+    let order = record(&scene, WarningCode::CurvesUnsupportedOrder);
+    assert_eq!(order.prims, ["/World/quintic"]);
+    assert_eq!(order.kind, WarningKind::Skipped);
+    let knots = record(&scene, WarningCode::CurvesInvalidKnots);
+    assert_eq!(knots.prims, ["/World/short_knots"]);
+    let rational = record(&scene, WarningCode::CurvesRationalApproximated);
+    assert_eq!(rational.prims, ["/World/rational"]);
+    assert_eq!(rational.kind, WarningKind::Approximated);
+    assert!(
+        !codes(&scene).contains(&WarningCode::GeomUnsupportedType),
+        "{:#?}",
+        scene.warnings
+    );
+    assert_eq!(scene.world.count(), 1, "only the rational arc renders");
+}
+
 /// "Points prim": three `Points` and a `NurbsPatch` render nothing and raise
 /// `geom.unsupported_type` once per type, in first-seen order, each naming
 /// its type's first prim and carrying its count.

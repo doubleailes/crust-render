@@ -417,6 +417,20 @@ Schema mapping:
   `tangent_frame(n)`'s arbitrary one: an isotropic lobe changes only its sample pattern,
   and an anisotropic one stretches along the strand. `normals` (ribbons), `wrap` and
   curve primvars are not read.
+- `UsdGeomNurbsCurves` → the same two batches (`nurbs_curve_segments`). openusd-schemas
+  has no typed schema for it, so the prim is recognised by type name and its attributes
+  read raw. Each knot interval `[u_i, u_i+1]` inside the domain `[u_p, u_n+1]` (narrowed
+  by `ranges`) becomes one Bézier span by **blossoming**: the span's `j`th Bézier point is
+  de Boor's recurrence with `p − j` levels at the interval's start and `j` at its end.
+  No knot insertion, so clamped and unclamped (uniform, periodic-style) knot vectors take
+  the same path, and a `ranges` trim is just a narrower interval. Width and the
+  homogeneous weight ride the same recurrence as extra channels, so per-vertex widths
+  follow the curve as `BasisCurves`' do. Order 3 is degree-elevated to a cubic span,
+  order 2 is a linear segment; higher orders are refused (`curves.unsupported_order`).
+  **Gap:** rational curves (unequal `pointWeights`) are approximated by projecting each
+  span's homogeneous Bézier points, which keeps the span's ends but not its exact shape
+  (`curves.rational_approximated`); the kernel has no rational span. ALab's stoat
+  whiskers (33 `NurbsCurves` prims) were the first scene to need this.
 - **Instancing** — both USD mechanisms reduce to the same thing, and share one code path
   (`collect_proto_parts` → `attach_proto_parts`): build a prototype's geometry *once*, then
   place it by transform. A prototype becomes a `Vec<ProtoPart>` — one part per bound leaf
@@ -569,7 +583,7 @@ rendered in usdview rendered with holes here.
   - The end of the import logs one DEBUG line: shapes read, triangles generated and the
     histogram of radial counts.
 - **Dispatch order, the same in both walks**: volume, `Mesh`, `Sphere`, `BasisCurves`,
-  implicit shapes, then (top level) camera and lights, then an unread `Gprim`.
+  `NurbsCurves`, implicit shapes, then (top level) camera and lights, then an unread `Gprim`.
 - **Displacement is refused**: an implicit shape has no chart to displace along.
   `undisplaced` drops the bound material's displacement with `geom.implicit_displacement`
   and the shape renders with the rest of its material.

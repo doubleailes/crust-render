@@ -44,7 +44,9 @@ use super::attrs::{
 use super::implicit::{Shape, undisplaced};
 use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
-use super::shapes::{curve_segments, sphere_radius};
+use super::shapes::{
+    curve_segments, curves_scene, is_nurbs_curves, nurbs_curve_segments, sphere_radius,
+};
 use super::xform::compose_with_parent;
 use super::{ImportCaches, WalkScope, prim_at, prune_reason};
 
@@ -283,20 +285,15 @@ pub(super) fn collect_proto_parts(
                 None,
                 None,
             ));
-        } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
+        } else if let Some(batches) = match UsdBasisCurves::get(stage, prim.path().clone()) {
+            Ok(Some(curves)) => Some(curve_segments(&prim, &curves)),
+            _ if is_nurbs_curves(&prim) => Some(nurbs_curve_segments(&prim)),
+            _ => None,
+        } {
             let material = resolve_material(stage, &prim, caches);
-            if let Some((segments, cubic_segments)) = curve_segments(&prim, &curves) {
-                let mut b = RtSceneBuilder::new();
-                if !segments.is_empty() {
-                    b.attach(Geometry::RoundCurves { segments });
-                }
-                if !cubic_segments.is_empty() {
-                    b.attach(Geometry::CubicCurves {
-                        segments: cubic_segments,
-                    });
-                }
+            if let Some(batches) = batches {
                 parts.push(ProtoPart::leaf(
-                    Arc::new(b.commit_with(crate::commit_options())),
+                    Arc::new(curves_scene(batches)),
                     this_local,
                     mask,
                     material,

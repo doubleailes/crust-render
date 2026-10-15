@@ -233,6 +233,32 @@ are not yet read.
 - **WHEN** a `BasisCurves` prim authors `normals`
 - **THEN** it still renders as round tubes
 
+### Requirement: NurbsCurves import as round curves
+
+A `UsdGeomNurbsCurves` prim SHALL be imported as round curves of its authored
+widths, one Bézier span per non-empty knot interval inside the curve's domain
+(narrowed by `ranges` when authored), and shade along the strand as
+`BasisCurves` do, at every placement. Orders 2, 3 and 4 SHALL be read; a curve
+of any other order, or whose `order` / `knots` do not match its points, SHALL be
+skipped with a warning. Unequal `pointWeights` SHALL be approximated by
+polynomial spans with a warning.
+
+#### Scenario: A cubic NURBS curve renders
+
+- **WHEN** a `NurbsCurves` prim authors one order-4 curve with clamped knots
+- **THEN** it renders as a round tube through the same points as the Bézier
+  curve of those control points, and the import raises no warning
+
+#### Scenario: Ranges trim the curve
+
+- **WHEN** the same curve authors `ranges = [(0, 0.5)]`
+- **THEN** only the half of the curve over that parameter interval renders
+
+#### Scenario: Unsupported orders are reported
+
+- **WHEN** a `NurbsCurves` prim authors an order-5 curve
+- **THEN** that curve renders nothing and `curves.unsupported_order` names the prim
+
 ### Requirement: Material resolution by shader id
 
 The importer SHALL resolve a bound material via `MaterialBindingAPI` and dispatch

@@ -273,7 +273,13 @@ warning_codes! {
     CurvesInvalidCounts => "curves.invalid_counts", Skipped, Each,
         "curveVertexCounts overruns the points; the remaining curves are skipped.";
     CurvesNonInvertibleTransform => "curves.non_invertible_transform", Skipped, Each,
-        "BasisCurves has a non-invertible transform.";
+        "BasisCurves or NurbsCurves have a non-invertible transform.";
+    CurvesUnsupportedOrder => "curves.unsupported_order", Skipped, Each,
+        "NurbsCurves of an order above 4 (or below 2); those curves are skipped.";
+    CurvesInvalidKnots => "curves.invalid_knots", Skipped, Each,
+        "NurbsCurves whose order or knots do not match their points; the curves are skipped.";
+    CurvesRationalApproximated => "curves.rational_approximated", Approximated, Each,
+        "NurbsCurves with unequal pointWeights; the rational curves are approximated by polynomial spans.";
     VolumeUnknownType => "volume.unknown_type", Skipped, Each,
         "crust:volume:type is not homogeneous, smoke or grid.";
     VolumeInvalidGrid => "volume.invalid_grid", Skipped, Each,
