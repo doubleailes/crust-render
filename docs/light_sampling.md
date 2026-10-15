@@ -872,6 +872,7 @@ grid of first hits; min of 7 runs, and instructions per call from callgrind
 | `veach_mis` (4) | 96–102 ns | | 490 ns, 4.8× | 277 ns, 2.9× |
 | `domelight` (2) | 41–47 ns | | 456 ns, 9.7× | 235 ns, 5.8× |
 | `materialx_basic` (2) | 33 ns | | 456 ns, 13.8× | 249 ns, 7.4× |
+| **ALab** frame 1004 (43) | 1 198 ns, 6 604 Ir | 9.6 / 29.0 ns | 1 131 ns, **0.94×**; 14 703 Ir, 2.2× | not needed |
 
 - Two bit-identical passes over `crust-nn` came first: per axis rather than per
   corner in the hash grid (no `floorf` call), and the dense layers' accumulator
@@ -880,17 +881,27 @@ grid of first hits; min of 7 runs, and instructions per call from callgrind
   table reads per evaluation at 7 lights.
 - The cost is per NEE vertex whatever the scene, while a shadow ray's cost grows
   with the BVH: these samples are small scenes with cheap rays. **D9's gate is
-  defined on ALab** (go at ≤ ~2 rays, stop at > ~5), whose rays cost several
-  times more but whose 47 lights add ~1 300 multiply-adds to the output layer.
-  ALab was not available where this was measured, so the gate's own verdict is
-  open. On the samples, D3 as designed is no-go (4.8–13.8×) and the small
-  network marginal on two scenes and no-go on two (2.9–7.4×).
+  defined on ALab** (go at ≤ ~2 rays, stop at > ~5). On the samples, D3 as
+  designed is no-go (4.8–13.8×) and the small network marginal on two scenes
+  and no-go on two (2.9–7.4×).
+- **On ALab the gate passes: go, at 0.94 shadow rays** (measured 2026-10-15 on
+  the 72-vCPU VM, `renders/alab/alab.usda`, min of 7; the means give 0.91). A
+  ray there costs 15× a `usdlux` one, while the 43 lights only double the
+  evaluation (14 703 Ir against 6 045). In instructions it is still 2.2 rays:
+  the network is dense arithmetic, an ALab ray is cache misses, and callgrind
+  counts instructions, not cycles. ALab's instructions were counted on an
+  overlay at 300×200 — fewer pre-pass receivers, so the four single-threaded
+  callgrind runs take ~1¾ hours instead of most of a day; the per-call cost of
+  the network does not depend on how many receivers trained it.
+- **The design's L2 risk is real on ALab.** A shadow ray cast right after an
+  evaluation costs 1 442 ns, not 1 198 (+20%): the 1 MiB hash table evicts BVH
+  nodes. That cost is part of the render times below, not of the gate.
 - The small network trains to a higher loss (`usdlux` 0.152 against 0.118) and
   costs half the pre-pass (`usdlux` 0.26 s against 0.42 s; `learned`'s is
   0.03 s).
 
-D3 was kept as designed for everything below, with the gate's own verdict
-left to ALab.
+D3 was kept as designed for everything below; ALab, the gate's own scene,
+needed no shrinking.
 
 **Measured, unbiasedness.** `usdlux` under `neural` against a 1024 spp `power`
 reference, `--indirect-clamp 0`, adaptive sampling off (an override layer
@@ -906,8 +917,8 @@ but with adaptive sampling off on the 1024 spp references too:
 
 | scene | power full / trimmed | learned full / trimmed | neural full / trimmed | neural vs power | neural vs learned |
 |---|---|---|---|---|---|
-| ALab, direct lighting only | not measured | | | | |
-| ALab, full | not measured | | | | |
+| ALab, direct lighting only (2) | 0.630 / 0.274 | 0.480 / 0.195 | 0.633 / 0.189 | 1.00× / **1.45×** | 0.76× / **1.03×** |
+| ALab, full | 6.76 / 3.53 | 6.81 / 3.00 | 48.2 / 3.66 | 0.14× / 0.96× | 0.14× / 0.82× |
 | `usdlux` (4) | 0.0780 / 0.0641 | 0.0233 / 0.0191 | 0.0646 / 0.0536 | 1.21× / 1.20× | 0.36× / 0.36× |
 | `veach_mis` (4) | 0.0286 / 0.00682 | 0.0139 / 0.00363 | 0.0291 / 0.00675 | 0.98× / 1.01× | 0.48× / 0.54× |
 | `domelight` (4) | 0.335 / 0.0221 | 0.296 / 0.0179 | 0.291 / 0.0221 | 1.15× / 1.00× | 1.02× / 0.81× |
@@ -918,6 +929,28 @@ lights are visible from most receivers, and what `learned` exploits is how much
 each light *contributes* — distance, orientation, the BSDF — which D2 leaves
 to the power table.
 
+On ALab, where visibility *is* the problem, the network predicts it a little
+better than the grid: 38.0% of direct lighting's shadow rays are occluded
+under `neural`, 42.9% under `learned`, 69.0% under `power`. It still only ties
+`learned` per sample (trimmed, 1.03×), because `learned` weighs what each
+visible light contributes as well. The ALab rows:
+- **How they were rendered.** The 1200×800 shot (`renders/alab/alab.usda`)
+  through an overlay stage that adds `crust:minSamplesPerPixel = 4096`, so
+  adaptive sampling never stops a pixel early, and for direct lighting
+  `crust:maxDepth = 1` (one light sample per pixel sample, at the camera
+  vertex).
+- **Frames.** The camera is animated, so a second seed is a second frame with
+  its own reference: direct lighting averages frames 1004 and 1030 (trimmed
+  per frame: power 0.268 / 0.281, `learned` 0.200 / 0.189, `neural` 0.182 /
+  0.196). The full image is frame 1004 alone, its reference 1024 spp in 13½
+  minutes.
+- **Not comparable with §3.12's ALab rows.** Shadow links are read since then
+  (`docs/alab_profile.md`): power's occluded share in direct lighting fell
+  from 94.2% to 69.0%, and the full frame at 16 spp with the clamp off is now
+  firefly-bound (a mean absolute error of 0.83 on pixels around 0.1).
+- **Only trimmed relMSE ranks anything there.** `neural`'s untrimmed 48.2 is
+  one firefly.
+
 **Measured, cost, and the equal-time verdict.** `scripts/bench_ab.sh` at 128
 spp, 6 interleaved reps, `Render` (pre-pass included), min:
 
@@ -927,25 +960,53 @@ spp, 6 interleaved reps, `Render` (pre-pass included), min:
 | `veach_mis` | 31.63 / 17.67 s, **1.79×** | 1.04× | 0.27× / 0.30× | 0.53× / 0.54× |
 | `domelight` | 6.79 / 4.35 s, **1.56×** | 1.10× | 0.65× / 0.52× | 0.67× / 0.58× |
 | `materialx_basic` | 8.10 / 5.86 s, **1.38×** | 1.02× | 0.58× / 0.58× | 0.71× / 0.70× |
+| ALab, direct lighting | 41.65 / 32.17 s, **1.29×** | 1.09× | 0.59× / **0.79×** | 0.71× / 1.03× |
+| ALab, full | 128.8 / 108.6 s, **1.19×** | 1.05× | 0.12× / **0.69×** | 0.11× / 0.77× |
 
 (Equal time is relMSE × time, full / trimmed; the means agree with the mins
-within 1%. The `neural` pre-pass is part of it: 0.4 s on `usdlux` against
-`learned`'s 0.03 s.)
+within 1% on the samples and 3% on ALab. ALab ran 3 interleaved reps, through
+the same overlays as its noise rows; each column is its own `bench_ab` session,
+since the script compares two binaries (here one binary behind two wrappers
+that append `--light-selection`). The `neural` pre-pass is part of it: 0.4 s on
+`usdlux` against `learned`'s 0.03 s, 6.2 s on ALab against 1.5 s.)
 
-**Verdict: retire.** At equal time `neural` loses to `learned` by 1.5–5.3× and
-to `power` by 1.4–1.9× on every scene measured. The inference adds 40–100% to
-a render where a shadow ray is cheap, and the visibility it predicts buys at
-most 1.2× per sample over power. D2's contribution variant is not proposed: it
-would add an O(N) `sample_li` per vertex to the same inference, and would have
-to beat `learned` by 2× per sample to break even. ALab, the scene the
-experiment was built for and the one where visibility is the whole problem
-(§3.12), is unmeasured; it is the one result that could reverse this, so it
-should be measured before the code goes.
+**Verdict: retire, now on ALab too.** At equal time `neural` loses to
+`learned` by 1.5–5.3× on every sample, and on ALab, the scene the experiment
+was built for, by 1.27× on direct lighting and 1.45× on the full image
+(trimmed). Against `power` it loses on every sample by 1.4–1.9×, loses on
+ALab's full image, and ties on ALab's direct lighting.
+- **The inference cost.** It adds 40–100% to a render where a shadow ray is
+  cheap, and 19–29% on ALab, where the gate passes.
+- **Even with a free pre-pass, it loses.** The per-sample cost is still +14%
+  on ALab (128.8 − 108.6 − 4.7 s of extra pre-pass, over 108.6), for at most a
+  tie per sample.
+- **The visibility it predicts buys little.** At most 1.2× per sample over
+  power on the samples, and on ALab 1.45× on direct lighting, against
+  `learned`'s 1.41×.
+- **D2's contribution variant is not proposed.** It would add an O(N)
+  `sample_li` per vertex to the same inference, and would have to beat
+  `learned` by about 1.3× per sample on ALab, and 2× on the samples, just to
+  break even.
 
 **`D` below 0.3.** `neural` at 0.2 and 0.1 moves relMSE by at most 2.5%
 (`domelight` 0.291 / 0.283 / 0.285, `usdlux` 0.0646 / 0.0635 / 0.0640, at
-0.3 / 0.2 / 0.1), inside the noise and without fireflies: kept at 0.3, shared
-with `learned` (`light_cache::DEFENSIVE`).
+0.3 / 0.2 / 0.1), inside the noise and without fireflies. ALab's direct
+lighting does gain from a lower `D`, under both learned selections (trimmed,
+frames 1004 and 1030):
+
+| ALab direct lighting | D = 0.3 | 0.2 | 0.1 | gain at 0.1 |
+|---|---|---|---|---|
+| `neural` | 0.189 | 0.162 (frame 1004) | 0.141 | 1.34× |
+| `learned` | 0.195 | | 0.164 | 1.19× |
+
+- **Its full image does not** (`neural` 3.66 / 3.68 / 3.73, `learned` 3.00 /
+  3.01).
+- **Nor does the verdict.** At 0.1 `neural` still costs 1.32× `learned`'s time
+  (`bench_ab`, 30.65 against 40.58 s), so at equal time it is 0.88× of it.
+- **Kept at 0.3**, shared with `learned` (`light_cache::DEFENSIVE`). The
+  gain is ALab's direct lighting alone, and `learned` fireflied at 0.2 on
+  `domelight` (§3.12). Lowering it for `learned` would be a change of its own,
+  measured on `domelight` again first.
 
 ## 4. The anatomy of the direct-lighting estimator
 

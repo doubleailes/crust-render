@@ -78,8 +78,12 @@ const LIGHT_SAMPLES: usize = 2;
 /// at most 2.5%, inside the noise, on `domelight` (0.291 / 0.283 / 0.285 at
 /// 0.3 / 0.2 / 0.1) and `usdlux` (0.0646 / 0.0635 / 0.0640). No firefly came
 /// with the lower shares, as a continuous visibility does not straddle the
-/// sun's shadow the way a cell does, but nothing was gained either, so it
-/// stays 0.3 for both. ALab was not measured.
+/// sun's shadow the way a cell does, but nothing was gained either. On
+/// ALab's direct lighting a lower share does gain (trimmed relMSE, frames
+/// 1004 and 1030: `neural` 0.189 / 0.141, `learned` 0.195 / 0.164 at 0.3 /
+/// 0.1), but its full image does not (`neural` 3.66 / 3.73, `learned` 3.00
+/// / 3.01), and `domelight` fireflies under `learned` at 0.2, so it stays
+/// 0.3 for both (`docs/light_sampling.md` §3.14).
 pub const DEFENSIVE: f32 = 0.3;
 /// Receivers a cell needs before its own distribution is trusted.
 const MIN_RECEIVERS: u32 = 2;
