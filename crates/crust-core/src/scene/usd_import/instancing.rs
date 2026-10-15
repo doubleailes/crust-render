@@ -29,8 +29,8 @@ use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::geom::{
-    BasisCurves as UsdBasisCurves, Mesh as UsdMesh, PointInstancer, PointInstancerSchema,
-    Sphere as UsdSphere,
+    BasisCurves as UsdBasisCurves, Mesh as UsdMesh, NurbsCurves as UsdNurbsCurves, PointInstancer,
+    PointInstancerSchema, Sphere as UsdSphere,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
@@ -44,9 +44,7 @@ use super::attrs::{
 use super::implicit::{Shape, undisplaced};
 use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
-use super::shapes::{
-    curve_segments, curves_scene, is_nurbs_curves, nurbs_curve_segments, sphere_radius,
-};
+use super::shapes::{curve_segments, curves_scene, nurbs_curve_segments, sphere_radius};
 use super::xform::compose_with_parent;
 use super::{ImportCaches, WalkScope, prim_at, prune_reason};
 
@@ -287,8 +285,10 @@ pub(super) fn collect_proto_parts(
             ));
         } else if let Some(batches) = match UsdBasisCurves::get(stage, prim.path().clone()) {
             Ok(Some(curves)) => Some(curve_segments(&prim, &curves)),
-            _ if is_nurbs_curves(&prim) => Some(nurbs_curve_segments(&prim)),
-            _ => None,
+            _ => match UsdNurbsCurves::get(stage, prim.path().clone()) {
+                Ok(Some(curves)) => Some(nurbs_curve_segments(&prim, &curves)),
+                _ => None,
+            },
         } {
             let material = resolve_material(stage, &prim, caches);
             if let Some(batches) = batches {
