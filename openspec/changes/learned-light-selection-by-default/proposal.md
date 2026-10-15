@@ -1,3 +1,18 @@
+## Status: on hold
+
+This change waits for `light-tree-selection`, which goes first: a light BVH
+(pbrt-v4's `BVHLightSampler`) as a new selection mode, which becomes the default
+if it passes its own equal-time gate against `power`. Do not apply this change
+as written. Once the tree change is archived, revise this one against the tree
+(`/opsx:update`):
+
+- The fallback outside trained cells becomes the tree instead of the power table.
+- The defensive share is re-measured with tree weights instead of uniform `0.3/n`.
+- D3's baseline becomes the tree, the new default, instead of `power`.
+- The non-goal "a light tree inside the cells" becomes the foundation this
+  change builds on.
+- The "Light selection" requirement is restated over the tree change's version.
+
 ## Why
 
 `learned` light selection (`crust:lightSelection = "learned"`) is visibility-aware.
