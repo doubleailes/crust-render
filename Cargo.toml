@@ -54,7 +54,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "hdr
 # crate — a renamed dependency is addressed by its key, not by its lib target
 # — so the key is `ptex`, which is both the lib name and what every `use` in
 # the workspace already says.
-ptex = { package = "ptex-rust", version = "0.4.0", features = ["cache"] }
+ptex = { package = "ptex-rust", version = "0.5.0", features = ["cache"] }
 # Tiled, mip-mapped TIFF — the `.tx` textures a streaming cache reads a single
 # tile at a time. Named directly rather than reached through `image`, because
 # the tiled reader uses the chunk API (`read_chunk`, `seek_to_image`) that
@@ -80,6 +80,14 @@ half = "2.7"
 # converts them into the working space (`crust_core::color`). From crates.io
 # (doubleailes/ocio-rs#2); the committed `Cargo.lock` pins the exact version.
 ocio = "0.1.0"
+# The USD reader and its typed schema views, versioned in lockstep. Declared
+# once so crust-core (the import) and crust-render (the MCP session's override
+# layer, the probe examples) can never name different versions of the stage
+# they share; `[patch.crates-io]` below swaps both for GitHub `main`. No
+# default features (openusd has none since 0.8): each member adds the ones it
+# needs — crust-core's `mmap` and schema families, crust-render's `serde`.
+openusd = { version = "0.8", default-features = false }
+openusd-schemas = { version = "0.8", default-features = false }
 
 # The hot loops are spread across crates: the integrator in `crust-core`
 # calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.
@@ -124,9 +132,9 @@ lto = "fat"
 codegen-units = 1
 
 # openusd tracks its GitHub `main` rather than the 0.8.0 release, to take its
-# fixes as they land. A patch rather than a `git =` in each manifest, so the
-# crates that name openusd keep their `0.8` requirement and dropping this
-# section is the whole revert to the release. Cargo.lock pins the commit; `cargo update -p
+# fixes as they land. A patch rather than a `git =` in `[workspace.dependencies]`,
+# so the requirement stays the release's `0.8` and dropping this section is the
+# whole revert to it. Cargo.lock pins the commit; `cargo update -p
 # openusd -p openusd-schemas` moves it.
 [patch.crates-io]
 openusd = { git = "https://github.com/mxpv/openusd", branch = "main" }
