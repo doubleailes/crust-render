@@ -13,7 +13,9 @@ every frame. Production renderers expand variables in output paths. Crust alread
 
 - Output paths expand husk's frame variables: `$F` (integer frame), `$F2`…`$F9` (zero-padded to
   that width), `$FF` (the frame as a float, subframes kept), and the braced forms `${F}`, `${F4}`,
-  `${FF}`. `\$` writes a literal `$`.
+  `${FF}`. `\$` writes a literal `$`. Husk's UDIM-style forms `<F>`, `<F2>`…`<F9>` and `<FF>` are
+  the same variables. They are what Solaris leaves in a USD `productName`, because Houdini expands
+  `$F4` before the stage is written.
 - Expansion applies to both `-o` and every authored `productName` (after the time code is applied).
   It also applies to the no-products `-o` path. The PNG preview follows the expanded path, as it
   already follows the EXR's.
@@ -43,7 +45,7 @@ _None._
 
 - `image-output`: output paths (`-o`, `productName`, and the PNG that follows them) expand frame
   variables. The time-sampled `productName` requirement gains the expansion step.
-- `cli`: `-o/--output` documents the frame variables.
+- `cli`: `-o/--output` documents the frame variables, both forms.
 - `scene-check`: the reported product files are the expanded paths for the checked frame.
 
 ## Impact

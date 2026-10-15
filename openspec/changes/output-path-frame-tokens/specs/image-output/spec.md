@@ -7,8 +7,9 @@
 Before any file is written, the tool SHALL expand husk's frame variables in every output path:
 the `-o` value, each product's `productName`, and so the PNG beside them. `$F` is the integer
 frame; `$F2`–`$F9` are that frame zero-padded to the width, sign included; `$FF` is the frame
-with any fraction kept and no trailing `.0`. `${F}`, `${F4}` and `${FF}` are the same variables.
-`\$` writes a literal `$`.
+with any fraction kept and no trailing `.0`. `${F}`, `${F4}` and `${FF}`, and husk's UDIM-style
+`<F>`, `<F2>`–`<F9>` and `<FF>`, are the same variables. `\$` writes a literal `$`; any other `<…>`
+is left as written.
 
 #### Scenario: Padded frame in -o
 
@@ -25,6 +26,17 @@ with any fraction kept and no trailing `.0`. `${F}`, `${F4}` and `${FF}` are the
 
 - **WHEN** the render uses `-f 12` and `-o` is `a.$F.${F3}.$FF.exr`
 - **THEN** the file is `a.12.012.12.exr`
+
+#### Scenario: UDIM-style forms in a Solaris productName
+
+- **WHEN** a product authors `productName = "renders/beauty.<F4>.exr"`, another
+  `"renders/raw.<F>.<FF>.exr"`, and the render uses `-f 12`
+- **THEN** they are written to `renders/beauty.0012.exr` and `renders/raw.12.12.exr`
+
+#### Scenario: Other angle-bracket tokens
+
+- **WHEN** `-o` is `a.<UDIM>.<F4>.exr` and the render uses `-f 2`
+- **THEN** the file is `a.<UDIM>.0002.exr` and no warning is logged
 
 #### Scenario: Negative frame
 
@@ -48,9 +60,9 @@ read their default values, as they do today.
 
 ### Requirement: Subframes round integer frame variables
 
-On a fractional frame, `$F` and `$F2`–`$F9` SHALL round to the nearest frame, with halves rounded
+On a fractional frame, `$F` and `$F2`–`$F9` (and `<F>`, `<F2>`–`<F9>`) SHALL round to the nearest frame, with halves rounded
 away from zero, and SHALL raise one `product.subframe_frame` warning (kind `approximated`) per path
-that names the path and suggests `$FF`. `$FF` SHALL keep the fraction and raise nothing.
+that names the path and suggests `$FF`. `$FF` and `<FF>` SHALL keep the fraction and raise nothing.
 
 #### Scenario: A subframe with $F4
 

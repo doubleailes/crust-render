@@ -119,9 +119,31 @@ Where to write the image. What it does depends on whether the stage authors
 
 With products, the PNG is made from the first product's beauty and written beside it.
 
+**Frame variables.** `-o`, like every `productName`, expands husk's frame variables before
+anything is written:
+
+| variable | expands to | at `-f 12` | at `-f 12.5` |
+|----------|------------|------------|--------------|
+| `$F`, `${F}`, `<F>` | the integer frame | `12` | `13` |
+| `$F2`–`$F9`, `${F4}`, `<F4>` | the integer frame, zero-padded to that width (the sign counts) | `0012` | `0013` |
+| `$FF`, `${FF}`, `<FF>` | the frame, fraction kept, no trailing `.0` | `12` | `12.5` |
+
+- Without [`-f`](#frame), the frame is 1, husk's default.
+- On a subframe, the integer forms round to the nearest frame (halves away from zero) and
+  raise a [`product.subframe_frame`](@/docs/reference/warnings.md) warning. Use `$FF` when
+  subframes must not share a file.
+- `\$` writes a literal `$`. Any other `$NAME` is left in the path and raises
+  [`product.unknown_variable`](@/docs/reference/warnings.md). Any other `<…>`, such as
+  `<UDIM>`, is left alone silently. Nothing else is expanded: no environment variables.
+- **Single-quote** an `-o` holding a `$` variable, or the shell expands it first and
+  `out.$F4.exr` silently becomes `out..exr`.
+
 ```bash
-crust render -i shot.usda -o renders/shot.0001.exr
-# without products: writes renders/shot.0001.exr and renders/shot.0001.png
+crust render -i shot.usda -o shot.0001.exr
+# without products: writes shot.0001.exr and shot.0001.png
+
+crust render -i shot.usda -f 12 -o 'shot.$F4.exr'
+# writes shot.0012.exr and shot.0012.png
 
 crust render -i samples/aovs.usda
 # writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr

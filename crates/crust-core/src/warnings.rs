@@ -196,6 +196,10 @@ warning_codes! {
         "A RenderProduct has no RenderVar crust can write; nothing is written for it.";
     ProductSharedPath => "product.shared_path", Skipped, Each,
         "A RenderProduct writes the path an earlier one already writes; nothing is written for it.";
+    ProductUnknownVariable => "product.unknown_variable", Refused, Each,
+        "An output path names a variable crust does not expand; it is left in the path as written.";
+    ProductSubframeFrame => "product.subframe_frame", Approximated, Each,
+        "An output path's integer frame variable rounded a fractional frame to the nearest one.";
     AovNotARenderVar => "aov.not_a_render_var", Skipped, Each,
         "orderedVars targets a prim that is not a RenderVar.";
     AovUnsupportedSource => "aov.unsupported_source", Skipped, Each,

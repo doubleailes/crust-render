@@ -224,7 +224,9 @@ AOVs are requested only through `RenderProduct` / `RenderVar`. There is no
 three problems:
 
 1. It takes no time code. `productName` is *varying* precisely so that it can
-   be time-sampled per frame, which is how Solaris writes `$F4` paths.
+   be time-sampled per frame, which is how Solaris writes `$F4` paths (Houdini
+   expands `$F4` per frame as it writes the stage; a stage meant for one husk
+   run over many frames carries `<F4>` instead, which § Paths expands).
 2. Its namespaced-settings reader sees only default values, not time samples.
 3. Its fallbacks are private constants, and the getters apply none.
 
@@ -765,9 +767,19 @@ like `st`, and evaluated at the first hit.
   An authored `renderingColorSpace` other than Rec.709 linear gives a `WARN`.
   Crust renders in one space; the colour-management change owns that.
 
-**Paths.** `productName` is used as authored. A relative name resolves against
-the working directory, as husk and usdrecord do. Parent directories are
-created.
+**Paths.** `productName` is read at the render's time code, then its husk
+frame variables are expanded (`$F`, `$F2`–`$F9`, `$FF`, their `${…}` forms,
+and the UDIM-style `<F>`, `<F4>`, `<FF>` Solaris writes into a stage). The
+order is fixed: `-o` replaces the first product's name, every name is
+expanded, then the empty-name and shared-path refusals run on the expanded
+names, then the MCP session anchors relative names to its layer's directory.
+So two names that differ only in a variable collide when they expand to one
+file. The grammar, the number formatting (default frame 1, halves away from
+zero, sign in the padding) and the two warning codes
+(`product.unknown_variable`, `product.subframe_frame`) are the
+`output-path-frame-tokens` change's design (D3–D7, its sources in D7). A
+relative name resolves against the working directory, as husk and usdrecord
+do. Parent directories are created.
 
 **PNG preview.** Written from the first product's beauty, beside that
 product's file. A product with no beauty var gets no PNG (`DEBUG` line).
@@ -787,6 +799,11 @@ listed under Follow-ups.
 - **Products authored, no `-o`:** each product goes to its `productName`.
 - **No products:** `-o`, defaulting to `output.exr`. This is today's
   behaviour.
+
+In every case `-o`'s frame variables are expanded at `-f` (frame 1 without
+it) before anything is written, as a `productName`'s are (§ Paths). On the
+no-products path the parent directories are *not* created: `write_rgb_file`
+writes where it is told.
 
 No new flag in this change. One `INFO` line lists the products written, once
 per render, which stays within the bounded-INFO rule.
