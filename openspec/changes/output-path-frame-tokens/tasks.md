@@ -17,7 +17,7 @@
 - [x] 4.1 Give `select_products` a `frame: f64` and expand every product name after the `-o` substitution and before the empty-name check and `refuse_shared_paths` (D2). Turn each issue into a coded warning at the product's prim. Verify: a unit test in `main.rs` shows `out.$F4.exr` + `out.0003.exr` at frame 3 raising `product.shared_path` on the second product.
 - [x] 4.2 Pass `cli.frame.unwrap_or(1.0)` from `render_and_write` and `args.scene.frame.unwrap_or(1.0)` from `check`. Make `beauty_output` take the frame and expand `-o` for the no-products case, raising the same codes with no prim. Verify: an integration test renders `samples/cornellbox.usda` at `-s 1 -f 12 -o <tmp>/b.$F4.exr` and finds `b.0012.exr` and `b.0012.png`; `crust check -f 5 --json -` on a stage with `productName = "x.$F4.exr"` reports `x.0005.exr` and, at `-f 5.5`, a `product.subframe_frame` record.
 - [x] 4.3 Confirm the MCP `render_final` path still anchors the expanded names (the anchor join runs after expansion). Verify: the existing MCP `render_final` test passes, and a new assertion on an `$F4` productName (if that test fixture permits it) finds the expanded file under the session directory.
-- [ ] 4.4 Confirm that nothing changes when there is no `$`. Verify: `cargo test --workspace` passes with the existing product, check and image-output tests untouched, and `scripts/check_images.sh check` on a recorded golden directory reports no change.
+- [x] 4.4 Confirm that nothing changes when there is no `$`. Verify: `cargo test --workspace` passes with the existing product, check and image-output tests untouched, and `scripts/check_images.sh check` on a recorded golden directory reports no change.
 
 ## 5. Documentation
 
@@ -26,7 +26,7 @@
 
 ## 6. Final checks
 
-- [ ] 6.1 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`. Verify: all pass.
+- [x] 6.1 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`. Verify: all pass.
 
 ## Workflow follow-up
 
