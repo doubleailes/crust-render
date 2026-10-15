@@ -386,7 +386,7 @@ fn the_pmf_sums_to_one_where_every_light_can_reach() {
         let lights = scattered_spheres(n, n as u64);
         let tree = LightTree::build(n, &lights).unwrap();
         // With no normal, a sphere's importance is never zero.
-        for r in receivers(3, 60).into_iter().filter(|r| r.n == Vec3A::ZERO) {
+        for r in receivers(3, 60).into_iter().filter(|r| r.n == Vec3::ZERO) {
             let sum: f64 = (0..n).map(|k| tree.pmf(&r, k) as f64).sum();
             assert!((sum - 1.0).abs() < 1e-5, "{n} lights: sum {sum}");
         }

@@ -17,7 +17,7 @@
 
 use std::f32::consts::PI;
 
-use glam::{Quat, Vec3A};
+use glam::{Quat, Vec3, Vec3A};
 
 /// The largest `f32` below one: where a remapped `u` is clamped, so that
 /// rounding never carries it to one.
@@ -35,8 +35,11 @@ const ONE_MINUS_EPSILON: f32 = 1.0 - f32::EPSILON / 2.0;
 pub struct Receiver {
     pub p: Vec3A,
     /// The surface normal, facing the side the ray arrived from
-    /// (`HitRecord::normal`); zero for none.
-    pub n: Vec3A,
+    /// (`HitRecord::normal`); zero for none. Stored unaligned, which makes a
+    /// receiver 32 bytes rather than 48: the integrator carries one per
+    /// path vertex, and moving the aligned form cost `power`, which never
+    /// reads it, a measurable share of cornellbox's instructions.
+    pub n: Vec3,
     /// Whether the surface reflects only ([`crate::Material::transmits`] is
     /// false): then no light below its horizon can reach it.
     pub opaque: bool,
@@ -48,7 +51,7 @@ impl Receiver {
     pub fn at(p: Vec3A) -> Self {
         Self {
             p,
-            n: Vec3A::ZERO,
+            n: Vec3::ZERO,
             opaque: false,
         }
     }
@@ -57,15 +60,19 @@ impl Receiver {
     /// arrived from).
     #[inline]
     pub fn surface(p: Vec3A, n: Vec3A, opaque: bool) -> Self {
-        Self { p, n, opaque }
+        Self {
+            p,
+            n: n.into(),
+            opaque,
+        }
     }
 
     /// Whether `self` and `other` are the same bits — what NEE and the
     /// bounce side must agree on.
     pub fn same_bits(&self, other: &Self) -> bool {
-        let bits = |v: Vec3A| v.to_array().map(f32::to_bits);
-        bits(self.p) == bits(other.p)
-            && bits(self.n) == bits(other.n)
+        let bits = |v: [f32; 3]| v.map(f32::to_bits);
+        bits(self.p.to_array()) == bits(other.p.to_array())
+            && bits(self.n.to_array()) == bits(other.n.to_array())
             && self.opaque == other.opaque
     }
 }
@@ -157,14 +164,15 @@ impl LightBounds {
             return 0.0;
         }
         let mut importance = self.phi * cos_p / d2;
-        if r.n != Vec3A::ZERO {
+        if r.n != Vec3::ZERO {
+            let n = Vec3A::from(r.n);
             // The receiver's angle to the light, reduced by the box's
             // subtended angle. Signed at an opaque receiver, so a box wholly
             // below its horizon gets zero; unsigned where it may transmit.
             let cos_i = if r.opaque {
-                r.n.dot(-wi)
+                n.dot(-wi)
             } else {
-                r.n.dot(wi).abs()
+                n.dot(wi).abs()
             };
             let sin_i = safe_sqrt(1.0 - cos_i * cos_i);
             importance *= cos_sub_clamped(sin_i, cos_i, sin_b, cos_b);
