@@ -150,7 +150,9 @@ Its log SHALL go to stderr, so stdout holds only the list.
 - `-i/--input`: the USD scene path.
 - `-o/--output`: the output path. When the stage authors RenderProducts, this
   overrides the first product's path. Otherwise it is the single EXR's path,
-  default `output.exr`.
+  default `output.exr`. Its frame variables (`$F`, `$F2`–`$F9`, `$FF`, or
+  `<F>`, `<F2>`–`<F9>`, `<FF>`) are expanded as `image-output` describes; quote
+  it so the shell leaves them alone.
 - `-l/--level`: log verbosity, default `info`.
 - `--scanline`: row-order rendering instead of the default 16×16 tiles.
 - `-s/--samples`: override the scene's samples-per-pixel.
@@ -202,6 +204,11 @@ lines, and SHALL have no effect.
   `-o out/x.exr`
 - **THEN** the first product is written to `out/x.exr` and the second to
   `b.exr`
+
+#### Scenario: Output with a frame variable
+
+- **WHEN** the user runs `crust render -i scene.usda -f 40 -o 'out/x.$F4.exr'`
+- **THEN** the EXR is written to `out/x.0040.exr`
 
 ### Requirement: Adaptive subdivision flag
 

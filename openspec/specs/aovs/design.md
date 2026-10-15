@@ -777,7 +777,9 @@ So two names that differ only in a variable collide when they expand to one
 file. The grammar, the number formatting (default frame 1, halves away from
 zero, sign in the padding) and the two warning codes
 (`product.unknown_variable`, `product.subframe_frame`) are the
-`output-path-frame-tokens` change's design (D3–D7, its sources in D7). A
+`output-path-frame-tokens` change's design
+(`openspec/changes/archive/2026-10-15-output-path-frame-tokens/design.md`, D3–D7,
+its sources in D7). A
 relative name resolves against the working directory, as husk and usdrecord
 do. Parent directories are created.
 
