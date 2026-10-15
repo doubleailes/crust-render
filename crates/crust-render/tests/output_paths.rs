@@ -109,3 +109,73 @@ fn a_path_without_variables_is_written_as_given() {
     assert!(!log.contains("[product."), "{log}");
     assert_eq!(files(&dir), ["plain.exr", "plain.png"]);
 }
+
+/// A stage whose every product is refused writes its beauty to `-o`, which
+/// was already expanded as the first product's name: its issues are warned
+/// about once, not again for the fallback.
+#[test]
+fn a_refused_products_fallback_warns_about_o_once() {
+    let dir = work_dir("refused_fallback");
+    let stage = dir.join("stage.usda");
+    std::fs::write(
+        &stage,
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Camera "cam"
+    {
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/cam>
+        rel products = [</Render/main>]
+        uniform int2 resolution = (16, 8)
+    }
+    def RenderProduct "main"
+    {
+        token productName = "main.exr"
+        rel orderedVars = [</Render/intrinsic>]
+    }
+    def RenderVar "intrinsic"
+    {
+        uniform token dataType = "float"
+        uniform token sourceType = "intrinsic"
+        uniform string sourceName = "anything"
+    }
+}
+"#,
+    )
+    .expect("write stage");
+    let out = render(
+        &dir,
+        &[
+            "-i",
+            stage.to_str().unwrap(),
+            "-f",
+            "2.5",
+            "-o",
+            "b.$SHOT.$F2.exr",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = String::from_utf8_lossy(&out.stdout);
+    for code in ["[product.unknown_variable]", "[product.subframe_frame]"] {
+        assert_eq!(log.matches(code).count(), 1, "{code} in {log}");
+    }
+    assert_eq!(
+        files(&dir),
+        ["b.$SHOT.03.exr", "b.$SHOT.03.png", "stage.usda"]
+    );
+}

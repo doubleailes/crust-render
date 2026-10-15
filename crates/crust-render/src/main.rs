@@ -901,7 +901,11 @@ fn apply_scene_overrides(cli: &SceneArgs, mut settings: RenderSettings) -> Rende
 /// `product.no_writable_vars`, `product.shared_path`), which `crust check`
 /// collects. Collisions are judged on the expanded paths. Empty means the
 /// single beauty EXR at `-o`.
-fn select_products(aovs: &mut AovRequest, output: Option<&str>, frame: f64) {
+///
+/// Returns `-o` as expanded when it named the first product, so that a
+/// render whose products are all refused writes its beauty there without
+/// expanding (and warning about) the same path a second time.
+fn select_products(aovs: &mut AovRequest, output: Option<&str>, frame: f64) -> Option<String> {
     if let (Some(first), Some(o)) = (aovs.products.first_mut(), output) {
         debug!(
             "-o {o} replaces {}'s productName {:?}",
@@ -912,6 +916,9 @@ fn select_products(aovs: &mut AovRequest, output: Option<&str>, frame: f64) {
     for product in &mut aovs.products {
         product.name = expand_output(&product.name, frame, Some(&product.prim_path));
     }
+    let expanded_output = output
+        .and(aovs.products.first())
+        .map(|first| first.name.clone());
     if !aovs.products.is_empty() {
         aovs.products.retain(|p| {
             if p.name.is_empty() {
@@ -938,6 +945,7 @@ fn select_products(aovs: &mut AovRequest, output: Option<&str>, frame: f64) {
             warn!("No RenderProduct can be written; writing the beauty to -o instead");
         }
     }
+    expanded_output
 }
 
 /// A JSON report's destination: `-` is stdout.
@@ -1223,7 +1231,7 @@ fn check_scene(
     // Without -f, frame variables expand as frame 1, husk's default.
     let frame = args.scene.frame.unwrap_or(1.0);
     let selecting = WarningScope::enter();
-    select_products(&mut aovs, None, frame);
+    let _ = select_products(&mut aovs, None, frame);
     let mut warnings = scene.warnings.clone();
     warnings.extend(selecting.finish());
     let products = if aovs.products.is_empty() {
@@ -1812,7 +1820,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     let mut aovs = scene.aovs;
     // Without -f, frame variables expand as frame 1, husk's default.
     let frame = cli.frame.unwrap_or(1.0);
-    select_products(&mut aovs, output.as_deref(), frame);
+    let expanded_output = select_products(&mut aovs, output.as_deref(), frame);
     if let Some(dir) = run.anchor {
         for product in &mut aovs.products {
             if Path::new(&product.name).is_relative() {
@@ -1820,12 +1828,12 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
             }
         }
     }
-    // Expanded only for a beauty-only render: with products, -o already
-    // named (and was expanded as) the first product's path.
+    // With products, -o already named (and was expanded as) the first
+    // product's path: a render whose products were all refused reuses that
+    // expansion rather than warning about the same path twice.
     let beauty_path = match (output.as_deref(), run.beauty) {
         (None, Some(beauty)) => beauty.to_owned(),
-        (output, _) if aovs.products.is_empty() => beauty_output(output, frame),
-        (output, _) => output.unwrap_or("output.exr").to_owned(),
+        (output, _) => expanded_output.unwrap_or_else(|| beauty_output(output, frame)),
     };
     let beauty_path = beauty_path.as_str();
     let camera = scene.camera;

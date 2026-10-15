@@ -190,9 +190,12 @@ impl FrameVar {
     fn format(self, frame: f64) -> (String, bool) {
         match self {
             // `round` takes halves away from zero, as Houdini's `round`;
-            // the width counts the sign (`-003`), as its `padzero`.
+            // the width counts the sign (`-003`), as its `padzero`. Formatted
+            // from the `f64` itself: any finite frame is accepted, and a cast
+            // to an integer type would saturate, giving two frames one name.
+            // `+ 0.0` turns a rounded `-0` (from `-0.4`) into `0`.
             FrameVar::Int(width) => (
-                format!("{:0width$}", frame.round() as i64),
+                format!("{:0width$.0}", frame.round() + 0.0),
                 frame.fract() != 0.0,
             ),
             // The shortest round-trip form, with no trailing `.0`; `-0`
@@ -863,6 +866,23 @@ mod tests {
     fn a_negative_frame_counts_its_sign_in_the_width() {
         assert_eq!(expand("a.$F4.exr", -3.0).0, "a.-003.exr");
         assert_eq!(expand("a.$FF.exr", -3.0).0, "a.-3.exr");
+    }
+
+    #[test]
+    fn frames_beyond_any_integer_type_keep_their_digits() {
+        // 2^63 and -(2^63 + 2048): just past `i64`'s range on each side.
+        assert_eq!(expand("$F", 9223372036854775808.0).0, "9223372036854775808");
+        assert_eq!(
+            expand("$F", -9223372036854777856.0).0,
+            "-9223372036854777856"
+        );
+        assert_eq!(expand("$F4", 1e20).0, "100000000000000000000");
+    }
+
+    #[test]
+    fn a_frame_rounding_to_zero_has_no_sign() {
+        assert_eq!(expand("$F2", -0.4).0, "00");
+        assert_eq!(expand("$F", -0.0).0, "0");
     }
 
     #[test]
