@@ -36,23 +36,17 @@
 //!   gradient is summed in chunk order whatever the thread count
 //!   (`crust_nn::Network::batch_gradient`).
 
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
-use crust_nn::{Adam, GridConfig, MAX_WIDTH, Network, Shape, sigmoid};
+use crust_nn::{Adam, GridConfig, Network, Shape};
 use rayon::prelude::*;
 
+use super::light_cache;
+use crate::PathSampler;
 use crate::camera::Camera;
 use crate::light::LightList;
-use crate::light_cache::{self, DEFENSIVE};
+use crate::light::neural::{MAX_LIGHTS, NEXT_ID, VisibilityCache};
 use crate::rt_world::World;
-use crate::{PathSampler, Vec3A};
-
-/// The most lights `neural` supports (design D7): the output layer is one
-/// unit per light, and past this its cost outgrows the go/no-go gate. ALab
-/// has 47.
-pub const MAX_LIGHTS: usize = 64;
-const _: () = assert!(MAX_LIGHTS <= MAX_WIDTH);
 
 /// Domain key for initialisation and shuffling, apart from every key the
 /// render and `learned`'s walk draw with. "NV".
@@ -66,10 +60,6 @@ const BATCH: usize = 256;
 /// (tiny-cuda-nn's defaults for a hash encoding).
 const GRID_LR: f32 = 1e-2;
 const MLP_LR: f32 = 1e-3;
-/// Below this `Σ πV̂`, every light is predicted hidden: the ratios of
-/// near-zero predictions are noise, and the power table answers instead.
-const HIDDEN: f64 = 1e-6;
-
 /// The network (design D3): 8 hash levels of 2 features, from 4 to 107 cells
 /// per axis — the finest matching `learned`'s 96-cell grid — in tables of
 /// 2^14 vertices (at most 1 MiB of `f32`), then 16 → 32 → 32 → `lights`, ReLU
@@ -85,137 +75,6 @@ pub(crate) fn shape(lights: usize) -> Shape {
         },
         hidden: vec![32, 32],
         outputs: lights,
-    }
-}
-
-/// Distinguishes caches in the thread-local memo, so that no renderer reads
-/// another's.
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-/// The trained network and what it is read with. Built by [`train`], frozen,
-/// and read by [`LightList`] at every pick and every MIS weight.
-#[derive(Debug)]
-pub struct VisibilityCache {
-    id: u64,
-    /// The receivers' robust bounds; the unit cube's origin is `lo`, and
-    /// every axis is scaled by the longest one's extent, so the encoding's
-    /// cells stay cubic.
-    lo: Vec3A,
-    hi: Vec3A,
-    inv_extent: f32,
-    net: Network<f32>,
-    /// The power table the predictions weigh, and which lights are live.
-    power: Vec<f32>,
-    live: Vec<bool>,
-    n_live: usize,
-    /// For the debug line and the tests.
-    pub receivers: usize,
-    pub trained: usize,
-    pub loss: f64,
-}
-
-/// The last table a thread computed, keyed by the cache and the exact bits
-/// of the position (design D6).
-struct Memo {
-    id: u64,
-    key: [u32; 3],
-    /// Whether the network answered there; `false` is the power table.
-    some: bool,
-    pmf: [f32; MAX_LIGHTS],
-    cdf: [f32; MAX_LIGHTS],
-}
-
-thread_local! {
-    static MEMO: RefCell<Memo> = const {
-        RefCell::new(Memo {
-            id: 0,
-            key: [0; 3],
-            some: false,
-            pmf: [0.0; MAX_LIGHTS],
-            cdf: [0.0; MAX_LIGHTS],
-        })
-    };
-}
-
-impl VisibilityCache {
-    /// Lights the network predicts for.
-    pub fn lights(&self) -> usize {
-        self.power.len()
-    }
-
-    /// `p` in the network's unit cube, or `None` outside the trained bounds.
-    #[inline]
-    fn unit(&self, p: Vec3A) -> Option<[f32; 3]> {
-        let inside = p.cmpge(self.lo).all() && p.cmple(self.hi).all();
-        inside.then(|| ((p - self.lo) * self.inv_extent).to_array())
-    }
-
-    /// Each light's predicted visibility from `p`, or `None` outside the
-    /// trained bounds.
-    pub fn visibility(&self, p: Vec3A) -> Option<Vec<f32>> {
-        let x = self.unit(p)?;
-        let mut z = [0.0f32; MAX_LIGHTS];
-        let n = self.lights();
-        self.net.infer(x, &mut z[..n]);
-        Some(z[..n].iter().map(|&z| sigmoid(z)).collect())
-    }
-
-    /// The pick distribution at `p` into `cdf` and `pmf` (design D2), or
-    /// `false` where the power table answers instead: outside the bounds, or
-    /// where every light is predicted hidden. A pure function of `p`'s bits.
-    #[inline]
-    fn compute(&self, p: Vec3A, cdf: &mut [f32], pmf: &mut [f32]) -> bool {
-        let Some(x) = self.unit(p) else {
-            return false;
-        };
-        let n = self.lights();
-        let mut z = [0.0f32; MAX_LIGHTS];
-        self.net.infer(x, &mut z[..n]);
-        let mut w = [0.0f64; MAX_LIGHTS];
-        let mut total = 0.0f64;
-        for ((w, &z), &pi) in w.iter_mut().zip(&z[..n]).zip(&self.power) {
-            *w = pi as f64 * sigmoid(z) as f64;
-            total += *w;
-        }
-        if !(total > HIDDEN && total.is_finite()) {
-            return false;
-        }
-        light_cache::defensive_table(&w[..n], total, &self.live, self.n_live, DEFENSIVE, cdf, pmf);
-        true
-    }
-
-    /// Calls `f` with the `(pmf, cdf)` NEE picks with at `p`, or with `None`
-    /// where the power table answers. Served from this thread's memo when the
-    /// last call was at the same `p`'s bits — the bounce side's lookup at
-    /// `prev.pos` right after NEE's at that vertex — and recomputed, to the
-    /// same bits, otherwise.
-    #[inline]
-    pub(crate) fn with_table<T>(
-        &self,
-        p: Vec3A,
-        f: impl FnOnce(Option<(&[f32], &[f32])>) -> T,
-    ) -> T {
-        let key = p.to_array().map(f32::to_bits);
-        let n = self.lights();
-        MEMO.with(|memo| {
-            let mut memo = memo.borrow_mut();
-            if memo.id != self.id || memo.key != key {
-                let Memo { pmf, cdf, .. } = &mut *memo;
-                let some = self.compute(p, &mut cdf[..n], &mut pmf[..n]);
-                memo.some = some;
-                memo.id = self.id;
-                memo.key = key;
-            }
-            f(memo.some.then(|| (&memo.pmf[..n], &memo.cdf[..n])))
-        })
-    }
-
-    /// [`VisibilityCache::with_table`] without the memo, into the caller's
-    /// arrays: for the tests that pin the memo to it, and the bench.
-    pub fn table_uncached(&self, p: Vec3A) -> Option<(Vec<f32>, Vec<f32>)> {
-        let n = self.lights();
-        let (mut pmf, mut cdf) = (vec![0.0; n], vec![0.0; n]);
-        self.compute(p, &mut cdf, &mut pmf).then_some((pmf, cdf))
     }
 }
 
@@ -265,7 +124,7 @@ pub(crate) fn train(
         xs.len(),
         started.elapsed()
     );
-    let (live, n_live) = light_cache::live_lights(lights);
+    let (live, n_live) = crate::light::learned::live_lights(lights);
     Some(VisibilityCache {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         lo,

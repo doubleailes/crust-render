@@ -370,7 +370,7 @@ impl ResolvedOpenPBR {
         r_in: &Ray,
         rec: &HitRecord,
         draw: impl FnOnce() -> [f32; 4],
-        out: &mut crate::lpe::LobeSplit,
+        out: &mut crate::material::lobe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
         if self.1 {
@@ -519,7 +519,7 @@ impl OpenPBR {
         r_in: &Ray,
         rec: &HitRecord,
         draw: impl FnOnce() -> [f32; 4],
-        mut split: Option<&mut crate::lpe::LobeSplit>,
+        mut split: Option<&mut crate::material::lobe::LobeSplit>,
     ) -> Option<ScatterSample> {
         if SPLIT && let Some(out) = split.as_deref_mut() {
             out.clear();
@@ -710,7 +710,7 @@ impl OpenPBR {
         r_in: &Ray,
         rec: &HitRecord,
         wi: Vec3A,
-        out: &mut crate::lpe::LobeSplit,
+        out: &mut crate::material::lobe::LobeSplit,
     ) -> bool {
         let frame = Frame::new(rec.normal);
         let v_local = frame.to_local(-r_in.direction().normalize());
@@ -739,7 +739,7 @@ impl OpenPBR {
         r_in: &Ray,
         rec: &HitRecord,
         draw: impl FnOnce() -> [f32; 4],
-        out: &mut crate::lpe::LobeSplit,
+        out: &mut crate::material::lobe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
         self.scatter_with::<true, true>(r_in, rec, draw, Some(out))
@@ -775,7 +775,7 @@ impl OpenPBR {
 
     /// The event of a delta sample: OpenPBR's only delta lobe is thin-walled
     /// transmission.
-    pub(crate) fn delta_event(&self) -> crate::lpe::LobeEvent {
+    pub(crate) fn delta_event(&self) -> crate::material::lobe::LobeEvent {
         Lobe::Transmission.event(self)
     }
 

@@ -4,7 +4,7 @@
 
 Define the scene's light sources, how the integrator samples them for next
 event estimation, and how UsdLux prims map onto them. Lives in
-`crust-core/src/light/`, `lux.rs`, `light_cache.rs` and `environment.rs`, with
+`crust-core/src/light/`, `lux.rs`, `tracer/light_cache.rs`, `tracer/light_visibility.rs` and `environment.rs`, with
 import in `scene/usd_import/lights.rs`. The reasoning and measurements behind
 these requirements are in `design.md`.
 

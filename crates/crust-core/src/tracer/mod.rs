@@ -18,6 +18,8 @@ use crate::{LightList, LightSelection};
 use openqmc::{Sampler, SamplerImpl};
 
 mod control;
+mod light_cache;
+mod light_visibility;
 mod path;
 pub(crate) use path::{past_medium_boundaries, surface_visibility};
 mod region;
@@ -338,7 +340,7 @@ impl Renderer {
         let settings = self.settings;
         self.lights.select_by(settings.light_selection());
         if settings.light_selection() == LightSelection::Learned {
-            match crate::light_cache::train(
+            match light_cache::train(
                 &self.world,
                 &self.camera,
                 &self.lights,
@@ -359,7 +361,7 @@ impl Renderer {
             }
         }
         if settings.light_selection() == LightSelection::Neural {
-            match crate::light_visibility::train(
+            match light_visibility::train(
                 &self.world,
                 &self.camera,
                 &self.lights,

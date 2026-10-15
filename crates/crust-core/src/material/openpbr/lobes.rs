@@ -5,8 +5,8 @@ use std::f32::consts::PI;
 
 use glam::Vec3A;
 
-use crate::lpe::{LobeEvent, LobeLabel, LobeSplit, Scatter, microfacet_scatter};
 use crate::material::brdf::*;
+use crate::material::lobe::{LobeEvent, LobeLabel, LobeSplit, Scatter, microfacet_scatter};
 
 use super::OpenPBR;
 use super::transmission::{eval_transmission, transmission_is_continuous};

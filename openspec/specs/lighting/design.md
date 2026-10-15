@@ -108,7 +108,7 @@
     - a black light gets zero.
   - **`uniform`** is one in N, the renderer before this was a choice, reproduced
     **bit for bit**: 0 differing pixels on all 22 checked-in samples at 16 spp.
-  - **`learned`** (opt-in, `light_cache.rs`; `docs/light_sampling.md` §3.12) is
+  - **`learned`** (opt-in, `tracer/light_cache.rs` trains it, `light/learned.rs` holds its tables; `docs/light_sampling.md` §3.12) is
     visibility-aware. Before the first pass, a deterministic pre-pass (one camera
     path per 4×4 pixels, two BSDF bounces) estimates **every** light's NEE
     contribution at each vertex with the integrand itself (radiance × BSDF ×
@@ -135,8 +135,8 @@
     - **Power table underneath.** The cache only installs over a power table:
       with none, `density` divides by `n` and would disagree with the per-cell
       pmf.
-  - **`neural`** (opt-in and experimental, `light_visibility.rs` over the
-    `crust-nn` crate; `docs/light_sampling.md` § "Neural visibility cache") is
+  - **`neural`** (opt-in and experimental, `tracer/light_visibility.rs` trains it over the
+    `crust-nn` crate and `light/neural.rs` holds it; `docs/light_sampling.md` § "Neural visibility cache") is
     `learned`'s knowledge stored as a continuous function instead of a grid,
     after Bokšanský & Meister's *Neural Visibility Cache* (JCGT 2025). The
     same pre-pass walk (`light_cache::walk`) labels each receiver with the
@@ -148,7 +148,7 @@
     frozen. Three details are load-bearing:
     - **The pick (D2)** is `(1 − D) · πℓ V̂ℓ(x) / Σ πV̂ + D / n_live` over the
       power table `π`, with `learned`'s `DEFENSIVE` as `D` (shared, not
-      copied) and the table built by the same `light_cache::defensive_table`,
+      copied) and the table built by the same `light::learned::defensive_table`,
       CDF first. Where every prediction is hidden (`Σ πV̂ ≤ 1e-6`) or the
       vertex is outside the receivers' 2–98% bounds, the power table answers.
       The network learns visibility only; distance and power stay analytic.

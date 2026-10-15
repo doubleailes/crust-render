@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::Vec3A;
+use crate::light::learned::DEFENSIVE;
 use crate::rt::Geometry;
 use crate::{AreaLight, Emissive, LightSelection, OpenPBR, SphereShape, WorldBuilder};
 

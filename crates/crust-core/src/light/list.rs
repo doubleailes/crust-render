@@ -89,9 +89,9 @@ crate::names::named!(
 #[derive(Debug)]
 pub(crate) enum Learned {
     /// [`LightSelection::Learned`]'s per-cell tables.
-    Grid(crate::light_cache::LightCache),
+    Grid(super::learned::LightCache),
     /// [`LightSelection::Neural`]'s network.
-    Neural(crate::light_visibility::VisibilityCache),
+    Neural(super::neural::VisibilityCache),
     /// [`LightSelection::Tree`]'s light BVH.
     Tree(TreeSelection),
 }
@@ -514,13 +514,13 @@ impl LightList {
 
     /// Installs a learned selection over the power one (see
     /// [`LightSelection::Learned`]). Must be built for this list's lights.
-    pub(crate) fn set_cache(&mut self, cache: crate::light_cache::LightCache) {
+    pub(crate) fn set_cache(&mut self, cache: super::learned::LightCache) {
         self.cache = Some(std::sync::Arc::new(Learned::Grid(cache)));
     }
 
     /// Installs a neural visibility cache over the power selection (see
     /// [`LightSelection::Neural`]). Must be trained on this list's lights.
-    pub(crate) fn set_visibility(&mut self, cache: crate::light_visibility::VisibilityCache) {
+    pub(crate) fn set_visibility(&mut self, cache: super::neural::VisibilityCache) {
         debug_assert_eq!(cache.lights(), self.lights.len());
         self.cache = Some(std::sync::Arc::new(Learned::Neural(cache)));
     }
@@ -528,7 +528,7 @@ impl LightList {
     /// The installed neural visibility cache, under
     /// [`LightSelection::Neural`]: for the probes that time or inspect it
     /// (`examples/nvc_bench.rs`).
-    pub fn visibility_cache(&self) -> Option<&crate::light_visibility::VisibilityCache> {
+    pub fn visibility_cache(&self) -> Option<&super::neural::VisibilityCache> {
         match self.cache.as_deref() {
             Some(Learned::Neural(c)) => Some(c),
             _ => None,
@@ -701,7 +701,7 @@ impl LightList {
     #[inline(never)]
     fn pick_index_neural(
         &self,
-        c: &crate::light_visibility::VisibilityCache,
+        c: &super::neural::VisibilityCache,
         p: Vec3A,
         u: f32,
     ) -> Option<(usize, f32)> {
@@ -736,12 +736,7 @@ impl LightList {
     /// [`LightList::pick_index_neural`].
     #[cold]
     #[inline(never)]
-    fn pmf_at_neural(
-        &self,
-        c: &crate::light_visibility::VisibilityCache,
-        p: Vec3A,
-        index: usize,
-    ) -> f32 {
+    fn pmf_at_neural(&self, c: &super::neural::VisibilityCache, p: Vec3A, index: usize) -> f32 {
         c.with_table(p, |table| match table {
             Some((pmf, _)) => pmf[index],
             None => self.pmf(index),
