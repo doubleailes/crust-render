@@ -398,7 +398,7 @@ impl LightTree {
             let c0 = self.nodes[at + 1].bounds.importance(r);
             let c1 = self.nodes[second].bounds.importance(r);
             let sum = c0 + c1;
-            if !(sum > 0.0) {
+            if sum.is_nan() || sum <= 0.0 {
                 return None;
             }
             let p0 = c0 / sum;
@@ -437,7 +437,7 @@ impl LightTree {
             let c0 = self.nodes[at + 1].bounds.importance(r);
             let c1 = self.nodes[second].bounds.importance(r);
             let sum = c0 + c1;
-            if !(sum > 0.0) {
+            if sum.is_nan() || sum <= 0.0 {
                 return 0.0;
             }
             if trail & 1 == 0 {
