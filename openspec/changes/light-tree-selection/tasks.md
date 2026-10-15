@@ -121,7 +121,7 @@
       `docs/light_sampling.md` §9.3 m, the site pages from 3.6 and
       `docs/architecture.md` if the invariants list changes. Verify: `zola
       build` in `site/`.
-- [ ] 5.5 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy
+- [x] 5.5 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy
       --workspace --all-targets -- -D warnings`, `cargo test --workspace
       --no-fail-fast`, `scripts/test_simd_matrix.sh -p crust-core`. Verify:
       all pass.
