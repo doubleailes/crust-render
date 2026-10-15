@@ -1,10 +1,12 @@
-//! Analytic and curve geometry: `UsdGeomSphere` and `UsdGeomBasisCurves`.
+//! Analytic and curve geometry: `UsdGeomSphere`, `UsdGeomBasisCurves` and
+//! `UsdGeomNurbsCurves`.
 
 use crate::warning;
 use std::sync::Arc;
 
 use crust_rt::{CubicCurveSegment, CurveSegment, Geometry, SceneBuilder as RtSceneBuilder};
 use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
+use openusd::sdf;
 use openusd::usd::Prim;
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, CurvesSchema, PointBasedSchema, Sphere as UsdSphere,
@@ -16,8 +18,8 @@ use crate::material::Material;
 use crate::rt_world::WorldBuilder;
 
 use super::attrs::{
-    attr_f32, custom_token, decode_f32_array, decode_i32_array, decode_vec3f_array,
-    prim_motion_translate, prim_ray_mask, value_at,
+    attr_f32, custom_token, decode_f32_array, decode_f64_array, decode_i32_array,
+    decode_vec3f_array, prim_motion_translate, prim_ray_mask, prim_value, value_at,
 };
 
 // -----------------------------------------------------------------------
@@ -169,10 +171,7 @@ fn span_end_values(m: &[[f32; 4]; 4], w: [f32; 4]) -> (f32, f32) {
 /// vectors live in local space under an `Instance`, like meshes. Shared by
 /// the top-level emitter and the prototype collector; the caller supplies
 /// the placement.
-pub(super) fn curve_segments(
-    prim: &Prim,
-    curves: &UsdBasisCurves,
-) -> Option<(Vec<CurveSegment>, Vec<CubicCurveSegment>)> {
+pub(super) fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<CurveBatches> {
     let points = value_at(&curves.points_attr()).and_then(decode_vec3f_array);
     let counts = value_at(&curves.curve_vertex_counts_attr()).and_then(decode_i32_array);
     let (points, counts) = match (points, counts) {
@@ -297,25 +296,13 @@ pub(super) fn curve_segments(
     Some((segments, cubic_segments))
 }
 
-pub(super) fn emit_curves(
-    world: &mut WorldBuilder,
-    prim: &Prim,
-    curves: &UsdBasisCurves,
-    world_xf: GMat4,
-    material: Arc<dyn Material>,
-) {
-    let Some((segments, cubic_segments)) = curve_segments(prim, curves) else {
-        return;
-    };
-    if world_xf.determinant().abs() < 1e-12 {
-        warning!(
-            CurvesNonInvertibleTransform,
-            at = prim.path(),
-            "BasisCurves at {} has a non-invertible transform — skipped",
-            prim.path()
-        );
-        return;
-    }
+/// The two primitive batches one curves prim imports as: linear segments
+/// and cubic (Bézier-form) spans.
+pub(super) type CurveBatches = (Vec<CurveSegment>, Vec<CubicCurveSegment>);
+
+/// One kernel scene holding a curves prim's batches, in its local space.
+pub(super) fn curves_scene(batches: CurveBatches) -> crust_rt::Scene {
+    let (segments, cubic_segments) = batches;
     let mut b = RtSceneBuilder::new();
     if !segments.is_empty() {
         b.attach(Geometry::RoundCurves { segments });
@@ -325,15 +312,337 @@ pub(super) fn emit_curves(
             segments: cubic_segments,
         });
     }
+    b.commit_with(crate::commit_options())
+}
+
+/// Places a curves prim's batches ([`curve_segments`] or
+/// [`nurbs_curve_segments`]) at the top level, under an `Instance` carrying
+/// its world transform.
+pub(super) fn emit_curves(
+    world: &mut WorldBuilder,
+    prim: &Prim,
+    batches: Option<CurveBatches>,
+    world_xf: GMat4,
+    material: Arc<dyn Material>,
+) {
+    let Some(batches) = batches else {
+        return;
+    };
+    if world_xf.determinant().abs() < 1e-12 {
+        warning!(
+            CurvesNonInvertibleTransform,
+            at = prim.path(),
+            "Curves at {} have a non-invertible transform — skipped",
+            prim.path()
+        );
+        return;
+    }
     world.attach_masked(
         Geometry::Instance {
-            scene: Arc::new(b.commit_with(crate::commit_options())),
+            scene: Arc::new(curves_scene(batches)),
             transform: Affine3A::from_mat4(world_xf),
             transform_end: None,
         },
         material,
         prim_ray_mask(prim),
     );
+}
+
+// -----------------------------------------------------------------------
+// NURBS curves
+// -----------------------------------------------------------------------
+
+/// Whether `prim` is a `UsdGeomNurbsCurves`. openusd-schemas has no typed
+/// schema for it, so the prim is recognised by its type name and read
+/// through raw attributes.
+pub(super) fn is_nurbs_curves(prim: &Prim) -> bool {
+    matches!(prim.type_name(), Ok(Some(t)) if t.as_str() == "NurbsCurves")
+}
+
+/// A NURBS control point carried through the blossom: the homogeneous
+/// position `(w·x, w·y, w·z)`, the width (a primvar, so not weighted) and the
+/// weight `w`. Every channel is affine in the control points, so one
+/// recurrence evaluates them all.
+type NurbsVertex = [f64; 5];
+
+fn lerp5(a: &NurbsVertex, b: &NurbsVertex, t: f64) -> NurbsVertex {
+    std::array::from_fn(|c| a[c] + (b[c] - a[c]) * t)
+}
+
+/// The blossom (polar form) of span `span` of a degree-`p` B-spline,
+/// evaluated at the `p` parameters `ts`: de Boor's recurrence with a
+/// different parameter at each level. `ctrl` is the span's `p + 1` control
+/// points `P[span-p ..= span]`, `knots` the curve's own knot vector.
+///
+/// With `ts = [s; p-j] ++ [e; j]` it is the `j`th Bézier control point of the
+/// curve restricted to `[s, e]` (any sub-interval of the span), which is how
+/// [`nurbs_curve_segments`] extracts spans: no knot insertion, clamped or
+/// not, and a `ranges` trim is just a narrower `[s, e]`.
+fn nurbs_blossom(
+    ctrl: &[NurbsVertex],
+    knots: &[f64],
+    span: usize,
+    p: usize,
+    ts: &[f64],
+) -> NurbsVertex {
+    let mut d: Vec<NurbsVertex> = ctrl.to_vec();
+    for r in 1..=p {
+        let t = ts[r - 1];
+        for k in (r..=p).rev() {
+            let lo = knots[span + k - p];
+            let hi = knots[span + 1 + k - r];
+            let a = if hi > lo { (t - lo) / (hi - lo) } else { 0.0 };
+            d[k] = lerp5(&d[k - 1], &d[k], a);
+        }
+    }
+    d[p]
+}
+
+/// The Bézier control points (degree `p`) of a B-spline span restricted to
+/// `[s, e]`.
+fn nurbs_span_bezier(
+    ctrl: &[NurbsVertex],
+    knots: &[f64],
+    span: usize,
+    p: usize,
+    s: f64,
+    e: f64,
+) -> Vec<NurbsVertex> {
+    (0..=p)
+        .map(|j| {
+            let ts: Vec<f64> = (0..p).map(|r| if r < p - j { s } else { e }).collect();
+            nurbs_blossom(ctrl, knots, span, p, &ts)
+        })
+        .collect()
+}
+
+/// A `double2[]` (`ranges`) as `(min, max)` pairs.
+fn decode_ranges(v: sdf::Value) -> Option<Vec<(f64, f64)>> {
+    match v {
+        sdf::Value::Vec2dVec(v) => Some(v.into_iter().map(|r| (r.x, r.y)).collect()),
+        sdf::Value::Vec2fVec(v) => Some(
+            v.into_iter()
+                .map(|r| (f64::from(r.x), f64::from(r.y)))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Import a `UsdGeomNurbsCurves` batch as round curves, into the same two
+/// batches [`curve_segments`] builds: each span between distinct knots
+/// becomes one Bézier span ([`nurbs_span_bezier`]) — order 4 directly as a
+/// [`CubicCurveSegment`], order 3 degree-elevated to one, order 2 as a
+/// linear [`CurveSegment`]. Higher orders are refused with
+/// `curves.unsupported_order`.
+///
+/// Read: `points`, `curveVertexCounts`, `order`, `knots` (one vector of
+/// `count + order` values per curve, concatenated), `ranges` (the parameter
+/// interval rendered per curve; the full domain when absent), `widths` (as
+/// for `BasisCurves`, `vertex` widths following the basis) and
+/// `pointWeights`. A rational curve with unequal weights is approximated:
+/// each span's Bézier control points are projected out of homogeneous
+/// space, which keeps the span's ends and end tangents' directions but not
+/// its exact shape (`curves.rational_approximated`).
+pub(super) fn nurbs_curve_segments(prim: &Prim) -> Option<CurveBatches> {
+    let points = prim_value(prim, "points").and_then(decode_vec3f_array);
+    let counts = prim_value(prim, "curveVertexCounts").and_then(decode_i32_array);
+    let (points, counts) = match (points, counts) {
+        (Some(p), Some(c)) => (p, c),
+        _ => {
+            debug!(
+                "NurbsCurves at {} missing points / curveVertexCounts — skipped",
+                prim.path()
+            );
+            return None;
+        }
+    };
+    let n_points = points.len();
+    let n_curves = counts.len();
+    let orders = prim_value(prim, "order")
+        .and_then(decode_i32_array)
+        .unwrap_or_default();
+    let knots = prim_value(prim, "knots")
+        .and_then(decode_f64_array)
+        .unwrap_or_default();
+    let expected_knots: i64 = counts
+        .iter()
+        .zip(&orders)
+        .map(|(&c, &o)| i64::from(c) + i64::from(o))
+        .sum();
+    if orders.len() != n_curves || knots.len() as i64 != expected_knots {
+        warning!(
+            CurvesInvalidKnots,
+            at = prim.path(),
+            "NurbsCurves at {}: {} curves need one order each and count + order knots each \
+             ({} orders, {} knots authored, {} expected) — skipped",
+            prim.path(),
+            n_curves,
+            orders.len(),
+            knots.len(),
+            expected_knots
+        );
+        return None;
+    }
+    let widths: Vec<f32> = prim_value(prim, "widths")
+        .and_then(decode_f32_array)
+        .unwrap_or_else(|| vec![1.0]);
+    let weights = prim_value(prim, "pointWeights")
+        .and_then(decode_f64_array)
+        .filter(|w| w.len() == n_points);
+    let ranges = prim_value(prim, "ranges")
+        .and_then(decode_ranges)
+        .filter(|r| r.len() == n_curves);
+    let width_of = |global_idx: usize, curve_idx: usize| -> f64 {
+        f64::from(if widths.len() == n_points {
+            widths[global_idx]
+        } else if widths.len() == n_curves {
+            widths[curve_idx]
+        } else {
+            widths[0]
+        })
+    };
+
+    let mut segments: Vec<CurveSegment> = Vec::new();
+    let mut cubic_segments: Vec<CubicCurveSegment> = Vec::new();
+    let mut rational = false;
+    let mut unsupported_order: Option<i32> = None;
+    let mut bad_knots = 0usize;
+    let mut offset = 0usize;
+    let mut knot_offset = 0usize;
+    for (curve_idx, (&cnt, &order)) in counts.iter().zip(&orders).enumerate() {
+        let cnt = cnt.max(0) as usize;
+        let n_knots = cnt + order.max(0) as usize;
+        if offset + cnt > n_points {
+            warning!(
+                CurvesInvalidCounts,
+                at = prim.path(),
+                "NurbsCurves at {}: curveVertexCounts overruns points — remaining curves skipped",
+                prim.path()
+            );
+            break;
+        }
+        let first = offset;
+        let u = &knots[knot_offset..knot_offset + n_knots];
+        offset += cnt;
+        knot_offset += n_knots;
+        if !(2..=4).contains(&order) {
+            unsupported_order.get_or_insert(order);
+            continue;
+        }
+        let p = (order - 1) as usize;
+        if cnt < order as usize
+            || u.iter().any(|k| !k.is_finite())
+            || u.windows(2).any(|k| k[1] < k[0])
+        {
+            bad_knots += 1;
+            continue;
+        }
+        let ctrl: Vec<NurbsVertex> = (0..cnt)
+            .map(|k| {
+                let g = first + k;
+                let pt = points[g];
+                let w = weights.as_ref().map_or(1.0, |w| w[g]);
+                [
+                    f64::from(pt.x) * w,
+                    f64::from(pt.y) * w,
+                    f64::from(pt.z) * w,
+                    width_of(g, curve_idx),
+                    w,
+                ]
+            })
+            .collect();
+        if ctrl.windows(2).any(|c| c[0][4] != c[1][4]) {
+            rational = true;
+        }
+        // The rendered interval: the curve's domain [u_p, u_n+1], narrowed
+        // by an authored range.
+        let (mut lo, mut hi) = (u[p], u[cnt]);
+        if let Some(&(r0, r1)) = ranges.as_ref().map(|r| &r[curve_idx])
+            && r0 < r1
+        {
+            lo = lo.max(r0);
+            hi = hi.min(r1);
+        }
+        for span in p..cnt {
+            let s = u[span].max(lo);
+            let e = u[span + 1].min(hi);
+            // Finite: the knots are, and a NaN range is never applied.
+            if e <= s {
+                continue;
+            }
+            let bez = nurbs_span_bezier(&ctrl[span - p..=span], u, span, p, s, e);
+            let pos = |v: &NurbsVertex| -> Vec3A {
+                let w = if v[4] != 0.0 { v[4] } else { 1.0 };
+                Vec3A::new((v[0] / w) as f32, (v[1] / w) as f32, (v[2] / w) as f32)
+            };
+            let radius = |v: &NurbsVertex| 0.5 * (v[3] as f32).max(1e-6);
+            let (first_v, last_v) = (&bez[0], &bez[p]);
+            match p {
+                1 => segments.push(CurveSegment {
+                    p0: pos(first_v),
+                    p1: pos(last_v),
+                    r0: radius(first_v),
+                    r1: radius(last_v),
+                }),
+                2 => {
+                    // Degree elevation: the cubic tracing the same quadratic.
+                    let (q0, q1, q2) = (pos(&bez[0]), pos(&bez[1]), pos(&bez[2]));
+                    cubic_segments.push(CubicCurveSegment {
+                        cp: [q0, (q0 + q1 * 2.0) / 3.0, (q1 * 2.0 + q2) / 3.0, q2],
+                        r0: radius(first_v),
+                        r1: radius(last_v),
+                    });
+                }
+                _ => cubic_segments.push(CubicCurveSegment {
+                    cp: std::array::from_fn(|j| pos(&bez[j])),
+                    r0: radius(first_v),
+                    r1: radius(last_v),
+                }),
+            }
+        }
+    }
+
+    if let Some(order) = unsupported_order {
+        warning!(
+            CurvesUnsupportedOrder,
+            at = prim.path(),
+            "NurbsCurves at {}: order {} is not supported (2 | 3 | 4) — those curves skipped",
+            prim.path(),
+            order
+        );
+    }
+    if bad_knots > 0 {
+        warning!(
+            CurvesInvalidKnots,
+            at = prim.path(),
+            "NurbsCurves at {}: {} curves have fewer points than their order, or decreasing \
+             or non-finite knots — skipped",
+            prim.path(),
+            bad_knots
+        );
+    }
+    if rational {
+        warning!(
+            CurvesRationalApproximated,
+            at = prim.path(),
+            "NurbsCurves at {}: unequal pointWeights — the rational curves are approximated \
+             by polynomial spans",
+            prim.path()
+        );
+    }
+    if segments.is_empty() && cubic_segments.is_empty() {
+        debug!("NurbsCurves at {} produced no segments", prim.path());
+        return None;
+    }
+    debug!(
+        "Imported NurbsCurves at {} ({} curves, {} segments, {} cubic spans)",
+        prim.path(),
+        n_curves,
+        segments.len(),
+        cubic_segments.len()
+    );
+    Some((segments, cubic_segments))
 }
 
 #[cfg(test)]
@@ -397,6 +706,103 @@ mod curve_basis_tests {
                     direct.abs_diff_eq(via_bezier, 1e-4),
                     "t={t}: direct={direct:?} via_bezier={via_bezier:?}"
                 );
+            }
+        }
+    }
+
+    /// A point on a degree-`p` B-spline by de Boor's algorithm — the blossom
+    /// on the diagonal.
+    fn de_boor(ctrl: &[NurbsVertex], knots: &[f64], p: usize, t: f64) -> NurbsVertex {
+        let span = (p..ctrl.len())
+            .rfind(|&i| knots[i] <= t && knots[i] < knots[i + 1])
+            .unwrap_or(p);
+        nurbs_blossom(&ctrl[span - p..=span], knots, span, p, &vec![t; p])
+    }
+
+    fn vertex(x: f64, y: f64, z: f64) -> NurbsVertex {
+        [x, y, z, 0.1, 1.0]
+    }
+
+    fn eval_bezier(b: &[NurbsVertex], t: f64) -> NurbsVertex {
+        let mut d = b.to_vec();
+        for r in 1..d.len() {
+            for k in 0..d.len() - r {
+                d[k] = lerp5(&d[k], &d[k + 1], t);
+            }
+        }
+        d[0]
+    }
+
+    fn near(a: &NurbsVertex, b: &NurbsVertex) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+    }
+
+    /// A clamped single-span cubic NURBS curve is its own Bézier curve.
+    #[test]
+    fn clamped_cubic_nurbs_is_its_bezier() {
+        let ctrl = [
+            vertex(0.0, 0.0, 0.0),
+            vertex(1.0, 2.0, 0.0),
+            vertex(2.0, -1.0, 1.0),
+            vertex(3.0, 0.0, 0.0),
+        ];
+        let knots = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let bez = nurbs_span_bezier(&ctrl, &knots, 3, 3, 0.0, 1.0);
+        for (b, c) in bez.iter().zip(&ctrl) {
+            assert!(near(b, c), "{bez:?}");
+        }
+    }
+
+    /// A uniform-knot cubic span is the `bspline` basis's span.
+    #[test]
+    fn uniform_cubic_nurbs_matches_the_bspline_basis() {
+        let pts = [
+            Vec3A::new(0.0, 0.0, 0.0),
+            Vec3A::new(1.0, 2.0, 0.5),
+            Vec3A::new(2.0, -1.0, 1.0),
+            Vec3A::new(3.5, 1.0, -0.5),
+        ];
+        let ctrl = pts.map(|p| vertex(f64::from(p.x), f64::from(p.y), f64::from(p.z)));
+        let knots: Vec<f64> = (0..8).map(f64::from).collect();
+        let bez = nurbs_span_bezier(&ctrl, &knots, 3, 3, 3.0, 4.0);
+        let want = basis_to_bezier(&BSPLINE_M, &pts);
+        for (b, w) in bez.iter().zip(&want) {
+            let got = Vec3A::new(b[0] as f32, b[1] as f32, b[2] as f32);
+            assert!(got.abs_diff_eq(*w, 1e-5), "{got:?} vs {w:?}");
+        }
+    }
+
+    /// Every extracted span, trimmed or not, traces the B-spline itself —
+    /// on a non-uniform, multi-span knot vector, densely over each span.
+    #[test]
+    fn extracted_spans_trace_the_nurbs_curve() {
+        let ctrl = [
+            vertex(0.0, 0.0, 0.0),
+            [1.0, 2.0, 0.0, 0.3, 1.0],
+            vertex(2.0, -1.0, 1.0),
+            [3.0, 0.5, -1.0, 0.05, 1.0],
+            vertex(4.0, 1.0, 0.0),
+            vertex(5.0, 0.0, 2.0),
+        ];
+        for p in 1..=3 {
+            let n = ctrl.len();
+            let mut knots = vec![0.0; p + 1];
+            knots.extend([0.2, 0.25, 0.7, 0.9, 1.3][..n - p - 1].iter().copied());
+            knots.extend(vec![2.0; p + 1]);
+            assert_eq!(knots.len(), n + p + 1);
+            for span in p..n {
+                let (lo, hi) = (knots[span], knots[span + 1]);
+                // The whole span, then its middle half (a `ranges` trim).
+                for (s, e) in [(lo, hi), (lo + 0.25 * (hi - lo), lo + 0.75 * (hi - lo))] {
+                    let ctrl_span = &ctrl[span - p..=span];
+                    let bez = nurbs_span_bezier(ctrl_span, &knots, span, p, s, e);
+                    for i in 0..=8 {
+                        let f = f64::from(i) / 8.0;
+                        let direct = de_boor(&ctrl, &knots, p, s + (e - s) * f);
+                        let via = eval_bezier(&bez, f);
+                        assert!(near(&direct, &via), "p={p} span={span} f={f}");
+                    }
+                }
             }
         }
     }

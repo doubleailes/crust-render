@@ -157,7 +157,10 @@ plain text and are not counted.
 |------|------|---------|------------|
 | `curves.unsupported_basis` | skipped | BasisCurves uses a basis crust does not support. | Use `bezier`, `bspline` or `catmullRom`. |
 | `curves.invalid_counts` | skipped | curveVertexCounts overruns the points; the remaining curves are skipped. | Make `curveVertexCounts` sum to the number of points. |
-| `curves.non_invertible_transform` | skipped | BasisCurves has a non-invertible transform. | Give the curves a non-zero scale on every axis. |
+| `curves.non_invertible_transform` | skipped | BasisCurves or NurbsCurves have a non-invertible transform. | Give the curves a non-zero scale on every axis. |
+| `curves.unsupported_order` | skipped | NurbsCurves of an order above 4 (or below 2); those curves are skipped. | Rebuild the curves as cubic (order 4) or lower. |
+| `curves.invalid_knots` | skipped | NurbsCurves whose order or knots do not match their points; the curves are skipped. | Author one `order` per curve and `count + order` non-decreasing `knots` per curve. |
+| `curves.rational_approximated` | approximated | NurbsCurves with unequal pointWeights; the rational curves are approximated by polynomial spans. | Author equal (or no) `pointWeights`, or convert the curves to non-rational ones. |
 | `volume.unknown_type` | skipped | crust:volume:type is not homogeneous, smoke or grid. | Use `homogeneous`, `smoke` or `grid`. |
 | `volume.invalid_grid` | skipped | A grid volume's gridDims and gridData are missing or do not match. | Author `crust:volume:gridDims` and a `crust:volume:gridData` of that many values. |
 | `volume.in_prototype` | skipped | A volume inside an instance prototype; volumes cannot be instanced. | Move the volume out of the prototype. |

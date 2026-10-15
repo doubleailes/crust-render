@@ -1084,6 +1084,53 @@ fn single_axis_ops_place_non_xform_prims() {
     );
 }
 
+/// A `NurbsCurves` prim renders as round curves where it is placed, over the
+/// parameter interval its `ranges` names.
+#[test]
+fn nurbs_curves_import_and_honour_ranges() {
+    let nurbs = |name: &str, ranges: &str| {
+        load_inline(
+            name,
+            &format!(
+                r#"def Xform "W" {{
+    double3 xformOp:translate = (2, 0, 5)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    def NurbsCurves "C" {{
+        int[] curveVertexCounts = [4]
+        int[] order = [4]
+        double[] knots = [0, 0, 0, 0, 1, 1, 1, 1]
+        point3f[] points = [(0, -1, 0), (0, -0.3333333, 0), (0, 0.3333333, 0), (0, 1, 0)]
+        float[] widths = [0.1] (interpolation = "constant")
+        {ranges}
+    }}
+}}
+"#
+            ),
+        )
+    };
+    let full = nurbs("nurbs_full", "");
+    assert!(
+        full.warnings
+            .iter()
+            .all(|w| w.code == crust_core::WarningCode::CameraMissing),
+        "a cubic NURBS curve is read: {:#?}",
+        full.warnings
+    );
+    assert_near(
+        bounds_centre(&full),
+        Vec3A::new(2.0, 0.0, 5.0),
+        "NurbsCurves",
+    );
+    let b = full.world.bounds().expect("bounds");
+    assert!((b.maximum.y - 1.05).abs() < 1e-3, "{b:?}");
+
+    // The lower half of the parameter domain is the lower half of the line.
+    let half = nurbs("nurbs_half", "double2[] ranges = [(0, 0.5)]");
+    let b = half.world.bounds().expect("bounds");
+    assert!((b.minimum.y + 1.05).abs() < 1e-3, "{b:?}");
+    assert!((b.maximum.y - 0.05).abs() < 1e-3, "{b:?}");
+}
+
 /// A leading `!resetXformStack!` drops the inherited transform on a light,
 /// not only on the six types the old dispatch listed.
 #[test]

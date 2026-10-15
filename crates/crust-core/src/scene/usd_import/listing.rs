@@ -33,6 +33,7 @@ use super::lights::{LightInputs, light_inputs};
 use super::materials::{bound_material, surface_shader_id};
 use super::products::import_render_products;
 use super::settings::{CameraPick, import_render_settings, pick_camera, wanted_camera};
+use super::shapes::is_nurbs_curves;
 use super::time::EvalTimeScope;
 use super::{
     Prune, WalkScope, open_stage, prim_at, prune_reason, release_stage, stage_builder, stream_roots,
@@ -296,6 +297,7 @@ fn bound_materials(stage: &Stage, out: &mut HashSet<String>) {
         let geometry = matches!(UsdMesh::get(stage, p()), Ok(Some(_)))
             || matches!(UsdSphere::get(stage, p()), Ok(Some(_)))
             || matches!(UsdBasisCurves::get(stage, p()), Ok(Some(_)))
+            || is_nurbs_curves(&prim)
             || (custom_token(&prim, "crust:volume:type").is_none() && Shape::read(&prim).is_some());
         if geometry && let Some(m) = bound_material(stage, &prim) {
             out.insert(m.to_string());

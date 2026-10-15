@@ -294,6 +294,17 @@ pub(super) fn decode_f32_array(v: sdf::Value) -> Option<Vec<f32>> {
     }
 }
 
+/// A float array in double precision, whatever precision it was authored in
+/// (`knots`, `pointWeights`).
+pub(super) fn decode_f64_array(v: sdf::Value) -> Option<Vec<f64>> {
+    match v {
+        sdf::Value::DoubleVec(v) => Some(v),
+        sdf::Value::FloatVec(v) => Some(v.into_iter().map(f64::from).collect()),
+        sdf::Value::HalfVec(v) => Some(v.into_iter().map(|h| f64::from(h.to_f32())).collect()),
+        _ => None,
+    }
+}
+
 pub(super) fn decode_i32_array(v: sdf::Value) -> Option<Vec<i32>> {
     match v {
         sdf::Value::IntVec(v) => Some(v),
