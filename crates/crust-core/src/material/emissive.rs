@@ -64,6 +64,12 @@ impl Emissive {
         self.one_sided
     }
 
+    /// The directional falloff ([`Emissive::light`]'s shaping), `None` when
+    /// the emission is the same in every direction.
+    pub fn shaping(&self) -> Option<&Shaping> {
+        self.shaping.as_deref()
+    }
+
     /// Whether emission is the same everywhere and in every direction — the
     /// case `emitted_at` answers without evaluating anything.
     fn is_uniform(&self) -> bool {

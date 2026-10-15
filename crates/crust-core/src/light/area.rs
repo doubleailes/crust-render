@@ -8,6 +8,7 @@ use glam::Vec3A;
 use crate::material::Emissive;
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
+use super::cone::ConeCut;
 use super::rect::RectShape;
 use super::shape::{AffineShape, LightShape, ShapeHits, SolidAngleSampler, SphereShape};
 use super::{FoundAlong, Light, LightSample};
@@ -110,11 +111,20 @@ pub struct AreaLight {
 
 impl AreaLight {
     /// The light, with its shape told whether the emitter is one-sided —
-    /// which a tube's visible-arc strategy needs (`AffineShape`).
+    /// which a tube's visible-arc strategy needs (`AffineShape`) — and the
+    /// emitter's shaping cone and focus, which a rect or disk whose shaping
+    /// axis is its normal samples by ([`ConeCut`]).
     pub fn new(shape: impl Into<AreaShape>, material: Arc<Emissive>, geom_id: u32) -> Self {
         let mut shape = shape.into();
         if let AreaShape::Affine(affine) = &mut shape {
             affine.set_front_only(material.is_one_sided());
+        }
+        if let Some(cone) = material.shaping().and_then(ConeCut::of) {
+            match &mut shape {
+                AreaShape::Rect(rect) => rect.set_cone(cone),
+                AreaShape::Affine(affine) => affine.set_cone(cone),
+                AreaShape::Sphere(_) => {}
+            }
         }
         Self {
             shape,

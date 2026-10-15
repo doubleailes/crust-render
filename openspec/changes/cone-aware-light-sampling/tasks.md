@@ -2,10 +2,10 @@
 
 ## 1. Measurement scenes
 
-- [ ] 1.1 Author `samples/spotlights.usda` (design D1): six small spots on disjoint pools (four sphere lights, two IES fixtures from `samples/ies/spot30.ies`), a dim fill, and one wide shaped disk near a subject. Verify that `crust check -i samples/spotlights.usda --json -` reports no warnings and `cargo test --workspace` (which loads every sample) passes.
-- [ ] 1.2 Render the stage with `--stats` and check in numbers, not by eye: each pool is lit only by its own spot, the gaps are lit only by the fill, and the frame renders in a few seconds at 16 spp. Verify that `crust light-paths` on one pool pixel attributes its direct light to that pool's spot alone.
-- [ ] 1.3 Write `scripts/make_spot_sweep.py <out_dir>` (design D1): 96 shaped rect/disk frames plus the 8 unshaped-disk rows, named by their parameters. Verify that it runs, that every generated frame passes `crust check`, and that the frame count matches.
-- [ ] 1.4 Add the stage to the golden set (`scripts/check_images.sh record`) and mention the sample and the generator in the `lighting` design record. Verify that `check_images.sh check` passes.
+- [x] 1.1 Author `samples/spotlights.usda` (design D1): six small spots on disjoint pools (four sphere lights, two IES fixtures from `samples/ies/spot30.ies`), a dim fill, and one wide shaped disk near a subject. Verify that `crust check -i samples/spotlights.usda --json -` reports no warnings and `cargo test --workspace` (which loads every sample) passes.
+- [x] 1.2 Render the stage with `--stats` and check in numbers, not by eye: each pool is lit only by its own spot, the gaps are lit only by the fill, and the frame renders in a few seconds at 16 spp. Verify that `crust light-paths` on one pool pixel attributes its direct light to that pool's spot alone.
+- [x] 1.3 Write `scripts/make_spot_sweep.py <out_dir>` (design D1): 96 shaped rect/disk frames plus the 8 unshaped-disk rows, named by their parameters. Verify that it runs, that every generated frame passes `crust check`, and that the frame count matches.
+- [x] 1.4 Add the stage to the golden set (`scripts/check_images.sh record`) and mention the sample and the generator in the `lighting` design record. Verify that `check_images.sh check` passes.
 
 ## 2. Baseline
 
@@ -16,9 +16,9 @@
 
 ## 3. Shaping cone handed to the shape
 
-- [ ] 3.1 Add `CRUST_CONE_CLIP` (`off` | `on`, default `off`) to `crust_core::Config`, and the value `polar` to `CRUST_DISK_SAMPLING`. Add rows to `docs/architecture.md` § Environment switches and sections in `site/content/docs/reference/environment-variables.md`. Verify with the config parsing unit tests and `zola build`.
-- [ ] 3.2 Have `AreaLight::new` pass `(axis, tan θc, focus)` from the emitter's shaping to the shape, as it passes one-sidedness (design D3). Pass nothing when `θc ≥ 90°` or the axis is not the normal within 1e-6. Verify with a unit test per case (rect, disk, sheared rect, tilted axis, 90° cone).
-- [ ] 3.3 Implement the conservative cutoff radius `ρc = h · tan θc · (1 + 1e-5)` (design D3 trap). Verify with a unit test that, over a dense grid of points just outside `ρc`, `Shaping::factor` is exactly zero, including with softness and focus.
+- [x] 3.1 Add `CRUST_CONE_CLIP` (`off` | `on`, default `off`) to `crust_core::Config`, and the value `polar` to `CRUST_DISK_SAMPLING`. Add rows to `docs/architecture.md` § Environment switches and sections in `site/content/docs/reference/environment-variables.md`. Verify with the config parsing unit tests and `zola build`.
+- [x] 3.2 Have `AreaLight::new` pass `(axis, tan θc, focus)` from the emitter's shaping to the shape, as it passes one-sidedness (design D3). Pass no cutoff when `θc ≥ 90°`, but still the focus, which `polar` follows. Pass nothing when the axis is not the normal within 1e-6, or the shaping has neither a cutoff nor a focus. Verify with a unit test per case (rect, disk, sheared rect, tilted axis, 90° cone).
+- [x] 3.3 Implement the conservative cutoff radius `ρc = h · tan(acos(cos θc − 1e-6))` (design D3 trap; a relative 1e-5 was too tight for narrow cones). Verify with a unit test that, over a dense grid of points just outside `ρc`, `Shaping::factor` is exactly zero, including with softness and focus.
 
 ## 4. Cone-clipped rect (gated on 2.3 showing waste on shaped rects)
 

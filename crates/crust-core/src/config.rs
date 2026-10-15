@@ -184,12 +184,17 @@ impl std::fmt::Display for TubeSampling {
 /// every disk used before; `ellipse` samples the spherical ellipse it
 /// subtends (Guillén et al. 2017) within a solid-angle band, and by area
 /// outside it. Not the default: it loses at equal time on glossy receivers
-/// and on small disks, and costs 2–4× per sample.
+/// and on small disks, and costs 2–4× per sample. `polar` samples a disk
+/// that is round in world space in polar coordinates about the shading
+/// point's foot on its plane, following `cos θl / r²` (and a shaping's focus)
+/// along each direction in closed form, and by area otherwise
+/// (`openspec/changes/cone-aware-light-sampling`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DiskSampling {
     #[default]
     Area,
     Ellipse,
+    Polar,
 }
 
 impl FromStr for DiskSampling {
@@ -199,6 +204,7 @@ impl FromStr for DiskSampling {
         match s {
             "area" => Ok(DiskSampling::Area),
             "ellipse" => Ok(DiskSampling::Ellipse),
+            "polar" => Ok(DiskSampling::Polar),
             _ => Err(()),
         }
     }
@@ -209,6 +215,7 @@ impl std::fmt::Display for DiskSampling {
         f.write_str(match self {
             DiskSampling::Area => "area",
             DiskSampling::Ellipse => "ellipse",
+            DiskSampling::Polar => "polar",
         })
     }
 }
@@ -308,8 +315,13 @@ pub struct Config {
     /// outside it (`area` | `arc` | `equiangular`, the default).
     pub tube_sampling: TubeSampling,
     /// `CRUST_DISK_SAMPLING`: how a disk light is sampled from in front of it
-    /// (`area`, the default, | `ellipse`).
+    /// (`area`, the default, | `ellipse` | `polar`).
     pub disk_sampling: DiskSampling,
+    /// `CRUST_CONE_CLIP`: sample a shaped rect light only within the bounding
+    /// square of its cone's cutoff circle, and cap a `polar` disk's samples
+    /// at that circle, for a light whose shaping axis is its normal
+    /// (`false`: sample the whole light, as before).
+    pub cone_clip: bool,
     /// `OCIO`: the OpenColorIO config to use when the host names none — a
     /// path or an `ocio://` URI, `None` when unset or empty. Not validated
     /// here: loading it is the host's, which reports a bad one as an error.
@@ -364,6 +376,7 @@ impl Default for Config {
             ptex_mip_space: PtexMipSpace::Capped,
             tube_sampling: TubeSampling::Equiangular,
             disk_sampling: DiskSampling::Area,
+            cone_clip: false,
             ocio: None,
         }
     }
@@ -456,8 +469,9 @@ impl Config {
                 &lookup,
                 "CRUST_DISK_SAMPLING",
                 d.disk_sampling,
-                "`area` or `ellipse`",
+                "`area`, `ellipse` or `polar`",
             ),
+            cone_clip: flag("CRUST_CONE_CLIP", d.cone_clip),
             // OCIO's own convention: an empty `OCIO` is no config.
             ocio: lookup("OCIO").filter(|v| !v.is_empty()),
         }
@@ -600,6 +614,8 @@ mod tests {
         assert!(!with(&[("CRUST_ADAPTIVE_FRUSTUM", "0")]).adaptive_frustum);
         assert!(with(&[]).ptex_stream, "Ptex streams by default");
         assert!(!with(&[("CRUST_PTEX_STREAM", "0")]).ptex_stream);
+        assert!(!with(&[]).cone_clip, "the cone clip is off by default");
+        assert!(with(&[("CRUST_CONE_CLIP", "on")]).cone_clip);
     }
 
     #[test]
@@ -678,7 +694,11 @@ mod tests {
             let c = with(&[("CRUST_TUBE_SAMPLING", &t.to_string())]);
             assert_eq!(c.tube_sampling, t);
         }
-        for d in [DiskSampling::Area, DiskSampling::Ellipse] {
+        for d in [
+            DiskSampling::Area,
+            DiskSampling::Ellipse,
+            DiskSampling::Polar,
+        ] {
             let c = with(&[("CRUST_DISK_SAMPLING", &d.to_string())]);
             assert_eq!(c.disk_sampling, d);
         }

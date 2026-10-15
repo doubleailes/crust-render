@@ -933,7 +933,12 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   as the reference's is, and a `.tex` (RenderMan) map is not decoded.
   `inputs:diffuse` / `inputs:specular` warn and are ignored rather than split per lobe. Shaping is per *direction* only, so a shaped light
   is still sampled without regard to its cone (by solid angle for a rect, by area otherwise): a narrow spotlight wastes the NEE samples its cone
-  cuts off (unbiased, but noisier than cone-aware sampling), and shaping is not applied
+  cuts off (unbiased, but noisier than cone-aware sampling). It is measured on
+  `samples/spotlights.usda` (six small spots on disjoint pools, where power selection
+  gives a pool's own sphere spot about 1 NEE pick in 13, plus one wide disk spot) and on
+  the sweep `scripts/make_spot_sweep.py` writes (shaped rects and disks, and the
+  unshaped disks of the ellipse sweep); `openspec/changes/cone-aware-light-sampling`.
+  Shaping is not applied
   to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the
   reference's is. A tube light samples the arc of wall facing the shading point; a
   squashed sphere samples its visible cone. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a

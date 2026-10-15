@@ -91,13 +91,18 @@ when `|p − f| ≤ ρc = h · tan θc`. Everything in `Shaping` except IES depe
 
 - The condition is checked once, at light construction: `|a · n| ≥ 1 − 1e-6` in f64,
   the tolerance `RECT_ORTHOGONALITY` already uses. Otherwise there is no clip.
-- `AreaLight::new` passes the shape `(axis, tan θc, focus)` from `Emissive`, as
-  `set_front_only` passes one-sidedness. `θc ≥ 90°` passes nothing.
+- `AreaLight::new` passes the shape a `ConeCut` (axis, cutoff, focus) from `Emissive`,
+  as `set_front_only` passes one-sidedness. The cutoff is `None` for `θc ≥ 90°`. Focus
+  alone is still passed, because `polar` follows it. A shaping with neither passes
+  nothing.
 - **Trap: the cap must be conservative.** `factor` computes θ with `acos` in f32, the
   cap uses `tan` in f64. A point the cap excludes can still have a few ulps of
-  radiance from rounding. Inflate `ρc` by a relative 1e-5. Then every point with
-  non-zero radiance lies inside the sampled domain, and nothing visible to the bounce
-  side is missing from NEE.
+  radiance from rounding. A relative inflation of `ρc` (the 1e-5 first planned here)
+  is not enough: an f32 `acos` near a small angle θ errs by about `ε / sin θ`, which
+  relative to θ grows as `1/θ²`, ~7e-4 at 1°. So the margin is taken in cosine:
+  `θcut = acos(cos θc − 1e-6)`, about 17 f32 ulps of a cosine near 1, and
+  `ρc = h · tan θcut`. `nothing_outside_the_cutoff_radius_is_lit` pins it: cones of
+  0.5–85°, heights 1e-3–100, with softness and focus.
 
 ### D4. The clipped rect reuses the spherical rectangle
 

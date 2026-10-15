@@ -3,6 +3,7 @@
 
 use glam::{DVec2, DVec3, Vec3, Vec3A};
 
+use super::cone::ConeCut;
 use super::shape::{LightShape, ShapeHits, SolidAngleSampler};
 use crate::pdf::PdfSolidAngle;
 
@@ -28,6 +29,11 @@ pub struct RectShape {
     /// The orthonormal frame the spherical-rectangle map works in, `None` for
     /// a parallelogram that is not a rectangle (a sheared light).
     pub(super) frame: Option<RectFrame>,
+    /// The emitter's shaping, for a rectangle whose shaping axis is its
+    /// normal ([`RectShape::set_cone`]).
+    pub(super) cone: Option<ConeCut>,
+    /// `CRUST_CONE_CLIP`: sample only within the cone's cutoff square.
+    pub(super) cone_clip: bool,
 }
 
 /// A rectangle's own frame, in f64: the solid angle it subtends is a sum of
@@ -105,7 +111,29 @@ impl RectShape {
             edge_v,
             normal,
             frame,
+            cone: None,
+            cone_clip: crate::config().cone_clip,
         }
+    }
+
+    /// The same light with the cone clip on or off whatever the environment
+    /// says: both sides of the switch in one process.
+    #[must_use]
+    pub fn with_cone_clip(mut self, cone_clip: bool) -> Self {
+        self.cone_clip = cone_clip;
+        self
+    }
+
+    /// Takes the emitter's shaping where the cutoff region is a circle about
+    /// a receiver's foot: on a true rectangle whose shaping axis is its
+    /// normal. Any other light keeps sampling as if unshaped.
+    pub(super) fn set_cone(&mut self, cone: ConeCut) {
+        self.cone = (self.frame.is_some() && cone.is_along(self.normal)).then_some(cone);
+    }
+
+    /// The shaping this light samples by, if it took one.
+    pub fn cone(&self) -> Option<&ConeCut> {
+        self.cone.as_ref()
     }
 
     /// The spherical rectangle this light projects to from `from`, or `None`

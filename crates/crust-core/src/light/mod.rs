@@ -3,6 +3,7 @@ use glam::Vec3A;
 use crate::pdf::PdfSolidAngle;
 
 mod area;
+mod cone;
 mod ellipse;
 mod infinite;
 mod kind;
@@ -11,6 +12,7 @@ mod rect;
 mod shape;
 
 pub use area::{AreaLight, AreaShape};
+pub use cone::ConeCut;
 pub use infinite::{DistantLight, DomeLight, projected_cone_solid_angle};
 pub use kind::LightKind;
 pub use list::{EVERY_CLASS, LightLinks, LightList, LightSelection};

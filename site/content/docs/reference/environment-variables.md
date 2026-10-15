@@ -79,6 +79,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_LINK_TWIN`](#crust-link-twin) | on | lighting |
 | [`CRUST_TUBE_SAMPLING`](#crust-tube-sampling) | `equiangular` | lighting |
 | [`CRUST_DISK_SAMPLING`](#crust-disk-sampling) | `area` | lighting |
+| [`CRUST_CONE_CLIP`](#crust-cone-clip) | off | lighting |
 | [`CRUST_TEX`](#crust-tex) | on | UV textures |
 | [`CRUST_TEX_MAX`](#crust-tex-max) | 1024 | UV textures |
 | [`CRUST_TEX_MIP`](#crust-tex-mip) | on | UV textures |
@@ -270,7 +271,7 @@ CRUST_TUBE_SAMPLING=area crust render -i scene.usda
 
 ### CRUST_DISK_SAMPLING
 
-One of `area` or `ellipse`, default **`area`**.
+One of `area`, `ellipse` or `polar`, default **`area`**.
 
 How a `DiskLight` picks the points it sends shadow rays to, from a surface in front of
 it. `area` samples the disk evenly by area. `ellipse` samples it evenly over the solid
@@ -281,8 +282,38 @@ several times more per sample, and is noisier on glossy surfaces and for small o
 distant disks. That is why it is not the default. A disk seen from behind, nearly
 edge-on, or covering too small or too large a solid angle is sampled by area either way.
 
-Both converge to the same image, and a scene without a disk light renders identically
-whatever the value.
+`polar` samples the disk in rings and wedges centred on the point of the disk's plane
+straight above the surface, placing more points where the disk is nearer and faces the
+surface more directly, in closed form at a fraction of `ellipse`'s cost. With a shaping
+`focus` it also follows the focus fall-off, and with [`CRUST_CONE_CLIP`](#crust-cone-clip)
+it skips the part of the disk whose cone excludes the surface. A disk stretched into an
+ellipse by its transform, or one whose cone axis is not its normal, is sampled by area.
+
+All values converge to the same image, and a scene without a disk light renders
+identically whatever the value.
+
+### CRUST_CONE_CLIP
+
+Boolean, default **off**.
+
+A spotlight (a light with `ShapingAPI` and a cone narrower than 90°) emits toward a
+surface point only from the part of the light within the cone. Seen from the point,
+that part is a circle on the light's plane, centred straight above the point, of radius
+its height times the tangent of the cone angle. On, a `RectLight` whose cone axis is its
+normal sends its shadow rays only to the part of the rectangle inside the square around
+that circle, and a `DiskLight` sampled with `CRUST_DISK_SAMPLING=polar` only to the part
+inside the circle. Off, the whole light is sampled, and the samples outside the cone
+come back dark: still correct, just noisier.
+
+Either value converges to the same image. A scene without such a light renders
+identically either way. Picking *which* light to sample is not affected: see
+[`crust:lightSelection`](@/docs/usd/render-settings.md#crust-lightselection) for a selection that learns
+where each light reaches.
+
+```bash
+# a wide softbox with a narrow cone, both strategies
+CRUST_CONE_CLIP=on CRUST_DISK_SAMPLING=polar crust render -i scene.usda
+```
 
 ## Textures
 

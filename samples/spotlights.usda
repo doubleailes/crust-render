@@ -1,0 +1,229 @@
+#usda 1.0
+(
+    doc = """A stage of spotlights: the measurement scene for cone-aware light sampling.
+
+    Six small spots, 4 units above the floor, each lighting its own pool. The
+    pools are 5 units apart and no cone is wider than 30° (a pool radius of at
+    most 4 tan 30° = 2.31), so the pools never overlap and every point in a pool
+    is lit by exactly one spot. Power selection cannot see a cone, so a point in
+    one pool still sends most of its NEE samples to the other five. This is
+    case (A) of openspec/changes/cone-aware-light-sampling: a selection problem.
+      - Spot1-Spot4: sphere lights of radius 0.05, cones of 20-30°, with and
+                     without softness and focus.
+      - Ies1, Ies2 : sphere lights shaped by samples/ies/spot30.ies, cut off
+                     at 30° by the cone.
+    Case (B), where the light is wide enough that only part of it emits
+    toward a receiver, is the WideDisk in front: radius 0.6, 1.5 above the
+    floor, with a 25° cone, so its cutoff circle on the floor (radius 0.70)
+    is about as large as the disk itself.
+
+    A faint DomeLight is the only light in the gaps between the pools. Every
+    light has `normalize` on, so `intensity` is proportional to its power."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 36
+        double3 xformOp:translate = (0, 9, 15)
+        float xformOp:rotateX = -30
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Mesh "Floor"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, -8), (-10, 0, 9), (10, 0, 9), (10, 0, -8)]
+    }
+
+    # One subject per pool, off its centre, so each pool shows a shadow.
+    def Sphere "Ball1"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (-4.6, 0.5, -3.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Ball2"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (0.4, 0.5, -3.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Ball3"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (5.4, 0.5, -3.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Ball4"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (-4.6, 0.5, 1.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Ball5"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (0.4, 0.5, 1.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Ball6"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (5.4, 0.5, 1.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # The subject under the wide disk.
+    def Sphere "Subject"
+    {
+        double radius = 0.3
+        double3 xformOp:translate = (0.25, 0.3, 5.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Every spot points down: its local -Z rotated onto -Y.
+
+    # A hard 20° cone.
+    def SphereLight "Spot1" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        bool inputs:normalize = 1
+        float inputs:intensity = 60
+        float inputs:shaping:cone:angle = 20
+        double3 xformOp:translate = (-5, 4, -3.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # 25°, softened over its outer 40%.
+    def SphereLight "Spot2" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        bool inputs:normalize = 1
+        float inputs:intensity = 60
+        float inputs:shaping:cone:angle = 25
+        float inputs:shaping:cone:softness = 0.4
+        double3 xformOp:translate = (0, 4, -3.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # 30°, with focus pulling light toward the axis, warm.
+    def SphereLight "Spot3" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        bool inputs:normalize = 1
+        float inputs:intensity = 60
+        float inputs:shaping:cone:angle = 30
+        float inputs:shaping:focus = 2
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 3200
+        double3 xformOp:translate = (5, 4, -3.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # 25°, softness and focus, cool.
+    def SphereLight "Spot4" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        bool inputs:normalize = 1
+        float inputs:intensity = 60
+        float inputs:shaping:cone:angle = 25
+        float inputs:shaping:cone:softness = 0.4
+        float inputs:shaping:focus = 2
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 6500
+        double3 xformOp:translate = (-5, 4, 1.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # IES downlights, barn-doored at 30° by the cone.
+    def SphereLight "Ies1" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        bool inputs:normalize = 1
+        float inputs:intensity = 20
+        asset inputs:shaping:ies:file = @ies/spot30.ies@
+        bool inputs:shaping:ies:normalize = 1
+        float inputs:shaping:cone:angle = 30
+        double3 xformOp:translate = (0, 4, 1.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def SphereLight "Ies2" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        bool inputs:normalize = 1
+        float inputs:intensity = 20
+        asset inputs:shaping:ies:file = @ies/spot30.ies@
+        bool inputs:shaping:ies:normalize = 1
+        float inputs:shaping:cone:angle = 30
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 4000
+        double3 xformOp:translate = (5, 4, 1.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # Case (B): a wide disk close to its subject with a narrow cone. Seen from
+    # a floor point, only the part of the disk within 1.5 tan 25° = 0.70 of
+    # the point's foot emits toward it.
+    def DiskLight "WideDisk" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.6
+        bool inputs:normalize = 1
+        float inputs:intensity = 6
+        float inputs:shaping:cone:angle = 25
+        float inputs:shaping:cone:softness = 0.2
+        double3 xformOp:translate = (0, 1.5, 5.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "Fill"
+    {
+        float inputs:intensity = 0.03
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 360)
+        int crust:samplesPerPixel = 256
+        int crust:maxDepth = 6
+        int crust:minSamplesPerPixel = 32
+        float crust:varianceThreshold = 0.02
+        int crust:frame = 0
+    }
+}

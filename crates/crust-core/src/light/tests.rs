@@ -1132,3 +1132,91 @@ fn far_end_on_tube_samples_stay_equiangular() {
         }
     }
 }
+
+/// An emitter shaped by a `cone`° cone (and `focus`), aimed along the local
+/// −Z of `light_to_world`.
+fn shaped(light_to_world: glam::Mat3A, cone: f32, focus: f32) -> Arc<Emissive> {
+    let mut shaping = crate::lux::Shaping::new(light_to_world);
+    shaping.cone_angle_deg = cone;
+    shaping.focus = focus;
+    Arc::new(Emissive::light(Vec3A::ONE, Some(shaping)))
+}
+
+/// A unit square in the plane z = 1, emitting down (−Z), optionally sheared.
+fn square(shear: f32) -> RectShape {
+    RectShape::new(
+        Vec3A::new(-0.5, -0.5, 1.0),
+        Vec3A::X,
+        Vec3A::new(shear, 1.0, 0.0),
+        -Vec3A::Z,
+    )
+}
+
+fn rect_of(light: &AreaLight) -> &RectShape {
+    match &light.shape {
+        AreaShape::Rect(s) => s,
+        _ => unreachable!("a rect light"),
+    }
+}
+
+/// `AreaLight::new` hands the shape its emitter's cone where the cutoff
+/// region is a circle about a receiver's foot, and nowhere else: a true
+/// rectangle or a disk whose shaping axis is its normal, with a cone under
+/// 90° or a focus.
+#[test]
+fn shapes_take_the_cone_only_where_it_is_a_circle() {
+    let down = glam::Mat3A::IDENTITY;
+    let rect = |shape: RectShape, emitter| AreaLight::new(shape, emitter, 0);
+    // A rect and its cone.
+    assert!(
+        rect_of(&rect(square(0.0), shaped(down, 30.0, 0.0)))
+            .cone()
+            .is_some()
+    );
+    // Focus alone is still taken: a polar disk follows it.
+    let focus = rect(square(0.0), shaped(down, 180.0, 2.0));
+    assert_eq!(rect_of(&focus).cone().unwrap().cutoff_radius(1.0), None);
+    // A 90° cone and no focus: nothing to cut or weight.
+    assert!(
+        rect_of(&rect(square(0.0), shaped(down, 90.0, 0.0)))
+            .cone()
+            .is_none()
+    );
+    // A sheared parallelogram has no circle-shaped cutoff region it can sample.
+    assert!(
+        rect_of(&rect(square(0.3), shaped(down, 30.0, 0.0)))
+            .cone()
+            .is_none()
+    );
+    // An axis tilted 0.1 rad off the normal.
+    let tilted = glam::Mat3A::from_rotation_x(0.1);
+    assert!(
+        rect_of(&rect(square(0.0), shaped(tilted, 30.0, 0.0)))
+            .cone()
+            .is_none()
+    );
+    // An unshaped light.
+    let plain = rect(square(0.0), Arc::new(Emissive::light(Vec3A::ONE, None)));
+    assert!(rect_of(&plain).cone().is_none());
+
+    // A disk placed by a rotation and a uniform in-plane scale: its world
+    // normal is the placement's −Z, and so is the shaping's axis.
+    let rotation = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.5, 0.2);
+    let m = Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(0.4, 0.4, 1.0),
+        rotation,
+        glam::Vec3::new(1.0, 2.0, 3.0),
+    );
+    let along = glam::Mat3A::from_quat(rotation);
+    let disk = |emitter| AreaLight::new(AffineShape::new(UnitShape::Disk, m).unwrap(), emitter, 0);
+    assert!(affine(&disk(shaped(along, 25.0, 0.0))).cone().is_some());
+    let off = along * glam::Mat3A::from_rotation_y(0.05);
+    assert!(affine(&disk(shaped(off, 25.0, 0.0))).cone().is_none());
+    // A sphere or a tube never takes it.
+    let sphere = AreaLight::new(
+        AffineShape::new(UnitShape::Sphere, m).unwrap(),
+        shaped(along, 25.0, 0.0),
+        0,
+    );
+    assert!(affine(&sphere).cone().is_none());
+}

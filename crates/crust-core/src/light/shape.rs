@@ -9,6 +9,7 @@ use crate::config::{DiskSampling, TubeSampling};
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 use crate::ray::TRACE_T_MIN;
 
+use super::cone::ConeCut;
 use super::ellipse::SphericalEllipse;
 use super::rect::{RectShape, SphericalRect};
 
@@ -582,6 +583,12 @@ pub struct AffineShape {
     tube: TubeSampling,
     /// How a disk is sampled from in front (`CRUST_DISK_SAMPLING`).
     disk: DiskSampling,
+    /// The emitter's shaping, for a disk whose shaping axis is its normal
+    /// ([`AffineShape::set_cone`]).
+    cone: Option<ConeCut>,
+    /// `CRUST_CONE_CLIP`: a `polar` disk stops its samples at the cone's
+    /// cutoff circle.
+    cone_clip: bool,
     /// Whether the emitter on this surface is one-sided, which
     /// [`AreaLight::new`](super::AreaLight::new) sets. A tube's visible-arc
     /// strategy needs it: a two-sided tube seen through an open end shows
@@ -609,6 +616,8 @@ impl AffineShape {
             area: 0.0,
             tube: config.tube_sampling,
             disk: config.disk_sampling,
+            cone: None,
+            cone_clip: config.cone_clip,
             front_only: false,
         };
         shape.area = shape.integrate_area();
@@ -624,8 +633,30 @@ impl AffineShape {
         self
     }
 
+    /// The same shape with the cone clip on or off whatever the environment
+    /// says.
+    #[must_use]
+    pub fn with_cone_clip(mut self, cone_clip: bool) -> Self {
+        self.cone_clip = cone_clip;
+        self
+    }
+
     pub(super) fn set_front_only(&mut self, front_only: bool) {
         self.front_only = front_only;
+    }
+
+    /// Takes the emitter's shaping where the cutoff region is a circle about
+    /// a receiver's foot: on a disk whose shaping axis is its world normal.
+    /// Spheres and tubes, and a disk aimed off its normal, keep sampling as
+    /// if unshaped.
+    pub(super) fn set_cone(&mut self, cone: ConeCut) {
+        let normal = (self.normal_mat * UnitShape::Disk.normal(Vec3A::ZERO)).normalize_or_zero();
+        self.cone = (self.unit == UnitShape::Disk && cone.is_along(normal)).then_some(cone);
+    }
+
+    /// The shaping this shape samples by, if it took one.
+    pub fn cone(&self) -> Option<&ConeCut> {
+        self.cone.as_ref()
     }
 
     pub fn unit(&self) -> UnitShape {
@@ -766,7 +797,7 @@ impl LightShape for AffineShape {
             // Their setup out of line, as their strategies' bodies are (see
             // `SolidAngleSampler::sample`), behind the switch, which a disk or
             // tube that keeps area sampling reads without a call.
-            UnitShape::Disk if self.disk != DiskSampling::Area => {
+            UnitShape::Disk if self.disk == DiskSampling::Ellipse => {
                 let from_local = self.world_to_light.transform_point3a(from);
                 let ellipse = SphericalEllipse::new(from_local)?;
                 Some(SolidAngleSampler(Strategy::Ellipse {
