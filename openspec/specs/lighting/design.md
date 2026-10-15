@@ -895,6 +895,13 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   domain, §3.11 there.)
   Measure changes with
   `crust diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
+- **Power selection is blind to a spotlight's cone.** On `samples/spotlights.usda`
+  (six small spots on disjoint pools) a point in a pool sends ~12 of 13 NEE picks to
+  spots whose cones exclude it. `learned` selection fixes most of it: 6.3× lower relMSE
+  in the pools, 4.5× over the frame, for +6% Render time (4.3× at equal time;
+  `openspec/changes/cone-aware-light-sampling/notes.md` § 2.2). A small source is a
+  selection problem only: under 7% of its in-light samples miss the cone. It stays
+  default-off with `learned` (`learned-light-selection-by-default`).
 - **`neural` selection loses at equal time** on every checked-in sample and on
   ALab, whose problem is visibility alone: 0.79× `learned` on its direct
   lighting, 0.69× on its full image (the lighting design above;

@@ -11,6 +11,7 @@ use crate::ray::TRACE_T_MIN;
 
 use super::cone::ConeCut;
 use super::ellipse::SphericalEllipse;
+use super::polar::{PolarView, RoundDisk};
 use super::rect::{RectShape, SphericalRect};
 
 /// The emitting surface of an area light, decoupled from any material: pure
@@ -174,7 +175,12 @@ enum Strategy<'a> {
         from_local: Vec3A,
         cone: SubtendedCone,
     },
-    /// A rectangle, uniform over the spherical rectangle it subtends.
+    /// No point of the light emits toward the shading point: a shaped light
+    /// whose cone's cutoff square misses it. Nothing is sampled, and no
+    /// density answered.
+    Nothing,
+    /// A rectangle, uniform over the spherical rectangle it subtends, or over
+    /// that of its part inside a cone's cutoff square.
     Rect {
         shape: &'a RectShape,
         rect: SphericalRect,
@@ -185,6 +191,12 @@ enum Strategy<'a> {
         shape: &'a AffineShape,
         from_local: Vec3A,
         ellipse: SphericalEllipse,
+    },
+    /// A round disk in polar coordinates about the shading point's foot on its
+    /// plane (`light/polar.rs`).
+    Polar {
+        shape: &'a AffineShape,
+        view: PolarView,
     },
     /// A one-sided tube seen from outside: the azimuth uniform over the arc
     /// of wall that faces `from`, `|φ − φ₀| < half_arc` in local space, and
@@ -211,6 +223,14 @@ pub(super) struct TubeView {
 impl<'a> SolidAngleSampler<'a> {
     pub(super) fn rect(shape: &'a RectShape, rect: SphericalRect) -> Self {
         SolidAngleSampler(Strategy::Rect { shape, rect })
+    }
+
+    pub(super) fn nothing() -> Self {
+        SolidAngleSampler(Strategy::Nothing)
+    }
+
+    pub(super) fn polar(shape: &'a AffineShape, view: PolarView) -> Self {
+        SolidAngleSampler(Strategy::Polar { shape, view })
     }
 
     /// A point on the surface from two unit random numbers, and its
@@ -244,9 +264,15 @@ impl<'a> SolidAngleSampler<'a> {
             // light exactly as an area sample does — on the triangles a
             // bounce ray hits, and at the texel a textured card looks up.
             Strategy::Rect { shape, rect } => {
-                let (s, t) = rect.sample(u as f64, v as f64);
-                Some((shape.sample_point(s as f32, t as f32), rect.pdf()))
+                let (s, t) = if rect.is_clipped() {
+                    shape.clipped_st(&rect, rect.sample_xy(u as f64, v as f64))
+                } else {
+                    let (s, t) = rect.sample(u as f64, v as f64);
+                    (s as f32, t as f32)
+                };
+                Some((shape.sample_point(s, t), rect.pdf()))
             }
+            Strategy::Nothing => None,
             // Out of line, both, handed their state by value and answering
             // in registers — a point, then its density — so this match's
             // result never leaves them. Each other way cost every sphere and
@@ -273,6 +299,14 @@ impl<'a> SolidAngleSampler<'a> {
                 let p = shape.tube_point(view, u, v);
                 shape.tube_pdf(view, p).map(|pdf| (p, pdf))
             }
+            Strategy::Polar { shape, view } => {
+                let disk = shape.round.as_ref()?;
+                let p = shape.polar_point(disk, view, u, v);
+                if !p.is_finite() {
+                    return None;
+                }
+                shape.polar_pdf(disk, view, p).map(|pdf| (p, pdf))
+            }
         }
     }
 
@@ -290,13 +324,17 @@ impl<'a> SolidAngleSampler<'a> {
                 let p_local = shape.world_to_light.transform_point3a(p);
                 Some(shape.world_solid_angle_pdf(cone.pdf(), p_local - from_local))
             }
-            Strategy::Rect { rect, .. } => Some(rect.pdf()),
+            Strategy::Rect { shape, rect } => {
+                (!rect.is_clipped() || shape.clip_holds(&rect, p)).then(|| rect.pdf())
+            }
+            Strategy::Nothing => None,
             Strategy::Ellipse {
                 shape,
                 from_local,
                 ellipse,
             } => shape.ellipse_pdf(from_local, ellipse, p),
             Strategy::Tube { shape, view } => shape.tube_pdf(view, p),
+            Strategy::Polar { shape, view } => shape.polar_pdf(shape.round.as_ref()?, view, p),
         }
     }
 }
@@ -589,6 +627,10 @@ pub struct AffineShape {
     /// `CRUST_CONE_CLIP`: a `polar` disk stops its samples at the cone's
     /// cutoff circle.
     cone_clip: bool,
+    /// A disk's world placement when it is round, for the polar strategy.
+    /// Boxed: only the out-of-line polar strategy reads it, and inline it
+    /// would grow every light by its 80 bytes.
+    round: Option<Box<RoundDisk>>,
     /// Whether the emitter on this surface is one-sided, which
     /// [`AreaLight::new`](super::AreaLight::new) sets. A tube's visible-arc
     /// strategy needs it: a two-sided tube seen through an open end shows
@@ -618,8 +660,12 @@ impl AffineShape {
             disk: config.disk_sampling,
             cone: None,
             cone_clip: config.cone_clip,
+            round: None,
             front_only: false,
         };
+        if unit == UnitShape::Disk {
+            shape.round = RoundDisk::of(&light_to_world, shape.normal_mat).map(Box::new);
+        }
         shape.area = shape.integrate_area();
         Some(shape)
     }
@@ -657,6 +703,11 @@ impl AffineShape {
     /// The shaping this shape samples by, if it took one.
     pub fn cone(&self) -> Option<&ConeCut> {
         self.cone.as_ref()
+    }
+
+    /// Whether a `polar` disk stops its samples at the cone's cutoff circle.
+    pub(super) fn cone_clip(&self) -> bool {
+        self.cone_clip
     }
 
     pub fn unit(&self) -> UnitShape {
@@ -805,6 +856,9 @@ impl LightShape for AffineShape {
                     from_local,
                     ellipse,
                 }))
+            }
+            UnitShape::Disk if self.disk == DiskSampling::Polar => {
+                self.polar_sampler(self.round.as_ref()?, from)
             }
             UnitShape::Cylinder if self.tube != TubeSampling::Area && self.front_only => {
                 let view = self.tube_view(from)?;

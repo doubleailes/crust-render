@@ -734,11 +734,10 @@ fn at(m: Affine3A, local: Vec3A) -> Vec3A {
 /// each weighted by the area it stands for); the shares must sum to one —
 /// the density is normalised — and the samples, a stratified grid of
 /// `(u, v)`, must fill the bins in the same shares.
-fn check_density(name: &str, light: &AreaLight, from: Vec3A, bin: impl Fn(Vec3A) -> usize) {
+fn check_density(name: &str, shape: &impl LightShape, from: Vec3A, bin: impl Fn(Vec3A) -> usize) {
     const A: usize = 1024;
     const K: usize = 256;
     const BINS: usize = 32;
-    let shape = affine(light);
     let sampler = shape
         .solid_angle_sampler(from)
         .unwrap_or_else(|| panic!("{name}: no strategy from {from}"));
@@ -831,7 +830,7 @@ fn tube_samples_follow_their_density() {
             let light = round_light(UnitShape::Cylinder, m, tube, DiskSampling::Area, true);
             check_density(
                 &format!("{name} ({tube})"),
-                &light,
+                affine(&light),
                 from,
                 tube_bins(m, from),
             );
@@ -898,7 +897,7 @@ fn sheared_disk_samples_follow_their_density() {
             let a = ((l.y.atan2(l.x) + PI) / (2.0 * PI) * 8.0) as usize;
             a.min(7) * 4 + r
         };
-        check_density(&format!("disk from {f}"), &light, from, bins);
+        check_density(&format!("disk from {f}"), affine(&light), from, bins);
         let shape = affine(&light);
         let sampler = shape.solid_angle_sampler(from).unwrap();
         let mut rng = openqmc::pcg::Rng::new(5);
@@ -1219,4 +1218,316 @@ fn shapes_take_the_cone_only_where_it_is_a_circle() {
         0,
     );
     assert!(affine(&sphere).cone().is_none());
+}
+
+/// A 4 × 4 rect light 1 above the floor z = 0, emitting down, shaped by a
+/// 20° cone softened over its outer 40% and focused, with the cone clip on
+/// or off.
+fn spot_panel(clip: bool) -> AreaLight {
+    let mut shaping = crate::lux::Shaping::new(glam::Mat3A::IDENTITY);
+    shaping.cone_angle_deg = 20.0;
+    shaping.cone_softness = 0.4;
+    shaping.focus = 2.0;
+    let rect = RectShape::new(
+        Vec3A::new(-2.0, -2.0, 1.0),
+        Vec3A::new(4.0, 0.0, 0.0),
+        Vec3A::new(0.0, 4.0, 0.0),
+        -Vec3A::Z,
+    )
+    .with_cone_clip(clip);
+    AreaLight::new(
+        rect,
+        Arc::new(Emissive::light(Vec3A::ONE, Some(shaping))),
+        0,
+    )
+}
+
+/// The bounding square of the cone's cutoff circle about `from`'s foot on the
+/// panel's plane z = 1, clipped to the panel.
+fn clip_square(light: &AreaLight, from: Vec3A) -> (f32, f32, f32, f32) {
+    let rc = rect_of(light)
+        .cone()
+        .unwrap()
+        .cutoff_radius(f64::from(1.0 - from.z))
+        .unwrap() as f32;
+    (
+        (from.x - rc).max(-2.0),
+        (from.x + rc).min(2.0),
+        (from.y - rc).max(-2.0),
+        (from.y + rc).min(2.0),
+    )
+}
+
+/// The clipped rect samples its own density over the part of the panel in
+/// the cone's cutoff square, and nothing else: from under the middle, near
+/// an edge and near a corner, the density integrates to one over the whole
+/// panel (zero outside the square), the samples fill the square in the
+/// shares it claims, `sample`'s density is `pdf`'s bit for bit, and every
+/// sample lies in the square.
+#[test]
+fn clipped_rect_samples_follow_their_density() {
+    let light = spot_panel(true);
+    let shape = rect_of(&light);
+    for from in [
+        Vec3A::new(0.0, 0.0, 0.0),
+        Vec3A::new(1.9, 0.3, 0.0),
+        Vec3A::new(-1.95, 1.9, 0.2),
+        Vec3A::new(0.5, -0.7, -3.0),
+    ] {
+        let (x0, x1, y0, y1) = clip_square(&light, from);
+        let bins = |p: Vec3A| {
+            let i = (((p.x - x0) / (x1 - x0)) * 8.0).clamp(0.0, 7.0) as usize;
+            let j = (((p.y - y0) / (y1 - y0)) * 4.0).clamp(0.0, 3.0) as usize;
+            i * 4 + j
+        };
+        check_density(&format!("clipped rect from {from}"), shape, from, bins);
+        let sampler = shape.solid_angle_sampler(from).unwrap();
+        let tol = 1e-5;
+        for i in 0..64 {
+            for j in 0..64 {
+                let (u, v) = ((i as f32 + 0.5) / 64.0, (j as f32 + 0.5) / 64.0);
+                let (p, _) = sampler.sample(u, v).unwrap();
+                assert!(
+                    p.x >= x0 - tol && p.x <= x1 + tol && p.y >= y0 - tol && p.y <= y1 + tol,
+                    "from {from}: {p} outside [{x0}, {x1}] × [{y0}, {y1}]"
+                );
+            }
+        }
+    }
+}
+
+/// A receiver whose cutoff square misses the panel draws no light sample
+/// (and so no shadow ray), and the panel has no density for it.
+#[test]
+fn a_clip_that_misses_the_light_samples_nothing() {
+    let light = spot_panel(true);
+    let from = Vec3A::new(3.0, 3.0, 0.0);
+    let sampler = rect_of(&light)
+        .solid_angle_sampler(from)
+        .expect("a strategy");
+    for k in 0..256 {
+        let (u, v) = ((k % 16) as f32 / 16.0 + 0.03, (k / 16) as f32 / 16.0 + 0.03);
+        assert!(sampler.sample(u, v).is_none());
+        assert!(light.sample_li(from, u, v).is_none());
+        let p = rect_of(&light).sample_point(u, v);
+        assert!(sampler.pdf(p).is_none());
+        assert!(light.pdf_at_point(from, p).is_none());
+    }
+}
+
+/// Where the cutoff square holds the whole panel, the clip is the unclipped
+/// strategy bit for bit; so is a light whose cone the panel did not take.
+#[test]
+fn a_clip_that_holds_the_light_changes_nothing() {
+    let (on, off) = (spot_panel(true), spot_panel(false));
+    // h = 21: the cutoff radius is 21 tan 20° = 7.6, past every edge.
+    for from in [Vec3A::new(0.0, 0.0, -20.0), Vec3A::new(1.0, -0.5, -20.0)] {
+        for k in 0..1024 {
+            let (u, v) = ((k % 32) as f32 / 32.0 + 0.01, (k / 32) as f32 / 32.0 + 0.01);
+            let (a, b) = (on.sample_li(from, u, v), off.sample_li(from, u, v));
+            assert_eq!(
+                a.map(|s| (s.direction, s.distance, s.radiance, s.pdf)),
+                b.map(|s| (s.direction, s.distance, s.radiance, s.pdf)),
+                "from {from}, sample {k}"
+            );
+        }
+    }
+}
+
+/// A round disk of radius 0.6, rotated and moved, emitting along its local
+/// −Z; and the rotation, whose −Z is the disk's normal.
+fn round_disk() -> (Affine3A, glam::Quat) {
+    let q = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.5, -0.3, 0.8);
+    (
+        Affine3A::from_scale_rotation_translation(
+            glam::Vec3::new(0.6, 0.6, 1.0),
+            q,
+            glam::Vec3::new(0.4, -1.0, 2.0),
+        ),
+        q,
+    )
+}
+
+/// The round disk sampled by `polar`, with an emitter shaped by a 30° cone
+/// (softness 0.4, focus 2) along its normal or unshaped, and the clip on or
+/// off.
+fn polar_disk(shaped_cone: bool, clip: bool) -> AreaLight {
+    let (m, q) = round_disk();
+    let shape = AffineShape::new(UnitShape::Disk, m)
+        .unwrap()
+        .with_sampling(TubeSampling::Area, DiskSampling::Polar)
+        .with_cone_clip(clip);
+    let emitter = if shaped_cone {
+        let mut shaping = crate::lux::Shaping::new(glam::Mat3A::from_quat(q));
+        shaping.cone_angle_deg = 30.0;
+        shaping.cone_softness = 0.4;
+        shaping.focus = 2.0;
+        Arc::new(Emissive::light(Vec3A::ONE, Some(shaping)))
+    } else {
+        Arc::new(Emissive::light(Vec3A::ONE, None))
+    };
+    AreaLight::new(shape, emitter, 0)
+}
+
+/// Disk bins in local space: eight azimuths by four rings.
+fn disk_bins(m: Affine3A) -> impl Fn(Vec3A) -> usize {
+    let inv = m.inverse();
+    move |p| {
+        let l = inv.transform_point3a(p);
+        let r = (((l.x * l.x + l.y * l.y) * 4.0) as usize).min(3);
+        let a = ((l.y.atan2(l.x) + PI) / (2.0 * PI) * 8.0) as usize;
+        a.min(7) * 4 + r
+    }
+}
+
+/// The polar strategy samples its own density, which integrates to one over
+/// the disk, from a foot inside the disk, outside it, near its plane and at
+/// a grazing angle; unshaped (`cos θl / r²` along each slice) and with the
+/// focus followed; and every sample lies on the disk.
+#[test]
+fn polar_disk_samples_follow_their_density() {
+    let (m, _) = round_disk();
+    let inv = m.inverse();
+    for shaped_cone in [false, true] {
+        let light = polar_disk(shaped_cone, false);
+        assert!(affine(&light).cone().is_some() == shaped_cone);
+        for f in [
+            Vec3A::new(0.2, 0.1, -0.8),
+            Vec3A::new(1.8, -0.5, -0.6),
+            Vec3A::new(0.9, 0.9, -0.05),
+            Vec3A::new(3.0, 0.0, -0.4),
+            Vec3A::new(0.0, 0.0, -6.0),
+        ] {
+            let from = at(m, f);
+            let name = format!("polar disk from {f} (shaped {shaped_cone})");
+            check_density(&name, affine(&light), from, disk_bins(m));
+            let sampler = affine(&light).solid_angle_sampler(from).unwrap();
+            let mut rng = openqmc::pcg::Rng::new(9);
+            for _ in 0..2000 {
+                let (p, _) = sampler.sample(rng.next_f32(), rng.next_f32()).unwrap();
+                let l = inv.transform_point3a(p);
+                assert!(
+                    l.z.abs() < 1e-5 && l.x * l.x + l.y * l.y <= 1.0 + 1e-5,
+                    "{name}: {l}"
+                );
+            }
+        }
+    }
+}
+
+/// With the clip on, the polar strategy samples only within the cone's
+/// cutoff circle about the foot, still at its own density, and samples
+/// nothing where that circle misses the disk.
+#[test]
+fn capped_polar_samples_stay_in_the_beam() {
+    let (m, _) = round_disk();
+    let light = polar_disk(true, true);
+    let shape = affine(&light);
+    let cone = *shape.cone().unwrap();
+    let n = (shape.normal_mat * -Vec3A::Z).normalize();
+    let center = m.translation;
+    for f in [
+        Vec3A::new(0.2, 0.1, -0.8),
+        Vec3A::new(1.1, -0.4, -0.7),
+        Vec3A::new(0.5, 0.6, -0.3),
+        Vec3A::new(0.0, 0.0, -3.0),
+    ] {
+        let from = at(m, f);
+        let h = (from - center).dot(n);
+        let foot = from - h * n;
+        let cap = cone.cutoff_radius(f64::from(h)).unwrap() as f32;
+        let name = format!("capped polar disk from {f}");
+        check_density(&name, shape, from, disk_bins(m));
+        let sampler = shape.solid_angle_sampler(from).unwrap();
+        for i in 0..64 {
+            for j in 0..64 {
+                let (u, v) = ((i as f32 + 0.5) / 64.0, (j as f32 + 0.5) / 64.0);
+                let (p, _) = sampler.sample(u, v).unwrap();
+                assert!((p - foot).length() <= cap * (1.0 + 1e-5), "{name}: {p}");
+            }
+        }
+    }
+    // The cutoff circle (radius 0.577 h) misses the disk (radius 0.6).
+    let from = at(m, Vec3A::new(4.0, 0.0, -0.5));
+    let sampler = shape.solid_angle_sampler(from).expect("a strategy");
+    assert!(sampler.sample(0.3, 0.7).is_none());
+    assert!(light.sample_li(from, 0.3, 0.7).is_none());
+}
+
+/// A disk squashed into an ellipse is not round, so `polar` area-samples it,
+/// bit for bit as `area` does.
+#[test]
+fn an_elliptical_disk_falls_back_to_area() {
+    let m = Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(0.8, 0.5, 1.0),
+        glam::Quat::from_rotation_x(0.4),
+        glam::Vec3::ZERO,
+    );
+    let polar = round_light(
+        UnitShape::Disk,
+        m,
+        TubeSampling::Area,
+        DiskSampling::Polar,
+        true,
+    );
+    let area = round_light(
+        UnitShape::Disk,
+        m,
+        TubeSampling::Area,
+        DiskSampling::Area,
+        true,
+    );
+    let from = at(m, Vec3A::new(0.3, 0.2, -1.0));
+    assert!(affine(&polar).solid_angle_sampler(from).is_none());
+    for k in 0..256 {
+        let (u, v) = ((k % 16) as f32 / 16.0 + 0.02, (k / 16) as f32 / 16.0 + 0.02);
+        let (a, b) = (polar.sample_li(from, u, v), area.sample_li(from, u, v));
+        assert_eq!(
+            a.map(|s| (s.direction, s.distance, s.pdf)),
+            b.map(|s| (s.direction, s.distance, s.pdf))
+        );
+    }
+}
+
+/// Far beyond the rim and high above the plane, each slice is thin against
+/// the height: drawn as `ρ = √(d² − h²)`, or with `G1 − G2` as a plain
+/// difference, it would cancel. Instead 256 strata of `v` along one slice
+/// land on 256 distinct, ordered distances, and each one's density is the
+/// slice's.
+#[test]
+fn thin_far_polar_slices_keep_their_strata() {
+    let m = Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(0.05, 0.05, 1.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::ZERO,
+    );
+    let light = round_light(
+        UnitShape::Disk,
+        m,
+        TubeSampling::Area,
+        DiskSampling::Polar,
+        true,
+    );
+    let shape = affine(&light);
+    // 400 above the plane (in front: local −Z), its foot 3 from the centre.
+    let from = Vec3A::new(3.0, 0.0, -400.0);
+    let sampler = shape
+        .solid_angle_sampler(from)
+        .expect("a round disk from in front");
+    let mut last = f32::INFINITY;
+    let mut pdfs = Vec::new();
+    for j in 0..256 {
+        let v = (j as f32 + 0.5) / 256.0;
+        let (p, pdf) = sampler.sample(0.5, v).unwrap();
+        // Along the slice through the centre, from the foot at x = 3 toward
+        // x = 0: the distance from the foot grows as x falls.
+        assert!(p.x < last, "stratum {j}: {} after {last}", p.x);
+        last = p.x;
+        pdfs.push(pdf.get());
+    }
+    // Unshaped, the solid-angle density is constant along a slice.
+    let (lo, hi) = pdfs.iter().fold((f32::INFINITY, 0.0f32), |(lo, hi), &p| {
+        (lo.min(p), hi.max(p))
+    });
+    assert!(hi / lo - 1.0 < 1e-4, "pdf varies {lo}..{hi} along a slice");
 }

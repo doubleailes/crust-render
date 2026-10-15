@@ -13,8 +13,8 @@ use std::sync::Arc;
 use crust_core::rt::{Geometry, SceneBuilder};
 use crust_core::{
     AffineShape, AreaLight, DiskSampling, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR,
-    PathSampler, Ray, SamplingStrategy, TubeSampling, UnitShape, Vec3A, Volumes, WorldBuilder,
-    ray_color,
+    PathSampler, Ray, SamplingStrategy, Shaping, TubeSampling, UnitShape, Vec3A, Volumes,
+    WorldBuilder, ray_color,
 };
 use glam::{Affine3A, Mat3, Quat, Vec3};
 
@@ -148,7 +148,13 @@ const TUBES: [TubeSampling; 3] = [
     TubeSampling::Arc,
     TubeSampling::Equiangular,
 ];
-const DISKS: [DiskSampling; 2] = [DiskSampling::Area, DiskSampling::Ellipse];
+// `Polar` here is the fallback: this disk is squashed into an ellipse, so
+// it is area-sampled. The round disk's polar strategy is tested below.
+const DISKS: [DiskSampling; 3] = [
+    DiskSampling::Area,
+    DiskSampling::Ellipse,
+    DiskSampling::Polar,
+];
 
 /// Every strategy, under every switch value, estimates the same floor: each
 /// against power MIS with both switches at `area`, within four standard
@@ -215,6 +221,142 @@ fn the_difference_from_area_sampling_falls_as_one_over_root_n() {
             coarse / fine > 2.5,
             "tube {tube}, disk {disk}: RMS difference {coarse} at 64 spp, {fine} at 1024 spp \
              (ratio {}, expected about 4)",
+            coarse / fine
+        );
+    }
+}
+
+/// A round disk of radius 0.8, 1.2 above the floor and tilted 0.2 rad,
+/// emitting down.
+fn round_disk_placement() -> (Affine3A, Mat3) {
+    let turn = Mat3::from_quat(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2));
+    let tilt = Mat3::from_quat(Quat::from_rotation_z(0.2));
+    let rotation = tilt * turn;
+    (
+        Affine3A::from_mat3_translation(
+            rotation * Mat3::from_diagonal(Vec3::new(0.8, 0.8, 1.0)),
+            Vec3::new(0.0, 1.2, 0.0),
+        ),
+        rotation,
+    )
+}
+
+/// The floor and the round disk, unshaped or shaped by a 30° cone (softness
+/// 0.4, focus 2) along its normal, sampled as told, with the cone clip on or
+/// off.
+fn round_disk_stage(shaped: bool, disk: DiskSampling, clip: bool) -> Stage {
+    let mut world = WorldBuilder::new();
+    let mut lights = LightList::new();
+    world.attach(
+        Geometry::TriangleMesh {
+            vertices: vec![
+                [-50.0, 0.0, -50.0],
+                [50.0, 0.0, -50.0],
+                [50.0, 0.0, 50.0],
+                [-50.0, 0.0, 50.0],
+            ],
+            indices: vec![[0, 2, 1], [0, 3, 2]],
+            normals: None,
+        },
+        Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+    );
+    let (placement, rotation) = round_disk_placement();
+    let shaping = shaped.then(|| {
+        let mut s = Shaping::new(glam::Mat3A::from(rotation));
+        s.cone_angle_deg = 30.0;
+        s.cone_softness = 0.4;
+        s.focus = 2.0;
+        s
+    });
+    let emitter = Arc::new(Emissive::light(Vec3A::splat(6.0), shaping));
+    let mut proto = SceneBuilder::new();
+    proto.attach(unit_geometry(UnitShape::Disk));
+    let id = world.attach_masked(
+        Geometry::Instance {
+            scene: Arc::new(proto.commit()),
+            transform: placement,
+            transform_end: None,
+        },
+        emitter.clone(),
+        MASK_SHADOW | MASK_INDIRECT,
+    );
+    let shape = AffineShape::new(UnitShape::Disk, placement)
+        .unwrap()
+        .with_sampling(TubeSampling::Area, disk)
+        .with_cone_clip(clip);
+    let light = AreaLight::new(shape, emitter, id);
+    if let crust_core::AreaShape::Affine(a) = light.shape() {
+        assert_eq!(
+            a.cone().is_some(),
+            shaped,
+            "a shaped round disk takes its cone"
+        );
+    }
+    lights.add(light);
+    Stage {
+        world: world.commit(),
+        lights,
+    }
+}
+
+/// The polar strategy on a round disk, unshaped and shaped, with the clip
+/// off and on: light-only, BSDF-only and power-MIS estimates of the floor
+/// agree with power MIS under area sampling, under the disk (where the foot
+/// is inside it), beside it, and where the shaped cone's edge falls.
+#[test]
+fn polar_disk_sampling_is_unbiased() {
+    for shaped in [false, true] {
+        let reference = round_disk_stage(shaped, DiskSampling::Area, false);
+        let truth: Vec<(f64, f64)> = (0..FLOOR.len())
+            .map(|k| estimate(&reference, SamplingStrategy::PowerMis, k, 1 << 20, 16_384))
+            .collect();
+        assert!(truth.iter().filter(|(m, _)| *m > 0.01).count() >= 3);
+        for clip in [false, true] {
+            let stage = round_disk_stage(shaped, DiskSampling::Polar, clip);
+            for (s, n) in [
+                (SamplingStrategy::PowerMis, 4096),
+                (SamplingStrategy::LightOnly, 4096),
+                (SamplingStrategy::BsdfOnly, 16_384),
+            ] {
+                for (k, &(want, want_se)) in truth.iter().enumerate() {
+                    let (got, se) = estimate(&stage, s, k, 0, n);
+                    let tol = 4.0 * (se * se + want_se * want_se).sqrt() + 1e-3 * want + 1e-6;
+                    assert!(
+                        (got - want).abs() <= tol,
+                        "shaped {shaped}, clip {clip}, {s:?}, floor point {k}: {got} vs {want} \
+                         (tolerance {tol})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The light-only difference between polar and area sampling on the round
+/// disk falls at least as `1/√N`: noise, not bias.
+#[test]
+fn polar_differs_from_area_by_noise_alone() {
+    const RUNS: u32 = 8;
+    for (shaped, clip) in [(false, false), (true, true)] {
+        let area = round_disk_stage(shaped, DiskSampling::Area, false);
+        let polar = round_disk_stage(shaped, DiskSampling::Polar, clip);
+        let rms = |n: u32| {
+            let mut sum2 = 0.0f64;
+            for run in 0..RUNS {
+                for k in 0..FLOOR.len() {
+                    let s = SamplingStrategy::LightOnly;
+                    let (a, _) = estimate(&area, s, k, (2 * run) * n + (1 << 16), n);
+                    let (b, _) = estimate(&polar, s, k, (2 * run + 1) * n + (1 << 16), n);
+                    sum2 += (a - b) * (a - b);
+                }
+            }
+            (sum2 / (RUNS as usize * FLOOR.len()) as f64).sqrt()
+        };
+        let (coarse, fine) = (rms(64), rms(1024));
+        assert!(
+            coarse / fine > 2.5,
+            "shaped {shaped}, clip {clip}: RMS difference {coarse} at 64 spp, {fine} at 1024 \
+             (ratio {})",
             coarse / fine
         );
     }

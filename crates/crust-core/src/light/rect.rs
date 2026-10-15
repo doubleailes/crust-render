@@ -155,6 +155,80 @@ impl RectShape {
             .contains(&rect.solid_angle)
             .then_some(rect)
     }
+
+    /// The strategy from `from` with the cone clip on (`CRUST_CONE_CLIP`): the
+    /// spherical rectangle of the part of the light inside the bounding
+    /// square of the cone's cutoff circle about `from`'s foot, where the rest
+    /// of the light emits nothing toward `from` ([`ConeCut::cutoff_radius`]).
+    ///
+    /// In the [`SphericalRect`] frame the foot is the origin, so the square
+    /// is `[−ρc, ρc]²` and the clip is four comparisons. A square that misses
+    /// the light is [`SolidAngleSampler::nothing`]: no sample, and no density
+    /// on the bounce side, where the light is dark toward `from` anyway. A
+    /// square that holds the whole light is the unclipped strategy, bit for
+    /// bit. A clipped one is sampled by its spherical rectangle at any solid
+    /// angle the map holds in f64 (the floor that sends a whole small light to
+    /// area sampling is for speed, and a clipped light is the one worth the
+    /// map), and by area over the whole light above `MAX_SPHERICAL_RECT_SR`,
+    /// which only a cone wider than about 87° reaches.
+    #[inline(never)]
+    fn clipped_sampler(&self, cone: &ConeCut, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
+        let whole = || {
+            self.spherical_rect(from)
+                .map(|rect| SolidAngleSampler::rect(self, rect))
+        };
+        let frame = self.frame.as_ref()?;
+        let d = frame.origin - DVec3::from(Vec3::from(from));
+        let h = d.dot(frame.z).abs();
+        if d.dot(frame.normal) >= 0.0 || h <= 0.0 {
+            return whole();
+        }
+        let Some(rc) = cone.cutoff_radius(h) else {
+            return whole();
+        };
+        let (x0, y0) = (d.dot(frame.x), d.dot(frame.y));
+        // The light's bounds as `SphericalRect::new` forms them.
+        let (x1, y1) = (x0 + frame.width, y0 + frame.height);
+        let (cx0, cx1, cy0, cy1) = (x0.max(-rc), x1.min(rc), y0.max(-rc), y1.min(rc));
+        if !(cx0 < cx1 && cy0 < cy1) {
+            return Some(SolidAngleSampler::nothing());
+        }
+        if (cx0, cx1, cy0, cy1) == (x0, x1, y0, y1) {
+            return whole();
+        }
+        let rect =
+            SphericalRect::from_bounds(cx0, cx1, cy0, cy1, h)?.clipped_from(DVec2::new(x0, y0));
+        if rect.solid_angle > 0.0 && rect.solid_angle <= MAX_SPHERICAL_RECT_SR {
+            Some(SolidAngleSampler::rect(self, rect))
+        } else {
+            None
+        }
+    }
+
+    /// The light's own `(s, t)` of a point a clipped [`SphericalRect`] drew
+    /// at `(x, y)` in its frame.
+    pub(super) fn clipped_st(&self, rect: &SphericalRect, (x, y): (f64, f64)) -> (f32, f32) {
+        let frame = self.frame.as_ref().expect("a clipped light is a rectangle");
+        let s = (x - rect.full.x) / frame.width;
+        let t = (y - rect.full.y) / frame.height;
+        (s.clamp(0.0, 1.0) as f32, t.clamp(0.0, 1.0) as f32)
+    }
+
+    /// Whether `p`, a point on the light, lies within a clipped
+    /// [`SphericalRect`]'s bounds, give or take the f32 rounding of a point
+    /// placed through the light's edges.
+    pub(super) fn clip_holds(&self, rect: &SphericalRect, p: Vec3A) -> bool {
+        let frame = self.frame.as_ref().expect("a clipped light is a rectangle");
+        let rel = DVec3::from(Vec3::from(p)) - frame.origin;
+        let (x, y) = (
+            rect.full.x + rel.dot(frame.x),
+            rect.full.y + rel.dot(frame.y),
+        );
+        let tol = 8.0
+            * f64::from(f32::EPSILON)
+            * (frame.origin.abs().max_element() + frame.width + frame.height);
+        (rect.x0 - tol..=rect.x1 + tol).contains(&x) && (rect.y0 - tol..=rect.y1 + tol).contains(&y)
+    }
 }
 
 /// A rectangle as seen from a shading point, in the rectangle's frame with
@@ -177,6 +251,11 @@ pub(super) struct SphericalRect {
     pub(super) g23: DVec2,
     /// `g0 + g1 + g2 + g3 − 2π`, the solid angle it subtends.
     pub(super) solid_angle: f64,
+    /// For the part of a light inside a cone's cutoff square, the whole
+    /// light's origin corner in this frame, which a sample's `(s, t)` on the
+    /// light is measured from; `NaN` for a whole light, whose `(s, t)` are
+    /// this rectangle's own.
+    pub(super) full: DVec2,
 }
 
 impl SphericalRect {
@@ -205,7 +284,12 @@ impl SphericalRect {
         if h <= 0.0 {
             return None;
         }
-        let (x1, y1) = (x0 + frame.width, y0 + frame.height);
+        Self::from_bounds(x0, x0 + frame.width, y0, y0 + frame.height, h)
+    }
+
+    /// The rectangle `[x0, x1] × [y0, y1]` in the plane `z = −h`, `h > 0`,
+    /// seen from the origin.
+    pub(super) fn from_bounds(x0: f64, x1: f64, y0: f64, y1: f64, h: f64) -> Option<Self> {
         let (h2, x02, x12, y02, y12) = (h * h, x0 * x0, x1 * x1, y0 * y0, y1 * y1);
         // `(cos, sin)` of each internal angle, both scaled by the same
         // positive factor.
@@ -239,7 +323,20 @@ impl SphericalRect {
             b1: y1 / (h2 + y12).sqrt(),
             g23,
             solid_angle,
+            full: DVec2::NAN,
         })
+    }
+
+    /// This rectangle as the clipped part of a light whose origin corner is
+    /// `full` in the same frame.
+    pub(super) fn clipped_from(mut self, full: DVec2) -> Self {
+        self.full = full;
+        self
+    }
+
+    /// Whether this is the clipped part of a light rather than a whole one.
+    pub(super) fn is_clipped(&self) -> bool {
+        !self.full.x.is_nan()
     }
 
     /// Uniform over the solid angle. Finite and positive: a rectangle is only
@@ -253,6 +350,14 @@ impl SphericalRect {
     /// angle it subtends. Area-preserving from `(u, v)`, so the sampler's
     /// stratification carries onto the sphere of directions.
     pub(super) fn sample(&self, u: f64, v: f64) -> (f64, f64) {
+        let (xu, yv) = self.sample_xy(u, v);
+        let s = (xu - self.x0) / (self.x1 - self.x0);
+        let t = (yv - self.y0) / (self.y1 - self.y0);
+        (s.clamp(0.0, 1.0), t.clamp(0.0, 1.0))
+    }
+
+    /// The point uniform in the solid angle, as `(x, y)` in this frame.
+    pub(super) fn sample_xy(&self, u: f64, v: f64) -> (f64, f64) {
         // The azimuthal slice holding a fraction `u` of the solid angle (the
         // paper's eq. 7-9, whose `u (g0 + g1 − 2π) + (u − 1)(g2 + g3)` is
         // `u Ω − (g2 + g3)`), by the angle-difference identities.
@@ -283,9 +388,7 @@ impl SphericalRect {
             self.y1
         };
         let yv = yv.max(self.y0).min(self.y1);
-        let s = (xu - self.x0) / (self.x1 - self.x0);
-        let t = (yv - self.y0) / (self.y1 - self.y0);
-        (s.clamp(0.0, 1.0), t.clamp(0.0, 1.0))
+        (xu, yv)
     }
 }
 
@@ -308,6 +411,11 @@ impl LightShape for RectShape {
 
     #[inline(always)]
     fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
+        if self.cone_clip
+            && let Some(cone) = &self.cone
+        {
+            return self.clipped_sampler(cone, from);
+        }
         self.spherical_rect(from)
             .map(|rect| SolidAngleSampler::rect(self, rect))
     }

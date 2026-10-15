@@ -8,6 +8,7 @@ mod ellipse;
 mod infinite;
 mod kind;
 mod list;
+mod polar;
 mod rect;
 mod shape;
 
