@@ -2,9 +2,8 @@
 
 crust traces one path at a time. `trace_path` (`tracer/path.rs`) follows a camera
 sample from its first hit to its last vertex on one thread's stack, so every
-kernel query, shader run, texture fetch and (in the in-flight neural changes)
-network inference is issued for a single path, in path order. That has three
-measured or recorded costs:
+kernel query, shader run and texture fetch is issued for a single path, in path
+order. That has four measured or recorded costs:
 - the kernel's design record lists "rays are traced one at a time, so there is no
   coherent ray-packet tracing (that needs the integrator restructured, not just
   the kernel)" as a known gap;
@@ -12,19 +11,28 @@ measured or recorded costs:
   `match` dispatch per instruction per hit (`docs/shading_performance.md`);
 - ALab and Moana stream `.tx` tiles and Ptex faces in path order, the access
   pattern Hyperion's sorted deferred shading (Eisenacher et al., EGSR 2013) was
-  built to fix.
+  built to fix;
+- a vertex interleaves working sets that evict one another. When
+  `neural-visibility-light-selection` was measured on ALab (`docs/light_sampling.md`
+  §3.14, PR #308), a shadow ray cast right after one network evaluation cost
+  1,442 ns instead of 1,198 (+20%): the network's 1 MiB hash table evicted BVH
+  nodes. The same contention exists between BVH nodes, MaterialX programs, texture
+  tiles and light tables at every vertex. A staged sweep runs each kind of work
+  across many paths in turn, so each stage keeps its own working set hot.
 
-`neural-visibility-light-selection` and `neural-bvh-experiment` both gate on
-the cost of one inference. Run one path at a time, that is a 1×64
-matrix-vector product: memory-bound on a CPU. A batch of live paths turns the
-same query into a matrix product.
+The same experiment closes another possible motivation. Batched inference
+would make a network cheaper, but `neural` lost to `learned` per sample on
+ALab's full frame (0.82× trimmed relMSE) and at best tied on its direct
+lighting (1.03×), before any cost was counted. Its verdict is retire, and no
+schedule changes that. Batched inference stays a possible side benefit of
+this change, not a reason for it.
 
-This change builds the foundation every one of those wins needs: an integrator
-that can hold many paths in flight and advance them stage by stage. It is
-pinned **bit for bit** to today's integrator, so it changes the schedule and
-nothing else. Exploiting the batch (sorting by material or texture, ray
-streams, batched inference) is left to follow-up changes, each measured on its
-own.
+This change builds the foundation the coherence wins need: an integrator that
+can hold many paths in flight and advance them stage by stage. It is pinned
+**bit for bit** to today's integrator, so it changes the schedule and nothing
+else. Exploiting the batch (sorting by material or texture, separate stages
+for separate working sets, ray streams) is left to follow-up changes, each
+measured on its own.
 
 ## What Changes
 
@@ -112,7 +120,12 @@ None. Path scheduling belongs to `rendering`; the switch belongs to `cli`.
   - Memory: one path state per live path, `VertexRec` records included,
     bounded by the batch cap (design.md).
 - **No new dependencies, no `unsafe`, no GPU.**
-- **In-flight changes:** `neural-visibility-light-selection`, `neural-bvh-experiment`
-  and path guiding touch the vertex loop. Whichever lands second rebases onto the
-  other's step. The design keeps NEE and the bounce sample inside the step, so
-  their seams do not move.
+- **In-flight changes:**
+  - `neural-visibility-light-selection` (PR #308) adds per-thread state to
+    `trace_path`: a debug check that NEE and the bounce side read the light
+    selection at the same vertex, and a memo of the per-vertex selection
+    probabilities. Both assume a thread runs one path's vertex at a time.
+  - `neural-bvh-experiment` and path guiding also touch the vertex loop.
+  - Whichever lands second rebases onto the other's step. The design keeps NEE
+    and the bounce sample inside one step, so their seams do not move and the
+    per-thread state stays valid (design.md, Risks).

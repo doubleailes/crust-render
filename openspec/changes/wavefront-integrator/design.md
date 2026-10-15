@@ -190,6 +190,16 @@ The gate is measured against `CRUST_WAVEFRONT=0` on the default
 - **`bench_ab.sh`:** min and mean wall-clock ≤ 5% slower, reported per scene;
 - **`--stats`:** the peak resident memory increase.
 
+callgrind and wall-clock answer different questions:
+- **callgrind** counts instructions, not cycles. It measures the batch's
+  bookkeeping, and it decides the overhead check on the small samples, where
+  instruction count tracks time.
+- **Wall-clock on ALab and Moana** decides whether exploit changes proceed. Their
+  rays are mostly cache misses, which callgrind does not see: in §3.14 of
+  `docs/light_sampling.md`, one network evaluation measured 2.2 ALab shadow rays
+  in instructions but 0.94 in time. The batch's cost there, and every later
+  exploit's gain, is cache behaviour.
+
 **Pass:** follow-up exploit changes build on this driver.
 
 **Fail:** the record names the cost and its cause, for example cache misses on
@@ -241,6 +251,20 @@ same step code.
 - **[A batch that keeps few paths live wastes rounds]** (one long subsurface or
   glass path keeps a batch alive). → It is harmless to correctness and measured
   by the gate. Refilling dead slots is the follow-up fix (Open Questions).
+- **[Per-thread state that assumes one path's vertex at a time]**, added by
+  `neural-visibility-light-selection` (PR #308):
+  - in debug builds, `nee_picks_from` / `bounce_weighs_from` keep in a
+    thread-local where NEE last picked a light, and assert that the bounce side
+    weighs from the same position;
+  - `light_visibility.rs` memoises the last vertex's selection probabilities in
+    a one-entry thread-local.
+
+  → Under D1 both stay correct, because NEE and the bounce sample of a vertex run
+  in one `step`, with no other slot's step in between. In P1 and P2, every place
+  that resets the check moves into `begin` or `step`. A later change that splits
+  a vertex into separate shade, NEE and bounce stages must first move this state
+  into the path's own state. Otherwise the check asserts falsely and the memo
+  misses every time, running inference twice per vertex.
 - **[Cancellation latency grows]** from one pixel advance to one batch per worker.
   → At `K` = 1024 and 1 spp that is one tile's worth of samples, the latency the
   tiled stage-1 sweep already has. The `rendering` delta states it.
