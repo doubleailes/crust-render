@@ -523,6 +523,10 @@ impl Material for ExitLambertian {
         "subsurface_exit"
     }
 
+    fn transmits(&self) -> bool {
+        false
+    }
+
     fn scatter_importance(
         &self,
         _r_in: &Ray,

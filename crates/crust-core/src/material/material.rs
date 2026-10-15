@@ -270,6 +270,18 @@ pub trait Material: Send + Sync {
         false
     }
 
+    /// Whether light can arrive at this surface from below its horizon: any
+    /// transmission, refractive, diffuse or thin-walled. Known when the
+    /// material is built, never per hit, and conservative: `true` (the
+    /// default) is always safe. A surface that answers `false` lets
+    /// [`LightSelection::Tree`](crate::LightSelection::Tree) rank a light
+    /// wholly below its horizon at its defensive share alone; answering
+    /// `false` for a surface that does transmit costs noise from behind, never
+    /// bias.
+    fn transmits(&self) -> bool {
+        true
+    }
+
     /// The surface's presence at a hit, in [0, 1]: MaterialX `surface`'s
     /// `opacity`. A ray meets the surface with this probability and otherwise
     /// passes through it untouched — no vertex, no depth, no change of medium

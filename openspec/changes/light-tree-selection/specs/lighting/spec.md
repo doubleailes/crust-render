@@ -87,6 +87,19 @@ the surface. At a volume vertex the surface terms SHALL be ignored.
   10 m, both above its surface, under `--light-selection tree`
 - **THEN** the near light is picked with higher probability than the far one
 
+#### Scenario: A light below an opaque receiver is picked less
+
+- **WHEN** an opaque diffuse floor is lit by two equal sphere lights at the
+  same distance, one above it and one wholly below it, under
+  `--light-selection tree`
+- **THEN** the light below has only its defensive share there
+
+#### Scenario: A transmissive receiver still sees lights behind it
+
+- **WHEN** a glass or thin-walled transmissive surface is lit by two equal
+  sphere lights at the same distance, one on each side
+- **THEN** both are picked with more than their defensive share
+
 #### Scenario: A narrow spotlight is not picked outside its cone
 
 - **WHEN** a receiver lies outside the shaping cone of one of two lights under

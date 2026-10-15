@@ -485,6 +485,12 @@ impl PatternMaterial for PreviewSurface {
         self.base.geometry_thin_walled
     }
 
+    /// The constants' transmission, or a textured `opacity`, which drives
+    /// it per point.
+    fn pattern_transmits(&self) -> bool {
+        self.base.transmits() || self.inputs.iter().any(|(t, _)| *t == Target::Opacity)
+    }
+
     fn pattern_has_cutout(&self) -> bool {
         self.cutout.is_some() || self.base.has_cutout()
     }

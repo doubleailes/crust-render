@@ -67,6 +67,36 @@ pub trait LightShape: Send + Sync {
     /// `dir`.
     #[must_use]
     fn hits(&self, origin: Vec3A, dir: Vec3A) -> ShapeHits;
+
+    /// Where the surface lies, and its emitting normal where that is the same
+    /// at every point (a flat shape): what [`Light::bounds`](super::Light::bounds)
+    /// is built from. Conservative: every point the shape can sample lies in
+    /// the box.
+    #[must_use]
+    fn extent(&self) -> ShapeExtent;
+}
+
+/// A shape's world box and, for a flat shape, its one emitting normal
+/// ([`LightShape::extent`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeExtent {
+    pub min: Vec3A,
+    pub max: Vec3A,
+    /// The unit normal every point of a flat shape shares; `None` for a
+    /// curved one.
+    pub normal: Option<Vec3A>,
+}
+
+impl ShapeExtent {
+    /// The box around `points`, with `normal`.
+    pub(super) fn around(points: impl IntoIterator<Item = Vec3A>, normal: Option<Vec3A>) -> Self {
+        let (min, max) = points
+            .into_iter()
+            .fold((Vec3A::INFINITY, Vec3A::NEG_INFINITY), |(lo, hi), p| {
+                (lo.min(p), hi.max(p))
+            });
+        Self { min, max, normal }
+    }
 }
 
 /// Where a ray meets a light's surface ([`LightShape::hits`]): at most two
@@ -436,6 +466,14 @@ impl LightShape for SphereShape {
         }
         hits
     }
+    fn extent(&self) -> ShapeExtent {
+        let r = Vec3A::splat(self.radius.abs());
+        ShapeExtent {
+            min: self.center - r,
+            max: self.center + r,
+            normal: None,
+        }
+    }
 }
 
 /// A point on a sphere, uniform over the cone it subtends from `from`
@@ -790,6 +828,28 @@ impl LightShape for AffineShape {
             self.world_to_light.transform_point3a(origin),
             self.world_to_light.matrix3 * dir,
         )
+    }
+
+    /// The local box's eight corners through the placement: the unit sphere
+    /// in `[−1, 1]³`, the disk in `[−1, 1]² × {0}`, the tube in
+    /// `[−½, ½] × [−1, 1]²`. A disk's normal is the same everywhere.
+    fn extent(&self) -> ShapeExtent {
+        let (lo, hi) = match self.unit {
+            UnitShape::Sphere => (Vec3A::splat(-1.0), Vec3A::splat(1.0)),
+            UnitShape::Disk => (Vec3A::new(-1.0, -1.0, 0.0), Vec3A::new(1.0, 1.0, 0.0)),
+            UnitShape::Cylinder => (Vec3A::new(-0.5, -1.0, -1.0), Vec3A::new(0.5, 1.0, 1.0)),
+        };
+        let corners = (0..8).map(|k| {
+            let c = Vec3A::new(
+                if k & 1 == 0 { lo.x } else { hi.x },
+                if k & 2 == 0 { lo.y } else { hi.y },
+                if k & 4 == 0 { lo.z } else { hi.z },
+            );
+            self.light_to_world.transform_point3a(c)
+        });
+        let normal = (self.unit == UnitShape::Disk)
+            .then(|| (self.normal_mat * -Vec3A::Z).normalize_or(Vec3A::Z));
+        ShapeExtent::around(corners, normal)
     }
 }
 

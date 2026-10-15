@@ -3,7 +3,7 @@
 
 use glam::{DVec2, DVec3, Vec3, Vec3A};
 
-use super::shape::{LightShape, ShapeHits, SolidAngleSampler};
+use super::shape::{LightShape, ShapeExtent, ShapeHits, SolidAngleSampler};
 use crate::pdf::PdfSolidAngle;
 
 /// Rectangular light surface (UsdLux `RectLight`): the parallelogram
@@ -301,5 +301,17 @@ impl LightShape for RectShape {
             hits.push(t);
         }
         hits
+    }
+
+    fn extent(&self) -> ShapeExtent {
+        ShapeExtent::around(
+            [
+                self.origin,
+                self.origin + self.edge_u,
+                self.origin + self.edge_v,
+                self.origin + self.edge_u + self.edge_v,
+            ],
+            Some(self.normal),
+        )
     }
 }

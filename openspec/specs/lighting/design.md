@@ -195,6 +195,11 @@
     shadow rays 20% slower behind it, as its 1 MiB table evicts BVH nodes. At
     equal time that is 0.79× `learned` on direct lighting and 0.69× on the
     full image. The verdict is retire.
+  - **`tree`** (`light/tree.rs`; `docs/light_sampling.md` §3.15) picks the finite
+    lights by walking a light BVH from the receiver, pbrt-v4's
+    `BVHLightSampler` in shape, over a defensive share of the power table.
+    It sees distance, orientation and the receiver's horizon, and no
+    visibility. See "Light tree" below.
 
   **Both halves of the design were forced by measurement** (`docs/light_sampling.md`
   §3.8):
@@ -237,6 +242,87 @@
 
   Emissive geometry with no light-list entry is handled: the bounce keeps its emission
   at full weight.
+
+## Light tree
+
+`crust:lightSelection = "tree"` (`light/tree.rs`, the `tree` arms of
+`LightList`'s `*_at` lookups). It answers the half of light-selection waste a
+position-and-flux table cannot see. On ALab, 29.5% of NEE picks went to a light
+facing away from the receiver, and 15.1% to one below its horizon
+(`docs/light_sampling.md` §3.12). It is the default selection in pbrt-v4 and
+Cycles. It is blind to occluders, which is `learned`'s half.
+
+- **Bounds.** `Light::bounds(phi)` gives a box, an axis `w`, a normal spread
+  `θo`, an emission spread `θe`, the flux and whether it is two-sided. `phi` is
+  `Light::power`, already computed for the power table. `AreaLight` takes the
+  shape's `LightShape::extent` (its world box, and its normal if flat) and the
+  tighter of two direction bounds:
+  - the surface's own: one-sided flat `θo = 0, θe = π/2`; two-sided flat the
+    same, mirrored; curved `θo = π`;
+  - the shaping cone's: `Shaping::factor` is exactly zero beyond the cone
+    angle `a` from the shaping axis, whatever the shape, so `θe = min(a, π/2)`
+    and `θo = a − θe`. The split keeps the emitter cosine `cos θ'` positive
+    inside the cone; `θo = 0, θe = a` past `π/2` would make it negative.
+    pbrt-v4 splits a spot's falloff the same way.
+
+  The unit tests sweep every shape, sided-ness and cone, and check that every
+  sampled point is in the box and every lit direction within `θo + θe` of `w`.
+  A bound too tight is the one way the tree could starve a light; the
+  defensive share below keeps that unbiased.
+- **Importance** (`LightBounds::importance`) is pbrt-v4's
+  `LightBounds::Importance`:
+  - `phi · cos θ' / d²`, with `d²` clamped to the half diagonal;
+  - `θ'` is the angle to `w` less `θo` and the box's subtended angle `θb`,
+    zero beyond `θe`;
+  - times the receiver's `cos θ_i`, reduced by `θb`.
+
+  One change from pbrt: the receiver term is **signed at an opaque receiver**
+  (`Receiver::opaque`, from `Material::transmits()`), so a box wholly below
+  the horizon gets zero there. Elsewhere it is pbrt's `|n·ω|`, so glass and
+  thin walls still see lights behind them. pbrt's `|n·ω|` alone cannot cut
+  ALab's below-horizon picks, and a signed form everywhere would starve glass
+  of light from behind. `transmits()` is per material and conservative
+  (default `true`). `OpenPBR` answers from `transmission_weight` and
+  thin-walled subsurface, which are never textured (only the base colour is).
+  `PreviewSurface` also answers `true` for a textured `opacity`. MaterialX
+  answers `false` only when every leaf reflects. The integrator asks it only
+  under `tree` (`LightList::reads_receiver_surface`), so other selections pay
+  no virtual call.
+- **The receiver travels.** The `*_at` lookups take a `Receiver { p, n,
+  opaque }` (`impl Into<Receiver>`: a bare position is a receiver with no
+  normal, which is what volume vertices and the probes pass). `n` is
+  `HitRecord::normal` (interpolated, before normal mapping, facing the side
+  the ray came from).
+  - `PrevBounce::from` stores the receiver NEE picked from, and
+    `PrevVertex::Phase` rebuilds `Receiver::at(pos)`.
+  - `nee_picks_from` / `bounce_weighs_from` compare all of it bit for bit.
+  - The link twin takes the receiver too.
+- **Build.** Binned SAOH, 12 buckets per axis (Conty Estevez & Kulla 2018, as
+  pbrt-v4), with a stable partition. Ties go to the lower axis and bucket, so
+  the tree is a function of the light list. Past depth 40 it halves instead,
+  so a bit trail (`u64`) always reaches a leaf. The first child is the next
+  node in a flat depth-first array.
+- **One pmf for both MIS halves.** `LightTree::sample` walks from the root,
+  choosing each child with `u < c0/(c0+c1)` and stretching `u` back over
+  `[0, 1)`. `LightTree::pmf` re-walks the light's trail. Both multiply
+  `c_child / (c0 + c1)` root to leaf, from the one `importance` function, so
+  the pick reports the trail's bits (pinned over random receivers at 2, 7, 47
+  and 1 000 lights). A node whose two children both have zero importance
+  ends the walk with no light, and the trail gives zero: consistent, so
+  unbiased.
+- **The defensive share.** A pick is `D · power + (1 − D) · q`, with `D =
+  TREE_DEFENSIVE_SHARE`. `q` gives each light at infinity `1/live` and the
+  tree's lights `finite_share · p_tree`. The first `D` of `u` inverts the
+  power CDF; the rest splits into the infinite lights' slice and the tree's.
+  Every emitting light keeps at least `D` times its power probability, so its
+  NEE weight is at most `1/D` times what `power` gives it, the bound `power`'s
+  even half gives against `uniform`. Lights at infinity keep exactly their
+  `1/live` share, as under `power`. Each part is monotone in its slice of
+  `u`, so the stratified picks of `crust:lightSamples` stay stratified within
+  each part; a light has two slices, not one.
+- **Nothing to choose.** With at most one emitting finite light,
+  `select_by(Tree)` builds no tree and the power table picks: such a scene
+  renders under `tree` bit for bit as under `power`.
 
 ## Disk and tube lights
 
