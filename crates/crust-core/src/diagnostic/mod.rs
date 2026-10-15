@@ -288,18 +288,19 @@ impl Shot {
 }
 
 /// A render's setup, `(selection, training)`: the `learned` or `neural`
-/// pre-pass and guiding's training passes. Every other selection is built in
-/// next to no time, and counts as none — so a trial without setup has none.
-fn setup_parts(settings: RenderSettings, selection: Duration, m: &Measured) -> (f64, f64) {
+/// pre-pass, the `tree` build, and guiding's training passes (`training_s`).
+/// `power` and `uniform` are built in next to no time, and count as none —
+/// so a trial without setup has none.
+fn setup_parts(settings: RenderSettings, selection: Duration, training_s: f64) -> (f64, f64) {
     let selection_s = if matches!(
         settings.light_selection(),
-        LightSelection::Learned | LightSelection::Neural
+        LightSelection::Learned | LightSelection::Neural | LightSelection::Tree
     ) {
         selection.as_secs_f64()
     } else {
         0.0
     };
-    (selection_s, m.setup_s)
+    (selection_s, training_s)
 }
 
 /// What a trial's change cost in setup the last time the same factor took
@@ -350,7 +351,7 @@ fn shoot(renderer: &mut Renderer, settings: RenderSettings) -> (Shot, Measured) 
     );
     let rect = settings.region().flip_y(settings.get_dimensions().1);
     let lum = luminance(&m, rect, renderer.lights.luma());
-    let (selection_s, training_s) = setup_parts(settings, selection, &m);
+    let (selection_s, training_s) = setup_parts(settings, selection, m.setup_s);
     let shot = Shot {
         image: CropImage {
             lum,
@@ -669,7 +670,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     if sched.exhausted() {
         exceeded = Some("P1".into());
     }
-    let (p1_selection, p1_training) = setup_parts(p1_settings, selection, &p1);
+    let (p1_selection, p1_training) = setup_parts(p1_settings, selection, p1.setup_s);
     let p1_setup = p1_selection + p1_training;
     info!(
         "diagnostic P1: {w}x{h} at {spp_p1} spp in {:.2}s (calibration {:.2}s at 1 spp)",

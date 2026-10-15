@@ -112,7 +112,7 @@ These rules keep the measurement honest:
 - **Unbiased conditions.** The clamp is off and adaptive sampling is off, so no trial
   can "win" by removing energy or by stopping where it happens to look converged.
 
-**Setup** — the `learned` light selection's pre-pass and guiding's training — is
+**Setup** — the `learned` and `neural` light selections' pre-pass, the `tree` selection's build and guiding's training — is
 reported per pair (`setup_trial_s`) but left out of a pair's ΔEff: on a small crop at a
 few samples it would weigh far more than in the render it stands for. It is charged
 where a render pays it, in the **ΔEff at the target** (`delta_eff_at_target`): the

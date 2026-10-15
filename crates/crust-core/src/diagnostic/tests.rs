@@ -949,3 +949,23 @@ fn setup_is_remembered_per_value() {
     assert!(!setup_measured_first("light_selection", "uniform"));
     assert!(!setup_measured_first("guiding", "true"));
 }
+
+/// A `tree` trial keeps its measured build as setup, as `learned` and
+/// `neural` keep their pre-pass; only `power` and `uniform` count as none
+/// (PR #314 review). The build is milliseconds even at 10 000 lights, so it
+/// is not measured before its first trial.
+#[test]
+fn tree_setup_is_counted() {
+    use super::{setup_measured_first, setup_parts};
+    use crate::LightSelection;
+    let built = std::time::Duration::from_millis(5);
+    let selection_s = |sel| {
+        let settings = crate::RenderSettings::default().with_light_selection(sel);
+        setup_parts(settings, built, 0.25)
+    };
+    assert_eq!(selection_s(LightSelection::Tree), (0.005, 0.25));
+    assert_eq!(selection_s(LightSelection::Learned), (0.005, 0.25));
+    assert_eq!(selection_s(LightSelection::Power), (0.0, 0.25));
+    assert_eq!(selection_s(LightSelection::Uniform), (0.0, 0.25));
+    assert!(!setup_measured_first("light_selection", "tree"));
+}
