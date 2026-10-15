@@ -244,7 +244,7 @@ How light sampling picks which light to sample.
 | `power` | by emitted power, defensively: half the shadow rays are shared evenly among the finite lights, and lights at infinity keep their uniform share |
 | `uniform` | every light is equally likely |
 | `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
-| `tree` | by a light BVH: at each shading point, lights are ranked by power, distance, which way they face, and whether they are above an opaque surface; a quarter of the picks still go by power, and lights at infinity keep their uniform share. With one finite light or none it picks as `power` does |
+| `tree` | by a light BVH: at each shading point, lights are ranked by power, distance, which way they face, and whether they are above an opaque surface; a tenth of the picks still go by power, and lights at infinity keep their uniform share. With one finite light or none it picks as `power` does |
 | `neural` | visibility-aware, experimental: the same pre-pass trains a small network that predicts, at any point, which lights reach it; picks by power weighted by that prediction. Up to 64 lights; past that, or with a single light, it picks by power |
 
 An unknown name logs a warning and uses `power`.

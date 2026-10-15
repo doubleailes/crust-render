@@ -310,7 +310,7 @@ How light sampling picks which light to sample at each vertex. Overrides
 | `power` | by emitted power, defensively: half the shadow rays are shared evenly among the finite lights, and lights at infinity keep their uniform share. **Default.** |
 | `uniform` | every light is equally likely, whatever it emits |
 | `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
-| `tree` | by a light BVH: at each shading point, lights are ranked by power, distance, which way they face, and whether they are above the surface; a quarter of the picks still go by power. Lights at infinity keep their uniform share |
+| `tree` | by a light BVH: at each shading point, lights are ranked by power, distance, which way they face, and whether they are above the surface; a tenth of the picks still go by power. Lights at infinity keep their uniform share |
 | `neural` | visibility-aware, experimental: the same pre-pass trains a small network that predicts, at any point, which lights reach it; picks by power weighted by that prediction |
 
 `tree` helps scenes with many lights spread through space: a light far away, facing

@@ -117,7 +117,7 @@ pub(crate) struct TreeSelection {
 /// this share of its power probability, so its NEE weight is at most
 /// `1 / TREE_DEFENSIVE_SHARE` times what `power` gives it. Chosen by
 /// measurement (`docs/light_sampling.md` §3.15).
-pub const TREE_DEFENSIVE_SHARE: f32 = 0.25;
+pub const TREE_DEFENSIVE_SHARE: f32 = 0.1;
 
 /// The largest `f32` below one, where a rescaled pick sample is clamped.
 const ONE_MINUS_EPSILON: f32 = 1.0 - f32::EPSILON / 2.0;
