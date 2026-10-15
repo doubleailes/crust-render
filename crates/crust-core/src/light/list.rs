@@ -483,17 +483,16 @@ impl LightList {
     }
 
     /// Installs [`LightSelection::Tree`]'s light BVH over the power table
-    /// [`LightList::select_by`] just built, from each light's power. With at
-    /// most one finite light that emits there is nothing to choose, and the
-    /// power table stays, picking exactly as [`LightSelection::Power`] does.
+    /// [`LightList::select_by`] just built, over the lights that table gives
+    /// a share (finite, with power). With at most one there is nothing to
+    /// choose, and the power table stays, picking exactly as
+    /// [`LightSelection::Power`] does.
     fn build_tree(&mut self, powers: &[Option<f64>]) {
         let bounded: Vec<(usize, super::LightBounds)> = powers
             .iter()
             .enumerate()
-            .filter_map(|(index, p)| {
-                let phi = (*p)? as f32;
-                Some((index, self.lights[index].bounds(phi)?))
-            })
+            .filter(|(_, p)| p.is_some_and(|p| p > 0.0))
+            .filter_map(|(index, _)| Some((index, self.lights[index].bounds(self.luma)?)))
             .collect();
         let Some(tree) = LightTree::build(self.lights.len(), &bounded) else {
             tracing::debug!("light tree: at most one finite light, picking by power");
