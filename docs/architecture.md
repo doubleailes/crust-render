@@ -178,7 +178,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/usd_import/implicit.rs` (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1` variants tessellated as OpenUSD's GeomUtil does, pinned point for point by `tests/geomutil_oracle.rs`, their radial count chosen from the screen when a camera is named); `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
-| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
+| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`, slots keyed by render layer); products resolved in `scene/usd_import/products.rs`; render passes in `render_pass.rs` (`RenderPass`) and `scene/usd_import/passes.rs` (the pass's settings, its layer collections into `World::layer`); `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection, and the pre-pass walk both learned selections share), `light_visibility.rs` (neural selection over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
@@ -247,6 +247,13 @@ other. The pairs:
   import and the listing, and the listing walks cameras a second time in the
   import's order to find that first one. Change the import's walk order and
   `the_render_camera_is_the_one_the_import_uses` (`tests/usd_listing.rs`) fails.
+- **Layer colours ↔ beauty.** A render layer's beauty is `C.*[LO]` restricted to the
+  samples its layer owns (`AovVar::layer`, `aovs/design.md` § Render layers), so the layers
+  sum to the beauty and a pass whose one layer owns every sample gives it the beauty bit
+  for bit (`the_layers_add_up_to_the_beauty`, `one_layer_is_the_beauty`,
+  `crust-core/tests/render_passes.rs`). Ownership is the `FirstHit` the alpha is decided
+  by: a new way for a camera ray to meet something must fill `FirstHit`'s layer where it
+  fills the hit, and a new film slot kind must skip the samples its layer does not own.
 - **Light radiance.** `Emissive::radiance_toward` is the one answer to "what
   does this light emit toward here", read by `AreaLight::sample_li` and by
   `Material::emitted_at`.

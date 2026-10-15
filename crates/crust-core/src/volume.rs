@@ -201,6 +201,10 @@ pub struct VolumeRegion {
     /// geometry's is ([`crate::World::light_class`]); [`EVERY_CLASS`] unless
     /// some light authors a `lightLink`.
     pub light_class: u16,
+    /// The render layer of the prim that authored the region, as a
+    /// geometry's is ([`crate::World::layer`]); 0 unless the render pass
+    /// declares layers.
+    pub layer: u16,
 }
 
 impl VolumeRegion {
@@ -254,6 +258,7 @@ impl VolumeRegion {
             majorant_sigma_t,
             mask: MASK_ALL,
             light_class: EVERY_CLASS,
+            layer: 0,
         }
     }
 
@@ -382,6 +387,10 @@ pub enum VolumeEvent {
         /// region there agrees, [`EVERY_CLASS`] when overlapping regions of
         /// different classes share the point.
         class: u16,
+        /// The render layer of the first region at `p` with any density
+        /// ([`VolumeRegion::layer`]): the layer a camera ray scattering here
+        /// is owned by.
+        layer: u16,
     },
     /// The segment was crossed without a real collision.
     Passthrough {
@@ -487,6 +496,7 @@ impl Volumes {
             let mut sigma_t_x = Vec3A::ZERO;
             let mut lobes: Vec<(f32, f32)> = Vec::new();
             let mut class: Option<u16> = None;
+            let mut layer: Option<u16> = None;
             for &(i, a, b) in &spans {
                 if t < a || t > b {
                     continue;
@@ -500,6 +510,7 @@ impl Volumes {
                     Some(c) if c != region.light_class => EVERY_CLASS,
                     _ => region.light_class,
                 });
+                layer.get_or_insert(region.layer);
                 let ss = region.sigma_s * d;
                 sigma_s_x += ss;
                 sigma_t_x += region.sigma_t_at_density(d);
@@ -523,6 +534,7 @@ impl Volumes {
                     phase: PhaseMix { lobes },
                     emitted,
                     class: class.unwrap_or(EVERY_CLASS),
+                    layer: layer.unwrap_or(0),
                 };
             }
             // Null/absorb combined: per-channel numerators are

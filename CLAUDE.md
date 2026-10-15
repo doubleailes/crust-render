@@ -33,6 +33,7 @@ opened with — `usd_import::stage_builder()`). Do not add loaders for any other
 | `crust diagnostic`: probe conditions, crops, trials and verdicts, the budget, the `crust-diagnostic/1` report, `--baseline`, the clamp counter's cost | `diagnostics` | `site/content/docs/help/diagnosing-a-render.md` |
 | `crust light-paths`: the inspection fold over a path's `Route` (one record per emission-ending term), the inspection alphabet and lights by index, dominant-lobe labels, the per-unit record store and its groups, what reproduces the frame, the `crust-light-paths/1` report and its hints, the MCP `light_paths` tool | `light-path-inspection` | `site/content/docs/help/light-paths.md` |
 | `crust mcp`: the session (the override layer is the session), the session thread, edits as USDA merged into the layer, undo, progressive renders, probe / diff, `render_final` | `mcp-session` | `site/content/docs/help/claude-desktop.md` |
+| render passes (`--pass`): the settings a pass names, render layers as collections on the pass, which layer owns a sample, file patterns and layer patterns, outputs grouped into files | `render-passes` | `site/content/docs/usd/render-passes.md` |
 
 Before changing a feature, read its design record: most sections end in a trap that was
 already fallen into once. When a change moves a measurement or retires a gap, update the

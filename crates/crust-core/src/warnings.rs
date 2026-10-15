@@ -200,6 +200,16 @@ warning_codes! {
         "An output path names a variable crust does not expand; it is left in the path as written.";
     ProductSubframeFrame => "product.subframe_frame", Approximated, Each,
         "An output path's integer frame variable rounded a fractional frame to the nearest one.";
+    PassLayerOverlap => "pass.layer_overlap", Approximated, Once,
+        "Two layers of a render pass claim one prim; it belongs to the earlier layer.";
+    PassLayerTargetInInstance => "pass.layer_target_in_instance", Approximated, Each,
+        "A layer collection targets a prim inside an instance or a point instancer; membership is judged on the instance or instancer.";
+    PassLayerMembershipExpression => "pass.layer_membership_expression", Approximated, Each,
+        "A layer collection authors membershipExpression, which is not read; it claims nothing.";
+    PassLayerUnreadableCollection => "pass.layer_unreadable_collection", Refused, Each,
+        "A layer collection cannot be read; it claims nothing.";
+    PassCollectionNotRead => "pass.collection_not_read", Skipped, Each,
+        "A render pass's renderVisibility or cameraVisibility collection restricts membership; it is not read, and every object is rendered.";
     AovNotARenderVar => "aov.not_a_render_var", Skipped, Each,
         "orderedVars targets a prim that is not a RenderVar.";
     AovUnsupportedSource => "aov.unsupported_source", Skipped, Each,

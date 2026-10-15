@@ -30,6 +30,7 @@ fn lpe(expr: &str) -> AovVar {
         expression: Some(expr.to_owned()),
         raw: false,
         variance: false,
+        layer: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn raw(name: &str, source: AovSource) -> AovVar {
         expression: None,
         raw: false,
         variance: false,
+        layer: None,
     }
 }
 
@@ -679,6 +681,7 @@ fn diffuse_filter_var() -> AovVar {
         expression: None,
         raw: false,
         variance: false,
+        layer: None,
     }
 }
 

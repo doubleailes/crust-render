@@ -22,6 +22,17 @@ pub enum Error {
     /// The requested camera is not an absolute prim path (`/root/cam`).
     /// Refused before the stage is opened, like a bad frame.
     InvalidCameraPath(String),
+    /// The requested render pass
+    /// ([`UsdImportOptions::render_pass`](crate::UsdImportOptions::render_pass))
+    /// is not an absolute prim path. Refused before the stage is opened.
+    InvalidPassPath(String),
+    /// The requested render pass names no `RenderPass` prim on the stage.
+    /// An error, like a missing camera: a pass's settings, layers and files
+    /// are all its own, and rendering another would write the wrong files.
+    NotARenderPass(String),
+    /// The render pass's `renderSource` targets a prim that is not a
+    /// `RenderSettings`, so the pass has no settings to render with.
+    PassSourceNotRenderSettings { pass: String, source: String },
     /// The requested camera path names no `UsdGeomCamera` on the stage.
     /// An error rather than a fallback: rendering a sequence through the
     /// wrong camera is worse than not rendering it. Carries every camera the
@@ -79,6 +90,16 @@ impl fmt::Display for Error {
                     "invalid camera path '{path}': expected an absolute prim path such as /root/cam"
                 )
             }
+            Error::InvalidPassPath(path) => write!(
+                f,
+                "invalid render pass path '{path}': expected an absolute prim path such as \
+                 /Render/Passes/render"
+            ),
+            Error::NotARenderPass(path) => write!(f, "no RenderPass at {path} on this stage"),
+            Error::PassSourceNotRenderSettings { pass, source } => write!(
+                f,
+                "{pass}.renderSource targets {source}, which is not a RenderSettings"
+            ),
             Error::InvalidWorkingSpace(why) | Error::InvalidOcioConfig(why) => write!(f, "{why}"),
             Error::EmptyRegion {
                 region,

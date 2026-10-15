@@ -704,3 +704,117 @@ fn an_unknown_path_variable_is_kept_and_reported() {
     assert_eq!(unknown["prims"], serde_json::json!(["/Render/main"]));
     assert_eq!(unknown["kind"], "refused");
 }
+
+/// `samples/render_passes.usda` sublayered, with its `render` pass's file
+/// pattern replaced by `pattern`, written as `pass.usda` in `dir`.
+fn pass_stage(dir: &Path, pattern: &str) -> PathBuf {
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/render_passes.usda")
+        .canonicalize()
+        .expect("samples/render_passes.usda");
+    let path = dir.join("pass.usda");
+    std::fs::write(
+        &path,
+        format!(
+            "#usda 1.0\n(\n    subLayers = [@{}@]\n)\n\nover \"Render\"\n{{\n    over \"Passes\"\n    {{\n        over \"render\"\n        {{\n            string crust:filePattern = \"{pattern}\"\n        }}\n    }}\n}}\n",
+            sample.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+#[test]
+fn check_reports_the_files_of_a_layered_pass() {
+    let dir = work_dir("layered_pass");
+    let input = pass_stage(&dir, "$l_$n.$04f.$x");
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            input.to_str().unwrap(),
+            "--pass",
+            "/Render/Passes/render",
+            "-f",
+            "3",
+            "--json",
+            "-",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = parse(&out.stdout);
+    let products = report["products"].as_array().expect("products");
+    let written: Vec<&str> = products
+        .iter()
+        .map(|p| p["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        written,
+        [
+            "render_set.0003.exr",
+            "render_hero.0003.exr",
+            "render_default.0003.exr"
+        ]
+    );
+    for (p, layer) in products.iter().zip(["set", "hero", "default"]) {
+        assert_eq!(p["prim"], "/Render/Passes/render");
+        let channels: Vec<&str> = p["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            channels,
+            [
+                format!("{layer}_Beauty.R"),
+                format!("{layer}_Beauty.G"),
+                format!("{layer}_Beauty.B"),
+                format!("{layer}_Beauty.A"),
+                format!("{layer}_Diffuse.R"),
+                format!("{layer}_Diffuse.G"),
+                format!("{layer}_Diffuse.B"),
+                format!("{layer}_Depth"),
+            ]
+        );
+    }
+    // Nothing is rendered or written.
+    assert_eq!(files(&dir), ["pass.usda"]);
+}
+
+#[test]
+fn check_fails_on_a_refused_pattern_as_a_render_would() {
+    let dir = work_dir("refused_pattern");
+    let input = pass_stage(&dir, "$(CRUST_TEST_UNSET_IMAGES)/$l.$x");
+    for command in ["check", "render"] {
+        let mut args = vec![
+            command,
+            "-i",
+            input.to_str().unwrap(),
+            "--pass",
+            "/Render/Passes/render",
+        ];
+        if command == "render" {
+            args.extend(["-s", "1"]);
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_crust"))
+            .current_dir(&dir)
+            .args(&args)
+            .env_remove("CRUST_TEST_UNSET_IMAGES")
+            .output()
+            .expect("run crust");
+        assert!(!out.status.success(), "{command}");
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(log.contains("CRUST_TEST_UNSET_IMAGES"), "{command}: {log}");
+        assert_eq!(files(&dir), ["pass.usda"], "{command} wrote nothing");
+    }
+}

@@ -13,7 +13,10 @@
 //! come through here at all — it keeps `write_rgb_file`, byte for byte.
 
 use crust_core::stamp::{STAMP_PREFIX, SamplingStamp, StampValue};
-use crust_core::{AovFilm, AovProduct, AovVar, Buffer, ChannelKind, Precision};
+use crust_core::{
+    Accumulation, AovFilm, AovProduct, AovSource, AovVar, Buffer, ChannelKind, Precision,
+    RenderPass,
+};
 use exr::meta::attribute::{AttributeValue, IntegerBounds};
 use exr::prelude::{
     AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, Image, Layer,
@@ -276,6 +279,443 @@ pub fn expand_frame_vars(path: &str, frame: f64) -> (String, Vec<PathIssue>) {
     (out, issues)
 }
 
+/// A render pass's file pattern, in the pass pattern dialect (`render-passes` design
+/// D6, D7): `$l` / `$L` the pass, `$n` the layer, `$o` the RenderVar, `$f`
+/// and `$01f`–`$09f` the frame, `$c` / `$C` the camera, `$e` / `$E` the eye,
+/// `$x` the extension, `$(NAME)` an environment variable, `$_` before any of
+/// them to lower-case it, and `\$` a literal `$`. Parsed once, expanded once
+/// per (layer, RenderVar). The frame follows `expand_frame_vars`' rules
+/// through the same [`FrameVar`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    source: String,
+    tokens: Vec<Token>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Literal(String),
+    Spec {
+        spec: Spec,
+        lower: bool,
+    },
+    /// A `$` and a name that is no specifier, kept as written.
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Spec {
+    Pass,
+    Layer,
+    Output,
+    Frame(usize),
+    Camera,
+    EyeNumber,
+    EyeName,
+    Extension,
+    Env(String),
+}
+
+/// What a pattern refuses to expand: either would write somewhere other
+/// than intended, so the command stops before rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternError {
+    /// `$(NAME)` names an environment variable that is not set (or not
+    /// UTF-8): the file would move to the filesystem root.
+    UnsetVariable { pattern: String, name: String },
+    /// The expanded path's extension is not `.exr`: the EXR would be
+    /// written under another format's name.
+    NotExr { pattern: String, path: String },
+}
+
+impl std::fmt::Display for PatternError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PatternError::UnsetVariable { pattern, name } => write!(
+                f,
+                "file pattern {pattern:?}: $({name}) names the environment variable {name}, \
+                 which is not set"
+            ),
+            PatternError::NotExr { pattern, path } => {
+                let ext = Path::new(path)
+                    .extension()
+                    .map_or("none".to_owned(), |e| format!(".{}", e.to_string_lossy()));
+                write!(
+                    f,
+                    "file pattern {pattern:?} writes {path:?}, whose extension ({ext}) is not \
+                     .exr: crust writes only OpenEXR"
+                )
+            }
+        }
+    }
+}
+
+/// What one expansion is of: the pass, the camera and the frame, which do
+/// not change, and the (layer, RenderVar) that does.
+pub struct PatternInputs<'a> {
+    pub pass: &'a str,
+    pub camera: &'a str,
+    pub frame: f64,
+    pub layer: &'a str,
+    pub output: &'a str,
+}
+
+impl Pattern {
+    /// The tokens of `source`. Every token boundary is an ASCII byte, so
+    /// non-ASCII text is copied through whole.
+    pub fn parse(source: &str) -> Pattern {
+        let bytes = source.as_bytes();
+        let is_name = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let spec_at = |j: usize| -> Option<(Spec, usize)> {
+            let single = |s: Spec| Some((s, j + 1));
+            match bytes.get(j)? {
+                b'l' | b'L' => single(Spec::Pass),
+                b'n' => single(Spec::Layer),
+                b'o' => single(Spec::Output),
+                b'f' => single(Spec::Frame(0)),
+                b'c' | b'C' => single(Spec::Camera),
+                b'e' => single(Spec::EyeNumber),
+                b'E' => single(Spec::EyeName),
+                b'x' => single(Spec::Extension),
+                b'0' => match (bytes.get(j + 1), bytes.get(j + 2)) {
+                    (Some(d @ b'1'..=b'9'), Some(b'f')) => {
+                        Some((Spec::Frame(usize::from(d - b'0')), j + 3))
+                    }
+                    _ => None,
+                },
+                b'(' => {
+                    let close = bytes[j + 1..].iter().position(|&c| c == b')')?;
+                    let name = &source[j + 1..j + 1 + close];
+                    (!name.is_empty()).then(|| (Spec::Env(name.to_owned()), j + 2 + close))
+                }
+                _ => None,
+            }
+        };
+        let mut tokens = Vec::new();
+        let mut literal = String::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'$') {
+                literal.push('$');
+                i += 2;
+                continue;
+            }
+            if bytes[i] != b'$' {
+                let next = (i + 1..=bytes.len())
+                    .find(|&k| k == bytes.len() || bytes[k] == b'$' || bytes[k] == b'\\')
+                    .unwrap_or(bytes.len());
+                literal.push_str(&source[i..next]);
+                i = next;
+                continue;
+            }
+            let lowered = (bytes.get(i + 1) == Some(&b'_'))
+                .then(|| spec_at(i + 2))
+                .flatten();
+            let (token, next) = if let Some((spec, next)) = lowered {
+                (Token::Spec { spec, lower: true }, next)
+            } else if let Some((spec, next)) = spec_at(i + 1) {
+                (Token::Spec { spec, lower: false }, next)
+            } else if bytes.get(i + 1).is_some_and(|&c| is_name(c)) {
+                let len = bytes[i + 1..].iter().take_while(|&&c| is_name(c)).count();
+                let end = i + 1 + len;
+                (Token::Unknown(source[i..end].to_owned()), end)
+            } else {
+                // A lone `$`: literal, and nothing to say about it.
+                literal.push('$');
+                i += 1;
+                continue;
+            };
+            if !literal.is_empty() {
+                tokens.push(Token::Literal(std::mem::take(&mut literal)));
+            }
+            tokens.push(token);
+            i = next;
+        }
+        if !literal.is_empty() {
+            tokens.push(Token::Literal(literal));
+        }
+        Pattern {
+            source: source.to_owned(),
+            tokens,
+        }
+    }
+
+    /// The pattern as written.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Every `$` name that is no specifier, as written, each once.
+    pub fn unknown(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for t in &self.tokens {
+            if let Token::Unknown(name) = t
+                && !out.contains(&name.as_str())
+            {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// Whether a frame specifier rounds `frame`: it is not an integer.
+    pub fn rounds(&self, frame: f64) -> bool {
+        frame.fract() != 0.0
+            && self.tokens.iter().any(|t| {
+                matches!(
+                    t,
+                    Token::Spec {
+                        spec: Spec::Frame(_),
+                        ..
+                    }
+                )
+            })
+    }
+
+    /// The pattern expanded for `inputs`, environment variables read through
+    /// `env`. Refused when a variable is unset; the extension is the
+    /// caller's to check, since a layer pattern names channels, not files.
+    pub fn expand(
+        &self,
+        inputs: &PatternInputs,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<String, PatternError> {
+        let mut out = String::new();
+        for t in &self.tokens {
+            match t {
+                Token::Literal(text) | Token::Unknown(text) => out.push_str(text),
+                Token::Spec { spec, lower } => {
+                    let value = match spec {
+                        Spec::Pass => inputs.pass.to_owned(),
+                        Spec::Layer => inputs.layer.to_owned(),
+                        Spec::Output => inputs.output.to_owned(),
+                        Spec::Frame(width) => FrameVar::Int(*width).format(inputs.frame).0,
+                        Spec::Camera => inputs.camera.to_owned(),
+                        Spec::EyeNumber => "1".to_owned(),
+                        Spec::EyeName => "left".to_owned(),
+                        Spec::Extension => "exr".to_owned(),
+                        Spec::Env(name) => {
+                            env(name).ok_or_else(|| PatternError::UnsetVariable {
+                                pattern: self.source.clone(),
+                                name: name.clone(),
+                            })?
+                        }
+                    };
+                    if *lower {
+                        out.push_str(&value.to_lowercase());
+                    } else {
+                        out.push_str(&value);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The process environment, as a pattern reads `$(NAME)`: a path input of
+/// the command, not a `CRUST_*` behaviour switch (design D6).
+pub fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// The RenderVar a pass writes when its settings name none: the beauty
+/// with alpha.
+fn default_pass_var(pass: &RenderPass) -> AovVar {
+    AovVar {
+        prim_path: pass.path.clone(),
+        name: "Beauty".to_owned(),
+        channel_prefix: None,
+        source: AovSource::Color,
+        components: 4,
+        precision: Precision::Float,
+        accumulation: Accumulation::Filtered,
+        clear: 0.0,
+        expression: None,
+        raw: false,
+        variance: false,
+        layer: None,
+    }
+}
+
+/// The files a render pass writes: its `pattern` (the pass's own, or `-o`)
+/// expanded for every (layer, var) — layer-major, vars in order — the
+/// outputs grouped by expanded path, in first-occurrence order, into one
+/// synthesized product each. A product holding several outputs names each
+/// one's channels with the pass's layer pattern (`channel_prefix`); one
+/// holding a single output keeps a product's names. `vars` are the pass's
+/// settings' RenderVars ([`pass_vars`]). Unknown specifiers and a rounded
+/// subframe are warned (`product.unknown_variable`, `product.subframe_frame`,
+/// naming the pass); an unset variable, an extension other than `.exr` and
+/// two outputs of one file with one layer name are refused, with the
+/// message to stop on.
+pub fn pass_products(
+    pass: &RenderPass,
+    vars: &[AovVar],
+    pattern: &str,
+    camera: &str,
+    frame: f64,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<AovProduct>, String> {
+    let file = Pattern::parse(pattern);
+    let layer = Pattern::parse(&pass.layer_pattern);
+    for (p, what) in [(&file, "file pattern"), (&layer, "layer pattern")] {
+        let unknown = p.unknown();
+        if !unknown.is_empty() {
+            crust_core::warning!(
+                ProductUnknownVariable,
+                at = pass.path,
+                "{}: {} in the {what} {:?} is not a pattern specifier; left as written",
+                pass.path,
+                unknown.join(", "),
+                p.source()
+            );
+        }
+    }
+    if file.rounds(frame) {
+        crust_core::warning!(
+            ProductSubframeFrame,
+            at = pass.path,
+            "{}: frame {frame} rounded to {} in the file pattern {:?}",
+            pass.path,
+            frame.round(),
+            file.source()
+        );
+    }
+    let default_var;
+    let vars = if vars.is_empty() {
+        default_var = [default_pass_var(pass)];
+        &default_var[..]
+    } else {
+        vars
+    };
+    // A layer's beauty is accumulated as one more light path expression; the
+    // render compiles at most `MAX_EXPRESSIONS`.
+    let mut expressions: Vec<&str> = vars
+        .iter()
+        .filter(|v| v.source == AovSource::Lpe)
+        .filter_map(|v| v.expression.as_deref())
+        .collect();
+    if vars.iter().any(|v| v.source == AovSource::Color) {
+        expressions.push(crust_core::aov::LAYER_BEAUTY);
+    }
+    expressions.sort_unstable();
+    expressions.dedup();
+    if expressions.len() > crust_core::lpe::MAX_EXPRESSIONS {
+        return Err(format!(
+            "{}: its RenderVars and its layers' beauty need {} light path expressions, more \
+             than the {} one render compiles",
+            pass.path,
+            expressions.len(),
+            crust_core::lpe::MAX_EXPRESSIONS
+        ));
+    }
+    // One entry per file, in first-use order.
+    let mut files: Vec<PassFile> = Vec::new();
+    for (l, name) in pass.layers.iter().enumerate() {
+        for var in vars {
+            let inputs = PatternInputs {
+                pass: &pass.name,
+                camera,
+                frame,
+                layer: name,
+                output: &var.name,
+            };
+            let path = file.expand(&inputs, env).map_err(|e| e.to_string())?;
+            if !Path::new(&path)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("exr"))
+            {
+                return Err(PatternError::NotExr {
+                    pattern: file.source().to_owned(),
+                    path,
+                }
+                .to_string());
+            }
+            let key: std::path::PathBuf = Path::new(&path).components().collect();
+            match files.iter_mut().find(|f| f.key == key) {
+                Some(f) => f.outputs.push((l as u16, var)),
+                None => files.push(PassFile {
+                    path,
+                    key,
+                    outputs: vec![(l as u16, var)],
+                }),
+            }
+        }
+    }
+    let mut products = Vec::with_capacity(files.len());
+    for PassFile { path, outputs, .. } in files {
+        let shared = outputs.len() > 1;
+        let mut names: Vec<String> = Vec::new();
+        let mut product_vars = Vec::with_capacity(outputs.len());
+        for (l, var) in outputs {
+            let mut var = var.clone();
+            var.layer = Some(l);
+            if shared {
+                let inputs = PatternInputs {
+                    pass: &pass.name,
+                    camera,
+                    frame,
+                    layer: &pass.layers[l as usize],
+                    output: &var.name,
+                };
+                let name = layer.expand(&inputs, env).map_err(|e| e.to_string())?;
+                if names.contains(&name) {
+                    return Err(format!(
+                        "{}: two outputs of {path} are named {name:?} by the layer pattern \
+                         {:?}; give it $n or $o",
+                        pass.path,
+                        layer.source()
+                    ));
+                }
+                names.push(name.clone());
+                var.channel_prefix = Some(name);
+            }
+            product_vars.push(var);
+        }
+        products.push(AovProduct {
+            prim_path: pass.path.clone(),
+            name: path,
+            vars: product_vars,
+            attributes: Vec::new(),
+        });
+    }
+    Ok(products)
+}
+
+/// One file of a pass, while its outputs are grouped: the path as expanded,
+/// the lexical key it is compared by, and its (layer, var) outputs.
+struct PassFile<'a> {
+    path: String,
+    key: std::path::PathBuf,
+    outputs: Vec<(u16, &'a AovVar)>,
+}
+
+/// The RenderVars a pass writes: every var of its settings' products,
+/// each prim once, in product order.
+pub fn pass_vars(products: &[AovProduct]) -> Vec<AovVar> {
+    let mut out: Vec<AovVar> = Vec::new();
+    for var in products.iter().flat_map(|p| &p.vars) {
+        if !out.iter().any(|v| v.prim_path == var.prim_path) {
+            out.push(var.clone());
+        }
+    }
+    out
+}
+
+/// The layer whose beauty a pass file's preview shows: the file's one
+/// layer, when it has a beauty var. `None` for a file of several layers, or
+/// without a beauty.
+pub fn preview_layer(product: &AovProduct) -> Option<&AovVar> {
+    let beauty = product.beauty()?;
+    let layer = beauty.layer;
+    product
+        .vars
+        .iter()
+        .all(|v| v.layer == layer)
+        .then_some(beauty)
+}
+
 /// Refuses (with a warning) every product whose path is one an earlier
 /// product already writes, keeping the first: the later write would replace
 /// the earlier file and silently lose its channels. Paths are compared
@@ -428,6 +868,7 @@ mod tests {
             expression: None,
             raw: false,
             variance: false,
+            layer: None,
         }
     }
 
@@ -967,5 +1408,321 @@ mod tests {
     #[test]
     fn non_ascii_text_around_variables_survives() {
         assert_eq!(expand("é.$F2.ü<F>.exr", 4.0).0, "é.04.ü4.exr");
+    }
+
+    // --- Render pass file patterns (`render-passes` design D6, D7).
+
+    fn inputs<'a>(frame: f64, layer: &'a str, output: &'a str) -> PatternInputs<'a> {
+        PatternInputs {
+            pass: "render",
+            camera: "shotCam",
+            frame,
+            layer,
+            output,
+        }
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    fn pat(pattern: &str, frame: f64) -> String {
+        Pattern::parse(pattern)
+            .expand(&inputs(frame, "hero", "Diffuse"), &no_env)
+            .unwrap()
+    }
+
+    #[test]
+    fn every_pattern_specifier() {
+        assert_eq!(
+            pat("$l|$L|$n|$o|$f|$04f|$c|$C|$e|$E|$x", 3.0),
+            "render|render|hero|Diffuse|3|0003|shotCam|shotCam|1|left|exr"
+        );
+        // Each specifier lower-cased by `$_`.
+        assert_eq!(
+            pat("$_l|$_n|$_o|$_c|$_E|$_04f|$_x", 3.0),
+            "render|hero|diffuse|shotcam|left|0003|exr"
+        );
+        assert_eq!(pat("$l_$_o.$x", 1.0), "render_diffuse.exr");
+    }
+
+    #[test]
+    fn a_pattern_with_no_dollar_is_unchanged() {
+        for p in ["", "out.exr", "a/b c/ü.exr"] {
+            assert_eq!(pat(p, 7.0), p);
+            assert!(Pattern::parse(p).unknown().is_empty());
+        }
+    }
+
+    #[test]
+    fn environment_variables_in_a_pattern() {
+        let env = |n: &str| (n == "IMAGES").then(|| "/tmp/images".to_owned());
+        let pattern = Pattern::parse("$(IMAGES)/$l.$x");
+        assert_eq!(
+            pattern
+                .expand(&inputs(1.0, "hero", "Beauty"), &env)
+                .unwrap(),
+            "/tmp/images/render.exr"
+        );
+        assert_eq!(
+            pattern.expand(&inputs(1.0, "hero", "Beauty"), &no_env),
+            Err(PatternError::UnsetVariable {
+                pattern: "$(IMAGES)/$l.$x".into(),
+                name: "IMAGES".into()
+            })
+        );
+        let lowered = Pattern::parse("$_(SHOT).$x");
+        let shot = |_: &str| Some("SH010".to_owned());
+        assert_eq!(
+            lowered.expand(&inputs(1.0, "a", "b"), &shot).unwrap(),
+            "sh010.exr"
+        );
+    }
+
+    #[test]
+    fn frame_specifiers_in_a_pattern() {
+        assert_eq!(pat("$l.$05f.$x", 12.0), "render.00012.exr");
+        // Without -f the caller passes frame 1, as for a product path.
+        assert_eq!(pat("$l.$04f.$x", 1.0), "render.0001.exr");
+        assert_eq!(pat("$l.$04f.$x", -3.0), "render.-003.exr");
+        assert_eq!(pat("$l.$f.$x", 1001.0), "render.1001.exr");
+        // A subframe rounds halves away from zero, as `$F4` does.
+        assert_eq!(pat("$l.$04f.$x", 12.5), "render.0013.exr");
+        assert_eq!(pat("$l.$04f.$x", -12.5), "render.-013.exr");
+        assert!(Pattern::parse("$l.$04f.$x").rounds(12.5));
+        assert!(!Pattern::parse("$l.$04f.$x").rounds(12.0));
+        assert!(!Pattern::parse("$l.$x").rounds(12.5));
+    }
+
+    #[test]
+    fn unknown_specifiers_are_left_as_written() {
+        assert_eq!(pat("$l_$q.$x", 1.0), "render_$q.exr");
+        assert_eq!(Pattern::parse("$l_$q.$x").unknown(), ["$q"]);
+        assert_eq!(pat("$SHOT/$l.$x", 1.0), "$SHOT/render.exr");
+        assert_eq!(Pattern::parse("$SHOT/$l.$x").unknown(), ["$SHOT"]);
+        // husk's frame variables are not this dialect's.
+        assert_eq!(pat("$l.$F4.$x", 4.0), "render.$F4.exr");
+        assert_eq!(Pattern::parse("$l.$F4.$x").unknown(), ["$F4"]);
+        // A lone dollar is literal and unremarkable.
+        assert_eq!(pat("$l_price$.$x", 1.0), "render_price$.exr");
+        assert!(Pattern::parse("$l_price$.$x").unknown().is_empty());
+        // `\$` is a literal dollar.
+        assert_eq!(pat(r"cost\$n.$x", 1.0), "cost$n.exr");
+        assert!(Pattern::parse(r"cost\$n.$x").unknown().is_empty());
+    }
+
+    fn pass(layers: &[&str], layer_pattern: &str) -> RenderPass {
+        RenderPass {
+            path: "/Render/Passes/render".into(),
+            name: "render".into(),
+            render_source: Some("/Render/settings".into()),
+            layers: layers.iter().map(|l| (*l).to_owned()).collect(),
+            file_pattern: crust_core::render_pass::DEFAULT_FILE_PATTERN.into(),
+            layer_pattern: layer_pattern.into(),
+        }
+    }
+
+    fn beauty_and_diffuse() -> Vec<AovVar> {
+        let mut beauty = var("Beauty", AovSource::Color);
+        beauty.components = 4;
+        vec![beauty, var("Diffuse", AovSource::Albedo)]
+    }
+
+    fn files(pattern: &str, layer_pattern: &str) -> Result<Vec<AovProduct>, String> {
+        pass_products(
+            &pass(&["hero", "default"], layer_pattern),
+            &beauty_and_diffuse(),
+            pattern,
+            "shotCam",
+            3.0,
+            &no_env,
+        )
+    }
+
+    fn file_names(products: &[AovProduct]) -> Vec<&str> {
+        products.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    fn channels(product: &AovProduct) -> Vec<String> {
+        product_channels(product)
+            .into_iter()
+            .flat_map(|(_, n)| n)
+            .collect()
+    }
+
+    #[test]
+    fn the_default_pattern_writes_one_file_per_layer_and_output() {
+        let p = files(crust_core::render_pass::DEFAULT_FILE_PATTERN, "$n_$o").unwrap();
+        assert_eq!(
+            file_names(&p),
+            [
+                "render_hero_Beauty.0003.exr",
+                "render_hero_Diffuse.0003.exr",
+                "render_default_Beauty.0003.exr",
+                "render_default_Diffuse.0003.exr",
+            ]
+        );
+        // One output per file: a product's names, the beauty bare.
+        assert_eq!(channels(&p[0]), ["R", "G", "B", "A"]);
+        assert_eq!(p[0].vars[0].layer, Some(0));
+        assert_eq!(p[3].vars[0].layer, Some(1));
+        assert!(preview_layer(&p[0]).is_some());
+        assert!(preview_layer(&p[1]).is_none(), "no beauty");
+    }
+
+    #[test]
+    fn no_o_puts_a_layers_outputs_in_one_file() {
+        let p = files("$l_$n.$x", "$n_$o").unwrap();
+        assert_eq!(file_names(&p), ["render_hero.exr", "render_default.exr"]);
+        assert_eq!(
+            channels(&p[0]),
+            [
+                "hero_Beauty.R",
+                "hero_Beauty.G",
+                "hero_Beauty.B",
+                "hero_Beauty.A",
+                "hero_Diffuse.R",
+                "hero_Diffuse.G",
+                "hero_Diffuse.B",
+            ]
+        );
+        // One layer and its beauty: a preview.
+        assert!(preview_layer(&p[0]).is_some());
+    }
+
+    #[test]
+    fn neither_n_nor_o_puts_everything_in_one_file() {
+        let p = files("$l.$x", "$n_$o").unwrap();
+        assert_eq!(file_names(&p), ["render.exr"]);
+        let c = channels(&p[0]);
+        for name in [
+            "hero_Beauty.R",
+            "hero_Beauty.A",
+            "hero_Diffuse.R",
+            "default_Beauty.R",
+            "default_Diffuse.B",
+        ] {
+            assert!(c.iter().any(|n| n == name), "{name} in {c:?}");
+        }
+        assert_eq!(c.len(), 14);
+        // Several layers: no preview.
+        assert!(preview_layer(&p[0]).is_none());
+        // Ordered by layer, then by var.
+        let order: Vec<(Option<u16>, &str)> = p[0]
+            .vars
+            .iter()
+            .map(|v| (v.layer, v.name.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (Some(0), "Beauty"),
+                (Some(0), "Diffuse"),
+                (Some(1), "Beauty"),
+                (Some(1), "Diffuse")
+            ]
+        );
+    }
+
+    #[test]
+    fn an_authored_layer_pattern() {
+        let p = files("$l_$n.$x", "$_n.$_o").unwrap();
+        let c = channels(&p[0]);
+        assert!(c.iter().any(|n| n == "hero.diffuse.R"), "{c:?}");
+        assert!(c.iter().any(|n| n == "hero.beauty.A"), "{c:?}");
+    }
+
+    #[test]
+    fn two_outputs_with_one_layer_name_are_refused() {
+        let e = files("$l_$n.$x", "$n").unwrap_err();
+        assert!(
+            e.contains("render_hero.exr") && e.contains("\"hero\""),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn patterns_that_would_write_elsewhere_are_refused() {
+        let e = files("$l_$n_$o.png", "$n_$o").unwrap_err();
+        assert!(e.contains(".png"), "{e}");
+        let e = files("$l_$n_$o", "$n_$o").unwrap_err();
+        assert!(e.contains("none"), "{e}");
+        let e = files("$(IMAGES)/$l.$x", "$n_$o").unwrap_err();
+        assert!(e.contains("IMAGES"), "{e}");
+        // Case does not matter.
+        assert!(files("$l_$n_$o.EXR", "$n_$o").is_ok());
+    }
+
+    #[test]
+    fn a_pass_without_vars_writes_its_beauty() {
+        let p = pass_products(
+            &pass(&["default"], "$n_$o"),
+            &[],
+            "$l_$n_$o.$x",
+            "cam",
+            1.0,
+            &no_env,
+        )
+        .unwrap();
+        assert_eq!(file_names(&p), ["render_default_Beauty.exr"]);
+        assert_eq!(channels(&p[0]), ["R", "G", "B", "A"]);
+    }
+
+    #[test]
+    fn pattern_warnings_name_the_pass() {
+        let scope = crust_core::WarningScope::enter();
+        let p = files("$l_$q.$04f.$x", "$n_$o").unwrap();
+        assert_eq!(p[0].name, "render_$q.0003.exr");
+        let _ = pass_products(
+            &pass(&["default"], "$n_$o"),
+            &[],
+            "$l.$04f.$x",
+            "cam",
+            12.5,
+            &no_env,
+        )
+        .unwrap();
+        let warnings = scope.finish();
+        let unknown = warnings
+            .iter()
+            .find(|w| w.code == crust_core::WarningCode::ProductUnknownVariable)
+            .expect("an unknown-variable warning");
+        assert!(unknown.message.contains("$q"), "{}", unknown.message);
+        assert_eq!(unknown.prims, ["/Render/Passes/render"]);
+        let subframe = warnings
+            .iter()
+            .find(|w| w.code == crust_core::WarningCode::ProductSubframeFrame)
+            .expect("a subframe warning");
+        assert!(subframe.message.contains("12.5"), "{}", subframe.message);
+        assert_eq!(subframe.count, 1);
+        // A lone dollar raises nothing.
+        let scope = crust_core::WarningScope::enter();
+        let _ = files("$l_price$.$x", "$n_$o");
+        assert!(scope.finish().is_empty());
+    }
+
+    #[test]
+    fn a_pass_whose_layers_need_too_many_expressions_is_refused() {
+        let mut vars = beauty_and_diffuse();
+        let lpe = |i: usize| {
+            let mut v = var(&format!("L{i}"), AovSource::Lpe);
+            v.expression = Some(format!("C<RD>.{{{i}}}[LO]"));
+            v
+        };
+        vars.extend((0..crust_core::lpe::MAX_EXPRESSIONS - 1).map(lpe));
+        let p = pass(&["default"], "$n_$o");
+        assert!(pass_products(&p, &vars, "$l_$o.$x", "cam", 1.0, &no_env).is_ok());
+        vars.push(lpe(999));
+        let e = pass_products(&p, &vars, "$l_$o.$x", "cam", 1.0, &no_env).unwrap_err();
+        assert!(e.contains("65"), "{e}");
+    }
+
+    #[test]
+    fn pass_vars_keep_each_prim_once_in_product_order() {
+        let a = var("A", AovSource::Albedo);
+        let b = var("B", AovSource::Depth);
+        let vars = pass_vars(&[product(vec![a.clone(), b.clone()]), product(vec![b, a])]);
+        let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["A", "B"]);
     }
 }

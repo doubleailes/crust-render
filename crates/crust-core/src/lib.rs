@@ -49,6 +49,7 @@ pub mod place;
 /// the render, after Guerilla Render's "Render Profile".
 pub mod profile;
 mod ray;
+pub mod render_pass;
 /// The envelope and value rules every JSON report shares.
 pub mod report;
 mod rt_world;
@@ -123,6 +124,7 @@ pub use pdf::{InvPdfArea, PdfSolidAngle};
 pub use ray::{
     MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask, TRACE_T_MIN,
 };
+pub use render_pass::RenderPass;
 pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
 pub use sampler::SamplerKind;
 pub use scene::Scene;
@@ -136,7 +138,7 @@ pub mod implicit_shapes {
 }
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
-    MaterialRecord, NoAssets, UsdImportOptions, usd_schema_registry,
+    MaterialRecord, NoAssets, PassRecord, UsdImportOptions, usd_schema_registry,
 };
 #[cfg(feature = "traversal-stats")]
 pub use stats::traversal_report;

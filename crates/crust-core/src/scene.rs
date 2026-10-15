@@ -53,6 +53,9 @@ pub struct Scene {
     /// a package as the package — sorted. What a host watches to see the
     /// stage change on disk. Empty for a hand-assembled scene.
     pub layers: Vec<std::path::PathBuf>,
+    /// The render pass the stage was imported for
+    /// ([`UsdImportOptions::render_pass`]); `None` for a render without one.
+    pub render_pass: Option<crate::RenderPass>,
 }
 
 impl Scene {
@@ -71,6 +74,7 @@ impl Scene {
             warnings: Vec::new(),
             provenance: None,
             layers: Vec::new(),
+            render_pass: None,
         }
     }
 
@@ -221,6 +225,7 @@ pub enum ListRecord {
     Camera(CameraRecord),
     Light(LightRecord),
     Material(MaterialRecord),
+    Pass(PassRecord),
 }
 
 impl ListRecord {
@@ -230,6 +235,7 @@ impl ListRecord {
             ListRecord::Camera(r) => &r.path,
             ListRecord::Light(r) => &r.path,
             ListRecord::Material(r) => &r.path,
+            ListRecord::Pass(r) => &r.path,
         }
     }
 }
@@ -286,6 +292,25 @@ pub struct MaterialRecord {
     pub bound: bool,
 }
 
+/// A `RenderPass`: what `crust render --pass` renders with and writes.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct PassRecord {
+    pub path: String,
+    /// The `RenderSettings` prim a render of the pass reads: its
+    /// `renderSource`, else the stage's own settings prim; `None` when the
+    /// pass names none and the stage has none, or when its `renderSource`
+    /// is not a `RenderSettings` (a render of it is refused).
+    pub render_source: Option<String>,
+    /// The render layers, in order, `default` last.
+    pub layers: Vec<String>,
+    /// The file pattern a render expands: `crust:filePattern`, else the
+    /// default.
+    pub file_pattern: String,
+    /// The pattern naming each output inside a shared file:
+    /// `crust:layerPattern`, else the default.
+    pub layer_pattern: String,
+}
+
 /// What [`Scene::list_usd`] lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListKind {
@@ -306,6 +331,9 @@ pub enum ListKind {
     /// inactive ancestor or inside an instance's prototype, whether or not
     /// anything binds them.
     Material,
+    /// `RenderPass` prims `--pass` accepts: all but those under an inactive
+    /// ancestor or inside an instance's prototype.
+    Pass,
 }
 
 impl ListKind {
@@ -315,6 +343,7 @@ impl ListKind {
             ListKind::Camera => "camera",
             ListKind::Light => "light",
             ListKind::Material => "material",
+            ListKind::Pass => "pass",
         }
     }
 }
@@ -374,6 +403,14 @@ pub struct UsdImportOptions {
     /// ([`Error::InvalidWorkingSpace`](crate::Error::InvalidWorkingSpace)
     /// otherwise). See [`crate::color`].
     pub working_space: Option<String>,
+    /// The `RenderPass` prim to render (the CLI's `--pass`), as an absolute
+    /// prim path: the render reads the settings its `renderSource` targets,
+    /// else the stage's own, and the scene carries the pass
+    /// ([`Scene::render_pass`]). A path that is not a `RenderPass`, or whose
+    /// source is not a `RenderSettings`, is an error
+    /// ([`crate::Error::NotARenderPass`],
+    /// [`crate::Error::PassSourceNotRenderSettings`]).
+    pub render_pass: Option<String>,
 }
 
 /// How the engine asks its host to decode an image.

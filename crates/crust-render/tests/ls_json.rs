@@ -82,6 +82,17 @@ fn ls_json_records_are_the_text_listing_with_their_values() {
             "usdpreview_textured.usda",
             &["path", "surface", "bound"],
         ),
+        (
+            "pass",
+            "render_passes.usda",
+            &[
+                "path",
+                "render_source",
+                "layers",
+                "file_pattern",
+                "layer_pattern",
+            ],
+        ),
     ] {
         let stage = sample(stage);
         let input = stage.to_str().unwrap();

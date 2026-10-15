@@ -26,6 +26,7 @@ fn var(name: &str, source: AovSource) -> AovVar {
         expression: None,
         raw: false,
         variance: false,
+        layer: None,
     }
 }
 

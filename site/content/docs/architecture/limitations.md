@@ -133,6 +133,21 @@ render.
   - Seen in a mirror or through clear glass, a shadow-linked light casts the shadows of
     every occluder, including the ones its `collection:shadowLink` leaves out.
 
+## Render passes
+
+- **A pass's visibility collections aren't read.** `renderVisibility` and
+  `cameraVisibility` would change what lights the pass; every object is rendered, with a
+  warning. Split what a pass shows with [render layers](@/docs/usd/render-passes.md).
+- **No per-pass overrides.** USD has no schema for a pass's own lights or materials.
+- **A point instancer is in one layer.** Its instances can't be split across layers, and
+  a layer can't target a prim inside an instance's prototype. Native instances of one
+  prototype can be in different layers.
+- **Every layer gets every AOV** of the pass, and glass always owns what is seen through
+  it.
+- **Single-part files.** A file holding several layers is one multichannel EXR, not a
+  multi-part one, and the products' `driver:parameters:*` aren't copied into it.
+- **One pass per render.**
+
 ## Path guiding
 
 - **Not repeatable bit for bit.** A guided render decides whether its last pass is

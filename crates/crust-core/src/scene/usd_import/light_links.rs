@@ -113,15 +113,15 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
 /// A link collection's authored opinions, as far as membership depends on
 /// them — what two stages must agree on to be interchangeable for it.
 #[derive(PartialEq)]
-struct Opinions {
-    includes: Vec<sdf::Path>,
-    excludes: Vec<sdf::Path>,
-    include_root: Option<bool>,
+pub(super) struct Opinions {
+    pub(super) includes: Vec<sdf::Path>,
+    pub(super) excludes: Vec<sdf::Path>,
+    pub(super) include_root: Option<bool>,
     expansion_rule: Option<String>,
-    expression: bool,
+    pub(super) expression: bool,
 }
 
-fn opinions(prim: &Prim, name: &str) -> Opinions {
+pub(super) fn opinions(prim: &Prim, name: &str) -> Opinions {
     let prop = |suffix: &str| format!("collection:{name}:{suffix}");
     let targets = |suffix: &str| {
         prim.relationship(prop(suffix))
@@ -139,7 +139,7 @@ fn opinions(prim: &Prim, name: &str) -> Opinions {
 
 /// Whether some strict ancestor of `path` is a native instance, i.e. `path`
 /// names geometry inside a prototype.
-fn inside_instance(stage: &Stage, path: &sdf::Path) -> bool {
+pub(super) fn inside_instance(stage: &Stage, path: &sdf::Path) -> bool {
     let mut p = path.parent();
     while let Some(a) = p {
         if a.is_abs_root() {
@@ -193,6 +193,44 @@ impl LightLinks {
             .zip(&self.run_ends)
             .filter_map(|(&(first, id), &end)| Some((first..end, by_id[id as usize]?.to_string())))
             .collect()
+    }
+
+    /// One value per `geom_id` (of `n_geoms`) and per volume region (of
+    /// `n_volumes`): `of` asked once per prim that emitted geometry or a
+    /// volume, judged by its stage path as the links judge receivers, and
+    /// `fallback` where no prim emitted. A run of ids ends where the next
+    /// begins, as in [`LightLinks::resolve`]. The render layers' table
+    /// ([`super::passes`]).
+    pub(super) fn per_receiver(
+        &self,
+        n_geoms: usize,
+        n_volumes: usize,
+        fallback: u16,
+        mut of: impl FnMut(&sdf::Path) -> u16,
+    ) -> (Vec<u16>, Vec<u16>) {
+        let mut by_id: Vec<Option<&sdf::Path>> = vec![None; self.paths.len()];
+        for (p, &id) in &self.paths {
+            by_id[id as usize] = Some(p);
+        }
+        // Asked in traversal order, once per prim: the first claim of a
+        // prim decides the order its warnings are raised in.
+        let mut answer: Vec<Option<u16>> = vec![None; by_id.len()];
+        let mut ask = |id: u32| -> u16 {
+            *answer[id as usize].get_or_insert_with(|| of(by_id[id as usize].expect("dense ids")))
+        };
+        let mut geoms = vec![fallback; n_geoms];
+        for (k, &(start, id)) in self.runs.iter().enumerate() {
+            let end = self.runs.get(k + 1).map_or(n_geoms as u32, |r| r.0);
+            let value = ask(id);
+            for slot in &mut geoms[start as usize..(end as usize).min(n_geoms)] {
+                *slot = value;
+            }
+        }
+        let mut volumes = vec![fallback; n_volumes];
+        for &(v, id) in &self.volumes {
+            volumes[v as usize] = ask(id);
+        }
+        (geoms, volumes)
     }
 
     fn intern(&mut self, path: &sdf::Path) -> u32 {

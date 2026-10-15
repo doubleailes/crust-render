@@ -137,6 +137,7 @@ fn var(key: &str, expression: &str, variance: bool) -> AovVar {
         expression: Some(expression.to_owned()),
         raw: false,
         variance,
+        layer: None,
     }
 }
 

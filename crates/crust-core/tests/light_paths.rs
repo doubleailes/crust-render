@@ -369,6 +369,7 @@ fn lpe_var(expr: &str) -> AovVar {
         expression: Some(expr.to_owned()),
         raw: false,
         variance: false,
+        layer: None,
     }
 }
 

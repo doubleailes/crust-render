@@ -12,6 +12,7 @@
 //! |----------------|--------------------------------------------------------------|
 //! | [`time`]       | the time code every attribute read resolves at (`-f`)        |
 //! | [`settings`]   | `UsdRenderSettings`, `crust:*` render attributes, camera choice |
+//! | [`passes`]     | `RenderPass`: the settings it names, its layers → `World::layer` |
 //! | [`attrs`]      | typed attribute readers, `crust:rayMask` / motion / subdivision |
 //! | [`xform`]      | `xformOp:*` stacks → world matrices                          |
 //! | [`camera`]     | `UsdGeomCamera`                                              |
@@ -80,6 +81,7 @@ mod live;
 mod materials;
 mod mesh;
 mod mtlx_network;
+mod passes;
 mod preview;
 mod products;
 mod settings;
@@ -706,6 +708,8 @@ fn open_stage_masked(
 struct ValidOptions {
     time: Option<f64>,
     camera: Option<sdf::Path>,
+    /// The render pass to render ([`crate::UsdImportOptions::render_pass`]).
+    pass: Option<sdf::Path>,
     working: Option<crate::color::Space>,
 }
 
@@ -730,6 +734,16 @@ impl ValidOptions {
             ),
             None => None,
         };
+        // A render pass path, the same way.
+        let pass = match &options.render_pass {
+            Some(p) => Some(
+                sdf::path(p)
+                    .ok()
+                    .filter(|p| p.is_abs() && p.is_prim_path() && !p.is_abs_root())
+                    .ok_or_else(|| crate::Error::InvalidPassPath(p.clone()))?,
+            ),
+            None => None,
+        };
         // A working space the host names is refused here, before the stage is
         // opened, like a bad camera path.
         let host_working = match &options.working_space {
@@ -739,6 +753,7 @@ impl ValidOptions {
         Ok(ValidOptions {
             time,
             camera: requested_camera,
+            pass,
             working: host_working,
         })
     }
@@ -922,11 +937,8 @@ pub(crate) fn load_scene(
     assets: &dyn AssetLoader,
     options: &crate::UsdImportOptions,
 ) -> Result<Scene, crate::Error> {
-    let ValidOptions {
-        time,
-        camera: requested_camera,
-        working: host_working,
-    } = ValidOptions::check(options)?;
+    let valid = ValidOptions::check(options)?;
+    let time = valid.time;
     let _time_scope = EvalTimeScope::enter(time);
     // Every coded warning this import raises, on this thread, is recorded
     // here and handed back on the scene.
@@ -959,6 +971,8 @@ pub(crate) fn load_scene(
         check_time_range(&index, t);
     }
     let IndexRead {
+        settings_path,
+        render_pass,
         settings,
         products,
         domes_seen_by_camera,
@@ -967,18 +981,8 @@ pub(crate) fn load_scene(
         wanted_camera,
         subdiv,
         projection,
-    } = read_index(
-        &index,
-        path,
-        path_str,
-        options,
-        &ValidOptions {
-            time,
-            camera: requested_camera,
-            working: host_working,
-        },
-    )?;
-    let render_settings = settings::render_settings_path(&index).map(|p| p.to_string());
+    } = read_index(&index, path, path_str, options, &valid)?;
+    let render_settings = settings_path.map(|p| p.to_string());
     let chunks = stream_roots(&index);
     let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
         subtree_roots(&index)
@@ -1074,6 +1078,11 @@ pub(crate) fn load_scene(
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
     let geometry_runs = ctx.links.geometry_runs();
+    // The render layers are judged against the same receivers, by the same
+    // collection membership, before the links consume them.
+    if let (Some(pass), Some(index)) = (&render_pass, ctx.index.as_ref()) {
+        passes::install_layers(index, pass, &ctx.links, &mut ctx.world, &mut ctx.volumes);
+    }
     let remap =
         std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
     // The provenance names each light by its place in the list as the links
@@ -1151,6 +1160,7 @@ pub(crate) fn load_scene(
     let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
     scene.stats = stats;
     scene.aovs = products.request;
+    scene.render_pass = render_pass;
     scene.working_space = working;
     scene.camera_path = camera_path;
     scene.time = time;
@@ -1214,6 +1224,11 @@ fn layer_files(
 /// The settings carry the products' resolution, region and motion blur, and
 /// the frame's seed; the camera's exposure comes later, from the camera.
 struct IndexRead {
+    /// The `RenderSettings` prim the render reads: the render pass's
+    /// `renderSource`, else the stage's own (`render_settings_path`).
+    settings_path: Option<sdf::Path>,
+    /// The render pass being rendered, when the host named one.
+    render_pass: Option<crate::RenderPass>,
     settings: RenderSettings,
     products: products::RenderProducts,
     domes_seen_by_camera: bool,
@@ -1235,11 +1250,28 @@ fn read_index(
     options: &crate::UsdImportOptions,
     valid: &ValidOptions,
 ) -> Result<IndexRead, crate::Error> {
+    // The one settings prim every setting below is read from: the render
+    // pass's, when the host names one, else the stage's.
+    let (settings_path, render_pass) = match &valid.pass {
+        Some(pass) => {
+            let at = passes::pass_settings(index, pass)?;
+            let read = passes::read_pass(index, pass, at.as_ref());
+            passes::warn_unread_collections(index, &read);
+            debug!(
+                "Render pass {pass}: settings {}, layers {:?}",
+                read.render_source.as_deref().unwrap_or("(none)"),
+                read.layers
+            );
+            (at, Some(read))
+        }
+        None => (settings::render_settings_path(index), None),
+    };
+    let at = settings_path.as_ref();
     // Render settings come first — the camera importer needs the aspect ratio.
-    let mut settings = import_render_settings(index);
+    let mut settings = import_render_settings(index, at);
     // The products the render writes. The first one's camera and resolution
     // are the render's: the settings' own unless that product overrides them.
-    let products = import_render_products(index);
+    let products = import_render_products(index, at);
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }
@@ -1255,31 +1287,32 @@ fn read_index(
         }
     }
     settings = settings.with_motion_blur(products.motion_blur);
-    let domes_seen_by_camera = dome_light_camera_visibility(index);
-    let exposure_compensation = enable_exposure_compensation(index);
+    let domes_seen_by_camera = dome_light_camera_visibility(index, at);
+    let exposure_compensation = enable_exposure_compensation(index, at);
     // The working colour space, before any colour is read: every texture
     // request and authored colour is converted into it.
     let working = valid
         .working
-        .unwrap_or_else(|| render_settings_color_space(index));
+        .unwrap_or_else(|| render_settings_color_space(index, at));
     debug!("Rendering in {} ({})", working.label(), working.name());
     // Geometry, not tracer, settings: every mesh whose scheme is not `none`
     // is refined to this one level, so it must be known before the traversal.
     let subdiv_level = resolve_subdiv_level(
         options.subdivision_level,
-        render_settings_subdiv_level(index),
+        render_settings_subdiv_level(index, at),
     );
     debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
     // Which camera to render through: the host's explicit choice, else the
     // stage's own `RenderSettings.camera`. Decided here, on the index stage,
     // because the traversal needs it before it meets any camera.
     let wanted_camera =
-        settings::wanted_camera(valid.camera.clone(), products.camera.clone(), index);
+        settings::wanted_camera(valid.camera.clone(), products.camera.clone(), index, at);
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
     }
     let (subdiv, projection) = subdiv_policy(
         index,
+        at,
         path,
         path_str,
         options,
@@ -1297,6 +1330,8 @@ fn read_index(
         settings = settings.with_frame(seed);
     }
     Ok(IndexRead {
+        settings_path,
+        render_pass,
         settings,
         products,
         domes_seen_by_camera,
@@ -1348,8 +1383,10 @@ fn apply_exposure(
 /// when the path is not a camera, there is none: adaptive mode then warns once
 /// and the uniform level applies, and implicit shapes take their fixed count,
 /// silently. Finding the first camera would take a traversal of its own.
+#[allow(clippy::too_many_arguments)]
 fn subdiv_policy(
     index: &Stage,
+    settings_path: Option<&sdf::Path>,
     path: &Path,
     path_str: &str,
     options: &crate::UsdImportOptions,
@@ -1359,7 +1396,7 @@ fn subdiv_policy(
 ) -> Result<(SubdivPolicy, Option<ScreenProjection>), crate::Error> {
     let target = resolve_subdiv_edge_length(
         options.subdivision_edge_length,
-        render_settings_subdiv_edge_length(index),
+        render_settings_subdiv_edge_length(index, settings_path),
     )
     .filter(|_| crate::config().subdiv);
     let Some(choice) = wanted_camera else {
@@ -1409,7 +1446,7 @@ fn subdiv_policy(
     };
     let max = resolve_adaptive_max_level(
         options.subdivision_level,
-        render_settings_subdiv_level(index),
+        render_settings_subdiv_level(index, settings_path),
     );
     info!(
         "Adaptive subdivision: unshared cage edges refined to at most {target} px through \

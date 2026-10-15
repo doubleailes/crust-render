@@ -18,7 +18,7 @@ top = false
 
 ```bash
 crust render [OPTIONS]              # render a scene
-crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materials
+crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights, materials or passes
 crust check -i <SCENE> [OPTIONS]    # what a render would use, and what crust refused
 crust diff <A> <B>                  # did the image change, and by how much?
 crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or cleaner
@@ -29,7 +29,7 @@ crust mcp                           # serve a live editing session to Claude Des
 | command | what it does |
 |---------|--------------|
 | `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` belongs to it. |
-| [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line, or as JSON with the values a render reads for each. |
+| [`ls`](#ls) | prints the stage's cameras, lights, materials or render passes, one prim path per line, or as JSON with the values a render reads for each. |
 | [`check`](#check) | imports the stage as a render would and reports on it without rendering: the render it describes, its effective settings, the import's cost, findings and warnings. Takes the scene flags of `render`. |
 | [`diff`](#diff) | compares two EXRs: whether they are identical, by how much they differ, and whether they can be compared at all. |
 | [`diagnostic`](#diagnostic) | measures which settings make the stage's render faster or cleaner, within a time budget, and reports the evidence. Takes the scene flags of `render`. |
@@ -61,6 +61,7 @@ The flags of `crust render`:
 |------|-------|---------|-----------|
 | [`-i`, `--input`](#input) | path | procedural scene | — |
 | [`-o`, `--output`](#output) | path | `output.exr` | first `productName` |
+| [`--pass`](#pass) | prim path | none | the settings prim |
 | [`--region`](#region) | `X0,Y0,X1,Y1` | scene / full frame | `dataWindowNDC` |
 | [`-s`, `--samples`](#samples) | integer | scene / 128 | `crust:samplesPerPixel` |
 | [`-f`, `--frame`](#frame) | number | default values | `crust:frame` (seed) |
@@ -116,6 +117,9 @@ Where to write the image. What it does depends on whether the stage authors
 - **Products authored, `-o` given.** `-o` replaces the first product's `productName`, as
   husk's `-o` does. The other products keep their own paths.
 - **Products authored, no `-o`.** Each product is written to its `productName`.
+- **With [`--pass`](#pass).** `-o` replaces the pass's file pattern, and is expanded with
+  the pattern's specifiers (`$n`, `$o`, `$04f`, `$x`, …) rather than husk's frame variables:
+  see [The files a pass writes](@/docs/usd/render-passes.md#the-files-a-pass-writes).
 
 With products, the PNG is made from the first product's beauty and written beside it.
 
@@ -147,6 +151,22 @@ crust render -i shot.usda -f 12 -o 'shot.$F4.exr'
 
 crust render -i samples/aovs.usda
 # writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr
+```
+
+### pass
+
+`--pass <PRIM_PATH>`
+
+The [render pass](@/docs/usd/render-passes.md) to render, as an absolute USD prim path, for
+example `/Render/Passes/render`. The render uses the `RenderSettings` prim the pass's
+`renderSource` names, else the stage's own.
+
+The command stops before anything is rendered when the path isn't a `RenderPass` on the
+stage, or when the pass's `renderSource` isn't a `RenderSettings`. [`check`](#check)
+takes `--pass` too, and [`crust ls pass`](#ls) lists the paths it accepts.
+
+```bash
+crust render -i samples/render_passes.usda --pass /Render/Passes/fx
 ```
 
 ### region
@@ -700,8 +720,9 @@ order. `KIND` is one of:
 | `camera` | the cameras a render can go through: the paths `--camera` accepts |
 | `light` | the lights the render reads (sphere, rect, disk, cylinder, distant, dome) |
 | `material` | the `Material` prims a binding can reach, whether or not anything binds them |
+| `pass` | the `RenderPass` prims: the paths [`--pass`](#pass) accepts |
 
-The plurals (`cameras`, `lights`, `materials`) work too.
+The plurals (`cameras`, `lights`, `materials`, `passes`) work too.
 
 ```bash
 $ crust ls camera -i samples/cornellbox.usda
@@ -723,8 +744,8 @@ the list is what a render would use:
   light of radius 0 or one whose transform scales it to nothing, is skipped with a
   warning when you render: whether a light is usable depends on the frame, and `ls`
   reads none.
-- A material is listed wherever a binding can reach it: only one inside an instance's
-  prototype is left out.
+- A material or a render pass is listed wherever it is on the stage: only one inside an
+  instance's prototype is left out.
 
 The log goes to stderr, so stdout holds only the list and can be piped:
 
@@ -752,6 +773,7 @@ render's own code, so an unauthored value is the one the render falls back to:
 | `camera` | `focal_length_mm`, `aperture_mm` (horizontal, vertical: the vertical one defaults to the horizontal over the image's aspect), `f_stop` (`0` is a pinhole), `focus_distance`, `is_render_camera`, `hidden` |
 | `light` | `type` (`sphere`, `rect`, `disk`, `cylinder`, `distant`, `dome`), `intensity`, `exposure`, `color`, `normalize`, as authored on the light: no transform, colour space or colour temperature applied |
 | `material` | `surface`, the `info:id` of the surface shader the render decodes (`null` when there is none), and `bound` |
+| `pass` | `render_source` (the `RenderSettings` prim a render of the pass reads, `null` when there is none), `layers` (the [render layers](@/docs/usd/render-passes.md), `default` last), `file_pattern` and `layer_pattern` (authored, or the defaults) |
 
 `is_render_camera` marks the camera `crust render` without `--camera` goes through: the
 first RenderProduct's camera, else `RenderSettings.camera`, else (that camera missing, or
@@ -802,6 +824,7 @@ creates, as a render would. The text report goes to stdout and the log to stderr
 
 It accepts the same scene flags as [`diagnostic`](#diagnostic), with the same names,
 values and defaults: [`-i`](#input) (required), [`-f`](#frame), [`--camera`](#camera),
+[`--pass`](#pass) (its own: `diagnostic` does not take it),
 [`--region`](#region), [`--strategy`](#strategy), [`--light-selection`](#light-selection),
 [`--light-samples`](#light-samples), [`--light-samples-indirect`](#light-samples-indirect),
 [`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),

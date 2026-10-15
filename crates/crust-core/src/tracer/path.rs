@@ -1723,6 +1723,7 @@ fn first_wall(
     let (t_wall, rec, geom_id) = thin.first.filter(|_| walls)?;
     (t_wall < t).then(|| FirstHit::Surface {
         p: rec.p,
+        layer: world.layer(geom_id),
         n: rec.normal,
         uv: rec.uv,
         motion: if motion_on {
@@ -1776,6 +1777,7 @@ fn volume_event_past_walls<S: SamplerImpl>(
                 phase,
                 emitted: e,
                 class,
+                layer,
             } => {
                 return VolumeEvent::Scatter {
                     t,
@@ -1784,6 +1786,7 @@ fn volume_event_past_walls<S: SamplerImpl>(
                     phase,
                     emitted: emitted + w * e,
                     class,
+                    layer,
                 };
             }
             VolumeEvent::Passthrough {
@@ -1848,6 +1851,7 @@ fn volume_event_crossing<S: SamplerImpl>(
                     phase,
                     emitted: e,
                     class,
+                    layer,
                 } => {
                     return VolumeEvent::Scatter {
                         t,
@@ -1856,6 +1860,7 @@ fn volume_event_crossing<S: SamplerImpl>(
                         phase,
                         emitted: emitted + w * e,
                         class,
+                        layer,
                     };
                 }
                 VolumeEvent::Passthrough {
@@ -2845,13 +2850,14 @@ pub(super) fn trace_path<
                 phase,
                 emitted,
                 class,
+                layer,
             } => {
                 let (weight, emitted) = carry_into(carried, weight, emitted);
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 if AOV && records.is_empty() {
                     *first = first_wall(thin, walls, t, world, motion_on)
-                        .unwrap_or(FirstHit::Volume { p });
+                        .unwrap_or(FirstHit::Volume { p, layer });
                 }
                 let wi = ray.direction().normalize();
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
@@ -2987,8 +2993,13 @@ pub(super) fn trace_path<
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
             if AOV && records.is_empty() {
-                *first = first_wall(thin, walls, t_med, world, motion_on)
-                    .unwrap_or(FirstHit::Volume { p: pos });
+                // A camera inside a carried medium met no prim of a layer:
+                // the `default` layer's, as an escaped ray is.
+                *first =
+                    first_wall(thin, walls, t_med, world, motion_on).unwrap_or(FirstHit::Volume {
+                        p: pos,
+                        layer: world.default_layer(),
+                    });
             }
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
             let dir = sample_henyey_greenstein(
@@ -3235,6 +3246,7 @@ pub(super) fn trace_path<
             *first =
                 first_wall(thin, walls, rec.t, world, motion_on).unwrap_or(FirstHit::Surface {
                     p: rec.p,
+                    layer: world.layer(hit.geom_id),
                     n: sp.normal(),
                     uv: rec.uv,
                     motion: if motion_on {

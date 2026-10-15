@@ -1,0 +1,245 @@
+#usda 1.0
+(
+    doc = """Render passes and render layers. A set (a floor and a
+back wall), a hero (a box), a cutout leaf in front of the hero's left half
+and a thin-walled glass pane in front of its right half, under a dome and a
+key light.
+
+/Render/Passes/render splits the image into the layers `set` and `hero`
+(collections on the pass) and the implicit `default` (the sky, the key
+light's own geometry). One traversal renders every layer; each holds out the
+others, and their colours sum to the beauty. Its crust:filePattern writes one
+EXR per layer and AOV:
+
+    cargo run --release -- render -i samples/render_passes.usda --pass /Render/Passes/render -f 3
+
+writes renders/render_set_Beauty.0003.exr, renders/render_set_Diffuse.0003.exr,
+… renders/render_default_Depth.0003.exr. `-o 'renders/$l_$n.$04f.$x'` puts a
+layer's AOVs in one file instead, and `-o 'renders/$l.$x'` every layer in one.
+
+/Render/Passes/fx renders with its own settings (/Render/fx_settings, at a
+smaller resolution) and has no layer: its one layer, `default`, is the
+beauty. Without --pass the stage renders its RenderProducts as any stage
+does."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        float verticalAperture = 11.787
+        double3 xformOp:translate = (0, 1.2, 7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Grey"
+        {
+            token outputs:surface.connect = </World/Looks/Grey/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.5, 0.5, 0.5)
+                float inputs:specularRoughness = 0.7
+                token outputs:surface
+            }
+        }
+
+        def Material "Red"
+        {
+            token outputs:surface.connect = </World/Looks/Red/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.8, 0.15, 0.1)
+                float inputs:specularRoughness = 0.4
+                token outputs:surface
+            }
+        }
+
+        # Opacity below the threshold everywhere: a leaf cut out whole, which
+        # camera rays pass straight through.
+        def Material "Leaf"
+        {
+            token outputs:surface.connect = </World/Looks/Leaf/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.2, 0.6, 0.15)
+                float inputs:opacity = 0
+                float inputs:opacityThreshold = 0.5
+                token outputs:surface
+            }
+        }
+
+        def Material "Glass"
+        {
+            token outputs:surface.connect = </World/Looks/Glass/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                float inputs:transmissionWeight = 1
+                color3f inputs:transmissionColor = (0.9, 0.95, 1)
+                float inputs:specularIor = 1.5
+                float inputs:specularRoughness = 0
+                bool inputs:geometryThinWalled = 1
+                token outputs:surface
+            }
+        }
+    }
+
+    def Xform "Set"
+    {
+        def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-6, 0, -3), (-6, 0, 6), (6, 0, 6), (6, 0, -3)]
+            rel material:binding = </World/Looks/Grey>
+        }
+
+        # Stops short of the frame's top: the sky shows above it.
+        def Mesh "Wall" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-6, 0, -3), (6, 0, -3), (6, 2.2, -3), (-6, 2.2, -3)]
+            rel material:binding = </World/Looks/Grey>
+        }
+
+        # In front of the hero's left half.
+        def Mesh "Leaf" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-0.9, 0.2, 2), (-0.05, 0.2, 2), (-0.05, 1.6, 2), (-0.9, 1.6, 2)]
+            rel material:binding = </World/Looks/Leaf>
+        }
+
+        # In front of the hero's right half.
+        def Mesh "Glass" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0.05, 0.2, 2), (0.9, 0.2, 2), (0.9, 1.6, 2), (0.05, 1.6, 2)]
+            rel material:binding = </World/Looks/Glass>
+        }
+    }
+
+    def Xform "Hero"
+    {
+        def Xform "Body"
+        {
+            def Mesh "Mesh" (prepend apiSchemas = ["MaterialBindingAPI"])
+            {
+                uniform token subdivisionScheme = "none"
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+                point3f[] points = [(-0.6, 0, 0.6), (0.6, 0, 0.6), (-0.6, 1.2, 0.6), (0.6, 1.2, 0.6), (-0.6, 1.2, -0.6), (0.6, 1.2, -0.6), (-0.6, 0, -0.6), (0.6, 0, -0.6)]
+                rel material:binding = </World/Looks/Red>
+            }
+        }
+    }
+
+    def SphereLight "Key"
+    {
+        float inputs:radius = 0.3
+        float inputs:intensity = 30
+        double3 xformOp:translate = (2.5, 4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.25, 0.3, 0.4)
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (160, 90)
+        rel products = [</Render/Products/beauty>]
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 4
+    }
+
+    # The fx pass's own settings: the same camera, a smaller image.
+    def RenderSettings "fx_settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (64, 36)
+        rel products = [</Render/Products/beauty>]
+        int crust:samplesPerPixel = 8
+        int crust:maxDepth = 4
+    }
+
+    def Scope "Passes"
+    {
+        def RenderPass "render" (
+            prepend apiSchemas = ["CollectionAPI:layer:set", "CollectionAPI:layer:hero"]
+        )
+        {
+            rel renderSource = </Render/settings>
+            uniform bool collection:layer:set:includeRoot = 0
+            rel collection:layer:set:includes = </World/Set>
+            uniform bool collection:layer:hero:includeRoot = 0
+            rel collection:layer:hero:includes = </World/Hero>
+            string crust:filePattern = "renders/$l_$n_$o.$04f.$x"
+        }
+
+        def RenderPass "fx"
+        {
+            rel renderSource = </Render/fx_settings>
+        }
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "beauty"
+        {
+            token productName = "renders/render_passes.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/Beauty>,
+                </Render/Products/Vars/Diffuse>,
+                </Render/Products/Vars/Depth>,
+            ]
+        }
+
+        def Scope "Vars"
+        {
+            def RenderVar "Beauty"
+            {
+                uniform token dataType = "color4f"
+                uniform string sourceName = "Ci"
+                uniform token sourceType = "raw"
+            }
+
+            def RenderVar "Diffuse"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<RD>.*[LO]"
+                uniform token sourceType = "lpe"
+            }
+
+            def RenderVar "Depth"
+            {
+                uniform token dataType = "float"
+                uniform string sourceName = "depth"
+                uniform token sourceType = "raw"
+            }
+        }
+    }
+}

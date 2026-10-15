@@ -365,6 +365,15 @@ pub struct AovVar {
     /// `variance` source's estimator over the expression's (raw, if `raw`)
     /// share of each sample. `components` is 1.
     pub variance: bool,
+    /// The render layer whose samples this var holds: an index into the
+    /// render pass's layers ([`crate::RenderPass::layers`]), each camera
+    /// sample owned by the layer of what its camera ray first meets
+    /// ([`crate::World::layer`]). The var receives only the samples its layer
+    /// owns, and keeps its clear value where it owns none: the layer holds
+    /// the others out. A `color` var with a layer is that layer's share of
+    /// the beauty, [`LAYER_BEAUTY`] restricted to its samples. `None`, the
+    /// var of a render without layers, receives every sample.
+    pub layer: Option<u16>,
 }
 
 impl AovVar {
@@ -388,9 +397,30 @@ impl AovVar {
         self.variance && self.source == AovSource::Lpe
     }
 
+    /// Whether this var is a layer's share of the beauty: a `color` var
+    /// with a layer, accumulated as [`LAYER_BEAUTY`] in its layer's slot.
+    fn is_layer_beauty(&self) -> bool {
+        self.source == AovSource::Color && self.layer.is_some()
+    }
+
     /// The film slot holding this var's per-sample accumulation, if any.
     /// `lpes` is the render's expression list ([`AovLayout::lpes`]).
     fn slot_key(&self, lpes: &[String]) -> Option<SlotKey> {
+        let layer = self.layer.unwrap_or(NO_LAYER);
+        if self.is_layer_beauty() {
+            // The beauty's own colour routed as `C.*[LO]`, which is pinned
+            // bit for bit to the beauty: one layer owning every sample holds
+            // exactly the beauty, and the layers sum to it.
+            return Some(SlotKey {
+                source: AovSource::Lpe,
+                accumulation: Accumulation::Filtered,
+                clear_bits: 0,
+                lpe: lpes.iter().position(|x| x == LAYER_BEAUTY)? as u16,
+                raw: false,
+                variance: false,
+                layer,
+            });
+        }
         let lpe = match &self.expression {
             Some(e) if self.source == AovSource::Lpe => lpes.iter().position(|x| x == e)? as u16,
             _ => NO_LPE,
@@ -410,12 +440,21 @@ impl AovVar {
             lpe,
             raw: self.raw,
             variance: self.is_lpe_variance(),
+            layer,
         })
     }
 }
 
 /// A slot that holds no light path expression.
 const NO_LPE: u16 = u16::MAX;
+
+/// A slot that receives every sample, whatever layer owns it: the slots of
+/// a render without layers.
+const NO_LAYER: u16 = u16::MAX;
+
+/// The expression a layer's beauty is accumulated as: every path, the
+/// beauty bit for bit.
+pub const LAYER_BEAUTY: &str = "C.*[LO]";
 
 /// One accepted `raster` RenderProduct.
 #[derive(Debug, Clone, PartialEq)]
@@ -451,7 +490,7 @@ impl AovRequest {
     /// the render must take the AOV path at all.
     pub fn needs_film(&self) -> bool {
         self.vars()
-            .any(|v| v.source != AovSource::Color || v.with_alpha())
+            .any(|v| v.source != AovSource::Color || v.with_alpha() || v.layer.is_some())
     }
 
     fn vars(&self) -> impl Iterator<Item = &AovVar> {
@@ -477,6 +516,9 @@ pub(crate) struct SlotKey {
     /// film holds the variance of the mean. It shares the expression's DFA
     /// bit with the value slot, as raw does.
     variance: bool,
+    /// The render layer whose samples the slot receives ([`AovVar::layer`]),
+    /// or [`NO_LAYER`] for every sample.
+    layer: u16,
 }
 
 impl SlotKey {
@@ -536,6 +578,9 @@ pub(crate) struct AovLayout {
     /// The working space's luminance weights, which an expression's
     /// variance reduces each sample by — the beauty's (`LightList::luma`).
     pub(crate) luma: utils::Luma,
+    /// The layer a camera sample whose ray escapes belongs to: the render
+    /// pass's `default` layer, its last ([`crate::World::default_layer`]).
+    pub(crate) default_layer: u16,
     /// The compiled expressions and event symbols, built by the renderer
     /// (it needs the lights' tags) when `lpes` or `albedo` ask for routing.
     pub(crate) route: Option<std::sync::Arc<crate::tracer::RouteCtx>>,
@@ -548,12 +593,18 @@ impl AovLayout {
     pub(crate) fn new(request: &AovRequest) -> Self {
         let mut layout = AovLayout::default();
         for var in request.vars() {
-            if let Some(e) = &var.expression
-                && var.source == AovSource::Lpe
-                && !layout.lpes.contains(e)
+            let expression = if var.is_layer_beauty() {
+                Some(LAYER_BEAUTY)
+            } else if var.source == AovSource::Lpe {
+                var.expression.as_deref()
+            } else {
+                None
+            };
+            if let Some(e) = expression
+                && !layout.lpes.iter().any(|x| x == e)
                 && layout.lpes.len() < crate::lpe::MAX_EXPRESSIONS
             {
-                layout.lpes.push(e.clone());
+                layout.lpes.push(e.to_owned());
             }
         }
         let lpes = layout.lpes.clone();
@@ -567,7 +618,7 @@ impl AovLayout {
                 add(key);
             }
             if var.with_alpha() {
-                add(ALPHA_OF_BEAUTY);
+                add(alpha_of_beauty(var.layer));
             }
         }
         layout.albedo = request.vars().any(|v| v.source == AovSource::Albedo);
@@ -581,15 +632,19 @@ impl AovLayout {
     }
 }
 
-/// The alpha a `color4*` beauty carries: filtered coverage, cleared to 0.
-const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
-    source: AovSource::Alpha,
-    accumulation: Accumulation::Filtered,
-    clear_bits: 0,
-    lpe: NO_LPE,
-    raw: false,
-    variance: false,
-};
+/// The alpha a `color4*` beauty carries: filtered coverage, cleared to 0 —
+/// of the samples `layer` owns, for a layer's beauty.
+fn alpha_of_beauty(layer: Option<u16>) -> SlotKey {
+    SlotKey {
+        source: AovSource::Alpha,
+        accumulation: Accumulation::Filtered,
+        clear_bits: 0,
+        lpe: NO_LPE,
+        raw: false,
+        variance: false,
+        layer: layer.unwrap_or(NO_LAYER),
+    }
+}
 
 /// What one camera sample carries for the AOVs besides its first hit: the
 /// light each expression selected, the albedo, and the shutter time it was
@@ -611,11 +666,15 @@ pub(crate) struct SampleExtras<'a> {
 pub(crate) enum FirstHit {
     /// The primary ray left the scene (or the path never started).
     Escaped,
-    /// A volume scatter: a position, but no surface.
-    Volume { p: Vec3A },
+    /// A volume scatter: a position, but no surface. `layer` is the render
+    /// layer of the region it scattered in ([`crate::VolumeRegion::layer`]).
+    Volume { p: Vec3A, layer: u16 },
     /// A camera-visible surface, after cutout pass-through.
     Surface {
         p: Vec3A,
+        /// The render layer of the prim hit ([`crate::World::layer`]): the
+        /// layer that owns the sample.
+        layer: u16,
         /// The shading normal (after bump and normal map), facing the ray.
         n: Vec3A,
         uv: Option<(f32, f32)>,
@@ -747,14 +806,14 @@ fn sample_value(
         (AovSource::DiffuseFilter, _) => put3(out, extras.diffuse_filter),
         (AovSource::Alpha, FirstHit::Surface { .. }) => out[0] = 1.0,
         (AovSource::Alpha, _) => out[0] = 0.0,
-        (AovSource::Depth, FirstHit::Surface { p, .. } | FirstHit::Volume { p }) => {
+        (AovSource::Depth, FirstHit::Surface { p, .. } | FirstHit::Volume { p, .. }) => {
             out[0] = cam.depth(*p)
         }
-        (AovSource::Distance, FirstHit::Surface { p, .. } | FirstHit::Volume { p }) => {
+        (AovSource::Distance, FirstHit::Surface { p, .. } | FirstHit::Volume { p, .. }) => {
             out[0] = (*p - cam.origin).length()
         }
-        (AovSource::P, FirstHit::Surface { p, .. } | FirstHit::Volume { p }) => put3(out, *p),
-        (AovSource::Peye, FirstHit::Surface { p, .. } | FirstHit::Volume { p }) => {
+        (AovSource::P, FirstHit::Surface { p, .. } | FirstHit::Volume { p, .. }) => put3(out, *p),
+        (AovSource::Peye, FirstHit::Surface { p, .. } | FirstHit::Volume { p, .. }) => {
             put3(out, cam.eye(*p - cam.origin))
         }
         (AovSource::Normal, FirstHit::Surface { n, .. }) => put3(out, *n),
@@ -868,6 +927,8 @@ pub(crate) struct UnitAov {
     pub(crate) pixel: usize,
     planes: Vec<SlotPlanes>,
     luma: utils::Luma,
+    /// [`AovLayout::default_layer`].
+    default_layer: u16,
 }
 
 impl UnitAov {
@@ -898,12 +959,16 @@ impl UnitAov {
                 })
                 .collect(),
             luma: layout.luma,
+            default_layer: layout.default_layer,
         }
     }
 
     /// Folds one camera sample into the current pixel. `(fx, fy)` is the
     /// sample's film offset from the pixel's corner (the box is `[0, 1)²`),
-    /// `weight` the beauty's filter weight for it.
+    /// `weight` the beauty's filter weight for it. A slot of a layer that
+    /// does not own the sample receives nothing from it — no weight, no
+    /// value, no hit, exactly as a sample that added zero — which is the
+    /// holdout.
     pub(crate) fn add(
         &mut self,
         hit: &FirstHit,
@@ -914,8 +979,15 @@ impl UnitAov {
     ) {
         let (p, cam) = (self.pixel, &self.cam);
         let in_box = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
+        let owner = match hit {
+            FirstHit::Surface { layer, .. } | FirstHit::Volume { layer, .. } => *layer,
+            FirstHit::Escaped => self.default_layer,
+        };
         let mut v = [0.0f32; 3];
         for (slot, planes) in self.slots.iter().zip(&mut self.planes) {
+            if slot.layer != NO_LAYER && slot.layer != owner {
+                continue;
+            }
             let comps = slot.components();
             match slot.accumulation {
                 Accumulation::Filtered if slot.variance => {
@@ -947,7 +1019,9 @@ impl UnitAov {
                 Accumulation::Closest => {
                     let key = if in_box {
                         match hit {
-                            FirstHit::Surface { p, .. } | FirstHit::Volume { p } => cam.depth(*p),
+                            FirstHit::Surface { p, .. } | FirstHit::Volume { p, .. } => {
+                                cam.depth(*p)
+                            }
                             FirstHit::Escaped => f32::INFINITY,
                         }
                     } else {
@@ -1236,7 +1310,7 @@ impl AovFilm {
             (0..w * h).map(|i| f((h - 1 - i / w) * w + i % w)).collect()
         };
         match var.source {
-            AovSource::Color => {
+            AovSource::Color if var.layer.is_none() => {
                 // `get_rgb` is already top-down over the same region.
                 let mut out: Vec<Vec<f32>> = (0..3)
                     .map(|c| {
@@ -1249,7 +1323,19 @@ impl AovFilm {
                     })
                     .collect();
                 if var.with_alpha() {
-                    let alpha = self.slot(&ALPHA_OF_BEAUTY);
+                    let alpha = self.slot(&alpha_of_beauty(None));
+                    out.push(top_down(&|q| alpha.planes.values[q]));
+                }
+                out
+            }
+            AovSource::Color => {
+                // A layer's share of the beauty: its slot, and its alpha.
+                let slot = self.slot(&var.slot_key(&self.lpes).expect("a layer's beauty slot"));
+                let mut out: Vec<Vec<f32>> = (0..3)
+                    .map(|c| top_down(&|q| slot.planes.values[q * 3 + c]))
+                    .collect();
+                if var.with_alpha() {
+                    let alpha = self.slot(&alpha_of_beauty(var.layer));
                     out.push(top_down(&|q| alpha.planes.values[q]));
                 }
                 out
@@ -1282,11 +1368,19 @@ impl AovFilm {
         // `top_down` maps it.
         let q = (h - 1 - y) * w + x;
         match var.source {
-            AovSource::Color => {
+            AovSource::Color if var.layer.is_none() => {
                 let (r, g, b) = beauty.get_rgb(x, y);
                 let mut out = vec![r, g, b];
                 if var.with_alpha() {
-                    out.push(self.slot(&ALPHA_OF_BEAUTY).planes.values[q]);
+                    out.push(self.slot(&alpha_of_beauty(None)).planes.values[q]);
+                }
+                out
+            }
+            AovSource::Color => {
+                let slot = self.slot(&var.slot_key(&self.lpes).expect("a layer's beauty slot"));
+                let mut out = slot.planes.values[q * 3..q * 3 + 3].to_vec();
+                if var.with_alpha() {
+                    out.push(self.slot(&alpha_of_beauty(var.layer)).planes.values[q]);
                 }
                 out
             }
@@ -1370,6 +1464,7 @@ mod tests {
             expression: None,
             raw: false,
             variance: false,
+            layer: None,
         }
     }
 
@@ -1398,6 +1493,7 @@ mod tests {
         let layout = AovLayout::new(&request);
         let cam = frame();
         let at = |z: f32| FirstHit::Volume {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -z),
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
@@ -1428,9 +1524,11 @@ mod tests {
         let cam = frame();
         let mut unit = UnitAov::new(&layout, cam, 1);
         let near = FirstHit::Volume {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -1.0),
         };
         let far = FirstHit::Volume {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -7.0),
         };
         unit.add(&near, &NONE, 1.6, 0.5, 1.0);
@@ -1454,6 +1552,7 @@ mod tests {
         let layout = AovLayout::new(&request);
         let cam = frame();
         let surface = FirstHit::Surface {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -1.0),
             n: Vec3A::Z,
             uv: None,
@@ -1482,6 +1581,7 @@ mod tests {
         let layout = AovLayout::new(&request);
         let cam = frame();
         let at = |z: f32| FirstHit::Volume {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -z),
         };
         // Two pixels: one mixing hits and misses under Mitchell-like signed
@@ -1708,6 +1808,7 @@ mod tests {
         let layout = AovLayout::new(&request);
         let mut unit = UnitAov::new(&layout, frame(), 1);
         let hit = FirstHit::Surface {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -1.0),
             n: Vec3A::Z,
             uv: None,
@@ -1744,6 +1845,7 @@ mod tests {
         sample_value(
             &key,
             &FirstHit::Volume {
+                layer: 0,
                 p: Vec3A::new(0.0, 0.0, -1.0),
             },
             &NONE,
@@ -1754,6 +1856,7 @@ mod tests {
         sample_value(&key, &FirstHit::Escaped, &NONE, &cam, &mut out);
         assert_eq!(out[..2], [7.0, 7.0]);
         let moving = FirstHit::Surface {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -2.0),
             n: Vec3A::Z,
             uv: None,
@@ -1765,6 +1868,7 @@ mod tests {
             "{out:?}"
         );
         let still = FirstHit::Surface {
+            layer: 0,
             p: Vec3A::new(0.0, 0.0, -2.0),
             n: Vec3A::Z,
             uv: None,

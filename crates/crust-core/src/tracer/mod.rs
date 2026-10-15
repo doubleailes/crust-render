@@ -540,6 +540,7 @@ impl Renderer {
         }
         let mut layout = AovLayout::new(request);
         layout.luma = self.lights.luma();
+        layout.default_layer = self.world.default_layer();
         if !layout.lpes.is_empty() || layout.albedo || layout.diffuse_filter {
             // One DFA for every expression of the render, over the lights'
             // tags; shared read-only by every worker.

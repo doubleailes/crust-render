@@ -583,6 +583,11 @@ pub struct WorldBuilder {
     /// light authors a `lightLink`; empty otherwise (see
     /// [`World::light_class`]).
     light_classes: Vec<u16>,
+    /// Per `geom_id`, the render layer of its prim, when the render pass
+    /// declares layers; empty otherwise (see [`World::layer`]).
+    layers: Vec<u16>,
+    /// The render pass's `default` layer (see [`World::default_layer`]).
+    default_layer: u16,
     /// Per `geom_id`, whether it is a transparent emitter; empty when none
     /// is (see [`World::is_transparent_emitter`]).
     transparent_emitters: Vec<bool>,
@@ -878,6 +883,8 @@ impl WorldBuilder {
             bounce_pass_throughs: cutouts || straight || emitters,
             boundaries,
             light_classes: self.light_classes,
+            layers: self.layers,
+            default_layer: self.default_layer,
             transparent_emitters: if emitters {
                 self.transparent_emitters
             } else {
@@ -922,6 +929,27 @@ impl WorldBuilder {
         assert_eq!(classes.len(), self.count(), "one class per geometry");
         self.light_classes = classes;
     }
+
+    /// Installs the render layer of every attached geometry, by `geom_id`
+    /// (see [`World::layer`]), and the pass's `default` layer, which owns
+    /// what no geometry does ([`World::default_layer`]). Empty clears it:
+    /// every geometry is in layer 0, the only one.
+    ///
+    /// # Panics
+    ///
+    /// If `layers` is neither empty nor one entry per attached geometry.
+    pub fn set_layers(&mut self, layers: Vec<u16>, default_layer: u16) {
+        assert!(
+            layers.is_empty() || layers.len() == self.count(),
+            "one layer per geometry"
+        );
+        self.layers = layers;
+        self.default_layer = if self.layers.is_empty() {
+            0
+        } else {
+            default_layer
+        };
+    }
 }
 
 /// A successful world intersection: the material-facing [`HitRecord`],
@@ -957,6 +985,8 @@ pub struct World {
     /// ([`Material::is_medium_boundary`]).
     boundaries: bool,
     light_classes: Vec<u16>,
+    layers: Vec<u16>,
+    default_layer: u16,
     /// Sparse, indexed by `geom_id`; empty when no geometry is one.
     transparent_emitters: Vec<bool>,
     /// The moving geometries' translations, sorted by `geom_id`; empty for a
@@ -988,6 +1018,23 @@ impl World {
             .get(geom_id as usize)
             .copied()
             .unwrap_or(crate::EVERY_CLASS)
+    }
+
+    /// The render layer of the prim a hit on `geom_id` belongs to: an index
+    /// into the render pass's layers. 0 when the pass declares none.
+    #[inline]
+    pub fn layer(&self, geom_id: u32) -> u16 {
+        self.layers
+            .get(geom_id as usize)
+            .copied()
+            .unwrap_or(self.default_layer)
+    }
+
+    /// The render pass's `default` layer, its last: the owner of every
+    /// camera ray that meets no geometry. 0 when the pass declares no layer.
+    #[inline]
+    pub fn default_layer(&self) -> u16 {
+        self.default_layer
     }
 
     /// Closest hit in `(t_min, t_max)` with its material resolved.

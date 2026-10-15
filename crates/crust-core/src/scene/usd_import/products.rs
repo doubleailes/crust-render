@@ -33,7 +33,6 @@ use crate::tracer::PixelRect;
 
 use super::attrs::{custom_bool, custom_token, decode_bool, decode_number, prim_value, value_at};
 use super::prim_at;
-use super::settings::render_settings_path;
 
 const DRIVER_PARAMETERS: &str = "driver:parameters:";
 
@@ -144,9 +143,12 @@ impl Base {
 
 /// Resolves the render settings prim's products. Empty when the stage has no
 /// settings prim or the prim authors no `products` — the "write the single
-/// beauty EXR" case.
-pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
-    let Some(path) = render_settings_path(stage) else {
+/// beauty EXR" case. `settings` is the settings prim the render reads.
+pub(super) fn import_render_products(
+    stage: &Stage,
+    settings: Option<&sdf::Path>,
+) -> RenderProducts {
+    let Some(path) = settings.cloned() else {
         return RenderProducts::default();
     };
     let Some(settings) = UsdRenderSettings::get(stage, path.clone()).ok().flatten() else {
@@ -807,6 +809,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         expression,
         raw,
         variance,
+        layer: None,
     })
 }
 

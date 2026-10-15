@@ -948,6 +948,7 @@ fn every_kind_of_aov() -> crate::AovRequest {
         expression: None,
         raw: false,
         variance: false,
+        layer: None,
     };
     let mut beauty = var("beauty", AovSource::Color);
     beauty.components = 4;

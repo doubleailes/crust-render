@@ -23,6 +23,7 @@ use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight, DomeLight, DomeLight_1, LightAPI, RectLight,
     SphereLight,
 };
+use openusd_schemas::render::Pass as UsdRenderPass;
 use openusd_schemas::shade::Material as UsdMaterial;
 use tracing::debug;
 
@@ -31,13 +32,16 @@ use super::camera::camera_lens;
 use super::implicit::Shape;
 use super::lights::{LightInputs, light_inputs};
 use super::materials::{bound_material, surface_shader_id};
+use super::passes::{pass_settings, read_pass};
 use super::products::import_render_products;
-use super::settings::{CameraPick, import_render_settings, pick_camera, wanted_camera};
+use super::settings::{
+    CameraPick, import_render_settings, pick_camera, render_settings_path, wanted_camera,
+};
 use super::time::EvalTimeScope;
 use super::{
     Prune, WalkScope, open_stage, prim_at, prune_reason, release_stage, stage_builder, stream_roots,
 };
-use crate::scene::{CameraRecord, LightRecord, ListKind, ListRecord, MaterialRecord};
+use crate::scene::{CameraRecord, LightRecord, ListKind, ListRecord, MaterialRecord, PassRecord};
 use crate::tracer::RenderSettings;
 
 /// Every `kind` prim on the stage at `path`, in namespace order (a parent's
@@ -82,12 +86,13 @@ pub(crate) fn list_records(
     // What the import reads before it meets a camera: the settings (the
     // image's aspect, which the vertical aperture defaults through) and the
     // camera it was told to use.
-    let products = import_render_products(&index);
-    let mut settings = import_render_settings(&index);
+    let settings_path = render_settings_path(&index);
+    let products = import_render_products(&index, settings_path.as_ref());
+    let mut settings = import_render_settings(&index, settings_path.as_ref());
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }
-    let wanted = wanted_camera(None, products.camera, &index);
+    let wanted = wanted_camera(None, products.camera, &index, settings_path.as_ref());
     drop(index);
 
     let mut found: Found<ListRecord> = Found::default();
@@ -139,7 +144,7 @@ pub(crate) fn list_records(
                 }
             }
         }
-        ListKind::Light => {}
+        ListKind::Light | ListKind::Pass => {}
     }
     debug!(
         "Read {} {kind:?} record(s) on {} in {:?}",
@@ -245,6 +250,17 @@ fn record(
             path,
             bound: false,
         }),
+        ListKind::Pass => {
+            let settings = pass_settings(stage, prim.path()).ok().flatten();
+            let pass = read_pass(stage, prim.path(), settings.as_ref());
+            ListRecord::Pass(PassRecord {
+                path,
+                render_source: pass.render_source,
+                layers: pass.layers,
+                file_pattern: pass.file_pattern,
+                layer_pattern: pass.layer_pattern,
+            })
+        }
     })
 }
 
@@ -385,6 +401,9 @@ fn collect(stage: &Stage, kind: ListKind, order: Order, mut found: impl FnMut(&P
 ///   inactive subtree, which USD removes from the stage, prunes, and an
 ///   instance's prototype is not entered (its materials are the prototype's,
 ///   bound only from inside it).
+/// - **render passes** — as materials: `--pass` accepts any `RenderPass` the
+///   stage composes, but one under an inactive ancestor is not on the stage,
+///   and one inside a prototype has no stage path of its own.
 fn visit(stage: &Stage, prim: &Prim, kind: ListKind, parent_hidden: bool) -> Visit {
     let pruned = prune_reason(prim, WalkScope::Stage);
     let is_instance = prim.is_instance().unwrap_or(false);
@@ -412,7 +431,7 @@ fn visit(stage: &Stage, prim: &Prim, kind: ListKind, parent_hidden: bool) -> Vis
             }
             Visit::Enter { hidden: false }
         }
-        ListKind::Material => {
+        ListKind::Material | ListKind::Pass => {
             if pruned == Some(Prune::Inactive) || is_instance && has_prototype() {
                 return Visit::Prune;
             }
@@ -422,7 +441,7 @@ fn visit(stage: &Stage, prim: &Prim, kind: ListKind, parent_hidden: bool) -> Vis
 }
 
 /// Whether `prim` is of `kind`: a `UsdGeomCamera`; one of the six UsdLux
-/// lights the import reads; a `UsdShadeMaterial`.
+/// lights the import reads; a `UsdShadeMaterial`; a `UsdRenderPass`.
 fn is_kind(stage: &Stage, prim: &Prim, kind: ListKind) -> bool {
     let path = || prim.path().clone();
     match kind {
@@ -437,5 +456,6 @@ fn is_kind(stage: &Stage, prim: &Prim, kind: ListKind) -> bool {
                 || matches!(DomeLight_1::get(stage, path()), Ok(Some(_)))
         }
         ListKind::Material => matches!(UsdMaterial::get(stage, path()), Ok(Some(_))),
+        ListKind::Pass => matches!(UsdRenderPass::get(stage, path()), Ok(Some(_))),
     }
 }

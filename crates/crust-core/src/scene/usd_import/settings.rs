@@ -53,11 +53,12 @@ pub(super) fn wanted_camera(
     requested: Option<sdf::Path>,
     product_camera: Option<sdf::Path>,
     index: &Stage,
+    settings: Option<&sdf::Path>,
 ) -> Option<CameraChoice> {
     match requested {
         Some(p) => Some(CameraChoice::Requested(p)),
         None => product_camera
-            .or_else(|| render_settings_camera(index))
+            .or_else(|| render_settings_camera(index, settings))
             .map(CameraChoice::Settings),
     }
 }
@@ -104,7 +105,9 @@ impl std::fmt::Display for CameraChoice {
 
 /// The prim holding the stage's render settings: the one the stage's
 /// `renderSettingsPrimPath` metadatum names, else the conventional
-/// `/Render/settings`.
+/// `/Render/settings`. A render without a render pass reads this one; every
+/// `render_settings_*` helper takes the path as an input, so a pass's
+/// `renderSource` replaces it everywhere at once.
 pub(super) fn render_settings_path(stage: &Stage) -> Option<sdf::Path> {
     UsdRenderSettings::stage_settings_path(stage)
         .ok()
@@ -114,8 +117,11 @@ pub(super) fn render_settings_path(stage: &Stage) -> Option<sdf::Path> {
 
 /// The first target of the render settings' `camera` relationship — the USD
 /// way for a stage to say which of its cameras is the shot camera.
-pub(super) fn render_settings_camera(stage: &Stage) -> Option<sdf::Path> {
-    let s = UsdRenderSettings::get(stage, render_settings_path(stage)?)
+pub(super) fn render_settings_camera(
+    stage: &Stage,
+    settings: Option<&sdf::Path>,
+) -> Option<sdf::Path> {
+    let s = UsdRenderSettings::get(stage, settings?.clone())
         .ok()
         .flatten()?;
     s.camera_rel().targets().ok()?.into_iter().next()
@@ -127,8 +133,8 @@ pub(super) fn render_settings_camera(stage: &Stage) -> Option<sdf::Path> {
 /// winning when both are authored. Default `true`. `false` hides every dome,
 /// distant light and backdrop from camera rays whatever the lights themselves
 /// author; how they illuminate is unchanged.
-pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn dome_light_camera_visibility(stage: &Stage, settings: Option<&sdf::Path>) -> bool {
+    let Some(path) = settings.cloned() else {
         return DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY;
     };
     let prim = prim_at(stage, path);
@@ -142,8 +148,8 @@ pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
 /// off the `RenderSettings` prim, with `crust:enableExposureCompensation`
 /// winning when both are authored. Default `true`. `false` renders at a scale
 /// of 1 whatever the camera authors.
-pub(super) fn enable_exposure_compensation(stage: &Stage) -> bool {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn enable_exposure_compensation(stage: &Stage, settings: Option<&sdf::Path>) -> bool {
+    let Some(path) = settings.cloned() else {
         return DEFAULT_ENABLE_EXPOSURE_COMPENSATION;
     };
     let prim = prim_at(stage, path);
@@ -158,8 +164,11 @@ pub(super) fn enable_exposure_compensation(stage: &Stage) -> bool {
 /// ([`resolve_subdiv_level`](super::attrs::resolve_subdiv_level)) applies the
 /// host override, the default and the clamp. A geometry setting, not a
 /// tracer one, so it stays out of [`RenderSettings`].
-pub(super) fn render_settings_subdiv_level(stage: &Stage) -> Option<i32> {
-    let prim = prim_at(stage, render_settings_path(stage)?);
+pub(super) fn render_settings_subdiv_level(
+    stage: &Stage,
+    settings: Option<&sdf::Path>,
+) -> Option<i32> {
+    let prim = prim_at(stage, settings?.clone());
     custom_i32(&prim, "crust:subdivisionLevel")
 }
 
@@ -168,8 +177,11 @@ pub(super) fn render_settings_subdiv_level(stage: &Stage) -> Option<i32> {
 /// caller ([`resolve_subdiv_edge_length`](super::attrs::resolve_subdiv_edge_length))
 /// applies the host override and refuses a bad value. A geometry setting, like
 /// [`render_settings_subdiv_level`].
-pub(super) fn render_settings_subdiv_edge_length(stage: &Stage) -> Option<f32> {
-    let prim = prim_at(stage, render_settings_path(stage)?);
+pub(super) fn render_settings_subdiv_edge_length(
+    stage: &Stage,
+    settings: Option<&sdf::Path>,
+) -> Option<f32> {
+    let prim = prim_at(stage, settings?.clone());
     custom_f32(&prim, "crust:subdivisionEdgeLength")
 }
 
@@ -178,8 +190,8 @@ pub(super) fn render_settings_subdiv_edge_length(stage: &Stage) -> Option<f32> {
 /// Unauthored or empty is `lin_rec709`; a name the config does not know, or a
 /// space that is not scene-linear, is refused with a warning and is
 /// `lin_rec709` too.
-pub(super) fn render_settings_color_space(stage: &Stage) -> Space {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn render_settings_color_space(stage: &Stage, settings: Option<&sdf::Path>) -> Space {
+    let Some(path) = settings.cloned() else {
         return Space::LIN_REC709;
     };
     match custom_token(&prim_at(stage, path.clone()), "renderingColorSpace") {
@@ -197,8 +209,13 @@ pub(super) fn render_settings_color_space(stage: &Stage) -> Space {
     }
 }
 
-pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
-    let Some(path) = render_settings_path(stage) else {
+/// The render settings off the `RenderSettings` prim at `settings` (the one
+/// [`render_settings_path`] names, or a render pass's `renderSource`).
+pub(super) fn import_render_settings(
+    stage: &Stage,
+    settings: Option<&sdf::Path>,
+) -> RenderSettings {
+    let Some(path) = settings.cloned() else {
         return default_settings();
     };
 

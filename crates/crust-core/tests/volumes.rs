@@ -565,6 +565,7 @@ fn a_pure_scatterer_collides_with_the_right_probability() {
                 phase,
                 emitted,
                 class,
+                ..
             } => {
                 scatters += 1;
                 // No light authors a link: the region is every class's.

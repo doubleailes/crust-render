@@ -117,6 +117,19 @@ plain text and are not counted.
 | `aov.invalid_raw` | skipped | crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written. | Start the expression with a diffuse reflection (`C<RD>…`). |
 | `lpe.invalid` | skipped | A light path expression does not parse or compile; no channel is written. | Fix the expression; the message gives the parser's error. |
 
+## Render passes
+
+Raised by a render with [`--pass`](@/docs/reference/command-line.md#pass) about the
+[render pass](@/docs/usd/render-passes.md) it renders.
+
+| code | kind | meaning | what to do |
+|------|------|---------|------------|
+| `pass.layer_overlap` | approximated | Two layers of a render pass claim one prim; it belongs to the earlier layer. | Exclude the prim from one of the layers, or reorder the layers' `apiSchemas` entries. |
+| `pass.layer_target_in_instance` | approximated | A layer collection targets a prim inside an instance or a point instancer; membership is judged on the instance or instancer. | Target the instance or the instancer prim itself: its geometry belongs to one layer. |
+| `pass.layer_membership_expression` | approximated | A layer collection authors membershipExpression, which is not read; it claims nothing. | List the layer's prims with `includes` and `excludes` instead. |
+| `pass.layer_unreadable_collection` | refused | A layer collection cannot be read; it claims nothing. | Fix the collection; the message gives openusd's error. |
+| `pass.collection_not_read` | skipped | A render pass's renderVisibility or cameraVisibility collection restricts membership; it is not read, and every object is rendered. | Remove the collection, or split the objects into [render layers](@/docs/usd/render-passes.md) instead. |
+
 ## Transforms
 
 | code | kind | meaning | what to do |

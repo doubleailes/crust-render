@@ -191,7 +191,9 @@ AOVs. Crust should combine:
 These are UsdRender settings worth a separate change ("camera and settings
 conformance"). They are listed in Known gaps, not silently dropped.
 
-- `RenderPass`. It is a pipeline concept and is not consumed by renderers.
+- `RenderPass`. It is a pipeline concept and is not consumed by renderers. (Consumed
+  since `render-passes-and-layers`: `--pass` reads its `renderSource` and its layer
+  collections; see "Render layers" below.)
 - `shader:*` / arbitrary shader exports (`sourceType = "raw"` naming an
   OpenPBR or MaterialX output). Possible later, through the MaterialX program.
 - An in-process denoiser. OIDN is FFI and `unsafe`, so that is a project
@@ -1234,6 +1236,57 @@ the LPE and variance planes Typhoon has no equivalent of. A scale of exactly 1 i
 skipped, so a camera without an exposure renders the bits it always did. Pinned by
 `exposure_scales_radiance_only` (×2 radiance, ×4 variances, every other channel
 identical) and `the_last_snapshot_is_exposed`.
+
+## Render layers (`render-passes-and-layers`)
+
+A render pass splits the film into render layers (`render-passes/design.md` for the pass,
+the patterns and the files). The film does it with one field and one comparison.
+
+**Layout.** `AovVar::layer: Option<u16>` names the layer whose samples a var holds, and
+`SlotKey::layer` keys its slot (`NO_LAYER`, `u16::MAX`, for a var without one: every
+sample). A host that renders `L` layers asks for each var once per layer, so the slots are
+the vars × the layers, deduplicated as before, one `Vec<f32>` plane per component each.
+There is no second film: the gather, the blend of a guided render and the exposure scale
+walk the slots as they always did, whatever their layer.
+
+**Ownership.** `FirstHit::Surface` and `FirstHit::Volume` carry `layer`, filled by the
+integrator where it writes them: `World::layer(geom_id)` of the hit (or of the thin wall in
+front of it, `first_wall`), the first region with density at a volume scatter
+(`VolumeRegion::layer`, carried by `VolumeEvent::Scatter`), and `World::default_layer` for a
+camera inside a carried medium. `Escaped` is `AovLayout::default_layer`. The table
+`World::layer` reads is empty unless the pass declares layers, and an empty table answers
+the default layer (0). `UnitAov::add` skips a slot whose layer is not the owner: no weight,
+no value, no hit, exactly a sample that added zero. So a layer that owns no sample of a
+pixel keeps each slot's clear value there (a `hits_only` slot its `+inf`, a `Closest` slot
+its clear value), and its alpha is 0: the holdout. Ownership is decided by the code that
+already decides the alpha and the geometric AOVs, so a layer's alpha and colour cannot
+disagree about who owns a sample (cutouts passed, a thin wall met).
+
+**A layer's beauty** is not the beauty buffer, which is the whole frame. A `color` var with
+a layer is accumulated as `C.*[LO]` (`LAYER_BEAUTY`, added to the render's expressions by
+`AovLayout::new`) in its layer's slot, with its alpha in that layer's alpha slot. `C.*[LO]`
+is pinned bit for bit to the beauty, so a pass whose one layer owns every sample gives that
+layer exactly the beauty, guided or not (`one_layer_is_the_beauty`), and the layers of any
+pass sum to it up to f32 rounding (`the_layers_add_up_to_the_beauty`, and `…_when_guided`:
+the blend weighs each pass's slots as it weighs its beauty). The beauty buffer itself never
+changes (`layering_changes_no_beauty`).
+
+**What is per pixel, not per layer.** `sampleCount` and `variance` are read off the
+pixel's own state: adaptive sampling stops on the beauty, so a layer with few pixels cannot
+stop sooner than its neighbours. Each layer's copy of them holds the same values.
+
+**Memory.** A film holds, per pixel of the region, `L × Σ_vars c_v × 4` bytes (`c_v` a var's
+components; a layer's `color4f` beauty is 3 + 1), plus 8 bytes per `hits_only` slot (depth,
+distance: hit weight and count) and 5 per `Closest` slot (rank key, in-box flag), each times
+`L`. Five layers of ten `color3f` vars at 3840×2160 is 5 × 10 × 12 B × 8.29 M ≈ 5.0 GB of
+planes, besides each work unit's own planes while it renders. `--stats` reports the
+render's peak memory, not the film's share of it: budget a shot with the formula.
+
+**Cost.** The AOV-less render takes the `AOV = false` instantiation and never reads a layer.
+An AOV render without layers pays one comparison per slot per sample (`slot.layer !=
+NO_LAYER`, false at once). A layered render pays one table lookup per camera sample in the
+integrator, where it writes `FirstHit`, and the slot comparison; measured in
+`render-passes/design.md`.
 
 ## Known gaps
 

@@ -59,8 +59,8 @@ enum Command {
     /// EXRs marked `crust:renderStatus = "interrupted"`, and exits 130; a
     /// second Ctrl-C, or one before the render starts, exits 130 at once.
     Render(Box<RenderArgs>),
-    /// List a USD stage's cameras, lights or materials, one prim path per
-    /// line on stdout.
+    /// List a USD stage's cameras, lights, materials or render passes, one prim
+    /// path per line on stdout.
     ///
     /// What is listed is what a render would use: a camera listed is a path
     /// `crust render --camera` accepts. The log goes to stderr, so stdout is
@@ -75,7 +75,8 @@ enum Command {
         /// (format `crust-ls/1`) to PATH, or to stdout with `-` instead of
         /// the paths: a camera's lens and whether a render goes through it,
         /// a light's type, intensity, exposure, color and normalize, a
-        /// material's surface shader and whether anything is bound to it.
+        /// material's surface shader and whether anything is bound to it, a
+        /// render pass's settings, layers, file pattern and layer pattern.
         #[arg(long, value_name = "PATH|-")]
         json: Option<std::path::PathBuf>,
         /// USD time code to evaluate the values at, as `render -f` takes it.
@@ -194,6 +195,15 @@ struct LightPathsArgs {
 struct CheckArgs {
     #[command(flatten)]
     scene: SceneArgs,
+    /// Render pass to check: a `RenderPass` prim's absolute path (e.g.
+    /// `/Render/Passes/render`). Its `renderSource` names the RenderSettings
+    /// it is checked with (camera, resolution, samples, RenderVars), else the stage's
+    /// own are used; its `collection:layer:<name>` collections split the image
+    /// into render layers, and its `crust:filePattern` names the files
+    /// (the report lists them). A path that is not a RenderPass, or whose source is not a
+    /// RenderSettings, stops the command before anything is imported.
+    #[arg(long, value_name = "PRIM_PATH")]
+    pass: Option<String>,
     /// Also write the report as JSON (format `crust-check/2`) to PATH; with
     /// `-`, the JSON goes to stdout instead of the text report.
     #[arg(long, value_name = "PATH|-")]
@@ -218,6 +228,9 @@ enum LsKind {
     /// Material prims a binding can reach, bound or not.
     #[value(alias = "materials")]
     Material,
+    /// RenderPass prims `render --pass` accepts.
+    #[value(alias = "passes")]
+    Pass,
 }
 
 impl From<LsKind> for crust_core::ListKind {
@@ -226,6 +239,7 @@ impl From<LsKind> for crust_core::ListKind {
             LsKind::Camera => crust_core::ListKind::Camera,
             LsKind::Light => crust_core::ListKind::Light,
             LsKind::Material => crust_core::ListKind::Material,
+            LsKind::Pass => crust_core::ListKind::Pass,
         }
     }
 }
@@ -325,6 +339,15 @@ struct SceneArgs {
 struct RenderArgs {
     #[command(flatten)]
     scene: SceneArgs,
+    /// Render pass to render: a `RenderPass` prim's absolute path (e.g.
+    /// `/Render/Passes/render`). Its `renderSource` names the RenderSettings
+    /// it renders with (camera, resolution, samples, RenderVars), else the stage's
+    /// own are used; its `collection:layer:<name>` collections split the image
+    /// into render layers, and its `crust:filePattern` names the files
+    /// (`-o` replaces it). A path that is not a RenderPass, or whose source is not a
+    /// RenderSettings, stops the command before anything is rendered.
+    #[arg(long, value_name = "PRIM_PATH")]
+    pass: Option<String>,
     /// Output image path. Without RenderProducts on the stage, the linear EXR
     /// is written here (default `output.exr`) and a tone-mapped sRGB PNG next
     /// to it (same path with a .png extension). When the stage authors
@@ -334,7 +357,9 @@ struct RenderArgs {
     /// `$F2`-`$F9` (zero-padded), `$FF` (fraction kept), or `<F>`, `<F4>`,
     /// `<FF>`; without -f the frame is 1, and a subframe rounds with a
     /// warning. `\$` is a literal `$`. Single-quote it so the shell leaves
-    /// the `$` alone: -o 'out.$F4.exr'.
+    /// the `$` alone: -o 'out.$F4.exr'. With --pass, it replaces the pass's
+    /// file pattern instead, and takes the pattern's specifiers (`$n`, `$o`,
+    /// `$04f`, `$x`, …), not husk's: -o 'renders/$l_$n.$04f.$x'.
     #[arg(short, long)]
     output: Option<String>,
     /// Also write the log to a file named for the time the run started
@@ -662,6 +687,18 @@ fn write_png(
             rgb.extend_from_slice(&[r, g, b]);
         }
     }
+    write_rgb_png(rgb, width, height, path, color)
+}
+
+/// Tone-map `rgb`, interleaved linear working-space colour in top-down rows
+/// of `width`, to an 8-bit PNG at `path`.
+fn write_rgb_png(
+    mut rgb: Vec<f32>,
+    width: usize,
+    height: usize,
+    path: &Path,
+    color: &OutputColor,
+) -> std::result::Result<(), image::ImageError> {
     let bytes = tone_map(&mut rgb, color);
     let mut img = image::RgbaImage::new(width as u32, height as u32);
     for (i, &[r, g, b]) in bytes.as_chunks::<3>().0.iter().enumerate() {
@@ -794,6 +831,7 @@ fn expand_output(path: &str, frame: f64, at: Option<&str>) -> String {
 /// those stages, and the files they map, for as long as it runs.
 fn load_scene(
     cli: &SceneArgs,
+    pass: Option<&String>,
     working_space: Option<&String>,
     assets: &FileAssets,
     keep_stage: bool,
@@ -808,6 +846,7 @@ fn load_scene(
             subdivision_edge_length: cli.subdiv_edge_length,
             skip_stage_teardown: keep_stage,
             working_space: working_space.cloned(),
+            render_pass: pass.cloned(),
         };
         match Scene::from_usd_with_options(input_path, assets, &options) {
             Ok(scene) => scene,
@@ -822,6 +861,11 @@ fn load_scene(
         }
         if let Some(camera) = &cli.camera {
             warn!("--camera {camera} has no effect without -i/--input");
+        }
+        if let Some(pass) = pass {
+            return Err(format!(
+                "--pass {pass} needs a stage: the procedural scene has no render pass"
+            ));
         }
         if let Some(space) = working_space {
             warn!(
@@ -946,6 +990,44 @@ fn select_products(aovs: &mut AovRequest, output: Option<&str>, frame: f64) -> O
         }
     }
     expanded_output
+}
+
+/// The files a render pass writes ([`products::pass_products`]): its own
+/// file pattern, or `-o` in its place, expanded at `frame` for each of its
+/// layers and each RenderVar of its settings' products (`aovs`, as the
+/// import resolved them). The error is the message to stop on.
+fn pass_files(
+    pass: &crust_core::RenderPass,
+    aovs: &AovRequest,
+    output: Option<&str>,
+    camera_path: Option<&str>,
+    frame: f64,
+) -> std::result::Result<Vec<crust_core::AovProduct>, String> {
+    let pattern = match output {
+        Some(o) => {
+            debug!(
+                "-o {o} replaces {}'s file pattern {:?}",
+                pass.path, pass.file_pattern
+            );
+            o
+        }
+        None => &pass.file_pattern,
+    };
+    // `$c` and `$C`: the camera rendered through, after any fallback.
+    let camera = camera_path
+        .and_then(|p| p.rsplit('/').next())
+        .unwrap_or("camera");
+    let vars = products::pass_vars(&aovs.products);
+    let files =
+        products::pass_products(pass, &vars, pattern, camera, frame, &products::process_env)?;
+    debug!(
+        "{}: {} layer(s) × {} var(s) into {} file(s)",
+        pass.path,
+        pass.layers.len(),
+        vars.len().max(1),
+        files.len()
+    );
+    Ok(files)
 }
 
 /// A JSON report's destination: `-` is stdout.
@@ -1195,7 +1277,7 @@ fn import_checked(
     if args.scene.input.is_none() {
         return Err("crust check needs a stage: -i <INPUT>".to_owned());
     }
-    let scene = load_scene(&args.scene, None, assets, keep_stage)?;
+    let scene = load_scene(&args.scene, args.pass.as_ref(), None, assets, keep_stage)?;
     let import_peak = crust_core::peak_memory_bytes();
     let preloaded = assets.texture_cache_stats().preloaded;
     check_scene(args, scene, preloaded, import_peak)
@@ -1231,7 +1313,15 @@ fn check_scene(
     // Without -f, frame variables expand as frame 1, husk's default.
     let frame = args.scene.frame.unwrap_or(1.0);
     let selecting = WarningScope::enter();
-    let _ = select_products(&mut aovs, None, frame);
+    match &scene.render_pass {
+        // A pass's files: refused as a render would refuse them.
+        Some(pass) => {
+            aovs.products = pass_files(pass, &aovs, None, scene.camera_path.as_deref(), frame)?;
+        }
+        None => {
+            let _ = select_products(&mut aovs, None, frame);
+        }
+    }
     let mut warnings = scene.warnings.clone();
     warnings.extend(selecting.finish());
     let products = if aovs.products.is_empty() {
@@ -1323,7 +1413,7 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
     }
     let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
     let import_start = Instant::now();
-    let mut scene = match load_scene(&args.scene, None, &assets, true) {
+    let mut scene = match load_scene(&args.scene, None, None, &assets, true) {
         Ok(scene) => scene,
         Err(e) => {
             error!("{e}");
@@ -1427,7 +1517,7 @@ fn light_paths(args: &LightPathsArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
-    let scene = match load_scene(&args.scene, None, &assets, true) {
+    let scene = match load_scene(&args.scene, None, None, &assets, true) {
         Ok(scene) => scene,
         Err(e) => {
             error!("{e}");
@@ -1791,7 +1881,13 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     }
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
-    let scene = match load_scene(cli, cli.working_space.as_ref(), &assets, true) {
+    let scene = match load_scene(
+        cli,
+        cli.pass.as_ref(),
+        cli.working_space.as_ref(),
+        &assets,
+        true,
+    ) {
         Ok(scene) => scene,
         Err(e) => {
             error!("{e}");
@@ -1820,7 +1916,28 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     let mut aovs = scene.aovs;
     // Without -f, frame variables expand as frame 1, husk's default.
     let frame = cli.frame.unwrap_or(1.0);
-    let expanded_output = select_products(&mut aovs, output.as_deref(), frame);
+    // A render pass writes its pattern's files instead: `-o` replaces the
+    // pattern, in the pattern's dialect, and never reaches husk's.
+    let layered = scene.render_pass.is_some();
+    let expanded_output = match &scene.render_pass {
+        Some(pass) => {
+            match pass_files(
+                pass,
+                &aovs,
+                output.as_deref(),
+                scene.camera_path.as_deref(),
+                frame,
+            ) {
+                Ok(products) => aovs.products = products,
+                Err(e) => {
+                    error!("{e}");
+                    return Err(ExitCode::FAILURE);
+                }
+            }
+            None
+        }
+        None => select_products(&mut aovs, output.as_deref(), frame),
+    };
     if let Some(dir) = run.anchor {
         for product in &mut aovs.products {
             if Path::new(&product.name).is_relative() {
@@ -1832,6 +1949,9 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     // product's path: a render whose products were all refused reuses that
     // expansion rather than warning about the same path twice.
     let beauty_path = match (output.as_deref(), run.beauty) {
+        // A pass always writes its own products, and `-o` is its pattern:
+        // there is no single beauty path, and nothing to expand as husk's.
+        _ if layered => String::new(),
         (None, Some(beauty)) => beauty.to_owned(),
         (output, _) => expanded_output.unwrap_or_else(|| beauty_output(output, frame)),
     };
@@ -1938,6 +2058,13 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     };
     // `--checkpoint`'s preview: where the final PNG goes, if anywhere.
     let checkpoint = cli.checkpoint.and_then(|every| {
+        if layered {
+            warn!(
+                "--checkpoint: a render pass's previews are its layers', which exist only once \
+                 the render is done; no preview will be written while it renders"
+            );
+            return None;
+        }
         let path = match aovs.products.first() {
             None => preview_png(beauty_path),
             Some(first) if first.beauty().is_some() => preview_png(&first.name),
@@ -2043,7 +2170,27 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         }
         info!("Products written: {}", written.join(", "));
         let first = &aovs.products[0];
-        if first.beauty().is_some() {
+        if layered {
+            // One preview per file holding one layer's beauty, of that
+            // layer: a file of several layers has no one image to show.
+            for product in &aovs.products {
+                let Some(beauty) = products::preview_layer(product) else {
+                    continue;
+                };
+                let (width, height) = film.dimensions();
+                let planes = film.var_channels(&buffer, beauty);
+                let rgb = (0..width * height)
+                    .flat_map(|i| [planes[0][i], planes[1][i], planes[2][i]])
+                    .collect();
+                let png_path = preview_png(&product.name);
+                if let Err(e) = write_rgb_png(rgb, width, height, &png_path, &output_color) {
+                    error!("Error writing PNG {}: {e}", png_path.display());
+                    return Err(ExitCode::FAILURE);
+                }
+                debug!("Image written to: {:?}", png_path);
+                files.push(png_path);
+            }
+        } else if first.beauty().is_some() {
             let png_path = preview_png(&first.name);
             match write_png(&buffer, &png_path, &output_color) {
                 Ok(_) => info!("Image written to: {:?}", png_path),

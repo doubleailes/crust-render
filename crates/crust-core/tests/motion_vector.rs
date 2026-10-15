@@ -558,6 +558,7 @@ fn a_motion_vector_var_alone_needs_the_film() {
                 expression: None,
                 raw: false,
                 variance: false,
+                layer: None,
             }],
             attributes: Vec::new(),
         }],

@@ -16,8 +16,10 @@ top = false
 
 ## How a render asks for AOVs
 
-AOVs (arbitrary output variables, or render passes) are requested only through the
-`UsdRender` schema. There is no `crust:*` attribute and no command-line flag for them.
+AOVs (arbitrary output variables) are requested only through the `UsdRender` schema.
+There is no `crust:*` attribute and no command-line flag for them. A
+[render pass](@/docs/usd/render-passes.md) renders the same RenderVars split into render
+layers, into files its own pattern names.
 
 - The `RenderSettings` prim lists its products in `rel products`.
 - Each `RenderProduct` is one output file, named by `productName`. It lists its channels
