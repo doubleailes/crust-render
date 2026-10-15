@@ -5,33 +5,44 @@
       and conservative containment; `crust diff` shows 0 differing pixels on cornellbox,
       veach_mis and the stress scene; the in-cache and `--large` A/Bs recorded in
       proposal.md and design.md D8.
-- [ ] 1.2 Record the pre-refactor baseline on `main`: the release binary as `bin_before`,
+- [x] 1.2 Record the pre-refactor baseline on `main`: the release binary as `bin_before`,
       goldens with `scripts/check_images.sh record <dir>`, and the `cornellbox` callgrind
       instruction count (`RAYON_NUM_THREADS=1`, `-s 2`). Verify
       `scripts/check_images.sh check <dir>` passes against itself.
+      *Done:* baseline is `main` at `84b6677` (release binary built from a worktree);
+      `cornellbox` callgrind (`RAYON_NUM_THREADS=1`, `-s 2`) is 4 250 222 346
+      instructions.
 
 ## 2. Make the width and node type generic
 
-- [ ] 2.1 Introduce a `NodeFormat` trait (node type, `WIDTH`, slab test, `child_at`,
+- [x] 2.1 Introduce a `NodeFormat` trait (node type, `WIDTH`, slab test, `child_at`,
       `is_leaf`) and implement it for the 4-wide `f32` node. Make the collapse, the
       traversal, `hit` / `hit_any`, the footprint and the tests generic over it,
       replacing the `LANES` constant and the `lanes4` / `lanes8` / `lanesq` `cfg`
       modules. Keep the nightly `bvh8` feature working as a second `NodeFormat`.
       Verify the default-build callgrind count on `cornellbox` is within +0.3 % of 1.2's,
       and `check_images.sh check` passes.
-- [ ] 2.2 Port the prototype's `QNode`, `finish()` conversion and slab test to a
+      *Done:* the trait pair is `NodeFormat<W>` / `BuildNode<W>` (`bvh/node.rs`), with the
+      width a const generic. The refactored default build counts 4 245 948 162
+      instructions on `cornellbox` (−0.10 % against 1.2), and `crust diff` of its render
+      against the baseline's shows 0 differing pixels. The nightly `bvh8` feature builds and
+      passes its tests as the second `f32` node (`Node8`).
+- [x] 2.2 Port the prototype's `QNode`, `finish()` conversion and slab test to a
       `NodeFormat` implementation. Verify the prototype's containment and size tests
       pass unchanged.
 
 ## 3. Per-tree selection
 
-- [ ] 3.1 Hold a tree's nodes as an enum of the two formats, match it once per descent
+- [ ] 3.1 *(enum, `CommitOptions` field and the `match` per descent are in; the size rule
+      is a provisional `None` until 5.2 measures the crossover)* Hold a tree's nodes as an enum of the two formats, match it once per descent
       (and once per instance descent), and add the size rule and the `CommitOptions`
       field. Verify the "A small tree keeps the 4-wide node", "A large tree uses the
       quantised node" and "A prototype and its placement choose separately" scenarios.
-- [ ] 3.2 Run the whole kernel test suite under each forced format
-      (`CRUST_BVH_NODES=wide4` and `quant8`) and under `auto`. Verify all three pass, and
-      that `scripts/test_simd_matrix.sh -p crust-rt` passes.
+- [x] 3.2 Run the whole kernel test suite under each forced format
+      (`CRUST_RT_NODES=wide` and `quant`, through the `test-node-env` feature) and under
+      `auto`. Verify all three pass, and that `scripts/test_simd_matrix.sh -p crust-rt`
+      passes. *Done for the three runs (75 unit + 77 integration + 1 doc test each, also
+      under the nightly `bvh8` feature); `test_simd_matrix.sh` not yet run.*
 - [ ] 3.3 Add the brute-force agreement test (random triangle soup, both formats,
       `intersect` and `occluded`, equal distances, equal occlusion, equal primitive
       except at exact ties) and the degenerate-extent test. Verify the "Random rays agree
