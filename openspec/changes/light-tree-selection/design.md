@@ -235,9 +235,17 @@ behind two wrapper scripts, each adding its `--light-selection`.
 
 If a scene fails:
 - `tree` ships opt-in;
-- the delta spec's "Tree selection is the default" scenario and the
-  `Light selection` text revert to `power` as the default;
 - the design record names the failing scenes.
+
+**Amended during apply: this change does not flip the default.** ALab and the
+OpenPBR Shader Playground were not available where it was built. ALab is
+where the tree's case is weakest: occlusion is 52% of its NEE waste, which no
+bound sees. So the gate runs on every checked-in sample, its table is
+recorded, `tree` ships opt-in whatever it says, and the flip is a follow-up
+made once those two scenes are measured. Of the 39 samples, 28 have at most
+one finite light (one, `materialx_emissive`, has none) and render under `tree`
+bit for bit as under `power` (D8), so they pass by construction; the other 11
+are measured.
 
 ### D11. A many-lights sample
 

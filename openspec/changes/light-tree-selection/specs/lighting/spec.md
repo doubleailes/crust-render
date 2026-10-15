@@ -8,11 +8,11 @@ every later surface and volume vertex (each default 1, from 1 to 1024; a stage
 value outside that range is clamped with a warning, a command-line one refused).
 The light
 of each sample SHALL be chosen by `crust:lightSelection` / `--light-selection`:
-`tree` (default; infinite lights keep a uniform share, and the finite lights
-are chosen by walking a light BVH by an importance bound at the shading point's
-position and normal, mixed with a defensive share of the `power` probabilities),
-`power` (infinite lights keep a uniform share, the finite lights split
-the rest half evenly and half by flux), `uniform` (bit-identical to the
+`power` (default; infinite lights keep a uniform share, the finite lights split
+the rest half evenly and half by flux), `tree` (infinite lights keep a uniform
+share, and the finite lights are chosen by walking a light BVH by an importance
+bound at the shading point's position and normal, mixed with a defensive share
+of the `power` probabilities), `uniform` (bit-identical to the
 historical renderer), `learned` (a visibility-aware per-cell table trained by
 a deterministic pre-pass, over the power table), or `neural` (the power table
 weighted by each light's visibility, predicted by a small network that a
@@ -50,12 +50,12 @@ selection probability.
 - **WHEN** a render runs with `--light-selection neural`, or its render settings author `crust:lightSelection = "neural"`
 - **THEN** the render completes, and the `--light-selection` help lists `neural` with a one-line description
 
-#### Scenario: Tree selection is the default
+#### Scenario: Tree selection is accepted
 
-- **WHEN** a render runs with no `--light-selection` and no authored
-  `crust:lightSelection`
-- **THEN** it selects lights by `tree`, and the `--light-selection` help lists
-  `tree` as the default with a one-line description
+- **WHEN** a render runs with `--light-selection tree`, or its render settings
+  author `crust:lightSelection = "tree"`
+- **THEN** the render completes, and the `--light-selection` help lists `tree`
+  with a one-line description, while `power` stays the default
 
 #### Scenario: Existing modes are unchanged
 
