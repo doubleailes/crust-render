@@ -642,6 +642,7 @@ dependencies = [
 name = "crust-nn"
 version = "0.7.0"
 dependencies = [
+ "openqmc-rs",
  "rayon",
 ]
 

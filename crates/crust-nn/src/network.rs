@@ -335,17 +335,13 @@ pub fn grad_check(net: &Network<f64>, xs: &[[f32; 3]], ys: &[f32], h: f64) -> [f
     [error(net.grid_params()), error(net.mlp_params())]
 }
 
-/// A small, seeded generator in `[0, 1)` for the tests: a PCG-style LCG's
-/// top 24 bits.
+/// Seeded draws in `[0, 1)` for the tests, from `openqmc::pcg::Rng` (the
+/// repository's one source of test randomness), in the `FnMut() -> f32`
+/// shape [`Network::new`] takes.
 #[cfg(test)]
-pub(crate) fn test_rand(seed: u64) -> impl FnMut() -> f32 {
-    let mut state = seed.wrapping_mul(6_364_136_223_846_793_005) ^ 0x9e37_79b9_7f4a_7c15;
-    move || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        (state >> 40) as f32 / (1u64 << 24) as f32
-    }
+pub(crate) fn test_rand(seed: u32) -> impl FnMut() -> f32 {
+    let mut rng = openqmc::pcg::Rng::new(seed);
+    move || rng.next_f32()
 }
 
 #[cfg(test)]
@@ -441,7 +437,7 @@ mod tests {
             adam.step(net.params_mut(), &grad);
         }
         h = net.params().iter().fold(h, |h, v| fnv(h, v.to_bits()));
-        assert_eq!(h, 0x446c_be01_d79a_4604, "{h:#x}");
+        assert_eq!(h, 0x8279_243d_5cb3_6d28, "{h:#x}");
     }
 
     /// Training's forward pass is inference's: the loss a batch reports is

@@ -302,6 +302,28 @@ fn setup_parts(settings: RenderSettings, selection: Duration, m: &Measured) -> (
     (selection_s, m.setup_s)
 }
 
+/// What a trial's change cost in setup the last time the same factor took
+/// the same value, per trial render. Keyed by both: `learned`'s pre-pass
+/// and `neural`'s differ fourfold (ALab: 1.5 s and 6.2 s), and `power` or
+/// `uniform` have none.
+fn remembered_setup(
+    known: &[(&'static str, String, f64)],
+    factor: &str,
+    value: &str,
+) -> Option<f64> {
+    known
+        .iter()
+        .find(|(f, v, _)| *f == factor && v == value)
+        .map(|(_, _, s)| *s)
+}
+
+/// Whether a change's setup is measured before its first trial is
+/// admitted: a light selection with a pre-pass, which an estimate of none
+/// would let overrun its tier.
+fn setup_measured_first(factor: &str, value: &str) -> bool {
+    factor == "light_selection" && (value == "learned" || value == "neural")
+}
+
 /// Each pixel's luminance in a measured render, indexed as its variance
 /// map (raster space, over the render's region).
 fn luminance(m: &Measured, rect: PixelRect, luma: utils::Luma) -> Vec<f64> {
@@ -904,7 +926,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         plan.tier2_reserve_s, plan.tier3_reserve_s
     );
     let seeds: Vec<isize> = (0..repeats).map(|i| seed(authored.frame(), i)).collect();
-    let mut setup_by_factor: Vec<(&'static str, f64)> = Vec::new();
+    let mut setup_by_change: Vec<(&'static str, String, f64)> = Vec::new();
     let mut runs: Vec<Running> = Vec::new();
     let mut tier1_complete = exceeded.is_none();
     // The baseline's own setup per crop render, which every pair pays too:
@@ -914,29 +936,26 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         p1_selection * picked.len() as f64 + p1_training * crop_pixels as f64 / pixels;
     let measure = |renderer: &mut Renderer,
                    sched: &mut schedule::Schedule,
-                   setup_by_factor: &mut Vec<(&'static str, f64)>,
+                   setup_by_change: &mut Vec<(&'static str, String, f64)>,
                    changes: Vec<Change>,
                    id: String,
                    factor: String,
                    value: String|
      -> Option<Running> {
-        // Setup, per trial render: what this factor cost last time, else
-        // measured (a `learned` pre-pass, over the full frame whatever the
-        // crop) or estimated (guiding's training passes) before admitting
-        // the trial — a first trial estimated at no setup could overrun.
+        // Setup, per trial render: what this factor cost last time at this
+        // value, else measured (a `learned` or `neural` pre-pass, over the
+        // full frame whatever the crop) or estimated (guiding's training
+        // passes) before admitting the trial — a first trial estimated at no
+        // setup could overrun.
         let mut setup_total = 0.0f64;
         for c in &changes {
-            let known = setup_by_factor
-                .iter()
-                .find(|(f, _)| *f == c.factor)
-                .map(|(_, s)| *s);
-            setup_total += match known {
+            setup_total += match remembered_setup(setup_by_change, c.factor, &c.value) {
                 Some(s) => s * picked.len() as f64,
-                None if c.factor == "light_selection" && c.value == "learned" => {
+                None if setup_measured_first(c.factor, &c.value) => {
                     let s = renderer
                         .reconfigure((c.apply)(crop_settings(full, 0, spp_t), &c.value))
                         .as_secs_f64();
-                    setup_by_factor.push((c.factor, s));
+                    setup_by_change.push((c.factor, c.value.clone(), s));
                     s * picked.len() as f64
                 }
                 None if c.factor == "guiding" && c.value == "true" => {
@@ -988,8 +1007,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             }
         }
         for c in &changes {
-            setup_by_factor.retain(|(f, _)| *f != c.factor);
-            setup_by_factor.push((c.factor, setup_seen));
+            setup_by_change.retain(|(f, v, _)| !(*f == c.factor && *v == c.value));
+            setup_by_change.push((c.factor, c.value.clone(), setup_seen));
         }
         sched.set_spent(elapsed());
         // Per crop, the picture check's shift and z, and the untrimmed
@@ -1032,7 +1051,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             match measure(
                 &mut renderer,
                 &mut sched,
-                &mut setup_by_factor,
+                &mut setup_by_change,
                 vec![change.clone()],
                 id.clone(),
                 change.factor.into(),
@@ -1110,7 +1129,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         match measure(
             &mut renderer,
             &mut sched,
-            &mut setup_by_factor,
+            &mut setup_by_change,
             changes,
             combined_id.clone(),
             COMBINED.into(),

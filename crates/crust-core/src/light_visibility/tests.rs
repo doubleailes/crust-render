@@ -285,3 +285,26 @@ fn the_memo_is_the_function() {
     assert_eq!(b.with_table(p, owned), Some(want_b));
     assert_eq!(a.with_table(p, owned), Some(want_a));
 }
+
+/// `learned` walks without labels and allocates none; its contributions are
+/// the bits the labelled walk computes (PR #308 review).
+#[test]
+fn labels_are_collected_only_when_asked() {
+    let (world, camera, lights) = two_rooms();
+    let with = light_cache::walk(&world, &camera, &lights, 64, 64, 0, true);
+    let without = light_cache::walk(&world, &camera, &lights, 64, 64, 0, false);
+    assert!(!with.is_empty());
+    assert_eq!(with.len(), without.len());
+    for (a, b) in with.iter().zip(&without) {
+        assert_eq!(
+            a.p.to_array().map(f32::to_bits),
+            b.p.to_array().map(f32::to_bits)
+        );
+        assert_eq!(
+            a.contrib.iter().map(|c| c.to_bits()).collect::<Vec<_>>(),
+            b.contrib.iter().map(|c| c.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(a.delivered.len(), lights.count());
+        assert!(b.delivered.is_empty() && b.delivered.capacity() == 0);
+    }
+}

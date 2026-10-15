@@ -201,11 +201,8 @@ mod tests {
     /// order.
     #[test]
     fn every_width_is_the_definition() {
-        let mut seed = 3u64;
-        let mut rand = move || {
-            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            (seed >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
-        };
+        let mut draw = crate::network::test_rand(3);
+        let mut rand = move || draw() * 2.0 - 1.0;
         for &(inputs, outputs) in &[
             (3, 1),
             (16, 7),

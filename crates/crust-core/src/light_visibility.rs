@@ -237,7 +237,7 @@ pub(crate) fn train(
         return None;
     }
     let started = std::time::Instant::now();
-    let receivers = light_cache::walk(world, camera, lights, width, height, frame);
+    let receivers = light_cache::walk(world, camera, lights, width, height, frame, true);
     let (lo, hi) = light_cache::robust_bounds(&receivers)?;
     let n = lights.count();
     let extent = (hi - lo).max_element().max(1e-6);

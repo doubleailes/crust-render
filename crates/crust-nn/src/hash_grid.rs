@@ -311,11 +311,7 @@ mod tests {
     #[test]
     fn corners_are_the_definition() {
         let g = grid();
-        let mut seed = 7u64;
-        let mut rand = move || {
-            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            (seed >> 40) as f32 / (1u64 << 24) as f32
-        };
+        let mut rand = crate::network::test_rand(7);
         for _ in 0..200 {
             let x = [rand(), rand(), rand()];
             for level in &g.levels {
