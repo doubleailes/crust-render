@@ -360,7 +360,8 @@ model).
   is a refactor, not a toolchain question, and crust stays on stable. The feature is
   kept as the record and a starting point, and the parallel nightly workflow
   (`.github/workflows/nightly.yml`) lints and tests it on a pinned and the latest
-  nightly (`docs/simd.md`, "BVH8 on nightly"). Reaching 256 bits on stable still
+  nightly, at `x86-64-v3` where an `f32x8` is one AVX register (`docs/simd.md`, "BVH8
+  on nightly"). Reaching 256 bits on stable still
   needs `unsafe` `core::arch` intrinsics (against this crate's "100% safe Rust" claim),
   a new dependency (`wide`/`multiversion`), or a non-distributable `-C target-cpu`.
   **The collapsed tables hold no spare capacity.** `collapse()` used to reserve one

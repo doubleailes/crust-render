@@ -162,6 +162,14 @@ jobs:
   # nodes (its tests pin both node layouts, and hit results against a linear
   # scan), and the renderer is checked with the feature forwarded through
   # crust-core, so the plumbing cannot rot either.
+  #
+  # At `x86-64-v3` (AVX2 + FMA + BMI), the configuration bvh8 was designed
+  # and measured for (docs/simd.md, "BVH8 on nightly"): there an f32x8 is
+  # one AVX register, where baseline x86-64 splits it into two SSE halves,
+  # so a baseline build tests code nobody would run. The tests' bit-exact
+  # expectations then hold under the codegen that matters. Only this job:
+  # the stable pipeline, the other nightly legs and every shipped binary
+  # stay baseline x86-64.
   bvh8:
     name: bvh8 (${{ matrix.channel }})
     runs-on: ubuntu-latest
@@ -170,7 +178,18 @@ jobs:
       fail-fast: false
       matrix:
         channel: [pinned, latest]
+    env:
+      RUSTFLAGS: -D warnings -C target-cpu=x86-64-v3
     steps:
+      # A runner without AVX2 would die on SIGILL in the first test binary;
+      # say why instead. GitHub's hosted x86-64 runners all have it.
+      - name: Check the runner implements x86-64-v3
+        run: |
+          # x86-64-v3's features as /proc/cpuinfo names them (LZCNT is `abm`).
+          for f in avx avx2 bmi1 bmi2 f16c fma abm movbe xsave; do
+            grep -qw "$f" /proc/cpuinfo || {
+              echo "::error::this runner lacks $f, so it cannot run x86-64-v3 code"; exit 1; }
+          done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain
         run: |
@@ -183,7 +202,7 @@ jobs:
           RUSTUP_TOOLCHAIN="$tc" rustc --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: bvh8-${{ matrix.channel }}
+          key: bvh8-v3-${{ matrix.channel }}
       - name: Lint crust-rt
         run: cargo clippy -p crust-rt --all-targets --features bvh8 -- -D warnings
       - name: Test crust-rt
