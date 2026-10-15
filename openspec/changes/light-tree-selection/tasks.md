@@ -100,22 +100,22 @@
 
 ## 5. The gate and the default (design D10)
 
-- [ ] 5.1 Measure equal-time relMSE, `tree` against `power`, full and
+- [x] 5.1 Measure equal-time relMSE, `tree` against `power`, full and
       trimmed, 4 seeds, `--indirect-clamp 0`, with `scripts/bench_ab.sh`
       timing (one binary behind two wrapper scripts), on the 11 checked-in
       samples that build a tree (the other 28 render bit for bit as under
       `power`). Record the table in §3.15. ALab and the OpenPBR Shader
       Playground are not available here (design D10, amended).
-- [ ] 5.2 Keep `power` as the default (design D10, amended): the delta
+- [x] 5.2 Keep `power` as the default (design D10, amended): the delta
       spec's `Light selection` text and its "Tree selection is accepted"
       scenario say so. Verify: a render with no `crust:lightSelection` reports
       `crust:lightSelection = power` in its EXR stamp, and `openspec validate
       light-tree-selection --strict` passes.
-- [ ] 5.3 List the gate's outcome in the lighting design record: every
+- [x] 5.3 List the gate's outcome in the lighting design record: every
       measured scene's equal-time ratio, the scenes that fail, and ALab and
       the Shader Playground as the scenes still owed before the default can
       flip. Verify: the record's "Light tree" section carries the table.
-- [ ] 5.4 Update for the outcome: the lighting design record's "Known gaps:
+- [x] 5.4 Update for the outcome: the lighting design record's "Known gaps:
       light sampling" (selection by importance; what the tree still cannot
       see: visibility, glossy lobes, infinite lights' share),
       `docs/light_sampling.md` §9.3 m, the site pages from 3.6 and
