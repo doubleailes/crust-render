@@ -86,7 +86,7 @@
       decades) over a floor and wall with occluders. Verify: it renders in
       under 10 s at 16 spp, `crust check -i samples/many_lights.usda` reports
       no warnings, and the integration tests that load `samples/*.usda` pass.
-- [ ] 4.2 Choose `D` from {0.1, 0.25, 0.5}: full and trimmed relMSE at
+- [x] 4.2 Choose `D` from {0.1, 0.25, 0.5}: full and trimmed relMSE at
       16 spp, 4 seeds, `--indirect-clamp 0`, against a 1024 spp `power`
       reference, on `usdlux`, `veach_mis`, `domelight` and `many_lights`.
       Record the table in `docs/light_sampling.md` (a new §3.15). Verify:
