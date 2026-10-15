@@ -186,6 +186,12 @@ cargo run --release -p crust-render --example nvc_bench -- samples/usdlux.usda
 for r in 1 3; do RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no \
     --branch-sim=no target/release/examples/nvc_bench samples/usdlux.usda \
     --only neural --repeat $r 2>&1 | grep -E 'Collected|receivers'; done
+# On ALab (renders/alab/alab.usda, --frame 1004), count through an overlay
+# stage that only lowers the resolution (300x200): the pre-passes train on one
+# path per 4x4 pixels, and on one thread under valgrind at 1200x800 they take
+# most of a day. The per-call counts do not depend on the receivers; the four
+# runs (neural and shadow, --repeat 1 and 3) then take ~1.75 h side by side,
+# ~9 GiB each.
 
 # Placing a camera in a downloaded production asset, and settling whether a
 # texture is display-encoded or linear (see "Ptex" under USD import).

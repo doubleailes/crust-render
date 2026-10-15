@@ -50,14 +50,14 @@
 - [x] 3.1 Assert that NEE's sampling position and the bounce side's `prev.pos` are the same `Vec3A` bits, at every NEE site (surface and volume / phase), behind `debug_assert!`:
   - Verify with `cargo test --workspace` (debug) passing over every sample.
   - If any site differs, fix it so both sides store one value, and confirm `power` / `learned` stay bit-identical with `check_images.sh`.
-- [ ] 3.2 Add `crates/crust-render/examples/nvc_bench.rs`. It trains on a scene and times one `(pmf, cdf)` evaluation, one shadow ray, and one `learned` lookup over the same receivers, printing min-of-N wall time:
+- [x] 3.2 Add `crates/crust-render/examples/nvc_bench.rs`. It trains on a scene and times one `(pmf, cdf)` evaluation, one shadow ray, and one `learned` lookup over the same receivers, printing min-of-N wall time:
   - Verify it runs on `samples/usdlux.usda` and on ALab.
-  - Status: runs on `usdlux`, `veach_mis`, `domelight` and `materialx_basic`; ALab was not available where this was implemented.
-- [ ] 3.3 Count the same three costs with callgrind, using the CLAUDE.md recipe, on `usdlux` and ALab.
+  - Status: runs on `usdlux`, `veach_mis`, `domelight`, `materialx_basic` and ALab (`renders/alab/alab.usda --frame 1004`: 43 lights, 14 400 receivers, ~2 min).
+- [x] 3.3 Count the same three costs with callgrind, using the CLAUDE.md recipe, on `usdlux` and ALab.
   - Record wall time and instructions in a new `docs/light_sampling.md` § "Neural visibility cache".
   - Write the go/no-go decision there per D9.
   - If no-go: shrink D3 once and re-measure. If it is still no-go, stop here, keep the recorded result, and update proposal.md and design.md to say so.
-  - Status: counted and recorded on `usdlux` (docs/light_sampling.md §3.14): D3 no-go on the samples (4.8–13.8×), shrunk once marginal (2.9–7.4×). ALab not measured; D3 kept as designed by decision, and groups 5–6 run on the samples.
+  - Status: counted and recorded on `usdlux` and ALab (docs/light_sampling.md §3.14). D3 is no-go on the samples (4.8–13.8×); shrunk once, it is marginal (2.9–7.4×). On ALab, the gate's own scene, it is **go**: 0.94 shadow rays in wall time, 2.2 in instructions (14 703 against 6 604 Ir, counted on a 300×200 overlay). D3 kept as designed.
 - [x] 3.4 Add the `nvc_bench` recipe to the command cookbook in `openspec/specs/cli/design.md`:
   - Verify that the documented command runs as written.
 
@@ -93,15 +93,15 @@
 
 ## 6. The equal-time verdict (design Goals, D9)
 
-- [ ] 6.1 relMSE at 16 spp (full and trimmed, `--indirect-clamp 0`, against 1024 spp `power` references) for ALab direct lighting, ALab full, `usdlux` (4 seeds), `veach_mis` (4), `domelight` (4) and `materialx_basic`, under `power` / `learned` / `neural`:
+- [x] 6.1 relMSE at 16 spp (full and trimmed, `--indirect-clamp 0`, against 1024 spp `power` references) for ALab direct lighting, ALab full, `usdlux` (4 seeds), `veach_mis` (4), `domelight` (4) and `materialx_basic`, under `power` / `learned` / `neural`:
   - Verify that the table is in `docs/light_sampling.md`, in the same shape as §3.12's.
-  - Status: every row but ALab's measured and recorded in §3.14; the ALab rows read "not measured".
-- [ ] 6.2 `scripts/bench_ab.sh` `learned` against `neural` on ALab and `usdlux` at 128 spp; report min and mean:
+  - Status: every row measured and recorded in §3.14. ALab's direct lighting averages frames 1004 and 1030, because the camera is animated, so a seed is a frame. ALab full is frame 1004 alone; untrimmed, it is firefly-bound.
+- [x] 6.2 `scripts/bench_ab.sh` `learned` against `neural` on ALab and `usdlux` at 128 spp; report min and mean:
   - Verify that the equal-time gains are computed and recorded beside 6.1, with the verdict: keep opt-in, propose D2's contribution variant, or retire.
-  - Status: measured on `usdlux`, `veach_mis`, `domelight` and `materialx_basic` (and `power` against `learned`); verdict on the samples: retire. ALab not measured.
-- [ ] 6.3 Measure whether `D` can fall below 0.3 under `neural` (0.2, 0.1) on `domelight` and ALab:
+  - Status: measured on the samples (6 reps) and ALab (3 reps; `neural` 1.19× `learned`'s time on the full image, 1.29× on direct lighting), with `power` against `learned` too. At equal time on ALab, `neural` is 0.79× `learned` on direct lighting and 0.69× on the full image (trimmed). Verdict: **retire**, on every scene.
+- [x] 6.3 Measure whether `D` can fall below 0.3 under `neural` (0.2, 0.1) on `domelight` and ALab:
   - Verify that the result and the chosen value are recorded beside the `DEFENSIVE` constant's comment.
-  - Status: measured on `domelight` and `usdlux` and recorded beside `DEFENSIVE`: no gain below 0.3, kept. ALab not measured.
+  - Status: measured on `domelight`, `usdlux` and ALab, and recorded beside `DEFENSIVE`. ALab's direct lighting gains at 0.1, under `neural` (1.34×) and `learned` (1.19×) alike; its full image does not, and `neural` still loses at equal time (0.88×). Kept at 0.3.
 
 ## 7. Integration checks
 

@@ -186,8 +186,15 @@
     after two bit-identical passes cut it from ~820 ns — and adds 40–100% to a
     render, while visibility alone buys at most 1.2× per sample over power.
     At equal time it loses to `learned` by 1.5–5.3× and to power by 1.4–1.9×
-    on every sample measured. The verdict there is retire; ALab, the scene it
-    was built for, is unmeasured.
+    on every sample measured. **ALab, the scene it was built for, confirms
+    it.** There one evaluation costs 0.94 of a shadow ray (1 131 against
+    1 198 ns; 14 703 against 6 604 instructions), so the D9 gate passes. Yet
+    the network only ties `learned` per sample on direct lighting (trimmed
+    relMSE 1.03×), and loses on the full image (0.82×). It costs 19–29% more
+    time: a 6.2 s pre-pass against 1.5 s, inference at every vertex, and
+    shadow rays 20% slower behind it, as its 1 MiB table evicts BVH nodes. At
+    equal time that is 0.79× `learned` on direct lighting and 0.69× on the
+    full image. The verdict is retire.
 
   **Both halves of the design were forced by measurement** (`docs/light_sampling.md`
   §3.8):
@@ -888,9 +895,10 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   domain, §3.11 there.)
   Measure changes with
   `crust diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
-- **`neural` selection loses at equal time** on every checked-in sample, and is
-  unmeasured where it might not: ALab, whose problem is visibility alone (the
-  lighting design above; `docs/light_sampling.md` §3.14). Its inputs are
+- **`neural` selection loses at equal time** on every checked-in sample and on
+  ALab, whose problem is visibility alone: 0.79× `learned` on its direct
+  lighting, 0.69× on its full image (the lighting design above;
+  `docs/light_sampling.md` §3.14). Its inputs are
   position only, so it learns the local average of a normal-dependent horizon,
   as `learned`'s grid does; it learns visibility only, leaving distance and
   orientation to the power table, which is most of what `learned` exploits on
