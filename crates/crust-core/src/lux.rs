@@ -279,7 +279,11 @@ impl Shaping {
             1.0
         };
         let ies = self.ies.as_ref().map_or(1.0, |ies| {
-            let norm = if ies.normalize { ies.profile.power() } else { 1.0 };
+            let norm = if ies.normalize {
+                ies.profile.power()
+            } else {
+                1.0
+            };
             if norm > 0.0 {
                 ies.profile.max_intensity() / norm
             } else {
@@ -543,11 +547,7 @@ impl IesProfile {
     /// The largest intensity in the table: [`IesProfile::eval`] interpolates
     /// bilinearly, so it never returns more.
     pub fn max_intensity(&self) -> f32 {
-        self.intensity
-            .iter()
-            .flatten()
-            .copied()
-            .fold(0.0, f32::max)
+        self.intensity.iter().flatten().copied().fold(0.0, f32::max)
     }
 
     /// Intensity toward polar angle `theta` and azimuth `phi` (radians),
