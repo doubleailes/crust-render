@@ -66,9 +66,11 @@
 
 ## 5. Measurement and the gate
 
-- [ ] 5.1 Check images: render cornellbox, veach_mis and the stress scene at 16 spp with
+- [x] 5.1 Check images: render cornellbox, veach_mis and the stress scene at 16 spp with
       `CRUST_BVH_NODES=quant8` and `wide4`, and run `crust diff`. Verify 0 differing
-      pixels each ("A render is unchanged").
+      pixels each ("A render is unchanged"). *Done with the `crust` binary built from
+      `b693281`: 0 / 230 400, 0 / 518 400 and 0 / 230 400 differing pixels; `--stats` shows
+      the `BVH nodes (quantised)` row under `CRUST_BVH_NODES=quant8`.*
 - [ ] 5.2 Find the size threshold. Sweep tree sizes across the in-cache and out-of-cache
       range with `ray_throughput` (min-of-N, `x86-64-v3` and baseline x86-64), and choose the crossover. Record the machine, the commands and the
       numbers with the constant.

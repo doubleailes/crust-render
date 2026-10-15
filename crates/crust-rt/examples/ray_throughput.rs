@@ -17,6 +17,9 @@
 //! packet layout (default `auto`), which is how the two are A/B'd per tree
 //! size.
 //!
+//! `--sweep M1,M2,...` times the f32 and the quantised node on the same soup of
+//! each size, alternating repeat by repeat in one process (see `sweep`).
+//!
 //! `--nodes wide|quant|auto` commits every scene with that BVH node format
 //! (default `auto`), which is how the 4-wide `f32` node and the quantised
 //! 8-wide node are A/B'd in one binary.
@@ -181,11 +184,113 @@ static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
 /// The node format every scene below commits with (`--nodes`).
 static NODES: std::sync::OnceLock<NodeFormatChoice> = std::sync::OnceLock::new();
 
+thread_local! {
+    /// Set while `--sweep` builds one scene of a pair, overriding `--nodes`.
+    static FORCED: std::cell::Cell<Option<NodeFormatChoice>> = const { std::cell::Cell::new(None) };
+}
+
 fn commit(b: SceneBuilder) -> Scene {
     b.commit_with(CommitOptions {
         layout: *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
-        nodes: *NODES.get().unwrap_or(&NodeFormatChoice::Auto),
+        nodes: FORCED
+            .get()
+            .or_else(|| NODES.get().copied())
+            .unwrap_or(NodeFormatChoice::Auto),
     })
+}
+
+/// One timed pass of every ray through `scene`: seconds and the hit count.
+fn pass(scene: &Scene, rays: &[crust_rt::Ray], closest: bool) -> (f64, usize) {
+    let start = Instant::now();
+    let mut hits = 0usize;
+    for r in rays {
+        let hit = if closest {
+            scene.intersect(r, T_MIN, f32::INFINITY).is_some()
+        } else {
+            scene.occluded(r, T_MIN, f32::INFINITY)
+        };
+        hits += usize::from(hit);
+    }
+    (start.elapsed().as_secs_f64(), hits)
+}
+
+fn median(v: &[f64]) -> f64 {
+    let mut v = v.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// `--sweep M1,M2,...`: for each soup size (millions of triangles), commits
+/// the same soup once per node format *in this one process*, then times the
+/// two alternately, repeat by repeat, so time drift lands on both. Prints the
+/// min and median of each, the quantised/f32 ratio of the medians, the hit
+/// counts (which must match) and the kernel bytes. `CRUST_SWEEP_REPEATS`
+/// sets the repeats (default 6).
+fn sweep(sizes: &[f64]) {
+    let repeats: usize = std::env::var("CRUST_SWEEP_REPEATS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    println!(
+        "{:>8} {:<10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>9} {:>9}",
+        "Mtris",
+        "query",
+        "wide min",
+        "wide med",
+        "quant min",
+        "quant med",
+        "q/w med",
+        "wide MiB",
+        "quant MiB"
+    );
+    for &m in sizes {
+        let n = (m * 1e6) as usize;
+        let build = |choice| {
+            FORCED.set(Some(choice));
+            let s = soup_scene(n);
+            FORCED.set(None);
+            s
+        };
+        let (wide, quant) = (
+            build(NodeFormatChoice::Wide),
+            build(NodeFormatChoice::Quantised),
+        );
+        let mib = |s: &Scene| s.memory_footprint().total() as f64 / (1 << 20) as f64;
+        let rays = ray_batch(LARGE_RAYS, LARGE_HALF);
+        for (kind, closest) in [("intersect", true), ("occluded", false)] {
+            let (mut tw, mut tq) = (Vec::new(), Vec::new());
+            let (mut hw, mut hq) = (0, 0);
+            for r in 0..repeats {
+                let order = if r % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for quantised in order {
+                    let (secs, hits) = pass(if quantised { &quant } else { &wide }, &rays, closest);
+                    if quantised {
+                        tq.push(secs * 1e3);
+                        hq = hits;
+                    } else {
+                        tw.push(secs * 1e3);
+                        hw = hits;
+                    }
+                }
+            }
+            let min = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
+            println!(
+                "{m:>8} {kind:<10} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>7.1}% {:>9.0} {:>9.0}{}",
+                min(&tw),
+                median(&tw),
+                min(&tq),
+                median(&tq),
+                100.0 * (median(&tq) / median(&tw) - 1.0),
+                mib(&wide),
+                mib(&quant),
+                if hw == hq { "" } else { "  HIT COUNTS DIFFER" },
+            );
+        }
+    }
 }
 
 fn main() {
@@ -216,6 +321,18 @@ fn main() {
             }
             _ => break,
         }
+    }
+
+    if args.peek().map(String::as_str) == Some("--sweep") {
+        args.next();
+        let sizes: Vec<f64> = args
+            .next()
+            .expect("--sweep wants M1,M2,... (millions of triangles)")
+            .split(',')
+            .map(|x| x.parse().expect("a size in millions of triangles"))
+            .collect();
+        sweep(&sizes);
+        return;
     }
 
     let tri = triangle_scene(commit);
