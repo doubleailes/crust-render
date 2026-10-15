@@ -538,7 +538,8 @@ fn bounds_cover_all_prims() {
 #[test]
 #[cfg(feature = "bvh8q")]
 fn quantised_node_is_76_bytes() {
-    assert_eq!(std::mem::size_of::<QNode>(), 76);
+    let want = if cfg!(feature = "bvh8q-pad") { 128 } else { 76 };
+    assert_eq!(std::mem::size_of::<QNode>(), want);
 }
 
 /// Quantisation rounds outward: every lane's dequantised box contains the

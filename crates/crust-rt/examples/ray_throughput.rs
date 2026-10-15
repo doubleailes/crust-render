@@ -123,6 +123,7 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
         crust_rt::traversal_stats::reset();
         let mut best = f64::INFINITY;
         let mut hits = 0usize;
+        let mut all = Vec::new();
         for _ in 0..repeats {
             let start = Instant::now();
             let mut h = 0usize;
@@ -139,6 +140,10 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
             let secs = start.elapsed().as_secs_f64();
             hits = h;
             best = best.min(secs);
+            all.push(secs * 1e3);
+        }
+        if std::env::var_os("CRUST_PRINT_REPEATS").is_some() {
+            println!("{name} {kind} repeats_ms {all:.1?}");
         }
         println!(
             "{name:<12} {kind:<10} {:>8.3} ms   {:>6.2} Mray/s   ({hits}/{n_rays} hit)",
@@ -207,8 +212,17 @@ fn main() {
             mem.total() as f64 / (1 << 20) as f64,
             t.elapsed().as_secs_f64()
         );
-        probe_with("soup", &soup, LARGE_HALF, LARGE_RAYS, LARGE_REPEATS);
+        // `CRUST_LARGE_REPEATS` / `CRUST_SOUP_ONLY` / `CRUST_PRINT_REPEATS`:
+        // knobs for a longer A/B of the soup alone (every repeat is printed).
+        let repeats = std::env::var("CRUST_LARGE_REPEATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(LARGE_REPEATS);
+        probe_with("soup", &soup, LARGE_HALF, LARGE_RAYS, repeats);
         drop(soup);
+        if std::env::var_os("CRUST_SOUP_ONLY").is_some() {
+            return;
+        }
 
         // A quarter as many instances as the soup has triangles: 2 M at the
         // default, a top level the size of a production stage's.

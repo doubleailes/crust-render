@@ -30,6 +30,10 @@ bvh8 = []
 # obvhs's `CwBvh`), on stable. Prototype: the f32 8-wide build converted at
 # commit, to A/B quantisation against `bvh8` alone. Exclusive with `bvh8`.
 bvh8q = []
+# Control for the `bvh8q` A/B: the same quantised node padded to 128 bytes
+# (two aligned cache lines), to tell whether node *bytes* or the node
+# *arithmetic* is what the traversal is paying for.
+bvh8q-pad = ["bvh8q"]
 
 [dependencies]
 glam.workspace = true
