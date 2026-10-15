@@ -33,8 +33,7 @@
 
 ## 3. Per-tree selection
 
-- [ ] 3.1 *(enum, `CommitOptions` field and the `match` per descent are in; the size rule
-      is a provisional `None` until 5.2 measures the crossover)* Hold a tree's nodes as an enum of the two formats, match it once per descent
+- [x] 3.1 Hold a tree's nodes as an enum of the two formats, match it once per descent
       (and once per instance descent), and add the size rule and the `CommitOptions`
       field. Verify the "A small tree keeps the 4-wide node", "A large tree uses the
       quantised node" and "A prototype and its placement choose separately" scenarios.
@@ -71,9 +70,13 @@
       pixels each ("A render is unchanged"). *Done with the `crust` binary built from
       `b693281`: 0 / 230 400, 0 / 518 400 and 0 / 230 400 differing pixels; `--stats` shows
       the `BVH nodes (quantised)` row under `CRUST_BVH_NODES=quant8`.*
-- [ ] 5.2 Find the size threshold. Sweep tree sizes across the in-cache and out-of-cache
+- [x] 5.2 Find the size threshold. Sweep tree sizes across the in-cache and out-of-cache
       range with `ray_throughput` (min-of-N, `x86-64-v3` and baseline x86-64), and choose the crossover. Record the machine, the commands and the
-      numbers with the constant.
+      numbers with the constant. *Done: `ray_throughput --sweep` and `--compare` time both
+      formats alternately in one process. In cache the quantised node is 1–27 % slower
+      (43 k-triangle meshes about neutral, small sphere grids and prototypes 17–27 %);
+      from a 50 k-triangle soup to 8 M it is 7–43 % faster on both queries. The threshold
+      is `AUTO_QUANT_MIN_REFS = 100 000`, recorded with the numbers in `bvh/mod.rs`.*
 - [ ] 5.3 Repeat the out-of-cache A/B on the 8 M-triangle soup and the 2 M-instance field
       with every variant interleaved as closely as the builds allow (design D8), and on
       a production-shaped scene (ALab or the island when present, otherwise the

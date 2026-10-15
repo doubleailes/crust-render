@@ -17,6 +17,9 @@
 //! packet layout (default `auto`), which is how the two are A/B'd per tree
 //! size.
 //!
+//! `--compare` does the same for the default in-cache scenes, and
+//! `--field [N]` for the instance field (`auto` and all-quantised against
+//! all-f32).
 //! `--sweep M1,M2,...` times the f32 and the quantised node on the same soup of
 //! each size, alternating repeat by repeat in one process (see `sweep`).
 //!
@@ -220,6 +223,45 @@ fn median(v: &[f64]) -> f64 {
     v[v.len() / 2]
 }
 
+/// Times `wide` and `quant` alternately, repeat by repeat, on the same rays,
+/// and prints one row per query (see `sweep`).
+fn compare_pair(label: &str, wide: &Scene, quant: &Scene, rays: &[crust_rt::Ray], repeats: usize) {
+    let mib = |s: &Scene| s.memory_footprint().total() as f64 / (1 << 20) as f64;
+    for (kind, closest) in [("intersect", true), ("occluded", false)] {
+        let (mut tw, mut tq) = (Vec::new(), Vec::new());
+        let (mut hw, mut hq) = (0, 0);
+        for r in 0..repeats {
+            let order = if r % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for quantised in order {
+                let (secs, hits) = pass(if quantised { quant } else { wide }, rays, closest);
+                if quantised {
+                    tq.push(secs * 1e3);
+                    hq = hits;
+                } else {
+                    tw.push(secs * 1e3);
+                    hw = hits;
+                }
+            }
+        }
+        let min = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
+        println!(
+            "{label:>8} {kind:<10} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>7.1}% {:>9.0} {:>9.0}{}",
+            min(&tw),
+            median(&tw),
+            min(&tq),
+            median(&tq),
+            100.0 * (median(&tq) / median(&tw) - 1.0),
+            mib(wide),
+            mib(quant),
+            if hw == hq { "" } else { "  HIT COUNTS DIFFER" },
+        );
+    }
+}
+
 /// `--sweep M1,M2,...`: for each soup size (millions of triangles), commits
 /// the same soup once per node format *in this one process*, then times the
 /// two alternately, repeat by repeat, so time drift lands on both. Prints the
@@ -255,41 +297,8 @@ fn sweep(sizes: &[f64]) {
             build(NodeFormatChoice::Wide),
             build(NodeFormatChoice::Quantised),
         );
-        let mib = |s: &Scene| s.memory_footprint().total() as f64 / (1 << 20) as f64;
         let rays = ray_batch(LARGE_RAYS, LARGE_HALF);
-        for (kind, closest) in [("intersect", true), ("occluded", false)] {
-            let (mut tw, mut tq) = (Vec::new(), Vec::new());
-            let (mut hw, mut hq) = (0, 0);
-            for r in 0..repeats {
-                let order = if r % 2 == 0 {
-                    [false, true]
-                } else {
-                    [true, false]
-                };
-                for quantised in order {
-                    let (secs, hits) = pass(if quantised { &quant } else { &wide }, &rays, closest);
-                    if quantised {
-                        tq.push(secs * 1e3);
-                        hq = hits;
-                    } else {
-                        tw.push(secs * 1e3);
-                        hw = hits;
-                    }
-                }
-            }
-            let min = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
-            println!(
-                "{m:>8} {kind:<10} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>7.1}% {:>9.0} {:>9.0}{}",
-                min(&tw),
-                median(&tw),
-                min(&tq),
-                median(&tq),
-                100.0 * (median(&tq) / median(&tw) - 1.0),
-                mib(&wide),
-                mib(&quant),
-                if hw == hq { "" } else { "  HIT COUNTS DIFFER" },
-            );
-        }
+        compare_pair(&format!("{m}"), &wide, &quant, &rays, repeats);
     }
 }
 
@@ -323,6 +332,65 @@ fn main() {
         }
     }
 
+    if args.peek().map(String::as_str) == Some("--compare") {
+        // The default in-cache scenes, both formats alternated in one process.
+        args.next();
+        let repeats: usize = std::env::var("CRUST_SWEEP_REPEATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        let pair = |f: fn(fn(SceneBuilder) -> Scene) -> Scene| {
+            let build = |choice| {
+                FORCED.set(Some(choice));
+                let s = f(commit);
+                FORCED.set(None);
+                s
+            };
+            (
+                build(NodeFormatChoice::Wide),
+                build(NodeFormatChoice::Quantised),
+            )
+        };
+        for (name, f, extent) in [
+            (
+                "tri_sph",
+                triangle_scene as fn(fn(SceneBuilder) -> Scene) -> Scene,
+                6.0,
+            ),
+            ("sph_grid", sphere_grid_scene, 14.0),
+            ("instances", instance_scene, 7.0),
+        ] {
+            let (w, q) = pair(f);
+            compare_pair(name, &w, &q, &ray_batch(RAYS, extent), repeats);
+        }
+        return;
+    }
+    if args.peek().map(String::as_str) == Some("--field") {
+        // The instance field three ways: every tree f32, `auto` (the top level
+        // quantised, the small prototypes f32), and every tree quantised.
+        args.next();
+        let count: usize = args
+            .next()
+            .and_then(|a| a.parse().ok())
+            .unwrap_or(2_000_000);
+        let repeats: usize = std::env::var("CRUST_SWEEP_REPEATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6);
+        let build = |choice| {
+            FORCED.set(Some(choice));
+            let s = instance_field_scene(count);
+            FORCED.set(None);
+            s
+        };
+        let wide = build(NodeFormatChoice::Wide);
+        let auto = build(NodeFormatChoice::Auto);
+        let quant = build(NodeFormatChoice::Quantised);
+        let rays = ray_batch(LARGE_RAYS, LARGE_HALF);
+        compare_pair("auto", &wide, &auto, &rays, repeats);
+        compare_pair("quant", &wide, &quant, &rays, repeats);
+        return;
+    }
     if args.peek().map(String::as_str) == Some("--sweep") {
         args.next();
         let sizes: Vec<f64> = args

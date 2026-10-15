@@ -90,9 +90,14 @@ const Q_WIDTH: usize = 8;
 use crate::scene::NodeFormatChoice as NodeChoice;
 
 /// Trees with at least this many primitive references get the quantised
-/// node under [`NodeChoice::Auto`]. **Provisional** (`None`): no tree qualifies until
-/// the crossover is measured (change `quantised-bvh8-nodes`, task 5.2).
-const AUTO_QUANT_MIN_REFS: Option<usize> = None;
+/// node under [`NodeChoice::Auto`]. Measured with `ray_throughput --compare`
+/// and `--sweep` (both formats alternated in one process, 4-core Xeon @
+/// 2.8 GHz, 2026-10): below about 50 k references the f32 node is faster
+/// (quantised 1–6 % slower on a 43 k-triangle mesh set, 5–27 % on small
+/// sphere grids and instance prototypes), and from a 50 k-triangle soup up
+/// to 8 M the quantised node is 7–43 % faster on both queries. 100 k leaves
+/// a margin above the crossover.
+const AUTO_QUANT_MIN_REFS: Option<usize> = Some(100_000);
 
 /// A tree's nodes, in whichever format it was committed with.
 enum Nodes {

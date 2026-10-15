@@ -2436,3 +2436,62 @@ fn node_formats_agree_on_degenerate_extents() {
     }
     assert!(verdicts > 500, "the down-rays should hit the grid");
 }
+
+/// Under `Auto` a small tree keeps the `f32` node and a large one gets the
+/// quantised node, per tree: a small prototype placed 110 000 times gives a
+/// quantised top level over `f32` prototype trees, and rays crossing both
+/// answer as they do with every tree forced to the `f32` node.
+#[test]
+fn auto_chooses_the_node_format_per_tree() {
+    use crust_rt::{CommitOptions, NodeFormatChoice};
+    let commit = |b: SceneBuilder, nodes| {
+        b.commit_with(CommitOptions {
+            nodes,
+            ..Default::default()
+        })
+    };
+    let field = |nodes| {
+        let mut inner = SceneBuilder::new();
+        inner.attach(sphere(Vec3A::ZERO, 0.3));
+        inner.attach(unit_quad());
+        let inner = Arc::new(commit(inner, nodes));
+        let mut b = SceneBuilder::new();
+        let mut rng = Rng::new(0xF1E1D);
+        for _ in 0..110_000 {
+            b.attach(Geometry::Instance {
+                scene: Arc::clone(&inner),
+                transform: Affine3A::from_translation(vec3(&mut rng, -60.0, 60.0).into()),
+                transform_end: None,
+            });
+        }
+        (commit(b, nodes), inner)
+    };
+    let (auto, auto_inner) = field(NodeFormatChoice::Auto);
+    let (wide, _) = field(NodeFormatChoice::Wide);
+
+    // The prototype is small: f32 nodes, no quantised bytes.
+    let fi = auto_inner.memory_footprint();
+    assert!(fi.bvh_nodes > 0 && fi.bvh_nodes_quantised == 0, "{fi:?}");
+    // The top level is large: quantised; the footprint counts the shared
+    // prototype once, so both rows are non-zero.
+    let fa = auto.memory_footprint();
+    assert!(fa.bvh_nodes_quantised > 0 && fa.bvh_nodes > 0, "{fa:?}");
+    let fw = wide.memory_footprint();
+    assert_eq!(fw.bvh_nodes_quantised, 0);
+
+    let mut rng = Rng::new(0xA070);
+    let rays: Vec<Ray> = (0..4000)
+        .map(|_| Ray::new(vec3(&mut rng, -70.0, 70.0), dir(&mut rng)))
+        .collect();
+    assert_formats_agree(&wide, &auto, &rays);
+}
+
+/// Under `Auto` a scene below the threshold commits exactly the `f32` tree.
+#[test]
+fn auto_keeps_small_trees_on_the_f32_node() {
+    let mut b = SceneBuilder::new();
+    let (v, t) = grid(32);
+    b.attach(mesh(v, t));
+    let fp = b.commit().memory_footprint();
+    assert!(fp.bvh_nodes > 0 && fp.bvh_nodes_quantised == 0, "{fp:?}");
+}

@@ -57,8 +57,8 @@ pub enum PacketLayout {
 /// tree. Both answer every query identically, up to exact distance ties.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeFormatChoice {
-    /// The kernel chooses by the tree's size. Provisionally this is always
-    /// the `f32` node: no size qualifies until the crossover is measured.
+    /// The kernel chooses by the tree's size: the quantised node for a tree
+    /// of at least 100 000 primitives, the `f32` node below that.
     Auto,
     /// The `f32` node on every tree.
     Wide,
