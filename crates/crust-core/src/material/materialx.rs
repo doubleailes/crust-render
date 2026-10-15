@@ -320,6 +320,23 @@ impl Material for MtlxMaterial {
             })
     }
 
+    /// Any leaf that is not reflection-only: a dielectric or Schlick lobe
+    /// that transmits, subsurface, translucency or hair. A volume-only
+    /// material, or one with no BSDF, answers the safe default.
+    fn transmits(&self) -> bool {
+        use crust_mtlx::{Bsdf, Closure};
+        self.volume_only
+            || self.closures.root.is_none()
+            || self.closures.nodes.iter().any(|node| match node {
+                Closure::Leaf(leaf) => match leaf.bsdf {
+                    Bsdf::Diffuse { .. } | Bsdf::Conductor { .. } | Bsdf::Sheen { .. } => false,
+                    Bsdf::Dielectric { mode, .. } | Bsdf::Schlick { mode, .. } => mode.transmits(),
+                    _ => true,
+                },
+                _ => false,
+            })
+    }
+
     fn is_medium_boundary(&self) -> bool {
         self.volume_only
     }

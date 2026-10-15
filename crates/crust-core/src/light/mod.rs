@@ -9,16 +9,18 @@ mod kind;
 mod list;
 mod rect;
 mod shape;
+mod tree;
 
 pub use area::{AreaLight, AreaShape};
 pub use infinite::{DistantLight, DomeLight, projected_cone_solid_angle};
 pub use kind::LightKind;
-pub use list::{EVERY_CLASS, LightLinks, LightList, LightSelection};
+pub use list::{EVERY_CLASS, LightLinks, LightList, LightSelection, TREE_DEFENSIVE_SHARE};
 pub use rect::RectShape;
 pub use shape::{
-    AffineShape, LightShape, ShapeHits, SolidAngleSampler, SolidAngleSampling, SphereShape,
-    UnitShape,
+    AffineShape, LightShape, ShapeExtent, ShapeHits, SolidAngleSampler, SolidAngleSampling,
+    SphereShape, UnitShape,
 };
+pub use tree::{LightBounds, LightTree, Receiver};
 
 /// One sampled connection from a shading point to a light: where to aim
 /// the shadow ray, how far it must reach, the radiance arriving from that
@@ -136,6 +138,19 @@ pub trait Light: Send + Sync {
     /// The flux is a colour, weighed into one number by `luma`, the working
     /// space's luminance weights ([`LightList::luma`]).
     fn power(&self, luma: utils::Luma) -> Option<f32>;
+
+    /// A conservative bound on where this light emits from and into which
+    /// directions, carrying the flux `phi` (its [`Light::power`], which the
+    /// caller already has): what [`LightSelection::Tree`] ranks lights by.
+    /// `None` (the default) for a light at infinity, which has no position,
+    /// and for one whose `phi` is not finite and positive. Too loose a bound
+    /// costs noise; too tight a one starves the light of samples where it
+    /// does reach, so it must contain every point and direction the light
+    /// emits from and into.
+    fn bounds(&self, phi: f32) -> Option<LightBounds> {
+        let _ = phi;
+        None
+    }
 }
 
 #[cfg(test)]

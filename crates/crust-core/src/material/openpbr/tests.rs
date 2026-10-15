@@ -2060,3 +2060,23 @@ fn a_fuzz_dims_what_passes_through_the_glass_beneath_it() {
         );
     }
 }
+
+/// Light from below the horizon reaches only a surface that transmits:
+/// refraction, or subsurface on a thin wall.
+#[test]
+fn only_transmission_and_thin_walled_subsurface_transmit() {
+    assert!(!OpenPBR::default().transmits());
+    assert!(OpenPBR::glass(1.5).transmits());
+    let thin_sss = OpenPBR {
+        geometry_thin_walled: true,
+        subsurface_weight: 0.5,
+        ..OpenPBR::default()
+    };
+    assert!(thin_sss.transmits());
+    // Volumetric subsurface re-emerges on the side it entered.
+    let sss = OpenPBR {
+        subsurface_weight: 1.0,
+        ..OpenPBR::default()
+    };
+    assert!(!sss.transmits());
+}

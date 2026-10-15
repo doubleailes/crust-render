@@ -9,8 +9,10 @@ use crate::material::Emissive;
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
 use super::rect::RectShape;
-use super::shape::{AffineShape, LightShape, ShapeHits, SolidAngleSampler, SphereShape};
-use super::{FoundAlong, Light, LightSample};
+use super::shape::{
+    AffineShape, LightShape, ShapeExtent, ShapeHits, SolidAngleSampler, SphereShape,
+};
+use super::{FoundAlong, Light, LightBounds, LightSample};
 
 /// The emitting surface of an [`AreaLight`]: one of the crate's
 /// [`LightShape`]s, dispatched by `match` rather than through a
@@ -93,6 +95,9 @@ impl LightShape for AreaShape {
     #[inline]
     fn hits(&self, origin: Vec3A, dir: Vec3A) -> ShapeHits {
         dispatch!(self, s => s.hits(origin, dir))
+    }
+    fn extent(&self) -> ShapeExtent {
+        dispatch!(self, s => s.extent())
     }
 }
 
@@ -289,5 +294,51 @@ impl Light for AreaLight {
                 / points.len() as f32
         };
         Some(luma.of(self.material.flux(self.shape.area(), projected_area)))
+    }
+    /// The shape's box, with the tighter of two direction bounds:
+    /// - the surface's own: a flat one-sided light emits into the hemisphere
+    ///   about its normal (`θo = 0`, `θe = π/2`), a flat two-sided one into
+    ///   both, a curved one anywhere (`θo = π`);
+    /// - its shaping cone, when one is authored: every direction farther
+    ///   than the cone angle `a` from the shaping axis is dark
+    ///   (`Shaping::factor`), whatever the shape, so `θe = min(a, π/2)` and
+    ///   `θo = a − θe` (the split keeps `cos θ'` positive inside the cone).
+    ///
+    /// The second is taken when its spread `a` is below the first's: `π/2`
+    /// one-sided flat, `π` otherwise.
+    fn bounds(&self, phi: f32) -> Option<LightBounds> {
+        if !(phi.is_finite() && phi > 0.0) {
+            return None;
+        }
+        let extent = self.shape.extent();
+        let one_sided = self.material.is_one_sided();
+        let half_pi = 0.5 * std::f32::consts::PI;
+        let (mut w, mut cos_theta_o, mut cos_theta_e, mut two_sided, spread) = match extent.normal {
+            Some(n) if one_sided => (n, 1.0, 0.0, false, half_pi),
+            Some(n) => (n, 1.0, 0.0, true, std::f32::consts::PI),
+            None => (Vec3A::Z, -1.0, 0.0, false, std::f32::consts::PI),
+        };
+        if let Some(shaping) = self.material.shaping() {
+            let a = shaping
+                .cone_angle_deg
+                .to_radians()
+                .clamp(0.0, std::f32::consts::PI);
+            if a < spread {
+                let theta_e = a.min(half_pi);
+                w = shaping.axis();
+                cos_theta_o = (a - theta_e).cos();
+                cos_theta_e = theta_e.cos();
+                two_sided = false;
+            }
+        }
+        Some(LightBounds {
+            min: extent.min,
+            max: extent.max,
+            w,
+            phi,
+            cos_theta_o,
+            cos_theta_e,
+            two_sided,
+        })
     }
 }

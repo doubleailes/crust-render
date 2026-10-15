@@ -251,3 +251,43 @@ fn the_jit_displacement_matches_the_interpreter() {
         );
     }
 }
+
+/// A surface whose only BSDF is `bsdf` (a node named `b`).
+fn surface_of(bsdf: &str) -> String {
+    format!(
+        r#"{bsdf}
+           <surface name="s" type="surfaceshader">
+             <input name="bsdf" type="BSDF" nodename="b" />
+           </surface>
+           <surfacematerial name="m" type="material">
+             <input name="surfaceshader" type="surfaceshader" nodename="s" />
+           </surfacematerial>"#
+    )
+}
+
+/// Only a tree of reflection-only leaves is opaque.
+#[test]
+fn only_reflection_only_leaves_are_opaque() {
+    let transmits = |name: &str, bsdf: &str| {
+        load_inline(name, &surface_of(bsdf))
+            .expect("loads")
+            .material
+            .transmits()
+    };
+    assert!(!transmits(
+        "tx_diffuse",
+        r#"<oren_nayar_diffuse_bsdf name="b" type="BSDF" />"#
+    ));
+    assert!(!transmits(
+        "tx_r",
+        r#"<dielectric_bsdf name="b" type="BSDF"><input name="scatter_mode" type="string" value="R" /></dielectric_bsdf>"#
+    ));
+    assert!(transmits(
+        "tx_t",
+        r#"<dielectric_bsdf name="b" type="BSDF"><input name="scatter_mode" type="string" value="T" /></dielectric_bsdf>"#
+    ));
+    assert!(transmits(
+        "tx_translucent",
+        r#"<translucent_bsdf name="b" type="BSDF" />"#
+    ));
+}

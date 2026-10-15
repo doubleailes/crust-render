@@ -2,11 +2,11 @@
 
 ## 1. Light bounds (`crates/crust-core/src/light/`)
 
-- [ ] 1.1 Add `LightBounds` (box, axis `w`, `cos_theta_o`, `cos_theta_e`,
+- [x] 1.1 Add `LightBounds` (box, axis `w`, `cos_theta_o`, `cos_theta_e`,
       `phi`, `two_sided`) and `Light::bounds() -> Option<LightBounds>`
       (default `None`) (design D2). Verify: `cargo build -p crust-core`, and
       lights at infinity return `None`.
-- [ ] 1.2 Implement `bounds()` for `AreaLight` over every `AreaShape`
+- [x] 1.2 Implement `bounds()` for `AreaLight` over every `AreaShape`
       (rect, sphere, affine sphere/disk/tube; one- and two-sided; shaped by
       `Shaping::axis()` and its cone angle), with `phi = Light::power`.
       Verify with a unit test per shape: 4 096 `sample_point`s lie in the
@@ -15,18 +15,19 @@
 
 ## 2. The tree (`crates/crust-core/src/light/tree.rs`)
 
-- [ ] 2.1 Implement the importance function (design D4): `d²` clamped by
-      the box, `θo` / `θb` / `θe` in cosines, `|n·ω|` with `n = 0` dropping
-      the surface terms, plain `f32`. Verify with unit tests: zero for a node
-      wholly behind a one-sided receiver's horizon and for one whose cone
-      misses the point; non-zero from behind a receiver when `n = 0`;
-      decreasing with distance.
-- [ ] 2.2 Implement the binned SAOH build (D3) over lights with
+- [x] 2.1 Implement the importance function (design D4): `d²` clamped by
+      the box, `θo` / `θb` / `θe` in cosines, the receiver term signed at an
+      opaque receiver and `|n·ω|` otherwise, with no normal dropping the
+      surface terms, plain `f32`. Verify with unit tests: zero for a node
+      wholly below an opaque receiver's horizon and for one whose cone
+      misses the point; non-zero below a transmissive receiver and with no
+      normal; decreasing with distance.
+- [x] 2.2 Implement the binned SAOH build (D3) over lights with
       `bounds().is_some()` and `phi > 0`, with a flat node array, per-light
       bit trails (depth ≤ 64) and deterministic tie-breaks. Verify: building
       twice from the same list gives identical nodes, and a 4 096-light
       random list builds without exceeding depth 64.
-- [ ] 2.3 Implement the pick by monotone warp and the pmf by trail (D6).
+- [x] 2.3 Implement the pick by monotone warp and the pmf by trail (D6).
       Verify with unit tests over random `(p, n, u)` on 2, 7, 47 and 1 000
       lights: the pmf of every light sums to 1 within 1e-5; the picked
       light's pmf from the pick equals `pmf` by trail bit for bit; the picked
@@ -35,19 +36,25 @@
 
 ## 3. `tree` as a selection mode, both MIS sides
 
-- [ ] 3.1 Add `LightSelection::Tree` (`"tree"` in `CHOICES` with a one-line
+- [x] 3.1 Add `LightSelection::Tree` (`"tree"` in `CHOICES` with a one-line
       description), parsed from `--light-selection` and
       `crust:lightSelection`. In `select_by(Tree)`, build the tree over the
       power table, or skip it when at most one emitting finite light exists
       (D8). Verify: `names.rs`'s `round_trips` test passes, and
       `crust render --help` lists `tree`.
-- [ ] 3.2 Make `pick_index_at`, `pmf_at`, `find_index_by_geom_at` and
+- [x] 3.2 Make `pick_index_at`, `pmf_at`, `find_index_by_geom_at` and
       `infinite_at` take the receiver's normal, and under `Tree` return the
       D5 mixture `(1 − D) · p_tree + D · p_powerfinite` within the finite
       share, with `D` a named constant (0.25 for now). Verify: a unit test
       that every emitting finite light's pmf is ≥ `D · p_power` at random
       `(p, n)`, including a light wholly behind the receiver.
-- [ ] 3.3 Pass the normal at every call site: surface NEE (`rec.normal`),
+- [x] 3.2b Add `Material::transmits()` (default `true`) and answer `false`
+      for opaque `OpenPBR`, reflection-only MaterialX materials and the
+      subsurface exit's Lambertian (design D4). Verify with unit tests: an
+      `OpenPBR::default()` is opaque, one with `transmission_weight = 1` or
+      thin-walled subsurface is not, and a MaterialX `dielectric_bsdf` in `T`
+      mode is not.
+- [ ] 3.3 Pass the receiver at every call site: surface NEE (`rec.normal`, opaque by `transmits()`),
       volume NEE (zero), the shadow-link twins, `bounce_emission_weight` and
       `escaped_emission`. Add `normal` to `PrevBounce`, set from the same
       value NEE used, and pass zero for `PrevVertex::Phase`. Extend
@@ -64,7 +71,7 @@
       and `RAYON_NUM_THREADS=1` ↔ default bit-identity under `tree`, and
       the light-only / BSDF-only / MIS agreement on a floor lit by sphere
       lights, rect lights and a dome. Verify: the tests pass.
-- [ ] 3.6 Document `tree` as an opt-in mode:
+- [x] 3.6 Document `tree` as an opt-in mode:
       `site/content/docs/reference/command-line.md` (`--light-selection`),
       `site/content/docs/usd/render-settings.md` (`crust:lightSelection`) and
       a "Light tree" section in `openspec/specs/lighting/design.md`

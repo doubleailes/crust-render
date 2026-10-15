@@ -234,7 +234,10 @@ other. The pairs:
   / `crust:lightSamplesIndirect`): NEE both weights with and divides by
   `count · density` (the division is the average over the samples — do not
   divide by the count again), and the bounce side weights with the count
-  `PrevVertex` carries from the vertex it left.
+  `PrevVertex` carries from the vertex it left. Under `tree` the selection
+  reads the receiver's normal and opacity as well as its position, so
+  `PrevBounce` carries the whole `Receiver` NEE picked from; build a receiver
+  anywhere else and the two halves disagree.
 - **Hidden light sources.** A source the camera does not see is invisible to
   shadow rays (`light_ray_mask`) *and* crossed by bounce rays, which collect its
   emission and continue (`World::is_transparent_emitter`, `pass_cutouts`,

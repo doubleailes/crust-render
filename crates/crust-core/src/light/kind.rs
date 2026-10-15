@@ -121,4 +121,8 @@ impl Light for LightKind {
     fn power(&self, luma: utils::Luma) -> Option<f32> {
         dispatch!(self, l => l.power(luma))
     }
+
+    fn bounds(&self, phi: f32) -> Option<super::LightBounds> {
+        dispatch!(self, l => l.bounds(phi))
+    }
 }

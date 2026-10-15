@@ -1,12 +1,12 @@
 //! [`LightList`] and NEE's light selection ([`LightSelection`]): uniform,
-//! defensive power, the learned per-cell table, or the neural visibility
-//! cache.
+//! defensive power, the light tree, the learned per-cell table, or the
+//! neural visibility cache.
 
 use std::collections::HashMap;
 
 use glam::Vec3A;
 
-use super::{Light, LightKind};
+use super::{Light, LightKind, LightTree, Receiver};
 use crate::pdf::PdfSolidAngle;
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_SHADOW, RayMask};
 
@@ -41,6 +41,15 @@ pub enum LightSelection {
     /// experiment against [`LightSelection::Learned`]'s grid
     /// (`docs/light_sampling.md`, "Neural visibility cache").
     Neural,
+    /// By a light BVH (Conty Estevez & Kulla 2018; pbrt-v4's
+    /// `BVHLightSampler`): the finite lights are walked from the shading
+    /// point, each node's children chosen by an importance bound built from
+    /// flux, distance, the lights' emission cones and the receiver's normal
+    /// (see `tree.rs`). Mixed with [`TREE_DEFENSIVE_SHARE`] of the power
+    /// table, so no light falls below that share of its power probability;
+    /// lights at infinity keep their uniform share. Blind to visibility,
+    /// which [`LightSelection::Learned`] sees.
+    Tree,
 }
 
 crate::names::named!(
@@ -63,6 +72,11 @@ crate::names::named!(
             "Visibility-aware: per-region pick distributions learned by a short pre-pass"
         ),
         (
+            LightSelection::Tree,
+            "tree",
+            "By a light BVH: flux, distance, orientation and the receiver's horizon at each shading point, over a defensive share of power"
+        ),
+        (
             LightSelection::Neural,
             "neural",
             "Visibility-aware: power weighted by each light's visibility, as a small network trained by the same pre-pass predicts it (experimental)"
@@ -70,15 +84,43 @@ crate::names::named!(
     ]
 );
 
-/// A learned selection over the power table, consulted by every `*_at`
-/// method of [`LightList`].
+/// A position-dependent selection over the power table, consulted by every
+/// `*_at` method of [`LightList`].
 #[derive(Debug)]
 pub(crate) enum Learned {
     /// [`LightSelection::Learned`]'s per-cell tables.
     Grid(crate::light_cache::LightCache),
     /// [`LightSelection::Neural`]'s network.
     Neural(crate::light_visibility::VisibilityCache),
+    /// [`LightSelection::Tree`]'s light BVH.
+    Tree(TreeSelection),
 }
+
+/// [`LightSelection::Tree`]: the light BVH over the finite lights, and the
+/// shares the non-defensive part of a pick splits into. That part (`q`)
+/// gives each light at infinity `1 / live` and the tree's lights
+/// `finite_share` times the tree's probability, where `live` counts the
+/// lights at infinity and the tree's lights; the pick is
+/// `TREE_DEFENSIVE_SHARE · power + (1 − TREE_DEFENSIVE_SHARE) · q`.
+#[derive(Debug)]
+pub(crate) struct TreeSelection {
+    tree: LightTree,
+    /// The number of lights at infinity plus the number in the tree.
+    live: u32,
+    /// The tree's lights' share of `q`: their count over `live`.
+    finite_share: f32,
+}
+
+/// Under [`LightSelection::Tree`], the share of every pick made by the power
+/// table rather than the tree: what keeps a light the tree's bound rates low
+/// (a bump-mapped normal, a receiver inside a node's box) at no less than
+/// this share of its power probability, so its NEE weight is at most
+/// `1 / TREE_DEFENSIVE_SHARE` times what `power` gives it. Chosen by
+/// measurement (`docs/light_sampling.md` §3.15).
+pub const TREE_DEFENSIVE_SHARE: f32 = 0.25;
+
+/// The largest `f32` below one, where a rescaled pick sample is clamped.
+const ONE_MINUS_EPSILON: f32 = 1.0 - f32::EPSILON / 2.0;
 
 /// Under [`LightSelection::Power`], the share of the finite lights' shadow
 /// rays split evenly among them rather than by power (Hesterberg's
@@ -435,6 +477,40 @@ impl LightList {
                 *c = 1.0;
             }
         }
+        if selection == LightSelection::Tree {
+            self.build_tree(&powers);
+        }
+    }
+
+    /// Installs [`LightSelection::Tree`]'s light BVH over the power table
+    /// [`LightList::select_by`] just built, from each light's power. With at
+    /// most one finite light that emits there is nothing to choose, and the
+    /// power table stays, picking exactly as [`LightSelection::Power`] does.
+    fn build_tree(&mut self, powers: &[Option<f64>]) {
+        let bounded: Vec<(usize, super::LightBounds)> = powers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, p)| {
+                let phi = (*p)? as f32;
+                Some((index, self.lights[index].bounds(phi)?))
+            })
+            .collect();
+        let Some(tree) = LightTree::build(self.lights.len(), &bounded) else {
+            tracing::debug!("light tree: at most one finite light, picking by power");
+            return;
+        };
+        let live = (self.infinite.len() + bounded.len()) as u32;
+        tracing::debug!(
+            "light tree: {} lights, {} nodes, depth {}",
+            bounded.len(),
+            tree.node_count(),
+            tree.depth()
+        );
+        self.cache = Some(std::sync::Arc::new(Learned::Tree(TreeSelection {
+            tree,
+            live,
+            finite_share: bounded.len() as f32 / live as f32,
+        })));
     }
 
     /// Installs a learned selection over the power one (see
@@ -465,9 +541,18 @@ impl LightList {
         match self.cache.as_deref() {
             Some(Learned::Grid(_)) => LightSelection::Learned,
             Some(Learned::Neural(_)) => LightSelection::Neural,
+            Some(Learned::Tree(_)) => LightSelection::Tree,
             None if self.pmf.is_empty() => LightSelection::Uniform,
             None => LightSelection::Power,
         }
+    }
+
+    /// Whether the selection reads a receiver's normal and opacity, not just
+    /// its position ([`LightSelection::Tree`]): the integrator asks the
+    /// material whether it transmits only then.
+    #[inline]
+    pub fn reads_receiver_surface(&self) -> bool {
+        matches!(self.cache.as_deref(), Some(Learned::Tree(_)))
     }
 
     /// The probability [`LightList::pick`] chooses light `index`.
@@ -530,10 +615,11 @@ impl LightList {
         Some((index, self.pmf(index)))
     }
 
-    /// [`LightList::pick`] for a vertex at `p`, as an index into
-    /// [`LightList::lights`]: under a learned selection, from the distribution
-    /// of the cell holding `p`, or the network's at `p`; otherwise exactly
-    /// `pick_index`.
+    /// [`LightList::pick`] for a receiver `r` (a position, or a position with
+    /// a surface), as an index into [`LightList::lights`]: under a learned
+    /// selection, from the distribution of the cell holding its position, or
+    /// the network's there; under the tree, by walking it from `r`; otherwise
+    /// exactly `pick_index`.
     ///
     /// Forced inline: it sits on every NEE pick, and LLVM's own threshold
     /// outlined it once `trace_path` grew by a few instructions elsewhere,
@@ -541,15 +627,64 @@ impl LightList {
     /// The neural arm stays out of line, so the other selections' code is
     /// what it was.
     #[inline(always)]
-    pub fn pick_index_at(&self, p: Vec3A, u: f32) -> Option<(usize, f32)> {
+    pub fn pick_index_at(&self, r: impl Into<Receiver>, u: f32) -> Option<(usize, f32)> {
+        let r = r.into();
         match self.cache.as_deref() {
             None => self.pick_index(u),
-            Some(Learned::Grid(c)) => match c.lookup(p) {
+            Some(Learned::Grid(c)) => match c.lookup(r.p) {
                 Some((pmf, cdf)) => Some(self.pick_from(pmf, cdf, u)),
                 None => self.pick_index(u),
             },
-            Some(Learned::Neural(c)) => self.pick_index_neural(c, p, u),
+            Some(Learned::Neural(c)) => self.pick_index_neural(c, r.p, u),
+            Some(Learned::Tree(t)) => self.pick_index_tree(t, &r, u),
         }
+    }
+
+    /// [`LightList::pick_index_at`]'s tree arm, out of line so the other
+    /// selections' code is what it was. The first [`TREE_DEFENSIVE_SHARE`] of
+    /// `u` picks by the power table; the rest picks from `q` (see
+    /// [`TreeSelection`]): its first `n_inf / live` the lights at infinity,
+    /// uniformly in list order, and the remainder the tree, walked from `r`.
+    /// Each part is a monotone map of its slice of `u`. The probability
+    /// returned is [`LightList::pmf_at`]'s, computed by the same functions.
+    #[inline(never)]
+    fn pick_index_tree(&self, t: &TreeSelection, r: &Receiver, u: f32) -> Option<(usize, f32)> {
+        if u < TREE_DEFENSIVE_SHARE {
+            let (index, _) = self.pick_index((u / TREE_DEFENSIVE_SHARE).min(ONE_MINUS_EPSILON))?;
+            return Some((index, self.pmf_tree(t, r, index)));
+        }
+        let u = ((u - TREE_DEFENSIVE_SHARE) / (1.0 - TREE_DEFENSIVE_SHARE)).min(ONE_MINUS_EPSILON);
+        let k = u * t.live as f32;
+        let n_inf = self.infinite.len();
+        if (k as usize) < n_inf {
+            let index = self.infinite[k as usize] as usize;
+            return Some((index, self.tree_mix(index, 1.0 / t.live as f32)));
+        }
+        let n_tree = t.live as usize - n_inf;
+        let u = ((k - n_inf as f32) / n_tree as f32).min(ONE_MINUS_EPSILON);
+        let (index, p_tree) = t.tree.sample(r, u)?;
+        Some((index, self.tree_mix(index, t.finite_share * p_tree)))
+    }
+
+    /// The probability [`LightList::pick_index_tree`] picks light `index` at
+    /// `r`.
+    #[inline(never)]
+    fn pmf_tree(&self, t: &TreeSelection, r: &Receiver, index: usize) -> f32 {
+        let q = if t.tree.contains(index) {
+            t.finite_share * t.tree.pmf(r, index)
+        } else if self.lights[index].at_infinity() {
+            1.0 / t.live as f32
+        } else {
+            0.0
+        };
+        self.tree_mix(index, q)
+    }
+
+    /// Light `index`'s pick probability under the tree, given its `q`: the
+    /// one expression both MIS halves end in.
+    #[inline(always)]
+    fn tree_mix(&self, index: usize, q: f32) -> f32 {
+        TREE_DEFENSIVE_SHARE * self.pmf[index] + (1.0 - TREE_DEFENSIVE_SHARE) * q
     }
 
     /// The first light whose running sum in `cdf` exceeds `u`, with its pmf.
@@ -577,17 +712,19 @@ impl LightList {
         })
     }
 
-    /// The probability [`LightList::pick_index_at`] at `p` picks light `index` —
-    /// what the bounce side weights emission found from a vertex at `p` with.
+    /// The probability [`LightList::pick_index_at`] at `r` picks light `index` —
+    /// what the bounce side weights emission found from a vertex at `r` with.
     #[inline]
-    pub fn pmf_at(&self, p: Vec3A, index: usize) -> f32 {
+    pub fn pmf_at(&self, r: impl Into<Receiver>, index: usize) -> f32 {
+        let r = r.into();
         match self.cache.as_deref() {
             None => self.pmf(index),
-            Some(Learned::Grid(c)) => match c.lookup(p) {
+            Some(Learned::Grid(c)) => match c.lookup(r.p) {
                 Some((pmf, _)) => pmf[index],
                 None => self.pmf(index),
             },
-            Some(Learned::Neural(c)) => self.pmf_at_neural(c, p, index),
+            Some(Learned::Neural(c)) => self.pmf_at_neural(c, r.p, index),
+            Some(Learned::Tree(t)) => self.pmf_tree(t, &r, index),
         }
     }
 
@@ -608,19 +745,24 @@ impl LightList {
     }
 
     /// The light whose scene geometry has world id `geom_id`, as an index into
-    /// [`LightList::lights`], with the pick probability of a vertex at `p`: the
+    /// [`LightList::lights`], with the pick probability of a vertex at `r`: the
     /// bounce-side half of [`LightList::pick_index_at`]. Emissive geometry with
     /// no light-list entry returns `None`.
-    pub fn find_index_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(usize, f32)> {
+    pub fn find_index_by_geom_at(
+        &self,
+        geom_id: u32,
+        r: impl Into<Receiver>,
+    ) -> Option<(usize, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
-        Some((index, self.pmf_at(p, index)))
+        Some((index, self.pmf_at(r, index)))
     }
 
-    /// The lights at infinity with the pick probabilities of a vertex at `p`,
+    /// The lights at infinity with the pick probabilities of a vertex at `r`,
     /// in list order: what an escaping ray needs. A finite light's
     /// [`Light::escaped`] is `None` by contract, so skipping it changes
     /// nothing but the number of virtual calls.
-    pub fn infinite_at(&self, p: Vec3A) -> impl Iterator<Item = (&LightKind, f32)> {
+    pub fn infinite_at(&self, r: impl Into<Receiver>) -> impl Iterator<Item = (&LightKind, f32)> {
+        let r = r.into();
         // Each light's pmf through `pmf_at`, rather than a table looked up
         // once and carried: a table that could hold the network's pmf made
         // the iterator 270 bytes, paid for at every escaping ray (1.2% of the
@@ -629,7 +771,7 @@ impl LightList {
         // fills the memo the others read.
         self.infinite.iter().map(move |&index| {
             let index = index as usize;
-            (&self.lights[index], self.pmf_at(p, index))
+            (&self.lights[index], self.pmf_at(r, index))
         })
     }
 
@@ -637,9 +779,10 @@ impl LightList {
     /// category `mask` sees, with each light's index into [`LightList::lights`].
     pub fn infinite_indexed_seen_by(
         &self,
-        p: Vec3A,
+        r: impl Into<Receiver>,
         mask: RayMask,
     ) -> impl Iterator<Item = (usize, &LightKind, f32)> {
+        let r = r.into();
         // Filtered first, then each survivor's pmf: no zip with
         // `infinite_at`'s iterator, which the compiler stopped inlining once
         // `pmf_at` grew a neural arm (0.9% of the default render's
@@ -651,7 +794,7 @@ impl LightList {
             .filter(move |(_, m)| m.sees(mask))
             .map(move |(&index, _)| {
                 let index = index as usize;
-                (index, &self.lights[index], self.pmf_at(p, index))
+                (index, &self.lights[index], self.pmf_at(r, index))
             })
     }
 

@@ -20,7 +20,7 @@ use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{EVERY_CLASS, Light, LightList, profile};
+use crate::{EVERY_CLASS, Light, LightList, Receiver, profile};
 use openqmc::{Sampler, SamplerImpl};
 
 use super::GuidingContext;
@@ -94,42 +94,39 @@ pub(super) fn stratified_pick(u: f32, count: u32, index: u32) -> f32 {
 const BELOW_ONE: f32 = 1.0 - f32::EPSILON / 2.0;
 
 // Debug builds check that NEE and the bounce side read the light selection
-// at the same position, to the bit. Every `*_at` lookup takes the vertex NEE
-// sampled from, and the bounce side passes `prev.pos`; `learned`'s grid
-// forgave an ulp between the two, a continuous selection (`neural`) would
-// turn one into an MIS mismatch, a silent bias. Today both sides read one
-// binding at every site; this keeps it so.
+// at the same receiver, to the bit. Every `*_at` lookup takes the receiver NEE
+// sampled from — its position, and under `tree` its normal and opacity — and
+// the bounce side passes `prev`'s; `learned`'s grid forgave an ulp between the
+// two, a continuous selection (`neural`, `tree`) would turn one into an MIS
+// mismatch, a silent bias. Today both sides read one binding at every site;
+// this keeps it so.
 #[cfg(debug_assertions)]
 thread_local! {
-    /// The position this thread's NEE last picked a light from, until the
+    /// The receiver this thread's NEE last picked a light from, until the
     /// vertex's bounce side is set up.
-    static NEE_FROM: std::cell::Cell<Option<[u32; 3]>> = const { std::cell::Cell::new(None) };
+    static NEE_FROM: std::cell::Cell<Option<Receiver>> = const { std::cell::Cell::new(None) };
 }
 
-/// Records that NEE picks a light from `p` (debug builds; nothing otherwise).
+/// Records that NEE picks a light from `r` (debug builds; nothing otherwise).
 #[inline(always)]
-fn nee_picks_from(p: Vec3A) {
+fn nee_picks_from(r: Receiver) {
     #[cfg(debug_assertions)]
-    NEE_FROM.with(|c| c.set(Some(p.to_array().map(f32::to_bits))));
+    NEE_FROM.with(|c| c.set(Some(r)));
     #[cfg(not(debug_assertions))]
-    let _ = p;
+    let _ = r;
 }
 
-/// Asserts that the vertex the bounce side weighs from, `pos`, is the one
+/// Asserts that the receiver the bounce side weighs from, `from`, is the one
 /// NEE last picked from, bit for bit, when NEE ran there; `forget` ends the
 /// vertex (debug builds; nothing otherwise).
 #[inline(always)]
-fn bounce_weighs_from(pos: Option<Vec3A>, forget: bool) {
+fn bounce_weighs_from(from: Option<Receiver>, forget: bool) {
     #[cfg(debug_assertions)]
     NEE_FROM.with(|c| {
-        if let (Some(at), Some(pos)) = (c.get(), pos) {
-            let pos = pos.to_array().map(f32::to_bits);
-            debug_assert_eq!(
-                at,
-                pos,
-                "NEE picked from {:?}, the bounce side weighs from {:?}",
-                at.map(f32::from_bits),
-                pos.map(f32::from_bits)
+        if let (Some(at), Some(from)) = (c.get(), from) {
+            debug_assert!(
+                at.same_bits(&from),
+                "NEE picked from {at:?}, the bounce side weighs from {from:?}"
             );
         }
         if forget {
@@ -137,7 +134,7 @@ fn bounce_weighs_from(pos: Option<Vec3A>, forget: bool) {
         }
     });
     #[cfg(not(debug_assertions))]
-    let _ = (pos, forget);
+    let _ = (from, forget);
 }
 
 /// The white Lambertian every random walk exits through.
@@ -593,7 +590,9 @@ impl PathScratch {
 /// `eval` again, which for a textured material is a full network run
 /// answering a question the sample already had.
 pub(super) struct PrevBounce<'a> {
-    pub(super) pos: Vec3A,
+    /// The surface the bounce left, as NEE there picked its lights from:
+    /// position, normal and opacity.
+    pub(super) from: Receiver,
     pub(super) pdf: PdfSolidAngle,
     pub(super) delta: bool,
     /// The light-link class of the surface this bounce left: the receiver
@@ -685,13 +684,18 @@ fn bounce_emission_weight_at(
     // whatever the bounce's lobe: a light that does not illuminate it gives
     // nothing on this side, exactly as NEE there skips it.
     let (from, class, competing, nee_count) = match prev {
-        PrevVertex::Surface(p) => (p.pos, p.class, p.continuous().then_some(p.pdf), p.nee_count),
+        PrevVertex::Surface(p) => (
+            p.from,
+            p.class,
+            p.continuous().then_some(p.pdf),
+            p.nee_count,
+        ),
         PrevVertex::Phase {
             pos,
             pdf,
             class,
             nee_count,
-        } => (*pos, *class, Some(*pdf), *nee_count),
+        } => (Receiver::at(*pos), *class, Some(*pdf), *nee_count),
     };
     // Nothing competes after a delta bounce, and without links nothing can
     // filter it either: skip the light lookup, as before links existed.
@@ -721,7 +725,7 @@ fn bounce_emission_weight_at(
         // No pdf is a point NEE refuses to sample (an edge-on point of
         // an area-sampled light, say): nothing competes for it, exactly
         // as for a light NEE never picks.
-        let Some(point_pdf) = light.pdf_at_point(from, point) else {
+        let Some(point_pdf) = light.pdf_at_point(from.p, point) else {
             return strategy.unopposed_weight();
         };
         let light_pdf = lights.density(point_pdf, pmf, nee_count).max(1e-6);
@@ -772,13 +776,13 @@ pub(super) fn escaped_emission(
     // means NEE could not have found this light, so there is no competing
     // strategy and the emission is taken whole.
     let competing = match prev {
-        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf, p.nee_count)),
+        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.from, p.pdf, p.nee_count)),
         Some(PrevVertex::Phase {
             pos,
             pdf,
             nee_count,
             ..
-        }) => Some((*pos, *pdf, *nee_count)),
+        }) => Some((Receiver::at(*pos), *pdf, *nee_count)),
         // Primary rays, and rays leaving a carried-medium scatter, run no
         // NEE — full weight, exactly as `prev = None` means elsewhere.
         None => None,
@@ -790,7 +794,7 @@ pub(super) fn escaped_emission(
         Some(PrevVertex::Phase { class, .. }) => *class,
         None => EVERY_CLASS,
     };
-    let from = competing.map_or(Vec3A::ZERO, |(p, _, _)| p);
+    let from = competing.map_or(Receiver::at(Vec3A::ZERO), |(r, _, _)| r);
     // The pmf at the vertex the escaping ray left: the one its NEE picked with.
     // Only lights at infinity can answer `escaped`; the rest are skipped.
     for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
@@ -802,7 +806,7 @@ pub(super) fn escaped_emission(
         if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
             continue;
         }
-        let Some((emitted, pdf)) = light.escaped(from, direction) else {
+        let Some((emitted, pdf)) = light.escaped(from.p, direction) else {
             continue;
         };
         let weight = match (competing, pdf) {
@@ -846,13 +850,13 @@ fn escaped_split(
         return;
     }
     let competing = match prev {
-        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf, p.nee_count)),
+        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.from, p.pdf, p.nee_count)),
         Some(PrevVertex::Phase {
             pos,
             pdf,
             nee_count,
             ..
-        }) => Some((*pos, *pdf, *nee_count)),
+        }) => Some((Receiver::at(*pos), *pdf, *nee_count)),
         None => None,
     };
     let class = match prev {
@@ -860,7 +864,7 @@ fn escaped_split(
         Some(PrevVertex::Phase { class, .. }) => *class,
         None => EVERY_CLASS,
     };
-    let from = competing.map_or(Vec3A::ZERO, |(p, _, _)| p);
+    let from = competing.map_or(Receiver::at(Vec3A::ZERO), |(r, _, _)| r);
     for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
         if !lights.illuminates(index, class) {
             continue;
@@ -868,7 +872,7 @@ fn escaped_split(
         if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
             continue;
         }
-        let Some((emitted, pdf)) = light.escaped(from, direction) else {
+        let Some((emitted, pdf)) = light.escaped(from.p, direction) else {
             continue;
         };
         let weight = match (competing, pdf) {
@@ -1977,7 +1981,7 @@ fn collect_crossings(
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
-    from: Vec3A,
+    receiver: Receiver,
     dir: Vec3A,
     bounce_pdf: PdfSolidAngle,
     class: u16,
@@ -1996,6 +2000,7 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     stats: &mut RayStats,
 ) -> (Vec3A, Vec3A) {
     let (mut weighted, mut raw) = (Vec3A::ZERO, Vec3A::ZERO);
+    let from = receiver.p;
     for &index in lights.twinned_lights() {
         let index = index as usize;
         if !lights.illuminates(index, class) {
@@ -2008,8 +2013,8 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         if !escapes && light.at_infinity() {
             continue;
         }
-        bounce_weighs_from(Some(from), false);
-        let pmf = lights.pmf_at(from, index);
+        bounce_weighs_from(Some(receiver), false);
+        let pmf = lights.pmf_at(receiver, index);
         let domain = vertex.new_domain(K_LINK_TWIN).new_domain(index as i32);
         light.found_along(from, dir, |found| {
             // `bounce_emission_weight_at`'s weight, for this point.
@@ -2100,7 +2105,7 @@ fn volume_nee<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         let nee = sampler.new_domain(K_NEE).draw_sample_f32::<4>();
         // As at a surface: a light that does not illuminate this region gives
         // nothing, and its pick probability stays what it was.
-        nee_picks_from(p);
+        nee_picks_from(Receiver::at(p));
         let Some((index, pmf)) = lights.pick_index_at(p, stratified_pick(nee[0], count, i)) else {
             continue;
         };
@@ -2185,6 +2190,7 @@ fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     rec: &HitRecord,
     sp: &ShadingPoint<'_>,
     class_here: u16,
+    opaque_here: bool,
     guiding_here: Option<&GuidingContext<'_>>,
     nee_count: u32,
     exiting: bool,
@@ -2209,11 +2215,12 @@ fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     // closure with two call sites is one LLVM no longer inlines — the pick
     // and the visibility test below each became an out-of-line call per
     // sample, 0.65% of cornellbox's instructions apiece (callgrind, 2 spp).
+    let receiver = Receiver::surface(rec.p, rec.normal, opaque_here);
     if strategy.samples_lights() {
-        nee_picks_from(rec.p);
+        nee_picks_from(receiver);
     }
     if strategy.samples_lights()
-        && let Some((light_index, pmf)) = lights.pick_index_at(rec.p, pick_u)
+        && let Some((light_index, pmf)) = lights.pick_index_at(receiver, pick_u)
         && lights.illuminates(light_index, class_here)
         && let Some(ls) = lights
             .light(light_index)
@@ -2356,6 +2363,7 @@ fn extra_surface_light_samples<S: SamplerImpl, const PROFILE: bool, const MEDIA:
     rec: &HitRecord,
     sp: &ShadingPoint<'_>,
     class_here: u16,
+    opaque_here: bool,
     guiding_here: Option<&GuidingContext<'_>>,
     nee_count: u32,
     exiting: bool,
@@ -2380,6 +2388,7 @@ fn extra_surface_light_samples<S: SamplerImpl, const PROFILE: bool, const MEDIA:
             rec,
             sp,
             class_here,
+            opaque_here,
             guiding_here,
             nee_count,
             exiting,
@@ -2925,7 +2934,7 @@ pub(super) fn trace_path<
                 let phase_pdf = PdfSolidAngle::from_measure(phase_pdf);
                 if TWINS {
                     let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
-                        p,
+                        Receiver::at(p),
                         dir,
                         phase_pdf,
                         class,
@@ -2946,7 +2955,7 @@ pub(super) fn trace_path<
                     vrec.crossed += w;
                     vrec.crossed_raw += raw;
                 }
-                bounce_weighs_from(Some(p), true);
+                bounce_weighs_from(Some(Receiver::at(p)), true);
                 prev = Some(PrevVertex::Phase {
                     pos: p,
                     pdf: phase_pdf,
@@ -3079,7 +3088,7 @@ pub(super) fn trace_path<
                 && TWINS
             {
                 let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
-                    pos,
+                    Receiver::at(pos),
                     dir,
                     phase_pdf,
                     e.class,
@@ -3111,7 +3120,7 @@ pub(super) fn trace_path<
                 .with_mask(crate::ray::MASK_INDIRECT)
                 .with_cone(cone);
             remaining -= 1;
-            bounce_weighs_from(enclosed.is_some().then_some(pos), true);
+            bounce_weighs_from(enclosed.is_some().then_some(Receiver::at(pos)), true);
             prev = enclosed.map(|e| PrevVertex::Phase {
                 pos,
                 pdf: phase_pdf,
@@ -3214,6 +3223,10 @@ pub(super) fn trace_path<
         // The receiver's light-link class, for NEE here and for whatever the
         // bounce leaving this vertex collects.
         let class_here = world.light_class(hit.geom_id);
+        // Whether light from below the horizon can reach this surface: only
+        // a selection that reads the receiver's surface asks, so the others
+        // spend no call on it.
+        let opaque_here = lights.reads_receiver_surface() && !mat.transmits();
         // The material's per-hit work (pattern network, textures), done once
         // for every query at this vertex: the emission here, NEE's `eval`, the
         // scatter, and guiding's `eval` / `make_ray`. Every surface vertex
@@ -3317,6 +3330,7 @@ pub(super) fn trace_path<
             &rec,
             &sp,
             class_here,
+            opaque_here,
             guiding_here,
             nee_count,
             exiting,
@@ -3339,6 +3353,7 @@ pub(super) fn trace_path<
                 &rec,
                 &sp,
                 class_here,
+                opaque_here,
                 guiding_here,
                 nee_count,
                 exiting,
@@ -3491,7 +3506,7 @@ pub(super) fn trace_path<
                 let bounce_pdf = PdfSolidAngle::from_measure(sample.pdf);
                 if TWINS && !sample.delta {
                     let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
-                        rec.p,
+                        Receiver::surface(rec.p, rec.normal, opaque_here),
                         dir,
                         bounce_pdf,
                         class_here,
@@ -3514,9 +3529,10 @@ pub(super) fn trace_path<
                     vrec.crossed += w;
                     vrec.crossed_raw += raw;
                 }
-                bounce_weighs_from(Some(rec.p), true);
+                let receiver = Receiver::surface(rec.p, rec.normal, opaque_here);
+                bounce_weighs_from(Some(receiver), true);
                 prev = Some(PrevVertex::Surface(PrevBounce {
-                    pos: rec.p,
+                    from: receiver,
                     pdf: bounce_pdf,
                     delta: sample.delta,
                     class: class_here,

@@ -79,6 +79,11 @@ pub(crate) trait PatternMaterial: Send + Sync {
         let _ = (r_in, rec);
         1.0
     }
+
+    /// [`Material::transmits`].
+    fn pattern_transmits(&self) -> bool {
+        true
+    }
 }
 
 impl<T: PatternMaterial> Material for T {
@@ -144,6 +149,10 @@ impl<T: PatternMaterial> Material for T {
 
     fn has_straight_transmission(&self) -> bool {
         self.pattern_has_straight_transmission()
+    }
+
+    fn transmits(&self) -> bool {
+        self.pattern_transmits()
     }
 
     fn may_emit(&self) -> bool {

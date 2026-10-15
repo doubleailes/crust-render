@@ -74,6 +74,12 @@ impl Emissive {
         self.color
     }
 
+    /// The directional falloff, when one is authored (a neutral one is
+    /// dropped by [`Emissive::light`]).
+    pub fn shaping(&self) -> Option<&Shaping> {
+        self.shaping.as_deref()
+    }
+
     /// The flux this emission carries off a surface of total `area`, whose
     /// projected area toward a unit direction ω (counting the side ω leaves
     /// from) is `projected_area(ω)`. It weighs lights for power-proportional

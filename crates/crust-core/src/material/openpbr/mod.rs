@@ -834,6 +834,15 @@ impl Material for OpenPBR {
         self.has_straight_lobe()
     }
 
+    /// Transmission, or subsurface on a thin wall (OpenPBR's translucency).
+    /// Every parameter here is a constant: only the base colour is ever
+    /// textured per hit (`shaded`).
+    fn transmits(&self) -> bool {
+        self.transmission_weight > 0.0
+            || (self.geometry_thin_walled && self.subsurface_weight > 0.0)
+            || !self.transmission_weight.is_finite()
+    }
+
     fn opacity(&self, _r_in: &Ray, _rec: &HitRecord) -> f32 {
         if self.geometry_opacity.is_finite() {
             self.geometry_opacity.clamp(0.0, 1.0)

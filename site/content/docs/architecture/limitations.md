@@ -124,6 +124,11 @@ render.
 - **Emissive surfaces aren't sampled as lights.** An emissive MaterialX surface, emissive
   curves, instances or volumes are found only by rays that hit them. Use UsdLux lights for
   a scene's main light sources.
+- **The light tree can't see walls.** `tree` light selection ranks lights by power,
+  distance, orientation and the surface's horizon, not by whether anything is in the way;
+  `learned` is the visibility-aware selection. It treats the receiving surface as diffuse,
+  so a glossy highlight from a dim light is not favoured, and lights at infinity (domes,
+  distant lights) keep a fixed share whatever they contribute.
 - **Light-linking gaps:**
   - A collection target inside an instance prototype can't tell instances apart.
   - `membershipExpression` is refused.

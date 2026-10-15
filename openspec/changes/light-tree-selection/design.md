@@ -117,8 +117,23 @@ threaded. With N ≤ a few thousand it is far below a millisecond.
   inside the box does not divide by a near-zero distance.
 - The angle between the box's direction and `w` is reduced by `θo` and the
   box's subtended angle `θb`. The result is 0 beyond `θe`.
-- `cos θ'_i` is taken against `|n·ω|` reduced by `θb`, so a transmissive
-  receiver still sees lights behind it. When `n` is zero this term is 1.
+- `cos θ'_i` is reduced by `θb`, and how it is taken depends on the
+  receiver. At an **opaque** receiver it is the signed `n·ω`, with `n` facing
+  the side the ray arrived from, so a node wholly below the horizon gets zero.
+  At a receiver whose material may transmit it is `|n·ω|`, pbrt-v4's form, so
+  a transmissive receiver still sees lights behind it. When `n` is zero the
+  term is 1.
+- Which receivers are opaque comes from a new `Material::transmits()`. It is
+  known when the material is built, never per hit, and conservative: the
+  default is `true`. It answers `false` for:
+  - an `OpenPBR` with no transmission weight and no thin-walled subsurface;
+  - a MaterialX material whose every leaf is reflection-only (diffuse,
+    conductor, sheen, or a dielectric/Schlick in `R` mode);
+  - the subsurface exit's Lambertian.
+
+  This was decided during apply. pbrt-v4's `|n·ω|` alone cannot cut the
+  15.1% of ALab's picks that land below the horizon, and a signed form
+  everywhere would starve glass of light from behind.
 - All the trigonometry is in cosines and sines, with no `acos`, as pbrt does.
 - Plain `f32`, no `mul_add`, one `#[inline]` function. Every caller then
   computes the same bits for the same `(p, n, node)`.
@@ -162,13 +177,16 @@ ratios in the same order, so it reproduces the bits NEE got.
 
 ### D7. The normal travels with the vertex
 
-- Every `*_at` lookup takes `n: Vec3A`.
+- Every `*_at` lookup takes a `Receiver { p, n, opaque }` instead of `p`.
+  `From<Vec3A>` gives a receiver with no normal, so the probes and tests that
+  pass a position keep compiling, and that is the volume form.
 - Surface NEE passes `rec.normal`, the interpolated normal from before normal
-  mapping, which every NEE site has.
-- Volume NEE passes `Vec3A::ZERO`.
-- `PrevBounce` gains `normal` and stores the same value.
-  `PrevVertex::Phase` passes zero.
-- `nee_picks_from` / `bounce_weighs_from` compare `(p, n)` bits.
+  mapping, which every NEE site has. It faces the side the ray arrived from
+  (`set_face_normal`). `opaque` is `!mat.transmits()`.
+- Volume NEE passes no normal.
+- `PrevBounce` gains the same `Receiver` in place of `pos`.
+  `PrevVertex::Phase` uses a receiver with no normal.
+- `nee_picks_from` / `bounce_weighs_from` compare the receiver's bits.
 - `learned`, `neural`, `power` and `uniform` ignore `n`, which is how they
   stay bit-identical.
 
