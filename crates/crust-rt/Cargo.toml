@@ -26,10 +26,6 @@ traversal-stats = []
 # than two SSE halves, which is how the nightly workflow's bvh8 job builds it.
 # See docs/simd.md, "BVH8 on nightly".
 bvh8 = []
-# Padding control for the quantised node: pads it to 128 bytes (two aligned
-# cache lines), to tell whether node *bytes* or node *arithmetic* is what a
-# traversal pays for. An experiment knob, not a default.
-bvh8q-pad = []
 # Lets `CRUST_RT_NODES` (`wide` | `quant`) pick the node format of every
 # commit that does not name one, so the kernel's whole test suite can run
 # under each format. Test and diagnostic use only.

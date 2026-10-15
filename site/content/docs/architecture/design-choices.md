@@ -49,7 +49,9 @@ light and fully readable.
 
 **Trade-off.** SIMD stops at 128 bits (SSE2/NEON width). Wider vectors would need
 `std::simd`, which is nightly-only, or `unsafe` intrinsics. An 8-wide BVH was tried on
-nightly behind the `bvh8` feature. There is no GPU path.
+nightly behind the `bvh8` feature. Large trees use 8-wide nodes anyway, on stable: their
+child boxes are stored as bytes and tested as two 4-wide halves (see below). There is no
+GPU path.
 
 ## An Embree-shaped kernel in its own crate
 
@@ -63,7 +65,11 @@ Inside:
 - triangles use a **watertight** intersection test (Woop et al. 2013), so rays can't slip
   through shared edges;
 - the acceleration structure is an **SBVH** with spatial splits (Stich et al. 2009),
-  collapsed into 4-wide nodes tested four boxes at a time;
+  collapsed into 4-wide nodes tested four boxes at a time. A tree of 100 000 primitives or
+  more uses **quantised 8-wide nodes** instead (Ylitie et al. 2017): child boxes stored as
+  bytes on a per-node grid, rounded outward so no hit is lost. They are 40% smaller and
+  measured 7–43% faster on trees too large for the cache, and slower on small ones, so
+  the choice is made per tree (`CRUST_BVH_NODES`);
 - leaf triangles are packed into 4-wide SIMD packets;
 - the build runs in parallel and is **deterministic**: the same scene always produces the
   same tree.

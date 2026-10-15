@@ -1,4 +1,4 @@
-//! The `bvh8q` node: 8 children with bounds quantised to bytes, the node
+//! The quantised 8-wide node: 8 children with bounds quantised to bytes, the node
 //! format of Ylitie et al. (HPG 2017, "Efficient incoherent ray traversal
 //! on GPUs through compressed wide BVHs") that obvhs ships as `CwBvh`.
 //! Stable Rust, safe code: the byte→float conversion is plain `as f32`,
@@ -46,7 +46,6 @@ const NQ_SCALE: f32 = 255.0;
 /// Lane `l`'s internal child is node `child_base + popcount(imask & (2^l -
 /// 1))`; its leaf is `leaves[leaf_base + popcount(leaf_mask & (2^l - 1))]`.
 #[repr(C)]
-#[cfg_attr(feature = "bvh8q-pad", repr(align(128)))]
 pub(super) struct QNode {
     /// Min corner of the node's box (the union of its children).
     p: [f32; 3],

@@ -144,7 +144,7 @@ when this document was first written; see the addendum in §4.)*
 | User geometry | ✅ callbacks | ✅-ish (`Hittable` trait — same idea, idiomatic Rust) |
 | Instancing | ✅ multi-level + arrays | ✅ multi-level `Instance` (nests to any depth), shared local-space BLAS with content dedup; no instance *arrays* |
 | Motion blur | ✅ 2–129 steps, quaternion | ✅⁺ 2-step transform blur (linear matrix lerp) |
-| BVH arity | 4–8 wide, SIMD node tests | ✅⁺ 4-wide SoA nodes, `Vec4` slab tests |
+| BVH arity | 4–8 wide, SIMD node tests | ✅⁺ 4-wide SoA nodes, `Vec4` slab tests; 8-wide quantised nodes on large trees |
 | Build quality tiers | low / medium / high(SBVH) / refit | ✅⁺ medium + SBVH spatial splits (α-gated) |
 | Parallel build | ✅ TBB, many-core | ✅⁺ rayon subtree tasks, deterministic |
 | Two-level structure | ✅ (scene of instances) | ✅⁺ scene of instances sharing BLASes |
@@ -154,7 +154,7 @@ when this document was first written; see the addendum in §4.)*
 | Ray masks | ✅ | ✅⁺ camera/shadow/indirect bits via `crust:rayMask` |
 | Point queries / collision | ✅ | ❌ |
 | ISA dispatch / packets | SSE2→AVX-512, NEON, SYCL GPUs | scalar rays + 4-wide node tests via glam |
-| Memory options | compact/quantized nodes | one wide-node layout |
+| Memory options | compact/quantized nodes | ✅⁺ quantised 8-wide nodes chosen per tree (`CRUST_BVH_NODES`), indexed triangle packets (`CRUST_TRI_PACKETS`) |
 
 The honest performance summary: for the scenes crust targets (a few meshes, up to a
 few hundred thousand triangles), a well-built binary SAH BVH with ordered traversal is

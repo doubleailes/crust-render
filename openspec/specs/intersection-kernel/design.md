@@ -299,6 +299,80 @@ model).
   `scripts/test_simd_matrix.sh -p crust-rt` passes under every codegen, and every
   sample scene renders bit-identically.
 
+## Node formats: the f32 node and the quantised 8-wide node
+
+The BVH has two node formats, chosen per tree at `commit()` (change
+`quantised-bvh8-nodes`):
+
+- the **`f32` node**: four children (eight under the nightly `bvh8` feature), six SoA
+  bound vectors, one `u32` child index per lane, 128 bytes;
+- the **quantised node** (`bvh/lanesq.rs`): eight children whose bounds are bytes on a
+  per-node power-of-two grid (Ylitie et al., HPG 2017; obvhs's `CwBvh` was the reference
+  implementation studied, and no code was taken from it), 76 bytes. Each child's
+  min is floored and its max ceiled, with a one-step correction for rounding in the
+  subtraction, so a quantised box contains the exact one. A lane's child index is
+  derived (`base + popcount`), which needs a node's internal children and its leaf
+  entries to be consecutive; a breadth-first renumbering after the collapse provides
+  that. The slab test is `q * (cell * inv) + (p - o) * inv` on two glam `Vec4` halves,
+  safe stable Rust.
+
+The collapse and the traversal are generic over the node format (`bvh/node.rs`:
+`BuildNode<W>`, `NodeFormat<W>`, the width a const generic), and `Bvh` holds its nodes as an
+enum matched once per tree descent, so the format costs nothing per node: the default
+build's `cornellbox` instruction count moved −0.10 % across the refactor, with
+bit-identical output. A quantised tree is built by collapsing to plain `f32` arrays and
+converting; triangle packets and leaves are shared with the `f32` format, so the two
+answer every query alike (brute-force and render-diff tests pin it; exact distance ties
+between distinct primitives may resolve either way).
+
+**Selection.** `CommitOptions::nodes` (`NodeFormatChoice`) and, in the renderer,
+`CRUST_BVH_NODES` (`auto` | `wide4` | `quant8`). `auto` gives a tree of at least
+`AUTO_QUANT_MIN_REFS` = 100 000 references the quantised node, and a smaller one the `f32`
+node. An instanced scene and the scene placing it choose separately, which is the point:
+a Moana-class top level is large and out of cache, its prototypes often small.
+
+**Measurements** (4-core Xeon @ 2.8 GHz with AVX2/AVX-512, shared VM, 2026-10; both
+formats compiled into one `ray_throughput` binary at `x86-64-v3` and **alternated repeat by
+repeat in one process**, pinned to one core; medians of 6 repeats of 2^18 incoherent
+rays, 40 repeats of 4 096 for the in-cache scenes):
+
+| tree | query | `f32` median | quantised median | change |
+| --- | --- | --- | --- | --- |
+| `tri_spheres` (43 k triangles, in cache) | intersect / occluded | 4.2 / 2.5 ms | 4.5 / 2.5 ms | +5.7 % / +1.6 % |
+| `sphere_grid` (small) | intersect / occluded | 1.8 / 1.1 ms | 2.1 / 1.3 ms | +17 % / +24 % |
+| `instances` (small prototypes) | intersect / occluded | 3.6 / 2.1 ms | 4.3 / 2.2 ms | +18 % / +4.9 % |
+| soup, 50 k triangles | intersect / occluded | 1 297 / 900 ms | 1 078 / 836 ms | −17 % / −7.1 % |
+| soup, 100 k | intersect / occluded | 2 176 / 1 461 ms | 1 658 / 1 155 ms | −24 % / −21 % |
+| soup, 500 k | intersect / occluded | 5 645 / 4 656 ms | 4 205 / 3 826 ms | −26 % / −18 % |
+| soup, 1 M | intersect / occluded | 5 002 / 6 633 ms | 3 981 / 5 062 ms | −20 % / −24 % |
+| soup, 8 M | intersect / occluded | 17 282 / 16 727 ms | 13 474 / 9 477 ms | −22 % / −43 % |
+| 2 M-instance field, `auto` vs all-`f32` | intersect / occluded | 5 564 / 4 533 ms | 4 811 / 3 831 ms | −14 % / −16 % |
+
+Kernel memory falls 9 % on the 8 M soup (1 112 → 1 015 MiB) and 16 % on the field
+(306 → 258 MiB). At baseline x86-64 the in-cache losses are larger (sphere grid
++27 % / +26 %, instances +25 % / +12 %). Hit counts matched in every row, and
+`crust diff` of cornellbox, veach_mis and the stress scene rendered with every tree
+forced to each format reports 0 differing pixels.
+
+Reproduce with `cargo run --release -p crust-rt --example ray_throughput -- --compare`,
+`-- --sweep 0.05,0.1,0.25,0.5,1,2,4,8` and `-- --field 2000000` (`CRUST_SWEEP_REPEATS`
+sets the repeats), under `taskset -c 1` and `RUSTFLAGS='-C target-cpu=x86-64-v3'`.
+
+**Why in-cache trees lose and large ones win.** The quantised test converts sixteen
+bytes per axis pair to `f32` before the same min/max work, so where node bytes are
+cheap (in cache) it is pure overhead; where a node visit is a cache miss, a node of 76
+bytes instead of 128, eight children per visit and 9–16 % less kernel memory pay for it
+several times over. The crossover sits near 50 k references; 100 k leaves a margin.
+
+**Earlier measurements, and why they disagreed.** The first A/Bs built the format as a
+compile-time feature and so compared separate processes, run one after the other or
+concurrently on separate cores. They were dominated by drift and bandwidth contention:
+closest-hit on the 8 M soup moved between −2 % and −25 % from round to round, and a
+128-byte padded control (a `bvh8q-pad` feature, since removed) gave back part of the gain in
+some rounds and none in others. Alternating inside one process removed the spread. The
+lesson matches the one in `CLAUDE.md`: compare two variants within the same seconds,
+and when the variants are compile-time, make them runtime first.
+
 ## Known gaps: geometry and acceleration
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*
@@ -356,8 +430,9 @@ model).
   visits −38%, latency-bound at ~140 ns a node), while a 2 M-instance field is 5–9%
   slower because most of its time is in small prototype trees that fit in cache.
   8-wide nodes cost 0.4–3% more kernel memory. So the width wants choosing *per tree
-  by size* at `commit()`, which needs both widths compiled in rather than a `cfg`; that
-  is a refactor, not a toolchain question, and crust stays on stable. The feature is
+  by size* at `commit()`; that is now done, on stable, with the *quantised* 8-wide node
+  rather than the `f32` one ("Node formats" above), which wins out of cache without
+  the 256-byte node. The feature is
   kept as the record and a starting point, and the parallel nightly workflow
   (`.github/workflows/nightly.yml`) lints and tests it on a pinned and the latest
   nightly, at `x86-64-v3` where an `f32x8` is one AVX register (`docs/simd.md`, "BVH8

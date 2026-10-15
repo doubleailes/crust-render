@@ -442,7 +442,7 @@ experiment's record and as a starting point: the literature's BVH8 wins
 bounds, so an 8-wide node fits the bytes a 4-wide one does) and from
 cheaper lane ordering, neither of which is a `std::simd` question. Revisit
 with those, and on a traversal-bound workload, before revisiting the
-toolchain. The parallel nightly workflow (`.github/workflows/nightly.yml`)
+toolchain. (Since done for the compressed half: see "Not done" below.) The parallel nightly workflow (`.github/workflows/nightly.yml`)
 lints and tests the feature, and checks the renderer with it forwarded, on
 a pinned nightly (a failure there is this code's) and on the latest one
 (allowed to fail), so the experiment keeps compiling. That job builds at
@@ -454,25 +454,25 @@ shipped binary stay baseline x86-64.
 
 ## Not done
 
-- **BVH8 (8-wide) nodes, done right.** A straightforward `f32x8` BVH8 now
-  exists behind the nightly `bvh8` feature and is 12–37% *slower* in the
-  kernel (see "BVH8 on nightly" above). What is not done is the version that
-  could win: compressed/quantised 8-wide nodes. Note `Tri8` packets are
-  ruled out by the occupancy data above — this is about nodes only.
+- **BVH8 (8-wide) nodes, done right** — *since done.* The version that wins is
+  the compressed one: 8-wide nodes with byte-quantised child bounds (Ylitie et al.
+  2017), 76 bytes, tested as two `Vec4` halves on stable, so none of the options
+  below were needed. Both formats are compiled in and chosen per tree at
+  `commit()` (`CRUST_BVH_NODES`, `auto` from 100 000 references); out of cache
+  the quantised node is 7–43% faster than the `f32` BVH4, in cache up to 27%
+  slower. Measurements and method: `openspec/specs/intersection-kernel/design.md`,
+  "Node formats". The note below is kept for the `f32x8` route.
 
-  Re-measure before starting. The traversal counters previously said node
-  visits were the cost and pointed at widening (or compressing) the node — but
-  a large share of those visits should never have happened: every imported mesh
-  was wrapped in an instance whether or not its geometry was shared, so a ray
-  paid a transform and a cold descent into a second tree per mesh. Baking
-  single-placement meshes flat took cornellbox from 3.85 instance descents per
-  camera ray to 0.13. Widening the node would have optimised traversal that no
-  longer occurs. The general lesson: confirm the work is *necessary* before
-  making it faster.
+  Note `Tri8` packets are ruled out by the occupancy data above: this was about
+  nodes only. Re-measure before going further. The traversal counters
+  previously said node visits were the cost, but a large share of those visits
+  should never have happened: every imported mesh was wrapped in an instance
+  whether or not its geometry was shared. Baking single-placement meshes flat
+  took cornellbox from 3.85 instance descents per camera ray to 0.13. The
+  general lesson: confirm the work is *necessary* before making it faster.
 
-  It is not just a matter of writing the 8-wide slab test, because the width
-  has to be *reachable at runtime*. The options, in the terms the article
-  lays out:
+  Reaching 256-bit vectors at runtime (rather than compressing the node) still
+  has these options:
 
   | approach | 256-bit at runtime? | cost |
   | --- | --- | --- |
@@ -481,12 +481,8 @@ shipped binary stay baseline x86-64.
   | `multiversion` | yes | +1 dep, keeps call sites safe |
   | `-C target-cpu=native` | yes | binary not distributable |
 
-  The middle option is the article's recommendation (stable, zero
-  dependencies) but it conflicts with a stated property of this crate:
-  `crust-rt`'s own docs say the implementation "stays 100% safe Rust", and
-  `CLAUDE.md` describes the project as written in safe Rust. Widening the
-  nodes is therefore a *project* decision about safety and dependencies, not
-  just an optimization, and is left for whoever owns that call.
+  The middle option conflicts with `crust-rt`'s "100% safe Rust", so it stays a
+  *project* decision about safety and dependencies.
 - **`-C target-cpu`.** Not set, so the shipped binary stays baseline
   x86-64. Measured above at 2–4% on the current 4-lane code; not a portable
   default.

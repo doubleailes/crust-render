@@ -73,6 +73,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_ADAPTIVE_PER_FACE`](#crust-adaptive-per-face) | on | USD import |
 | [`CRUST_ADAPTIVE_FRUSTUM`](#crust-adaptive-frustum) | on | USD import |
 | [`CRUST_TRI_PACKETS`](#crust-tri-packets) | `auto` | ray tracing |
+| [`CRUST_BVH_NODES`](#crust-bvh-nodes) | `auto` | ray tracing |
 | [`CRUST_MTLX_OPT`](#crust-mtlx-opt) | on | shading |
 | [`CRUST_SHADER_JIT`](#crust-shader-jit) | on | shading |
 | [`CRUST_RAY_CONES`](#crust-ray-cones) | on | textures |
@@ -205,6 +206,22 @@ bit-identical results.
 | `indexed` | 92-byte packets of vertex indices. About a quarter less kernel memory per triangle, with 13–30% slower traversal. On the Moana island at subdivision level 1 it saves 8.4 GiB of 36.6 for an 8–9% slower render, and the import gets slightly faster. |
 
 Use `indexed` when a scene doesn't otherwise fit in memory.
+
+### CRUST_BVH_NODES
+
+Keyword, default **`auto`**.
+
+The node format of the ray tracing kernel's acceleration structures. Every format
+finds the same hits, and renders are identical.
+
+| value | meaning |
+|-------|---------|
+| `auto` | per tree: `quant8` for a tree of 100 000 primitives or more, `wide4` below |
+| `wide4` | 4-wide nodes with exact `f32` boxes, 128 bytes. Fastest on trees that fit in the CPU cache. The format used before `quant8` existed. |
+| `quant8` | 8-wide nodes whose child boxes are stored as bytes, rounded outward, 76 bytes. Measured 7–43% faster than `wide4` on trees from 50 000 to 8 million triangles, up to 27% slower on small trees, and about 9–16% less kernel memory on large scenes. |
+
+`--stats` reports the bytes of each format under kernel memory (`BVH nodes` and
+`BVH nodes (quantised)`).
 
 ## Shading
 

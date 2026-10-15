@@ -588,12 +588,11 @@ fn bounds_cover_all_prims() {
     assert!(bbox.maximum.cmpge(Vec3A::splat(6.5)).all());
 }
 
-/// The `bvh8q` node: one cache line plus change, against the `f32`
+/// The quantised node: one cache line plus change, against the `f32`
 /// 8-wide node's four.
 #[test]
 fn quantised_node_is_76_bytes() {
-    let want = if cfg!(feature = "bvh8q-pad") { 128 } else { 76 };
-    assert_eq!(std::mem::size_of::<QNode>(), want);
+    assert_eq!(std::mem::size_of::<QNode>(), 76);
 }
 
 /// Quantisation rounds outward: every lane's dequantised box contains the
