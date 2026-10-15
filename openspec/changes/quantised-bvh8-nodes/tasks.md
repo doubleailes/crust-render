@@ -138,6 +138,13 @@
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast`, `cargo deny --locked check`, and the
       nightly `bvh8` job. Verify all pass.
+      *Run at `937e68d`:* `cargo fmt --check` and workspace `clippy -D warnings` clean;
+      `cargo test --workspace --no-fail-fast` 2 113 passed, 5 ignored, 1 failed. The failure,
+      `the_desktop_bundle_manifest_matches_the_server`, is pre-existing on `main`
+      (`84b6677` bumped the crates to 0.8.0 but `packaging/mcpb/manifest.json` still says
+      0.7.0) and is untouched by this change. The nightly `bvh8` tests pass at `x86-64-v3`
+      (76 + 81 + 1). **Not run:** `cargo deny` (not installed here) and nightly clippy (the
+      pinned nightly has no clippy component here).
 - [x] 7.4 Remove the `bvh8q` cargo feature and its `bvh8q-pad` control once the runtime
       selection lands, since the format is then always compiled in. Verify
       `cargo build` with each remaining feature.
