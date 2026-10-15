@@ -63,14 +63,33 @@ macro_rules! tstat {
 
 mod build;
 mod collapse;
-#[cfg(not(feature = "bvh8"))]
+#[cfg(all(feature = "bvh8", feature = "bvh8q"))]
+compile_error!("`bvh8` (f32 nodes) and `bvh8q` (quantised nodes) are alternatives; pick one");
+#[cfg(not(any(feature = "bvh8", feature = "bvh8q")))]
 mod lanes4;
 #[cfg(feature = "bvh8")]
 mod lanes8;
-#[cfg(not(feature = "bvh8"))]
+#[cfg(feature = "bvh8q")]
+mod lanesq;
+#[cfg(not(any(feature = "bvh8", feature = "bvh8q")))]
 use lanes4::{LANES, Lanes, RaySlab, splat};
 #[cfg(feature = "bvh8")]
 use lanes8::{LANES, Lanes, RaySlab, splat};
+#[cfg(feature = "bvh8q")]
+use lanesq::{LANES, Lanes, QNode, RaySlab, finish, splat};
+
+/// The node type traversal walks: the build's [`WideNode`], or under
+/// `bvh8q` its quantised conversion.
+#[cfg(not(feature = "bvh8q"))]
+type TravNode = WideNode;
+#[cfg(feature = "bvh8q")]
+type TravNode = QNode;
+
+/// Identity: only `bvh8q` converts the collapse output.
+#[cfg(not(feature = "bvh8q"))]
+fn finish(wide: Vec<WideNode>, leaves: Vec<Leaf>) -> (Vec<WideNode>, Vec<Leaf>) {
+    (wide, leaves)
+}
 
 /// Leaves are forced at this depth so the traversal stack can never
 /// overflow; SAH partitions are otherwise free to be arbitrarily uneven.
@@ -176,6 +195,7 @@ struct WideNode {
 /// A leaf's payload: the 4-wide triangle packets to run, plus the leftover
 /// primitives (spheres, curves, instances, and the triangles that did not
 /// fill a packet's worth) that still go one at a time.
+#[derive(Clone, Copy)]
 struct Leaf {
     /// Range in the BVH's `packets`.
     pkt_first: u32,
@@ -213,6 +233,12 @@ impl WideNode {
     #[inline]
     fn is_leaf(&self, lane: usize) -> bool {
         self.flags & (1 << (LEAF_SHIFT + lane as u32)) != 0
+    }
+
+    #[cfg(not(feature = "bvh8q"))]
+    #[inline]
+    fn child_at(&self, lane: usize) -> u32 {
+        self.child[lane]
     }
 
     fn mark_leaf(&mut self, lane: usize) {
@@ -381,7 +407,7 @@ impl Primitives {
 /// a box can neither grow nor hold capacity slack the memory footprint would
 /// have to count.
 pub(crate) struct Bvh {
-    wide: Box<[WideNode]>,
+    wide: Box<[TravNode]>,
     /// Leaf payloads, indexed by a leaf lane's `child`.
     leaves: Box<[Leaf]>,
     /// 4-wide triangle packets, grouped per leaf; one of the two tables
@@ -483,7 +509,7 @@ impl Bvh {
             .filter_map(|i| input.bbox(i).map(|bbox| PrimRef::new(bbox, i)))
             .collect();
 
-        let (wide, collected, root_bbox) = if refs.is_empty() {
+        let (wide, mut collected, root_bbox) = if refs.is_empty() {
             (Vec::new(), LeafData::default(), None)
         } else {
             let root_bbox = union_all(&refs);
@@ -492,10 +518,11 @@ impl Bvh {
             (wide, collected, Some(root_bbox))
         };
 
+        let (wide, leaves) = finish(wide, std::mem::take(&mut collected.leaves));
         let n_degenerate = input.tris.iter().filter(|r| r.is_degenerate()).count();
         Bvh {
             wide: wide.into_boxed_slice(),
-            leaves: collected.leaves.into_boxed_slice(),
+            leaves: leaves.into_boxed_slice(),
             packets: collected.packets.into_boxed_slice(),
             packets_i: collected.packets_i.into_boxed_slice(),
             layout,
@@ -930,7 +957,7 @@ impl Bvh {
             for &(_, l) in &order[..n_hit] {
                 if node.is_leaf(l)
                     && let Some(hit) =
-                        self.intersect_leaf(node.child[l], ray, shear.as_ref(), t_min, closest)
+                        self.intersect_leaf(node.child_at(l), ray, shear.as_ref(), t_min, closest)
                 {
                     closest = hit.t();
                     best = Some(hit);
@@ -939,7 +966,7 @@ impl Bvh {
             for i in (0..n_hit).rev() {
                 let l = order[i].1;
                 if !node.is_leaf(l) {
-                    stack.push(node.child[l]);
+                    stack.push(node.child_at(l));
                 }
             }
         }
@@ -1074,11 +1101,11 @@ impl Bvh {
                 let l = mask.trailing_zeros() as usize;
                 mask &= mask - 1;
                 if node.is_leaf(l) {
-                    if self.occlude_leaf(node.child[l], ray, shear.as_ref(), t_min, t_max) {
+                    if self.occlude_leaf(node.child_at(l), ray, shear.as_ref(), t_min, t_max) {
                         return true;
                     }
                 } else {
-                    stack.push(node.child[l]);
+                    stack.push(node.child_at(l));
                 }
             }
         }

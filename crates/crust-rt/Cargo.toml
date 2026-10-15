@@ -26,6 +26,10 @@ traversal-stats = []
 # than two SSE halves, which is how the nightly workflow's bvh8 job builds it.
 # See docs/simd.md, "BVH8 on nightly".
 bvh8 = []
+# 8-wide BVH nodes with child bounds quantised to bytes (Ylitie et al. 2017;
+# obvhs's `CwBvh`), on stable. Prototype: the f32 8-wide build converted at
+# commit, to A/B quantisation against `bvh8` alone. Exclusive with `bvh8`.
+bvh8q = []
 
 [dependencies]
 glam.workspace = true

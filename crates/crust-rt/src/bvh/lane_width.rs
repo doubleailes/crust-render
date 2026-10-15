@@ -4,7 +4,7 @@ use crate::ray::MASK_ALL;
 
 use super::*;
 
-fn uv_sphere_prims(segs: usize, rings: usize) -> Primitives {
+pub(super) fn uv_sphere_prims(segs: usize, rings: usize) -> Primitives {
     let mut v = Vec::new();
     for r in 0..=rings {
         let phi = (r as f32 / rings as f32) * std::f32::consts::PI;

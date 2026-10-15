@@ -381,7 +381,7 @@ fn hit_any_matches_hit() {
 /// was moved into a side table precisely so the node still fits two
 /// cache lines. Growing it would silently cost traversal bandwidth.
 #[test]
-#[cfg(not(feature = "bvh8"))]
+#[cfg(not(any(feature = "bvh8", feature = "bvh8q")))]
 fn wide_node_is_two_cache_lines() {
     assert_eq!(std::mem::size_of::<WideNode>(), 128);
     assert_eq!(std::mem::align_of::<WideNode>(), 16);
@@ -453,6 +453,15 @@ fn build_is_deterministic() {
         assert_eq!((x.pkt_first, x.pkt_count), (y.pkt_first, y.pkt_count));
         assert_eq!((x.idx_first, x.idx_count), (y.idx_first, y.idx_count));
     }
+    #[cfg(feature = "bvh8q")]
+    for (x, y) in a.wide.iter().zip(&b.wide) {
+        assert_eq!(x.valid_mask(), y.valid_mask());
+        for l in 0..LANES {
+            assert_eq!(x.child_box(l), y.child_box(l));
+            assert_eq!(x.child_at(l), y.child_at(l));
+        }
+    }
+    #[cfg(not(feature = "bvh8q"))]
     for (x, y) in a.wide.iter().zip(&b.wide) {
         assert_eq!(x.child, y.child);
         assert_eq!(x.flags, y.flags);
@@ -522,4 +531,63 @@ fn bounds_cover_all_prims() {
     let bbox = bvh.bounds().expect("grid is fully bounded");
     assert!(bbox.minimum.cmple(Vec3A::splat(-0.5)).all());
     assert!(bbox.maximum.cmpge(Vec3A::splat(6.5)).all());
+}
+
+/// The `bvh8q` node: one cache line plus change, against the `f32`
+/// 8-wide node's four.
+#[test]
+#[cfg(feature = "bvh8q")]
+fn quantised_node_is_76_bytes() {
+    assert_eq!(std::mem::size_of::<QNode>(), 76);
+}
+
+/// Quantisation rounds outward: every lane's dequantised box contains the
+/// exact box of the child it stands for (the conservativeness that keeps
+/// hits exact), and the breadth-first renumbering keeps every lane pointing
+/// at the same child it did before.
+#[test]
+#[cfg(feature = "bvh8q")]
+fn quantised_boxes_contain_the_exact_ones() {
+    use crate::bvh::lanesq::finish;
+    let prims = super::lane_width::uv_sphere_prims(80, 40);
+    let refs: Vec<PrimRef> = (0..prims.len() as u32)
+        .filter_map(|i| prims.bbox(i).map(|b| PrimRef::new(b, i)))
+        .collect();
+    let root = union_all(&refs);
+    let sub = build_subtree(&prims, refs, 0, surface_area(&root));
+    let (wide, data) = collapse(&sub.nodes, &sub.indices, &prims, Layout::Gathered);
+    // The build is deterministic, so a second collapse is the same tree,
+    // and `finish` can consume it while the first stays for comparison.
+    let (wide2, data2) = collapse(&sub.nodes, &sub.indices, &prims, Layout::Gathered);
+    let n_leaves = data.leaves.len();
+    let (q, leaves) = finish(wide2, data2.leaves);
+    assert_eq!(q.len(), wide.len());
+    assert_eq!(leaves.len(), n_leaves);
+    // Walk both trees in lock step from the roots.
+    let mut stack = vec![(0usize, 0usize)];
+    while let Some((o, n)) = stack.pop() {
+        let (w, qn) = (&wide[o], &q[n]);
+        assert_eq!(w.flags & VALID_MASK, qn.valid_mask() as u32);
+        for l in 0..LANES {
+            if w.flags & (1 << l) == 0 {
+                continue;
+            }
+            let (lo, hi) = qn.child_box(l);
+            let exact_lo = [w.bmin_x[l], w.bmin_y[l], w.bmin_z[l]];
+            let exact_hi = [w.bmax_x[l], w.bmax_y[l], w.bmax_z[l]];
+            for a in 0..3 {
+                assert!(lo[a] <= exact_lo[a], "min axis {a}: {} > {}", lo[a], exact_lo[a]);
+                assert!(hi[a] >= exact_hi[a], "max axis {a}: {} < {}", hi[a], exact_hi[a]);
+            }
+            assert_eq!(w.is_leaf(l), qn.is_leaf(l));
+            if w.is_leaf(l) {
+                let a = &data.leaves[w.child[l] as usize];
+                let b = &leaves[qn.child_at(l) as usize];
+                assert_eq!((a.pkt_first, a.pkt_count), (b.pkt_first, b.pkt_count));
+                assert_eq!((a.idx_first, a.idx_count), (b.idx_first, b.idx_count));
+            } else {
+                stack.push((w.child[l] as usize, qn.child_at(l) as usize));
+            }
+        }
+    }
 }
