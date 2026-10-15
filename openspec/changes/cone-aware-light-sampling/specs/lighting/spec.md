@@ -2,12 +2,11 @@
 
 ### Requirement: Rect lights can be sampled within their cone
 
-With `CRUST_CONE_CLIP = on`, a rect light SHALL be sampled only within the bounding
-square of its cutoff circle when all of these hold: its shaping cone angle is below
-90°, its shaping axis is its normal, and the shading point is in front of it. The
-cutoff circle is the region of the light's plane that emits toward the point. A
-point that sees none of the light SHALL draw no light sample. `off`, the default,
-SHALL leave sampling unchanged.
+By default (`CRUST_CONE_CLIP = on`), a rect light SHALL be sampled only within the
+bounding square of its cutoff circle when its shaping cone is below 90°, its shaping
+axis is its normal, and the shading point is in front of it. The cutoff circle is the
+region of the light's plane that emits toward the point. A point that sees none of the
+light SHALL draw no light sample. `off` SHALL restore the unclipped sampling.
 
 #### Scenario: Cone-clipped rect sampling is unbiased
 
@@ -26,6 +25,12 @@ SHALL leave sampling unchanged.
 - **WHEN** a shaped rect light is sampled with `CRUST_CONE_CLIP = on` from a point
   whose cutoff square misses the rect
 - **THEN** no light sample and no shadow ray is drawn for that light
+
+#### Scenario: The clip off restores the previous sampling
+
+- **WHEN** a stage with a shaped rect light is rendered at 16 spp with
+  `CRUST_CONE_CLIP = off`
+- **THEN** the image is bit-identical to the same render before this requirement
 
 #### Scenario: Unclipped lights are unchanged
 

@@ -11,7 +11,7 @@ use crate::ray::TRACE_T_MIN;
 
 use super::cone::ConeCut;
 use super::ellipse::SphericalEllipse;
-use super::polar::{PolarView, RoundDisk};
+use super::polar::RoundDisk;
 use super::rect::{RectShape, SphericalRect};
 
 /// The emitting surface of an area light, decoupled from any material: pure
@@ -175,28 +175,19 @@ enum Strategy<'a> {
         from_local: Vec3A,
         cone: SubtendedCone,
     },
-    /// No point of the light emits toward the shading point: a shaped light
-    /// whose cone's cutoff square misses it. Nothing is sampled, and no
-    /// density answered.
-    Nothing,
-    /// A rectangle, uniform over the spherical rectangle it subtends, or over
-    /// that of its part inside a cone's cutoff square.
+    /// A rectangle, uniform over the spherical rectangle it subtends.
     Rect {
         shape: &'a RectShape,
         rect: SphericalRect,
     },
+    /// The cone-aware strategies, behind one arm.
+    Cut(Cut<'a>),
     /// A disk under an affine placement: the unit disk's spherical ellipse
     /// in local space, mapped out.
     Ellipse {
         shape: &'a AffineShape,
         from_local: Vec3A,
         ellipse: SphericalEllipse,
-    },
-    /// A round disk in polar coordinates about the shading point's foot on its
-    /// plane (`light/polar.rs`).
-    Polar {
-        shape: &'a AffineShape,
-        view: PolarView,
     },
     /// A one-sided tube seen from outside: the azimuth uniform over the arc
     /// of wall that faces `from`, `|φ − φ₀| < half_arc` in local space, and
@@ -205,6 +196,70 @@ enum Strategy<'a> {
         shape: &'a AffineShape,
         view: TubeView,
     },
+}
+
+/// What a cone-aware strategy makes of a light from one shading point, as
+/// its out-of-line decision answers it: nothing in it but the answer, in a
+/// register.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// The light's usual strategy: the clip does not apply from here, or holds
+    /// the whole light; for the polar disk, area sampling.
+    Whole,
+    /// Nothing to sample: the cutoff circle misses the light.
+    Nothing,
+    /// The cone-aware strategy.
+    Part,
+    /// Area sampling of the whole light (a clipped part too large for the
+    /// spherical-rectangle map).
+    Area,
+}
+
+/// The cone-aware strategies (the lighting design record, "Cone-aware
+/// sampling"), and the polar disk's, which follows the focus.
+///
+/// They hold only the shape and the shading point, the types the other
+/// strategies hold, and rebuild their clip or view inside their out-of-line
+/// `sample` and `pdf`. Holding the clipped rectangle or the polar view (f64s)
+/// here, and handing it out of line, kept the whole sampler in memory, the
+/// sphere's cone included: `veach_mis`, with four sphere lights and none of
+/// these, spent 13% more instructions in `sample_li`, its stack traffic up from
+/// 147 to 256 moves in the function's body. The rebuild costs a shaped light a
+/// second clip per sample, which is small beside the sample.
+#[derive(Clone, Copy)]
+pub(super) enum Cut<'a> {
+    /// No point of the light emits toward the shading point: a shaped light
+    /// whose cone's cutoff circle misses it. Nothing is sampled, and no
+    /// density answered.
+    Nothing,
+    /// A shaped rectangle, uniform over the spherical rectangle of its part
+    /// inside the cone's cutoff square about `from`'s foot.
+    Rect { shape: &'a RectShape, from: Vec3A },
+    /// A round disk in polar coordinates about `from`'s foot on its plane
+    /// (`light/polar.rs`).
+    Polar { shape: &'a AffineShape, from: Vec3A },
+}
+
+impl Cut<'_> {
+    /// A point and its density, `0` refused.
+    #[inline(always)]
+    fn sample(self, u: f32, v: f32) -> (Vec3A, f32) {
+        match self {
+            Cut::Nothing => (Vec3A::ZERO, 0.0),
+            Cut::Rect { shape, from } => shape.clip_sample(from, u, v),
+            Cut::Polar { shape, from } => shape.polar_sample(from, u, v),
+        }
+    }
+
+    /// The density of `sample` having produced `p`, `0` where it never does.
+    #[inline(always)]
+    fn pdf(self, p: Vec3A) -> f32 {
+        match self {
+            Cut::Nothing => 0.0,
+            Cut::Rect { shape, from } => shape.clip_pdf(from, p),
+            Cut::Polar { shape, from } => shape.polar_density(from, p),
+        }
+    }
 }
 
 /// A tube as seen from one shading point outside it: what its strategy
@@ -225,12 +280,16 @@ impl<'a> SolidAngleSampler<'a> {
         SolidAngleSampler(Strategy::Rect { shape, rect })
     }
 
-    pub(super) fn nothing() -> Self {
-        SolidAngleSampler(Strategy::Nothing)
+    pub(super) fn clipped_rect(shape: &'a RectShape, from: Vec3A) -> Self {
+        SolidAngleSampler(Strategy::Cut(Cut::Rect { shape, from }))
     }
 
-    pub(super) fn polar(shape: &'a AffineShape, view: PolarView) -> Self {
-        SolidAngleSampler(Strategy::Polar { shape, view })
+    pub(super) fn nothing() -> Self {
+        SolidAngleSampler(Strategy::Cut(Cut::Nothing))
+    }
+
+    pub(super) fn polar(shape: &'a AffineShape, from: Vec3A) -> Self {
+        SolidAngleSampler(Strategy::Cut(Cut::Polar { shape, from }))
     }
 
     /// A point on the surface from two unit random numbers, and its
@@ -264,15 +323,13 @@ impl<'a> SolidAngleSampler<'a> {
             // light exactly as an area sample does — on the triangles a
             // bounce ray hits, and at the texel a textured card looks up.
             Strategy::Rect { shape, rect } => {
-                let (s, t) = if rect.is_clipped() {
-                    shape.clipped_st(&rect, rect.sample_xy(u as f64, v as f64))
-                } else {
-                    let (s, t) = rect.sample(u as f64, v as f64);
-                    (s as f32, t as f32)
-                };
-                Some((shape.sample_point(s, t), rect.pdf()))
+                let (s, t) = rect.sample(u as f64, v as f64);
+                Some((shape.sample_point(s as f32, t as f32), rect.pdf()))
             }
-            Strategy::Nothing => None,
+            Strategy::Cut(cut) => {
+                let (p, pdf) = cut.sample(u, v);
+                PdfSolidAngle::new(pdf).map(|pdf| (p, pdf))
+            }
             // Out of line, both, handed their state by value and answering
             // in registers — a point, then its density — so this match's
             // result never leaves them. Each other way cost every sphere and
@@ -299,14 +356,6 @@ impl<'a> SolidAngleSampler<'a> {
                 let p = shape.tube_point(view, u, v);
                 shape.tube_pdf(view, p).map(|pdf| (p, pdf))
             }
-            Strategy::Polar { shape, view } => {
-                let disk = shape.round.as_ref()?;
-                let p = shape.polar_point(disk, view, u, v);
-                if !p.is_finite() {
-                    return None;
-                }
-                shape.polar_pdf(disk, view, p).map(|pdf| (p, pdf))
-            }
         }
     }
 
@@ -324,17 +373,14 @@ impl<'a> SolidAngleSampler<'a> {
                 let p_local = shape.world_to_light.transform_point3a(p);
                 Some(shape.world_solid_angle_pdf(cone.pdf(), p_local - from_local))
             }
-            Strategy::Rect { shape, rect } => {
-                (!rect.is_clipped() || shape.clip_holds(&rect, p)).then(|| rect.pdf())
-            }
-            Strategy::Nothing => None,
+            Strategy::Rect { rect, .. } => Some(rect.pdf()),
+            Strategy::Cut(cut) => PdfSolidAngle::new(cut.pdf(p)),
             Strategy::Ellipse {
                 shape,
                 from_local,
                 ellipse,
             } => shape.ellipse_pdf(from_local, ellipse, p),
             Strategy::Tube { shape, view } => shape.tube_pdf(view, p),
-            Strategy::Polar { shape, view } => shape.polar_pdf(shape.round.as_ref()?, view, p),
         }
     }
 }
@@ -630,7 +676,7 @@ pub struct AffineShape {
     /// A disk's world placement when it is round, for the polar strategy.
     /// Boxed: only the out-of-line polar strategy reads it, and inline it
     /// would grow every light by its 80 bytes.
-    round: Option<Box<RoundDisk>>,
+    pub(super) round: Option<Box<RoundDisk>>,
     /// Whether the emitter on this surface is one-sided, which
     /// [`AreaLight::new`](super::AreaLight::new) sets. A tube's visible-arc
     /// strategy needs it: a two-sided tube seen through an open end shows
@@ -858,7 +904,11 @@ impl LightShape for AffineShape {
                 }))
             }
             UnitShape::Disk if self.disk == DiskSampling::Polar => {
-                self.polar_sampler(self.round.as_ref()?, from)
+                match self.polar_kind(self.round.as_deref()?, from) {
+                    Kind::Part => Some(SolidAngleSampler::polar(self, from)),
+                    Kind::Nothing => Some(SolidAngleSampler::nothing()),
+                    Kind::Whole | Kind::Area => None,
+                }
             }
             UnitShape::Cylinder if self.tube != TubeSampling::Area && self.front_only => {
                 let view = self.tube_view(from)?;

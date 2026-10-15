@@ -320,7 +320,9 @@ pub struct Config {
     /// `CRUST_CONE_CLIP`: sample a shaped rect light only within the bounding
     /// square of its cone's cutoff circle, and cap a `polar` disk's samples
     /// at that circle, for a light whose shaping axis is its normal
-    /// (`false`: sample the whole light, as before).
+    /// (`false`: sample the whole light, as before). On by default: it won at
+    /// equal time on every shaped rect measured, 1.1–44× (the lighting design
+    /// record, "Cone-aware sampling").
     pub cone_clip: bool,
     /// `OCIO`: the OpenColorIO config to use when the host names none — a
     /// path or an `ocio://` URI, `None` when unset or empty. Not validated
@@ -376,7 +378,7 @@ impl Default for Config {
             ptex_mip_space: PtexMipSpace::Capped,
             tube_sampling: TubeSampling::Equiangular,
             disk_sampling: DiskSampling::Area,
-            cone_clip: false,
+            cone_clip: true,
             ocio: None,
         }
     }
@@ -614,8 +616,8 @@ mod tests {
         assert!(!with(&[("CRUST_ADAPTIVE_FRUSTUM", "0")]).adaptive_frustum);
         assert!(with(&[]).ptex_stream, "Ptex streams by default");
         assert!(!with(&[("CRUST_PTEX_STREAM", "0")]).ptex_stream);
-        assert!(!with(&[]).cone_clip, "the cone clip is off by default");
-        assert!(with(&[("CRUST_CONE_CLIP", "on")]).cone_clip);
+        assert!(with(&[]).cone_clip, "the cone clip is on by default");
+        assert!(!with(&[("CRUST_CONE_CLIP", "off")]).cone_clip);
     }
 
     #[test]

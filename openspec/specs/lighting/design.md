@@ -345,6 +345,101 @@ value is the old sampler bit for bit (pinned by the goldens and
 - Measured on a sweep under the scratchpad (not checked in); ALab was not available.
   Numbers in `openspec/changes/archive/*-solid-angle-disk-and-tube-lights/notes.md`.
 
+## Cone-aware sampling
+
+A `ShapingAPI` cone darkens a light toward some receivers. Shaping lives on the
+emitter (`Emissive::radiance_toward`), so the light's strategy used to ignore it, and
+the samples the cone cut off came back zero: no shadow ray, since NEE tests radiance
+first, but no variance removed either. That waste comes in two kinds, measured apart
+on `samples/spotlights.usda` and the sweep `scripts/make_spot_sweep.py` writes:
+- **(A) Selection.** A small source gives every point of its surface the same answer
+  about a receiver outside its beam, so only *which light* to sample can help. Power
+  selection cannot see a cone; `learned` selection can, and does ("Known gaps: light
+  sampling").
+- **(B) Placement.** A wide rect or disk with a narrow cone emits toward a receiver
+  from only part of its surface: up to 91% of today's samples miss it.
+
+**The geometry.** When the shaping axis is the light's emitting normal, a point `p` on
+the light emits toward a receiver `x`, at height `h` in front of the plane with foot
+`f`, exactly when `|p − f| ≤ h · tan θc`: the direction `x − p` makes the angle
+`atan(|p − f| / h)` with the axis. So the lit region is a circle about the foot.
+Everything `Shaping` does except IES depends on `|p − f| / h` alone, focus included.
+- `ConeCut` (`light/cone.rs`) carries the axis, the cutoff and the focus from
+  `Emissive` to the shape, as `set_front_only` carries one-sidedness. A rect or a disk
+  takes it only when the axis is its normal (to 1e-6); a sphere or tube never does.
+- **Trap: the cutoff must be conservative.** `Shaping::factor` decides with an f32
+  `acos`, whose angle error near a small θ is `ε / sin θ`. Relative to `tan θc` that
+  grows as `1/θ²` (~7e-4 at 1°), so no fixed relative inflation is safe. The margin is
+  in cosine: `θcut = acos(cos θc − 1e-6)`. Pinned by
+  `nothing_outside_the_cutoff_radius_is_lit` (cones 0.5–85°, heights 1e-3–100,
+  softness and focus).
+
+**Rect: the clipped spherical rectangle (`CRUST_CONE_CLIP`, on by default).** In
+`SphericalRect`'s frame the foot is the origin, so the circle's bounding square is
+`[−ρc, ρc]²` and the clip is four comparisons (`RectShape::clip`). The same map
+(`rect_xy`, shared) runs on the sub-rectangle, a `ClippedRect`. It is the size of a
+`SphericalRect`: it keeps the whole light's origin corner `full` where that keeps
+`b0, b1`, and recomputes those per sample. `full` maps a sample back to the light's own
+`(s, t)`, so it lies where a bounce ray hits, and the bounce side refuses points
+outside the sub-rectangle. A square that misses the light is `Cut::Nothing` on both
+sides (no sample, no shadow ray); one that holds it all is the unclipped strategy, bit
+for bit. A clipped sub-rectangle uses the map at any solid angle up to 6.22 sr: the 1e-4 sr
+floor that area-samples a small whole light is for speed. It wastes at most `1 − π/4`
+of its samples in the square's corners. Sampling the lens (circle ∩ rect) exactly
+has no closed form that keeps `openqmc`'s stratification, and rejection would break it.
+
+**Disk: polar coordinates about the foot (`CRUST_DISK_SAMPLING = polar`).**
+`light/polar.rs`. The azimuth is uniform over the wedge the disk spans from the foot
+(2π from inside), and the distance along it is drawn from
+`g(ρ) ∝ ρ (h² + ρ²)^(−(k+3)/2)`: with `k = 0` that is `cos θl / r²` exactly, so the
+solid-angle density is constant along each slice; with `k` = focus it follows the focus
+too. Its integral `(h² + ρ²)^(−(k+1)/2)` inverts in closed form. With the clip, `ρ`
+stops at `ρc` and the wedge narrows to the directions that reach the disk within it
+(where the two circles cross), so no draw lands on an empty slice. It applies to a disk
+round in world space (in-plane axes equal and perpendicular to 1e-6), from more than
+`1e-4 R` in front; otherwise area.
+- **Trap: three cancellations.** Under a small disk (`ρ ~ 1e-3 h`), `ρ = √(d² − h²)`
+  loses ~10%; the slice's `G1 − G2` cancels as the tube's two `atan`s did; and outside
+  the disk the near root `D cos ψ − √disc` cancels at the rim. So: `ρ` is drawn as
+  `s = ρ²` through `ln1p` / `expm1` of the slice's relative width; `G1 − G2` as
+  `d1^−(k+1) · −expm1(−(k+1)/2 · ln1p δ)`; the near root as `(D − R)(D + R) / ρ2`.
+  `thin_far_polar_slices_keep_their_strata` pins it.
+- `RoundDisk` is boxed: inline, its 80 bytes grew `AreaLight` from 288 to 368 bytes
+  (clippy's `large_enum_variant` on `LightKind`), and only the out-of-line strategy
+  reads it.
+
+**Trap: the strategies hold only the shape and `from`.** `shape::Cut` (nothing,
+clipped rect, polar) keeps a pointer and a `Vec3A`, as the ellipse and tube arms do,
+and rebuilds its clip or view inside its out-of-line `sample` and `pdf`. Holding the
+clipped rectangle or the polar view (f64s) and handing it out of line kept the whole
+`SolidAngleSampler` in memory, the sphere's `Cone` included. Those bytes overlap the
+`Cone`'s f32 fields, and the compiler no longer split the enum into registers.
+`veach_mis`, which has none of these lights, spent +13% instructions in `sample_li`
+(147 stack moves in its body became 256). Neither a smaller sampler, nor out-of-line
+bodies, nor one folded arm, nor out-of-line decisions returning outcomes fixed it;
+only the payload's types did. The rebuild costs a shaped light a second clip per
+sample. After it, `veach_mis` is within callgrind's drift of the base (+0.07%), and
+`usdlux` with the clip off is +0.22%. The bisection is in the change's notes.
+
+**Measured** (`openspec/changes/archive/*-cone-aware-light-sampling/notes.md`):
+- Method: 16 spp, `--indirect-clamp 0`, 4 frames, against 1024 spp references. Cost
+  per frame is callgrind instructions, because the sweep's 40 ms frames time too
+  noisily ("winning" 1.3× at an identical relMSE).
+- **The clip, on by default.** At equal time it wins on all 48 shaped rect rows,
+  1.1–43× (median 2.5×), and never raises relMSE. A frame is ~11% *cheaper*: where the
+  square misses the light, nothing is evaluated. `usdlux` ties in relMSE (its spot's
+  pool is 1% of the frame) and is 4–6% faster.
+- **`polar`, not the default.** With the clip it wins 46 of 56 disk rows, up to 81× (a
+  disk three times its pool's width, 10° cone), at ~0.96× `area`'s cost on shaped
+  disks (1.33× unshaped). It loses on every small disk: radius 0.1 unshaped 0.09×,
+  radius 0.3 0.56×, soft focused cones at a tenth of their pool 0.43–0.87×. Alone it
+  splits the rows, as `ellipse` does at a fifth more cost.
+- Why it loses: with the foot outside the disk, the azimuth is uniform over the wedge,
+  so the thin slices at its edges get as many samples as the diameter, and the
+  estimator varies with chord length where area sampling of a small far disk is nearly
+  noiseless. It is not bias: the error falls with no floor, 4.0e-5 → 1.7e-7 from 16 to
+  1024 spp.
+
 ## Several light samples per vertex
 
 `crust:lightSamples` / `--light-samples` (N, the first vertex of each path, whatever
@@ -885,7 +980,10 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   fog, but 4–9% *higher* on the glossy `materialx_basic`/`usdpreview_textured` tiles, at
   ~110 ns more per NEE sample, §3.9 there); tube lights sample their visible arc,
   equiangularly along the wall (1.3–20× at equal time, "Disk and tube lights" above);
-  disk lights still sample by area by default. (NEE runs its three tests
+  disk lights still sample by area by default (`polar` wins with the cone clip on wide
+  shaped disks, up to 81×, but loses on small ones; "Cone-aware sampling" above).
+  Shaped rect lights sample only the part of the light their cone lights (the clip,
+  1.1–43× at equal time). (NEE runs its three tests
   cheapest first: the light's radiance, then the BSDF `eval`, then the shadow
   ray — for every material now, since `eval` goes through the vertex's
   `ShadingPoint` and reads no texture. Textured materials used to trace the ray
@@ -899,7 +997,7 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   (six small spots on disjoint pools) a point in a pool sends ~12 of 13 NEE picks to
   spots whose cones exclude it. `learned` selection fixes most of it: 6.3× lower relMSE
   in the pools, 4.5× over the frame, for +6% Render time (4.3× at equal time;
-  `openspec/changes/cone-aware-light-sampling/notes.md` § 2.2). A small source is a
+  `openspec/changes/archive/*-cone-aware-light-sampling/notes.md` § 2.2). A small source is a
   selection problem only: under 7% of its in-light samples miss the cone. It stays
   default-off with `learned` (`learned-light-selection-by-default`).
 - **`neural` selection loses at equal time** on every checked-in sample and on
@@ -916,6 +1014,11 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   than it need be. Gamito 2016 samples a finite-radius cylinder exactly in solid angle,
   by rejection, which would break `openqmc`'s stratification; a non-rejecting version
   is the pointer.
+- **`polar` loses on small disks**, where the foot is outside the disk: its azimuth is
+  uniform over the wedge, so the thin edge slices get as many samples as the middle.
+  Drawing the azimuth by each slice's weight, or using `polar` only where the foot is
+  inside the disk or the cone clips it (and area elsewhere), is the pointer. Either
+  would have to keep both MIS halves deciding from `from` alone.
 - **The disk's ellipse is opt-in and expensive.** It loses at equal time on glossy
   receivers and small disks, and costs ~5,000 instructions per sample, most of them in
   Carlson's `R_J` (`EllipseMap::omega_r`). A closed-form `R_C` inside `R_J` and fewer
@@ -938,13 +1041,15 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   `RectLight` is sampled by solid angle rather than by its map's luminance (a card
   with a small bright region is noisier than it need be), its lookup is nearest-texel
   as the reference's is, and a `.tex` (RenderMan) map is not decoded.
-  `inputs:diffuse` / `inputs:specular` warn and are ignored rather than split per lobe. Shaping is per *direction* only, so a shaped light
-  is still sampled without regard to its cone (by solid angle for a rect, by area otherwise): a narrow spotlight wastes the NEE samples its cone
-  cuts off (unbiased, but noisier than cone-aware sampling). It is measured on
+  `inputs:diffuse` / `inputs:specular` warn and are ignored rather than split per lobe. Cone-aware sampling ("Cone-aware sampling" above) covers
+  a rect light, and with `CRUST_DISK_SAMPLING=polar` a round disk, whose shaping axis is its normal. A sphere or tube, a sheared or squashed
+  light, or one aimed off its normal is still sampled without regard to its cone, and an IES profile shapes no light's samples
+  beyond its cone cutoff. Power selection is blind to cones: a narrow spot's NEE picks go to points its cone excludes (`learned`
+  selection fixes most of it, "Known gaps: light sampling"). It is measured on
   `samples/spotlights.usda` (six small spots on disjoint pools, where power selection
   gives a pool's own sphere spot about 1 NEE pick in 13, plus one wide disk spot) and on
   the sweep `scripts/make_spot_sweep.py` writes (shaped rects and disks, and the
-  unshaped disks of the ellipse sweep); `openspec/changes/cone-aware-light-sampling`.
+  unshaped disks of the ellipse sweep); `openspec/changes/archive/*-cone-aware-light-sampling`.
   Shaping is not applied
   to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the
   reference's is. A tube light samples the arc of wall facing the shading point; a

@@ -20,7 +20,7 @@
 
 use glam::{Affine3A, DVec3, Mat3A, Vec3, Vec3A};
 
-use super::shape::{AffineShape, SolidAngleSampler};
+use super::shape::{AffineShape, Kind};
 use crate::pdf::PdfSolidAngle;
 
 /// How far from round a placed disk may be, as relative differences of its
@@ -83,6 +83,13 @@ pub(super) struct PolarView {
     k: f32,
 }
 
+/// What the polar strategy makes of a disk from one shading point.
+pub(super) enum Polar {
+    Area,
+    Nothing,
+    View(PolarView),
+}
+
 /// The foot's frame: the foot, the unit direction from it to the centre (or
 /// `e1` when it is the centre), and its in-plane perpendicular.
 struct Frame {
@@ -129,19 +136,18 @@ impl PolarView {
 }
 
 impl AffineShape {
-    /// The polar strategy from `from`: `None` where the disk is area-sampled
-    /// instead (not round, `from` behind it or nearly in its plane), and the
-    /// strategy that samples nothing where the cone's cutoff circle misses it.
-    #[inline(never)]
-    pub(super) fn polar_sampler(
-        &self,
-        disk: &RoundDisk,
-        from: Vec3A,
-    ) -> Option<SolidAngleSampler<'_>> {
+    /// The polar strategy from `from`: area sampling where it does not apply
+    /// (`from` behind the disk or nearly in its plane), nothing where the
+    /// cone's cutoff circle misses the disk.
+    ///
+    /// Its kind is all the strategy keeps ([`AffineShape::polar_kind`]); the
+    /// view is rebuilt where a sample is drawn or a density asked (see
+    /// `shape::Cut`).
+    fn polar_view(&self, disk: &RoundDisk, from: Vec3A) -> Polar {
         let f = DVec3::from(Vec3::from(from));
         let h = (f - disk.center).dot(disk.normal);
         if !(h > MIN_HEIGHT * disk.radius && h.is_finite()) {
-            return None;
+            return Polar::Area;
         }
         let foot = f - h * disk.normal;
         let dist = (disk.center - foot).length();
@@ -152,7 +158,7 @@ impl AffineShape {
             _ => f64::INFINITY,
         };
         if dist - r >= cap {
-            return Some(SolidAngleSampler::nothing());
+            return Polar::Nothing;
         }
         let half = if dist < r {
             std::f64::consts::PI
@@ -171,24 +177,63 @@ impl AffineShape {
             }
         };
         let k = cone.map_or(0.0, |c| c.focus());
-        Some(SolidAngleSampler::polar(
-            self,
-            PolarView {
-                from,
-                h,
-                dist,
-                half,
-                cap,
-                k,
-            },
-        ))
+        Polar::View(PolarView {
+            from,
+            h,
+            dist,
+            half,
+            cap,
+            k,
+        })
+    }
+
+    /// The kind of [`AffineShape::polar_view`] from `from`, out of line.
+    #[inline(never)]
+    pub(super) fn polar_kind(&self, disk: &RoundDisk, from: Vec3A) -> Kind {
+        match self.polar_view(disk, from) {
+            Polar::Area => Kind::Whole,
+            Polar::Nothing => Kind::Nothing,
+            Polar::View(_) => Kind::Part,
+        }
+    }
+
+    /// A point of the polar strategy from `from` and its density (`0`
+    /// refused).
+    #[inline(never)]
+    pub(super) fn polar_sample(&self, from: Vec3A, u: f32, v: f32) -> (Vec3A, f32) {
+        let Some(disk) = self.round.as_deref() else {
+            return (Vec3A::ZERO, 0.0);
+        };
+        let Polar::View(view) = self.polar_view(disk, from) else {
+            return (Vec3A::ZERO, 0.0);
+        };
+        let p = self.polar_point(disk, view, u, v);
+        if !p.is_finite() {
+            return (p, 0.0);
+        }
+        (
+            p,
+            self.polar_pdf(disk, view, p).map_or(0.0, |pdf| pdf.get()),
+        )
+    }
+
+    /// The polar strategy's density from `from` at `p` (`0` where it never
+    /// draws).
+    #[inline(never)]
+    pub(super) fn polar_density(&self, from: Vec3A, p: Vec3A) -> f32 {
+        let Some(disk) = self.round.as_deref() else {
+            return 0.0;
+        };
+        let Polar::View(view) = self.polar_view(disk, from) else {
+            return 0.0;
+        };
+        self.polar_pdf(disk, view, p).map_or(0.0, |pdf| pdf.get())
     }
 
     /// A point of the polar strategy from two unit random numbers: the
     /// azimuth from `u`, the distance along it from `v`. Placed through the
     /// disk's local space, so it lies where an area sample would.
-    #[inline(never)]
-    pub(super) fn polar_point(&self, disk: &RoundDisk, view: PolarView, u: f32, v: f32) -> Vec3A {
+    fn polar_point(&self, disk: &RoundDisk, view: PolarView, u: f32, v: f32) -> Vec3A {
         let frame = view.frame(disk);
         let psi = (2.0 * f64::from(u) - 1.0) * view.half;
         let (sin, cos) = psi.sin_cos();
@@ -214,13 +259,7 @@ impl AffineShape {
     /// `(k+1) d^−k / (h Δψ (G1 − G2))` with `G = d^−(k+1)` at the slice's ends,
     /// the slice through `p`. `None` beyond the cap, where the cone darkens
     /// the disk toward `from` and the strategy never draws.
-    #[inline(never)]
-    pub(super) fn polar_pdf(
-        &self,
-        disk: &RoundDisk,
-        view: PolarView,
-        p: Vec3A,
-    ) -> Option<PdfSolidAngle> {
+    fn polar_pdf(&self, disk: &RoundDisk, view: PolarView, p: Vec3A) -> Option<PdfSolidAngle> {
         let frame = view.frame(disk);
         let rel = DVec3::from(Vec3::from(p)) - frame.foot;
         let (x, y) = (rel.dot(frame.a), rel.dot(frame.b));

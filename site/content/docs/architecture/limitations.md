@@ -121,6 +121,15 @@ render.
 
 - **Not supported:** mesh lights, portal lights, light filters, and shaping on distant and
   dome lights. `inputs:diffuse` and `inputs:specular` are ignored with a warning.
+- **Only some spotlights are sampled by their cone.** A `RectLight` with a `ShapingAPI`
+  cone, and a round `DiskLight` under `CRUST_DISK_SAMPLING=polar`, send shadow rays
+  only to the part of the light whose cone reaches the surface (see
+  [`CRUST_CONE_CLIP`](@/docs/reference/environment-variables.md#crust-cone-clip)). A
+  sphere or cylinder spotlight, a light stretched or tilted off its cone's axis, and an
+  IES profile's shape are not, so their samples outside the beam come back dark: still
+  correct, just noisier. Picking *which* light to sample ignores cones too: on a stage
+  of separate spots, `crust:lightSelection = "learned"` is several times less noisy
+  than the default.
 - **Emissive surfaces aren't sampled as lights.** An emissive MaterialX surface, emissive
   curves, instances or volumes are found only by rays that hit them. Use UsdLux lights for
   a scene's main light sources.

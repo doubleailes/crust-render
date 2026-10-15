@@ -25,7 +25,7 @@
 - [x] 4.1 Implement the clipped sub-rectangle in `RectShape`'s solid-angle sampler (design D4), with `None` from both `sample` and `pdf` for an empty clip. Verify with unit tests: every sample lies in the clip square, `sample`'s pdf equals `pdf` at the placed point bit for bit, and an empty clip yields no sample.
 - [x] 4.2 Add the spec's unbiasedness test: light-only, BSDF-only and MIS estimates of a floor under a shaped rect agree within 1/√N, for `CRUST_CONE_CLIP` `off` and `on`. Verify that it passes in `cargo test -p crust-core`.
 - [x] 4.3 Verify bit-identity: `check_images.sh check` passes with `CRUST_CONE_CLIP=off`, and with `on` on every sample without a qualifying shaped rect.
-- [ ] 4.4 Measure clip vs off on the shaped rect rows, the stage and `usdlux` (design D2 protocol, including callgrind per-sample cost). Record the table in `notes.md` and the gate verdict.
+- [x] 4.4 Measure clip vs off on the shaped rect rows, the stage and `usdlux` (design D2 protocol, including callgrind per-sample cost). Record the table in `notes.md` and the gate verdict.
 
 ## 5. Polar disk sampler (gated on 2.3)
 
@@ -33,7 +33,7 @@
 - [x] 5.2 Add the cone cap under `CRUST_CONE_CLIP = on`. Verify with a unit test that every capped sample lies within `ρc`, and that a slice with `ρ1 ≥ ρc` is never drawn.
 - [x] 5.3 Add a precision test in the spirit of `far_end_on_tube_samples_stay_equiangular`: a thin, far slice whose `cos α1 − cos α2` would cancel in f32 keeps distinct strata and a matching pdf. Verify that it passes.
 - [x] 5.4 Extend the "Disk and cylinder sampling is unbiased" test to `polar`, shaped and unshaped, cap on and off, and add the elliptical-disk fallback test from the spec. Verify that both pass.
-- [ ] 5.5 Measure polar vs area (and vs ellipse) on every disk row, the stage and `usdlux` (design D2 protocol, callgrind per-sample cost). Record the table in `notes.md` and the gate verdict.
+- [x] 5.5 Measure polar vs area (and vs ellipse) on every disk row, the stage and `usdlux` (design D2 protocol, callgrind per-sample cost). Record the table in `notes.md` and the gate verdict.
 
 ## 6. Defaults and records
 
