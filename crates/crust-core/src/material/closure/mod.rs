@@ -175,8 +175,8 @@ pub struct Prepared {
 impl Prepared {
     /// The event this leaf contributes toward a direction on the reflecting
     /// side, or (`transmitted`) the far side. Total over [`Lobe`].
-    pub fn event(&self, transmitted: bool) -> crate::lpe::LobeEvent {
-        use crate::lpe::{LobeEvent, LobeLabel, Scatter, microfacet_scatter};
+    pub fn event(&self, transmitted: bool) -> crate::material::lobe::LobeEvent {
+        use crate::material::lobe::{LobeEvent, LobeLabel, Scatter, microfacet_scatter};
         match self.lobe {
             Lobe::Diffuse { .. } => LobeEvent::reflect(Scatter::Diffuse, LobeLabel::Diffuse),
             Lobe::Translucent { .. } => {
@@ -794,14 +794,14 @@ impl ResolvedClosure {
     /// [`ResolvedClosure::eval`], split by leaf: each leaf's term of the
     /// sum `eval` computes, in the same order, so the shares add up to
     /// `eval`'s value bit for bit. `false` where `eval` answers `None`.
-    pub fn eval_lobes(&self, wi: Vec3A, out: &mut crate::lpe::LobeSplit) -> bool {
+    pub fn eval_lobes(&self, wi: Vec3A, out: &mut crate::material::lobe::LobeSplit) -> bool {
         self.eval_lobes_at(wi.normalize(), out)
     }
 
     /// [`ResolvedClosure::eval_lobes`] toward an already normalised `wi`,
     /// normalised no further — the terms `scatter`'s own `eval_pdf(world)`
     /// sums for a continuous sample, so they sum to its value bit for bit.
-    fn eval_lobes_at(&self, wi: Vec3A, out: &mut crate::lpe::LobeSplit) -> bool {
+    fn eval_lobes_at(&self, wi: Vec3A, out: &mut crate::material::lobe::LobeSplit) -> bool {
         out.clear();
         if self.len == 0 {
             return false;
@@ -822,7 +822,7 @@ impl ResolvedClosure {
         r_in: &Ray,
         rec: &HitRecord,
         draw: impl FnOnce() -> [f32; 4],
-        out: &mut crate::lpe::LobeSplit,
+        out: &mut crate::material::lobe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
         let (sample, choice) = self.scatter_choosing(r_in, rec, draw)?;
@@ -837,8 +837,8 @@ impl ResolvedClosure {
 
     /// The event of a delta sample: a subsurface walk's entry, or a
     /// thin-walled interface passing straight through.
-    pub fn delta_event(&self, sample: &ScatterSample) -> crate::lpe::LobeEvent {
-        use crate::lpe::{LobeEvent, LobeLabel, Scatter};
+    pub fn delta_event(&self, sample: &ScatterSample) -> crate::material::lobe::LobeEvent {
+        use crate::material::lobe::{LobeEvent, LobeLabel, Scatter};
         if sample.subsurface.is_some() {
             LobeEvent::transmit(Scatter::Diffuse, LobeLabel::Subsurface)
         } else {

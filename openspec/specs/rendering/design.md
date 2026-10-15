@@ -694,7 +694,7 @@ took anything, so `--stats` and `bench_ab.sh` never count a table build as sampl
 (`tests/sampler_warm.rs`).
 
 **The learned light-selection pre-pass stays on Sobol** whatever the setting
-(`light_cache.rs` keeps the concrete `PathSampler`). It is a training estimate, not an
+(`tracer/light_cache.rs` keeps the concrete `PathSampler`). It is a training estimate, not an
 image sample; keeping it fixed makes the learned table, and with it every light pick, the
 same under every sampler (`learned_selection.rs::the_learned_table_is_the_same_under_every_sampler`),
 so a sampler comparison measures the sampler alone. Path-guiding training passes do draw

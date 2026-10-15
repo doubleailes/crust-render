@@ -178,10 +178,10 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/usd_import/implicit.rs` (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1` variants tessellated as OpenUSD's GeomUtil does, pinned point for point by `tests/geomutil_oracle.rs`, their radial count chosen from the screen when a camera is named); `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
-| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
+| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` |
-| materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
-| lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection, and the pre-pass walk both learned selections share), `light_visibility.rs` (neural selection over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
+| materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`), `lobe.rs` (the lobe vocabulary: `Scatter`, `LobeLabel`, `LobeEvent`, `LobeSplit`, which `lpe` re-exports) |
+| lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection, `learned.rs` and `neural.rs` the frozen tables the learned selections pick with), `tracer/light_cache.rs` (`learned`'s training pre-pass, and the walk both learned selections share), `tracer/light_visibility.rs` (`neural`'s training over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
@@ -537,6 +537,23 @@ Still open, roughly in order of payoff:
    emits wide nodes directly (fused collapsing) is the remaining lever, and
    the composed USD stage, not the kernel, is most of a production scene's
    peak.
+5. **crust-core's modules still import upward in places.** The target is
+   layers that import only downward — foundation (`config`, `names`,
+   `warnings`, `report`, `profile`, `stats`, `pdf`, `color`, `texture`,
+   `lux`, `error`) → rays (`ray`, `medium`, `hittable`) → materials → world
+   (`rt_world`, `place`, `live`'s edit-check types) → lights → integrator
+   (`tracer/`, `aov`, `buffer`, `filter`, `sampler`, `guiding`, `volume`,
+   `camera`, `subsurface`) → import (`scene/`, `world.rs`, `live`'s rebuild)
+   → tools (`diagnostic/`, `inspect/`, `compare`, `stamp`, `check`) — so a
+   later split into crates is mechanical. Done: the lobe vocabulary moved
+   from `lpe` into `material/lobe.rs`, and the learned selections' tables
+   into `light/learned.rs` / `light/neural.rs`, their training into
+   `tracer/`. Left: `SubsurfaceEntry` into `material/`;
+   `From<&RenderSettings> for ImageCounters` out of `stats.rs`; `live.rs`
+   split into edit-check types and the rebuild; `inspect::store` into
+   `tracer/`; `inspect::Refusal` into `error.rs`; `PixelRect` and
+   `var_of_mean` into `buffer.rs`; `CameraFrame` beside `Camera`. Every one
+   is a move, not a new trait.
 
 ## Further reading
 

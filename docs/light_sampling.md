@@ -688,7 +688,7 @@ loss, not the cause. A light BVH (§6.3) would recover the backfacing share and
 none of the rest: power, distance and orientation cannot see a wall.
 
 **The change.** `crust:lightSelection = "learned"` / `--light-selection learned`
-(`light_cache.rs`):
+(`tracer/light_cache.rs`):
 - **Pre-pass.** Before the first pass, a deterministic training pre-pass traces
   one camera path per 4×4 pixels with two BSDF bounces. At each vertex it
   estimates **every** light's NEE contribution with the integrand itself: the
@@ -842,7 +842,7 @@ small MLP. The experiment asks one question in numbers: on a CPU, does a neural
 visibility cache beat the `learned` grid **at equal time**?
 
 **The change.** `crust:lightSelection = "neural"` / `--light-selection neural`
-(`light_visibility.rs`, over the new dependency-free `crust-nn` crate):
+(`tracer/light_visibility.rs`, over the new dependency-free `crust-nn` crate):
 - **Labels.** `learned`'s pre-pass walk, shared rather than copied
   (`light_cache::walk`), reports per receiver per light the fraction of its 2
   samples that delivered light: nonzero radiance, above the horizon, a clear
@@ -1003,7 +1003,7 @@ frames 1004 and 1030):
   3.01).
 - **Nor does the verdict.** At 0.1 `neural` still costs 1.32× `learned`'s time
   (`bench_ab`, 30.65 against 40.58 s), so at equal time it is 0.88× of it.
-- **Kept at 0.3**, shared with `learned` (`light_cache::DEFENSIVE`). The
+- **Kept at 0.3**, shared with `learned` (`light::learned::DEFENSIVE`). The
   gain is ALab's direct lighting alone, and `learned` fireflied at 0.2 on
   `domelight` (§3.12). Lowering it for `learned` would be a change of its own,
   measured on `domelight` again first.

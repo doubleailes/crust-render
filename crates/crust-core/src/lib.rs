@@ -35,8 +35,6 @@ mod hittable;
 /// (`crust light-paths`).
 pub mod inspect;
 mod light;
-mod light_cache;
-mod light_visibility;
 pub mod live;
 pub mod lpe;
 mod lux;

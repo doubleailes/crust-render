@@ -1366,7 +1366,7 @@ fn scatter_importance_finite() {
 
 #[test]
 fn every_lobe_has_an_event() {
-    use crate::lpe::{LobeLabel, Scatter};
+    use crate::material::lobe::{LobeLabel, Scatter};
     let m = OpenPBR {
         specular_roughness: 0.0,
         coat_roughness: 0.4,
@@ -1393,7 +1393,7 @@ fn every_lobe_has_an_event() {
 
 #[test]
 fn the_lobe_split_sums_to_eval_within_rounding() {
-    use crate::lpe::LobeSplit;
+    use crate::material::lobe::LobeSplit;
     let materials = [
         OpenPBR::default(),
         OpenPBR::diffuse(Vec3A::new(0.8, 0.3, 0.2)),
@@ -1455,7 +1455,7 @@ fn the_lobe_split_sums_to_eval_within_rounding() {
 /// select a lobe").
 #[test]
 fn exact_uniforms_select_a_lobe() {
-    use crate::lpe::{LobeLabel, LobeSplit};
+    use crate::material::lobe::{LobeLabel, LobeSplit};
     let m = OpenPBR {
         coat_weight: 1.0,
         coat_roughness: 0.0,
@@ -1509,7 +1509,7 @@ fn exact_uniforms_select_a_lobe() {
 
 #[test]
 fn scatter_split_draws_the_same_direction() {
-    use crate::lpe::LobeSplit;
+    use crate::material::lobe::LobeSplit;
     let materials = [
         OpenPBR {
             coat_weight: 1.0,
@@ -1993,10 +1993,10 @@ fn the_diffuse_filter_follows_the_fuzz() {
         let v = view_at(cos);
         let l = Vec3A::new(-0.3, 0.2, 0.9).normalize();
         let share = |m: &OpenPBR| {
-            let mut out = crate::lpe::LobeSplit::default();
+            let mut out = crate::material::lobe::LobeSplit::default();
             eval_split(m, v, l, true, &mut out);
             out.iter()
-                .find(|(e, _)| e.label == crate::lpe::LobeLabel::Diffuse)
+                .find(|(e, _)| e.label == crate::material::lobe::LobeLabel::Diffuse)
                 .map(|(_, f)| f)
                 .expect("a diffuse share")
         };

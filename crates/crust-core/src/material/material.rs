@@ -524,16 +524,16 @@ impl<'a> ShadingPoint<'a> {
         }
     }
 
-    /// [`ShadingPoint::eval`], split by lobe — see [`crate::lpe::LobeSplit`].
+    /// [`ShadingPoint::eval`], split by lobe — see [`crate::material::lobe::LobeSplit`].
     /// `false` where `eval` answers `None`. A material queried directly
     /// (no `OpenPBR`, no closure) is one diffuse lobe.
     pub(crate) fn eval_lobes(
         &self,
         r_in: &Ray,
         wi: Vec3A,
-        out: &mut crate::lpe::LobeSplit,
+        out: &mut crate::material::lobe::LobeSplit,
     ) -> bool {
-        use crate::lpe::{LobeEvent, LobeLabel, Scatter};
+        use crate::material::lobe::{LobeEvent, LobeLabel, Scatter};
         match &self.bsdf {
             Resolved::Material(m) => {
                 out.clear();
@@ -561,7 +561,7 @@ impl<'a> ShadingPoint<'a> {
         &self,
         r_in: &Ray,
         draw: impl Fn() -> [f32; 4],
-        out: &mut crate::lpe::LobeSplit,
+        out: &mut crate::material::lobe::LobeSplit,
     ) -> Option<ScatterSample> {
         match &self.bsdf {
             Resolved::Plain(m) => m.scatter_split(r_in, &self.rec, draw, out),
@@ -572,9 +572,9 @@ impl<'a> ShadingPoint<'a> {
                 out.clear();
                 if !sample.delta {
                     out.push(
-                        crate::lpe::LobeEvent::reflect(
-                            crate::lpe::Scatter::Diffuse,
-                            crate::lpe::LobeLabel::Diffuse,
+                        crate::material::lobe::LobeEvent::reflect(
+                            crate::material::lobe::Scatter::Diffuse,
+                            crate::material::lobe::LobeLabel::Diffuse,
                         ),
                         sample.value,
                     );
@@ -626,8 +626,8 @@ impl<'a> ShadingPoint<'a> {
     }
 
     /// The event of a delta sample this shading point produced.
-    pub(crate) fn delta_event(&self, sample: &ScatterSample) -> crate::lpe::LobeEvent {
-        use crate::lpe::{LobeEvent, LobeLabel, Scatter};
+    pub(crate) fn delta_event(&self, sample: &ScatterSample) -> crate::material::lobe::LobeEvent {
+        use crate::material::lobe::{LobeEvent, LobeLabel, Scatter};
         match &self.bsdf {
             Resolved::Closure(c) => c.delta_event(sample),
             Resolved::Plain(m) => m.delta_event(),

@@ -791,7 +791,7 @@ const COATED: &str = r#"
 
 #[test]
 fn the_lobe_split_sums_to_eval_bitwise() {
-    use crate::lpe::LobeSplit;
+    use crate::material::lobe::LobeSplit;
     let mut split = LobeSplit::default();
     let mut checked = 0;
     for (name, leaf) in LEAVES {
@@ -822,7 +822,7 @@ fn the_lobe_split_sums_to_eval_bitwise() {
 
 #[test]
 fn a_reflecting_interface_over_another_is_the_coat() {
-    use crate::lpe::{LobeLabel, Scatter};
+    use crate::material::lobe::{LobeLabel, Scatter};
     let c = resolved(&doc(COATED), "x", 0.3, true);
     let labels: Vec<_> = c
         .leaves()
@@ -964,7 +964,7 @@ fn a_hair_vertex_passes_out_of_curves() {
 /// near side a reflection, both glossy.
 #[test]
 fn a_hair_leaf_is_classified_by_hemisphere() {
-    use crate::lpe::{LobeLabel, Scatter};
+    use crate::material::lobe::{LobeLabel, Scatter};
     let hair = LEAVES.iter().find(|(n, _)| *n == "hair").unwrap().1;
     let c = resolved(&doc(hair), "x", 0.4, true);
     let leaf = &c.leaves()[0];
@@ -989,7 +989,7 @@ fn a_hair_leaf_is_classified_by_hemisphere() {
 /// it was.
 #[test]
 fn a_mixed_fibre_vertex_splits_its_continuation_by_share() {
-    use crate::lpe::LobeSplit;
+    use crate::material::lobe::LobeSplit;
     let body = doc(r#"
       <chiang_hair_bsdf name="h" type="BSDF" />
       <translucent_bsdf name="t" type="BSDF" />
