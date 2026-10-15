@@ -136,7 +136,7 @@ Either way the records are the scene's paths; only their samples differ.
 
 ## D5. The record store
 
-Per work unit (`inspect/store.rs`, `UnitStore`, on `UnitWork::inspect`): a bounded
+Per work unit (`tracer/inspection.rs`, `UnitStore`, on `UnitWork::inspect`): a bounded
 min-heap of the top N records (N at most `MAX_TOP`, 1 000: with the pixel cap, what
 bounds the store and the report — the groups count every record whatever N keeps)
 and a hash map from group key to aggregate. Units

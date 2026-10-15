@@ -2,7 +2,7 @@
 // renaming the file to satisfy the lint would only churn the history.
 #[allow(clippy::module_inception)]
 mod material;
-pub use material::{BsdfDraw, Material, Resolution, ScatterSample, ShadingPoint};
+pub use material::{BsdfDraw, Material, Resolution, ScatterSample, ShadingPoint, SubsurfaceEntry};
 mod emissive;
 pub use emissive::Emissive;
 pub(crate) mod brdf;

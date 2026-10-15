@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::region::PixelRect;
+
 /// Errors produced by the crust-core library. The library never exits the
 /// process or panics on bad input — fallible entry points return this.
 #[derive(Debug)]
@@ -48,14 +50,14 @@ pub enum Error {
     /// that holds no pixel of the frame once clipped to it. Refused rather
     /// than rendered as an empty image.
     EmptyRegion {
-        region: crate::PixelRect,
+        region: PixelRect,
         width: usize,
         height: usize,
     },
     /// A light path inspection ([`inspect::run`](crate::inspect::run),
     /// [`inspect::check_request`](crate::inspect::check_request)) asks for
     /// what no inspection runs with; refused before anything renders.
-    Inspection(crate::inspect::Refusal),
+    Inspection(Refusal),
 }
 
 impl fmt::Display for Error {
@@ -110,6 +112,82 @@ impl std::error::Error for Error {
         match self {
             Error::UsdOpen { source, .. } => Some(source.as_ref()),
             _ => None,
+        }
+    }
+}
+
+/// Why a change cannot be applied in place ([`crate::live`]): the host
+/// re-imports instead. Raised by the world and the light list as well as by
+/// the rebuild, so it sits here, below all three.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Structural(pub String);
+
+impl std::fmt::Display for Structural {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Structural {}
+
+// The light path inspector's limits, beside the refusal that names them;
+// `crust_core::inspect` re-exports them.
+
+/// The most pixels one inspection renders: a firefly is local, and the cap
+/// is what bounds the record store.
+pub const MAX_PIXELS: usize = 100;
+
+/// The most records one inspection keeps: with the pixel cap, what bounds
+/// the record store and the report (each work unit keeps up to this many).
+pub const MAX_TOP: usize = 1000;
+
+/// Why the records carry no prim paths yet, and the grouping that needs
+/// them is refused.
+pub const PRIMS_NOTE: &str = "crust keeps no table from a hit to its prim yet \
+     (add-identity-aovs-openexrid): prims are null, and --group-by expr+prims+light is refused";
+
+/// Why an inspection is refused before anything renders
+/// ([`crate::Error::Inspection`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The region holds no pixel.
+    EmptyRegion(PixelRect),
+    /// The region holds more than [`MAX_PIXELS`] pixels: `pixels` of them,
+    /// `None` when there are more than a `usize` counts.
+    RegionTooLarge {
+        region: PixelRect,
+        pixels: Option<usize>,
+    },
+    /// More than [`MAX_TOP`] records asked for.
+    TooManyRecords(usize),
+    /// `expr+prims+light`, before a hit can be resolved to its prim.
+    PrimsUnavailable,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::EmptyRegion(region) => write!(f, "the region {region} is empty"),
+            Refusal::RegionTooLarge { region, pixels } => {
+                write!(f, "the region {region} covers ")?;
+                match pixels {
+                    Some(n) => write!(f, "{n} pixels")?,
+                    None => write!(f, "more pixels than can be counted")?,
+                }
+                write!(
+                    f,
+                    "; an inspection renders at most {MAX_PIXELS} (10x10, say)"
+                )
+            }
+            Refusal::TooManyRecords(top) => write!(
+                f,
+                "{top} records asked for; an inspection lists at most {MAX_TOP} (its groups \
+                 count every record)"
+            ),
+            Refusal::PrimsUnavailable => write!(
+                f,
+                "grouping by expr+prims+light needs the prim of every hit: {PRIMS_NOTE}"
+            ),
         }
     }
 }

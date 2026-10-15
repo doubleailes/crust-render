@@ -41,7 +41,7 @@ use utils::{cosine_hemisphere, exp3};
 
 use crate::hittable::HitRecord;
 use crate::material::brdf::tangent_frame;
-use crate::material::{BsdfDraw, Material, ScatterSample};
+use crate::material::{BsdfDraw, Material, ScatterSample, SubsurfaceEntry};
 use crate::medium::{hg_phase, sample_henyey_greenstein};
 use crate::ray::{MASK_ALL, Ray, TRACE_T_MIN};
 use crate::rt_world::World;
@@ -65,20 +65,6 @@ const THROUGHPUT_EPS: f32 = 1e-6;
 /// steps a walk spends carrying almost nothing — 10–15% of a skin walk's.
 const RR_THRESHOLD: f32 = 0.05;
 const RR_MIN_PROB: f32 = 0.05;
-
-/// What a subsurface leaf hands the tracer when the closure selects it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SubsurfaceEntry {
-    /// World-space direction into the medium from the entry point.
-    pub dir: Vec3A,
-    /// The target multiple-scattering albedo (the leaf's `color`).
-    pub albedo: Vec3A,
-    /// Per-channel mean free path, world units (`radius`).
-    pub radius: Vec3A,
-    /// Henyey–Greenstein anisotropy; the walk clamps it to `[0, 0.99]`
-    /// ([`walk_anisotropy`]).
-    pub anisotropy: f32,
-}
 
 /// Where a successful walk left the object.
 #[derive(Clone, Copy)]

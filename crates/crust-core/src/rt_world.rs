@@ -4,6 +4,7 @@
 //! (`geom_id`) back to materials — the ID-based split that keeps shading
 //! state out of the intersection kernel.
 
+use crate::error::Structural;
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
@@ -11,6 +12,11 @@ use crate::warning;
 use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, RayMask, SceneBuilder};
 use glam::{Affine3A, Vec3A};
 use std::sync::Arc;
+
+/// The class of a receiver that every light illuminates: a vertex with no
+/// prim to judge (a volume-region scatter), or any vertex of a scene whose
+/// links were never resolved.
+pub const EVERY_CLASS: u16 = u16::MAX;
 
 /// How one triangle sits inside the polygon it was cut from.
 ///
@@ -987,7 +993,7 @@ impl World {
         self.light_classes
             .get(geom_id as usize)
             .copied()
-            .unwrap_or(crate::EVERY_CLASS)
+            .unwrap_or(EVERY_CLASS)
     }
 
     /// Closest hit in `(t_min, t_max)` with its material resolved.
@@ -1261,8 +1267,7 @@ impl World {
     pub fn check_materials(
         &self,
         swaps: &[(&[u32], &Arc<dyn Material>)],
-    ) -> Result<(), crate::live::Structural> {
-        use crate::live::{Signature, Structural};
+    ) -> Result<(), Structural> {
         for (slots, new) in swaps {
             let wanted = Signature::of(new.as_ref());
             for &slot in *slots {
@@ -1295,6 +1300,133 @@ impl World {
     pub fn material(&self, geom_id: u32) -> &dyn Material {
         self.materials[geom_id as usize].as_ref()
     }
+}
+
+/// The properties of a material the world and the geometry were built on:
+/// two materials with the same signature can swap slots without a re-import.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Signature {
+    kind: &'static str,
+    cutout: bool,
+    straight: bool,
+    boundary: bool,
+    emits: bool,
+    uv: bool,
+    uv_primvar: Option<String>,
+    face_texture: Option<usize>,
+}
+
+impl Signature {
+    pub(crate) fn of(m: &dyn Material) -> Signature {
+        Signature {
+            kind: m.kind(),
+            cutout: m.has_cutout(),
+            straight: m.has_straight_transmission(),
+            boundary: m.is_medium_boundary(),
+            emits: m.may_emit(),
+            uv: m.uses_uv(),
+            uv_primvar: m.uv_primvar().map(str::to_owned),
+            face_texture: m.face_texture().map(|t| t.num_faces()),
+        }
+    }
+}
+
+/// The kernel's BVH traversal counters, per camera ray, as the `--stats`
+/// section a `traversal-stats` build adds: queries, nodes, leaves and packets
+/// per tree level, then which top-level instances the descents went into.
+///
+/// One string rather than lines, so the caller can emit it as a single event:
+/// a `println!` per row would leave these lines out of `--log-file`, and one
+/// event per row would stamp each of them with a timestamp the table has no
+/// column for.
+#[cfg(feature = "traversal-stats")]
+pub fn traversal_report(world: &World, camera_rays: u64) -> String {
+    use crate::rt::traversal_stats as ts;
+    use crate::stats::REPORT_WIDTH;
+    use std::fmt::Write as _;
+    let rays = camera_rays.max(1) as f64;
+    let per = |n: u64| n as f64 / rays;
+    let rule = "-".repeat(REPORT_WIDTH);
+    let mut out = String::new();
+    // Infallible: `write!` into a String only fails if the formatter
+    // does, and none of these arguments can.
+    let _ = write!(out, "\n{rule}\nBVH Traversal (per camera ray)\n{rule}");
+    for (level, name) in [(0usize, "top-level"), (1, "instanced")] {
+        let (q, nodes, leaves, packets, scalars) = ts::read_level(level);
+        if q == 0 {
+            continue;
+        }
+        let _ = write!(
+            out,
+            "\n  {name:<12} queries {:>8.2}  nodes {:>9.2}  leaves {:>8.2}  packets {:>7.2}  scalar {:>8.2}",
+            per(q),
+            per(nodes),
+            per(leaves),
+            per(packets),
+            per(scalars),
+        );
+    }
+    // Which top-level instances the descents went into. A top level that
+    // culls well spreads them thinly; one that does not concentrates them
+    // on whatever geometry every ray's path overlaps. The importer's
+    // DEBUG lines give each instancer's `geom ids a..b` range, which is
+    // how an id here is traced back to a prim.
+    let descents = ts::top_level_descents();
+    let total: u64 = descents.iter().map(|d| d.1).sum();
+    if total > 0 {
+        let mut acc = 0u64;
+        let mut marks = vec![];
+        for (i, d) in descents.iter().enumerate() {
+            acc += d.1;
+            for f in [0.5, 0.9, 0.99] {
+                if (acc as f64) >= f * total as f64 && !marks.iter().any(|&(g, _)| g == f) {
+                    marks.push((f, i + 1));
+                }
+            }
+        }
+        let _ = write!(
+            out,
+            "\n  top-level instances entered: {} of them, {:.1} descents per camera ray \
+             (closest-hit and shadow rays; the rows above count closest-hit only)",
+            descents.len(),
+            per(total)
+        );
+        for (f, n) in marks {
+            let _ = write!(
+                out,
+                "\n    {:.0}% of descents go to {n} instances",
+                f * 100.0
+            );
+        }
+        let top: Vec<_> = descents.iter().take(40).collect();
+        let ids: std::collections::HashSet<u32> = top.iter().map(|d| d.0).collect();
+        let info: std::collections::HashMap<u32, _> = world
+            .describe_instances(&ids)
+            .into_iter()
+            .map(|(id, b, n, shared)| (id, (b, n, shared)))
+            .collect();
+        let _ = write!(
+            out,
+            "\n  {:>9} {:>7} {:>9} {:>8} {:>9}  bounds",
+            "geom_id", "share", "per ray", "prims", "shared by"
+        );
+        for &&(id, n) in &top {
+            let (b, prims, shared) = info[&id];
+            let _ = write!(
+                out,
+                "\n  {id:>9} {:>6.2}% {:>9.2} {prims:>8} {shared:>9}  [{:.0} {:.0} {:.0}]..[{:.0} {:.0} {:.0}]",
+                100.0 * n as f64 / total as f64,
+                per(n),
+                b.minimum.x,
+                b.minimum.y,
+                b.minimum.z,
+                b.maximum.x,
+                b.maximum.y,
+                b.maximum.z,
+            );
+        }
+    }
+    out
 }
 
 #[cfg(test)]

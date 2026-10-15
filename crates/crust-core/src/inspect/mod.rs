@@ -9,24 +9,31 @@
 //! the beauty's recurrence that ends on emission (`Route::fold`), so a
 //! sample's records sum to its radiance and nothing is attributed twice.
 //! Each work unit keeps the brightest records and one aggregate per group
-//! key ([`store`]); the units merge in unit order after the render, and the
-//! report is built once from the merge.
+//! key (`tracer/inspection.rs`); the units merge in unit order after the
+//! render, and the report is built once from the merge.
 //!
 //! The engine writes nothing: [`run`] returns a [`Report`], which the host
 //! prints ([`Report::to_markdown`]) and saves ([`Report::to_json`]).
 
 mod report;
-pub(crate) mod store;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::debug;
 
-use crate::tracer::{NO_LIGHT, PixelRect};
+use crate::region::PixelRect;
+use crate::tracer::NO_LIGHT;
+use crate::tracer::inspection::{
+    self as store, Collected, Config, MIXED_LIGHTS, group_key, is_light,
+};
 use crate::{Error, RenderSettings, Renderer};
-use store::{Collected, Config, MIXED_LIGHTS, group_key, is_light};
 
+// The limits and the refusal live in `error.rs`, beside the `Error` that
+// carries the refusal; the grouping with the per-unit store the integrator
+// fills (`tracer/inspection.rs`).
+pub use crate::error::{MAX_PIXELS, MAX_TOP, PRIMS_NOTE, Refusal};
+pub use crate::tracer::inspection::GroupBy;
 pub use report::{
     AMBIGUOUS_LUMA_SHARE, CLAMP_HIDES_RATIO, DOMINANT_LUMA_SHARE, HINTS, HintRule, RARE_HIT_RATE,
     RARE_SECOND_MOMENT_SHARE,
@@ -35,70 +42,12 @@ pub use report::{
     Consistency, FORMAT, Group, Hint, LobeShare, Pixel, Record, Report, Settings, Truncated,
 };
 
-/// The most pixels one inspection renders: a firefly is local, and the cap
-/// is what bounds the record store.
-pub const MAX_PIXELS: usize = 100;
-
 /// Records reported when no `--top` is given.
 pub const DEFAULT_TOP: usize = 32;
-
-/// The most records one inspection keeps: with the pixel cap, what bounds
-/// the record store and the report (each work unit keeps up to this many).
-pub const MAX_TOP: usize = 1000;
 
 /// A record whose dominant event carries less than this share of its
 /// vertex's luminance, at any vertex, is `label_ambiguous` (design D2).
 pub const AMBIGUOUS_SHARE: f32 = 0.6;
-
-/// Why the records carry no prim paths yet, and the grouping that needs
-/// them is refused.
-pub const PRIMS_NOTE: &str = "crust keeps no table from a hit to its prim yet \
-     (add-identity-aovs-openexrid): prims are null, and --group-by expr+prims+light is refused";
-
-/// What the records are aggregated by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GroupBy {
-    /// No groups: the brightest records only.
-    None,
-    /// The light that ends the path.
-    Light,
-    /// The expression, the light named by its tag.
-    Expr,
-    /// The expression and the light.
-    #[default]
-    ExprLight,
-    /// The expression, each vertex's prim and the light: not available
-    /// until a hit can be resolved to its prim ([`PRIMS_NOTE`]).
-    ExprPrimsLight,
-}
-
-crate::names::named!(
-    GroupBy,
-    "grouping",
-    [
-        (
-            GroupBy::None,
-            "none",
-            "No groups: the brightest records only"
-        ),
-        (GroupBy::Light, "light", "By the light that ends the path"),
-        (
-            GroupBy::Expr,
-            "expr",
-            "By the path's expression (lights told apart by their LPE tag)"
-        ),
-        (
-            GroupBy::ExprLight,
-            "expr+light",
-            "By the expression and the light (default)"
-        ),
-        (
-            GroupBy::ExprPrimsLight,
-            "expr+prims+light",
-            "By the expression, the prims it bounced on and the light (not yet available)"
-        ),
-    ]
-);
 
 /// What the host knows that the renderer does not.
 #[derive(Debug, Clone)]
@@ -120,52 +69,6 @@ impl Default for Options {
             group_by: GroupBy::default(),
             command: None,
             camera: None,
-        }
-    }
-}
-
-/// Why an inspection is refused before anything renders
-/// ([`crate::Error::Inspection`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    /// The region holds no pixel.
-    EmptyRegion(PixelRect),
-    /// The region holds more than [`MAX_PIXELS`] pixels: `pixels` of them,
-    /// `None` when there are more than a `usize` counts.
-    RegionTooLarge {
-        region: PixelRect,
-        pixels: Option<usize>,
-    },
-    /// More than [`MAX_TOP`] records asked for.
-    TooManyRecords(usize),
-    /// `expr+prims+light`, before a hit can be resolved to its prim.
-    PrimsUnavailable,
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Refusal::EmptyRegion(region) => write!(f, "the region {region} is empty"),
-            Refusal::RegionTooLarge { region, pixels } => {
-                write!(f, "the region {region} covers ")?;
-                match pixels {
-                    Some(n) => write!(f, "{n} pixels")?,
-                    None => write!(f, "more pixels than can be counted")?,
-                }
-                write!(
-                    f,
-                    "; an inspection renders at most {MAX_PIXELS} (10x10, say)"
-                )
-            }
-            Refusal::TooManyRecords(top) => write!(
-                f,
-                "{top} records asked for; an inspection lists at most {MAX_TOP} (its groups \
-                 count every record)"
-            ),
-            Refusal::PrimsUnavailable => write!(
-                f,
-                "grouping by expr+prims+light needs the prim of every hit: {PRIMS_NOTE}"
-            ),
         }
     }
 }

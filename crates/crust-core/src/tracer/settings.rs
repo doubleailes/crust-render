@@ -1,11 +1,12 @@
 //! What a render is asked to do: [`RenderSettings`] and the MIS
 //! [`SamplingStrategy`].
 
-use super::PixelRect;
 use crate::LightSelection;
 use crate::filter::PixelFilter;
 use crate::pdf::PdfSolidAngle;
+use crate::region::PixelRect;
 use crate::sampler::SamplerKind;
+use crate::stats::ImageCounters;
 
 /// The indirect clamp a render gets unless the stage (`crust:indirectClamp`)
 /// or the host (`--indirect-clamp`) says otherwise — see
@@ -514,5 +515,19 @@ impl RenderSettings {
 
     pub fn max_depth(&self) -> u32 {
         self.max_depth
+    }
+}
+
+// Here rather than in `stats.rs`, which sits below the integrator.
+impl From<&RenderSettings> for ImageCounters {
+    fn from(s: &RenderSettings) -> Self {
+        let (width, height) = s.get_dimensions();
+        ImageCounters {
+            width,
+            height,
+            region: (!s.is_full_frame()).then(|| s.region()),
+            samples_per_pixel: s.samples_per_pixel(),
+            max_depth: s.max_depth(),
+        }
     }
 }

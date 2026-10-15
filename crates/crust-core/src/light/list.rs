@@ -7,8 +7,11 @@ use std::collections::HashMap;
 use glam::Vec3A;
 
 use super::{Light, LightKind, LightTree, Receiver};
+use crate::error::Structural;
+// Defined beside the world's per-geometry classes, which default to it.
 use crate::pdf::PdfSolidAngle;
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_SHADOW, RayMask};
+pub use crate::rt_world::EVERY_CLASS;
 
 /// How NEE chooses which light to sample at a vertex (`crust:lightSelection`,
 /// `--light-selection`). Measured in `docs/light_sampling.md` §3.8.
@@ -126,11 +129,6 @@ const ONE_MINUS_EPSILON: f32 = 1.0 - f32::EPSILON / 2.0;
 /// rays split evenly among them rather than by power (Hesterberg's
 /// defensive importance sampling).
 pub const DEFENSIVE_SHARE: f64 = 0.5;
-
-/// The class of a receiver that every light illuminates: a vertex with no
-/// prim to judge (a volume-region scatter), or any vertex of a scene whose
-/// links were never resolved.
-pub const EVERY_CLASS: u16 = u16::MAX;
 
 /// Per-light light and shadow linking, indexed like [`LightList::lights`].
 /// Built by the importer once every receiver is known
@@ -302,16 +300,11 @@ impl LightList {
     /// Resolved links stay as they are: they are read from the lights'
     /// collections alone, which an in-place edit never changes, and keyed by
     /// index and `geom_id`, which a replacement keeps.
-    pub fn check_replace(
-        &self,
-        index: usize,
-        light: &LightKind,
-    ) -> Result<(), crate::live::Structural> {
-        use crate::live::Structural;
+    pub fn check_replace(&self, index: usize, light: &LightKind) -> Result<(), Structural> {
         let Some(old) = self.lights.get(index) else {
             return Err(Structural(format!("the light list has no light {index}")));
         };
-        if !crate::live::same_light_shape(old, light) {
+        if !same_light_shape(old, light) {
             return Err(Structural(format!(
                 "light {index} would change kind, infinity or geometry"
             )));
@@ -964,4 +957,11 @@ impl LightList {
     pub fn count(&self) -> usize {
         self.lights.len()
     }
+}
+
+/// A light's identity in the list: what a replacement must keep.
+pub(crate) fn same_light_shape(old: &LightKind, new: &LightKind) -> bool {
+    std::mem::discriminant(old) == std::mem::discriminant(new)
+        && old.at_infinity() == new.at_infinity()
+        && old.geom_id() == new.geom_id()
 }

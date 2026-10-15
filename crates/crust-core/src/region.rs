@@ -5,7 +5,7 @@ use std::fmt;
 
 /// A half-open rectangle of pixels, `x0..x1` × `y0..y1`.
 ///
-/// The render's region ([`RenderSettings::region`](super::RenderSettings::region))
+/// The render's region ([`RenderSettings::region`](crate::RenderSettings::region))
 /// is one in **image** space: top-left origin, `y` growing downwards, as an
 /// image viewer, `--region` and an EXR data window count. The tracer's own
 /// raster rows grow upwards (row 0 is the bottom of the frame, where the

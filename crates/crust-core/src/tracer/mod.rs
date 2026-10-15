@@ -4,33 +4,33 @@ use glam::Vec3A;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
-use crate::aov::{AovFilm, AovLayout, AovRequest, CameraFrame, SampleExtras, UnitAov};
-use crate::buffer::Buffer;
-use crate::camera::Camera;
+use crate::aov::{AovFilm, AovLayout, AovRequest, SampleExtras, UnitAov};
+use crate::buffer::{Buffer, var_of_mean};
+use crate::camera::{Camera, CameraFrame};
 use crate::filter::FilterSampler;
 use crate::guiding::{GuidingConfig, GuidingField, SampleData};
 use crate::profile::{self, Section};
 use crate::rt_world::World;
 use crate::sampler::SamplerKind;
-use crate::stats::RayStats;
+use crate::stats::{RayStats, RenderStats};
 use crate::volume::Volumes;
 use crate::{LightList, LightSelection};
 use openqmc::{Sampler, SamplerImpl};
 
 mod control;
+pub(crate) mod inspection;
 mod light_cache;
 mod light_visibility;
 mod path;
 pub(crate) use path::{past_medium_boundaries, surface_visibility};
-mod region;
 mod route;
 mod settings;
 
 use path::{K_CAMERA, K_TIME, PathContext, ray_cones_enabled, trace_path};
 
+pub use crate::region::PixelRect;
 pub use control::{RenderControl, RenderOutcome};
 pub use path::{ray_color, ray_color_with_light_samples};
-pub use region::PixelRect;
 pub use settings::{
     DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, DEFAULT_LIGHT_SAMPLES,
     MAX_LIGHT_SAMPLES, RenderSettings, SamplingStrategy,
@@ -167,7 +167,7 @@ pub(crate) struct Measured {
     pub(crate) outcome: RenderOutcome,
     /// The light path inspector's records of the final pass, when the
     /// layout asked for them ([`Renderer::render_inspection`]).
-    pub(crate) inspection: Option<crate::inspect::store::Collected>,
+    pub(crate) inspection: Option<inspection::Collected>,
 }
 
 impl Measured {
@@ -247,7 +247,7 @@ struct PassStats {
     /// was scheduled to.
     interrupted: bool,
     /// The pass's light path records, when its layout inspects.
-    inspection: Option<crate::inspect::store::Collected>,
+    inspection: Option<inspection::Collected>,
 }
 
 /// A guided render's pass that a [`RenderControl`] cut short: what the end
@@ -286,6 +286,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Records the material and light breakdowns of what will render into
+    /// `stats` (its `materials` and `light_kinds`).
+    pub fn inventory_into(&self, stats: &mut RenderStats) {
+        stats.materials = self.world.material_breakdown();
+        stats.light_kinds = self.lights.kind_breakdown();
+    }
+
     /// A renderer over the scene, configured for `settings` — exactly
     /// [`Renderer::reconfigure`] on a fresh one, so the two cannot drift.
     pub fn new(camera: Camera, world: World, lights: LightList, settings: RenderSettings) -> Self {
@@ -509,10 +516,7 @@ impl Renderer {
     /// the AOV instantiation with the inspection's routing and none of the
     /// stage's AOVs, so its beauty is the beauty-only render's, bit for bit,
     /// and every camera sample of the final pass is folded into records.
-    pub(crate) fn render_inspection(
-        &self,
-        cfg: std::sync::Arc<crate::inspect::store::Config>,
-    ) -> Measured {
+    pub(crate) fn render_inspection(&self, cfg: std::sync::Arc<inspection::Config>) -> Measured {
         let layout = AovLayout {
             luma: self.lights.luma(),
             route: Some(std::sync::Arc::new(route::RouteCtx::inspection(
@@ -1780,28 +1784,13 @@ impl Renderer {
 /// Out of line and cold, as a merge only an inspection runs.
 #[cold]
 #[inline(never)]
-fn collect_inspection(units: &mut [Unit]) -> crate::inspect::store::Collected {
-    crate::inspect::store::Collected::merge(
+fn collect_inspection(units: &mut [Unit]) -> inspection::Collected {
+    inspection::Collected::merge(
         units
             .iter_mut()
             .filter_map(|u| u.work.inspect.take().map(|s| *s))
             .collect(),
     )
-}
-
-/// The unbiased variance of a mean over `n` samples whose sum is `sum` and
-/// sum of squares `sq`: `(Σx² − (Σx)²/n) / (n−1) / n`, clamped at 0, and
-/// `+∞` below two samples, where it cannot be estimated.
-///
-/// The one estimator behind adaptive sampling's stop rule, the `variance`
-/// AOV and the light path expressions' variance modifier, so `C.*[LO]`'s
-/// variance is the `variance` AOV bit for bit.
-pub(crate) fn var_of_mean(sum: f64, sq: f64, n: u32) -> f64 {
-    if n < 2 {
-        return f64::INFINITY;
-    }
-    let n = n as f64;
-    ((sq - sum * sum / n) / (n - 1.0) / n).max(0.0)
 }
 
 /// One pixel's accumulators across the rounds of a pass, plus where it
@@ -2015,7 +2004,7 @@ struct UnitWork {
     /// measured clamp would remove; empty unless the pass measures one.
     clamp: Vec<f32>,
     /// The unit's light path records, when the layout inspects.
-    inspect: Option<Box<crate::inspect::store::UnitStore>>,
+    inspect: Option<Box<inspection::UnitStore>>,
 }
 
 /// One work unit of a pass — a tile or a row — and its pixels' state.
@@ -2037,7 +2026,7 @@ impl Unit {
                 clamp: if clamp { vec![0.0; pixels] } else { Vec::new() },
                 inspect: layout
                     .and_then(|l| l.inspect.clone())
-                    .map(|c| Box::new(crate::inspect::store::UnitStore::new(c))),
+                    .map(|c| Box::new(inspection::UnitStore::new(c))),
                 ..UnitWork::default()
             },
         }

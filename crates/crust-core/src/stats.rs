@@ -391,7 +391,7 @@ pub struct ImageCounters {
     /// The render region, when it is smaller than the frame (image space),
     /// as `[x0, y0, x1, y1]`, `x1` and `y1` excluded.
     #[serde(serialize_with = "region_json")]
-    pub region: Option<crate::PixelRect>,
+    pub region: Option<crate::region::PixelRect>,
     pub samples_per_pixel: u32,
     pub max_depth: u32,
 }
@@ -400,19 +400,6 @@ impl ImageCounters {
     /// The pixels the render traced: the region's, else the frame's.
     pub fn pixels(&self) -> usize {
         self.region.map_or(self.width * self.height, |r| r.area())
-    }
-}
-
-impl From<&crate::tracer::RenderSettings> for ImageCounters {
-    fn from(s: &crate::tracer::RenderSettings) -> Self {
-        let (width, height) = s.get_dimensions();
-        ImageCounters {
-            width,
-            height,
-            region: (!s.is_full_frame()).then(|| s.region()),
-            samples_per_pixel: s.samples_per_pixel(),
-            max_depth: s.max_depth(),
-        }
     }
 }
 
@@ -441,7 +428,7 @@ pub struct RenderStats {
     pub ptex: PtexCacheStats,
     /// Distinct materials by kind ("allocated materials"), and lights by
     /// kind. Filled by the host from the committed `World` / `LightList`
-    /// (see [`RenderStats::inventory_from`]), so the procedural fallback
+    /// (see [`Renderer::inventory_into`](crate::Renderer::inventory_into)), so the procedural fallback
     /// reports them as well as a USD stage.
     pub materials: Vec<(&'static str, usize)>,
     pub light_kinds: Vec<(&'static str, usize)>,
@@ -711,12 +698,6 @@ impl RenderStats {
             .find(|p| p.depth == 0 && p.name == "Render")
     }
 
-    /// Records the material and light breakdowns of what will render.
-    pub fn inventory_from(&mut self, world: &crate::World, lights: &crate::LightList) {
-        self.materials = world.material_breakdown();
-        self.light_kinds = lights.kind_breakdown();
-    }
-
     /// Total of the top-level phases. Sub-phases are skipped: their time is
     /// already inside a parent, so adding them would double count.
     pub fn total(&self) -> Duration {
@@ -878,7 +859,10 @@ impl Serialize for Kinds<'_> {
 }
 
 /// `PixelRect` as `[x0, y0, x1, y1]`.
-fn region_json<S: Serializer>(r: &Option<crate::PixelRect>, s: S) -> Result<S::Ok, S::Error> {
+fn region_json<S: Serializer>(
+    r: &Option<crate::region::PixelRect>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
     r.map(|r| [r.x0, r.y0, r.x1, r.y1]).serialize(s)
 }
 
@@ -1862,106 +1846,9 @@ impl RenderStats {
     }
 }
 
-/// The kernel's BVH traversal counters, per camera ray, as the `--stats`
-/// section a `traversal-stats` build adds: queries, nodes, leaves and packets
-/// per tree level, then which top-level instances the descents went into.
-///
-/// One string rather than lines, so the caller can emit it as a single event:
-/// a `println!` per row would leave these lines out of `--log-file`, and one
-/// event per row would stamp each of them with a timestamp the table has no
-/// column for.
-#[cfg(feature = "traversal-stats")]
-pub fn traversal_report(world: &crate::World, camera_rays: u64) -> String {
-    use crate::rt::traversal_stats as ts;
-    use std::fmt::Write as _;
-    let rays = camera_rays.max(1) as f64;
-    let per = |n: u64| n as f64 / rays;
-    let rule = "-".repeat(REPORT_WIDTH);
-    let mut out = String::new();
-    // Infallible: `write!` into a String only fails if the formatter
-    // does, and none of these arguments can.
-    let _ = write!(out, "\n{rule}\nBVH Traversal (per camera ray)\n{rule}");
-    for (level, name) in [(0usize, "top-level"), (1, "instanced")] {
-        let (q, nodes, leaves, packets, scalars) = ts::read_level(level);
-        if q == 0 {
-            continue;
-        }
-        let _ = write!(
-            out,
-            "\n  {name:<12} queries {:>8.2}  nodes {:>9.2}  leaves {:>8.2}  packets {:>7.2}  scalar {:>8.2}",
-            per(q),
-            per(nodes),
-            per(leaves),
-            per(packets),
-            per(scalars),
-        );
-    }
-    // Which top-level instances the descents went into. A top level that
-    // culls well spreads them thinly; one that does not concentrates them
-    // on whatever geometry every ray's path overlaps. The importer's
-    // DEBUG lines give each instancer's `geom ids a..b` range, which is
-    // how an id here is traced back to a prim.
-    let descents = ts::top_level_descents();
-    let total: u64 = descents.iter().map(|d| d.1).sum();
-    if total > 0 {
-        let mut acc = 0u64;
-        let mut marks = vec![];
-        for (i, d) in descents.iter().enumerate() {
-            acc += d.1;
-            for f in [0.5, 0.9, 0.99] {
-                if (acc as f64) >= f * total as f64 && !marks.iter().any(|&(g, _)| g == f) {
-                    marks.push((f, i + 1));
-                }
-            }
-        }
-        let _ = write!(
-            out,
-            "\n  top-level instances entered: {} of them, {:.1} descents per camera ray \
-             (closest-hit and shadow rays; the rows above count closest-hit only)",
-            descents.len(),
-            per(total)
-        );
-        for (f, n) in marks {
-            let _ = write!(
-                out,
-                "\n    {:.0}% of descents go to {n} instances",
-                f * 100.0
-            );
-        }
-        let top: Vec<_> = descents.iter().take(40).collect();
-        let ids: std::collections::HashSet<u32> = top.iter().map(|d| d.0).collect();
-        let info: std::collections::HashMap<u32, _> = world
-            .describe_instances(&ids)
-            .into_iter()
-            .map(|(id, b, n, shared)| (id, (b, n, shared)))
-            .collect();
-        let _ = write!(
-            out,
-            "\n  {:>9} {:>7} {:>9} {:>8} {:>9}  bounds",
-            "geom_id", "share", "per ray", "prims", "shared by"
-        );
-        for &&(id, n) in &top {
-            let (b, prims, shared) = info[&id];
-            let _ = write!(
-                out,
-                "\n  {id:>9} {:>6.2}% {:>9.2} {prims:>8} {shared:>9}  [{:.0} {:.0} {:.0}]..[{:.0} {:.0} {:.0}]",
-                100.0 * n as f64 / total as f64,
-                per(n),
-                b.minimum.x,
-                b.minimum.y,
-                b.minimum.z,
-                b.maximum.x,
-                b.maximum.y,
-                b.maximum.z,
-            );
-        }
-    }
-    out
-}
-
 /// Report column widths. Wide enough that the longest phase name ("Commit
 /// acceleration structure", nested one level) still clears the time column.
-const REPORT_WIDTH: usize = 84;
+pub(crate) const REPORT_WIDTH: usize = 84;
 const REPORT_NAME: usize = 36;
 
 impl fmt::Display for RenderStats {
@@ -2218,7 +2105,7 @@ mod tests {
             image: ImageCounters {
                 width: 640,
                 height: 360,
-                region: Some(crate::PixelRect::new(320, 0, 640, 360)),
+                region: Some(crate::region::PixelRect::new(320, 0, 640, 360)),
                 samples_per_pixel: 4,
                 max_depth: 8,
             },
@@ -2343,7 +2230,7 @@ mod tests {
                 peak: None,
             },
         );
-        s.image.region = Some(crate::PixelRect::new(0, 0, 4, 2));
+        s.image.region = Some(crate::region::PixelRect::new(0, 0, 4, 2));
         s.materials = vec![("OpenPBR", 2)];
         s.light_kinds = vec![("rect", 1)];
         s.subdivision.adaptive = Some((2.0, 3));

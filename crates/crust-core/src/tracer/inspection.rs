@@ -13,8 +13,53 @@ use std::sync::Arc;
 
 use glam::Vec3A;
 
-use super::GroupBy;
-use crate::tracer::{NO_LIGHT, PathTerm, PixelRect};
+use super::{NO_LIGHT, PathTerm};
+use crate::region::PixelRect;
+
+/// What the records are aggregated by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupBy {
+    /// No groups: the brightest records only.
+    None,
+    /// The light that ends the path.
+    Light,
+    /// The expression, the light named by its tag.
+    Expr,
+    /// The expression and the light.
+    #[default]
+    ExprLight,
+    /// The expression, each vertex's prim and the light: not available
+    /// until a hit can be resolved to its prim ([`PRIMS_NOTE`](crate::inspect::PRIMS_NOTE)).
+    ExprPrimsLight,
+}
+
+crate::names::named!(
+    GroupBy,
+    "grouping",
+    [
+        (
+            GroupBy::None,
+            "none",
+            "No groups: the brightest records only"
+        ),
+        (GroupBy::Light, "light", "By the light that ends the path"),
+        (
+            GroupBy::Expr,
+            "expr",
+            "By the path's expression (lights told apart by their LPE tag)"
+        ),
+        (
+            GroupBy::ExprLight,
+            "expr+light",
+            "By the expression and the light (default)"
+        ),
+        (
+            GroupBy::ExprPrimsLight,
+            "expr+prims+light",
+            "By the expression, the prims it bounced on and the light (not yet available)"
+        ),
+    ]
+);
 
 /// What every unit of an inspection is configured with.
 #[derive(Debug, Clone)]

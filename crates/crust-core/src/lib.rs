@@ -47,6 +47,7 @@ pub mod place;
 /// the render, after Guerilla Render's "Render Profile".
 pub mod profile;
 mod ray;
+mod region;
 /// The envelope and value rules every JSON report shares.
 pub mod report;
 mod rt_world;
@@ -132,12 +133,12 @@ pub mod implicit_shapes {
         Axis, MIN_CAP_AXIAL, MIN_RADIAL, Tessellation, capsule, cone, cuboid, cylinder, plane,
     };
 }
+#[cfg(feature = "traversal-stats")]
+pub use rt_world::traversal_report;
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
     MaterialRecord, NoAssets, UsdImportOptions, usd_schema_registry,
 };
-#[cfg(feature = "traversal-stats")]
-pub use stats::traversal_report;
 pub use stats::{
     DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,
     RayStats, RenderStats, SceneCounters, SubdivisionCounters, TextureCacheStats,

@@ -244,7 +244,7 @@ carries a warning of a family a setting can move (`settings.`, `product.`, `aov.
 
 `Update::check` then `Update::apply`, both in `crust-core`, keyed by slot and index:
 
-- `World::check_materials` compares each rebuilt material's `live::Signature` with the
+- `World::check_materials` compares each rebuilt material's `Signature` (`rt_world.rs`) with the
   one in every slot it goes into — `kind`, cutout, straight transmission, medium
   boundary, `may_emit`, `uses_uv`, `uv_primvar`, the Ptex face count. These are what
   `WorldBuilder::commit` derives flags from and what the mesh import built the UV and

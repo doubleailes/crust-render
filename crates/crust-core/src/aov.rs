@@ -19,7 +19,8 @@
 use glam::Vec3A;
 
 use crate::buffer::Buffer;
-use crate::tracer::PixelRect;
+use crate::camera::CameraFrame;
+use crate::region::PixelRect;
 
 /// What a RenderVar computes: one row of the canonical table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -541,7 +542,7 @@ pub(crate) struct AovLayout {
     pub(crate) route: Option<std::sync::Arc<crate::tracer::RouteCtx>>,
     /// The light path inspector's configuration: every camera sample's
     /// records are kept per work unit ([`crate::inspect`]).
-    pub(crate) inspect: Option<std::sync::Arc<crate::inspect::store::Config>>,
+    pub(crate) inspect: Option<std::sync::Arc<crate::tracer::inspection::Config>>,
 }
 
 impl AovLayout {
@@ -624,59 +625,6 @@ pub(crate) enum FirstHit {
         /// it does not move, or when no var asks for the motion vector.
         motion: Vec3A,
     },
-}
-
-/// The camera's frame, for the camera-space sources, and its image plane,
-/// for the screen-space ones. Camera space is the USD camera's: `u` right,
-/// `v` up, looking down `−w`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CameraFrame {
-    pub(crate) origin: Vec3A,
-    pub(crate) u: Vec3A,
-    pub(crate) v: Vec3A,
-    pub(crate) w: Vec3A,
-    /// The image plane `Camera::get_ray` aims at: its lower-left corner
-    /// relative to `origin`, and its two extents (`lower_left_corner −
-    /// origin`, `horizontal`, `vertical`). `horizontal` is along `u`,
-    /// `vertical` along `v`.
-    pub(crate) lower_left: Vec3A,
-    pub(crate) horizontal: Vec3A,
-    pub(crate) vertical: Vec3A,
-    /// The image resolution, in pixels.
-    pub(crate) width: f32,
-    pub(crate) height: f32,
-}
-
-impl CameraFrame {
-    /// `d`, a world-space offset or direction, in camera space.
-    fn eye(&self, d: Vec3A) -> Vec3A {
-        Vec3A::new(d.dot(self.u), d.dot(self.v), d.dot(self.w))
-    }
-
-    /// Camera-space depth of `p`: positive in front of the camera.
-    fn depth(&self, p: Vec3A) -> f32 {
-        -(p - self.origin).dot(self.w)
-    }
-
-    /// The pinhole inverse of `Camera::get_ray` at the lens centre: the
-    /// viewport coordinates `(s, t)` whose ray passes through `p` — in
-    /// `[0, 1]²` on the frame, outside it off the frame, `t` growing along
-    /// `v` (up). Depth of field is ignored on purpose: the vector built on
-    /// this describes the in-focus image. `p` must be in front of the camera
-    /// (depth > 0); callers clip first.
-    fn proj(&self, p: Vec3A) -> (f32, f32) {
-        let d = p - self.origin;
-        // The plane lies `f` in front of the origin, and the ray through
-        // `(s, t)` lands on it at `lower_left + s·horizontal + t·vertical`,
-        // so scaling `d` onto the plane by depth gives that point.
-        let f = -self.lower_left.dot(self.w);
-        let on_plane = d * (f / self.depth(p));
-        let rel = on_plane - self.lower_left;
-        (
-            rel.dot(self.u) / self.horizontal.length(),
-            rel.dot(self.v) / self.vertical.length(),
-        )
-    }
 }
 
 /// The `motionvector` value: where the point hit at `p` at shutter time
@@ -1052,7 +1000,7 @@ impl AovFilm {
             match slot.key.accumulation {
                 Accumulation::Filtered if slot.key.variance => {
                     let var = src.var.as_ref().expect("a unit's variance slot");
-                    dst.values[q] = crate::tracer::var_of_mean(var.sum[p], var.sq[p], taken) as f32;
+                    dst.values[q] = crate::buffer::var_of_mean(var.sum[p], var.sq[p], taken) as f32;
                 }
                 Accumulation::Filtered if slot.key.hits_only() => {
                     let (w, n) = (src.hit_weight[p], src.hits[p]);
@@ -1727,7 +1675,7 @@ mod tests {
             layout.luma.of(samples[0]) as f64,
             layout.luma.of(samples[1]) as f64,
         );
-        let want = crate::tracer::var_of_mean(x0 + x1, x0 * x0 + x1 * x1, 2) as f32;
+        let want = crate::buffer::var_of_mean(x0 + x1, x0 * x0 + x1 * x1, 2) as f32;
         assert!(want > 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![want]]);
     }
