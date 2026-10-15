@@ -29,7 +29,7 @@ use openusd_schemas::render::{
 use tracing::debug;
 
 use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
-use crate::tracer::PixelRect;
+use crate::region::PixelRect;
 
 use super::attrs::{custom_bool, custom_token, decode_bool, decode_number, prim_value, value_at};
 use super::prim_at;

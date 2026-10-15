@@ -34,11 +34,15 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::camera::Camera;
-use crate::light::{Light, LightKind, LightList};
+use crate::light::{LightKind, LightList};
 use crate::material::Material;
 use crate::rt_world::World;
 use crate::scene::Scene;
 use crate::tracer::RenderSettings;
+
+// Refusals come from the world and the light list too, so the type sits
+// below them.
+pub use crate::error::Structural;
 
 /// Where an imported scene's parts came from. Built by the USD import in its
 /// traversal order; memory in proportion to the material, light and emitting
@@ -263,18 +267,6 @@ impl Change {
     }
 }
 
-/// Why a change cannot be applied in place: the host re-imports instead.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Structural(pub String);
-
-impl std::fmt::Display for Structural {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Structural {}
-
 /// The settings a settings change re-reads.
 pub struct SettingsUpdate {
     /// The stage's render settings, before any host override.
@@ -350,40 +342,4 @@ impl Update {
         }
         Ok(())
     }
-}
-
-/// The properties of a material the world and the geometry were built on:
-/// two materials with the same signature can swap slots without a re-import.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Signature {
-    kind: &'static str,
-    cutout: bool,
-    straight: bool,
-    boundary: bool,
-    emits: bool,
-    uv: bool,
-    uv_primvar: Option<String>,
-    face_texture: Option<usize>,
-}
-
-impl Signature {
-    pub(crate) fn of(m: &dyn Material) -> Signature {
-        Signature {
-            kind: m.kind(),
-            cutout: m.has_cutout(),
-            straight: m.has_straight_transmission(),
-            boundary: m.is_medium_boundary(),
-            emits: m.may_emit(),
-            uv: m.uses_uv(),
-            uv_primvar: m.uv_primvar().map(str::to_owned),
-            face_texture: m.face_texture().map(|t| t.num_faces()),
-        }
-    }
-}
-
-/// A light's identity in the list: what a replacement must keep.
-pub(crate) fn same_light_shape(old: &LightKind, new: &LightKind) -> bool {
-    std::mem::discriminant(old) == std::mem::discriminant(new)
-        && old.at_infinity() == new.at_infinity()
-        && old.geom_id() == new.geom_id()
 }

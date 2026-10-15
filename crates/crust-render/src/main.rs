@@ -1985,7 +1985,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     // once the last one has stopped.
     stats.textures = assets.texture_cache_stats();
     stats.ptex = assets.ptex_stats();
-    stats.inventory_from(&renderer.world, &renderer.lights);
+    renderer.inventory_into(&mut stats);
     if cli.profile {
         stats.profile = crust_core::profile::take();
     }

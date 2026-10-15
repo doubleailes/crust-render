@@ -2,6 +2,59 @@ use crate::ray::Ray;
 use glam::Vec3A;
 use utils::concentric_disk;
 
+/// The camera's frame, for the camera-space sources, and its image plane,
+/// for the screen-space ones. Camera space is the USD camera's: `u` right,
+/// `v` up, looking down `−w`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CameraFrame {
+    pub(crate) origin: Vec3A,
+    pub(crate) u: Vec3A,
+    pub(crate) v: Vec3A,
+    pub(crate) w: Vec3A,
+    /// The image plane `Camera::get_ray` aims at: its lower-left corner
+    /// relative to `origin`, and its two extents (`lower_left_corner −
+    /// origin`, `horizontal`, `vertical`). `horizontal` is along `u`,
+    /// `vertical` along `v`.
+    pub(crate) lower_left: Vec3A,
+    pub(crate) horizontal: Vec3A,
+    pub(crate) vertical: Vec3A,
+    /// The image resolution, in pixels.
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+}
+
+impl CameraFrame {
+    /// `d`, a world-space offset or direction, in camera space.
+    pub(crate) fn eye(&self, d: Vec3A) -> Vec3A {
+        Vec3A::new(d.dot(self.u), d.dot(self.v), d.dot(self.w))
+    }
+
+    /// Camera-space depth of `p`: positive in front of the camera.
+    pub(crate) fn depth(&self, p: Vec3A) -> f32 {
+        -(p - self.origin).dot(self.w)
+    }
+
+    /// The pinhole inverse of `Camera::get_ray` at the lens centre: the
+    /// viewport coordinates `(s, t)` whose ray passes through `p` — in
+    /// `[0, 1]²` on the frame, outside it off the frame, `t` growing along
+    /// `v` (up). Depth of field is ignored on purpose: the vector built on
+    /// this describes the in-focus image. `p` must be in front of the camera
+    /// (depth > 0); callers clip first.
+    pub(crate) fn proj(&self, p: Vec3A) -> (f32, f32) {
+        let d = p - self.origin;
+        // The plane lies `f` in front of the origin, and the ray through
+        // `(s, t)` lands on it at `lower_left + s·horizontal + t·vertical`,
+        // so scaling `d` onto the plane by depth gives that point.
+        let f = -self.lower_left.dot(self.w);
+        let on_plane = d * (f / self.depth(p));
+        let rel = on_plane - self.lower_left;
+        (
+            rel.dot(self.u) / self.horizontal.length(),
+            rel.dot(self.v) / self.vertical.length(),
+        )
+    }
+}
+
 /// The `Camera` struct represents a virtual camera in the ray tracing system.
 /// It is responsible for generating rays that simulate the perspective view of a scene.
 #[derive(Debug, Clone, Copy)]
@@ -84,8 +137,8 @@ impl Camera {
     /// right, up, and backward (the view direction is `−w`, as in a USD
     /// camera); `get_ray` builds `v = w × u`, so `w = u × v` — and its image
     /// plane and resolution, for the screen-space ones.
-    pub(crate) fn frame(&self, width: usize, height: usize) -> crate::aov::CameraFrame {
-        crate::aov::CameraFrame {
+    pub(crate) fn frame(&self, width: usize, height: usize) -> CameraFrame {
+        CameraFrame {
             origin: self.origin,
             u: self.u,
             v: self.v,

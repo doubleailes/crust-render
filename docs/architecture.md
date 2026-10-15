@@ -179,15 +179,38 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/usd_import/implicit.rs` (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1` variants tessellated as OpenUSD's GeomUtil does, pinned point for point by `tests/geomutil_oracle.rs`, their radial count chosen from the screen when a camera is named); `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
 | AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
-| integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` |
+| integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` (and `var_of_mean`, the one variance estimator), `region.rs` (`PixelRect`) |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`), `lobe.rs` (the lobe vocabulary: `Scatter`, `LobeLabel`, `LobeEvent`, `LobeSplit`, which `lpe` re-exports) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection, `learned.rs` and `neural.rs` the frozen tables the learned selections pick with), `tracer/light_cache.rs` (`learned`'s training pre-pass, and the walk both learned selections share), `tracer/light_visibility.rs` (`neural`'s training over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
 | reporting | `stats.rs` (`--stats`, and `--stats-json`'s `crust-stats/1`), `profile.rs` (`--profile`), `report.rs` (the JSON reports' envelope and value rules), `stamp.rs` (the `crust:*` sampling stamp every EXR carries), `compare.rs` (`crust diff`: identity, metrics, comparability, over decoded planes), `error.rs` |
-| light path inspector | `inspect/` — `mod.rs` (`run`: the region render, the report's assembly, `GroupBy`), `store.rs` (per-unit top-N heap and group aggregates on interned keys, merged in unit order), `report.rs` (`Report`, the `crust-light-paths/1` JSON, the Markdown, the hint rules). The records come from `Route::fold` (`tracer/route.rs`), fed per camera sample by `advance_pixel`'s AOV instantiation, and the region renders through `Renderer::render_inspection` |
+| light path inspector | `inspect/` — `mod.rs` (`run`: the region render, the report's assembly), `tracer/inspection.rs` (`GroupBy`, and the per-unit top-N heap and group aggregates on interned keys the integrator fills, merged in unit order), `report.rs` (`Report`, the `crust-light-paths/1` JSON, the Markdown, the hint rules). The records come from `Route::fold` (`tracer/route.rs`), fed per camera sample by `advance_pixel`'s AOV instantiation, and the region renders through `Renderer::render_inspection` |
 | diagnostic | `diagnostic/` — `mod.rs` (`run`: calibration, baseline, crops, tiers 1–3, suggestions), `report.rs` (`Report`, the `crust-diagnostic/1` JSON), `markdown.rs`, `noise.rs` (the light path rows, light groups, tier-1 ordering rules, the brightest pixels' share), `crops.rs`, `schedule.rs` (budget, trial spp and the later tiers' reserves), `trials.rs` (the picture check, trimmed MRSE, the noise floor, ΔEff and at the target, verdicts, the per-crop reference), `checks.rs` (findings, picture ones included), `compare.rs` (`--baseline` deltas). It renders through `Renderer::render_measured` (`tracer/mod.rs`: `Instruments` → `Measured`), the only caller of the per-tile timer and the clamp counter |
+
+## Layering
+
+crust-core's modules import only downward, so that splitting it into crates
+stays a mechanical move. From the bottom:
+
+| layer | modules |
+|-------|---------|
+| foundation | `config`, `names`, `warnings`, `report`, `profile`, `stats`, `pdf`, `distribution`, `color`, `texture`, `lux`, `error` (with `Structural` and the inspection's `Refusal` and limits), `region`, `buffer` |
+| rays | `ray`, `medium`, `hittable`, `aabb` |
+| materials | `material/` (with the lobe vocabulary `lpe` matches, and `SubsurfaceEntry`), `lpe/` |
+| world | `rt_world` (with the material `Signature` an in-place edit is checked against, and `EVERY_CLASS`) |
+| lights | `light/` (with the learned selections' frozen tables), `environment` |
+| integrator | `tracer/` (with the learned selections' training and the inspection's per-unit store), `aov`, `camera`, `filter`, `sampler`, `guiding`, `volume`, `subsurface` |
+| import | `scene/`, `world.rs`, `live`, `place` |
+| tools | `diagnostic/`, `inspect/`, `compare`, `stamp`, `check` |
+
+A module may name its own layer or a lower one, by module path or through a
+crate-root re-export; doc comments may link upward. `tests/layering.rs`
+enforces it, and fails on a top-level module with no layer. When something
+low needs something high, the item is usually in the wrong place: move it
+down (as `PixelRect`, `Structural` and the lobe vocabulary were) rather than
+adding a trait.
 
 ## Invariants that span modules
 
@@ -206,7 +229,7 @@ other. The pairs:
   traversal called (`read_index`, `apply_exposure`, `resolve_fresh`,
   `emit_light`), never copies of them; `World::check_materials` and
   `LightList::check_replace` refuse a swap that would move anything the world,
-  the geometry or the list was built on (`live::Signature`); and the renderer is
+  the geometry or the list was built on (`Signature`, in `rt_world.rs`); and the renderer is
   rebuilt with `Renderer::new`, so the light selection is a fresh one's. A new
   material property the import bakes into geometry or a world flag belongs in
   `Signature`. Pinned per class, undo included, by
@@ -502,6 +525,18 @@ Paid down since, from `docs/rust_leverage.md`: environment parsing is one
 typed `Config` (`crust-core/src/config.rs`) instead of nineteen hand-rolled
 reads, some cached and some re-read per prim or texture open.
 
+Paid down by the layering pass (2026-10-15, no rendered output changed):
+crust-core's modules imported upward in about a dozen places (materials from
+`lpe`, the light list from the integrator through the learned selections'
+training, the world and the light list from `live`, `stats` from the tracer
+and the world, the integrator from `inspect`). Each was a move: the item went
+down to the layer that owns it, so the modules now form the layers in
+§ Layering, which `tests/layering.rs` keeps. Every sample, AOV products
+included, renders bit-identically under every light selection (the guided
+Cornell box aside: a guided render is not reproducible run to run, before or
+after), and the hot functions' instruction counts are unchanged under
+callgrind.
+
 Paid down by `compact-triangle-storage` (2026-10-01): the kernel stored every
 triangle three times (an 80-byte primitive node with its own vertex copy, the
 SIMD packet, and three unshared per-corner normals) and the importer kept
@@ -537,23 +572,6 @@ Still open, roughly in order of payoff:
    emits wide nodes directly (fused collapsing) is the remaining lever, and
    the composed USD stage, not the kernel, is most of a production scene's
    peak.
-5. **crust-core's modules still import upward in places.** The target is
-   layers that import only downward — foundation (`config`, `names`,
-   `warnings`, `report`, `profile`, `stats`, `pdf`, `color`, `texture`,
-   `lux`, `error`) → rays (`ray`, `medium`, `hittable`) → materials → world
-   (`rt_world`, `place`, `live`'s edit-check types) → lights → integrator
-   (`tracer/`, `aov`, `buffer`, `filter`, `sampler`, `guiding`, `volume`,
-   `camera`, `subsurface`) → import (`scene/`, `world.rs`, `live`'s rebuild)
-   → tools (`diagnostic/`, `inspect/`, `compare`, `stamp`, `check`) — so a
-   later split into crates is mechanical. Done: the lobe vocabulary moved
-   from `lpe` into `material/lobe.rs`, and the learned selections' tables
-   into `light/learned.rs` / `light/neural.rs`, their training into
-   `tracer/`. Left: `SubsurfaceEntry` into `material/`;
-   `From<&RenderSettings> for ImageCounters` out of `stats.rs`; `live.rs`
-   split into edit-check types and the rebuild; `inspect::store` into
-   `tracer/`; `inspect::Refusal` into `error.rs`; `PixelRect` and
-   `var_of_mean` into `buffer.rs`; `CameraFrame` beside `Camera`. Every one
-   is a move, not a new trait.
 
 ## Further reading
 

@@ -36,13 +36,13 @@ use utils::cosine_hemisphere;
 
 use crate::hittable::HitRecord;
 use crate::material::ScatterSample;
+use crate::material::SubsurfaceEntry;
 use crate::material::brdf::{
     ZeltnerSheen, ggx_d_aniso, ggx_g2_smith_aniso, pdf_vndf_ggx_aniso_local,
     pdf_vndf_h_aniso_local, sample_vndf_ggx_aniso_local, tangent_frame,
 };
 use crate::medium::Medium;
 use crate::ray::Ray;
-use crate::subsurface::SubsurfaceEntry;
 use crust_mtlx::{Bsdf, Closure, Closures, DiffuseModel, NodeId, ScatterMode, SheenMode, Val};
 use mx::{Fresnel, FresnelModel};
 

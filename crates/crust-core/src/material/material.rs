@@ -4,6 +4,20 @@ use crate::material::{OpenPBR, ResolvedOpenPBR};
 use crate::ray::Ray;
 use glam::Vec3A;
 
+/// What a subsurface leaf hands the tracer when the closure selects it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SubsurfaceEntry {
+    /// World-space direction into the medium from the entry point.
+    pub dir: Vec3A,
+    /// The target multiple-scattering albedo (the leaf's `color`).
+    pub albedo: Vec3A,
+    /// Per-channel mean free path, world units (`radius`).
+    pub radius: Vec3A,
+    /// Henyey–Greenstein anisotropy; the walk clamps it to `[0, 0.99]`
+    /// ([`walk_anisotropy`](crate::subsurface::walk_anisotropy)).
+    pub anisotropy: f32,
+}
+
 /// One direction sampled from a material's importance distribution.
 #[derive(Clone)]
 pub struct ScatterSample {
@@ -752,10 +766,7 @@ impl<'a> ShadingPoint<'a> {
 
     /// The random walk a sample with [`ScatterSample::subsurface`] set enters
     /// toward `dir`: `None` for any other sample.
-    pub fn subsurface_entry(
-        &self,
-        sample: &ScatterSample,
-    ) -> Option<crate::subsurface::SubsurfaceEntry> {
+    pub fn subsurface_entry(&self, sample: &ScatterSample) -> Option<SubsurfaceEntry> {
         match &self.bsdf {
             Resolved::Closure(c) => c.subsurface_entry(sample.subsurface?, sample.ray.direction()),
             _ => None,

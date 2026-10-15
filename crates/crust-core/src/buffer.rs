@@ -1,6 +1,6 @@
 use glam::Vec3A;
 
-use crate::tracer::PixelRect;
+use crate::region::PixelRect;
 
 /// The `Buffer` struct represents a 2D image buffer used to store pixel colors.
 /// It provides methods to set and retrieve pixel values, as well as access RGB data.
@@ -129,4 +129,19 @@ impl Buffer {
         let pixel: Vec3A = self.get_pixel(self.rect.x0 + x, self.rect.y1 - 1 - y);
         (pixel.x, pixel.y, pixel.z)
     }
+}
+
+/// The unbiased variance of a mean over `n` samples whose sum is `sum` and
+/// sum of squares `sq`: `(Σx² − (Σx)²/n) / (n−1) / n`, clamped at 0, and
+/// `+∞` below two samples, where it cannot be estimated.
+///
+/// The one estimator behind adaptive sampling's stop rule, the `variance`
+/// AOV and the light path expressions' variance modifier, so `C.*[LO]`'s
+/// variance is the `variance` AOV bit for bit.
+pub(crate) fn var_of_mean(sum: f64, sq: f64, n: u32) -> f64 {
+    if n < 2 {
+        return f64::INFINITY;
+    }
+    let n = n as f64;
+    ((sq - sum * sum / n) / (n - 1.0) / n).max(0.0)
 }
