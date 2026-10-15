@@ -125,7 +125,7 @@ fn scene(selection: LightSelection, spp: u32) -> (Renderer, LightList) {
 }
 
 /// The mean and variance of a floor point's estimate.
-fn moments(r: &Renderer, list: &LightList, s: SamplingStrategy, n: u32) -> (f64, f64) {
+fn moments(r: &Renderer, list: &LightList, s: SamplingStrategy, n: i32) -> (f64, f64) {
     let volumes = Volumes::default();
     let ray = Ray::new(Vec3A::new(0.5, 4.0, 3.0), Vec3A::new(-0.5, -4.0, -3.0));
     let (mut sum, mut sq) = (0.0f64, 0.0f64);
