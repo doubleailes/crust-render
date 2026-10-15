@@ -9,7 +9,7 @@ sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Crust Render is a Rust workspace of eight crates. Each owns one job and knows nothing about the others’ internals.'
+lead = 'Crust Render is a Rust workspace of seven crates. Each owns one job and knows nothing about the others’ internals.'
 toc = true
 top = false
 +++
@@ -36,8 +36,8 @@ in the repository.
          (USD import, integrator, materials, lights, volumes, guiding)
           │       │        │         │        │         │          │
           ▼       ▼        ▼         ▼        ▼         ▼          ▼
-      crust-rt crust-mtlx crust-jit crust-nn utils  openqmc-rs  openusd,
-      (kernel) (MaterialX) (JIT)   (networks) (math) (sampling)  opensubdiv-rs
+      crust-rt crust-mtlx crust-jit  utils  openqmc-rs  openusd,
+      (kernel) (MaterialX) (JIT)    (math) (sampling)  opensubdiv-rs
 ```
 
 | crate | owns | knows nothing about |
@@ -45,7 +45,6 @@ in the repository.
 | `crust-rt` | geometry, the BVH build, ray intersection, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | reading `.mtlx` documents, compiling node graphs into programs, the BSDF closure tree | any Crust type |
 | `crust-jit` | compiling MaterialX programs to machine code (optional, the `jit` feature) | everything but `crust-mtlx` |
-| `crust-nn` | small neural networks — a hash-grid encoding, dense layers, their training — that `neural` light selection learns visibility with | any Crust type |
 | `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, path guiding, statistics, the diagnostic and its report | decoding images, textures or IES files |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the texture tile caches, `.tx` conversion | the integrator |
 | `crust-render` | the command line, logging, the progress bar, writing the EXR and PNG, printing and saving the diagnostic's report | decoding anything |
@@ -61,7 +60,7 @@ Three libraries come from outside the workspace, all pure Rust:
   subdivision surfaces and read Ptex files.
 
 `openqmc-rs` started inside this repository and was extracted once it had no Crust types
-in its interface. `crust-rt`, `crust-mtlx` and `crust-nn` are kept the same way, so that
+in its interface. `crust-rt` and `crust-mtlx` are kept the same way, so that
 they could be extracted too.
 
 ## A render, end to end
@@ -77,7 +76,7 @@ they could be extracted too.
    instances, then the top-level acceleration structure is built.
 4. **Renderer setup.** Light-selection tables are built, plus the learned light cache when
    [`crust:lightSelection`](@/docs/usd/render-settings.md#crust-lightselection) is
-   `learned`, or the visibility network (`crust-nn`) when it is `neural`.
+   `learned`, or the light BVH when it is `tree`.
 5. **Rendering.** Tiles run in parallel. For each pixel and sample, a path is traced:
    intersect, shade the hit once, sample a light, pick the next direction, repeat. Path
    guiding (training passes) and adaptive sampling (stopping pixels early) wrap that same

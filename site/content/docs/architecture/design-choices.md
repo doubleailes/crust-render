@@ -167,9 +167,8 @@ is the only biased default. Set it to 0 for reference renders.
 bundled `cornellbox_guided.usda`, where all light arrives indirectly, guiding cuts the
 error by about 20% at the same sample count. Light selection can rank lights at each
 shading point by a light BVH (`tree`: power, distance, orientation and the surface's
-horizon, as pbrt-v4 and Cycles do), learn which lights reach each region of the scene
-(`learned`), or, as an experiment, predict it at any point with a small neural network
-(`neural`).
+horizon, as pbrt-v4 and Cycles do), or learn which lights reach each region of the scene
+(`learned`).
 
 ## The engine decodes no files
 

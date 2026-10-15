@@ -3,7 +3,6 @@ use glam::Vec3A;
 use crate::pdf::PdfSolidAngle;
 
 mod area;
-mod ellipse;
 mod infinite;
 mod kind;
 mod list;

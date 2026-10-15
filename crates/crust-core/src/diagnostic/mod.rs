@@ -287,14 +287,13 @@ impl Shot {
     }
 }
 
-/// A render's setup, `(selection, training)`: the `learned` or `neural`
-/// pre-pass, the `tree` build, and guiding's training passes (`training_s`).
+/// A render's setup, `(selection, training)`: the `learned` pre-pass, the `tree` build, and guiding's training passes (`training_s`).
 /// `power` and `uniform` are built in next to no time, and count as none —
 /// so a trial without setup has none.
 fn setup_parts(settings: RenderSettings, selection: Duration, training_s: f64) -> (f64, f64) {
     let selection_s = if matches!(
         settings.light_selection(),
-        LightSelection::Learned | LightSelection::Neural | LightSelection::Tree
+        LightSelection::Learned | LightSelection::Tree
     ) {
         selection.as_secs_f64()
     } else {
@@ -304,9 +303,8 @@ fn setup_parts(settings: RenderSettings, selection: Duration, training_s: f64) -
 }
 
 /// What a trial's change cost in setup the last time the same factor took
-/// the same value, per trial render. Keyed by both: `learned`'s pre-pass
-/// and `neural`'s differ fourfold (ALab: 1.5 s and 6.2 s), and `power` or
-/// `uniform` have none.
+/// the same value, per trial render. Keyed by both: `learned` has a
+/// pre-pass, and `power` or `uniform` have none.
 fn remembered_setup(
     known: &[(&'static str, String, f64)],
     factor: &str,
@@ -322,7 +320,7 @@ fn remembered_setup(
 /// admitted: a light selection with a pre-pass, which an estimate of none
 /// would let overrun its tier.
 fn setup_measured_first(factor: &str, value: &str) -> bool {
-    factor == "light_selection" && (value == "learned" || value == "neural")
+    factor == "light_selection" && value == "learned"
 }
 
 /// Each pixel's luminance in a measured render, indexed as its variance
@@ -944,7 +942,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                    value: String|
      -> Option<Running> {
         // Setup, per trial render: what this factor cost last time at this
-        // value, else measured (a `learned` or `neural` pre-pass, over the
+        // value, else measured (a `learned` pre-pass, over the
         // full frame whatever the crop) or estimated (guiding's training
         // passes) before admitting the trial — a first trial estimated at no
         // setup could overrun.

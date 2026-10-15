@@ -18,7 +18,6 @@ graph TD
     rt["crust-rt<br/><i>intersection kernel</i>"]
     mtlx["crust-mtlx<br/><i>MaterialX reader + interpreter</i>"]
     jit["crust-jit<br/><i>Cranelift JIT for crust-mtlx programs</i>"]
-    nn["crust-nn<br/><i>tiny networks: hash grid, MLP, Adam</i>"]
     utils["utils<br/><i>sampling warps, MIS heuristics</i>"]
     oqmc["openqmc-rs<br/><i>QMC samplers (crates.io)</i>"]
     usd["openusd + openusd-schemas"]
@@ -32,7 +31,6 @@ graph TD
     assets --> ptex
     core --> rt
     core --> mtlx
-    core --> nn
     core -. "feature jit" .-> jit
     jit --> mtlx
     core --> utils
@@ -47,7 +45,6 @@ graph TD
 | `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
-| `crust-nn` | tiny, bit-deterministic networks: the multi-resolution hash grid, dense layers, sigmoid cross-entropy, Adam, gradient checking (what `neural` light selection learns visibility with) | crust types, threads (the caller maps a batch's chunks) and random numbers (the caller draws them) |
 | `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown), the light path inspector (`inspect/`: the `crust-light-paths/1` report) | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
 | `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's and the light path inspector's reports; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
@@ -60,8 +57,8 @@ Two properties of this graph are deliberate and worth keeping:
   `AssetLoader` seam (below) into `crust-assets`. That is why the
   engine library has no codec dependencies and why the probe examples in
   `crust-render/examples/` decode exactly the way the renderer does.
-- **The leaf libraries have no crust dependency.** `crust-rt`, `crust-mtlx`
-  and `crust-nn` are shaped to be extracted the way `openqmc-rs` already was.
+- **The leaf libraries have no crust dependency.** `crust-rt` and
+  `crust-mtlx` are shaped to be extracted the way `openqmc-rs` already was.
   `crust-core` adopts their vocabulary (`crust_rt::Geometry`,
   `crust_mtlx::Texture` re-exported as `Texture2D`) instead of wrapping it in
   adapter traits: a wrapper would add a vtable hop per texel fetch that LTO
@@ -181,7 +178,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
-| lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection, and the pre-pass walk both learned selections share), `light_visibility.rs` (neural selection over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
+| lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection and its pre-pass walk), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
@@ -213,13 +210,13 @@ other. The pairs:
   `edits_in_place_render_as_a_full_import` (`crust-render/src/mcp/tests.rs`).
 - **`Renderer::new` ↔ `Renderer::reconfigure`.** `new` is `reconfigure` on a
   fresh renderer, and `reconfigure` rebuilds everything that depends on the
-  settings (the light selection, the `learned` or `neural` pre-pass); every other setting
+  settings (the light selection, the `learned` pre-pass); every other setting
   is read per pass. A setting cached at construction must be rebuilt there too,
   or the diagnostic's trials measure the wrong renderer —
   `reconfigure_renders_what_new_renders` pins every varied setting bitwise.
   `Renderer::retune` (an MCP session's renders) is `reconfigure` keeping the
   light selection when its inputs — the strategy, the resolution, the frame —
-  are unchanged: a new input to the `learned` or `neural` pre-pass belongs in its key, or a
+  are unchanged: a new input to the `learned` pre-pass belongs in its key, or a
   session renders with a stale selection (`retune_renders_what_new_renders`).
 - **The clamp and its counter.** The clamp counter (`PathContext::measure_clamp`)
   returns the *unclamped* radiance through a copy of the ordinary expression
@@ -414,7 +411,6 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_RAY_CONES` | on | `tracer/path.rs` | `0`: zero every texture footprint (finest mip always) |
 | `CRUST_LINK_TWIN` | on | `usd_import/light_links.rs` → `tracer/path.rs` | `0`: every shadow-linked light is sampled by NEE alone at continuous vertices (no bounce-side link twin, no MIS), the renderer before the twin. Unlinked scenes are bit-identical either way |
 | `CRUST_TUBE_SAMPLING` | `equiangular` | `light/shape.rs` (`AffineShape`) | How a one-sided `CylinderLight` is sampled from outside it. `area`: uniform in local area, the sampler before this switch (bit-identical to it); `arc`: the azimuth over the arc of wall facing the point only, the axial position uniform; `equiangular`: that arc, and the axial position equiangular along the sampled wall line. Scenes without a tube are bit-identical either way |
-| `CRUST_DISK_SAMPLING` | `area` | `light/shape.rs` (`AffineShape`), `light/ellipse.rs` | How a `DiskLight` is sampled from in front of it. `area`: uniform in local area (the default, and the sampler before this switch); `ellipse`: uniform over the spherical ellipse it subtends (Guillén et al. 2017), within a solid-angle band. Off by default: it loses at equal time on glossy receivers and small disks (`openspec/specs/lighting/design.md`, "Disk and tube lights") |
 | `CRUST_TEX` | on | `crust-assets/lib.rs` | `0`: decline every UV texture (surfaces use constants) |
 | `CRUST_TEX_MAX` | 1024 | `crust-assets/uv_texture/` | preloaded tile edge cap, pixels |
 | `CRUST_TEX_MIP` | on | `crust-assets/uv_texture/` | `0`: no mip pyramid on UV textures |

@@ -333,7 +333,6 @@ How light sampling picks which light to sample at each vertex. Overrides
 | `uniform` | every light is equally likely, whatever it emits |
 | `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
 | `tree` | by a light BVH: at each shading point, lights are ranked by power, distance, which way they face, and whether they are above the surface; a tenth of the picks still go by power. Lights at infinity keep their uniform share |
-| `neural` | visibility-aware, experimental: the same pre-pass trains a small network that predicts, at any point, which lights reach it; picks by power weighted by that prediction |
 
 `tree` helps scenes with many lights spread through space: a light far away, facing
 away, or below an opaque surface is picked less there. It does not know about walls, which
@@ -342,14 +341,7 @@ Lights below a surface's horizon are only ranked down at surfaces that cannot tr
 light; glass, translucent and thin-walled materials still see lights behind them.
 
 `learned` helps scenes with many lights where the brightest ones are often hidden, for
-example a room lit through its windows. `neural` is an experiment against `learned`: it
-stores the same knowledge as a continuous function rather than a grid of regions. It
-supports up to 64 lights (past that, or with a single light, it picks by power), and its
-pre-pass costs more than `learned`'s. It is slower than `learned` for the same noise on
-every scene measured, the bundled samples and the ALab production interior alike, and
-slower than `power` on all but ALab's direct lighting, where they tie: evaluating the
-network at every bounce costs more than the shadow rays it saves. Both stay unbiased: every light keeps a share of the light
-samples wherever it is predicted hidden.
+example a room lit through its windows.
 
 ### light-samples
 

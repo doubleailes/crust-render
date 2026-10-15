@@ -97,7 +97,7 @@ const BELOW_ONE: f32 = 1.0 - f32::EPSILON / 2.0;
 // at the same receiver, to the bit. Every `*_at` lookup takes the receiver NEE
 // sampled from — its position, and under `tree` its normal and opacity — and
 // the bounce side passes `prev`'s; `learned`'s grid forgave an ulp between the
-// two, a continuous selection (`neural`, `tree`) would turn one into an MIS
+// two, a continuous selection (`tree`) would turn one into an MIS
 // mismatch, a silent bias. Today both sides read one binding at every site;
 // this keeps it so.
 #[cfg(debug_assertions)]

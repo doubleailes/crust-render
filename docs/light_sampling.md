@@ -53,7 +53,7 @@ has the detail and §8 the measurement protocol.
 | 8 | **MIS compensation** for the dome map (Karlík et al. 2019, as in pbrt-v4) | per-light pdf | ~20 lines | large on sun + sky HDRIs | noise only |
 | 9 | **Per-vertex RIS**: M candidates, one shadow ray (Talbot et al. 2005) | selection | ~150 lines | large on glossy surfaces under several lights | noise only |
 | 10 | A **light BVH** with orientation cones (Conty Estevez & Kulla 2018; pbrt-v4, Cycles) | selection | ~600 lines | decisive for 10²+ lights, marginal below | noise only |
-| 2b | ✅ **Done for the tube.** Visible-arc, equiangular sampling for `CylinderLight`; Guillén et al. 2017's spherical ellipse for `DiskLight`, opt-in | per-light pdf | ~600 lines | tube: **measured 1.3–20× at equal time** on a sweep, 1.82× on `usdlux`; disk: 7.6× on a large disk over a matte floor, but a loss on every glossy one (§3.13) | noise only |
+| 2b | ✅ **Done for the tube.** Visible-arc, equiangular sampling for `CylinderLight`; Guillén et al. 2017's spherical ellipse for `DiskLight` measured and removed | per-light pdf | ~600 lines | tube: **measured 1.3–20× at equal time** on a sweep, 1.82× on `usdlux`; disk: 7.6× on a large disk over a matte floor, but a loss on every glossy one (§3.13) | noise only |
 | 11 | Cone-clipped sampling for shaped lights; image-importance sampling for textured rect lights; equiangular sampling in volumes | per-light pdf | moderate each | large in their niche | noise only |
 
 "Noise only" means the change alters the estimator but not its expectation. The
@@ -125,7 +125,7 @@ textured card, dome), and the dome gets 1/7 of it however dim it is.
 |---|---|---|
 | `SphereLight` (similarity transform) | **Fixed (§9.2 d):** `SphereShape` now samples the visible cone. It used to sample uniformly over the **whole** sphere. | What area sampling lost: everything outside the visible cap, at least half of all samples. More when close, because the visible cap is `(1 − r/d)/2` of the area. Back-facing samples are occluded by the sphere itself, so each one was a traced shadow ray that returned zero. |
 | `RectLight` | **Fixed (§9.2 e):** `RectShape` samples the spherical rectangle it subtends. It used to sample uniformly in `(u, v)`. | What area sampling lost: for a panel large or near relative to its distance, `cos θ_l / r²` varies by orders of magnitude across it. A few near samples dominate, and the QMC stratification is spent on the wrong measure. Sheared parallelograms and tiny lights still area-sample. |
-| `DiskLight`, `CylinderLight` | **Tube fixed (§3.13):** a one-sided tube samples the arc of wall facing the point, equiangularly along it (`CRUST_TUBE_SAMPLING`). The disk still samples uniformly in local area by default; its spherical ellipse (`CRUST_DISK_SAMPLING=ellipse`) is opt-in. | What area sampling lost on the tube: the far half of its wall, every sample there zero radiance, and the `1/r²` along a long tube. On the disk, the variance of `cos θ_l / r²` up close, which the ellipse removes on diffuse receivers but not at equal time on glossy ones. |
+| `DiskLight`, `CylinderLight` | **Tube fixed (§3.13):** a one-sided tube samples the arc of wall facing the point, equiangularly along it (`CRUST_TUBE_SAMPLING`). The disk samples uniformly in local area; a spherical-ellipse strategy lost at equal time and was removed (§3.13). | What area sampling lost on the tube: the far half of its wall, every sample there zero radiance, and the `1/r²` along a long tube. On the disk, the variance of `cos θ_l / r²` up close, which the ellipse removes on diffuse receivers but not at equal time on glossy ones. |
 | Squashed sphere (non-uniform scale) | **Fixed (§9.2 d):** `AffineShape` samples the unit sphere's visible cone in local space. It used to sample uniform in local area. | The same as the round sphere's. |
 | Shaped rect/disk (`ShapingAPI`, IES) | uniform by area, shaping applied as a factor | Every sample the cone rejects. A 30° spot wastes most of them. |
 | Textured `RectLight` | uniform by area | A card with a small bright region is sampled like a flat one. |
@@ -778,6 +778,9 @@ to every render, is why `learned` is opt-in rather than the default.
 
 ### 3.13 Visible-arc tubes and spherical-ellipse disks (§9.2 o)
 
+*The disk's spherical ellipse was removed on 2026-10-15 for the verdict below; the
+numbers stay as the record of why. Its code is in git history.*
+
 **What changed.**
 - A one-sided `CylinderLight` seen from outside samples only the arc of wall that faces
   the shading point, `|φ − φ₀| < acos(1/ρ)` in local space (exact under any affine
@@ -831,6 +834,10 @@ sampling.)
   64 and 256 spp falls toward the reference without a floor.
 
 ### 3.14 Neural visibility cache (`neural-visibility-light-selection`)
+
+*Removed on 2026-10-15 (`neural` selection and the `crust-nn` crate) for the
+verdict below; the numbers stay as the record of why. Its code, `nvc_bench`
+included, is in git history.*
 
 **Why.** `learned` (§3.12) stores visibility in a uniform grid of per-cell
 tables, and a grid has two measured weaknesses: a cell straddling a shadow
@@ -1725,7 +1732,7 @@ warp is not.**
   the next step here, and an API change on both MIS sides.
 
 **(o) Disks and tubes. ✅ Done for the tube (visible arc, equiangular along the
-wall, the default); the disk's spherical ellipse is opt-in. Measured in §3.13.**
+wall, the default); the disk's spherical ellipse was measured in §3.13 and removed.**
 
 **(f) Dome MIS compensation**, with a per-vertex fallback to the full pdf where
 BSDF sampling cannot reach the direction.
@@ -1806,7 +1813,7 @@ marked, and not guessed.
 | **V-Ray** | "Adaptive Lights": learned from the light cache; light-tree fallback | — | — |
 | **Iray** | a light hierarchy over per-triangle flux (Keller et al., arXiv 2017) | — | details not verified |
 | **Manuka** | not verified | — | — |
-| **crust** | power, defensive (infinite lights fixed, ½ even); uniform as the A/B | sphere: visible cone; rect: spherical rectangle; tube: visible arc, equiangular along the wall; disk: area (spherical ellipse opt-in) | power MIS; piecewise-constant dome |
+| **crust** | power, defensive (infinite lights fixed, ½ even); uniform as the A/B | sphere: visible cone; rect: spherical rectangle; tube: visible arc, equiangular along the wall; disk: area | power MIS; piecewise-constant dome |
 
 ---
 

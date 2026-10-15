@@ -245,7 +245,6 @@ How light sampling picks which light to sample.
 | `uniform` | every light is equally likely |
 | `learned` | visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it |
 | `tree` | by a light BVH: at each shading point, lights are ranked by power, distance, which way they face, and whether they are above an opaque surface; a tenth of the picks still go by power, and lights at infinity keep their uniform share. With one finite light or none it picks as `power` does |
-| `neural` | visibility-aware, experimental: the same pre-pass trains a small network that predicts, at any point, which lights reach it; picks by power weighted by that prediction. Up to 64 lights; past that, or with a single light, it picks by power |
 
 An unknown name logs a warning and uses `power`.
 
@@ -325,7 +324,7 @@ before changing a final render's sampler.
 The sampler is recorded in every EXR as `crust:sampler`, and
 [`crust diff`](@/docs/reference/command-line.md#diff) warns when two images were sampled
 differently: their pixels then differ by noise even where both converge to the same image.
-The pre-pass that trains `crust:lightSelection = "learned"` (or `"neural"`) always draws
+The pre-pass that trains `crust:lightSelection = "learned"` always draws
 from `sobol`, so the learned table is the same under every sampler and a comparison measures the sampler
 alone.
 

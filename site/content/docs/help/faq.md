@@ -46,8 +46,7 @@ dome and distant light at once.
 - Lower [`crust:varianceThreshold`](@/docs/usd/render-settings.md#crust-variancethreshold)
   so that adaptive sampling stops pixels later.
 - Many lights, most of them hidden? Try
-  [`--light-selection learned`](@/docs/reference/command-line.md#light-selection), or the
-  experimental `neural`, which learns the same thing as a continuous function.
+  [`--light-selection learned`](@/docs/reference/command-line.md#light-selection).
 - Mostly indirect light, for example a room lit through a door? Try
   [path guiding](@/docs/usd/render-settings.md#path-guiding).
 

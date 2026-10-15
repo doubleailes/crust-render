@@ -263,7 +263,7 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         }),
     };
 
-    // Light selection: `power` (default) | `uniform` | `learned` | `neural`.
+    // Light selection: `power` (default) | `uniform` | `learned` | `tree`.
     let light_selection = match custom_token(&prim, "crust:lightSelection") {
         None => LightSelection::Power,
         Some(name) => name.parse().unwrap_or_else(|e| {

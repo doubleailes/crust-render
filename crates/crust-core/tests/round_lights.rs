@@ -1,20 +1,19 @@
 //! Disk and cylinder lights through the integrator, under every value of
-//! `CRUST_DISK_SAMPLING` and `CRUST_TUBE_SAMPLING`: the `lighting` spec's
+//! `CRUST_TUBE_SAMPLING`: the `lighting` spec's
 //! "Disk and cylinder sampling is unbiased" scenario.
 //!
 //! A diffuse floor is lit by a sheared, non-uniformly scaled disk and an
 //! elliptical tube lying just above it. Light-only, BSDF-only and power-MIS
 //! estimates of the floor agree within noise whichever strategy samples
-//! either light, and the difference between a new strategy and area
+//! the tube, and the difference between a new strategy and area
 //! sampling falls as `1/√N` — noise, not bias, which would plateau.
 
 use std::sync::Arc;
 
 use crust_core::rt::{Geometry, SceneBuilder};
 use crust_core::{
-    AffineShape, AreaLight, DiskSampling, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR,
-    PathSampler, Ray, SamplingStrategy, TubeSampling, UnitShape, Vec3A, Volumes, WorldBuilder,
-    ray_color,
+    AffineShape, AreaLight, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR, PathSampler,
+    Ray, SamplingStrategy, TubeSampling, UnitShape, Vec3A, Volumes, WorldBuilder, ray_color,
 };
 use glam::{Affine3A, Mat3, Quat, Vec3};
 
@@ -61,8 +60,8 @@ struct Stage {
     lights: LightList,
 }
 
-/// The floor, the disk and the tube, each light sampled as told.
-fn stage(tube: TubeSampling, disk: DiskSampling) -> Stage {
+/// The floor, the disk and the tube, the tube sampled as told.
+fn stage(tube: TubeSampling) -> Stage {
     let mut world = WorldBuilder::new();
     let mut lights = LightList::new();
     world.attach(
@@ -96,7 +95,7 @@ fn stage(tube: TubeSampling, disk: DiskSampling) -> Stage {
         );
         let shape = AffineShape::new(unit, placement)
             .unwrap()
-            .with_sampling(tube, disk);
+            .with_sampling(tube);
         lights.add(AreaLight::new(shape, emitter, id));
     }
     Stage {
@@ -148,14 +147,13 @@ const TUBES: [TubeSampling; 3] = [
     TubeSampling::Arc,
     TubeSampling::Equiangular,
 ];
-const DISKS: [DiskSampling; 2] = [DiskSampling::Area, DiskSampling::Ellipse];
 
 /// Every strategy, under every switch value, estimates the same floor: each
-/// against power MIS with both switches at `area`, within four standard
+/// against power MIS with the switch at `area`, within four standard
 /// errors of the two together.
 #[test]
 fn disk_and_cylinder_sampling_is_unbiased() {
-    let reference = stage(TubeSampling::Area, DiskSampling::Area);
+    let reference = stage(TubeSampling::Area);
     let truth: Vec<(f64, f64)> = (0..FLOOR.len())
         .map(|k| estimate(&reference, SamplingStrategy::PowerMis, k, 1 << 20, 16_384))
         .collect();
@@ -163,22 +161,19 @@ fn disk_and_cylinder_sampling_is_unbiased() {
         assert!(*m > 0.01, "floor point {k} is unlit: {m}");
     }
     for tube in TUBES {
-        for disk in DISKS {
-            let stage = stage(tube, disk);
-            for (s, n) in [
-                (SamplingStrategy::PowerMis, 4096),
-                (SamplingStrategy::LightOnly, 4096),
-                (SamplingStrategy::BsdfOnly, 16_384),
-            ] {
-                for (k, &(want, want_se)) in truth.iter().enumerate() {
-                    let (got, se) = estimate(&stage, s, k, 0, n);
-                    let tol = 4.0 * (se * se + want_se * want_se).sqrt() + 1e-3 * want;
-                    assert!(
-                        (got - want).abs() <= tol,
-                        "tube {tube}, disk {disk}, {s:?}, floor point {k}: {got} vs {want} \
-                         (tolerance {tol})"
-                    );
-                }
+        let stage = stage(tube);
+        for (s, n) in [
+            (SamplingStrategy::PowerMis, 4096),
+            (SamplingStrategy::LightOnly, 4096),
+            (SamplingStrategy::BsdfOnly, 16_384),
+        ] {
+            for (k, &(want, want_se)) in truth.iter().enumerate() {
+                let (got, se) = estimate(&stage, s, k, 0, n);
+                let tol = 4.0 * (se * se + want_se * want_se).sqrt() + 1e-3 * want;
+                assert!(
+                    (got - want).abs() <= tol,
+                    "tube {tube}, {s:?}, floor point {k}: {got} vs {want} (tolerance {tol})"
+                );
             }
         }
     }
@@ -191,12 +186,9 @@ fn disk_and_cylinder_sampling_is_unbiased() {
 #[test]
 fn the_difference_from_area_sampling_falls_as_one_over_root_n() {
     const RUNS: u32 = 8;
-    let area = stage(TubeSampling::Area, DiskSampling::Area);
-    for (tube, disk) in [
-        (TubeSampling::Arc, DiskSampling::Ellipse),
-        (TubeSampling::Equiangular, DiskSampling::Ellipse),
-    ] {
-        let new = stage(tube, disk);
+    let area = stage(TubeSampling::Area);
+    for tube in [TubeSampling::Arc, TubeSampling::Equiangular] {
+        let new = stage(tube);
         let rms = |n: u32| {
             let mut sum2 = 0.0f64;
             for run in 0..RUNS {
@@ -213,7 +205,7 @@ fn the_difference_from_area_sampling_falls_as_one_over_root_n() {
         let (coarse, fine) = (rms(64), rms(1024));
         assert!(
             coarse / fine > 2.5,
-            "tube {tube}, disk {disk}: RMS difference {coarse} at 64 spp, {fine} at 1024 spp \
+            "tube {tube}: RMS difference {coarse} at 64 spp, {fine} at 1024 spp \
              (ratio {}, expected about 4)",
             coarse / fine
         );

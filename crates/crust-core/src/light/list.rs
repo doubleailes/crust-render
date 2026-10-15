@@ -1,10 +1,7 @@
 //! [`LightList`] and NEE's light selection ([`LightSelection`]): uniform,
-//! defensive power, the light tree, the learned per-cell table, or the
-//! neural visibility cache.
+//! defensive power, the light tree, or the learned per-cell table.
 
 use std::collections::HashMap;
-
-use glam::Vec3A;
 
 use super::{Light, LightKind, LightTree, Receiver};
 use crate::pdf::PdfSolidAngle;
@@ -35,12 +32,6 @@ pub enum LightSelection {
     /// selection wherever nothing was learned. What an interior lit through
     /// windows needs, where the most powerful lights are the ones hidden.
     Learned,
-    /// Visibility-aware, continuously: the power table weighted by each
-    /// light's visibility from the vertex, as a small network trained by the
-    /// same pre-pass predicts it (see `light_visibility.rs`). An opt-in
-    /// experiment against [`LightSelection::Learned`]'s grid
-    /// (`docs/light_sampling.md`, "Neural visibility cache").
-    Neural,
     /// By a light BVH (Conty Estevez & Kulla 2018; pbrt-v4's
     /// `BVHLightSampler`): the finite lights are walked from the shading
     /// point, each node's children chosen by an importance bound built from
@@ -76,11 +67,6 @@ crate::names::named!(
             "tree",
             "By a light BVH: flux, distance, orientation and the receiver's horizon at each shading point, over a defensive share of power"
         ),
-        (
-            LightSelection::Neural,
-            "neural",
-            "Visibility-aware: power weighted by each light's visibility, as a small network trained by the same pre-pass predicts it (experimental)"
-        ),
     ]
 );
 
@@ -90,8 +76,6 @@ crate::names::named!(
 pub(crate) enum Learned {
     /// [`LightSelection::Learned`]'s per-cell tables.
     Grid(crate::light_cache::LightCache),
-    /// [`LightSelection::Neural`]'s network.
-    Neural(crate::light_visibility::VisibilityCache),
     /// [`LightSelection::Tree`]'s light BVH.
     Tree(TreeSelection),
 }
@@ -198,8 +182,8 @@ pub struct LightList {
     /// them. Only an escaping camera ray reads them
     /// ([`LightList::backdrops`]).
     pub(super) backdrops: Vec<LightKind>,
-    /// The learned selection, under [`LightSelection::Learned`] or
-    /// [`LightSelection::Neural`]. Consulted by every `*_at` method; `pmf` /
+    /// The position-dependent selection, under [`LightSelection::Learned`] or
+    /// [`LightSelection::Tree`]. Consulted by every `*_at` method; `pmf` /
     /// `cdf` are what it falls back to wherever it has nothing to say.
     pub(super) cache: Option<std::sync::Arc<Learned>>,
     /// Light and shadow linking, when any light authors a link.
@@ -411,9 +395,9 @@ impl LightList {
     /// stratified samples that pick light *k* are still one contiguous slice
     /// of the pick dimension, as under uniform picking.
     ///
-    /// [`LightSelection::Learned`] and [`LightSelection::Neural`] build the
-    /// power table here; the learned part needs the scene and is added by the
-    /// renderer ([`LightList::set_cache`], [`LightList::set_visibility`]).
+    /// [`LightSelection::Learned`] builds the power table here; the learned
+    /// part needs the scene and is added by the renderer
+    /// ([`LightList::set_cache`]).
     pub fn select_by(&mut self, selection: LightSelection) {
         self.pmf.clear();
         self.cdf.clear();
@@ -518,28 +502,10 @@ impl LightList {
         self.cache = Some(std::sync::Arc::new(Learned::Grid(cache)));
     }
 
-    /// Installs a neural visibility cache over the power selection (see
-    /// [`LightSelection::Neural`]). Must be trained on this list's lights.
-    pub(crate) fn set_visibility(&mut self, cache: crate::light_visibility::VisibilityCache) {
-        debug_assert_eq!(cache.lights(), self.lights.len());
-        self.cache = Some(std::sync::Arc::new(Learned::Neural(cache)));
-    }
-
-    /// The installed neural visibility cache, under
-    /// [`LightSelection::Neural`]: for the probes that time or inspect it
-    /// (`examples/nvc_bench.rs`).
-    pub fn visibility_cache(&self) -> Option<&crate::light_visibility::VisibilityCache> {
-        match self.cache.as_deref() {
-            Some(Learned::Neural(c)) => Some(c),
-            _ => None,
-        }
-    }
-
     /// Which strategy [`LightList::pick`] is using.
     pub fn selection(&self) -> LightSelection {
         match self.cache.as_deref() {
             Some(Learned::Grid(_)) => LightSelection::Learned,
-            Some(Learned::Neural(_)) => LightSelection::Neural,
             Some(Learned::Tree(_)) => LightSelection::Tree,
             None if self.pmf.is_empty() => LightSelection::Uniform,
             None => LightSelection::Power,
@@ -616,15 +582,13 @@ impl LightList {
 
     /// [`LightList::pick`] for a receiver `r` (a position, or a position with
     /// a surface), as an index into [`LightList::lights`]: under a learned
-    /// selection, from the distribution of the cell holding its position, or
-    /// the network's there; under the tree, by walking it from `r`; otherwise
+    /// selection, from the distribution of the cell holding its position;
+    /// under the tree, by walking it from `r`; otherwise
     /// exactly `pick_index`.
     ///
     /// Forced inline: it sits on every NEE pick, and LLVM's own threshold
     /// outlined it once `trace_path` grew by a few instructions elsewhere,
     /// which cost cornellbox 0.6% of its instructions (callgrind, 2 spp).
-    /// The neural arm stays out of line, so the other selections' code is
-    /// what it was.
     #[inline(always)]
     pub fn pick_index_at(&self, r: impl Into<Receiver>, u: f32) -> Option<(usize, f32)> {
         let r = r.into();
@@ -634,7 +598,6 @@ impl LightList {
                 Some((pmf, cdf)) => Some(self.pick_from(pmf, cdf, u)),
                 None => self.pick_index(u),
             },
-            Some(Learned::Neural(c)) => self.pick_index_neural(c, r.p, u),
             Some(Learned::Tree(t)) => self.pick_index_tree(t, &r, u),
         }
     }
@@ -693,31 +656,13 @@ impl LightList {
         (index, pmf[index])
     }
 
-    /// [`LightList::pick_index_at`]'s neural arm. Cold, and out of line, so
-    /// that it is one call in the code every other selection runs around
-    /// each pick; under `neural` the inference it wraps costs hundreds of
-    /// nanoseconds, against which the call is nothing.
-    #[cold]
-    #[inline(never)]
-    fn pick_index_neural(
-        &self,
-        c: &crate::light_visibility::VisibilityCache,
-        p: Vec3A,
-        u: f32,
-    ) -> Option<(usize, f32)> {
-        c.with_table(p, |table| match table {
-            Some((pmf, cdf)) => Some(self.pick_from(pmf, cdf, u)),
-            None => self.pick_index(u),
-        })
-    }
-
     /// The probability [`LightList::pick_index_at`] at `r` picks light `index` —
     /// what the bounce side weights emission found from a vertex at `r` with.
     ///
     /// Forced inline, as `pick_index_at` is: the tree's arm grew it past
     /// LLVM's own threshold, and an out-of-line call per bounce-side lookup
     /// cost cornellbox 0.14% of its instructions under `power` (callgrind,
-    /// 2 spp). The tree's and the network's arms stay out of line.
+    /// 2 spp). The tree's arm stays out of line.
     #[inline(always)]
     pub fn pmf_at(&self, r: impl Into<Receiver>, index: usize) -> f32 {
         let r = r.into();
@@ -727,25 +672,8 @@ impl LightList {
                 Some((pmf, _)) => pmf[index],
                 None => self.pmf(index),
             },
-            Some(Learned::Neural(c)) => self.pmf_at_neural(c, r.p, index),
             Some(Learned::Tree(t)) => self.pmf_tree(t, &r, index),
         }
-    }
-
-    /// [`LightList::pmf_at`]'s neural arm; cold for the same reason as
-    /// [`LightList::pick_index_neural`].
-    #[cold]
-    #[inline(never)]
-    fn pmf_at_neural(
-        &self,
-        c: &crate::light_visibility::VisibilityCache,
-        p: Vec3A,
-        index: usize,
-    ) -> f32 {
-        c.with_table(p, |table| match table {
-            Some((pmf, _)) => pmf[index],
-            None => self.pmf(index),
-        })
     }
 
     /// The light whose scene geometry has world id `geom_id`, as an index into
@@ -770,9 +698,7 @@ impl LightList {
         // Each light's pmf through `pmf_at`, rather than a table looked up
         // once and carried: a table that could hold the network's pmf made
         // the iterator 270 bytes, paid for at every escaping ray (1.2% of the
-        // default render's instructions, cornellbox at 2 spp). Under `power`
-        // this is the read it always was; under `neural` the first light
-        // fills the memo the others read.
+        // default render's instructions, cornellbox at 2 spp).
         self.infinite.iter().map(move |&index| {
             let index = index as usize;
             (&self.lights[index], self.pmf_at(r, index))
@@ -789,7 +715,7 @@ impl LightList {
         let r = r.into();
         // Filtered first, then each survivor's pmf: no zip with
         // `infinite_at`'s iterator, which the compiler stopped inlining once
-        // `pmf_at` grew a neural arm (0.9% of the default render's
+        // `pmf_at` grew another arm (0.9% of the default render's
         // instructions, cornellbox at 2 spp), and no pmf for a light the ray
         // cannot see.
         self.infinite

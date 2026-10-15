@@ -47,8 +47,7 @@ use rayon::prelude::*;
 /// One training path per `TRAIN_STRIDE` x `TRAIN_STRIDE` pixels, at least.
 const TRAIN_STRIDE: usize = 4;
 /// Receiver-light pairs the pre-pass may estimate, and so retain until the
-/// reduction: 32 MiB of `f32` contributions and, for `neural`, 8 MiB of delivered counts,
-/// `LIGHT_SAMPLES` times as many light evaluations. The stride grows past `TRAIN_STRIDE` to stay inside it.
+/// reduction: 32 MiB of `f32` contributions, `LIGHT_SAMPLES` times as many light evaluations. The stride grows past `TRAIN_STRIDE` to stay inside it.
 /// Resolution times light count is what scales, and unbounded, 3840x2160 at
 /// the `MAX_LIGHTS` limit would hold ~2 GiB and evaluate over a billion light
 /// samples before the first pass. ALab (47 lights, 640x360) uses 2.0 M.
@@ -73,17 +72,10 @@ const LIGHT_SAMPLES: usize = 2;
 /// lost. On ALab power is the problem: it gives the two hidden lights half the
 /// picks.
 ///
-/// `neural` shares it (`light_visibility.rs`). Measured there at 0.2 and 0.1
-/// as well (16 spp, `--indirect-clamp 0`, mean of four frames): relMSE moved by
-/// at most 2.5%, inside the noise, on `domelight` (0.291 / 0.283 / 0.285 at
-/// 0.3 / 0.2 / 0.1) and `usdlux` (0.0646 / 0.0635 / 0.0640). No firefly came
-/// with the lower shares, as a continuous visibility does not straddle the
-/// sun's shadow the way a cell does, but nothing was gained either. On
-/// ALab's direct lighting a lower share does gain (trimmed relMSE, frames
-/// 1004 and 1030: `neural` 0.189 / 0.141, `learned` 0.195 / 0.164 at 0.3 /
-/// 0.1), but its full image does not (`neural` 3.66 / 3.73, `learned` 3.00
-/// / 3.01), and `domelight` fireflies under `learned` at 0.2, so it stays
-/// 0.3 for both (`docs/light_sampling.md` §3.14).
+/// On ALab's direct lighting a lower share does gain (trimmed relMSE, frames
+/// 1004 and 1030: 0.195 / 0.164 at 0.3 / 0.1), but its full image does not
+/// (3.00 / 3.01), and `domelight` fireflies at 0.2, so it stays 0.3
+/// (`docs/light_sampling.md` §3.14).
 pub const DEFENSIVE: f32 = 0.3;
 /// Receivers a cell needs before its own distribution is trusted.
 const MIN_RECEIVERS: u32 = 2;
@@ -146,27 +138,12 @@ pub(crate) struct Receiver {
     /// Per light, the mean estimated NEE contribution, `luminance(L·f)·V/p`
     /// over `LIGHT_SAMPLES` samples: what `learned` sums per cell.
     pub(crate) contrib: Vec<f32>,
-    /// Per light, how many of its `LIGHT_SAMPLES` samples **delivered
-    /// light**: nonzero radiance toward the receiver (not backfacing), above
-    /// its horizon (a nonzero BSDF), and a shadow ray at least partly clear.
-    /// What `neural` learns as the light's visibility from here
-    /// ([`Receiver::delivered`]); empty unless [`walk`] was asked for
-    /// labels, as `learned` never reads them.
-    pub(crate) delivered: Vec<u8>,
-}
-
-impl Receiver {
-    /// The fraction of light `k`'s samples that delivered light, in `[0, 1]`.
-    pub(crate) fn delivered(&self, k: usize) -> f32 {
-        self.delivered[k] as f32 / LIGHT_SAMPLES as f32
-    }
 }
 
 /// Whether a learned selection can be trained over `lights` at all: two
 /// lights or more, over a power table, and at most `limit`. Past the limit it
-/// says so once, at `WARN`, naming `mode` (`learned`, `neural`); the other
-/// refusals are silent.
-pub(crate) fn trainable(lights: &LightList, limit: usize, mode: &str) -> bool {
+/// says so once, at `WARN`; the other refusals are silent.
+fn trainable(lights: &LightList, limit: usize) -> bool {
     let n = lights.count();
     // Only over a power table: with none, `LightList::density` divides by
     // `n` instead of multiplying by the pmf, and would not describe the
@@ -176,7 +153,7 @@ pub(crate) fn trainable(lights: &LightList, limit: usize, mode: &str) -> bool {
     }
     if n > limit {
         tracing::warn!(
-            "crust:lightSelection {mode}: {n} lights is past the {limit} it supports — \
+            "crust:lightSelection learned: {n} lights is past the {limit} it supports — \
              picking by power instead"
         );
         return false;
@@ -197,11 +174,11 @@ pub(crate) fn train(
     height: usize,
     frame: isize,
 ) -> Option<LightCache> {
-    if !trainable(lights, MAX_LIGHTS, "learned") {
+    if !trainable(lights, MAX_LIGHTS) {
         return None;
     }
     let n = lights.count();
-    let receivers = walk(world, camera, lights, width, height, frame, false);
+    let receivers = walk(world, camera, lights, width, height, frame);
     if receivers.is_empty() {
         return None;
     }
@@ -277,31 +254,27 @@ pub(crate) fn train(
 
 /// The lights that can emit at all — the global selection gives them a
 /// nonzero pick — and how many: only these share a defensive part.
-pub(crate) fn live_lights(lights: &LightList) -> (Vec<bool>, usize) {
+fn live_lights(lights: &LightList) -> (Vec<bool>, usize) {
     let live: Vec<bool> = (0..lights.count()).map(|k| lights.pmf(k) > 0.0).collect();
     let n_live = live.iter().filter(|&&l| l).count().max(1);
     (live, n_live)
 }
 
-/// The training walk both learned selections share. Coarse camera paths,
+/// The training walk. Coarse camera paths,
 /// one per `TRAIN_STRIDE`² pixels (more past `MAX_PAIRS`) and
 /// `TRAIN_BOUNCES` BSDF bounces each, and at every vertex every light
 /// estimated through the same `sample_li`, BSDF `eval` and shadow-ray query
 /// NEE uses, `LIGHT_SAMPLES` times.
 ///
 /// The receivers come back in row order then path order, whatever the
-/// thread count: rows run in parallel and are collected in order. With
-/// `labels`, each also counts the samples that delivered light (`neural`'s
-/// labels); without, `delivered` stays empty and unallocated. The
-/// contributions are the same bits either way.
-pub(crate) fn walk(
+/// thread count: rows run in parallel and are collected in order.
+fn walk(
     world: &World,
     camera: &Camera,
     lights: &LightList,
     width: usize,
     height: usize,
     frame: isize,
-    labels: bool,
 ) -> Vec<Receiver> {
     let n = lights.count();
     // Vertices per path, times lights, times paths, within `MAX_PAIRS`.
@@ -360,10 +333,8 @@ pub(crate) fn walk(
                     // cell tables would favour lights this receiver cannot use.
                     let class = world.light_class(hit.geom_id);
                     let mut contrib = Vec::with_capacity(n);
-                    let mut delivered = Vec::with_capacity(if labels { n } else { 0 });
                     for (k, light) in list.iter().enumerate() {
                         let mut sum = 0.0f32;
-                        let mut count = 0u8;
                         if lights.illuminates(k, class) {
                             for s in 0..LIGHT_SAMPLES {
                                 let d = vertex
@@ -415,20 +386,12 @@ pub(crate) fn walk(
                                 let e = through * lights.luma().of(c) / ls.pdf.get();
                                 if e.is_finite() {
                                     sum += e;
-                                    count += (e > 0.0) as u8;
                                 }
                             }
                         }
                         contrib.push(sum / LIGHT_SAMPLES as f32);
-                        if labels {
-                            delivered.push(count);
-                        }
                     }
-                    out.push(Receiver {
-                        p,
-                        contrib,
-                        delivered,
-                    });
+                    out.push(Receiver { p, contrib });
                     let bsdf_dom = vertex.new_domain(2);
                     let Some(sample) =
                         sp.scatter_importance(&ray, || bsdf_dom.draw_sample_f32::<4>())
@@ -461,9 +424,8 @@ pub(crate) fn walk(
 ///
 /// `learned` then cuts them into cubic cells, sized for about
 /// `RECEIVERS_PER_CELL` receivers per occupied cell (receivers lie on
-/// surfaces, so occupied cells grow as the resolution squared); `neural`
-/// maps them into its network's unit cube.
-pub(crate) fn robust_bounds(receivers: &[Receiver]) -> Option<(Vec3A, Vec3A)> {
+/// surfaces, so occupied cells grow as the resolution squared).
+fn robust_bounds(receivers: &[Receiver]) -> Option<(Vec3A, Vec3A)> {
     let finite: Vec<Vec3A> = receivers
         .iter()
         .map(|r| r.p)

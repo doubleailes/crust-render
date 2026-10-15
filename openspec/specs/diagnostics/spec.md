@@ -182,7 +182,7 @@ Measurement:
   same pixels on both sides. The untrimmed MRSE SHALL be reported beside it.
 - **ΔEff.** Each pair's `ΔEff` SHALL be
   `(render_B · MRSE_B) / (render_T · MRSE_T)`, with render time excluding setup.
-  Setup (the `learned` and `neural` pre-pass, the `tree` build, guiding's training) SHALL be reported
+  Setup (the `learned` pre-pass, the `tree` build, guiding's training) SHALL be reported
   separately. The untrimmed ΔEff SHALL be reported beside it.
 - **Reference.** MRSE SHALL be measured against one reference per crop: the
   inverse-variance blend of the baseline's images of every seed, and of every

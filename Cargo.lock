@@ -602,7 +602,6 @@ dependencies = [
  "criterion",
  "crust-jit",
  "crust-mtlx",
- "crust-nn",
  "crust-rt",
  "glam",
  "ocio",
@@ -636,14 +635,6 @@ version = "0.8.0"
 dependencies = [
  "glam",
  "roxmltree",
-]
-
-[[package]]
-name = "crust-nn"
-version = "0.8.0"
-dependencies = [
- "openqmc-rs",
- "rayon",
 ]
 
 [[package]]

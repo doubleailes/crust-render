@@ -931,9 +931,9 @@ fn highlights_are_not_fireflies() {
     assert!(top.share < super::checks::FIREFLY_SHARE, "{top:?}");
 }
 
-/// A trial's setup is remembered per factor *and value*: `neural` must not
-/// be admitted on `learned`'s pre-pass time, and both are measured before
-/// their first trial (PR #308 review).
+/// A trial's setup is remembered per factor *and value*: `uniform` must not
+/// be admitted on `learned`'s pre-pass time, which is measured before its
+/// first trial (PR #308 review).
 #[test]
 fn setup_is_remembered_per_value() {
     use super::{remembered_setup, setup_measured_first};
@@ -942,16 +942,14 @@ fn setup_is_remembered_per_value() {
         remembered_setup(&known, "light_selection", "learned"),
         Some(1.5)
     );
-    assert_eq!(remembered_setup(&known, "light_selection", "neural"), None);
     assert_eq!(remembered_setup(&known, "light_selection", "uniform"), None);
     assert!(setup_measured_first("light_selection", "learned"));
-    assert!(setup_measured_first("light_selection", "neural"));
     assert!(!setup_measured_first("light_selection", "uniform"));
     assert!(!setup_measured_first("guiding", "true"));
 }
 
-/// A `tree` trial keeps its measured build as setup, as `learned` and
-/// `neural` keep their pre-pass; only `power` and `uniform` count as none
+/// A `tree` trial keeps its measured build as setup, as `learned` keeps its
+/// pre-pass; only `power` and `uniform` count as none
 /// (PR #314 review). The build is milliseconds even at 10 000 lights, so it
 /// is not measured before its first trial.
 #[test]

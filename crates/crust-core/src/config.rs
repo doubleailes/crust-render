@@ -179,40 +179,6 @@ impl std::fmt::Display for TubeSampling {
     }
 }
 
-/// `CRUST_DISK_SAMPLING`: how a `DiskLight` is sampled from in front of its
-/// emitting side. `area`, the default, is the uniform local-area sampler
-/// every disk used before; `ellipse` samples the spherical ellipse it
-/// subtends (Guillén et al. 2017) within a solid-angle band, and by area
-/// outside it. Not the default: it loses at equal time on glossy receivers
-/// and on small disks, and costs 2–4× per sample.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum DiskSampling {
-    #[default]
-    Area,
-    Ellipse,
-}
-
-impl FromStr for DiskSampling {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "area" => Ok(DiskSampling::Area),
-            "ellipse" => Ok(DiskSampling::Ellipse),
-            _ => Err(()),
-        }
-    }
-}
-
-impl std::fmt::Display for DiskSampling {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            DiskSampling::Area => "area",
-            DiskSampling::Ellipse => "ellipse",
-        })
-    }
-}
-
 /// The `CRUST_*` switches (and `OCIO`) in effect. [`Config::default`] is
 /// every switch unset; [`config()`] is the process's environment.
 ///
@@ -307,9 +273,6 @@ pub struct Config {
     /// `CRUST_TUBE_SAMPLING`: how a one-sided cylinder light is sampled from
     /// outside it (`area` | `arc` | `equiangular`, the default).
     pub tube_sampling: TubeSampling,
-    /// `CRUST_DISK_SAMPLING`: how a disk light is sampled from in front of it
-    /// (`area`, the default, | `ellipse`).
-    pub disk_sampling: DiskSampling,
     /// `OCIO`: the OpenColorIO config to use when the host names none — a
     /// path or an `ocio://` URI, `None` when unset or empty. Not validated
     /// here: loading it is the host's, which reports a bad one as an error.
@@ -363,7 +326,6 @@ impl Default for Config {
             ptex_stream_min_mb: DEFAULT_PTEX_STREAM_MIN_MB,
             ptex_mip_space: PtexMipSpace::Capped,
             tube_sampling: TubeSampling::Equiangular,
-            disk_sampling: DiskSampling::Area,
             ocio: None,
         }
     }
@@ -451,12 +413,6 @@ impl Config {
                 "CRUST_TUBE_SAMPLING",
                 d.tube_sampling,
                 "`area`, `arc` or `equiangular`",
-            ),
-            disk_sampling: env_parse(
-                &lookup,
-                "CRUST_DISK_SAMPLING",
-                d.disk_sampling,
-                "`area` or `ellipse`",
             ),
             // OCIO's own convention: an empty `OCIO` is no config.
             ocio: lookup("OCIO").filter(|v| !v.is_empty()),
@@ -669,7 +625,6 @@ mod tests {
     #[test]
     fn round_light_sampling_parses_every_value() {
         assert_eq!(with(&[]).tube_sampling, TubeSampling::Equiangular);
-        assert_eq!(with(&[]).disk_sampling, DiskSampling::Area);
         for t in [
             TubeSampling::Area,
             TubeSampling::Arc,
@@ -678,17 +633,9 @@ mod tests {
             let c = with(&[("CRUST_TUBE_SAMPLING", &t.to_string())]);
             assert_eq!(c.tube_sampling, t);
         }
-        for d in [DiskSampling::Area, DiskSampling::Ellipse] {
-            let c = with(&[("CRUST_DISK_SAMPLING", &d.to_string())]);
-            assert_eq!(c.disk_sampling, d);
-        }
         // A bad value warns (`env_parse`) and keeps the default.
-        let bad = with(&[
-            ("CRUST_TUBE_SAMPLING", "gamito"),
-            ("CRUST_DISK_SAMPLING", "square"),
-        ]);
+        let bad = with(&[("CRUST_TUBE_SAMPLING", "gamito")]);
         assert_eq!(bad.tube_sampling, TubeSampling::Equiangular);
-        assert_eq!(bad.disk_sampling, DiskSampling::Area);
     }
 
     #[test]

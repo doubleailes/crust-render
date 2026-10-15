@@ -14,8 +14,7 @@
 # Usage: scripts/test_simd_matrix.sh [extra cargo test args...]
 #
 # The codegen check at the end reads the IR of the crate a `-p <crate>` among
-# the arguments names (crust-rt without one): `-p crust-nn` checks the
-# network kit, whose bit-determinism rests on the same no-contraction rule.
+# the arguments names (crust-rt without one).
 
 set -euo pipefail
 
@@ -55,11 +54,6 @@ run "target-cpu=native" "-C target-cpu=native" "$@"
 # Machine code cannot answer it — glam fuses `cross` on purpose under FMA
 # (explicit `llvm.fma`), so `vfmadd` appears either way — but the IR can:
 # contraction needs a `contract` / fast-math flag or `llvm.fmuladd`.
-#
-# For crust-nn the lib's IR holds `Adam::step` and the `f64` instantiation
-# `grad_check` makes of the network; its `f32` one is the same generic source,
-# and whether the compiler contracts is a property of the source, not of the
-# type.
 crate=crust-rt
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do

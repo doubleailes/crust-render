@@ -158,7 +158,7 @@ render.
   rewrites the PNG from the image so far; the AOVs are written once, when the render ends
   or is [interrupted](@/docs/reference/command-line.md#interrupting-a-render).
 - **Loading can't be stopped and kept.** A Ctrl-C while the stage loads (or while the
-  `learned` or `neural` light selection trains, before the render starts) quits at once
+  `learned` light selection trains, before the render starts) quits at once
   and writes nothing.
 - **A guided preview gets noisier when the last pass starts.** Its first samples replace
   the last training pass's image, tile by tile, until it catches up.

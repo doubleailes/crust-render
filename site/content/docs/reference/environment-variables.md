@@ -78,7 +78,6 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_RAY_CONES`](#crust-ray-cones) | on | textures |
 | [`CRUST_LINK_TWIN`](#crust-link-twin) | on | lighting |
 | [`CRUST_TUBE_SAMPLING`](#crust-tube-sampling) | `equiangular` | lighting |
-| [`CRUST_DISK_SAMPLING`](#crust-disk-sampling) | `area` | lighting |
 | [`CRUST_TEX`](#crust-tex) | on | UV textures |
 | [`CRUST_TEX_MAX`](#crust-tex-max) | 1024 | UV textures |
 | [`CRUST_TEX_MIP`](#crust-tex-mip) | on | UV textures |
@@ -267,22 +266,6 @@ identically whatever the value.
 # the tube sampled as before, to compare noise
 CRUST_TUBE_SAMPLING=area crust render -i scene.usda
 ```
-
-### CRUST_DISK_SAMPLING
-
-One of `area` or `ellipse`, default **`area`**.
-
-How a `DiskLight` picks the points it sends shadow rays to, from a surface in front of
-it. `area` samples the disk evenly by area. `ellipse` samples it evenly over the solid
-angle it covers as seen from the surface (the *spherical ellipse* method of Guillén et
-al. 2017), which is less noisy on a matte surface near a large disk — about 7× at
-equal render time for a disk as wide as its height above the floor — but costs
-several times more per sample, and is noisier on glossy surfaces and for small or
-distant disks. That is why it is not the default. A disk seen from behind, nearly
-edge-on, or covering too small or too large a solid angle is sampled by area either way.
-
-Both converge to the same image, and a scene without a disk light renders identically
-whatever the value.
 
 ## Textures
 

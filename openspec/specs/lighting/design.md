@@ -68,7 +68,7 @@
   face a given point — with the direction map's solid-angle Jacobian
   `|Mω|³ / |det M|` on the pdf (`world_solid_angle_pdf`), so its density varies over
   the cap and both MIS sides evaluate it at the point. `AffineShape` tubes sample the
-  arc of wall that faces the point, and disks optionally their spherical ellipse: see
+  arc of wall that faces the point (disks sample by area): see
   "Disk and tube lights" below.
   **`RectShape` samples the spherical rectangle it subtends** (Ureña, Fajardo & King
   2013, as pbrt-v4's `SampleSphericalRectangle`): uniform in solid angle, pdf `1/Ω`,
@@ -135,66 +135,18 @@
     - **Power table underneath.** The cache only installs over a power table:
       with none, `density` divides by `n` and would disagree with the per-cell
       pmf.
-  - **`neural`** (opt-in and experimental, `light_visibility.rs` over the
-    `crust-nn` crate; `docs/light_sampling.md` § "Neural visibility cache") is
-    `learned`'s knowledge stored as a continuous function instead of a grid,
-    after Bokšanský & Meister's *Neural Visibility Cache* (JCGT 2025). The
-    same pre-pass walk (`light_cache::walk`) labels each receiver with the
-    fraction of each light's samples that **delivered light** — backfacing,
-    below the horizon and occluded all count as not — and a small network
-    learns each light's visibility `V̂ℓ(x)` from position: an 8-level hash grid
-    (4 to 107 cells per axis, tables of 2¹⁴ vertices) feeding 16 → 32 → 32 → N,
-    trained for a fixed 8 epochs of 256-receiver batches with Adam, then
-    frozen. Three details are load-bearing:
-    - **The pick (D2)** is `(1 − D) · πℓ V̂ℓ(x) / Σ πV̂ + D / n_live` over the
-      power table `π`, with `learned`'s `DEFENSIVE` as `D` (shared, not
-      copied) and the table built by the same `light_cache::defensive_table`,
-      CDF first. Where every prediction is hidden (`Σ πV̂ ≤ 1e-6`) or the
-      vertex is outside the receivers' 2–98% bounds, the power table answers.
-      The network learns visibility only; distance and power stay analytic.
-    - **One pure function on both MIS sides (D6).** The `*_at` lookups call
-      `VisibilityCache::with_table(p)`, a function of `p`'s bits alone, so the
-      bounce side, recomputing at `prev.pos`, reads the bits NEE picked with. A
-      grid forgave an ulp between the two positions; a continuous function
-      would make it an MIS mismatch. So debug builds assert, at every NEE site
-      and every bounce-side setup, that they are the same `Vec3A` bits
-      (`nee_picks_from` / `bounce_weighs_from` in `tracer/path.rs`). A
-      one-entry thread-local memo, keyed by the cache and `p`'s bits, serves
-      the bounce side's lookup right after NEE's for free; a miss recomputes
-      the same bits (`tests/neural_selection.rs` pins both). The neural arms of
-      the `*_at` methods are out of line, so the other selections' code is
-      unchanged.
-    - **At most 64 lights (D7)**, one output unit each. Past that, and below
-      two lights or with no receiver, it falls back to power — with one `WARN`
-      naming the limit past 64, silently otherwise — as `learned` does past
-      its 1024.
-
-    Training is a function of the scene alone: initialisation and each
-    epoch's shuffle draw from `openqmc` under `K_NVC`, and a batch's gradient
-    is summed in fixed 32-receiver chunks in chunk order however many threads
-    ran them (`crust_nn::Network::batch_gradient`). Plain `f32` in a fixed loop
-    order, no `mul_add`: `scripts/test_simd_matrix.sh -p crust-nn` pins the
-    bits under every codegen. **A trap:** the epoch count is fixed, so the
-    number of Adam steps scales with the receivers. A 64 × 36 frame trains on
-    ~300 receivers, 16 steps, and every prediction is still near ½ — which
-    degrades the pick towards power, never below the defensive floor.
-
-    **Measured** (`docs/light_sampling.md` §3.14): unbiased (relMSE × spp
-    flat from 16 to 256 spp on `usdlux`) and MIS-consistent (`veach_mis`'s mean
-    within 2e-5 of power's at 1024 spp). But one evaluation costs ~600 ns,
-    ~6 000 instructions at 7 lights — 4.8–13.8 shadow rays on the samples,
-    after two bit-identical passes cut it from ~820 ns — and adds 40–100% to a
-    render, while visibility alone buys at most 1.2× per sample over power.
-    At equal time it loses to `learned` by 1.5–5.3× and to power by 1.4–1.9×
-    on every sample measured. **ALab, the scene it was built for, confirms
-    it.** There one evaluation costs 0.94 of a shadow ray (1 131 against
-    1 198 ns; 14 703 against 6 604 instructions), so the D9 gate passes. Yet
-    the network only ties `learned` per sample on direct lighting (trimmed
-    relMSE 1.03×), and loses on the full image (0.82×). It costs 19–29% more
-    time: a 6.2 s pre-pass against 1.5 s, inference at every vertex, and
-    shadow rays 20% slower behind it, as its 1 MiB table evicts BVH nodes. At
-    equal time that is 0.79× `learned` on direct lighting and 0.69× on the
-    full image. The verdict is retire.
+  - **`neural` was removed** (2026-10-15). It stored `learned`'s knowledge
+    as a small network (`crust-nn`, after Bokšanský & Meister's *Neural
+    Visibility Cache*, JCGT 2025) instead of a grid, and lost at equal time
+    everywhere it was measured: to `learned` by 1.5–5.3× and to power by
+    1.4–1.9× on the samples, and 0.79× / 0.69× `learned` on ALab's direct
+    lighting / full image, the scene it was built for. Visibility alone buys
+    at most 1.2× per sample over power, and one inference cost about a shadow
+    ray. The design, the measurements (`docs/light_sampling.md` §3.14) and the
+    code are in `openspec/changes/archive/2026-10-15-neural-visibility-light-selection/`
+    and git history. A continuous selection read on both MIS sides must see
+    the same position bits; the debug assertions in `tracer/path.rs`
+    (`nee_picks_from` / `bounce_weighs_from`) that it added still guard `tree`.
   - **`tree`** (`light/tree.rs`; `docs/light_sampling.md` §3.15) picks the finite
     lights by walking a light BVH from the receiver, pbrt-v4's
     `BVHLightSampler` in shape, over a defensive share of the power table.
@@ -357,8 +309,8 @@ Cycles. It is blind to occluders, which is `learned`'s half.
 along −Z, and a unit-radius, unit-length open tube along local X, placed by the light's
 transform composed with its radius and length (`(r, r, 1)` and `(length, r, r)`), so a
 real tube's local space is almost never metric. Both used to be sampled uniformly in
-local area. Each now has a solid-angle strategy behind its own switch, whose `area`
-value is the old sampler bit for bit (pinned by the goldens and
+local area. Disks still are; the tube has a solid-angle strategy behind a switch, whose
+`area` value is the old sampler bit for bit (pinned by the goldens and
 `round_lights_fall_back_to_area_sampling_bit_for_bit`).
 
 **Tubes: the visible arc, equiangular along the wall (`CRUST_TUBE_SAMPLING`, default
@@ -409,54 +361,16 @@ value is the old sampler bit for bit (pinned by the goldens and
   the back-facing half it skips does not shrink with distance (the smallest tube still
   won 7.4×).
 
-**Disks: the spherical ellipse (`CRUST_DISK_SAMPLING`, default `area`).**
-- A disk seen from a point subtends a spherical ellipse, sampled uniformly by Guillén
-  et al. 2017's radial map (`light/ellipse.rs`) in local space and mapped out with the
-  direction map's Jacobian, as the squashed sphere is; the point comes back through the
-  unit disk, so it lies where a bounce ray hits it. Strictly in front of the emitting
-  side, `b ≥ 1e-4 a`, and `Ω ∈ [0.1, 6.22]` sr; area sampling otherwise.
-- **The map, from the paper, with three corrections.** (a) Eq. 3 as printed puts the
-  disk's centre in the plane of `x̂_d` and then measures the major axis along it; the
-  major axis is the one perpendicular to the plane through the point, the centre and
-  the normal, and the frame is built from that symmetry (pinned by brute-force solid
-  angle off axis, and `a ≥ b` over a dense grid). (b) Eq. 19's `φ − k Π` cancels for a
-  small eccentric ellipse, and `Π` from `(n, φ, m)` is ill-conditioned as `n → 1`:
-  `1 − n = b² cos² α / (a² cos² β)` and `1 − m = cos² α / cos² β` are formed in closed
-  form, without which the solid angle was off by 3e-4 on a grazing disk. (c) Newton runs
-  in eq. 20's `ψ = φ_t`, `Π`'s own argument, in which `Ω_r` is nearly linear for any
-  small ellipse; in `φ` an eccentric ellipse took up to 10 iterations where `Ω_r` is
-  flat (slope `b²` near `π/2`), in `ψ` at most 6 (2.7 on average over the grid), with a
-  bisection safeguard and a residual tolerance at `Ω_r`'s own rounding (8 ε).
-  `R_F` and `R_J` are Carlson's duplication algorithm, pinned to mpmath at 1e-12
-  (`scripts/ellipse_oracle.py`, 4e-14 worst); the circle reduces to the cone exactly.
-- **The low-distortion variant (eq. 23)**, Shirley–Chiu's concentric map pre-warping
-  `(u, v)`, had the lower 16 spp relMSE than the plain radial map on 7 of the 8 sweep
-  disks and on `usdlux`, so it is the only map.
-- **The sampler stays small.** `SolidAngleSampler` holds only `Ω_r(π/2)` for a disk
-  (the one elliptic integral the strategy decides with); the frame is rebuilt where a
-  sample is drawn. The strategies' bodies are out of line and answer in registers — a
-  point, then an `Option<PdfSolidAngle>`. Each other arrangement cost `veach_mis`, which
-  has neither shape, 2–14% of `sample_li`'s instructions (callgrind): inlined bodies;
-  a 200-byte ellipse in the sampler, copied for every sphere sample; a borrowed
-  sampler, kept in memory; an `Option<(Vec3A, _)>` returned from the out-of-line call,
-  which merged every arm's answer in memory. Pinned by
-  `round_strategies_do_not_grow_the_sampler`. As built: `sample_li` −0.8%, `Bvh::hit`
-  unchanged, `pdf_at_point` +0.36M of 7.78G.
-- **Why it is off.** On disks 1 unit above the same floors, radius/height 0.1, 0.3, 1,
-  3, it won at equal time only at radius 1 over the diffuse floor (**7.6×**: 28× lower
-  relMSE) and tied at 0.3 (1.08×); at radius 3 over it, 2.3× lower relMSE was not worth
-  its cost (0.62×). It lost on every glossy floor (0.30–0.62×), and on the 0.1 and 0.3
-  glossy ones in relMSE alone, as the spherical rectangle does
-  (`docs/light_sampling.md` §3.9: area sampling's `r²/cos θ_l` density follows some
-  highlights). It costs 2–4× per frame: about 5,000 instructions per sample, 37% of a
-  disk-lit render in `EllipseMap::omega_r` (about four `Π` per sample: the strategy's
-  `Ω`, then Newton). On radius 0.1 (~0.03 sr) it lost in relMSE too (1.8×: it
-  stratifies worse than the area map), which is what moved the band's floor from the
-  rect's `1e-4` to 0.1 sr. `usdlux`: same relMSE, +50% time. D5's circumscribed-square
-  alternative was not built: it is uniform in solid angle too, plus 21% zero samples,
-  so it cannot win the glossy cases either.
-- Measured on a sweep under the scratchpad (not checked in); ALab was not available.
-  Numbers in `openspec/changes/archive/*-solid-angle-disk-and-tube-lights/notes.md`.
+**Disks sample by area.** A spherical-ellipse strategy (Guillén et al. 2017, behind
+`CRUST_DISK_SAMPLING=ellipse`) was built, measured and removed (2026-10-15): it won at
+equal time only for a disk about as wide as its height over a diffuse floor (7.6×),
+lost on every glossy floor (0.30–0.62×) and on small disks, and cost 2–4× per frame
+(~5,000 instructions per sample in Carlson's `R_J`). The map, its three corrections to
+the paper and the sweep are in
+`openspec/changes/archive/2026-10-12-solid-angle-disk-and-tube-lights/` and git
+history. Its one lasting trap is pinned by `round_strategies_do_not_grow_the_sampler`:
+a 200-byte strategy state in `SolidAngleSampler` cost every sphere and rect sample a
+copy of it (+14% of `sample_li` on `veach_mis`).
 
 ## Several light samples per vertex
 
@@ -1022,25 +936,13 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   stays opt-in: the equal-time gate fails on 6 of the 11 samples that build a
   tree, and ALab and the OpenPBR Shader Playground are unmeasured (§3.15 there). `power` pays about
   0.6% more instructions for the receiver every vertex carries.
-- **`neural` selection loses at equal time** on every checked-in sample and on
-  ALab, whose problem is visibility alone: 0.79× `learned` on its direct
-  lighting, 0.69× on its full image (the lighting design above;
-  `docs/light_sampling.md` §3.14). Its inputs are
-  position only, so it learns the local average of a normal-dependent horizon,
-  as `learned`'s grid does; it learns visibility only, leaving distance and
-  orientation to the power table, which is most of what `learned` exploits on
-  the samples; and with a fixed 8 epochs a small frame trains a few dozen Adam
-  steps and stays near V̂ = ½.
 - **The tube's density is cosine-blind.** It follows the `1/r²` along the wall but
   neither cosine, so a thick tube within a few radii of a receiver is still noisier
   than it need be. Gamito 2016 samples a finite-radius cylinder exactly in solid angle,
   by rejection, which would break `openqmc`'s stratification; a non-rejecting version
   is the pointer.
-- **The disk's ellipse is opt-in and expensive.** It loses at equal time on glossy
-  receivers and small disks, and costs ~5,000 instructions per sample, most of them in
-  Carlson's `R_J` (`EllipseMap::omega_r`). A closed-form `R_C` inside `R_J` and fewer
-  `Π` per sample (the strategy's `Ω` is recomputed on the bounce side) are the obvious
-  savings; neither would win the glossy cases, which it loses in relMSE as well.
+- **Disks are area-sampled.** Close to a large disk over a matte receiver that is
+  noisier than a solid-angle strategy; the one built lost elsewhere (above).
 
 ## Known gaps: lighting
 

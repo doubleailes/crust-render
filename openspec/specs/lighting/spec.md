@@ -37,16 +37,13 @@ refused on both sides rather than given a finite stand-in.
 Rect, sphere, disk and cylinder lights SHALL be one-sided `AreaLight`s whose
 geometry is also attached to the world. Sphere lights SHALL sample the cone
 they subtend and rect lights the spherical rectangle they subtend where that
-density is well conditioned. Disk lights SHALL sample by area by default; with
-`CRUST_DISK_SAMPLING = ellipse` they SHALL sample the spherical ellipse they
-subtend from a shading point strictly in front of their emitting side, where that
-solid angle is well conditioned, and by area otherwise. Cylinder lights with a
+density is well conditioned. Disk lights SHALL sample by area. Cylinder lights with a
 one-sided emitter SHALL sample, from a shading point outside the tube, only the
 part of their wall that faces it. By default (`CRUST_TUBE_SAMPLING = equiangular`)
 they SHALL draw the axial position along the sampled wall line by a density that
 follows its inverse-square falloff. They SHALL sample by area from inside the tube
-or with a two-sided emitter. `CRUST_DISK_SAMPLING = area` and
-`CRUST_TUBE_SAMPLING = area` SHALL restore area sampling for the respective shape. A non-uniform scale SHALL be honoured through an
+or with a two-sided emitter. `CRUST_TUBE_SAMPLING = area` SHALL restore area
+sampling for cylinders. A non-uniform scale SHALL be honoured through an
 affine shape, by every strategy. A light's source geometry SHALL be invisible to
 camera rays by default. An authored `crust:rayMask` SHALL decide its visibility
 outright. Otherwise `crust:light:cameraVisible` SHALL decide it, and otherwise
@@ -69,7 +66,7 @@ outright. Otherwise `crust:light:cameraVisible` SHALL decide it, and otherwise
 
 - **WHEN** a diffuse floor lit by a disk light and a cylinder light, each under a
   non-uniform scale, is rendered light-only, BSDF-only and with power MIS, under
-  every value of `CRUST_DISK_SAMPLING` and `CRUST_TUBE_SAMPLING`
+  every value of `CRUST_TUBE_SAMPLING`
 - **THEN** all the estimates of the floor agree within noise that falls as 1/√N
 
 #### Scenario: A tube's light samples face the shading point
@@ -85,16 +82,10 @@ outright. Otherwise `crust:light:cameraVisible` SHALL decide it, and otherwise
 - **THEN** it is sampled by area, and its light-only and BSDF-only estimates agree
   within noise
 
-#### Scenario: A disk seen from behind
-
-- **WHEN** a disk light is sampled, under `CRUST_DISK_SAMPLING = ellipse`, from a
-  point behind its emitting side
-- **THEN** it is sampled by area, as before this requirement
-
 #### Scenario: Area sampling restored
 
 - **WHEN** a stage with disk and cylinder lights is rendered with
-  `CRUST_DISK_SAMPLING=area CRUST_TUBE_SAMPLING=area`
+  `CRUST_TUBE_SAMPLING=area`
 - **THEN** the image is bit-identical to the same render before this requirement
 
 #### Scenario: Scenes without round lights are unchanged
@@ -322,9 +313,7 @@ share, and the finite lights are chosen by walking a light BVH by an importance
 bound at the shading point's position and normal, mixed with a defensive share
 of the `power` probabilities), `uniform` (bit-identical to the
 historical renderer), `learned` (a visibility-aware per-cell table trained by
-a deterministic pre-pass, over the power table), or `neural` (the power table
-weighted by each light's visibility, predicted by a small network that a
-deterministic pre-pass trains). The samples at one vertex SHALL
+a deterministic pre-pass, over the power table). The samples at one vertex SHALL
 be stratified, so that each light is chosen close to the count times its
 selection probability.
 
@@ -353,10 +342,12 @@ selection probability.
 - **THEN** the difference between the two falls as 1/√N, and the direct-light
   noise per pixel sample is lower with 4
 
-#### Scenario: Neural selection is accepted
+#### Scenario: Neural selection is no longer accepted
 
-- **WHEN** a render runs with `--light-selection neural`, or its render settings author `crust:lightSelection = "neural"`
-- **THEN** the render completes, and the `--light-selection` help lists `neural` with a one-line description
+- **WHEN** a render runs with `--light-selection neural`, or its render settings
+  author `crust:lightSelection = "neural"`
+- **THEN** the command line rejects the value, and the render settings log one
+  `WARN` and pick by `power`
 
 #### Scenario: Tree selection is accepted
 
@@ -368,60 +359,9 @@ selection probability.
 #### Scenario: Existing modes are unchanged
 
 - **WHEN** a checked-in sample renders at 16 spp under `power`, `uniform`,
-  `learned` or `neural`, each given explicitly
+  or `learned`, each given explicitly
 - **THEN** the image is bit-identical to the one rendered under the same mode
   before `tree` existed
-
-### Requirement: Neural selection falls back to power
-
-Under `neural`, NEE SHALL pick by the power table wherever the network cannot apply: a scene with fewer than two lights, a pre-pass that finds no receivers, a position outside the trained bounds, or more lights than the network supports. Exceeding the light limit SHALL log one `WARN` naming the limit. The other cases SHALL be silent.
-
-#### Scenario: Too many lights
-
-- **WHEN** a scene with more lights than the neural limit renders with `--light-selection neural`
-- **THEN** one `WARN` line names the limit, and the image is bit-identical to the same render under `--light-selection power`
-
-#### Scenario: One light
-
-- **WHEN** a scene with a single light renders with `--light-selection neural`
-- **THEN** the image is bit-identical to the same render under `--light-selection power`, and nothing is logged at `WARN`
-
-### Requirement: Neural selection is unbiased
-
-Under `neural`, every light that can emit SHALL keep a pick probability of at least its defensive uniform share at every vertex, whatever visibility the network predicts. A render under `neural` SHALL converge to the same image as under `power`.
-
-#### Scenario: A light the network calls hidden stays sampleable
-
-- **WHEN** the network predicts zero visibility for a light at a vertex
-- **THEN** that light's pick probability there is still at least the defensive share divided by the number of emitting lights
-
-#### Scenario: Converges to the power reference
-
-- **WHEN** `usdlux` renders under `neural` at increasing spp with `--indirect-clamp 0`, compared against a 1024 spp `power` reference
-- **THEN** relMSE falls as roughly 1/N in spp rather than plateauing
-
-### Requirement: Neural selection weights both MIS sides alike
-
-Under `neural`, the probability that NEE picked a light at a vertex SHALL be exactly the probability the bounce side uses when a BSDF-sampled ray from that same vertex hits that light, or escapes to it.
-
-#### Scenario: Emission is not double-counted
-
-- **WHEN** `veach_mis` renders under `neural` with `--indirect-clamp 0` at 1024 spp
-- **THEN** its mean pixel value matches the `power` render's within the noise of either
-
-### Requirement: Neural selection is deterministic
-
-The `neural` pre-pass and training SHALL depend only on the scene and the render settings. The same scene, settings and frame SHALL give bit-identical images under tiled and scanline rendering, and at any rayon thread count.
-
-#### Scenario: Thread count does not change the image
-
-- **WHEN** the same scene renders under `neural` with `RAYON_NUM_THREADS=1` and with the default thread count
-- **THEN** the two images are bit-identical
-
-#### Scenario: Tiles and scanlines agree
-
-- **WHEN** the same scene renders under `neural` in tiled and in scanline mode
-- **THEN** the two images are bit-identical
 
 ### Requirement: Tree selection favours the lights that can reach the receiver
 
