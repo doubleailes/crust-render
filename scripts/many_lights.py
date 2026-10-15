@@ -79,7 +79,7 @@ def main():
         x = -19 + 38 * (gx + rng.next()) / 16
         z = -19 + 38 * (gz + rng.next()) / 10
         y = 0.4 + 5.6 * rng.next()
-        intensity = 2 * 10 ** (2 * rng.next())
+        intensity = 0.25 * 10 ** (2 * rng.next())
         w('')
         w(f'    def SphereLight "Sphere{k:03d}"')
         w('    {')
@@ -95,7 +95,7 @@ def main():
         z = -19 + 38 * rng.next()
         y = 2.5 + 4 * rng.next()
         yaw = 360 * rng.next()
-        intensity = 1 * 10 ** (2 * rng.next())
+        intensity = 0.125 * 10 ** (2 * rng.next())
         pitch = -90 if k % 2 == 0 else 90
         w('')
         w(f'    def RectLight "Panel{k:03d}"')
@@ -115,7 +115,7 @@ def main():
         z = -16 + 32 * rng.next()
         tilt = -90 + 30 * (rng.next() - 0.5)
         yaw = 360 * rng.next()
-        intensity = 40 * 10 ** (rng.next())
+        intensity = 5 * 10 ** (rng.next())
         w('')
         w(f'    def RectLight "Spot{k:02d}" (')
         w('        prepend apiSchemas = ["ShapingAPI"]')

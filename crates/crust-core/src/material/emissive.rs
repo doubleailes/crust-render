@@ -102,6 +102,17 @@ impl Emissive {
         self.color * texture * directional * sides
     }
 
+    /// [`Emissive::flux`] with the shaping left out but scaled by its peak
+    /// ([`Shaping::peak`]): the flux of an unshaped emitter as bright as this
+    /// one is in its brightest direction. What a light tree ranks a light by,
+    /// since its bounds already carry the cone.
+    pub fn peak_flux(&self, area: f32) -> Vec3A {
+        let sides = if self.one_sided { 1.0 } else { 2.0 };
+        let texture = self.texture.as_ref().map_or(Vec3A::ONE, |t| t.mean());
+        let peak = self.shaping.as_ref().map_or(1.0, |s| s.peak());
+        self.color * texture * (std::f32::consts::PI * area * sides * peak)
+    }
+
     /// Radiance leaving the surface at world point `p` along the unit world
     /// direction `emission_dir`. `front` says whether that direction is on
     /// the surface's emitting side; a one-sided emitter is dark from behind.

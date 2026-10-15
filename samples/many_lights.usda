@@ -72,7 +72,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 71.93
+        float inputs:intensity = 8.991
         double3 xformOp:translate = (-17.32, 0.9166, -15.83)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -81,7 +81,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 57.07
+        float inputs:intensity = 7.134
         double3 xformOp:translate = (-16.28, 4.571, -16.24)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -90,7 +90,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 79.52
+        float inputs:intensity = 9.94
         double3 xformOp:translate = (-13.48, 4.513, -18.08)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -99,7 +99,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 40.72
+        float inputs:intensity = 5.09
         double3 xformOp:translate = (-11.73, 3.76, -16.24)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -108,7 +108,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.993
+        float inputs:intensity = 0.4991
         double3 xformOp:translate = (-8.882, 0.9904, -15.86)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -117,7 +117,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.841
+        float inputs:intensity = 0.8551
         double3 xformOp:translate = (-6.708, 1.417, -16.35)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -126,7 +126,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 20.15
+        float inputs:intensity = 2.518
         double3 xformOp:translate = (-3.669, 3.765, -15.23)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -135,7 +135,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 65.97
+        float inputs:intensity = 8.246
         double3 xformOp:translate = (-1.21, 5.579, -16.08)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -144,7 +144,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 33.83
+        float inputs:intensity = 4.229
         double3 xformOp:translate = (2.012, 2.393, -17.57)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -153,7 +153,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 45.39
+        float inputs:intensity = 5.674
         double3 xformOp:translate = (3.844, 4.518, -17.8)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -162,7 +162,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 15.53
+        float inputs:intensity = 1.941
         double3 xformOp:translate = (6.976, 2.294, -16.01)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -171,7 +171,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 57.92
+        float inputs:intensity = 7.24
         double3 xformOp:translate = (7.195, 3.044, -17.59)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -180,7 +180,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 31.8
+        float inputs:intensity = 3.974
         double3 xformOp:translate = (11.67, 5.628, -16.58)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -189,7 +189,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 18.71
+        float inputs:intensity = 2.339
         double3 xformOp:translate = (13.78, 3.255, -15.61)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -198,7 +198,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 94.24
+        float inputs:intensity = 11.78
         double3 xformOp:translate = (16.53, 0.5191, -18.15)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -207,7 +207,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.379
+        float inputs:intensity = 0.7974
         double3 xformOp:translate = (18.83, 1.626, -18.64)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -216,7 +216,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 27.18
+        float inputs:intensity = 3.398
         double3 xformOp:translate = (-18.25, 0.66, -13.24)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -225,7 +225,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 68.92
+        float inputs:intensity = 8.615
         double3 xformOp:translate = (-14.46, 2.687, -14.65)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -234,7 +234,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.332
+        float inputs:intensity = 0.7916
         double3 xformOp:translate = (-12.52, 4.521, -11.99)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -243,7 +243,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 164.5
+        float inputs:intensity = 20.56
         double3 xformOp:translate = (-11.45, 3.771, -13.17)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -252,7 +252,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 11.85
+        float inputs:intensity = 1.481
         double3 xformOp:translate = (-7.6, 1.499, -12.54)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -261,7 +261,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 174.1
+        float inputs:intensity = 21.76
         double3 xformOp:translate = (-4.809, 3.363, -13.46)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -270,7 +270,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 136.2
+        float inputs:intensity = 17.02
         double3 xformOp:translate = (-3.542, 1.925, -11.58)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -279,7 +279,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 44.3
+        float inputs:intensity = 5.537
         double3 xformOp:translate = (-2.142, 4.195, -13.77)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -288,7 +288,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 79.86
+        float inputs:intensity = 9.982
         double3 xformOp:translate = (1.233, 3.814, -12.42)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -297,7 +297,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 20.43
+        float inputs:intensity = 2.554
         double3 xformOp:translate = (3.534, 2.353, -11.82)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -306,7 +306,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 7.914
+        float inputs:intensity = 0.9892
         double3 xformOp:translate = (5.093, 2.523, -14.83)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -315,7 +315,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 30.92
+        float inputs:intensity = 3.865
         double3 xformOp:translate = (7.254, 4.157, -15.11)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -324,7 +324,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 46.6
+        float inputs:intensity = 5.825
         double3 xformOp:translate = (10.1, 2.181, -14.69)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -333,7 +333,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 22.77
+        float inputs:intensity = 2.847
         double3 xformOp:translate = (12.17, 3.623, -13.81)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -342,7 +342,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 106.9
+        float inputs:intensity = 13.36
         double3 xformOp:translate = (15.19, 2.675, -13.36)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -351,7 +351,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 56.13
+        float inputs:intensity = 7.016
         double3 xformOp:translate = (18.91, 5.594, -13.05)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -360,7 +360,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 86.74
+        float inputs:intensity = 10.84
         double3 xformOp:translate = (-18.27, 5.992, -11.06)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -369,7 +369,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 13.44
+        float inputs:intensity = 1.679
         double3 xformOp:translate = (-15.04, 4.258, -8.652)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -378,7 +378,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 71.46
+        float inputs:intensity = 8.932
         double3 xformOp:translate = (-14.2, 2.982, -9.002)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -387,7 +387,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.515
+        float inputs:intensity = 0.3144
         double3 xformOp:translate = (-10.9, 5.706, -10.86)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -396,7 +396,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 108.5
+        float inputs:intensity = 13.56
         double3 xformOp:translate = (-7.711, 3.893, -9.491)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -405,7 +405,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 26.19
+        float inputs:intensity = 3.274
         double3 xformOp:translate = (-6.757, 1.753, -11.3)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -414,7 +414,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 84.26
+        float inputs:intensity = 10.53
         double3 xformOp:translate = (-3.072, 2.908, -8.914)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -423,7 +423,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 123.8
+        float inputs:intensity = 15.48
         double3 xformOp:translate = (-1.064, 1.013, -9.496)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -432,7 +432,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 131.8
+        float inputs:intensity = 16.48
         double3 xformOp:translate = (1.98, 4.961, -9.526)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -441,7 +441,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 179.2
+        float inputs:intensity = 22.4
         double3 xformOp:translate = (4.188, 5.575, -11.17)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -450,7 +450,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.863
+        float inputs:intensity = 0.8578
         double3 xformOp:translate = (5.394, 4.494, -8.5)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -459,7 +459,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 90.98
+        float inputs:intensity = 11.37
         double3 xformOp:translate = (7.752, 2.372, -8.708)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -468,7 +468,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 166.5
+        float inputs:intensity = 20.82
         double3 xformOp:translate = (9.753, 1.763, -9.551)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -477,7 +477,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 33.6
+        float inputs:intensity = 4.2
         double3 xformOp:translate = (13.32, 1.159, -9.341)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -486,7 +486,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.73
+        float inputs:intensity = 0.4662
         double3 xformOp:translate = (15.79, 5.351, -9.307)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -495,7 +495,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 187.5
+        float inputs:intensity = 23.44
         double3 xformOp:translate = (18.92, 5.458, -11.35)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -504,7 +504,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 117
+        float inputs:intensity = 14.63
         double3 xformOp:translate = (-18.35, 1.631, -7.218)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -513,7 +513,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 11.15
+        float inputs:intensity = 1.394
         double3 xformOp:translate = (-15.69, 2.238, -5.944)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -522,7 +522,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 20.22
+        float inputs:intensity = 2.528
         double3 xformOp:translate = (-13.1, 1.776, -3.936)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -531,7 +531,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.178
+        float inputs:intensity = 0.2722
         double3 xformOp:translate = (-11.02, 3.761, -4.049)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -540,7 +540,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 65.94
+        float inputs:intensity = 8.243
         double3 xformOp:translate = (-7.639, 2.523, -3.968)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -549,7 +549,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 8.411
+        float inputs:intensity = 1.051
         double3 xformOp:translate = (-5.967, 3.97, -6.427)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -558,7 +558,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.562
+        float inputs:intensity = 0.4452
         double3 xformOp:translate = (-3.796, 0.478, -4.068)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -567,7 +567,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 14.91
+        float inputs:intensity = 1.863
         double3 xformOp:translate = (-1.778, 5.329, -7.071)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -576,7 +576,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 39.61
+        float inputs:intensity = 4.951
         double3 xformOp:translate = (0.3349, 5.575, -5.968)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -585,7 +585,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.245
+        float inputs:intensity = 0.7806
         double3 xformOp:translate = (3.352, 1.774, -4.125)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -594,7 +594,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 29.62
+        float inputs:intensity = 3.702
         double3 xformOp:translate = (6.672, 3.583, -7.417)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -603,7 +603,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 11.28
+        float inputs:intensity = 1.41
         double3 xformOp:translate = (7.393, 3.642, -5.2)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -612,7 +612,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 21.11
+        float inputs:intensity = 2.639
         double3 xformOp:translate = (11.22, 4.947, -6.773)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -621,7 +621,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.922
+        float inputs:intensity = 0.3653
         double3 xformOp:translate = (13.34, 3.077, -4.876)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -630,7 +630,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 18.76
+        float inputs:intensity = 2.345
         double3 xformOp:translate = (16.02, 5.02, -7.517)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -639,7 +639,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.104
+        float inputs:intensity = 0.388
         double3 xformOp:translate = (17.69, 4.484, -4.54)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -648,7 +648,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 10.61
+        float inputs:intensity = 1.326
         double3 xformOp:translate = (-17.71, 2.414, -2.373)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -657,7 +657,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.246
+        float inputs:intensity = 0.7807
         double3 xformOp:translate = (-14.82, 4.881, -0.5598)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -666,7 +666,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 153.9
+        float inputs:intensity = 19.24
         double3 xformOp:translate = (-12.54, 5.401, -3.418)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -675,7 +675,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 5.22
+        float inputs:intensity = 0.6525
         double3 xformOp:translate = (-10.91, 0.6358, -0.5723)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -684,7 +684,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 7.079
+        float inputs:intensity = 0.8849
         double3 xformOp:translate = (-8.751, 4.06, -2.626)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -693,7 +693,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 82.97
+        float inputs:intensity = 10.37
         double3 xformOp:translate = (-6.61, 3.48, -1.803)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -702,7 +702,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 7.373
+        float inputs:intensity = 0.9216
         double3 xformOp:translate = (-4.62, 2.309, -2.611)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -711,7 +711,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 4.822
+        float inputs:intensity = 0.6028
         double3 xformOp:translate = (-1.933, 1.109, -1.591)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -720,7 +720,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 5.244
+        float inputs:intensity = 0.6554
         double3 xformOp:translate = (2.059, 3.722, -0.04105)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -729,7 +729,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 86.51
+        float inputs:intensity = 10.81
         double3 xformOp:translate = (2.656, 2.924, -3.02)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -738,7 +738,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 27.26
+        float inputs:intensity = 3.407
         double3 xformOp:translate = (6.072, 1.297, -3.325)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -747,7 +747,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 16
+        float inputs:intensity = 2
         double3 xformOp:translate = (8.47, 1.748, -0.7822)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -756,7 +756,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 15.06
+        float inputs:intensity = 1.883
         double3 xformOp:translate = (10.15, 0.9171, -1.978)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -765,7 +765,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.898
+        float inputs:intensity = 0.8623
         double3 xformOp:translate = (13.36, 3.516, -1.576)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -774,7 +774,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 12.17
+        float inputs:intensity = 1.521
         double3 xformOp:translate = (14.47, 1.997, -0.2518)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -783,7 +783,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 28.14
+        float inputs:intensity = 3.518
         double3 xformOp:translate = (18.73, 5.318, -2.305)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -792,7 +792,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.787
+        float inputs:intensity = 0.8484
         double3 xformOp:translate = (-18.58, 3.667, 2.734)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -801,7 +801,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 22.2
+        float inputs:intensity = 2.776
         double3 xformOp:translate = (-15.93, 2.25, 0.9331)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -810,7 +810,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 29.94
+        float inputs:intensity = 3.742
         double3 xformOp:translate = (-13.6, 2.899, 3.768)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -819,7 +819,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 50.55
+        float inputs:intensity = 6.319
         double3 xformOp:translate = (-11.29, 1.98, 2.839)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -828,7 +828,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 13.29
+        float inputs:intensity = 1.661
         double3 xformOp:translate = (-7.901, 1.832, 1.541)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -837,7 +837,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.975
+        float inputs:intensity = 0.3719
         double3 xformOp:translate = (-7.061, 5.595, 2.689)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -846,7 +846,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.082
+        float inputs:intensity = 0.2603
         double3 xformOp:translate = (-3.486, 2.85, 1.82)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -855,7 +855,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 56.01
+        float inputs:intensity = 7.002
         double3 xformOp:translate = (-2.261, 2.896, 2.027)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -864,7 +864,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 18.89
+        float inputs:intensity = 2.361
         double3 xformOp:translate = (0.2091, 0.8146, 2.97)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -873,7 +873,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.621
+        float inputs:intensity = 0.4526
         double3 xformOp:translate = (2.535, 2.924, 0.9372)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -882,7 +882,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 81.31
+        float inputs:intensity = 10.16
         double3 xformOp:translate = (5.376, 4.622, 0.02834)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -891,7 +891,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 15.42
+        float inputs:intensity = 1.927
         double3 xformOp:translate = (7.795, 4.908, 2.715)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -900,7 +900,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.597
+        float inputs:intensity = 0.3247
         double3 xformOp:translate = (11.26, 2.123, 0.7221)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -909,7 +909,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 166.8
+        float inputs:intensity = 20.85
         double3 xformOp:translate = (13.58, 5.372, 2.936)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -918,7 +918,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 15.2
+        float inputs:intensity = 1.9
         double3 xformOp:translate = (15.16, 1.581, 1.367)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -927,7 +927,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 23.32
+        float inputs:intensity = 2.915
         double3 xformOp:translate = (16.71, 0.8066, 3.274)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -936,7 +936,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 23.37
+        float inputs:intensity = 2.922
         double3 xformOp:translate = (-16.97, 4.477, 5.257)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -945,7 +945,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 66.67
+        float inputs:intensity = 8.334
         double3 xformOp:translate = (-15.15, 3.822, 5.81)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -954,7 +954,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 21.24
+        float inputs:intensity = 2.655
         double3 xformOp:translate = (-14.09, 4.807, 4.916)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -963,7 +963,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 8.655
+        float inputs:intensity = 1.082
         double3 xformOp:translate = (-11.39, 5.839, 6.297)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -972,7 +972,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.047
+        float inputs:intensity = 0.7559
         double3 xformOp:translate = (-7.66, 3.335, 7.011)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -981,7 +981,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.57
+        float inputs:intensity = 0.3213
         double3 xformOp:translate = (-6.009, 3.924, 5.972)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -990,7 +990,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 4.217
+        float inputs:intensity = 0.5272
         double3 xformOp:translate = (-4.379, 4.644, 4.655)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -999,7 +999,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 27.51
+        float inputs:intensity = 3.439
         double3 xformOp:translate = (-1.579, 2.965, 6.809)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1008,7 +1008,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 143.6
+        float inputs:intensity = 17.95
         double3 xformOp:translate = (0.3273, 0.6078, 6.649)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1017,7 +1017,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 35
+        float inputs:intensity = 4.375
         double3 xformOp:translate = (3.895, 1.752, 4.725)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1026,7 +1026,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 77.42
+        float inputs:intensity = 9.678
         double3 xformOp:translate = (5.448, 2.622, 4.291)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1035,7 +1035,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 189.2
+        float inputs:intensity = 23.65
         double3 xformOp:translate = (8.698, 5.021, 5.339)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1044,7 +1044,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 48.5
+        float inputs:intensity = 6.063
         double3 xformOp:translate = (9.808, 2.258, 6.534)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1053,7 +1053,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 46.9
+        float inputs:intensity = 5.862
         double3 xformOp:translate = (13.16, 1.791, 5.367)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1062,7 +1062,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.291
+        float inputs:intensity = 0.2864
         double3 xformOp:translate = (14.39, 2.148, 5.821)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1071,7 +1071,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 7.149
+        float inputs:intensity = 0.8936
         double3 xformOp:translate = (18.03, 1.989, 5.53)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1080,7 +1080,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.163
+        float inputs:intensity = 0.2704
         double3 xformOp:translate = (-18.43, 0.9775, 8.405)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1089,7 +1089,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.066
+        float inputs:intensity = 0.3833
         double3 xformOp:translate = (-14.73, 2.749, 8.97)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1098,7 +1098,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 13.03
+        float inputs:intensity = 1.628
         double3 xformOp:translate = (-13.33, 0.9152, 9.662)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1107,7 +1107,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.302
+        float inputs:intensity = 0.2878
         double3 xformOp:translate = (-9.797, 4.531, 10.39)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1116,7 +1116,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 12.65
+        float inputs:intensity = 1.581
         double3 xformOp:translate = (-8.911, 1.38, 8.468)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1125,7 +1125,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 98.77
+        float inputs:intensity = 12.35
         double3 xformOp:translate = (-6.694, 2.812, 8.27)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1134,7 +1134,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 26.69
+        float inputs:intensity = 3.336
         double3 xformOp:translate = (-3.488, 3.26, 7.674)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1143,7 +1143,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 22.97
+        float inputs:intensity = 2.872
         double3 xformOp:translate = (-1.332, 5.321, 9.07)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1152,7 +1152,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 5.494
+        float inputs:intensity = 0.6868
         double3 xformOp:translate = (1.012, 3.611, 7.937)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1161,7 +1161,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 20.12
+        float inputs:intensity = 2.515
         double3 xformOp:translate = (3.998, 5.678, 9.682)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1170,7 +1170,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 20.71
+        float inputs:intensity = 2.589
         double3 xformOp:translate = (6.275, 2.365, 10.12)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1179,7 +1179,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.408
+        float inputs:intensity = 0.801
         double3 xformOp:translate = (7.313, 5.684, 9.826)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1188,7 +1188,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 101.7
+        float inputs:intensity = 12.72
         double3 xformOp:translate = (10.74, 3.552, 8.56)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1197,7 +1197,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 32.26
+        float inputs:intensity = 4.033
         double3 xformOp:translate = (13.45, 4.935, 8.701)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1206,7 +1206,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 10.45
+        float inputs:intensity = 1.307
         double3 xformOp:translate = (14.37, 0.8542, 10.02)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1215,7 +1215,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 167.1
+        float inputs:intensity = 20.88
         double3 xformOp:translate = (18.42, 5.537, 8.095)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1224,7 +1224,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 6.324
+        float inputs:intensity = 0.7905
         double3 xformOp:translate = (-17.51, 4.986, 13.89)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1233,7 +1233,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 10.88
+        float inputs:intensity = 1.359
         double3 xformOp:translate = (-14.33, 3.737, 15.09)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1242,7 +1242,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 35.17
+        float inputs:intensity = 4.396
         double3 xformOp:translate = (-13.48, 2.853, 14.06)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1251,7 +1251,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 144
+        float inputs:intensity = 18
         double3 xformOp:translate = (-11.76, 0.9958, 11.53)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1260,7 +1260,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 51.92
+        float inputs:intensity = 6.49
         double3 xformOp:translate = (-9.27, 4.773, 14.16)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1269,7 +1269,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.207
+        float inputs:intensity = 0.2759
         double3 xformOp:translate = (-6.032, 3.289, 15.17)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1278,7 +1278,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 180.3
+        float inputs:intensity = 22.54
         double3 xformOp:translate = (-3.728, 3.589, 12.9)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1287,7 +1287,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 41.73
+        float inputs:intensity = 5.216
         double3 xformOp:translate = (-0.1451, 1.913, 12.76)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1296,7 +1296,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 8.143
+        float inputs:intensity = 1.018
         double3 xformOp:translate = (2.156, 5.333, 12.22)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1305,7 +1305,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 47.2
+        float inputs:intensity = 5.9
         double3 xformOp:translate = (2.916, 4.009, 13.38)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1314,7 +1314,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 40.59
+        float inputs:intensity = 5.074
         double3 xformOp:translate = (6.88, 0.5095, 14.88)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1323,7 +1323,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 47.31
+        float inputs:intensity = 5.914
         double3 xformOp:translate = (9.046, 2.533, 12.78)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1332,7 +1332,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 84.5
+        float inputs:intensity = 10.56
         double3 xformOp:translate = (11.17, 3.151, 12.12)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1341,7 +1341,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.717
+        float inputs:intensity = 0.3397
         double3 xformOp:translate = (13.27, 3.84, 12.57)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1350,7 +1350,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.25
+        float inputs:intensity = 0.2812
         double3 xformOp:translate = (15.92, 4.208, 13.99)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1359,7 +1359,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.874
+        float inputs:intensity = 0.4843
         double3 xformOp:translate = (18.11, 5.954, 12.96)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1368,7 +1368,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 36.04
+        float inputs:intensity = 4.504
         double3 xformOp:translate = (-16.86, 4.716, 15.53)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1377,7 +1377,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 29.84
+        float inputs:intensity = 3.731
         double3 xformOp:translate = (-14.43, 0.9253, 17.29)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1386,7 +1386,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.89
+        float inputs:intensity = 0.4862
         double3 xformOp:translate = (-11.96, 0.8881, 17.26)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1395,7 +1395,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.679
+        float inputs:intensity = 0.4598
         double3 xformOp:translate = (-11.61, 3.86, 16.99)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1404,7 +1404,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 2.311
+        float inputs:intensity = 0.2888
         double3 xformOp:translate = (-8.821, 4.991, 17)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1413,7 +1413,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 76.68
+        float inputs:intensity = 9.585
         double3 xformOp:translate = (-7.045, 5.842, 16.22)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1422,7 +1422,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 53.53
+        float inputs:intensity = 6.691
         double3 xformOp:translate = (-4.122, 2.247, 17.89)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1431,7 +1431,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 121.7
+        float inputs:intensity = 15.21
         double3 xformOp:translate = (-0.9824, 5.473, 17.43)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1440,7 +1440,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 14.51
+        float inputs:intensity = 1.814
         double3 xformOp:translate = (2.096, 2.59, 16.49)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1449,7 +1449,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 45.81
+        float inputs:intensity = 5.727
         double3 xformOp:translate = (4.257, 2.626, 18.83)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1458,7 +1458,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 36.05
+        float inputs:intensity = 4.506
         double3 xformOp:translate = (7.109, 3.424, 16.65)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1467,7 +1467,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 64.63
+        float inputs:intensity = 8.079
         double3 xformOp:translate = (8.256, 1.239, 18.44)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1476,7 +1476,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 119.4
+        float inputs:intensity = 14.92
         double3 xformOp:translate = (10.33, 3.362, 16)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1485,7 +1485,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 3.523
+        float inputs:intensity = 0.4403
         double3 xformOp:translate = (13.73, 3.379, 16.26)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1494,7 +1494,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 74.39
+        float inputs:intensity = 9.298
         double3 xformOp:translate = (16.59, 4.159, 15.57)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1503,7 +1503,7 @@ def Xform "World"
     {
         float inputs:radius = 0.08
         bool inputs:normalize = 1
-        float inputs:intensity = 7.775
+        float inputs:intensity = 0.9719
         double3 xformOp:translate = (17.73, 2.394, 15.59)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -1513,7 +1513,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.556
+        float inputs:intensity = 0.4444
         double3 xformOp:translate = (-13.41, 5.136, -15.69)
         float xformOp:rotateY = 295.3
         float xformOp:rotateX = -90
@@ -1525,7 +1525,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 15.35
+        float inputs:intensity = 1.919
         double3 xformOp:translate = (-9.815, 4.349, -16.93)
         float xformOp:rotateY = 261.5
         float xformOp:rotateX = 90
@@ -1537,7 +1537,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.043
+        float inputs:intensity = 0.1304
         double3 xformOp:translate = (-9.819, 3.695, 3.375)
         float xformOp:rotateY = 187.5
         float xformOp:rotateX = -90
@@ -1549,7 +1549,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 51.96
+        float inputs:intensity = 6.495
         double3 xformOp:translate = (-7.963, 4.534, 13.99)
         float xformOp:rotateY = 175.9
         float xformOp:rotateX = 90
@@ -1561,7 +1561,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 68.05
+        float inputs:intensity = 8.507
         double3 xformOp:translate = (-15.73, 2.728, 12.22)
         float xformOp:rotateY = 254.8
         float xformOp:rotateX = -90
@@ -1573,7 +1573,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 4.391
+        float inputs:intensity = 0.5488
         double3 xformOp:translate = (-17.58, 4.523, -14.51)
         float xformOp:rotateY = 257.6
         float xformOp:rotateX = 90
@@ -1585,7 +1585,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 4.807
+        float inputs:intensity = 0.6009
         double3 xformOp:translate = (-2.989, 2.754, 0.7734)
         float xformOp:rotateY = 165.8
         float xformOp:rotateX = -90
@@ -1597,7 +1597,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 4.976
+        float inputs:intensity = 0.6219
         double3 xformOp:translate = (-11.43, 3.429, 6.528)
         float xformOp:rotateY = 333.5
         float xformOp:rotateX = 90
@@ -1609,7 +1609,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.238
+        float inputs:intensity = 0.1548
         double3 xformOp:translate = (13.06, 4.333, -7.732)
         float xformOp:rotateY = 146.6
         float xformOp:rotateX = -90
@@ -1621,7 +1621,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 52.21
+        float inputs:intensity = 6.526
         double3 xformOp:translate = (-1.66, 4.188, -0.6397)
         float xformOp:rotateY = 24.81
         float xformOp:rotateX = 90
@@ -1633,7 +1633,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.562
+        float inputs:intensity = 0.1952
         double3 xformOp:translate = (15.86, 4.66, 16.74)
         float xformOp:rotateY = 117.4
         float xformOp:rotateX = -90
@@ -1645,7 +1645,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.965
+        float inputs:intensity = 0.4956
         double3 xformOp:translate = (1.521, 6.254, -1.934)
         float xformOp:rotateY = 292.3
         float xformOp:rotateX = 90
@@ -1657,7 +1657,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 9.316
+        float inputs:intensity = 1.165
         double3 xformOp:translate = (-10.14, 3.517, 5.048)
         float xformOp:rotateY = 217.9
         float xformOp:rotateX = -90
@@ -1669,7 +1669,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.577
+        float inputs:intensity = 0.1972
         double3 xformOp:translate = (5.397, 4.582, 6.702)
         float xformOp:rotateY = 87.69
         float xformOp:rotateX = 90
@@ -1681,7 +1681,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 4.032
+        float inputs:intensity = 0.504
         double3 xformOp:translate = (-14.52, 4.995, -10.55)
         float xformOp:rotateY = 204.6
         float xformOp:rotateX = -90
@@ -1693,7 +1693,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 13.06
+        float inputs:intensity = 1.632
         double3 xformOp:translate = (4.412, 4.866, -0.3479)
         float xformOp:rotateY = 206
         float xformOp:rotateX = 90
@@ -1705,7 +1705,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 56.5
+        float inputs:intensity = 7.062
         double3 xformOp:translate = (0.9903, 5.392, -7.832)
         float xformOp:rotateY = 64.18
         float xformOp:rotateX = -90
@@ -1717,7 +1717,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.207
+        float inputs:intensity = 0.4009
         double3 xformOp:translate = (5.55, 4.332, -8.879)
         float xformOp:rotateY = 348.2
         float xformOp:rotateX = 90
@@ -1729,7 +1729,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 2.267
+        float inputs:intensity = 0.2834
         double3 xformOp:translate = (18.71, 2.719, 5.089)
         float xformOp:rotateY = 129.8
         float xformOp:rotateX = -90
@@ -1741,7 +1741,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 50.8
+        float inputs:intensity = 6.35
         double3 xformOp:translate = (18.14, 5.735, -15.19)
         float xformOp:rotateY = 15.83
         float xformOp:rotateX = 90
@@ -1753,7 +1753,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 2.366
+        float inputs:intensity = 0.2957
         double3 xformOp:translate = (12.62, 6.106, 7.955)
         float xformOp:rotateY = 303.8
         float xformOp:rotateX = -90
@@ -1765,7 +1765,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 42.09
+        float inputs:intensity = 5.261
         double3 xformOp:translate = (10.89, 6.05, -13.5)
         float xformOp:rotateY = 239.5
         float xformOp:rotateX = 90
@@ -1777,7 +1777,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 36.73
+        float inputs:intensity = 4.591
         double3 xformOp:translate = (-10.89, 5.407, -3.401)
         float xformOp:rotateY = 281.5
         float xformOp:rotateX = -90
@@ -1789,7 +1789,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.764
+        float inputs:intensity = 0.2204
         double3 xformOp:translate = (14.78, 3.895, 0.2012)
         float xformOp:rotateY = 312.2
         float xformOp:rotateX = 90
@@ -1801,7 +1801,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 99.33
+        float inputs:intensity = 12.42
         double3 xformOp:translate = (1.681, 4.061, 14.47)
         float xformOp:rotateY = 332.2
         float xformOp:rotateX = -90
@@ -1813,7 +1813,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 7.431
+        float inputs:intensity = 0.9288
         double3 xformOp:translate = (-15.68, 5.168, 10.81)
         float xformOp:rotateY = 319.7
         float xformOp:rotateX = 90
@@ -1825,7 +1825,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 7.162
+        float inputs:intensity = 0.8952
         double3 xformOp:translate = (9.104, 4.041, 14.32)
         float xformOp:rotateY = 196.4
         float xformOp:rotateX = -90
@@ -1837,7 +1837,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 5.771
+        float inputs:intensity = 0.7214
         double3 xformOp:translate = (-18.16, 4.703, -5.562)
         float xformOp:rotateY = 331.5
         float xformOp:rotateX = 90
@@ -1849,7 +1849,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 19.67
+        float inputs:intensity = 2.459
         double3 xformOp:translate = (-0.595, 2.717, -15.69)
         float xformOp:rotateY = 69.59
         float xformOp:rotateX = -90
@@ -1861,7 +1861,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 86.41
+        float inputs:intensity = 10.8
         double3 xformOp:translate = (-18.56, 5.008, -14.61)
         float xformOp:rotateY = 185.6
         float xformOp:rotateX = 90
@@ -1873,7 +1873,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.213
+        float inputs:intensity = 0.1517
         double3 xformOp:translate = (-1.482, 4.868, 8.418)
         float xformOp:rotateY = 187.7
         float xformOp:rotateX = -90
@@ -1885,7 +1885,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 17.76
+        float inputs:intensity = 2.22
         double3 xformOp:translate = (-1.377, 2.526, -12.38)
         float xformOp:rotateY = 185.9
         float xformOp:rotateX = 90
@@ -1897,7 +1897,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 4.225
+        float inputs:intensity = 0.5281
         double3 xformOp:translate = (18.36, 3.965, -15.81)
         float xformOp:rotateY = 89.51
         float xformOp:rotateX = -90
@@ -1909,7 +1909,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 69.91
+        float inputs:intensity = 8.739
         double3 xformOp:translate = (17.79, 3.12, 13.43)
         float xformOp:rotateY = 89.57
         float xformOp:rotateX = 90
@@ -1921,7 +1921,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.562
+        float inputs:intensity = 0.1953
         double3 xformOp:translate = (13.74, 6.037, -3.261)
         float xformOp:rotateY = 213.5
         float xformOp:rotateX = -90
@@ -1933,7 +1933,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.281
+        float inputs:intensity = 0.4102
         double3 xformOp:translate = (-0.534, 6.405, 13.64)
         float xformOp:rotateY = 234.8
         float xformOp:rotateX = 90
@@ -1945,7 +1945,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 2.859
+        float inputs:intensity = 0.3574
         double3 xformOp:translate = (-13.27, 3.321, -4.507)
         float xformOp:rotateY = 139.6
         float xformOp:rotateX = -90
@@ -1957,7 +1957,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 2.575
+        float inputs:intensity = 0.3219
         double3 xformOp:translate = (-4.74, 5.922, 12.26)
         float xformOp:rotateY = 15.78
         float xformOp:rotateX = 90
@@ -1969,7 +1969,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 6.248
+        float inputs:intensity = 0.7809
         double3 xformOp:translate = (-16.94, 2.878, 13.57)
         float xformOp:rotateY = 235.1
         float xformOp:rotateX = -90
@@ -1981,7 +1981,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 13.67
+        float inputs:intensity = 1.709
         double3 xformOp:translate = (-11.61, 3.197, 8.08)
         float xformOp:rotateY = 12.51
         float xformOp:rotateX = 90
@@ -1993,7 +1993,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 56.73
+        float inputs:intensity = 7.091
         double3 xformOp:translate = (-0.7728, 3.989, -6.051)
         float xformOp:rotateY = 321.8
         float xformOp:rotateX = -90
@@ -2005,7 +2005,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 2.121
+        float inputs:intensity = 0.2651
         double3 xformOp:translate = (2.776, 3.171, 8.12)
         float xformOp:rotateY = 111.1
         float xformOp:rotateX = 90
@@ -2017,7 +2017,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 14.73
+        float inputs:intensity = 1.841
         double3 xformOp:translate = (6.676, 5.458, -18.34)
         float xformOp:rotateY = 226.9
         float xformOp:rotateX = -90
@@ -2029,7 +2029,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 48.95
+        float inputs:intensity = 6.118
         double3 xformOp:translate = (-10.1, 5.605, 5.885)
         float xformOp:rotateY = 190.3
         float xformOp:rotateX = 90
@@ -2041,7 +2041,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.117
+        float inputs:intensity = 0.1396
         double3 xformOp:translate = (-17.06, 3.823, -9.987)
         float xformOp:rotateY = 180.5
         float xformOp:rotateX = -90
@@ -2053,7 +2053,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 70.39
+        float inputs:intensity = 8.799
         double3 xformOp:translate = (-18.69, 3.506, -12.84)
         float xformOp:rotateY = 96.5
         float xformOp:rotateX = 90
@@ -2065,7 +2065,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 19.53
+        float inputs:intensity = 2.442
         double3 xformOp:translate = (-16.78, 2.709, -18.27)
         float xformOp:rotateY = 106.7
         float xformOp:rotateX = -90
@@ -2077,7 +2077,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.952
+        float inputs:intensity = 0.494
         double3 xformOp:translate = (0.3632, 5.188, -16.28)
         float xformOp:rotateY = 114.2
         float xformOp:rotateX = 90
@@ -2089,7 +2089,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 16.81
+        float inputs:intensity = 2.102
         double3 xformOp:translate = (-13.75, 2.523, 6.408)
         float xformOp:rotateY = 19.07
         float xformOp:rotateX = -90
@@ -2101,7 +2101,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 17.82
+        float inputs:intensity = 2.228
         double3 xformOp:translate = (11.27, 6.018, 4.616)
         float xformOp:rotateY = 357.6
         float xformOp:rotateX = 90
@@ -2113,7 +2113,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.501
+        float inputs:intensity = 0.1877
         double3 xformOp:translate = (-0.4109, 5.762, -11.04)
         float xformOp:rotateY = 320
         float xformOp:rotateX = -90
@@ -2125,7 +2125,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 33.28
+        float inputs:intensity = 4.16
         double3 xformOp:translate = (0.1677, 6.464, 14.82)
         float xformOp:rotateY = 286.9
         float xformOp:rotateX = 90
@@ -2137,7 +2137,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.983
+        float inputs:intensity = 0.2478
         double3 xformOp:translate = (18.88, 5.157, 17.24)
         float xformOp:rotateY = 294
         float xformOp:rotateX = -90
@@ -2149,7 +2149,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 17.18
+        float inputs:intensity = 2.148
         double3 xformOp:translate = (7.951, 4.21, -17.19)
         float xformOp:rotateY = 2.85
         float xformOp:rotateX = 90
@@ -2161,7 +2161,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 17.64
+        float inputs:intensity = 2.205
         double3 xformOp:translate = (-3.96, 5.677, -2.757)
         float xformOp:rotateY = 72.06
         float xformOp:rotateX = -90
@@ -2173,7 +2173,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 10.02
+        float inputs:intensity = 1.253
         double3 xformOp:translate = (7.002, 6.258, 8.954)
         float xformOp:rotateY = 263.9
         float xformOp:rotateX = 90
@@ -2185,7 +2185,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 9.231
+        float inputs:intensity = 1.154
         double3 xformOp:translate = (10.65, 4.38, 16.32)
         float xformOp:rotateY = 20.35
         float xformOp:rotateX = -90
@@ -2197,7 +2197,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.085
+        float inputs:intensity = 0.1356
         double3 xformOp:translate = (9.573, 3.453, 4.993)
         float xformOp:rotateY = 122.6
         float xformOp:rotateX = 90
@@ -2209,7 +2209,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 92.8
+        float inputs:intensity = 11.6
         double3 xformOp:translate = (6.592, 2.634, 0.5086)
         float xformOp:rotateY = 347.2
         float xformOp:rotateX = -90
@@ -2221,7 +2221,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.233
+        float inputs:intensity = 0.1541
         double3 xformOp:translate = (-11.87, 6.278, -1.107)
         float xformOp:rotateY = 148.6
         float xformOp:rotateX = 90
@@ -2233,7 +2233,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 2.029
+        float inputs:intensity = 0.2536
         double3 xformOp:translate = (-17.21, 5.15, -5.313)
         float xformOp:rotateY = 194.4
         float xformOp:rotateX = -90
@@ -2245,7 +2245,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 19.2
+        float inputs:intensity = 2.4
         double3 xformOp:translate = (7.463, 4.443, 6.539)
         float xformOp:rotateY = 215.9
         float xformOp:rotateX = 90
@@ -2257,7 +2257,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.141
+        float inputs:intensity = 0.1426
         double3 xformOp:translate = (-15.94, 5.446, 7.363)
         float xformOp:rotateY = 103.4
         float xformOp:rotateX = -90
@@ -2269,7 +2269,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 2.141
+        float inputs:intensity = 0.2676
         double3 xformOp:translate = (12.05, 2.545, -17.11)
         float xformOp:rotateY = 282
         float xformOp:rotateX = 90
@@ -2281,7 +2281,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.334
+        float inputs:intensity = 0.4168
         double3 xformOp:translate = (-6.12, 3.816, 11.21)
         float xformOp:rotateY = 318.5
         float xformOp:rotateX = -90
@@ -2293,7 +2293,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 10.36
+        float inputs:intensity = 1.296
         double3 xformOp:translate = (-12.72, 5.944, -17.28)
         float xformOp:rotateY = 22.99
         float xformOp:rotateX = 90
@@ -2305,7 +2305,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 30.58
+        float inputs:intensity = 3.822
         double3 xformOp:translate = (-15.49, 4.959, -6.412)
         float xformOp:rotateY = 62.43
         float xformOp:rotateX = -90
@@ -2317,7 +2317,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.834
+        float inputs:intensity = 0.4792
         double3 xformOp:translate = (7.64, 3.234, 0.327)
         float xformOp:rotateY = 236.4
         float xformOp:rotateX = 90
@@ -2329,7 +2329,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 7.273
+        float inputs:intensity = 0.9092
         double3 xformOp:translate = (-5.053, 4.939, -5.089)
         float xformOp:rotateY = 294.2
         float xformOp:rotateX = -90
@@ -2341,7 +2341,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 40.46
+        float inputs:intensity = 5.058
         double3 xformOp:translate = (13.09, 3.459, 0.6027)
         float xformOp:rotateY = 118.5
         float xformOp:rotateX = 90
@@ -2353,7 +2353,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 1.997
+        float inputs:intensity = 0.2496
         double3 xformOp:translate = (-17.77, 2.626, 3.547)
         float xformOp:rotateY = 52.52
         float xformOp:rotateX = -90
@@ -2365,7 +2365,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.482
+        float inputs:intensity = 0.4352
         double3 xformOp:translate = (13.54, 4.805, 13.75)
         float xformOp:rotateY = 43.57
         float xformOp:rotateX = 90
@@ -2377,7 +2377,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 3.01
+        float inputs:intensity = 0.3762
         double3 xformOp:translate = (-5.153, 6.314, 7.498)
         float xformOp:rotateY = 130.7
         float xformOp:rotateX = -90
@@ -2389,7 +2389,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 10.31
+        float inputs:intensity = 1.289
         double3 xformOp:translate = (7.754, 4.247, -14.85)
         float xformOp:rotateY = 358.6
         float xformOp:rotateX = 90
@@ -2401,7 +2401,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 66.71
+        float inputs:intensity = 8.339
         double3 xformOp:translate = (-13.61, 3.773, -6.08)
         float xformOp:rotateY = 218.4
         float xformOp:rotateX = -90
@@ -2413,7 +2413,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 46.94
+        float inputs:intensity = 5.867
         double3 xformOp:translate = (18.47, 2.642, -14.64)
         float xformOp:rotateY = 204.4
         float xformOp:rotateX = 90
@@ -2425,7 +2425,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 33.64
+        float inputs:intensity = 4.205
         double3 xformOp:translate = (7.22, 4.375, 2.55)
         float xformOp:rotateY = 213
         float xformOp:rotateX = -90
@@ -2437,7 +2437,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 18.91
+        float inputs:intensity = 2.364
         double3 xformOp:translate = (0.4498, 4.458, 13.17)
         float xformOp:rotateY = 262.5
         float xformOp:rotateX = 90
@@ -2449,7 +2449,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 9.096
+        float inputs:intensity = 1.137
         double3 xformOp:translate = (-8.783, 5.221, -5.323)
         float xformOp:rotateY = 306
         float xformOp:rotateX = -90
@@ -2461,7 +2461,7 @@ def Xform "World"
         float inputs:width = 0.6
         float inputs:height = 0.3
         bool inputs:normalize = 1
-        float inputs:intensity = 96.93
+        float inputs:intensity = 12.12
         double3 xformOp:translate = (14.91, 4.888, -14.24)
         float xformOp:rotateY = 324.8
         float xformOp:rotateX = 90
@@ -2475,7 +2475,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 90.66
+        float inputs:intensity = 11.33
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-2.571, 7, 6.859)
@@ -2491,7 +2491,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 89.01
+        float inputs:intensity = 11.13
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (7.138, 7, 3.725)
@@ -2507,7 +2507,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 86.43
+        float inputs:intensity = 10.8
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-9.236, 7, 0.1331)
@@ -2523,7 +2523,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 215.6
+        float inputs:intensity = 26.95
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-6.145, 7, -0.7535)
@@ -2539,7 +2539,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 97.59
+        float inputs:intensity = 12.2
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-9.346, 7, -11.35)
@@ -2555,7 +2555,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 46.62
+        float inputs:intensity = 5.827
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-6.197, 7, 7.033)
@@ -2571,7 +2571,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 52.21
+        float inputs:intensity = 6.527
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (9.871, 7, 10.96)
@@ -2587,7 +2587,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 135.1
+        float inputs:intensity = 16.89
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-15.88, 7, 3.916)
@@ -2603,7 +2603,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 112.2
+        float inputs:intensity = 14.03
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-6.659, 7, -3.182)
@@ -2619,7 +2619,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 305.8
+        float inputs:intensity = 38.23
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-1.57, 7, 11.89)
@@ -2635,7 +2635,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 302.6
+        float inputs:intensity = 37.83
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (2.381, 7, 11.74)
@@ -2651,7 +2651,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 51.9
+        float inputs:intensity = 6.488
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-11.97, 7, 10.82)
@@ -2667,7 +2667,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 99.44
+        float inputs:intensity = 12.43
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (8.19, 7, 5.127)
@@ -2683,7 +2683,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 206
+        float inputs:intensity = 25.75
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (4.1, 7, 12.91)
@@ -2699,7 +2699,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 40.06
+        float inputs:intensity = 5.007
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-12.1, 7, 7.619)
@@ -2715,7 +2715,7 @@ def Xform "World"
         float inputs:width = 0.2
         float inputs:height = 0.2
         bool inputs:normalize = 1
-        float inputs:intensity = 69.88
+        float inputs:intensity = 8.735
         float inputs:shaping:cone:angle = 10
         float inputs:shaping:cone:softness = 0.2
         double3 xformOp:translate = (-11.32, 7, -3.516)

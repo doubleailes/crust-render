@@ -252,9 +252,15 @@ facing away from the receiver, and 15.1% to one below its horizon
 (`docs/light_sampling.md` §3.12). It is the default selection in pbrt-v4 and
 Cycles. It is blind to occluders, which is `learned`'s half.
 
-- **Bounds.** `Light::bounds(phi)` gives a box, an axis `w`, a normal spread
-  `θo`, an emission spread `θe`, the flux and whether it is two-sided. `phi` is
-  `Light::power`, already computed for the power table. `AreaLight` takes the
+- **Bounds.** `Light::bounds(luma)` gives a box, an axis `w`, a normal spread
+  `θo`, an emission spread `θe`, a flux and whether it is two-sided. The flux
+  is `Emissive::peak_flux`, the flux of an unshaped emitter as bright as the
+  light's brightest direction (`Shaping::peak`), not `Light::power`. The cone
+  is already in `θe`, and a cone-integrated flux penalised a narrow spot twice:
+  inside its pool it was ranked like a dim light and weighted hugely, which
+  showed as fireflies in the first `many_lights` renders. pbrt-v4 gives a spot
+  the flux of an isotropic light of its peak intensity for the same reason.
+  The defensive power arm keeps `Light::power`. `AreaLight` takes the
   shape's `LightShape::extent` (its world box, and its normal if flat) and the
   tighter of two direction bounds:
   - the surface's own: one-sided flat `θo = 0, θe = π/2`; two-sided flat the
