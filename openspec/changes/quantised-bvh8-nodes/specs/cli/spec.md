@@ -11,11 +11,11 @@ SHALL print no row.
 
 - **WHEN** a scene with one large and one small prototype is rendered with `--stats` and
   the default `CRUST_BVH_NODES`
-- **THEN** the report prints a `bvh nodes (quantised)` row and a `bvh nodes (4-wide)`
-  row, both inside the `kernel memory` sum
+- **THEN** the report prints a `BVH nodes (quantised)` row beside the existing `BVH nodes`
+  row (the `f32` format), both inside the `kernel memory` sum
 
 #### Scenario: A render forced to the 4-wide node
 
 - **WHEN** the same scene is rendered with `CRUST_BVH_NODES=wide4 --stats`
-- **THEN** the report prints only the 4-wide row, and its other rows are unchanged
-  from before this change
+- **THEN** the report prints only the existing `BVH nodes` row and no quantised row, and the
+  report is otherwise unchanged from before this change

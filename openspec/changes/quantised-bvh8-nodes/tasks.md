@@ -43,23 +43,26 @@
       `auto`. Verify all three pass, and that `scripts/test_simd_matrix.sh -p crust-rt`
       passes. *Done for the three runs (75 unit + 77 integration + 1 doc test each, also
       under the nightly `bvh8` feature); `test_simd_matrix.sh` not yet run.*
-- [ ] 3.3 Add the brute-force agreement test (random triangle soup, both formats,
+- [x] 3.3 Add the brute-force agreement test (random triangle soup, both formats,
       `intersect` and `occluded`, equal distances, equal occlusion, equal primitive
       except at exact ties) and the degenerate-extent test. Verify the "Random rays agree
       with the 4-wide tree" and "A degenerate extent" scenarios.
-- [ ] 3.4 Extend `build_is_deterministic` to compare quantised nodes, and add the
+- [x] 3.4 Extend `build_is_deterministic` to compare quantised nodes, and add the
       different-thread-count commit test. Verify the "Committing twice at different
       thread counts" scenario.
 
 ## 4. The switch and the reporting
 
-- [ ] 4.1 Add `bvh_nodes` to `crust_core::Config` (`CRUST_BVH_NODES`, default `auto`),
+- [x] 4.1 Add `bvh_nodes` to `crust_core::Config` (`CRUST_BVH_NODES`, default `auto`),
       read through `commit_options()` like `CRUST_TRI_PACKETS`, warning once on a bad
       value. Verify with `Config::from_lookup` tests for "The switch forces a format"
-      and "A bad value".
-- [ ] 4.2 Add per-format node rows to `MemoryFootprint` and to the `--stats` report.
+      and "A bad value". *Done (`BvhNodes` in `crust-core/src/config.rs`).*
+- [x] 4.2 Add per-format node rows to `MemoryFootprint` and to the `--stats` report.
       Verify the "A quantised tree is smaller", "Mixed formats in one scene", "A render
-      with both formats" and "A render forced to the 4-wide node" scenarios.
+      with both formats" and "A render forced to the 4-wide node" scenarios. *Done: the
+      footprint has `bvh_nodes_quantised`, `--stats` prints a `BVH nodes (quantised)` row
+      beside the unchanged `BVH nodes` row, and the JSON gains
+      `bvh_nodes_quantised_bytes`.*
 
 ## 5. Measurement and the gate
 

@@ -906,6 +906,7 @@ fn footprint_json<S: Serializer>(fp: &crate::rt::MemoryFootprint, s: S) -> Resul
         instances,
         cubic_spans,
         bvh_nodes,
+        bvh_nodes_quantised,
         leaves,
         packets,
         packets_indexed,
@@ -929,6 +930,7 @@ fn footprint_json<S: Serializer>(fp: &crate::rt::MemoryFootprint, s: S) -> Resul
         instances_bytes: usize,
         cubic_spans_bytes: usize,
         bvh_nodes_bytes: usize,
+        bvh_nodes_quantised_bytes: usize,
         indices_bytes: usize,
         leaves_bytes: usize,
         geometry_tables_bytes: usize,
@@ -946,6 +948,7 @@ fn footprint_json<S: Serializer>(fp: &crate::rt::MemoryFootprint, s: S) -> Resul
         instances_bytes: instances,
         cubic_spans_bytes: cubic_spans,
         bvh_nodes_bytes: bvh_nodes,
+        bvh_nodes_quantised_bytes: bvh_nodes_quantised,
         indices_bytes: indices,
         leaves_bytes: leaves,
         geometry_tables_bytes: geometry_tables,
@@ -1274,6 +1277,7 @@ impl RenderStats {
                 ("instances", fp.instances),
                 ("cubic curve spans", fp.cubic_spans),
                 ("BVH nodes", fp.bvh_nodes),
+                ("BVH nodes (quantised)", fp.bvh_nodes_quantised),
                 ("leaf indices", fp.indices),
                 ("leaves", fp.leaves),
                 ("geometry tables", fp.geometry_tables),
@@ -2093,6 +2097,41 @@ mod tests {
         assert_eq!(fp.total(), 14_192);
     }
 
+    /// Node bytes are reported per format, each row inside the kernel-memory
+    /// sum, and a format no tree uses prints no row.
+    #[test]
+    fn report_shows_node_bytes_per_format() {
+        let report = |fp: crate::rt::MemoryFootprint| {
+            RenderStats {
+                scene: SceneCounters {
+                    footprint: fp,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .report()
+        };
+        let both = crate::rt::MemoryFootprint {
+            bvh_nodes: 2_048,
+            bvh_nodes_quantised: 1_520,
+            ..Default::default()
+        };
+        let out = report(both);
+        assert!(out.contains("BVH nodes (quantised)"), "{out}");
+        assert!(
+            out.lines()
+                .any(|l| l.trim_start().starts_with("BVH nodes ") && !l.contains("quantised")),
+            "{out}"
+        );
+        assert_eq!(both.total(), 3_568, "both rows are inside the total");
+
+        let wide_only = report(crate::rt::MemoryFootprint {
+            bvh_nodes: 2_048,
+            ..Default::default()
+        });
+        assert!(!wide_only.contains("quantised"), "{wide_only}");
+    }
+
     #[test]
     fn unique_breakdown_is_shown_only_when_it_differs() {
         let flat = PrimitiveCounts {
@@ -2481,6 +2520,7 @@ mod tests {
             "scene.geometries",
             "scene.kernel_memory",
             "scene.kernel_memory.bvh_nodes_bytes",
+            "scene.kernel_memory.bvh_nodes_quantised_bytes",
             "scene.kernel_memory.cubic_spans_bytes",
             "scene.kernel_memory.geometry_tables_bytes",
             "scene.kernel_memory.indices_bytes",

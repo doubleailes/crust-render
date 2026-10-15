@@ -439,6 +439,39 @@ fn wide8_node_is_four_cache_lines() {
     assert_eq!(std::mem::align_of::<FNode>(), 32);
 }
 
+/// Two trees are the same tree: leaves, packets, indices and every node.
+fn assert_same_tree(a: &Bvh, b: &Bvh) {
+    assert_eq!(a.indices, b.indices);
+    assert_eq!(a.packets.len(), b.packets.len());
+    assert_eq!(a.leaves.len(), b.leaves.len());
+    for (x, y) in a.leaves.iter().zip(&b.leaves) {
+        assert_eq!((x.pkt_first, x.pkt_count), (y.pkt_first, y.pkt_count));
+        assert_eq!((x.idx_first, x.idx_count), (y.idx_first, y.idx_count));
+    }
+    match (&a.nodes, &b.nodes) {
+        (Nodes::Wide(x), Nodes::Wide(y)) => {
+            assert_eq!(x.len(), y.len());
+            for (x, y) in x.iter().zip(y.iter()) {
+                assert_eq!(x.child, y.child);
+                assert_eq!(x.flags, y.flags);
+                assert_eq!(x.bmin_x, y.bmin_x);
+                assert_eq!(x.bmax_z, y.bmax_z);
+            }
+        }
+        (Nodes::Quant(x), Nodes::Quant(y)) => {
+            assert_eq!(x.len(), y.len());
+            for (x, y) in x.iter().zip(y.iter()) {
+                assert_eq!(x.valid_mask(), y.valid_mask());
+                for l in 0..Q_WIDTH {
+                    assert_eq!(x.child_box(l), y.child_box(l));
+                    assert_eq!(x.child_at(l), y.child_at(l));
+                }
+            }
+        }
+        _ => panic!("the same choice built two formats"),
+    }
+}
+
 /// Parallel subtree builds must not change the tree: the same input
 /// always produces byte-identical topology, in either node format.
 #[test]
@@ -446,35 +479,35 @@ fn build_is_deterministic() {
     for choice in [NodeChoice::Wide, NodeChoice::Quantised] {
         let a = Bvh::with_nodes(sphere_grid(6), Layout::Gathered, choice);
         let b = Bvh::with_nodes(sphere_grid(6), Layout::Gathered, choice);
-        assert_eq!(a.indices, b.indices);
-        assert_eq!(a.packets.len(), b.packets.len());
-        assert_eq!(a.leaves.len(), b.leaves.len());
-        for (x, y) in a.leaves.iter().zip(&b.leaves) {
-            assert_eq!((x.pkt_first, x.pkt_count), (y.pkt_first, y.pkt_count));
-            assert_eq!((x.idx_first, x.idx_count), (y.idx_first, y.idx_count));
-        }
-        match (&a.nodes, &b.nodes) {
-            (Nodes::Wide(x), Nodes::Wide(y)) => {
-                assert_eq!(x.len(), y.len());
-                for (x, y) in x.iter().zip(y.iter()) {
-                    assert_eq!(x.child, y.child);
-                    assert_eq!(x.flags, y.flags);
-                    assert_eq!(x.bmin_x, y.bmin_x);
-                    assert_eq!(x.bmax_z, y.bmax_z);
-                }
-            }
-            (Nodes::Quant(x), Nodes::Quant(y)) => {
-                assert_eq!(x.len(), y.len());
-                for (x, y) in x.iter().zip(y.iter()) {
-                    assert_eq!(x.valid_mask(), y.valid_mask());
-                    for l in 0..Q_WIDTH {
-                        assert_eq!(x.child_box(l), y.child_box(l));
-                        assert_eq!(x.child_at(l), y.child_at(l));
-                    }
-                }
-            }
-            _ => panic!("the same choice built two formats"),
-        }
+        assert_same_tree(&a, &b);
+    }
+}
+
+/// The thread count changes *when* subtrees are built, never *what*: a
+/// tree large enough to fork subtree tasks is identical on one thread and on
+/// eight, in either node format.
+#[test]
+fn build_is_identical_at_every_thread_count() {
+    let build = |threads: usize, choice| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a rayon pool")
+            .install(|| {
+                Bvh::with_nodes(
+                    super::lane_width::uv_sphere_prims(120, 60),
+                    Layout::Gathered,
+                    choice,
+                )
+            })
+    };
+    for choice in [NodeChoice::Wide, NodeChoice::Quantised] {
+        let (one, eight) = (build(1, choice), build(8, choice));
+        assert!(
+            one.leaves.len() > PARALLEL_THRESHOLD / 8,
+            "too small to fork"
+        );
+        assert_same_tree(&one, &eight);
     }
 }
 

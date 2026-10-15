@@ -100,15 +100,6 @@ enum Nodes {
     Quant(Box<[QNode]>),
 }
 
-impl Nodes {
-    fn bytes(&self) -> usize {
-        match self {
-            Nodes::Wide(n) => std::mem::size_of_val(&**n),
-            Nodes::Quant(n) => std::mem::size_of_val(&**n),
-        }
-    }
-}
-
 /// Leaves are forced at this depth so the traversal stack can never
 /// overflow; SAH partitions are otherwise free to be arbitrarily uneven.
 const MAX_DEPTH: usize = 60;
@@ -774,7 +765,10 @@ impl Bvh {
     ) {
         use std::mem::size_of_val;
         acc.prim_nodes += size_of_val(&*self.prims);
-        acc.bvh_nodes += self.nodes.bytes();
+        match &self.nodes {
+            Nodes::Wide(n) => acc.bvh_nodes += std::mem::size_of_val(&**n),
+            Nodes::Quant(n) => acc.bvh_nodes_quantised += std::mem::size_of_val(&**n),
+        }
         acc.leaves += size_of_val(&*self.leaves);
         acc.packets += size_of_val(&*self.packets);
         acc.packets_indexed += size_of_val(&*self.packets_i);

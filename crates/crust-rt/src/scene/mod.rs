@@ -117,8 +117,10 @@ pub struct MemoryFootprint {
     pub instances: usize,
     /// Cubic curve spans, 96 bytes each inline.
     pub cubic_spans: usize,
-    /// 4-wide BVH nodes.
+    /// BVH nodes of the `f32` format (4-wide, or 8-wide under `bvh8`).
     pub bvh_nodes: usize,
+    /// BVH nodes of the quantised 8-wide format (76 bytes each).
+    pub bvh_nodes_quantised: usize,
     pub leaves: usize,
     /// Triangle SIMD packets of the gathered layout (the vertices, SoA).
     pub packets: usize,
@@ -147,6 +149,7 @@ impl MemoryFootprint {
             + self.instances
             + self.cubic_spans
             + self.bvh_nodes
+            + self.bvh_nodes_quantised
             + self.leaves
             + self.packets
             + self.packets_indexed
