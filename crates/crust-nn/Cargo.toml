@@ -19,3 +19,6 @@ path = "src/lib.rs"
 [dev-dependencies]
 # Only to show that a batch's gradient is the same at any thread count.
 rayon.workspace = true
+# Seeded randomness for the tests: the repository rule is that tests which
+# only need random draws use `openqmc::pcg::Rng`.
+openqmc-rs = "0.2.4"

@@ -930,3 +930,22 @@ fn highlights_are_not_fireflies() {
     }
     assert!(top.share < super::checks::FIREFLY_SHARE, "{top:?}");
 }
+
+/// A trial's setup is remembered per factor *and value*: `neural` must not
+/// be admitted on `learned`'s pre-pass time, and both are measured before
+/// their first trial (PR #308 review).
+#[test]
+fn setup_is_remembered_per_value() {
+    use super::{remembered_setup, setup_measured_first};
+    let known = vec![("light_selection", "learned".to_string(), 1.5)];
+    assert_eq!(
+        remembered_setup(&known, "light_selection", "learned"),
+        Some(1.5)
+    );
+    assert_eq!(remembered_setup(&known, "light_selection", "neural"), None);
+    assert_eq!(remembered_setup(&known, "light_selection", "uniform"), None);
+    assert!(setup_measured_first("light_selection", "learned"));
+    assert!(setup_measured_first("light_selection", "neural"));
+    assert!(!setup_measured_first("light_selection", "uniform"));
+    assert!(!setup_measured_first("guiding", "true"));
+}

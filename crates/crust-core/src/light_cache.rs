@@ -47,7 +47,7 @@ use rayon::prelude::*;
 /// One training path per `TRAIN_STRIDE` x `TRAIN_STRIDE` pixels, at least.
 const TRAIN_STRIDE: usize = 4;
 /// Receiver-light pairs the pre-pass may estimate, and so retain until the
-/// reduction: 32 MiB of `f32` contributions and 8 MiB of delivered counts,
+/// reduction: 32 MiB of `f32` contributions and, for `neural`, 8 MiB of delivered counts,
 /// `LIGHT_SAMPLES` times as many light evaluations. The stride grows past `TRAIN_STRIDE` to stay inside it.
 /// Resolution times light count is what scales, and unbounded, 3840x2160 at
 /// the `MAX_LIGHTS` limit would hold ~2 GiB and evaluate over a billion light
@@ -150,7 +150,8 @@ pub(crate) struct Receiver {
     /// light**: nonzero radiance toward the receiver (not backfacing), above
     /// its horizon (a nonzero BSDF), and a shadow ray at least partly clear.
     /// What `neural` learns as the light's visibility from here
-    /// ([`Receiver::delivered`]).
+    /// ([`Receiver::delivered`]); empty unless [`walk`] was asked for
+    /// labels, as `learned` never reads them.
     pub(crate) delivered: Vec<u8>,
 }
 
@@ -200,7 +201,7 @@ pub(crate) fn train(
         return None;
     }
     let n = lights.count();
-    let receivers = walk(world, camera, lights, width, height, frame);
+    let receivers = walk(world, camera, lights, width, height, frame, false);
     if receivers.is_empty() {
         return None;
     }
@@ -289,7 +290,10 @@ pub(crate) fn live_lights(lights: &LightList) -> (Vec<bool>, usize) {
 /// NEE uses, `LIGHT_SAMPLES` times.
 ///
 /// The receivers come back in row order then path order, whatever the
-/// thread count: rows run in parallel and are collected in order.
+/// thread count: rows run in parallel and are collected in order. With
+/// `labels`, each also counts the samples that delivered light (`neural`'s
+/// labels); without, `delivered` stays empty and unallocated. The
+/// contributions are the same bits either way.
 pub(crate) fn walk(
     world: &World,
     camera: &Camera,
@@ -297,6 +301,7 @@ pub(crate) fn walk(
     width: usize,
     height: usize,
     frame: isize,
+    labels: bool,
 ) -> Vec<Receiver> {
     let n = lights.count();
     // Vertices per path, times lights, times paths, within `MAX_PAIRS`.
@@ -355,7 +360,7 @@ pub(crate) fn walk(
                     // cell tables would favour lights this receiver cannot use.
                     let class = world.light_class(hit.geom_id);
                     let mut contrib = Vec::with_capacity(n);
-                    let mut delivered = Vec::with_capacity(n);
+                    let mut delivered = Vec::with_capacity(if labels { n } else { 0 });
                     for (k, light) in list.iter().enumerate() {
                         let mut sum = 0.0f32;
                         let mut count = 0u8;
@@ -415,7 +420,9 @@ pub(crate) fn walk(
                             }
                         }
                         contrib.push(sum / LIGHT_SAMPLES as f32);
-                        delivered.push(count);
+                        if labels {
+                            delivered.push(count);
+                        }
                     }
                     out.push(Receiver {
                         p,
