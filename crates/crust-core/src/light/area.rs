@@ -306,7 +306,11 @@ impl Light for AreaLight {
     ///
     /// The second is taken when its spread `a` is below the first's: `π/2`
     /// one-sided flat, `π` otherwise.
-    fn bounds(&self, phi: f32) -> Option<LightBounds> {
+    ///
+    /// Its flux is [`Emissive::peak_flux`], not [`Light::power`]: see
+    /// [`Light::bounds`].
+    fn bounds(&self, luma: utils::Luma) -> Option<LightBounds> {
+        let phi = luma.of(self.material.peak_flux(self.shape.area()));
         if !(phi.is_finite() && phi > 0.0) {
             return None;
         }

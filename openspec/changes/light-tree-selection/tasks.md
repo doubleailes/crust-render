@@ -61,7 +61,7 @@
       `nee_picks_from` / `bounce_weighs_from` to compare `(p, n)` bits.
       Verify: `cargo test --workspace` passes in debug with those
       assertions on, rendering `usdlux` and `veach_mis` under `tree`.
-- [ ] 3.4 Verify the other modes are untouched:
+- [x] 3.4 Verify the other modes are untouched:
       `scripts/check_images.sh record` on `main` and `check` on this branch,
       each under `--light-selection power`, `uniform`, `learned` and
       `neural`, with 0 differing pixels on every sample. Also check a
@@ -81,7 +81,7 @@
 
 ## 4. The many-lights sample and tuning
 
-- [ ] 4.1 Author `samples/many_lights.usda` (design D11): 256 lights
+- [x] 4.1 Author `samples/many_lights.usda` (design D11): 256 lights
       (sphere grid, rect panels facing both ways, narrow spots, flux over two
       decades) over a floor and wall with occluders. Verify: it renders in
       under 10 s at 16 spp, `crust check -i samples/many_lights.usda` reports

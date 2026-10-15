@@ -78,8 +78,14 @@ light that emits nothing. The fields:
 - `w`: an axis.
 - `cos_theta_o`: the spread of the emitting normals about `w`.
 - `cos_theta_e`: the emission spread beyond them.
-- `phi`: the flux, `Light::power` itself, so the tree and the defensive share
-  agree on what bright means.
+- `phi`: the flux of an unshaped emitter as bright as the light is in its
+  brightest direction (`Emissive::peak_flux`). It is not `Light::power`. The
+  cone is already in `θe`, so a cone-integrated flux would penalise a narrow
+  spot twice. Inside its pool it would be ranked like a dim light and then
+  weighted hugely; the first `many_lights` renders showed exactly those
+  fireflies. pbrt-v4 gives a spotlight the flux of an isotropic light of the
+  same peak intensity for the same reason. The defensive power arm keeps
+  `Light::power`.
 - `two_sided`.
 
 For `AreaLight`:

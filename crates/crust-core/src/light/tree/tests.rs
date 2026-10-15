@@ -154,7 +154,7 @@ fn angle(a: Vec3A, b: Vec3A) -> f32 {
 #[test]
 fn bounds_contain_every_point_and_direction_a_light_emits() {
     for (name, l) in every_bounded_light() {
-        let b = l.bounds(1.0).expect("a finite light has bounds");
+        let b = l.bounds(utils::Luma::REC709).expect("a finite light has bounds");
         let slack = Vec3A::splat(1e-5) * (1.0 + b.max.abs().max(b.min.abs()));
         let spread = b.cos_theta_o.clamp(-1.0, 1.0).acos() + b.cos_theta_e.clamp(-1.0, 1.0).acos();
         const N: usize = 64;
@@ -200,15 +200,47 @@ fn bounds_contain_every_point_and_direction_a_light_emits() {
     }
 }
 
-/// A light whose flux is not finite and positive has no bounds, nor does a
-/// light at infinity.
+/// A light that emits nothing has no bounds, nor does a light at infinity.
 #[test]
 fn black_and_infinite_lights_have_no_bounds() {
-    let (_, l) = every_bounded_light().swap_remove(0);
-    assert!(l.bounds(0.0).is_none());
-    assert!(l.bounds(f32::NAN).is_none());
+    let luma = utils::Luma::REC709;
+    let black = light(
+        SphereShape {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
+        Emissive::light(Vec3A::ZERO, None),
+    );
+    assert!(black.bounds(luma).is_none());
     let sun = DistantLight::new(Vec3A::Z, Vec3A::ONE, 0.5);
-    assert!(sun.bounds(1.0).is_none());
+    assert!(sun.bounds(luma).is_none());
+}
+
+/// A narrow spot is ranked by its peak, not by the sliver of flux its cone
+/// lets out: the cone is already in its bounds' emission spread.
+#[test]
+fn a_spot_is_ranked_by_its_peak_not_its_cone_flux() {
+    let luma = utils::Luma::REC709;
+    let rect = || {
+        RectShape::new(
+            Vec3A::ZERO,
+            Vec3A::X,
+            Vec3A::Y,
+            -Vec3A::Z,
+        )
+    };
+    let open = light(rect(), Emissive::light(Vec3A::ONE, None));
+    let spot = light(
+        rect(),
+        Emissive::light(Vec3A::ONE, shaped(Mat3A::IDENTITY, 10.0)),
+    );
+    let (open_b, spot_b) = (open.bounds(luma).unwrap(), spot.bounds(luma).unwrap());
+    assert_eq!(open_b.phi, spot_b.phi);
+    // ...while its power, which picks by power, is the cone's sliver.
+    assert!(spot.power(luma).unwrap() < 0.05 * open.power(luma).unwrap());
+    // Under the spot, on its axis, it is as important as the open panel.
+    let below = Receiver::at(Vec3A::new(0.5, 0.5, -3.0));
+    assert!((spot_b.importance(&below) - open_b.importance(&below)).abs() < 1e-6 * open_b.importance(&below));
 }
 
 fn sphere_bounds(center: Vec3A, radius: f32, phi: f32) -> LightBounds {

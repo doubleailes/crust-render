@@ -140,15 +140,18 @@ pub trait Light: Send + Sync {
     fn power(&self, luma: utils::Luma) -> Option<f32>;
 
     /// A conservative bound on where this light emits from and into which
-    /// directions, carrying the flux `phi` (its [`Light::power`], which the
-    /// caller already has): what [`LightSelection::Tree`] ranks lights by.
-    /// `None` (the default) for a light at infinity, which has no position,
-    /// and for one whose `phi` is not finite and positive. Too loose a bound
-    /// costs noise; too tight a one starves the light of samples where it
-    /// does reach, so it must contain every point and direction the light
-    /// emits from and into.
-    fn bounds(&self, phi: f32) -> Option<LightBounds> {
-        let _ = phi;
+    /// directions, and its flux as an unshaped emitter at its peak brightness
+    /// (weighed into one number by `luma`): what [`LightSelection::Tree`]
+    /// ranks lights by. Not [`Light::power`]: a shaped light's power is
+    /// already cut down by its cone, which the bounds' emission spread
+    /// accounts for, and counting it twice ranks a narrow spot like a dim
+    /// light inside its own pool. `None` (the default) for a light at
+    /// infinity, which has no position, and for one that emits nothing. Too
+    /// loose a bound costs noise; too tight a one starves the light of
+    /// samples where it does reach, so it must contain every point and
+    /// direction the light emits from and into.
+    fn bounds(&self, luma: utils::Luma) -> Option<LightBounds> {
+        let _ = luma;
         None
     }
 }

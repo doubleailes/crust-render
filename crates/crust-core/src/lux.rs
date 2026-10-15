@@ -266,6 +266,29 @@ impl Shaping {
         self.axis
     }
 
+    /// An upper bound on [`Shaping::factor`] over every direction, as one
+    /// number per channel's largest: focus only blends toward its tint, the
+    /// cone only darkens, and bilinear IES never exceeds its table's largest
+    /// entry. What a light tree scales a shaped light's unshaped flux by, so
+    /// that its importance bounds the light's peak, not its cone-averaged,
+    /// emission (the cone itself is in the bounds' `θe`).
+    pub fn peak(&self) -> f32 {
+        let focus = if self.focus > 0.0 {
+            self.focus_tint.max_element().max(1.0)
+        } else {
+            1.0
+        };
+        let ies = self.ies.as_ref().map_or(1.0, |ies| {
+            let norm = if ies.normalize { ies.profile.power() } else { 1.0 };
+            if norm > 0.0 {
+                ies.profile.max_intensity() / norm
+            } else {
+                0.0
+            }
+        });
+        focus * ies
+    }
+
     /// The factor emission leaving along the world-space unit direction
     /// `emission_dir` (away from the light) is multiplied by.
     pub fn factor(&self, emission_dir: Vec3A) -> Vec3A {
@@ -515,6 +538,16 @@ impl IesProfile {
     /// `inputs:shaping:ies:normalize` divides by. See [`profile_power`].
     pub fn power(&self) -> f32 {
         self.power
+    }
+
+    /// The largest intensity in the table: [`IesProfile::eval`] interpolates
+    /// bilinearly, so it never returns more.
+    pub fn max_intensity(&self) -> f32 {
+        self.intensity
+            .iter()
+            .flatten()
+            .copied()
+            .fold(0.0, f32::max)
     }
 
     /// Intensity toward polar angle `theta` and azimuth `phi` (radians),
