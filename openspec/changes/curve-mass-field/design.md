@@ -98,9 +98,36 @@ number and primvars in `ShadeCtx`.
   and the import says so once at DEBUG.
 - The grid is sparse, in bricks: only bricks the splat or the band reach are
   allocated. `--stats` reports bricks, bytes and bake time per field.
-- Instanced grooms bake one field per prototype, in prototype space, scoped by
-  the stage epoch like every prototype-keyed cache; a placement's lookup
-  transforms `P` into it.
+### Instanced grooms: only where the hit can name its placement
+
+A field baked in prototype space needs, at a hit, the placement the ray went
+through, to carry `P` into prototype space and the normal back out. A hit
+carries `(geom_id, prim_id)` and nothing about the placement
+(`rt_world.rs`, `VertexSource`). That decides what this change supports:
+
+- **Top-level curves**, and curves baked into the top-level scene: the field is
+  baked in world space and looked up with the hit's `P` as is.
+- **A direct, unlabelled, static instance** — the one case where the id *is*
+  the placement, which `VertexSource::Placed` already records for tangent
+  frames: one field per prototype, in prototype space, scoped by the stage
+  epoch like every prototype-keyed cache. The lookup takes `P` through the
+  recorded placement's inverse, and returns the normal through the inverse
+  transpose of its linear part, renormalised.
+- **Every other placement** — a prototype placed through an instancer's group,
+  whose forwarded slot id two differently transformed placements share, and a
+  motion-blurred instance, intersected through a transform interpolated at the
+  ray's time — cannot recover its transform. Its lookups return their
+  `default` inputs, so the material falls back to per-strand shading, and the
+  import raises one warning per prim (a new `WarningCode`, listed in
+  `site/content/docs/reference/warnings.md`) naming it. No lookup ever
+  guesses a transform.
+- **Alternative: bake one world-space field per placement.** Correct for
+  every placement, but memory scales with the placement count, and a forwarded
+  hit still cannot say which placement's field to read. Rejected.
+- **The general fix** is the kernel reporting the hit point in the innermost
+  instance's space, beside `dpdu`: an intersection-kernel change with a cost
+  on every ray, to be measured in its own change. It is listed as this
+  capability's first known gap.
 
 ### The lookups are MaterialX nodes in a crust library
 
@@ -117,9 +144,35 @@ reads.
 sampled around it, with the matching pdf in `eval` (the NEE ↔ BSDF pair). Its
 hemisphere is `normal`'s, not the tube's, and its light passes out of the
 strand it starts in, exactly as a hair fibre's: the leaf is marked like a
-fibre leaf, so a closure mixing it with `chiang_hair_bsdf` has nothing to split
-and the mixed-vertex path (`mixes_hair`) only engages beside a transmitting
-leaf, as it does today.
+fibre leaf (`hair_leaves`).
+
+**Its normal is kept whichever way it faces.** Every other leaf's normal goes
+through `prepare` (`closure/mod.rs`), which drops a normal facing away from the
+hit's ray-facing normal (`n · rec.normal ≤ 1e-3`) and substitutes the hit's.
+On a curve that is the tube's normal, and a mass normal routinely faces away
+from it — a strand on the far side of a clump, seen through a gap — so that
+rule would put back exactly the discontinuity the field removes. The mass
+leaf's frame is built from its own normal unfiltered; only a non-finite or
+zero-length one falls back, to the tube's normal. Pinned by a shading test
+with the strand's normal and the field's opposed: the leaf's response follows
+the field's normal, and differs from what the tube's normal gives.
+
+**Mixed with other leaves.** Its light passing out of the strand is the fibre
+rule, so the vertex-wide flag (`ResolvedClosure::hair`) is set for it. A leaf
+beside it that is not a fibre must still meet its own tube's far wall wherever
+its light enters the tube. Today the mixed-vertex split (`mixes_hair`)
+engages only beside a transmitting leaf, on the reasoning that a reflecting
+leaf's light never enters the tube. That holds for a reflecting leaf on the
+hit's own normal, but not for one with a normal of its own (a normal map, or
+another mass leaf's field normal blended into an ordinary diffuse), whose
+hemisphere reaches into the tube. This change widens the test: the split
+engages beside any non-fibre leaf that is transmitting **or** whose prepared
+normal differs from the hit's. The same widening fixes the pre-existing case of
+`chiang_hair_bsdf` beside a normal-mapped reflecting leaf. Pinned by a variant
+of `only_the_fibres_light_passes_out_of_a_mixed_strand` with a tilted-normal
+diffuse in place of the translucent leaf; the common case, a mass leaf mixed
+with a fibre or with a diffuse on the hit's normal, keeps the single shadow
+ray.
 
 - **Alternative: let `oren_nayar_diffuse_bsdf` on a curve take its `normal`
   input this way.** Rejected: it would change what existing documents render.
@@ -160,6 +213,9 @@ above.
   worst case.
 - **[A field static over the shutter under motion blur]** → documented as a
   known gap; the strands still blur, only their mass colour and normal do not.
+- **[Instancer-placed and motion-blurred instanced grooms get no field]** →
+  warned per prim, falling back to per-strand shading; the kernel-side local
+  hit point is the follow-up (see "Instanced grooms").
 - **[MCP edits]** → every `crust:mass:*` attribute, the group membership and
   the colour graph belong in `Signature`, so an edit rebuilds the field
   through the import's own bake.

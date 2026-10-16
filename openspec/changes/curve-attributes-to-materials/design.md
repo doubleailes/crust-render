@@ -68,10 +68,20 @@ the `crust:*` attributes. A USD primvar name may itself be namespaced
 primvar under it is refused with a warning naming it, and the property wins.
 
 - **`curve:random`** is a hash of `(prim path hash, curve index)` to [0, 1),
-  not the index itself: random variation must not depend on the order a groom
-  tool wrote its curves in, nor repeat between two prims. The hash is the
-  workspace's existing integer hash (no RNG outside openqmc: this is a
-  deterministic function of the curve, not a sample).
+  not the index itself: neighbouring indices get uncorrelated values, and two
+  prims do not repeat each other's pattern. The hash is the workspace's
+  existing integer hash (no RNG outside openqmc: this is a deterministic
+  function of the curve, not a sample).
+- **Its stability is the curve order's.** A strand keeps its value across
+  frames and renders as long as the prim keeps its curves in the same order,
+  which a simulation cache with constant topology does. Reordering the curves
+  of a prim reassigns the values. A groom that needs order-independent
+  variation authors a stable per-curve id as a `uniform` primvar and feeds it
+  to `randomfloat`'s `seed` through `geompropvalue`; the documentation says so
+  where it describes `curve:random`.
+- **Alternative: hash the strand's root position.** Order-independent, but it
+  changes whenever the root moves (a groom edit, a simulated scalp), which is
+  the more common change. Rejected.
 - **Alternative: MaterialX's own `geomcolor` / `geompropvalue` defaults.** They
   have no notion of a curve, so a name is needed either way.
 
@@ -80,12 +90,26 @@ primvar under it is refused with a warning naming it, and the property wins.
 At import, the material's compiled program lists the `geomprop` names it reads.
 Only those primvars are decoded, and only on the curve prims bound to it.
 
-- **Storage**: `constant` and `uniform` values per curve; `vertex` and
-  `varying` values per span end (two values per span, interpolated linearly in
-  `v` within the span). A cubic `vertex` primvar is evaluated at the span ends
-  through the basis — the import already does exactly this for widths
-  (`span_end_values`) — so a `vertex` ramp is exact at span ends and linear
-  between, as widths are.
+- **The default chart is a need of its own.** `texcoord` (index 0) and an
+  image reading the shading point's chart name no `geomprop`
+  (`compile.rs`, `is_default_chart`), so the named list alone would miss
+  them. Curves ask the same two questions meshes already do —
+  `Material::uses_uv()` and `Material::uv_primvar()`, as `MeshNeeds::of`
+  (`usd_import/mesh.rs`) — and decode `primvars:st` (or the named chart) when
+  either says so, independently of the `geomprop` list.
+- **Storage**: `constant` and `uniform` values per curve. `varying` values per
+  span end, interpolated linearly in `u` within the span, which is what USD
+  specifies for `varying`. `vertex` values follow the curve's own basis: per
+  cubic span, its four control values converted to Bézier form by the same
+  `basis_to_bezier` the span's points go through, and evaluated as a cubic in
+  `u` at the hit; per linear segment, its two end values. A `vertex` ramp is
+  then exactly what USD's interpolation gives, inside a span too, not only at
+  its ends. That is four values per span per channel instead of two; the
+  tables exist only for primvars a bound material reads.
+- **Alternative: span-end values, linear between.** What widths do today
+  (`span_end_values`), and half the memory. Rejected for primvars: a colour
+  ramp authored on a few control points spans a strand in one or two spans,
+  where linear-between-ends visibly flattens the authored shape.
 - **Alternative: decode every primvar.** Rejected: a dense archive has tens of
   millions of spans, and a groom authors many primvars a given material never
   reads.
@@ -101,7 +125,10 @@ mesh hit leaves it `None`; `geompropvalue` of a curve property then returns the
 node's `default`, as MaterialX specifies for an absent property.
 
 - `primvars:st` on a curve fills `ShadeCtx::uv`, so an image read by
-  `texcoord` works on curves as on meshes.
+  `texcoord` works on curves as on meshes. It is decoded whenever the material
+  uses the default chart (see "Primvars are read on demand"); a curve material
+  that uses the chart on a prim authoring no `st` reads (0, 0), as a mesh
+  without one does today.
 - The JIT reads the record through the same accessor layout as the interpreter,
   and the bit-identity test gains a curve fixture.
 
