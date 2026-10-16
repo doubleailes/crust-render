@@ -61,7 +61,7 @@ SIMD packets for particles, and a k-buffer traversal.
 
 - `crates/crust-rt`: new particle primitive (bounds, hit at `t*`, any-hit) and
   its storage; deterministic build unchanged for scenes without particles.
-- `crates/crust-core/src/scene/usd_import/`: a `particle_field.rs` sibling and
+- `crates/crust-usd/src/scene/usd_import/`: a `particle_field.rs` sibling and
   dispatch on the prim type name; reads raw attributes (openusd 0.7 predates the
   26.03 schema), including `half` arrays and `quatf` / `quath`.
 - `crates/crust-core`: a splat "material" whose presence and `emitted_at` come

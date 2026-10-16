@@ -16,7 +16,7 @@
 //! Environment maps are not kept: they cross the seam by value, so a kept one
 //! would be copied on every hit.
 
-use crust_core::{ColorSpace, IesProfile, LightTexture, PtexTexture, Texture2D};
+use crust_world::{ColorSpace, IesProfile, LightTexture, PtexTexture, Texture2D};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

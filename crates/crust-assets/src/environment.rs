@@ -1,7 +1,7 @@
 //! Lat-long environment maps and light textures: OpenEXR, Radiance `.hdr`,
 //! and LDR images, all decoded to linear float RGB by [`read_rgb_image`].
 
-use crust_core::{ColorSpace, EnvironmentMap, Vec3A};
+use crust_world::{ColorSpace, EnvironmentMap, Vec3A};
 use exr::prelude::*;
 use std::path::Path;
 use tracing::warn;
@@ -52,7 +52,7 @@ pub(crate) fn try_load_environment(
     space: ColorSpace,
 ) -> std::result::Result<EnvironmentMap, AssetError> {
     let (w, h, pixels) = decode_pixels(path, exr, space)?;
-    EnvironmentMap::new_in(w, h, pixels, crust_core::color::luma(space.working()))
+    EnvironmentMap::new_in(w, h, pixels, crust_world::color::luma(space.working()))
         .ok_or_else(|| AssetError::unusable(path, "not a usable environment map (empty)"))
 }
 
@@ -334,7 +334,7 @@ mod tests {
             .expect("write png");
         let (_, _, px) = read_rgb_image(&png_path).expect("png decodes");
         assert!((px[0].x - 1.0).abs() < 1e-6);
-        let mid = crust_core::ResolvedColorSpace::SRGB.decode_curve(128.0 / 255.0);
+        let mid = crust_world::ResolvedColorSpace::SRGB.decode_curve(128.0 / 255.0);
         assert!(
             (px[0].y - mid).abs() < 1e-6 && mid < 0.25,
             "sRGB-decoded: {}",

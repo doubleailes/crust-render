@@ -1,4 +1,4 @@
-//! IES LM-63 photometric files → [`crust_core::IesProfile`].
+//! IES LM-63 photometric files → [`crust_world::IesProfile`].
 //!
 //! A port of the reader OpenUSD's hdEmbree vendors for `ShapingAPI`
 //! (`pxrIES/ies.cpp`, itself Blender Cycles' `util/ies.cpp`, Apache-2.0), so
@@ -17,7 +17,7 @@
 //!   text and routinely Latin-1 (`°`), which a strict UTF-8 read refuses
 //!   outright. Only the numeric block matters, and it is ASCII.
 
-use crust_core::IesProfile;
+use crust_world::IesProfile;
 use std::path::Path;
 
 /// Reads and decodes an `.ies` file. `None` for an unreadable file or one

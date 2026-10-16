@@ -14,7 +14,13 @@ the page to read first.
 graph TD
     render["crust-render<br/><i>CLI binary <code>crust</code></i>"]
     assets["crust-assets<br/><i>file decoders, texture streaming</i>"]
-    core["crust-core<br/><i>engine: import, integrator, materials, lights</i>"]
+    core["crust-core<br/><i>the engine's public surface (re-exports)</i>"]
+    tools["crust-tools<br/><i>diagnostic, light path inspector, check</i>"]
+    tracer["crust-tracer<br/><i>integrator, AOV film, guiding</i>"]
+    cusd["crust-usd<br/><i>USD import</i>"]
+    world["crust-world<br/><i>world, lights, camera, volumes, settings</i>"]
+    shading["crust-shading<br/><i>materials, light path expressions</i>"]
+    base["crust-base<br/><i>config, colour, stats, warnings, rays</i>"]
     rt["crust-rt<br/><i>intersection kernel</i>"]
     mtlx["crust-mtlx<br/><i>MaterialX reader + interpreter</i>"]
     jit["crust-jit<br/><i>Cranelift JIT for crust-mtlx programs</i>"]
@@ -28,18 +34,26 @@ graph TD
 
     render --> core
     render --> assets
-    assets --> core
+    assets --> world
     assets --> ptex
-    core --> rt
-    core --> mtlx
-    core --> nn
-    core -. "feature jit" .-> jit
+    core --> tools
+    tools --> tracer
+    tools --> cusd
+    tracer --> world
+    cusd --> world
+    world --> shading
+    shading --> base
+    tracer --> nn
+    world --> nn
+    shading -. "feature jit" .-> jit
     jit --> mtlx
-    core --> utils
-    core --> oqmc
-    core --> usd
-    core --> osd
-    core --> ocio
+    cusd --> usd
+    cusd --> osd
+    base --> rt
+    base --> mtlx
+    base --> utils
+    base --> oqmc
+    base --> ocio
 ```
 
 | crate | owns | knows nothing about |
@@ -48,21 +62,36 @@ graph TD
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
 | `crust-nn` | tiny, bit-deterministic networks: the multi-resolution hash grid, dense layers, sigmoid cross-entropy, Adam, gradient checking (what `neural` light selection learns visibility with) | crust types, threads (the caller maps a batch's chunks) and random numbers (the caller draws them) |
-| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown), the light path inspector (`inspect/`: the `crust-light-paths/1` report) | image, texture and IES decoding; UI |
-| `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
+| `crust-base` | `Config` (the one place the environment is read), colour management (the OCIO config, every transfer curve), stats and the render profile, coded warnings and their macros, the JSON reports' envelope, `Error`, the texture traits, IES and light textures (`lux`), rays, media, hit records | materials and everything above |
+| `crust-shading` | `Material`, `ShadingPoint` and every material (OpenPBR, MaterialX closures, `UsdPreviewSurface`, emission, displacement), the lobe vocabulary, light path expressions (`lpe/`) | lights, the world, the integrator |
+| `crust-world` | what a render is made of: the committed `World` and its side tables, lights and light selection (with the learned and neural selections' frozen tables), the environment map, `AssetLoader`, the camera, volumes, `RenderSettings`, `RenderControl`, the AOV request vocabulary, the sampling stamp, `crust diff`'s comparison | how a path is traced; USD |
+| `crust-tracer` | `Renderer`: passes, tiles, the adaptive schedule, `trace_path`, NEE and MIS, the AOV film, path guiding, the subsurface walk, the learned and neural selections' training, the inspection's per-unit store | USD |
+| `crust-usd` | the USD import (`scene/`: the streaming traversal, schema mapping, subdivision, displacement, instancing, render settings and products), `Scene`, `live` (an MCP edit's in-place rebuilds), `place`, the procedural fallback scene | the integrator |
+| `crust-tools` | the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown), the light path inspector (`inspect/`: the `crust-light-paths/1` report), the `crust-check/2` report | — |
+| `crust-core` | nothing of its own: re-exports the six engine crates' supported surface under the paths it always had (`crust_core::Renderer`, `crust_core::aov`, the warning macros), and carries the engine's integration tests, benches and feature switches | — |
+| `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator, the import |
 | `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's and the light path inspector's reports; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance` / `Luma`, `align_to_normal` | everything |
 
+The six engine crates are one library cut along its layers (§ Layering): each
+depends only on those below it and glob re-exports the one below at its root,
+so code written `crate::LightList` or `crate::color::…` reads the same in every
+layer. Their modules are public so the layers above can reach them, not as an
+API: a host depends on `crust-core`. `crust-tracer` and `crust-usd` are
+siblings — the import fills the world and the settings, the integrator reads
+them, neither names the other — so the two largest crates compile in
+parallel, and `crust-assets`, which needs only `crust-world`, alongside both.
+
 Two properties of this graph are deliberate and worth keeping:
 
-- **`crust-core` decodes no assets.** It parses USD itself (through `openusd`),
-  but every byte read from an image, Ptex or IES file crosses the
+- **The engine decodes no assets.** It parses USD itself (`crust-usd`, through
+  `openusd`), but every byte read from an image, Ptex or IES file crosses the
   `AssetLoader` seam (below) into `crust-assets`. That is why the
   engine library has no codec dependencies and why the probe examples in
   `crust-render/examples/` decode exactly the way the renderer does.
 - **The leaf libraries have no crust dependency.** `crust-rt`, `crust-mtlx`
   and `crust-nn` are shaped to be extracted the way `openqmc-rs` already was.
-  `crust-core` adopts their vocabulary (`crust_rt::Geometry`,
+  The engine adopts their vocabulary (`crust_rt::Geometry`,
   `crust_mtlx::Texture` re-exported as `Texture2D`) instead of wrapping it in
   adapter traits: a wrapper would add a vtable hop per texel fetch that LTO
   cannot remove.
@@ -75,7 +104,7 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
                               `crust light-paths` too, then inspect::run over its region)
  ├─ FileAssets::new()                        crust-assets: residency policy from CRUST_* env
  ├─ Scene::from_usd_with_options(path, &assets, opts)
- │   └─ scene::usd_import::load_scene        crust-core
+ │   └─ scene::usd_import::load_scene        crust-usd
  │       ├─ index stage (payloads unloaded) → RenderSettings, RenderProducts (AovRequest), camera choice, chunk list
  │       ├─ for each chunk: open masked stage → traverse_into → drop stage
  │       │     prims dispatch to mesh / shapes / instancing / lights / volume / camera
@@ -161,25 +190,34 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | seam | defined in | implemented by | contract in one line |
 |------|-----------|----------------|----------------------|
 | `crust_rt::Geometry`, `SceneBuilder`, `Scene` | `crust-rt/src/scene/` | the kernel | Embree-shaped: attach, `commit()`, `intersect` / `occluded`; hits are `(geom_id, prim_id)` only |
-| `WorldBuilder` / `World` | `crust-core/src/rt_world.rs` | — | pairs each `geom_id` with its material and per-triangle side tables (Ptex faces, UVs, density) |
-| `AssetLoader` | `crust-core/src/scene.rs` | `crust_assets::FileAssets`, `NoAssets` | the host decodes; returning `None` means "fall back", never an error |
-| `Texture2D` (= `crust_mtlx::Texture`), `PtexTexture` | `crust-mtlx/src/texture.rs`, `crust-core/src/texture.rs` | `UvTexture`, `StreamingTexture`, `PtexColor`, `PtexStream` | linear values out; unwrapped UVs in (UDIM addressing is the host's) |
-| `Material` | `crust-core/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
-| `Light`, `LightShape` | `crust-core/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
-| `ProgressCallback` | `crust-core/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
-| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage, `max_samples_reached` the most any pass has reached (a new pass, such as a guided render's next training pass, resets the first, not the second); a cancelled render returns what it traced and `Cancelled` |
+| `WorldBuilder` / `World` | `crust-world/src/rt_world.rs` | — | pairs each `geom_id` with its material and per-triangle side tables (Ptex faces, UVs, density) |
+| `AssetLoader` | `crust-world/src/assets.rs` | `crust_assets::FileAssets`, `NoAssets` | the host decodes; returning `None` means "fall back", never an error |
+| `Texture2D` (= `crust_mtlx::Texture`), `PtexTexture` | `crust-mtlx/src/texture.rs`, `crust-base/src/texture.rs` | `UvTexture`, `StreamingTexture`, `PtexColor`, `PtexStream` | linear values out; unwrapped UVs in (UDIM addressing is the host's) |
+| `Material` | `crust-shading/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
+| `Light`, `LightShape` | `crust-world/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
+| `ProgressCallback` | `crust-tracer/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
+| `RenderControl`, `RenderOutcome` | `crust-world/src/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage, `max_samples_reached` the most any pass has reached (a new pass, such as a guided render's next training pass, resets the first, not the second); a cancelled render returns what it traced and `Cancelled` |
 | `mcp::session::Session` | `crust-render/src/mcp/session.rs` | the tools in `mcp/mod.rs` | commands are closures run one at a time on the session thread, in the order sent; nothing the thread owns (the `Stage`) ever leaves it |
-| `RenderStats`, `profile::Section` | `crust-core/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
+| `RenderStats`, `profile::Section` | `crust-base/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
 
-## `crust-core` module map
+## Engine module map
+
+Paths are relative to the crate's `src/`: `crust-base` holds `config`,
+`names`, `warnings`, `report`, `profile`, `stats`, `pdf`, `distribution`,
+`color`, `texture`, `lux`, `error`, `region`, `buffer`, `ray`, `medium`,
+`hittable`, `aabb`; `crust-shading` `material/` and `lpe/`; `crust-world`
+`rt_world`, `light/`, `environment`, `assets`, `aov`, `camera`, `filter`,
+`sampler`, `settings`, `control`, `volume`, `stamp`, `compare`;
+`crust-tracer` `tracer/`, `guiding/`, `subsurface`; `crust-usd` `scene/`,
+`world`, `live`, `place`; `crust-tools` `diagnostic/`, `inspect/`, `check`.
 
 | area | modules |
 |------|---------|
-| scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
+| scene description | `scene.rs` (`Scene`, `UsdImportOptions`), `assets.rs` (`AssetLoader`, `NoAssets`), `camera.rs`, `settings.rs` (`RenderSettings`, `SamplingStrategy`, the adaptive budget's check points), `control.rs` (`RenderControl`, `RenderOutcome`), `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/usd_import/implicit.rs` (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1` variants tessellated as OpenUSD's GeomUtil does, pinned point for point by `tests/geomutil_oracle.rs`, their radial count chosen from the screen when a camera is named); `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
-| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
-| integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` (and `var_of_mean`, the one variance estimator), `region.rs` (`PixelRect`) |
+| AOVs | `aov.rs` (the source vocabulary, `AovRequest`); `tracer/film.rs` (the slots, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
+| integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` (and `var_of_mean`, the one variance estimator), `region.rs` (`PixelRect`) |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`), `lobe.rs` (the lobe vocabulary: `Scatter`, `LobeLabel`, `LobeEvent`, `LobeSplit`, which `lpe` re-exports) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection, `learned.rs` and `neural.rs` the frozen tables the learned selections pick with), `tracer/light_cache.rs` (`learned`'s training pre-pass, and the walk both learned selections share), `tracer/light_visibility.rs` (`neural`'s training over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
@@ -191,25 +229,33 @@ both sides must keep; the contract lives in the doc comment at the definition.
 
 ## Layering
 
-crust-core's modules import only downward, so that splitting it into crates
-stays a mechanical move. From the bottom:
+The engine's modules import only downward. Each layer belongs to one crate, so
+between crates Cargo enforces it; inside a crate `tests/layering.rs` does. From
+the bottom:
 
-| layer | modules |
-|-------|---------|
-| foundation | `config`, `names`, `warnings`, `report`, `profile`, `stats`, `pdf`, `distribution`, `color`, `texture`, `lux`, `error` (with `Structural` and the inspection's `Refusal` and limits), `region`, `buffer` |
-| rays | `ray`, `medium`, `hittable`, `aabb` |
-| materials | `material/` (with the lobe vocabulary `lpe` matches, and `SubsurfaceEntry`), `lpe/` |
-| world | `rt_world` (with the material `Signature` an in-place edit is checked against, and `EVERY_CLASS`) |
-| lights | `light/` (with the learned selections' frozen tables), `environment` |
-| integrator | `tracer/` (with the learned selections' training and the inspection's per-unit store), `aov`, `camera`, `filter`, `sampler`, `guiding`, `volume`, `subsurface` |
-| import | `scene/`, `world.rs`, `live`, `place` |
-| tools | `diagnostic/`, `inspect/`, `compare`, `stamp`, `check` |
+| layer | crate | modules |
+|-------|-------|---------|
+| foundation | `crust-base` | `config`, `names`, `warnings`, `report`, `profile`, `stats`, `pdf`, `distribution`, `color`, `texture`, `lux`, `error` (with `Structural` and the inspection's `Refusal` and limits), `region`, `buffer` |
+| rays | `crust-base` | `ray`, `medium`, `hittable`, `aabb` |
+| materials | `crust-shading` | `material/` (with the lobe vocabulary `lpe` matches, and `SubsurfaceEntry`), `lpe/` |
+| world | `crust-world` | `rt_world` (with the material `Signature` an in-place edit is checked against, and `EVERY_CLASS`) |
+| lights | `crust-world` | `light/` (with the learned selections' frozen tables), `environment`, `assets` |
+| contents | `crust-world` | `settings`, `control`, `camera`, `filter`, `sampler`, `volume`, `aov` (the request vocabulary), `stamp`, `compare` |
+| integrator | `crust-tracer` | `tracer/` (with the AOV film, the learned selections' training and the inspection's per-unit store), `guiding`, `subsurface` |
+| import | `crust-usd` | `scene/`, `world.rs`, `live`, `place` |
+| tools | `crust-tools` | `diagnostic/`, `inspect/`, `check` |
+
+The integrator and the import are siblings rather than stacked: nothing in
+`crust-usd` names the tracer, and the tracer's unit tests that render a sample
+stage take `crust-usd` as a dev-dependency only, so the two compile in
+parallel.
 
 A module may name its own layer or a lower one, whether by module path,
 through a crate-root re-export (the `pub use material::*` glob included) or by
-a `super::` chain that reaches the root; test-only items and doc comments may
-reach upward. `tests/layering.rs` enforces it, and fails on a top-level module
-with no layer. When something
+a `super::` chain that reaches the root; test-only items within a crate may
+reach upward, and a crate's tests may use a higher crate through a
+dev-dependency. `tests/layering.rs` enforces it, fails on a top-level module
+with no layer, and on a module outside its layer's crate. When something
 low needs something high, the item is usually in the wrong place: move it
 down (as `PixelRect`, `Structural` and the lobe vocabulary were) rather than
 adding a trait.
@@ -319,7 +365,7 @@ other. The pairs:
   them against the tables they replaced must keep passing if either formula
   moves.
 - **Import warnings.** A new import-time warning is a new `WarningCode` in
-  `crust-core/src/warnings.rs` *and* a row in
+  `crust-base/src/warnings.rs` *and* a row in
   `site/content/docs/reference/warnings.md`, kind included —
   `the_reference_page_lists_every_code` fails until the two agree. It must be
   raised on the importing thread: the collector is a thread-local entered by
@@ -340,7 +386,7 @@ other. The pairs:
   camera listed and counts the lights against the import's light list.
 - **Colour spaces.** Every colour input states its space; the per-input
   inventory is `docs/color_management.md`. Every curve is the OCIO config's
-  (`crust-core/src/color.rs`). Every heuristic weighs a colour by the working
+  (`crust-base/src/color.rs`). Every heuristic weighs a colour by the working
   space's luminance weights (`utils::Luma`, from `color::luma`), carried by
   value with the scene — `LightList::luma`, `OpenPBR::luma`, MaterialX
   `load_in`, `EnvironmentMap::new_in` — never a global; `Luma::REC709` must
@@ -412,7 +458,7 @@ Every switch exists to A/B one optimization against the behaviour it
 replaced; with the switch set, the result is either bit-identical or the
 documented alternative.
 
-All of them are parsed once, in `crust-core/src/config.rs`, into the typed
+All of them are parsed once, in `crust-base/src/config.rs`, into the typed
 `Config` that `crust_core::config()` returns (the "owner" column is the code
 that obeys the field). Booleans share one grammar: `0`/`false`/`off`/`no` is
 off, `1`/`true`/`on`/`yes` is on, and anything else warns once and keeps the
@@ -426,7 +472,7 @@ probe that needs another setting builds a `Config` and passes it
 | variable | default | owner | effect |
 |----------|---------|-------|--------|
 | `CRUST_STREAM_IMPORT` | on | `usd_import/mod.rs` | `0`: import under one stage instead of one masked stage per subtree |
-| `CRUST_USD_MMAP` | on | `usd_import/mod.rs` (`stage_builder`) | With the `mmap` feature only (on in the renderer's defaults). `0`: read each USD file into memory instead of serving it from a read-only memory mapping (bit-identical; the mapping is openusd's, opted into by crust-core's one non-test `unsafe`) |
+| `CRUST_USD_MMAP` | on | `usd_import/mod.rs` (`stage_builder`) | With the `mmap` feature only (on in the renderer's defaults). `0`: read each USD file into memory instead of serving it from a read-only memory mapping (bit-identical; the mapping is openusd's, opted into by crust-usd's one non-test `unsafe`) |
 | `CRUST_SCENE_DELTAS` | on | `crust-render/src/mcp/session.rs` | `0`: every MCP edit batch is re-imported whole with a fresh asset loader, instead of applied in place when confined to settings, light inputs or material inputs, through one loader that keeps its decodes (bit-identical either way) |
 | `CRUST_MESH_BAKE` | on | `usd_import/mesh.rs` | `0`: instance every mesh instead of baking single placements (not bit-identical: an instanced mesh is intersected in local space, so ~0.2% of cornellbox's pixels differ in the last ulp at 16 spp, relmse 4e-18) |
 | `CRUST_SUBDIV` | on | `usd_import/attrs.rs` | `0`: render every mesh as its faceted cage (unlike `--subdiv-level 0`, no smooth cage normals) |
@@ -524,7 +570,7 @@ Paid down in the 2026-09-27 architecture pass (no rendered output changed):
   `intersection-kernel`, `lighting`, `textures`).
 
 Paid down since, from `docs/rust_leverage.md`: environment parsing is one
-typed `Config` (`crust-core/src/config.rs`) instead of nineteen hand-rolled
+typed `Config` (`crust-base/src/config.rs`) instead of nineteen hand-rolled
 reads, some cached and some re-read per prim or texture open.
 
 Paid down by the layering pass (2026-10-15, no rendered output changed):
@@ -574,6 +620,15 @@ Still open, roughly in order of payoff:
    emits wide nodes directly (fused collapsing) is the remaining lever, and
    the composed USD stage, not the kernel, is most of a production scene's
    peak.
+5. **The engine crates' seams are wide.** About 170 items that were
+   `pub(crate)` in the one crate are `pub` now, because a layer above uses
+   them (the inspector's per-unit store, `Measured`, the learned and neural
+   tables' fields). They are not an API — `crust-core` re-exports the
+   supported surface — but nothing stops a host from naming
+   `crust_tracer::tracer::inspection::UnitStore`. Narrowing a seam to a
+   constructor or an accessor is a local change each time; none is urgent.
+   Doc comments that link to a higher layer (`[crate::Renderer]` from
+   `crust-world`) no longer resolve under `cargo doc`, which CI does not run.
 
 ## Further reading
 

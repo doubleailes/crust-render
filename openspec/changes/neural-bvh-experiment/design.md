@@ -3,7 +3,7 @@
 The motivation is in proposal.md, under Why.
 
 - **The kernel today.** Shadow rays reach the kernel through one call:
-  `surface_visibility` (`crust-core/src/tracer/path.rs`) calls `World::occluded`, which
+  `surface_visibility` (`crust-tracer/src/tracer/path.rs`) calls `World::occluded`, which
   calls `Scene::occluded`, which calls `Bvh::hit_any`. That is an early-exit BVH4
   traversal. It descends into an instance's inner `Scene` with the ray moved to local
   space, and the direction is left unnormalised, so `t` carries over.

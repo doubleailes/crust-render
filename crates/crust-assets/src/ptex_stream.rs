@@ -45,7 +45,7 @@ use crate::ptex_texture::{
     LevelReduction, capped_res, decode_face, level_reduction, ptex_space, reduce_level,
 };
 use crate::read_channel;
-use crust_core::{ColorSpace, PtexTexture, Vec3A};
+use crust_world::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
 
 use crate::texture_cache::{Ways, mib_to_bytes};
@@ -58,11 +58,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// caller that has not thought about it; a renderer has, and a path tracer
 /// asks for texels from every worker in an order nothing can predict, so the
 /// working set is the frame rather than a locality window.
-pub const DEFAULT_CACHE_MB: usize = crust_core::config::DEFAULT_CACHE_MB;
+pub const DEFAULT_CACHE_MB: usize = crust_world::config::DEFAULT_CACHE_MB;
 
 /// The render's whole Ptex budget `config` asks for (`CRUST_PTEX_CACHE_MB`),
 /// in bytes.
-pub fn budget_bytes(config: &crust_core::Config) -> usize {
+pub fn budget_bytes(config: &crust_world::Config) -> usize {
     mib_to_bytes(config.ptex_cache_mb.get() as u64) as usize
 }
 
@@ -95,18 +95,18 @@ pub fn budget_bytes(config: &crust_core::Config) -> usize {
 ///
 /// `CRUST_PTEX_STREAM_MIN_MB` overrides it; `0` admits everything, which is
 /// what reproduces the even-split behaviour for comparison.
-pub const DEFAULT_STREAM_MIN_MB: usize = crust_core::config::DEFAULT_PTEX_STREAM_MIN_MB;
+pub const DEFAULT_STREAM_MIN_MB: usize = crust_world::config::DEFAULT_PTEX_STREAM_MIN_MB;
 
 /// The admission threshold `config` asks for (`CRUST_PTEX_STREAM_MIN_MB`), in
 /// bytes. See [`DEFAULT_STREAM_MIN_MB`].
-pub(crate) fn stream_min_bytes(config: &crust_core::Config) -> usize {
+pub(crate) fn stream_min_bytes(config: &crust_world::Config) -> usize {
     mib_to_bytes(config.ptex_stream_min_mb as u64) as usize
 }
 
 /// Which mip chain a streamed texture is allowed to read — the reasoning is
-/// on [`crust_core::PtexMipSpace`], which `CRUST_PTEX_STREAM_MIPSPACE` parses
+/// on [`crust_world::PtexMipSpace`], which `CRUST_PTEX_STREAM_MIPSPACE` parses
 /// into.
-pub use crust_core::PtexMipSpace as MipSpace;
+pub use crust_world::PtexMipSpace as MipSpace;
 
 /// Mip levels a face of resolution `res` holds, halving each axis to a floor
 /// of one texel.
@@ -346,12 +346,12 @@ pub struct PtexStream {
     lut: Option<Box<[f32; 256]>>,
     /// The change of primaries a table-decoded texel takes into the working
     /// space; `None` on the working primaries.
-    gamut: Option<crust_core::Mat3A>,
+    gamut: Option<crust_world::Mat3A>,
     /// The whole conversion a texel of any other sample type takes, resolved
     /// once here rather than per tap — a lookup in the process-wide
     /// conversion cache is a lock and a hash per texel. `None` when it is the
     /// identity (raw data, a displacement map), which then costs nothing.
-    conversion: Option<std::sync::Arc<crust_core::color::Conversion>>,
+    conversion: Option<std::sync::Arc<crust_world::color::Conversion>>,
     /// The resolution ceiling, when one was asked for.
     ///
     /// `None` — the default — is the whole point: streaming has no reason to
@@ -382,16 +382,16 @@ pub struct PtexStream {
 
 impl PtexStream {
     /// Opens `path` for streaming, with the budget and caps of
-    /// [`crust_core::config()`].
+    /// [`crust_world::config()`].
     ///
     /// `Err` says why, for a warning; the caller falls back to preloading
     /// rather than failing the render.
     pub fn open(path: &Path) -> Result<Self, AssetError> {
-        PtexStream::open_config(path, crust_core::config())
+        PtexStream::open_config(path, crust_world::config())
     }
 
     /// [`PtexStream::open`] with the budget and caps of `config`.
-    pub fn open_config(path: &Path, config: &crust_core::Config) -> Result<Self, AssetError> {
+    pub fn open_config(path: &Path, config: &crust_world::Config) -> Result<Self, AssetError> {
         PtexStream::open_config_in(path, ColorSpace::GAMMA22, config)
     }
 
@@ -400,7 +400,7 @@ impl PtexStream {
     pub fn open_config_in(
         path: &Path,
         space: ColorSpace,
-        config: &crust_core::Config,
+        config: &crust_world::Config,
     ) -> Result<Self, AssetError> {
         let total = budget_bytes(config);
         let tex = PtexStream::open_in(
@@ -773,7 +773,7 @@ impl PtexStream {
         // preloading path applies.
         let c = |ch: usize| if ch < self.n_chan { ch } else { 0 };
         match &self.lut {
-            Some(t) => crust_core::color::apply_gamut(
+            Some(t) => crust_world::color::apply_gamut(
                 self.gamut.as_ref(),
                 Vec3A::new(
                     t[src[c(0)] as usize],
@@ -1083,7 +1083,7 @@ impl PtexStream {
 
 impl PtexTexture for PtexStream {
     fn eval(&self, face_id: u32, u: f32, v: f32, width: f32) -> Vec3A {
-        let _p = crust_core::profile::scope(crust_core::profile::Section::Texture);
+        let _p = crust_world::profile::scope(crust_world::profile::Section::Texture);
         let Ok(info) = self.reader.face_info(face_id as usize) else {
             return self.fallback;
         };

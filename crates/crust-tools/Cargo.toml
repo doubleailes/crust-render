@@ -1,0 +1,24 @@
+[package]
+name = "crust-tools"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crust Render's tools over the engine: the diagnostic, the light path inspector and the crust-check report"
+
+[lib]
+name = "crust_tools"
+path = "src/lib.rs"
+
+[dependencies]
+crust-tracer = { path = "../crust-tracer" }
+crust-usd = { path = "../crust-usd" }
+utils = { path = "../utils" }
+rayon.workspace = true
+glam.workspace = true
+tracing.workspace = true
+# The `crust diagnostic` and `crust light-paths` reports: written as JSON for
+# a machine reader, and read back for `--baseline`.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

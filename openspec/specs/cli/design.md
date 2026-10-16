@@ -404,7 +404,7 @@ and the Moana island. So:
   one WARN counting the tile reads that used a fallback.
 
 **Import warnings carry a code.** Every WARN the USD import raises goes through
-`crust_core::warning!` (`crust-core/src/warnings.rs`) with a `WarningCode`, and the macro
+`crust_core::warning!` (`crust-base/src/warnings.rs`) with a `WarningCode`, and the macro
 writes the code into the message itself — `[light.degenerate_shape] RectLight at …` — so
 every subscriber shows it, `--log-file` included, and `logging.rs` is unchanged. One code
 per *cause*; each has one kind (`refused` / `approximated` / `skipped`) and one log
@@ -593,7 +593,9 @@ against a single beauty) before the example was deleted.
 
 ## Stats and render profile (`stats.rs`, `profile.rs`)
 
-From the `crust-core` crate description:
+From the `crust-core` crate description (the engine is now built as layered crates —
+`crust-base`, `crust-shading`, `crust-world`, `crust-tracer`, `crust-usd`,
+`crust-tools` — that `crust-core` re-exports; `docs/architecture.md` § Crates):
 
 - **`crust-core`** — the engine as a library (`crust_core`): renderer, integrator,
   materials, lights, volumes, path guiding, USD import (MaterialX through

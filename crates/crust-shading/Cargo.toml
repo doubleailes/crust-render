@@ -1,0 +1,31 @@
+[package]
+name = "crust-shading"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crust Render's materials: the Material trait and ShadingPoint, OpenPBR, MaterialX closures, UsdPreviewSurface, and light path expressions"
+
+[lib]
+name = "crust_shading"
+path = "src/lib.rs"
+
+[features]
+# Compile MaterialX programs to machine code with Cranelift (crust-jit, the
+# workspace's one crate with `unsafe` outside tests). Off here and on in
+# the renderer, so the engine carries no JIT unless a host asks;
+# `CRUST_SHADER_JIT=0` turns it off at run time.
+jit = ["dep:crust-jit"]
+
+[dependencies]
+crust-base = { path = "../crust-base" }
+utils = { path = "../utils" }
+openqmc-rs = "0.2.4"
+crust-rt = { path = "../crust-rt" }
+# The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
+# graphs onto `Material` / `OpenPBR`.
+crust-mtlx = { path = "../crust-mtlx" }
+crust-jit = { path = "../crust-jit", optional = true }
+glam.workspace = true
+tracing.workspace = true

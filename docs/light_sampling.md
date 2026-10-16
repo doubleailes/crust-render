@@ -94,7 +94,7 @@ shadow rays count.
 
 ## 3. Where crust stands
 
-Read from `crates/crust-core/src/light.rs` and `tracer.rs` at the time of
+Read from `crates/crust-world/src/light.rs` and `tracer.rs` at the time of
 writing.
 
 ### 3.1 Light selection: uniform

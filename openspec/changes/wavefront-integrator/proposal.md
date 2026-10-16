@@ -103,13 +103,13 @@ None. Path scheduling belongs to `rendering`; the switch belongs to `cli`.
 ## Impact
 
 - **Code:**
-  - `crates/crust-core/src/tracer/path.rs`: `trace_path`'s body becomes the path
+  - `crates/crust-tracer/src/tracer/path.rs`: `trace_path`'s body becomes the path
     state plus the step; the one-path entry points (`ray_color*`) keep their
     signatures.
-  - `crates/crust-core/src/tracer/mod.rs`: the per-pixel sample loop gains a
+  - `crates/crust-tracer/src/tracer/mod.rs`: the per-pixel sample loop gains a
     batched counterpart.
   - New module `tracer/wavefront.rs`: the batch, its slots and the round loop.
-  - `crust-core/src/config.rs`: the `CRUST_WAVEFRONT` field.
+  - `crust-base/src/config.rs`: the `CRUST_WAVEFRONT` field.
 - **Tests:** new bitwise pins, batched ↔ default, across the sample scenes, tiles
   and scanlines, staged and unstaged, AOV, inspection and guided renders. The
   existing goldens (`scripts/check_images.sh`) stay unchanged.

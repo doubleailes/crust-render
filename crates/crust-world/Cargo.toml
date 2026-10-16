@@ -1,0 +1,31 @@
+[package]
+name = "crust-world"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crust Render's scene contents: the committed world, lights and light selection, camera, volumes, render settings and control, AOV requests, sampling stamps and image comparison"
+
+[lib]
+name = "crust_world"
+path = "src/lib.rs"
+
+[features]
+# Forwards crust-rt's traversal counters; see that crate's feature.
+traversal-stats = ["crust-rt/traversal-stats"]
+
+[dependencies]
+crust-shading = { path = "../crust-shading" }
+utils = { path = "../utils" }
+openqmc-rs = "0.2.4"
+crust-rt = { path = "../crust-rt" }
+# The tiny-network kit `neural` light selection's frozen visibility table is
+# evaluated with (`light/neural.rs`): no dependencies, `forbid(unsafe_code)`.
+crust-nn = { path = "../crust-nn" }
+rayon.workspace = true
+glam.workspace = true
+tracing.workspace = true
+# `crust diff`'s report (`compare.rs`).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

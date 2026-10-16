@@ -1,6 +1,6 @@
 //!! Per-face Ptex textures, fully decoded at load.
 //!!
-//!! The host's implementation of `crust_core::PtexTexture`, on top of the
+//!! The host's implementation of `crust_world::PtexTexture`, on top of the
 //!! pure-Rust `ptex` reader.
 //!!
 //!! Why the whole file is read up front: `ptex::PtexReader` takes `&mut self` for
@@ -23,7 +23,7 @@
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
-use crust_core::{ColorSpace, PtexTexture, ResolvedColorSpace, Vec3A};
+use crust_world::{ColorSpace, PtexTexture, ResolvedColorSpace, Vec3A};
 use std::path::Path;
 
 /// Default per-face resolution cap, as a log2 edge length: 32×32 texels.
@@ -43,7 +43,7 @@ pub const DEFAULT_MAX_LOG2: i8 = 5;
 /// cap can come *down*: the island at a 16x16 base plus a full pyramid is
 /// ~2.45 GiB against 4.58 GiB flat at 32x32, and filters better at distance.
 pub(crate) fn mip_enabled() -> bool {
-    crust_core::config().ptex_mip
+    crust_world::config().ptex_mip
 }
 
 /// Mip levels a `w`x`h` face holds: halve both axes until both reach one.
@@ -309,7 +309,7 @@ impl MipSource for FaceSource<'_> {
 
 impl PtexTexture for PtexColor {
     fn eval(&self, face_id: u32, u: f32, v: f32, width: f32) -> Vec3A {
-        let _p = crust_core::profile::scope(crust_core::profile::Section::Texture);
+        let _p = crust_world::profile::scope(crust_world::profile::Section::Texture);
         let Some(f) = self.faces.get(face_id as usize) else {
             return self.fallback;
         };
@@ -558,13 +558,13 @@ pub fn read_channel(src: &[u8], dt: ptex::DataType) -> f32 {
     }
 }
 
-/// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_core::config()`], or
+/// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_world::config()`], or
 /// [`DEFAULT_MAX_LOG2`].
 pub fn max_log2_from_env() -> i8 {
     max_log2_from_env_opt().unwrap_or(DEFAULT_MAX_LOG2)
 }
 
-/// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_core::config()`] (validated
+/// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_world::config()`] (validated
 /// there, to `0..=14`), or `None` when it is not set.
 ///
 /// The preloading path has no use for the distinction — an absent cap there
@@ -575,7 +575,7 @@ pub fn max_log2_from_env() -> i8 {
 /// still one function, so the validation and the warning cannot diverge
 /// between the two backends.
 pub fn max_log2_from_env_opt() -> Option<i8> {
-    crust_core::config().ptex_max_log2
+    crust_world::config().ptex_max_log2
 }
 
 #[cfg(test)]

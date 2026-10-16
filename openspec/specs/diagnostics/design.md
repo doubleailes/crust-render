@@ -22,7 +22,7 @@ stays the tool for code changes.
 
 ## Shape
 
-- **Engine in `crust-core/src/diagnostic/`, a thin subcommand in
+- **Engine in `crust-tools/src/diagnostic/`, a thin subcommand in
   `crust-render`.** `diagnostic::run(scene, &Options) -> Report`; the CLI
   parses, calls it, prints `Report::to_markdown()` on stdout, writes
   `Report::to_json()`, maps the exit status. The Markdown is rendered from the

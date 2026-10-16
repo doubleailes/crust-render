@@ -5,7 +5,7 @@ tessellation is checked against.
 crust tessellates `Cube`, `Plane`, `Cylinder`, `Cylinder_1`, `Cone`, `Capsule`
 and `Capsule_1` prims into the meshes USD's own `pxr/imaging/geomUtil`
 generators produce, the ones Storm draws in usdview
-(`crates/crust-core/src/scene/usd_import/implicit.rs`). This script checks that
+(`crates/crust-usd/src/scene/usd_import/implicit.rs`). This script checks that
 transcription against the real thing:
 
 - it downloads micromamba from conda.anaconda.org and creates a throwaway

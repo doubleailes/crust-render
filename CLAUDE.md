@@ -97,31 +97,39 @@ verifies shading **in numbers, not by eye**.
 
 ## Workspace
 
-Eight crates under `crates/` (ownership table in `docs/architecture.md`):
+Fourteen crates under `crates/` (ownership table in `docs/architecture.md`):
 `crust-rt` (intersection kernel, no crust deps), `crust-mtlx` (MaterialX reader, no crust
 deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-nn`
 (tiny bit-deterministic networks — hash grid, dense layers, Adam — for `neural` light
-selection; no dependencies at all, the caller brings threads and random numbers), `crust-core`
-(the engine library: import, integrator, materials, lights, volumes, guiding, stats),
-`crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
-`crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
-writes their files — the images, the reports — while the engine writes nothing: `main.rs`,
-`products.rs`, `logging.rs`) and `utils` (stateless math:
-warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
-`opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
-re-exports the public surface.
+selection; no dependencies at all, the caller brings threads and random numbers); the
+engine, one library cut along its layers into `crust-base` (config, colour, stats,
+warnings, rays), `crust-shading` (materials, `lpe`), `crust-world` (world, lights, camera,
+volumes, settings, AOV requests, `AssetLoader`), then `crust-tracer` (the integrator) and
+`crust-usd` (the import) side by side, and `crust-tools` (diagnostic, inspector, check),
+with `crust-core` re-exporting their supported surface and holding the engine's
+integration tests; `crust-assets` (every file decoder and texture cache, behind
+`AssetLoader`; it needs only `crust-world`), `crust-render` (the CLI, binary `crust`; it
+drives a render, a diagnosis or a comparison and writes their files — the images, the
+reports — while the engine writes nothing: `main.rs`, `products.rs`, `logging.rs`) and
+`utils` (stateless math: warps, MIS heuristics, the one Rec.709 `luminance`).
+`openqmc-rs` (all sampling) and `opensubdiv-rs` / `ptex-rs` are external. Hosts import
+from `crust_core::` roots. Inside the engine each crate glob re-exports the one below at
+its root, so `crate::LightList` reads the same in every layer; an item a higher layer
+uses is `pub` (the layer crates are not an API), and a unit test lives in the crate
+whose items it needs (`crust-tracer`'s that render a stage take `crust-usd` as a
+dev-dependency).
 
 ## Rules
 
 **Code shape**
 
-- Safe Rust everywhere: crates are `forbid(unsafe_code)` (`crust-nn` included) except `crust-core` (`deny`, one
+- Safe Rust everywhere: crates are `forbid(unsafe_code)` (`crust-nn` included) except `crust-usd` (`deny`, one
   test-only `GlobalAlloc` and, behind the `mmap` feature, the import's memory-mapped USD
   reads, `mapping_resolver` in `usd_import/mod.rs`) and `crust-jit` (`deny`, five audited blocks). Adding `unsafe`,
   or a dependency that carries it on the hot path, is a project decision, not a local one.
-- **crust-core decodes no assets.** Every image, Ptex or IES byte crosses `AssetLoader`
+- **The engine decodes no assets.** Every image, Ptex or IES byte crosses `AssetLoader`
   into `crust-assets`; a loader returning `None` means "fall back", never an error.
-- `crust-rt`, `crust-mtlx` and `crust-nn` stay free of crust types. crust-core adopts their
+- `crust-rt`, `crust-mtlx` and `crust-nn` stay free of crust types. The engine adopts their
   vocabulary (`crust_rt::Geometry`, `Texture2D = crust_mtlx::Texture`) instead of wrapping
   it — a wrapper adds a vtable hop per texel fetch that LTO cannot remove.
 - `scene/usd_import/` siblings share through `pub(super)` and import each other
@@ -175,7 +183,7 @@ sample. `--stats` output is an event on `STATS_TARGET`, which
 `-l` cannot silence. Details: `openspec/specs/cli/design.md` § Logging.
 
 **Environment switches** exist to A/B an optimization against the behaviour it replaced.
-Adding one: a field on `crust_core::Config` (`crust-core/src/config.rs`, the only place
+Adding one: a field on `crust_core::Config` (`crust-base/src/config.rs`, the only place
 the environment is read), a row in `docs/architecture.md` § Environment switches, a
 section in the user documentation (`site/`, below), and make the "off" side the old
 behaviour so the A/B is honest.

@@ -35,8 +35,8 @@ None.
 
 ## Impact
 
-- **Code**: `crust-core/src/scene/usd_import/` (prim-path table, primvar keep
-  set), `crust-core/src/aov.rs` (identity and primvar sources), the tracer's
+- **Code**: `crust-usd/src/scene/usd_import/` (prim-path table, primvar keep
+  set), `crust-world/src/aov.rs` (identity and primvar sources), the tracer's
   first hit (prim, instance and face ids, primvar values), a deep EXR writer
   in `crust-render` or upstream in `exr`.
 - **Dependencies**: possibly a newer `exr` with deep writing; no C++/FFI (a

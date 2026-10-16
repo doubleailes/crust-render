@@ -759,7 +759,7 @@ natural follow-up; this change only makes it possible.
 ## Progressive output and cancellation
 
 A render can be watched while it runs and stopped (`RenderControl`, `RenderOutcome`,
-`tracer/control.rs`; change `progressive-cancellable-render`). It was built in the engine
+`control.rs`; change `progressive-cancellable-render`). It was built in the engine
 first, with the CLI as its first consumer (Ctrl-C and `--checkpoint`, `cli` design record),
 so the API is honest before any Hydra or FFI code depends on it.
 
