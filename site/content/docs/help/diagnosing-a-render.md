@@ -383,6 +383,12 @@ report: every one of them is meant to change only noise and time.
   wall-clock measurement, and its image blends every pass, so no replay can say what a
   guided render takes. When the best tier-1 settings are guided, the sweep records and
   verifies them without guiding, and says so (`unguided`).
+- **An adaptive setting's predicted error is optimistic.** A pixel stops when its own
+  noise estimate looks low, so the error the sweep predicts for a setting that stops
+  pixels early reads low. On `veach_mis` the sweep predicted ΔEff 1.97 for its
+  suggestion; against a high-sample reference the full frame gained about 1.5 (2.3×
+  faster for 1.5× the error). The suggestion was still right, but read the ΔEff as an
+  upper bound.
 - **The adaptive grid is coarse.** Thresholds step by factors of two. To refine around
   `best`, diagnose again with `--variance-threshold` near it.
 - **Guiding has no flag.** A guiding suggestion names `crust:pathGuiding` only; the
