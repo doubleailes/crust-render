@@ -45,7 +45,8 @@ instanced and `PointInstancer`-placed (curves carry no motion blur).
 
 `constant`, `uniform`, `varying` and `vertex` primvars on `BasisCurves` and
 `NurbsCurves` of type `float`, `float2`, `float3`, `color3f` and `int` (read as
-float) SHALL be read when a material bound to the prim reads them by name, and
+float), in any precision and as an array or a lone `constant` value, SHALL be
+read when a material bound to the prim reads them by name, and
 interpolated at a hit as USD specifies: `uniform` per curve, `varying` linearly
 within a span, `vertex` by the curve's own basis. A primvar no bound material
 reads SHALL NOT be decoded.
@@ -103,6 +104,19 @@ without one does.
 - **THEN** every hit reads the image at (0, 0) and the import raises no
   warning
 
+### Requirement: A curve's chart is filtered by the ray's footprint
+
+Images SHALL filter a curve's chart by the ray's footprint, converted through
+how fast the chart changes along the strand, as they filter a mesh's chart
+through its UV density.
+
+#### Scenario: A chart seen from afar is filtered
+
+- **WHEN** a ray whose footprint is 0.01 wide hits a strand whose `vertex` `st`
+  changes by half a unit per world unit along it
+- **THEN** the hit's texture footprint is 0.005 chart units, and 0 for a chart
+  authored once per curve
+
 ### Requirement: The curve: primvar namespace is reserved
 
 The `geomprop` names `curve:v`, `curve:index` and `curve:random` SHALL name the
@@ -124,6 +138,16 @@ primvar or the curve's chart SHALL build no per-span strand table and SHALL
 render bit-identically to its render before this change. A mesh SHALL render
 bit-identically unless its material uses a node that did not compile before
 (it then had the reported unsupported-node grey).
+
+A curve whose material reads only the chart, and which authors none, SHALL
+build no strand table either.
+
+#### Scenario: A textured groom with no st
+
+- **WHEN** a curve that authors no `st` is bound to a material whose only
+  curve need is the chart
+- **THEN** the import builds no strand table for it, and every hit reads the
+  chart at (0, 0)
 
 #### Scenario: The curves sample is unchanged
 

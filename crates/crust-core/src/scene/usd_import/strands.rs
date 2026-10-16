@@ -187,6 +187,9 @@ fn weighted(vals: &[Val], w: &[f32]) -> Val {
 /// `prim_id` order.
 pub(super) struct StrandBuilder {
     path: String,
+    /// Whether the material reads the strand itself (a curve property or a
+    /// primvar), or only the chart.
+    strand: bool,
     spans: Vec<StrandSpan>,
     chart: Option<Channel>,
     primvars: Vec<Option<Channel>>,
@@ -242,6 +245,7 @@ impl StrandBuilder {
             .collect();
         StrandBuilder {
             path: prim.path().to_string(),
+            strand: request.needs.strand,
             spans: Vec::new(),
             chart,
             primvars,
@@ -273,8 +277,11 @@ impl StrandBuilder {
         }
     }
 
-    /// The table, with any primvar whose values ran out refused.
-    pub(super) fn finish(self, prim: &Prim) -> StrandTable {
+    /// The table, with any primvar whose values ran out refused — or none
+    /// when the material reads only the chart and the prim authors none: a
+    /// table would then carry nothing a hit could read, and still cost its
+    /// spans and take every hit off `World::intersect`'s plain path.
+    pub(super) fn finish(self, prim: &Prim) -> Option<StrandTable> {
         let done = |c: Option<Channel>| -> Option<StrandValues> {
             let c = c?;
             if c.overrun {
@@ -291,9 +298,13 @@ impl StrandBuilder {
             }
             Some(c.out)
         };
-        StrandTable::new(self.spans, &self.path)
-            .with_chart(done(self.chart))
-            .with_primvars(self.primvars.into_iter().map(done).collect())
+        let chart = done(self.chart);
+        let primvars: Vec<_> = self.primvars.into_iter().map(done).collect();
+        (self.strand || chart.is_some()).then(|| {
+            StrandTable::new(self.spans, &self.path)
+                .with_chart(chart)
+                .with_primvars(primvars)
+        })
     }
 }
 
@@ -409,6 +420,8 @@ fn decode(value: sdf::Value) -> Option<Vec<Val>> {
         V::HalfVec(v) => v.into_iter().map(|x| Val::float(x.to_f32())).collect(),
         V::IntVec(v) => v.into_iter().map(|x| Val::float(x as f32)).collect(),
         V::Vec2f(p) => vec![v2(p.x, p.y)],
+        V::Vec2d(p) => vec![v2(p.x as f32, p.y as f32)],
+        V::Vec2h(p) => vec![v2(p.x.to_f32(), p.y.to_f32())],
         V::Vec2fVec(v) => v.into_iter().map(|p| v2(p.x, p.y)).collect(),
         V::Vec2dVec(v) => v.into_iter().map(|p| v2(p.x as f32, p.y as f32)).collect(),
         V::Vec2hVec(v) => v
@@ -416,6 +429,8 @@ fn decode(value: sdf::Value) -> Option<Vec<Val>> {
             .map(|p| v2(p.x.to_f32(), p.y.to_f32()))
             .collect(),
         V::Vec3f(p) => vec![v3(p.x, p.y, p.z)],
+        V::Vec3d(p) => vec![v3(p.x as f32, p.y as f32, p.z as f32)],
+        V::Vec3h(p) => vec![v3(p.x.to_f32(), p.y.to_f32(), p.z.to_f32())],
         V::Vec3fVec(v) => v.into_iter().map(|p| v3(p.x, p.y, p.z)).collect(),
         V::Vec3dVec(v) => v
             .into_iter()

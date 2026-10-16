@@ -828,6 +828,14 @@ the finest level held at every footprint). See
     identity), **except** on a subdivided mesh, whose triangles carry explicit
     sub-face UVs: the constant would over-estimate by 4^L, 64× at level 3, and send
     every Ptex lookup on the mesh to its coarsest level.
+  - **A strand's chart** has no triangles to hold a density, so it takes one per
+    hit: `|d st/du| / |dP/du|`, the chart's derivative along the span
+    (`CurveHit::chart_rate`, from the strand table's own values) over the kernel's
+    `dpdu`, which instancing already carries through the placement's linear part —
+    so no scale is recorded, and nested placements are exact here. It is the density
+    **along** the strand, the only direction a curve chart varies in: one constant
+    per curve (`uniform`, `constant`) point-samples, as its derivative says, however
+    many strands a footprint spans. Pinned by `a_strand_chart_is_filtered_by_the_ray_cone`.
   - **`SideTables::Default` is hand-written for one field**: `scale` must be 1.0, not
     0.0. `attach_masked` pushes one per geometry, so a derived default divides every
     footprint by zero and hands each texture an infinite width — which renders as a

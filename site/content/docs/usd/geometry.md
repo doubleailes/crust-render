@@ -211,13 +211,17 @@ Curve primvars are read with any of these interpolations:
 | `vertex` | one per point | through the curve's basis, as its points are: a `bspline` ramp is a B-spline inside each span too |
 
 The types read are `float`, `float2`, `float3`, `color3f` (converted from its
-`colorSpace`) and `int` (read as a float); indexed primvars (`primvars:<name>:indices`)
+`colorSpace`) and `int` (read as a float), in any precision (`double3`, `half2`, …),
+as an array or, for `constant`, a lone value; indexed primvars (`primvars:<name>:indices`)
 are expanded. A `faceVarying` primvar, any other type, or an array whose length does
 not match its interpolation is refused with
 [`curves.unsupported_primvar`](@/docs/reference/warnings.md#curves-and-volumes).
 
 `primvars:st` on a curve is its chart, read by `texcoord` and by images, as on a mesh.
-A curve with no `st` reads the chart at (0, 0), without a warning.
+A curve with no `st` reads the chart at (0, 0), without a warning. Images filter a curve's
+chart by how fast it changes along the strand, as they filter a mesh's by its UV
+density: a `vertex` or `varying` chart blurs to coarser mip levels with distance, while
+one value per curve (`uniform` or `constant`) is read at the finest level.
 
 The `curve:` names belong to Crust Render. A primvar authored under `primvars:curve:`
 is not read, and is reported with

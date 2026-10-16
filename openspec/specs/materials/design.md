@@ -1184,7 +1184,8 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   `geompropvalue` naming any other primvar (a second UV set): it reads the
   chart the host chose for the geometry, as it did while `geompropvalue` did
   not compile, so a mesh renders as before. Only a `curve:` property, or a
-  subgraph over one, is a coordinate of its own. A coordinate
+  subgraph over one, is a coordinate of its own — with or without a `primvars:`
+  prefix, which `geomprop_name` strips for the image's test as for the op. A coordinate
   subgraph that hits an unsupported node (`place2d`) also
   falls back to the chart, because the constant that node would compile to
   pins the lookup to a single texel. The JIT sends shifted lookups back to the interpreter, which keeps its

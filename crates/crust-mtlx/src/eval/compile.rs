@@ -443,12 +443,7 @@ impl<'a> Compiler<'a> {
     /// name a primvar the host supplies per hit ([`Program::primvars`]) —
     /// each falling back to the node's `default` where the hit has none.
     fn compile_geompropvalue(&mut self, node: &Node, arity: u8) -> u32 {
-        let name = node
-            .input("geomprop")
-            .and_then(|i| i.text.as_deref())
-            .map(str::trim)
-            .unwrap_or("");
-        let name = name.strip_prefix("primvars:").unwrap_or(name);
+        let name = geomprop_name(node);
         // The nodedef's `default` is a typed zero; an authored one is a
         // literal like any other (a colour converted into the working
         // space). A connected one cannot be folded into the op.
@@ -907,7 +902,19 @@ fn is_default_chart(node: &Node) -> bool {
     };
     match node.category.as_str() {
         "texcoord" => text("index").is_none_or(|i| i == "0"),
-        "geompropvalue" => text("geomprop").is_some_and(|g| !g.starts_with("curve:")),
+        "geompropvalue" => !geomprop_name(node).starts_with("curve:"),
         _ => false,
     }
+}
+
+/// The property a `geompropvalue` names, as [`Compiler::compile_geompropvalue`]
+/// reads it: trimmed, and without a `primvars:` prefix, so `primvars:curve:v`
+/// is `curve:v` wherever the name is looked at.
+fn geomprop_name(node: &Node) -> &str {
+    let name = node
+        .input("geomprop")
+        .and_then(|i| i.text.as_deref())
+        .map(str::trim)
+        .unwrap_or("");
+    name.strip_prefix("primvars:").unwrap_or(name)
 }
