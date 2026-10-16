@@ -28,8 +28,8 @@ pub(super) const TRACE_BYTES: usize = 512 << 20;
 /// The samples per pixel tier 2 records its crops at (design D3–D4): the
 /// authored count within 64..=1024, halved while the traces of
 /// `crop_pixels` would pass `trace_bytes` (down to 4), and while a
-/// recording and a verification of every crop, at `s_per_pixel_spp`, would
-/// take more than half of `left_s` (down to 64).
+/// recording, a second render and a verification of every crop, at
+/// `s_per_pixel_spp`, would take more than half of `left_s` (down to 64).
 pub(super) fn recording_spp(
     authored_spp: u32,
     crop_pixels: usize,
@@ -39,7 +39,7 @@ pub(super) fn recording_spp(
 ) -> u32 {
     let mut spp = authored_spp.clamp(64, 1024);
     let bytes = |spp: u32| crop_pixels * spp as usize * 8;
-    let cost = |spp: u32| 2.0 * s_per_pixel_spp * crop_pixels as f64 * spp as f64;
+    let cost = |spp: u32| 3.0 * s_per_pixel_spp * crop_pixels as f64 * spp as f64;
     while spp > 64 && cost(spp) > 0.5 * left_s {
         spp /= 2;
     }
@@ -201,23 +201,123 @@ pub(super) fn pixel_costs(trace: &LuminanceTrace, render_s: f64) -> Vec<f64> {
     costs
 }
 
-/// What `replayed` predicts on its crop: the image's variance in the
-/// reference's units (the trace is in scene radiance, before the camera's
-/// `exposure`), against `reference_lum`, and its time at `costs`.
+/// What a crop's predicted errors are measured against (design D2, as fixed
+/// after the full-frame check).
+///
+/// Either way a pixel's error is relative to `norm`, the crop's steadiest
+/// estimate of its value (tier 1's blended reference with the recording in
+/// it), as tier 1's MRSE is.
+pub(super) enum ErrorReference {
+    /// A second fixed-count render of the crop at the recording's count and
+    /// settings, of another seed: `lum`, independent of every stop decision
+    /// the replay makes. Its own squared error per pixel is half the squared
+    /// difference between it and the recording's full mean, `(μ_N − b)² / 2`
+    /// — the two are the same render but for the seed — so it is measured,
+    /// and holds for QMC samples, which no i.i.d. variance formula describes.
+    ///
+    /// Where the two renders disagree most — the top [`trials::MRSE_TRIM`]
+    /// of the crop by `own_error`, fireflies — two renders cannot measure a
+    /// pixel's error, and those few pixels would decide the crop: they are
+    /// left out (`keep` false), the same pixels for every setting.
+    Independent {
+        lum: Vec<f64>,
+        own_error: Vec<f64>,
+        norm: Vec<f64>,
+        keep: Vec<bool>,
+    },
+    /// No second render (the budget could not fit it): each pixel's own
+    /// variance estimate at its stop. Biased low where pixels stop early: a
+    /// pixel stops when that estimate happens to be low (Kirk & Arvo).
+    Variance { norm: Vec<f64> },
+}
+
+impl ErrorReference {
+    /// From the second render's luminance `second` and the recording's full
+    /// mean `recorded_mean`, both in the image's units, raster order.
+    pub(super) fn independent(second: &[f64], recorded_mean: &[f64], norm: &[f64]) -> Self {
+        let own_error: Vec<f64> = second
+            .iter()
+            .zip(recorded_mean)
+            .map(|(b, a)| (a - b).powi(2) / 2.0)
+            .collect();
+        let relative: Vec<f64> = own_error
+            .iter()
+            .zip(norm)
+            .map(|(e, d)| e / (d * d).max(1e-4))
+            .collect();
+        let mut keep = vec![true; own_error.len()];
+        let k = trials::trimmed_count(own_error.len(), trials::MRSE_TRIM);
+        for q in trials::top(&relative, k) {
+            keep[q] = false;
+        }
+        ErrorReference::Independent {
+            lum: second.to_vec(),
+            own_error,
+            norm: norm.to_vec(),
+            keep,
+        }
+    }
+
+    pub(super) fn variance(norm: &[f64]) -> Self {
+        ErrorReference::Variance {
+            norm: norm.to_vec(),
+        }
+    }
+
+    /// `"second_render"` or `"variance"`: what the errors were measured
+    /// against.
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            ErrorReference::Independent { .. } => "second_render",
+            ErrorReference::Variance { .. } => "variance",
+        }
+    }
+}
+
+/// What `replayed` predicts on its crop: its MRSE against `reference` (the
+/// trace is in scene radiance, before the camera's `exposure`; the
+/// reference is in the image's units), and its time at `costs`.
+///
+/// Against a second render `b`, each pixel's error is `(μ − b)² −
+/// own_error`: `E[(μ − b)²] = MSE(μ) + MSE(b)`, `b` being independent of the
+/// stop, so it is unbiased for the stopped mean's error, the bias its stop
+/// put in the mean included. For the fixed count it is `(μ_N − b)² / 2`.
+/// It is over the pixels the reference keeps. The crop's MRSE is a mean of estimates that may be negative one by one;
+/// it is floored at 0.
 pub(super) fn point(
     replayed: &Replayed,
-    reference_lum: &[f64],
+    reference: &ErrorReference,
     exposure: f32,
     costs: &[f64],
 ) -> Point {
     let n = replayed.taken.len().max(1) as f64;
-    let square = f64::from(exposure) * f64::from(exposure);
-    let var: Vec<f64> = replayed.variance.iter().map(|v| v * square).collect();
+    let e = f64::from(exposure);
+    let mrse = match reference {
+        ErrorReference::Independent {
+            lum,
+            own_error,
+            norm,
+            keep,
+        } => {
+            let (sum, count) = (0..replayed.mean.len())
+                .filter(|&q| keep[q])
+                .map(|q| {
+                    let err = (replayed.mean[q] * e - lum[q]).powi(2) - own_error[q];
+                    err / (norm[q] * norm[q]).max(1e-4)
+                })
+                .fold((0.0, 0usize), |(s, c), r| (s + r, c + 1));
+            sum / count.max(1) as f64
+        }
+        ErrorReference::Variance { norm } => {
+            let var: Vec<f64> = replayed.variance.iter().map(|v| v * e * e).collect();
+            trials::mrse(&var, norm)
+        }
+    };
     Point {
         mean_spp: replayed.taken.iter().map(|&t| t as f64).sum::<f64>() / n,
         early_stopped_share: replayed.early_stopped as f64 / n,
         held_share: replayed.held as f64 / n,
-        mrse: trials::mrse(&var, reference_lum),
+        mrse: mrse.max(0.0),
         time_s: replayed
             .taken
             .iter()
@@ -232,12 +332,12 @@ pub(super) fn point(
 pub(super) fn sweep(
     trace: &LuminanceTrace,
     grid: &[AdaptiveSetting],
-    reference_lum: &[f64],
+    reference: &ErrorReference,
     exposure: f32,
     costs: &[f64],
 ) -> Vec<Point> {
     grid.par_iter()
-        .map(|&s| point(&replay(trace, s), reference_lum, exposure, costs))
+        .map(|&s| point(&replay(trace, s), reference, exposure, costs))
         .collect()
 }
 
@@ -292,12 +392,21 @@ pub(super) fn pick(per_crop: &[Vec<Point>], targets: &[f64]) -> (usize, bool) {
     }
 }
 
-/// The efficiency gain of setting `g` over setting `h`: summed time ×
-/// summed MRSE of `h`, over `g`'s.
+/// The efficiency gain of setting `g` over setting `h`: per crop, `h`'s
+/// time × MRSE over `g`'s, and their geometric mean over the crops, as
+/// tier 1 combines crops — so a crop whose error is far larger than the
+/// others' does not decide alone. A crop where either side's product is
+/// not positive and finite is left out; with none left, 1.
 pub(super) fn delta_eff(per_crop: &[Vec<Point>], g: usize, h: usize) -> f64 {
-    let t = |g: usize| per_crop.iter().map(|c| c[g].time_s).sum::<f64>();
-    let m = |g: usize| per_crop.iter().map(|c| c[g].mrse).sum::<f64>();
-    (t(h) * m(h)) / (t(g) * m(g))
+    let ratios: Vec<f64> = per_crop
+        .iter()
+        .map(|c| (c[h].time_s * c[h].mrse) / (c[g].time_s * c[g].mrse))
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .collect();
+    if ratios.is_empty() {
+        return 1.0;
+    }
+    (ratios.iter().map(|r| r.ln()).sum::<f64>() / ratios.len() as f64).exp()
 }
 
 #[cfg(test)]
@@ -363,29 +472,126 @@ mod tests {
         assert!(g.iter().any(|x| (x.threshold - 0.03).abs() < 1e-6));
     }
 
+    fn replayed(taken: u32, mean: f64, variance: f64) -> Replayed {
+        Replayed {
+            taken: vec![taken; 6],
+            variance: vec![variance; 6],
+            mean: vec![mean; 6],
+            early_stopped: 0,
+            held: 0,
+        }
+    }
+
     /// A fixed-count setting's predicted time is the recording's time: each
     /// pixel's samples at its tile's cost per sample.
     #[test]
     fn a_fixed_setting_costs_the_recorded_time() {
-        let replayed = Replayed {
-            taken: vec![64; 6],
-            variance: vec![0.01; 6],
-            mean: vec![1.0; 6],
-            early_stopped: 0,
-            held: 0,
-        };
         // Two tiles of three pixels: 0.3 s and 0.9 s at 64 spp.
         let costs: Vec<f64> = [0.3, 0.3, 0.3, 0.9, 0.9, 0.9]
             .iter()
             .map(|t| t / (3.0 * 64.0))
             .collect();
-        let pt = point(&replayed, &[1.0; 6], 1.0, &costs);
+        let without = ErrorReference::variance(&[1.0; 6]);
+        assert_eq!(without.name(), "variance");
+        let pt = point(&replayed(64, 1.0, 0.01), &without, 1.0, &costs);
         assert!((pt.time_s - 1.2).abs() < 1e-12);
         assert_eq!(pt.mean_spp, 64.0);
         assert!((pt.mrse - 0.01).abs() < 1e-12);
         // The exposure scales the variance into the reference's units.
-        let pt = point(&replayed, &[2.0; 6], 2.0, &costs);
+        let without = ErrorReference::variance(&[2.0; 6]);
+        let pt = point(&replayed(64, 1.0, 0.01), &without, 2.0, &costs);
         assert!((pt.mrse - 0.01).abs() < 1e-12);
+    }
+
+    /// The trap the measured error is for: a pixel whose first samples
+    /// agree stops with a variance of 0 at a mean of 0, though the second
+    /// render says 8 (and agrees with the recording's full mean, so it has
+    /// no error of its own). Its own variance calls it perfect; the second
+    /// render charges it the 64 it is off by.
+    #[test]
+    fn a_pixel_stopped_on_agreeing_samples_is_charged_its_error() {
+        let eight = [8.0; 6];
+        let reference = ErrorReference::independent(&eight, &eight, &eight);
+        assert_eq!(reference.name(), "second_render");
+        let costs = [1.0; 6];
+        let pt = point(&replayed(4, 0.0, 0.0), &reference, 1.0, &costs);
+        assert!((pt.mrse - 1.0).abs() < 1e-12, "64 / 8²: {}", pt.mrse);
+        let pt = point(
+            &replayed(4, 0.0, 0.0),
+            &ErrorReference::variance(&eight),
+            1.0,
+            &costs,
+        );
+        assert_eq!(pt.mrse, 0.0, "the stopped variance says perfect");
+        // The exposure brings the mean into the reference's units.
+        let pt = point(&replayed(4, 4.0, 0.0), &reference, 2.0, &costs);
+        assert_eq!(pt.mrse, 0.0);
+    }
+
+    /// The second render's own error is half its squared difference from
+    /// the recording's full mean: 1 and 3 give (3 − 1)² / 2 = 2, taken off
+    /// every pixel's error, floored at 0 for the crop. The fixed count's
+    /// error is that same 2: the recording's mean is the second render's
+    /// equal.
+    #[test]
+    fn the_second_render_s_own_error_is_taken_off() {
+        let reference = ErrorReference::independent(&[1.0; 6], &[3.0; 6], &[2.0; 6]);
+        let ErrorReference::Independent {
+            own_error, keep, ..
+        } = &reference
+        else {
+            panic!("a second render");
+        };
+        assert_eq!(own_error[0], 2.0);
+        // The trim leaves out at least one pixel, as tier 1's does.
+        assert_eq!(keep.iter().filter(|&&k| !k).count(), 1);
+        let costs = [1.0; 6];
+        // The fixed count: (3 − 1)² − 2 = 2, over 2².
+        let pt = point(&replayed(64, 3.0, 0.0), &reference, 1.0, &costs);
+        assert!((pt.mrse - 0.5).abs() < 1e-12, "{}", pt.mrse);
+        // A mean at the second render: −2 a pixel, floored at 0.
+        let pt = point(&replayed(16, 1.0, 0.0), &reference, 1.0, &costs);
+        assert_eq!(pt.mrse, 0.0);
+    }
+
+    /// The pixels the two renders disagree on most are left out, the same
+    /// for every setting: of 2000 pixels where they agree, the two (0.1%)
+    /// where they differ by 100 do not decide the crop.
+    #[test]
+    fn the_pixels_two_renders_disagree_on_most_are_left_out() {
+        let n = 2000;
+        let mut second = vec![1.0; n];
+        second[7] = 101.0;
+        second[1500] = 101.0;
+        let reference = ErrorReference::independent(&second, &vec![1.0; n], &vec![1.0; n]);
+        let ErrorReference::Independent { keep, .. } = &reference else {
+            panic!("a second render");
+        };
+        assert_eq!(keep.iter().filter(|&&k| !k).count(), 2);
+        assert!(!keep[7] && !keep[1500]);
+        let replayed = Replayed {
+            taken: vec![16; n],
+            variance: vec![0.0; n],
+            mean: vec![1.5; n],
+            early_stopped: 0,
+            held: 0,
+        };
+        // 0.5² over the kept pixels; the two outliers would have made it ≈ 5.
+        let pt = point(&replayed, &reference, 1.0, &vec![1.0; n]);
+        assert!((pt.mrse - 0.25).abs() < 1e-12, "{}", pt.mrse);
+    }
+
+    /// Crops combine by the geometric mean of their efficiency ratios: a
+    /// crop with a hundred times the others' error weighs as one crop.
+    #[test]
+    fn crops_combine_by_the_geometric_mean() {
+        let per_crop = vec![
+            vec![p(1.0, 0.001), p(0.5, 0.001)],
+            vec![p(1.0, 1.0), p(1.0, 1.0)],
+        ];
+        // Ratios 2 and 1: √2. Summed, the second crop would have said 1.
+        assert!((delta_eff(&per_crop, 1, 0) - 2f64.sqrt()).abs() < 1e-12);
+        assert_eq!(delta_eff(&per_crop, 0, 0), 1.0);
     }
 
     /// The front keeps the points nothing beats on both, by time.
@@ -432,7 +638,7 @@ mod tests {
         assert_eq!(recording_spp(128, px, 0.0, 100.0, TRACE_BYTES), 128);
         assert_eq!(recording_spp(16, px, 0.0, 100.0, TRACE_BYTES), 64);
         assert_eq!(recording_spp(4096, px, 0.0, 100.0, TRACE_BYTES), 1024);
-        // 2 × 1e-7 s × 49152 px × spp ≤ 5 s: spp ≤ 508, so 256.
+        // 3 × 1e-7 s × 49152 px × spp ≤ 5 s: spp ≤ 339, so 256.
         assert_eq!(recording_spp(1024, px, 1e-7, 10.0, TRACE_BYTES), 256);
         assert_eq!(recording_spp(1024, px, 1.0, 10.0, TRACE_BYTES), 64);
         // A forced-small bound: 49152 px × 8 B × spp ≤ 4 MiB → 10, so 8.

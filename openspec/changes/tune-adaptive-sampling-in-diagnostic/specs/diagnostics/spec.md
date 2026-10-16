@@ -39,8 +39,9 @@ rendered:
 
 The report SHALL state these conditions. The only exceptions are tier 2's
 verifying adaptive renders and tier 3's depth trial. Each of those SHALL
-state what it changed. Tier 2's recording render keeps every condition
-above: it is a fixed-count render that also keeps each sample's luminance.
+state what it changed. Tier 2's recording and second renders keep every
+condition above: they are fixed-count renders, the first also keeping each
+sample's luminance.
 
 #### Scenario: An authored clamp does not reach the comparison
 
@@ -86,12 +87,11 @@ setting may be suggested").
 
 ### Requirement: Adaptive sampling sweep
 
-Per crop, tier 2 SHALL render once at a fixed sample count with the best tier-1
-settings. It SHALL then predict, for every setting of a grid of variance
-threshold, minimum samples, neighbour tolerance and sample cap, each pixel's
-sample count and the variance of its mean. From these it SHALL derive the
-setting's predicted MRSE against the crop's reference and its predicted time
-from the crop's measured cost.
+Per crop, tier 2 SHALL render twice at a fixed sample count with the best
+tier-1 settings, each with its own seed. Over the first it SHALL predict each
+pixel's sample count for every setting of a grid of variance threshold,
+minimum samples, neighbour tolerance and sample cap. The setting's MRSE SHALL
+be measured against the second render, and its time from the measured cost.
 
 #### Scenario: The authored setting is always on the grid
 
@@ -107,6 +107,19 @@ from the crop's measured cost.
   tolerance and cap it tried, and `sample_budget.adaptive.front` lists, per
   crop, the settings no other setting beats on both predicted time and
   predicted MRSE
+
+#### Scenario: The error is not the stopped pixels' own
+
+- **WHEN** a setting stops pixels early
+- **THEN** its predicted MRSE is measured against the second render, never
+  from the stopped pixels' own variance estimates, and each crop's
+  `error_from` is `second_render`
+
+#### Scenario: No room for the second render
+
+- **WHEN** the budget cannot fit a crop's second render
+- **THEN** it is listed under `not_tried` as `adaptive_second@<crop>`, and
+  that crop's `error_from` is `variance`
 
 #### Scenario: Adaptive sampling off in the stage
 
@@ -172,7 +185,7 @@ single run.
 
 `best` SHALL become a suggestion only when every crop's verification
 matched, and its ΔEff at the target over the authored setting is at least
-1.10. ΔEff is predicted time × predicted MRSE, each summed over crops. The
+1.10. ΔEff is the geometric mean over crops of predicted time × MRSE. The
 suggestion SHALL name the changed values' `crust:*` attributes and flags, and
 cite the sweep and the verifications as evidence.
 

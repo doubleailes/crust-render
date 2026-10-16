@@ -229,7 +229,7 @@ looks for the adaptive settings that reach the target error soonest. It searches
 [`--min-samples`](@/docs/reference/command-line.md#min-samples),
 [`--neighbour-tolerance`](@/docs/reference/command-line.md#neighbour-tolerance) and the
 sample count [`-s`](@/docs/reference/command-line.md#samples), with the best tier-1
-settings. The search costs two renders per crop, however many settings it tries:
+settings. The search costs three renders per crop, however many settings it tries:
 
 1. **Record.** Each crop is rendered once at a fixed sample count, the authored one
    within 64 to 1024 (`spp_recorded`). Every pixel keeps the brightness of each of its
@@ -243,21 +243,31 @@ settings. The search costs two renders per crop, however many settings it tries:
    - tolerances of −1, 0, 1, 2 and the authored one;
    - a quarter, half and all of `spp_recorded`, and the authored count.
 
-   For each setting, every pixel's sample count and `variance` give the setting's
-   error on the crop, and the recording's time per tile gives its render time. A few
-   hundred settings take well under a second to replay.
-3. **Pick.** `best` is the setting that reaches the target error on every crop in the
+   For each setting, every pixel's sample count gives the setting's render time, from
+   the recording's time per tile. Its error comes from step 3. A few hundred settings
+   take well under a second to replay.
+3. **Measure the error.** Each crop is rendered a second time at the same count, with
+   another seed. A pixel's error is how far its stopped value is from the second
+   render, less the second render's own error. That error is measured too: it is half
+   the squared difference between the two full renders, which differ only in their
+   seed. A pixel's own noise estimate at its stop can't be used: a pixel stops when
+   that estimate happens to be low, so it reads optimistic. The 0.1% of pixels where
+   the two renders disagree most, fireflies, are left out for every setting. When
+   the budget can't fit the second render, a crop falls back on each pixel's own
+   estimate, and `error_from` says `variance`.
+4. **Pick.** `best` is the setting that reaches the target error on every crop in the
    least predicted time. If none reaches it, `best` is the one with the lowest error and
    `target_reached` is `false`. `front` lists, per crop, every setting that no other
    beats on both time and error: where it bends is what more time buys.
-4. **Verify.** `best` is rendered once per crop with the `sampleCount` and `variance`
+5. **Verify.** `best` is rendered once per crop with the `sampleCount` and `variance`
    AOVs. The report says whether the rendered `sampleCount` matches the replay in every
    pixel (`verification`). The measured time sits beside the predicted one; it is a
    single run, so read it as a sign only.
 
 `best` becomes a suggestion, one per value it changes (`adaptive_sampling.*`), only when
 every crop's verification matched and it is at least 1.10 more efficient than the
-authored point. Efficiency here is summed time × summed error. The suggested command
+authored point. Efficiency here is time × error, per crop, combined across the crops
+by their geometric mean. The suggested command
 then carries the new flags. Without a target (adaptive sampling off as authored, and no
 [`--target-mrse`](@/docs/reference/command-line.md#diagnostic)), `best` must be at least
 as clean as the authored point on every crop. A fixed count is already the cleanest, so
@@ -383,12 +393,11 @@ report: every one of them is meant to change only noise and time.
   wall-clock measurement, and its image blends every pass, so no replay can say what a
   guided render takes. When the best tier-1 settings are guided, the sweep records and
   verifies them without guiding, and says so (`unguided`).
-- **An adaptive setting's predicted error is optimistic.** A pixel stops when its own
-  noise estimate looks low, so the error the sweep predicts for a setting that stops
-  pixels early reads low. On `veach_mis` the sweep predicted ΔEff 1.97 for its
-  suggestion; against a high-sample reference the full frame gained about 1.5 (2.3×
-  faster for 1.5× the error). The suggestion was still right, but read the ΔEff as an
-  upper bound.
+- **The adaptive sweep's error leaves fireflies out.** It ignores the 0.1% of pixels
+  where two renders disagree most. Elsewhere it is unbiased, but measured from one
+  pair of renders, so it is noisy on a crop that fireflies dominate. On `veach_mis` its
+  predicted gain matched the full frame: 3.94 predicted, 3.95 measured, 5.6× faster
+  for 1.4× the error.
 - **The adaptive grid is coarse.** Thresholds step by factors of two. To refine around
   `best`, diagnose again with `--variance-threshold` near it.
 - **Guiding has no flag.** A guiding suggestion names `crust:pathGuiding` only; the

@@ -101,6 +101,15 @@ single verifying run. This ignores the per-round fork/join tail, which the desig
 record measured as a few percent at 16 rounds. The verification's single-run time
 is reported beside the prediction so a gap is visible.
 
+*As fixed after the full-frame check:* the error is not the replayed variance. A
+second fixed-count render of each crop, with another seed, is the reference. A pixel's
+error is `(μ − b)² − (μ_N − b)² / 2`, which is unbiased for the stopped mean's error,
+stop-induced bias included, and holds for QMC samples. The top 0.1% of pixels by the
+two renders' disagreement are left out, and crops combine by geometric mean. The
+diagnostics design record has the three estimators that were measured and rejected,
+and the full-frame check: predicted ΔEff 3.94, measured 3.95. Tier 2 costs three
+renders per crop.
+
 ### D3. The grid
 
 The grid is the product of:

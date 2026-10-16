@@ -209,6 +209,7 @@ fn fixture_sweep() -> AdaptiveSweep {
         mrse: n(mrse),
         predicted_render_s: n(s),
         reaches_target: reaches,
+        error_from: "second_render".into(),
     };
     AdaptiveSweep {
         spp_recorded: 256,
@@ -1209,7 +1210,8 @@ fn a_recording_s_costs_add_up_to_its_wall_time() {
         },
     );
     let lum = vec![1.0; costs.len()];
-    let p = super::adaptive::point(&fixed, &lum, 1.0, &costs);
+    let reference = super::adaptive::ErrorReference::variance(&lum);
+    let p = super::adaptive::point(&fixed, &reference, 1.0, &costs);
     assert!(
         (p.time_s - m.render_s).abs() <= 1e-9 * m.render_s.max(1.0),
         "{} vs {}",

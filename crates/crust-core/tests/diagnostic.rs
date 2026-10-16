@@ -173,6 +173,21 @@ fn the_adaptive_sweep_is_verified_by_a_render() {
     assert!(a.grid.settings > 50, "{:?}", a.grid);
     assert_eq!(a.authored.per_crop.len(), 1);
     assert!(a.authored.per_crop[0].mean_spp.0 <= 64.0);
+    // The errors are measured against a second render of each crop, or —
+    // when it did not fit — each pixel's own variance, which says why.
+    for c in &a.authored.per_crop {
+        match c.error_from.as_str() {
+            "second_render" => {}
+            "variance" => assert!(
+                r.not_tried
+                    .iter()
+                    .any(|n| n.id == format!("adaptive_second@{}", c.crop)),
+                "{:?}",
+                r.not_tried
+            ),
+            other => panic!("error_from {other}"),
+        }
+    }
     assert!(a.replay_s.0 >= 0.0);
     assert!(!a.front[0].points.is_empty());
     for v in &a.verification {

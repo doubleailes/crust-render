@@ -564,6 +564,12 @@ pub struct AdaptivePoint {
     /// each tile: an estimate.
     pub predicted_render_s: Num,
     pub reaches_target: bool,
+    /// What `mrse` was measured against: `second_render` (the crop rendered
+    /// again at the recording's count, another seed) or `variance` (each
+    /// pixel's own estimate at its stop, which reads low where pixels stop
+    /// early; when the budget could not fit the second render).
+    #[serde(default)]
+    pub error_from: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
