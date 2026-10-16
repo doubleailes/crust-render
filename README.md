@@ -77,6 +77,27 @@ composition to roughly one element at a time. Ptex streaming cuts texture reside
 from 6 GiB to 0.6 GiB. The full
 numbers are in [`openspec/specs/usd-scene-import/design.md`](openspec/specs/usd-scene-import/design.md).
 
+### Alab
+
+<video src="images/alab_v005.mp4" controls muted loop width="100%">
+  Your viewer cannot play this video: <a href="images/alab_v005.mp4">download alab_v005.mp4</a>.
+</video>
+
+Netflix Animation Studios' [ALab](https://animallogic.com/alab/) 2.2 (shot mk020_0281) is a
+production interior: a cluttered lab bench lit by practical lights in lamps and
+fixtures. It is a stress test of a different kind from Moana. The challenges:
+
+- **Scale of the stage.** 12 605 instances share 380 prototypes, and 5 722 tiled EXR
+  textures stream through the `.tx` cache. A material samples about five textures per
+  shading point, so texture lookups take about 38% of render time.
+- **Import cost.** Composing the stage is most of the frame (about 1:30 of 1:58), so
+  the importer, not the path tracer, is what gets optimized first.
+- **Noise from practical lights.** Most light samples are wasted: about 96% of shadow
+  rays are occluded, because power-based light selection cannot tell that most
+  fixtures are hidden from most points.
+
+See [`docs/alab_profile.md`](docs/alab_profile.md) for the measurements.
+
 ## Project layout
 
 | crate | role |
@@ -94,7 +115,7 @@ Every crate is `forbid(unsafe_code)` except `crust-core` and `crust-jit`, which 
 
 ## Status
 
-Crust is a learning and research renderer, not a production one. It runs on the CPU only
+Crust is a production oriented renderer but not use in production. It runs on the CPU only
 and has no GPU path. Motion blur covers transforms only, and it does not import OpenVDB.
 These gaps are listed in the
 [limitations](https://doubleailes.github.io/crust-render/docs/architecture/limitations/)
