@@ -32,7 +32,7 @@
 
 ## 6. Integration
 
-- [ ] 6.1 Run CI locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`. Verify all are clean.
+- [x] 6.1 Run CI locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`. Verify all are clean.
 - [ ] 6.2 Run `crust diagnostic --budget 2m --adaptive-maps maps.exr` on `samples/cornellbox.usda` and `veach_mis`. Record in `diagnostics/design.md`: each crop's verification matched; the replay's wall time; tier 2's share of the budget against before; `best` against the authored point. Then render the full frame with `suggested_command` and with the authored settings at `--indirect-clamp 0`, compare against an adaptive-off reference with `crust diff`, and confirm that the suggested setting's relMSE is at or below the target while its time is lower (`bench_ab.sh`-style interleaved timing).
 
 ## Workflow follow-up
