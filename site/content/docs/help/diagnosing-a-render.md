@@ -265,10 +265,15 @@ settings. The search costs three renders per crop, however many settings it trie
    single run, so read it as a sign only.
 
 `best` becomes a suggestion, one per value it changes (`adaptive_sampling.*`), only when
-every crop's verification matched and it is at least 1.10 more efficient than the
-authored point. Efficiency here is time × error, per crop, combined across the crops
-by their geometric mean. The suggested command
-then carries the new flags. Without a target (adaptive sampling off as authored, and no
+every crop was recorded and verified, every verification matched, and it is at least
+1.10 more efficient than the authored point. Efficiency here is time × error, per crop,
+combined across the crops by their geometric mean. A crop the budget skipped means no
+suggestion. So does a stage authored above the recording's sample count when `best`
+changes the count, since that count was never measured.
+
+The suggested command carries the adaptive values the diagnosis ran with, including any
+you passed to it, with the suggested ones in their place. Without a target (adaptive
+sampling off as authored, and no
 [`--target-mrse`](@/docs/reference/command-line.md#diagnostic)), `best` must be at least
 as clean as the authored point on every crop. A fixed count is already the cleanest, so
 pass `--target-mrse` to tune such a stage.

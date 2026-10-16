@@ -512,7 +512,9 @@ pub struct AdaptiveSweep {
     /// MRSE when none reaches it.
     pub best: AdaptivePick,
     pub target_reached: bool,
-    /// Summed time × summed MRSE of the authored point over `best`'s.
+    /// The geometric mean over the crops of the authored point's time ×
+    /// MRSE over `best`'s; `null` when a crop cannot be compared (one side's
+    /// MRSE measured 0, the other's not).
     pub delta_eff_over_authored: Num,
     /// Per crop, the settings no other beats on both predicted time and
     /// MRSE, by increasing time.
@@ -599,7 +601,9 @@ pub struct AdaptiveVerification {
 }
 
 /// The `--adaptive-maps` EXR: its path, its layers, and why it was not
-/// written when it was not.
+/// written when it was not. The engine writes no file: `written` is false
+/// until the host has written it, and the host records a failure's
+/// `reason`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveMapsInfo {
     pub path: String,

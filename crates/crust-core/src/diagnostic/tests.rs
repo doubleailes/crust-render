@@ -666,7 +666,7 @@ fn a_verified_adaptive_gain_is_suggested() {
     let authored = adaptive(128, 32, 0.05, 1.0);
     let best = adaptive(256, 16, 0.025, 1.0);
     let v = [verified("crop_a", true), verified("crop_b", true)];
-    let s = super::adaptive_suggestions_for(authored, Some(best), 1.43, &v, 2);
+    let s = super::adaptive_suggestions_for(authored, false, Some(best), 1.43, &v, 2);
     let got: Vec<(&str, &str, &str, &str)> = s
         .iter()
         .map(|x| {
@@ -713,13 +713,19 @@ fn a_verified_adaptive_gain_is_suggested() {
     let o = super::Options::new("scene.usda");
     let cmd = super::command(&o, &crate::RenderSettings::default(), &s, None);
     assert!(
-        cmd.ends_with("-s 256 --variance-threshold 0.025 --min-samples 16"),
+        cmd.ends_with("-s 256 --variance-threshold 0.025 --min-samples 16 --neighbour-tolerance 1"),
         "{cmd}"
     );
     assert!(!cmd.contains('#'), "{cmd}");
     // A negative tolerance is passed as the flag's value.
-    let s =
-        super::adaptive_suggestions_for(authored, Some(adaptive(128, 32, 0.05, -1.0)), 1.2, &v, 2);
+    let s = super::adaptive_suggestions_for(
+        authored,
+        false,
+        Some(adaptive(128, 32, 0.05, -1.0)),
+        1.2,
+        &v,
+        2,
+    );
     let cmd = super::command(&o, &crate::RenderSettings::default(), &s, None);
     assert!(cmd.ends_with("--neighbour-tolerance -1"), "{cmd}");
 }
@@ -731,17 +737,101 @@ fn an_adaptive_setting_is_suggested_only_when_verified_past_the_bar() {
     let authored = adaptive(128, 32, 0.05, 1.0);
     let best = Some(adaptive(256, 16, 0.025, 1.0));
     let both = [verified("crop_a", true), verified("crop_b", true)];
-    assert!(super::adaptive_suggestions_for(authored, best, 1.05, &both, 2).is_empty());
+    assert!(super::adaptive_suggestions_for(authored, false, best, 1.05, &both, 2).is_empty());
     let one_off = [verified("crop_a", true), verified("crop_b", false)];
-    assert!(super::adaptive_suggestions_for(authored, best, 1.5, &one_off, 2).is_empty());
+    assert!(super::adaptive_suggestions_for(authored, false, best, 1.5, &one_off, 2).is_empty());
     // crop_b's verification did not fit the budget.
-    assert!(super::adaptive_suggestions_for(authored, best, 1.5, &both[..1], 2).is_empty());
+    assert!(super::adaptive_suggestions_for(authored, false, best, 1.5, &both[..1], 2).is_empty());
     // The authored point is best: nothing to change.
-    assert!(super::adaptive_suggestions_for(authored, None, 1.5, &both, 2).is_empty());
-    assert!(super::adaptive_suggestions_for(authored, best, 1.5, &[], 0).is_empty());
+    assert!(super::adaptive_suggestions_for(authored, false, None, 1.5, &both, 2).is_empty());
+    assert!(super::adaptive_suggestions_for(authored, false, best, 1.5, &[], 0).is_empty());
     assert_eq!(
-        super::adaptive_suggestions_for(authored, best, 1.5, &both, 2).len(),
+        super::adaptive_suggestions_for(authored, false, best, 1.5, &both, 2).len(),
         3
+    ); // Three crops picked, two recorded and verified: the third gave no
+    // evidence, so nothing is suggested.
+    assert!(super::adaptive_suggestions_for(authored, false, best, 1.5, &both, 3).is_empty());
+    // A NaN gain (a crop that could not be compared) passes no bar.
+    assert!(super::adaptive_suggestions_for(authored, false, best, f64::NAN, &both, 2).is_empty());
+}
+
+/// An authored count above the recording was never replayed: compared with
+/// the replayed authored point (the recording's 1024 here), a best at
+/// another count is not suggested, and a best at 1024 suggests its other
+/// values but no `-s`.
+#[test]
+fn a_capped_authored_count_is_never_cut_unmeasured() {
+    let replayed = adaptive(1024, 32, 0.05, 1.0);
+    let both = [verified("crop_a", true), verified("crop_b", true)];
+    let lower = Some(adaptive(512, 8, 0.05, 1.0));
+    assert!(super::adaptive_suggestions_for(replayed, true, lower, 2.0, &both, 2).is_empty());
+    let same_cap = Some(adaptive(1024, 8, 0.025, 1.0));
+    let s = super::adaptive_suggestions_for(replayed, true, same_cap, 2.0, &both, 2);
+    let ids: Vec<&str> = s.iter().map(|x| x.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "adaptive_sampling.variance_threshold",
+            "adaptive_sampling.min_samples_per_pixel"
+        ]
+    );
+    // Not capped, the same lower count is a measured cut and is suggested.
+    let s = super::adaptive_suggestions_for(replayed, false, lower, 2.0, &both, 2);
+    assert!(
+        s.iter()
+            .any(|x| x.id == "adaptive_sampling.samples_per_pixel" && x.value == "512")
+    );
+}
+
+/// The adaptive values the diagnosis measured with — here an override of
+/// the minimum to 16 — stay in the suggested command when the sweep
+/// changes only another value, so the command renders what was verified.
+#[test]
+fn the_suggested_command_keeps_the_measured_adaptive_values() {
+    let o = super::Options::new("scene.usda");
+    let s = crate::RenderSettings::default()
+        .with_adaptive_sampling(16, 0.05)
+        .with_adaptive_neighbour_tolerance(-1.0);
+    let authored = adaptive(128, 16, 0.05, -1.0);
+    let v = [verified("crop_a", true)];
+    let only_threshold = super::adaptive_suggestions_for(
+        authored,
+        false,
+        Some(adaptive(128, 16, 0.02, -1.0)),
+        1.5,
+        &v,
+        1,
+    );
+    assert_eq!(only_threshold.len(), 1);
+    let cmd = super::command(&o, &s, &only_threshold, None);
+    assert!(
+        cmd.ends_with("--variance-threshold 0.02 --min-samples 16 --neighbour-tolerance -1"),
+        "{cmd}"
+    );
+    // With no suggestion at all, the measured values still.
+    let cmd = super::command(&o, &s, &[], None);
+    assert!(
+        cmd.ends_with("--variance-threshold 0.05 --min-samples 16 --neighbour-tolerance -1"),
+        "{cmd}"
+    );
+}
+
+/// `crop_of` takes a crop's pixels out of a full-frame plane, in the crop's
+/// own raster order.
+#[test]
+fn a_crop_is_taken_out_of_a_frame_plane() {
+    let frame = crate::PixelRect::new(0, 0, 4, 3);
+    let plane: Vec<f64> = (0..12).map(f64::from).collect();
+    let crop = crate::PixelRect::new(1, 1, 3, 3);
+    assert_eq!(
+        super::crop_of(&plane, frame, crop),
+        [
+            frame.index(1, 1),
+            frame.index(2, 1),
+            frame.index(1, 2),
+            frame.index(2, 2)
+        ]
+        .map(|q| q as f64)
     );
 }
 
@@ -767,7 +857,8 @@ fn the_suggested_command_applies_every_suggestion() {
     assert_eq!(
         cmd,
         "crust render -i 'shots/a b.usda' -f 1012 --camera /cams/main --strategy power \
-         --light-selection learned --light-samples 2 --light-samples-indirect 1 --auto-tx  \
+         --light-selection learned --light-samples 2 --light-samples-indirect 1 --auto-tx \
+         --variance-threshold 0.05 --min-samples 32 --neighbour-tolerance 1  \
          # and author on the stage: crust:pathGuiding = true"
     );
     o.region = Some(crate::PixelRect::new(0, 0, 64, 32));

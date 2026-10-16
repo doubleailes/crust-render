@@ -1425,20 +1425,37 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
         adaptive_maps: args.adaptive_maps.as_ref().map(|p| p.display().to_string()),
         ..crust_core::diagnostic::Options::new(input.clone())
     };
-    let report = crust_core::diagnostic::run(scene, &options);
+    let mut report = crust_core::diagnostic::run(scene, &options);
     assets.release_texture_files();
+    // The maps first, so the report says what really happened to them.
+    let mut maps_failed = false;
+    if let (Some(path), Some(maps)) = (&args.adaptive_maps, &report.adaptive_maps) {
+        let written = products::write_adaptive_maps(path, maps);
+        if let Some(info) = report
+            .sample_budget
+            .as_mut()
+            .and_then(|sb| sb.adaptive.as_mut())
+            .and_then(|a| a.maps.as_mut())
+        {
+            info.written = written.is_ok();
+            info.reason = written.as_ref().err().map(|e| e.to_string());
+        }
+        match written {
+            Ok(()) => info!("Adaptive maps written to {}", path.display()),
+            Err(e) => {
+                error!("--adaptive-maps {}: {e}", path.display());
+                maps_failed = true;
+            }
+        }
+    }
     print!("{}", report.to_markdown());
     if let Err(e) = std::fs::write(&args.json, report.to_json()) {
         error!("--json {}: {e}", args.json.display());
         return ExitCode::FAILURE;
     }
     info!("Report written to {}", args.json.display());
-    if let (Some(path), Some(maps)) = (&args.adaptive_maps, &report.adaptive_maps) {
-        if let Err(e) = products::write_adaptive_maps(path, maps) {
-            error!("--adaptive-maps {}: {e}", path.display());
-            return ExitCode::FAILURE;
-        }
-        info!("Adaptive maps written to {}", path.display());
+    if maps_failed {
+        return ExitCode::FAILURE;
     }
     match report.run.exit {
         0 => ExitCode::SUCCESS,

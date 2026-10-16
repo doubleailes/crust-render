@@ -362,3 +362,42 @@ fn the_adaptive_maps_are_one_exr_of_four_layers() {
         }
     }
 }
+
+/// The maps are written before the report, and the report says what
+/// happened to them: a path whose directory cannot be made (it is a file)
+/// leaves `written` false with the reason, and the run fails.
+#[test]
+fn a_maps_file_that_cannot_be_written_is_reported_as_not_written() {
+    let dir = work_dir("adaptive_maps_unwritable");
+    std::fs::write(dir.join("blocker"), b"a file, not a directory").unwrap();
+    let out = crust(
+        &dir,
+        &[
+            "-i",
+            cornellbox().to_str().unwrap(),
+            "--region",
+            "8,8,40,40",
+            "--budget",
+            "20s",
+            "--repeats",
+            "1",
+            "--adaptive-maps",
+            "blocker/maps.exr",
+        ],
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("crust-diagnostic.json")).expect("the JSON report"),
+    )
+    .unwrap();
+    let maps = &report["sample_budget"]["adaptive"]["maps"];
+    if maps.is_null() {
+        // Tier 2 did not run on a slow machine: nothing was tried.
+        return;
+    }
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(maps["written"], false, "{maps}");
+    assert!(
+        maps["reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "{maps}"
+    );
+}
