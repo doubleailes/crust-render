@@ -167,6 +167,12 @@ struct DiagnosticArgs {
     /// to the square of the scene's adaptive variance threshold.
     #[arg(long, value_name = "MRSE", value_parser = parse_target)]
     target_mrse: Option<f64>,
+    /// Also write one EXR of the adaptive sampling sweep's evidence, at the
+    /// scene's resolution: per crop, the authored setting's predicted
+    /// `sampleCount` and `variance` and the best setting's rendered ones
+    /// (layers `authored.*`, `best.*`; 0 outside the crops).
+    #[arg(long, value_name = "PATH")]
+    adaptive_maps: Option<std::path::PathBuf>,
 }
 
 #[derive(Args)]
@@ -312,6 +318,22 @@ struct SceneArgs {
     /// Overrides the scene's `crust:indirectClamp`.
     #[arg(long, value_parser = parse_clamp)]
     indirect_clamp: Option<f32>,
+    /// Adaptive sampling: a pixel may stop once the relative standard error
+    /// of its mean is below this. 0 turns adaptive sampling off. Overrides
+    /// the scene's `crust:varianceThreshold`.
+    #[arg(long, value_name = "T", value_parser = parse_threshold)]
+    variance_threshold: Option<f32>,
+    /// Adaptive sampling: the samples every pixel takes before it may stop
+    /// (floored at the square root of the sample count, and at 2).
+    /// Overrides the scene's `crust:minSamplesPerPixel`.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    min_samples: Option<u32>,
+    /// Adaptive sampling: how far a still-sampling cross neighbour's
+    /// convergence index may sit above a pixel's own before it holds the
+    /// pixel back. Negative turns the comparison off. Overrides the scene's
+    /// `crust:adaptiveNeighbourTolerance`.
+    #[arg(long, value_name = "T", allow_negative_numbers = true, value_parser = parse_tolerance)]
+    neighbour_tolerance: Option<f32>,
     /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
     /// (same path, extension `.tx`) on first use, when the `.tx` is missing,
     /// older than its source, or written by an older crust without the alpha
@@ -529,6 +551,31 @@ fn parse_clamp(s: &str) -> std::result::Result<f32, String> {
         Err(format!(
             "{s} is not a finite, non-negative limit (0 turns the clamp off)"
         ))
+    }
+}
+
+/// `--variance-threshold`'s parser: a finite, non-negative threshold, `0`
+/// turning adaptive sampling off.
+fn parse_threshold(s: &str) -> std::result::Result<f32, String> {
+    let t: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if t.is_finite() && t >= 0.0 {
+        Ok(t)
+    } else {
+        Err(format!(
+            "{s} is not a finite, non-negative threshold (0 turns adaptive sampling off)"
+        ))
+    }
+}
+
+/// `--neighbour-tolerance`'s parser: any finite number, a negative one
+/// turning the neighbour comparison off. The engine ignores a non-finite
+/// tolerance silently; refusing it here says so.
+fn parse_tolerance(s: &str) -> std::result::Result<f32, String> {
+    let t: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if t.is_finite() {
+        Ok(t)
+    } else {
+        Err(format!("{s} is not a finite tolerance"))
     }
 }
 
@@ -878,6 +925,23 @@ fn apply_scene_overrides(cli: &SceneArgs, mut settings: RenderSettings) -> Rende
     if let Some(limit) = cli.indirect_clamp {
         debug!("--indirect-clamp {limit} overrides the scene's crust:indirectClamp");
         settings = settings.with_indirect_clamp(limit);
+    }
+    if cli.variance_threshold.is_some() || cli.min_samples.is_some() {
+        let min = cli.min_samples.unwrap_or(settings.min_samples_per_pixel());
+        let threshold = cli
+            .variance_threshold
+            .unwrap_or(settings.variance_threshold());
+        if let Some(n) = cli.min_samples {
+            debug!("--min-samples {n} overrides the scene's crust:minSamplesPerPixel");
+        }
+        if let Some(t) = cli.variance_threshold {
+            debug!("--variance-threshold {t} overrides the scene's crust:varianceThreshold");
+        }
+        settings = settings.with_adaptive_sampling(min, threshold);
+    }
+    if let Some(t) = cli.neighbour_tolerance {
+        debug!("--neighbour-tolerance {t} overrides the scene's crust:adaptiveNeighbourTolerance");
+        settings = settings.with_adaptive_neighbour_tolerance(t);
     }
     if cli.light_samples.is_some() || cli.light_samples_indirect.is_some() {
         let camera = cli.light_samples.unwrap_or(settings.light_samples());
@@ -1358,16 +1422,41 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
         subdivision_level: args.scene.subdiv_level,
         subdivision_edge_length: args.scene.subdiv_edge_length,
         cache_stats: Some(&cache_stats),
+        adaptive_maps: args.adaptive_maps.as_ref().map(|p| p.display().to_string()),
         ..crust_core::diagnostic::Options::new(input.clone())
     };
-    let report = crust_core::diagnostic::run(scene, &options);
+    let mut report = crust_core::diagnostic::run(scene, &options);
     assets.release_texture_files();
+    // The maps first, so the report says what really happened to them.
+    let mut maps_failed = false;
+    if let (Some(path), Some(maps)) = (&args.adaptive_maps, &report.adaptive_maps) {
+        let written = products::write_adaptive_maps(path, maps);
+        if let Some(info) = report
+            .sample_budget
+            .as_mut()
+            .and_then(|sb| sb.adaptive.as_mut())
+            .and_then(|a| a.maps.as_mut())
+        {
+            info.written = written.is_ok();
+            info.reason = written.as_ref().err().map(|e| e.to_string());
+        }
+        match written {
+            Ok(()) => info!("Adaptive maps written to {}", path.display()),
+            Err(e) => {
+                error!("--adaptive-maps {}: {e}", path.display());
+                maps_failed = true;
+            }
+        }
+    }
     print!("{}", report.to_markdown());
     if let Err(e) = std::fs::write(&args.json, report.to_json()) {
         error!("--json {}: {e}", args.json.display());
         return ExitCode::FAILURE;
     }
     info!("Report written to {}", args.json.display());
+    if maps_failed {
+        return ExitCode::FAILURE;
+    }
     match report.run.exit {
         0 => ExitCode::SUCCESS,
         code => ExitCode::from(code as u8),
@@ -2561,6 +2650,74 @@ mod tests {
             (ok.indirect_clamp, ok.filter_radius),
             (Some(0.0), Some(1.5))
         );
+    }
+
+    /// The adaptive flags are scene flags: `render`, `diagnostic`, `check`
+    /// and `light-paths` all take them and apply them the same way, one at
+    /// a time; a negative or non-finite threshold, a zero minimum and a
+    /// non-finite tolerance are usage errors.
+    #[test]
+    fn cli_adaptive_flags_are_shared_scene_flags() {
+        let flags = [
+            "--variance-threshold",
+            "0.02",
+            "--min-samples",
+            "16",
+            "--neighbour-tolerance",
+            "-1",
+        ];
+        for sub in ["render", "diagnostic", "check", "light-paths"] {
+            let cli = Cli::try_parse_from(
+                ["crust", sub, "-i", "s.usda", "--region", "0,0,4,4"]
+                    .into_iter()
+                    .chain(flags),
+            )
+            .unwrap_or_else(|e| panic!("{sub}: {e}"));
+            let scene = match &cli.command {
+                Command::Render(a) => &a.scene,
+                Command::Diagnostic(a) => &a.scene,
+                Command::Check(a) => &a.scene,
+                Command::LightPaths(a) => &a.scene,
+                _ => unreachable!(),
+            };
+            assert_eq!(scene.variance_threshold, Some(0.02), "{sub}");
+            assert_eq!(scene.min_samples, Some(16), "{sub}");
+            assert_eq!(scene.neighbour_tolerance, Some(-1.0), "{sub}");
+            let (_, base) = crust_core::get_settings();
+            let s = apply_scene_overrides(scene, base);
+            assert_eq!(s.variance_threshold(), 0.02);
+            assert_eq!(s.min_samples_per_pixel(), 16);
+            assert_eq!(s.adaptive_neighbour_tolerance(), -1.0);
+        }
+        let (_, base) = crust_core::get_settings();
+        let scene = base.with_adaptive_sampling(8, 0.05);
+        let s = apply_overrides(&render(["--min-samples", "4"]).unwrap(), scene);
+        assert_eq!(
+            (s.min_samples_per_pixel(), s.variance_threshold()),
+            (4, 0.05)
+        );
+        let s = apply_overrides(&render(["--variance-threshold", "0"]).unwrap(), scene);
+        assert_eq!(
+            (s.min_samples_per_pixel(), s.variance_threshold()),
+            (8, 0.0)
+        );
+        let s = apply_overrides(&render([]).unwrap(), scene);
+        assert_eq!(
+            (s.min_samples_per_pixel(), s.variance_threshold()),
+            (8, 0.05)
+        );
+        assert_eq!(
+            s.adaptive_neighbour_tolerance(),
+            base.adaptive_neighbour_tolerance()
+        );
+        for bad in [
+            ["--variance-threshold", "-1"],
+            ["--variance-threshold", "inf"],
+            ["--min-samples", "0"],
+            ["--neighbour-tolerance", "nan"],
+        ] {
+            assert!(render(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

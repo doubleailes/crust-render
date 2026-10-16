@@ -190,7 +190,7 @@ impl Shift {
 
 /// How many of `n` pixels a trim of `share` leaves out: at least one, never
 /// all (none of a single pixel).
-fn trimmed_count(n: usize, share: f64) -> usize {
+pub(super) fn trimmed_count(n: usize, share: f64) -> usize {
     if n < 2 {
         return 0;
     }
@@ -198,7 +198,7 @@ fn trimmed_count(n: usize, share: f64) -> usize {
 }
 
 /// The indices of the `k` largest of `values` (NaN counts as largest).
-fn top(values: &[f64], k: usize) -> Vec<usize> {
+pub(super) fn top(values: &[f64], k: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..values.len()).collect();
     if k == 0 {
         return Vec::new();

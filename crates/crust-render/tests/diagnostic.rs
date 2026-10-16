@@ -204,3 +204,200 @@ fn a_baseline_of_another_camera_is_not_comparable() {
         "not comparable: a different camera"
     );
 }
+
+/// The adaptive flags are scene flags: the report's effective settings show
+/// what they set, with the flag and attribute of each, as a render with the
+/// same flags would use.
+#[test]
+fn the_adaptive_flags_are_shared() {
+    let dir = work_dir("adaptive_flags");
+    let json = dir.join("r.json");
+    let out = crust(
+        &dir,
+        &[
+            "-i",
+            cornellbox().to_str().unwrap(),
+            "--budget",
+            "1s",
+            "--variance-threshold",
+            "0.02",
+            "--min-samples",
+            "16",
+            "--neighbour-tolerance",
+            "0.5",
+            "--json",
+            json.to_str().unwrap(),
+        ],
+    );
+    assert!(matches!(out.status.code(), Some(0 | 3)), "{out:?}");
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).expect("written")).unwrap();
+    let row = |name: &str| {
+        report["effective_settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .clone()
+    };
+    for (name, value, flag, attr) in [
+        (
+            "variance_threshold",
+            "0.02",
+            "--variance-threshold",
+            "crust:varianceThreshold",
+        ),
+        (
+            "min_samples_per_pixel",
+            "16",
+            "--min-samples",
+            "crust:minSamplesPerPixel",
+        ),
+        (
+            "adaptive_neighbour_tolerance",
+            "0.5",
+            "--neighbour-tolerance",
+            "crust:adaptiveNeighbourTolerance",
+        ),
+    ] {
+        let r = row(name);
+        assert_eq!(r["value"], value, "{name}");
+        assert_eq!(r["flag"], flag, "{name}");
+        assert_eq!(r["usd_attribute"], attr, "{name}");
+    }
+}
+
+/// The spec's scenarios "Asking for the adaptive maps", "Layers of the
+/// maps" and "Tier 2 did not run": with `--adaptive-maps`, the EXR (and no
+/// PNG) beside the JSON, its four layers at the scene's resolution, non-zero
+/// only inside the crop, and named in the report; with no budget for tier 2,
+/// no file and the reason.
+#[test]
+fn the_adaptive_maps_are_one_exr_of_four_layers() {
+    use exr::prelude::{ReadChannels, ReadLayers, read};
+    let dir = work_dir("adaptive_maps");
+    let stage = cornellbox();
+    let samples = snapshot(stage.parent().unwrap());
+    let out = crust(
+        &dir,
+        &[
+            "-i",
+            stage.to_str().unwrap(),
+            "--region",
+            "8,8,40,40",
+            "--budget",
+            "20s",
+            "--repeats",
+            "1",
+            "--adaptive-maps",
+            "maps.exr",
+        ],
+    );
+    assert!(matches!(out.status.code(), Some(0) | Some(3)), "{out:?}");
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("crust-diagnostic.json")).expect("the JSON report"),
+    )
+    .unwrap();
+    let maps = &report["sample_budget"]["adaptive"]["maps"];
+    let written: Vec<_> = snapshot(&dir).into_iter().map(|(p, _)| p).collect();
+    assert!(
+        snapshot(stage.parent().unwrap()) == samples,
+        "a file beside the stage changed"
+    );
+    if maps.is_null() {
+        // A machine too slow for tier 2 in the budget: no file, and why.
+        assert_eq!(written, [dir.join("crust-diagnostic.json")]);
+        assert!(
+            report["not_tried"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["id"] == "adaptive_maps"),
+            "{report}"
+        );
+        return;
+    }
+    assert_eq!(maps["path"], "maps.exr");
+    assert_eq!(maps["written"], true);
+    let layers = [
+        "authored.sampleCount",
+        "authored.variance",
+        "best.sampleCount",
+        "best.variance",
+    ];
+    assert_eq!(maps["layers"], serde_json::json!(layers));
+    assert_eq!(
+        written,
+        [dir.join("crust-diagnostic.json"), dir.join("maps.exr")]
+    );
+    let image = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(dir.join("maps.exr"))
+        .expect("a readable EXR");
+    let res = report["scene"]["resolution"].as_array().unwrap();
+    let (w, h) = (
+        res[0].as_u64().unwrap() as usize,
+        res[1].as_u64().unwrap() as usize,
+    );
+    let layer = &image.layer_data;
+    assert_eq!((layer.size.0, layer.size.1), (w, h));
+    let names: Vec<String> = layer
+        .channel_data
+        .list
+        .iter()
+        .map(|c| c.name.to_string())
+        .collect();
+    assert_eq!(names, layers);
+    let count = &layer.channel_data.list[0].sample_data;
+    for y in 0..h {
+        for x in 0..w {
+            let v = count.value_by_flat_index(y * w + x).to_f32();
+            let inside = (8..40).contains(&x) && (8..40).contains(&y);
+            assert_eq!(v > 0.0, inside, "({x}, {y}): {v}");
+        }
+    }
+}
+
+/// The maps are written before the report, and the report says what
+/// happened to them: a path whose directory cannot be made (it is a file)
+/// leaves `written` false with the reason, and the run fails.
+#[test]
+fn a_maps_file_that_cannot_be_written_is_reported_as_not_written() {
+    let dir = work_dir("adaptive_maps_unwritable");
+    std::fs::write(dir.join("blocker"), b"a file, not a directory").unwrap();
+    let out = crust(
+        &dir,
+        &[
+            "-i",
+            cornellbox().to_str().unwrap(),
+            "--region",
+            "8,8,40,40",
+            "--budget",
+            "20s",
+            "--repeats",
+            "1",
+            "--adaptive-maps",
+            "blocker/maps.exr",
+        ],
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("crust-diagnostic.json")).expect("the JSON report"),
+    )
+    .unwrap();
+    let maps = &report["sample_budget"]["adaptive"]["maps"];
+    if maps.is_null() {
+        // Tier 2 did not run on a slow machine: nothing was tried.
+        return;
+    }
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(maps["written"], false, "{maps}");
+    assert!(
+        maps["reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "{maps}"
+    );
+}

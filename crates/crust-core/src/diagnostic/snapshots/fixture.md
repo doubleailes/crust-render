@@ -73,6 +73,15 @@ Light groups by: none.
 - target MRSE 0.0025 (from variance_threshold), with light_samples=2 settings
 - estimated spp to reach it: 48; projected full-frame render time 9.6 s (sampling only), and 0 s of setup
 
+### Adaptive sampling (192 settings replayed over 256 spp recordings in 0.21 s)
+
+- authored: 128 spp, min 32, threshold 0.05, tolerance 1; predicted 1.2 s and MRSE 0.003 over the crops (crop_a: mean 90 spp, 40% stopped early, misses the target)
+- best: 256 spp, min 16, threshold 0.025, tolerance 1; predicted 1.4 s and MRSE 0.0024 over the crops (crop_a: mean 110 spp, 40% stopped early)
+- best against authored: ΔEff 1.071, target (variance_threshold) reached
+- verified on crop_a: sampleCount matches the replay in every pixel, 1.5 s rendered against 1.4 s predicted (one run)
+- front on crop_a (time, MRSE): 1.4 s / 0.0024 at 256 spp, min 16, threshold 0.025, tolerance 1
+- maps: maps.exr (authored.sampleCount, authored.variance, best.sampleCount, best.variance)
+
 ## Picture-changing settings (measured, not ranked)
 
 - indirect clamp 10: removes 0.4% of the image's luminance (mean 0.001 per pixel), touching 2% of the pixels
