@@ -1121,6 +1121,21 @@ impl World {
             }
             _ => (0.0, 0.0),
         };
+        // A strand's chart has no UV map to carry a density: it changes only
+        // along the strand, at `chart_rate` per unit of the span's parameter,
+        // over which the curve moves `|dpdu|` world units (already through
+        // the placement, so no scale to undo).
+        let uv_width = match &curve {
+            Some(c) if uv.is_some() => {
+                let (rate, len) = (c.chart_rate(), h.dpdu.length());
+                if rate > 0.0 && len > 0.0 {
+                    footprint_width(ray, h.t, h.normal) * rate / len
+                } else {
+                    0.0
+                }
+            }
+            _ => uv_width,
+        };
         Some(WorldHit {
             rec: HitRecord {
                 p: ray.at(h.t),

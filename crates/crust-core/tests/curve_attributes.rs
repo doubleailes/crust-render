@@ -5,7 +5,7 @@
 //! Each stage binds a pure emitter whose colour is the graph under test, so a
 //! hit's `emitted_at` reads back exactly what the material computed there.
 
-use crust_core::{Ray, Scene, Vec3A, WarningCode};
+use crust_core::{Ray, RayCone, Scene, Vec3A, WarningCode};
 use std::path::PathBuf;
 
 /// A directory of its own per test, for the stage and its `.mtlx`.
@@ -730,4 +730,122 @@ fn a_stable_id_seeds_variation_that_survives_reordering() {
         &strands([2, 0, 1]),
     );
     assert_ne!(at(&ra, 0.5, 0.0).x, at(&rb, 0.5, 0.0).x);
+}
+
+/// The chart through `texcoord`, a vector2 read as red and green.
+const CHART: &str = r#"
+      <texcoord name="uv" type="vector2" />
+      <convert name="value" type="color3"><input name="in" type="vector2" nodename="uv" /></convert>"#;
+
+#[test]
+fn a_strand_chart_is_filtered_by_the_ray_cone() {
+    // The texture footprint of a hit at `x` from a cone 0.01 wide.
+    let width = |s: &Scene, x: f32, cone: RayCone| {
+        let ray = Ray::new(Vec3A::new(x, 0.0, 5.0), -Vec3A::Z).with_cone(cone);
+        let hit = s.world.intersect(&ray, 1e-4, 1e4).expect("a hit");
+        assert!(hit.rec.uv.is_some(), "the chart");
+        hit.rec.uv_width
+    };
+    let cone = RayCone {
+        width: 0.01,
+        spread: 0.0,
+    };
+    // st runs 0 → 2 over 4 world units: half a chart unit per world unit,
+    // seen square on at the top of the strand.
+    let st = r#"texCoord2f[] primvars:st = [(0, 0.5), (2, 0.5)] (interpolation = "vertex")"#;
+    let line = |name: &str, extra: &str| {
+        load(
+            name,
+            CHART,
+            &curves("C", "linear", "bezier", "2", "(0, 0, 0), (4, 0, 0)", extra),
+        )
+    };
+    let s = line("cone_chart", st);
+    let w = width(&s, 1.0, cone);
+    assert!(close(w, 0.005, 1e-5), "uv_width {w}");
+    // A pencil ray still point-samples.
+    assert_eq!(width(&s, 1.0, RayCone::default()), 0.0);
+    // Scaled twice as large, the same chart covers twice the world.
+    let scaled = line(
+        "cone_chart_scaled",
+        &format!(
+            r#"{st}
+        double3 xformOp:scale = (2, 2, 2)
+        uniform token[] xformOpOrder = ["xformOp:scale"]"#
+        ),
+    );
+    let w = width(&scaled, 2.0, cone);
+    assert!(close(w, 0.0025, 1e-5), "scaled uv_width {w}");
+    // A chart constant along the strand does not change under the footprint.
+    let per_curve = line(
+        "cone_chart_uniform",
+        r#"texCoord2f[] primvars:st = [(0.3, 0.5)] (interpolation = "uniform")"#,
+    );
+    assert_eq!(width(&per_curve, 1.0, cone), 0.0);
+}
+
+#[test]
+fn a_chart_only_material_on_curves_without_a_chart_builds_no_table() {
+    let line = |name: &str, extra: &str| {
+        load(
+            name,
+            CHART,
+            &curves("C", "linear", "bezier", "2", "(0, 0, 0), (4, 0, 0)", extra),
+        )
+    };
+    let bare = line("chart_only_bare", "");
+    assert_eq!(bare.stats.scene.strand_tables_bytes, 0);
+    assert_eq!(
+        at(&bare, 1.0, 0.0),
+        Vec3A::ZERO,
+        "the chart's origin, as before"
+    );
+    let st = line(
+        "chart_only_st",
+        r#"texCoord2f[] primvars:st = [(0, 0.5), (1, 0.5)] (interpolation = "vertex")"#,
+    );
+    assert!(st.stats.scene.strand_tables_bytes > 0);
+}
+
+#[test]
+fn lone_values_of_every_precision_are_read() {
+    let line = |name: &str, graph: &str, extra: &str| {
+        load(
+            name,
+            graph,
+            &curves("C", "linear", "bezier", "2", "(0, 0, 0), (1, 0, 0)", extra),
+        )
+    };
+    // Three components, as a colour.
+    for ty in ["float3", "double3", "half3", "color3f", "color3d"] {
+        let s = line(
+            &format!("lone_{ty}"),
+            &primvar("tint"),
+            &format!(r#"{ty} primvars:tint = (0.25, 0.5, 0.75) (interpolation = "constant")"#),
+        );
+        assert_eq!(at(&s, 0.5, 0.0), Vec3A::new(0.25, 0.5, 0.75), "{ty}");
+        assert!(
+            warned(&s, WarningCode::CurvesUnsupportedPrimvar).is_empty(),
+            "{ty}"
+        );
+    }
+    // Two, as a vector2 into red and green.
+    let pair = r#"
+      <geompropvalue name="p" type="vector2"><input name="geomprop" type="string" value="pair" /></geompropvalue>
+      <convert name="value" type="color3"><input name="in" type="vector2" nodename="p" /></convert>"#;
+    for ty in ["float2", "double2", "half2"] {
+        let s = line(
+            &format!("lone_{ty}"),
+            pair,
+            &format!(r#"{ty} primvars:pair = (0.25, 0.75) (interpolation = "constant")"#),
+        );
+        assert_eq!(at(&s, 0.5, 0.0), Vec3A::new(0.25, 0.75, 0.0), "{ty}");
+        // And as the chart.
+        let s = line(
+            &format!("lone_{ty}_chart"),
+            CHART,
+            &format!(r#"{ty} primvars:st = (0.25, 0.75) (interpolation = "constant")"#),
+        );
+        assert_eq!(at(&s, 0.5, 0.0), Vec3A::new(0.25, 0.75, 0.0), "{ty} chart");
+    }
 }

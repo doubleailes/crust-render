@@ -8,8 +8,8 @@
 //! [`StrandTable`] maps the one to the other, the way a [`crate::FaceMap`]
 //! maps a triangle to its polygon. The import builds one only for curves whose
 //! material reads a curve property, a curve primvar or the chart
-//! ([`crate::Material::curve_needs`]), so a groom shaded by a material that
-//! reads none of them pays nothing.
+//! ([`crate::Material::curve_needs`]) — the chart only where the prim authors
+//! one — so a groom shaded by a material that reads none of them pays nothing.
 
 use crust_mtlx::Val;
 
@@ -59,6 +59,33 @@ impl StrandValues {
                 ))
             }
         }
+    }
+
+    /// How fast the first two lanes change along span `span` at its
+    /// parameter `u`: the length of their derivative in `u`, zero for a value
+    /// that is constant along the strand.
+    fn rate(&self, span: usize, u: f32) -> f32 {
+        let d = match self {
+            StrandValues::Constant(_) | StrandValues::PerCurve(_) => return 0.0,
+            StrandValues::Linear(vs) => match vs.get(span) {
+                Some([a, b]) => [b.v[0] - a.v[0], b.v[1] - a.v[1]],
+                None => return 0.0,
+            },
+            StrandValues::Cubic(vs) => match vs.get(span) {
+                // The Bézier derivative: 3 Σ (cᵢ₊₁ − cᵢ) Bᵢ²(u).
+                Some(c) => {
+                    let s = 1.0 - u;
+                    let w = [3.0 * s * s, 6.0 * u * s, 3.0 * u * u];
+                    std::array::from_fn(|lane| {
+                        (0..3)
+                            .map(|i| w[i] * (c[i + 1].v[lane] - c[i].v[lane]))
+                            .sum()
+                    })
+                }
+                None => return 0.0,
+            },
+        };
+        (d[0] * d[0] + d[1] * d[1]).sqrt()
     }
 
     /// Bytes held, for `--stats`.
@@ -158,6 +185,15 @@ impl StrandTable {
         Some((v.v[0], v.v[1]))
     }
 
+    /// How fast the chart changes along primitive `prim_id` at `u`, per unit
+    /// of `u`: zero without a chart, or with one that is constant along the
+    /// strand.
+    pub fn chart_rate(&self, prim_id: u32, u: f32) -> f32 {
+        self.chart
+            .as_ref()
+            .map_or(0.0, |c| c.rate(prim_id as usize, u))
+    }
+
     /// Bytes held, for `--stats`.
     pub fn bytes(&self) -> usize {
         std::mem::size_of::<StrandTable>()
@@ -242,6 +278,12 @@ impl<'w> CurveHit<'w> {
         self.table.chart_at(self.prim_id, self.u)
     }
 
+    /// How fast the chart changes along the strand at the hit, per unit of
+    /// the span's parameter (see [`StrandTable::chart_rate`]).
+    pub fn chart_rate(&self) -> f32 {
+        self.table.chart_rate(self.prim_id, self.u)
+    }
+
     /// Whether the table carries any primvar values at all.
     pub fn has_primvars(&self) -> bool {
         !self.table.primvars.is_empty()
@@ -319,6 +361,30 @@ mod tests {
         assert_eq!(x, [Some(2.0), Some(1.0), Some(2.0), Some(0.5), None]);
         CurveHit::new(&t, 2, 0.5).unwrap().primvars_into(&mut out);
         assert_eq!(out[1].unwrap().x(), 3.0);
+    }
+
+    #[test]
+    fn the_chart_rate_is_its_derivative_along_the_span() {
+        let rate =
+            |chart: StrandValues, prim, u| table().with_chart(Some(chart)).chart_rate(prim, u);
+        // Constant along the strand: no rate, wherever the chart sits.
+        let per_curve = StrandValues::PerCurve(vec![Val::vec2(0.2, 0.7), Val::vec2(0.9, 0.1)]);
+        assert_eq!(rate(per_curve, 2, 0.5), 0.0);
+        // Linear: the end-to-end difference, a 3-4-5 triangle.
+        let linear = StrandValues::Linear(vec![[Val::vec2(0.0, 0.0), Val::vec2(0.3, 0.4)]; 3]);
+        assert!((rate(linear, 1, 0.25) - 0.5).abs() < 1e-6);
+        // Cubic: evenly spaced control values are the straight line, whose
+        // derivative is three times the step everywhere; bunched ones are
+        // flat at the ends and fastest in the middle.
+        let even = StrandValues::Cubic(vec![[0.0, 1.0, 2.0, 3.0].map(|x| Val::vec2(x, 0.0)); 3]);
+        for u in [0.0, 0.3, 1.0] {
+            assert!((rate(even.clone(), 0, u) - 3.0).abs() < 1e-5, "u {u}");
+        }
+        let bunched = StrandValues::Cubic(vec![[0.0, 0.0, 1.0, 1.0].map(|y| Val::vec2(0.0, y)); 3]);
+        assert_eq!(rate(bunched.clone(), 0, 0.0), 0.0);
+        assert!((rate(bunched, 0, 0.5) - 1.5).abs() < 1e-6);
+        // No chart: no rate.
+        assert_eq!(table().chart_rate(0, 0.5), 0.0);
     }
 
     #[test]

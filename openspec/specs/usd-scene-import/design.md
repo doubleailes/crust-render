@@ -427,7 +427,8 @@ Schema mapping:
   last → 1; for NURBS, the rendered domain). `World::intersect` turns a hit on a geometry
   with a table into `HitPart::Curve` (`CurveHit`: the table, the span and `u`, borrowing
   the table — which is why `HitRecord` carries the world's lifetime) and fills `uv` from
-  the table's chart. The strand shares `HitRecord::part` with the Ptex face (which took
+  the table's chart, and `uv_width` from how fast that chart changes along the strand
+  (textures record, "A strand's chart"). The strand shares `HitRecord::part` with the Ptex face (which took
   the face footprint width into `FaceHit`), because no hit lies on both, and because the
   record must stay at 96 bytes: `WorldHit` is then exactly 128, the most LLVM copies
   inline, and the integrator moves one per vertex. Beside the face, the strand made it
@@ -445,7 +446,11 @@ Schema mapping:
     `true`, which would build a chart table for every MaterialX groom. With no need,
     no table, and the import and the image are what they were (`samples/curves.usda`
     and `hair.usda` bit-identical). Only the named primvars are decoded, on the prims
-    bound to the material.
+    bound to the material. A need for the chart alone, on a prim that authors no
+    chart, builds no table either (`StrandBuilder::finish` returns `None`): it would
+    hold nothing a hit reads, yet cost a span per primitive and take every hit off the
+    plain path — and it is the case of every textured `UsdPreviewSurface` groom, whose
+    `uses_uv` is `true`.
   - **One recipe for every primvar.** A span's `vertex` values are fixed linear
     combinations of at most four authored values — `basis_to_bezier` and the NURBS
     blossom are both linear in the control values — so the span loops hand the strand
@@ -454,8 +459,9 @@ Schema mapping:
     degree 2 elevated to a cubic as its points are). A cubic span stores four Bézier
     values per channel, evaluated as a cubic in `u`: linear-between-ends (what widths
     do) would flatten a colour ramp authored on a few control points. `varying` is one
-    value per span end, linear in `u`; `uniform` per curve; `constant` once. `color3f`
-    is converted from its `colorSpace`; `:indices` are expanded. A `faceVarying`
+    value per span end, linear in `u`; `uniform` per curve; `constant` once. Any
+    precision is read (`float`, `double`, `half`), as an array or a lone `constant`
+    value. `color3f` is converted from its `colorSpace`; `:indices` are expanded. A `faceVarying`
     primvar, another type or a length that does not match the interpolation is refused
     (`curves.unsupported_primvar`), as is anything under `primvars:curve:`
     (`curves.reserved_primvar`).

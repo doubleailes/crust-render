@@ -2523,3 +2523,37 @@ fn an_image_at_a_named_uv_set_reads_the_chart() {
             .any(|op| matches!(op, Op::Texture { coord: None, .. }))
     );
 }
+
+#[test]
+fn an_image_at_a_curve_property_reads_it_with_or_without_the_prefix() {
+    // `compile_geompropvalue` reads `primvars:curve:v` as `curve:v`, so an
+    // image whose coordinate it is must read the strand too, not the chart.
+    for prop in ["curve:v", "primvars:curve:v"] {
+        let d = Doc::parse(&format!(
+            r#"<materialx>
+                 <geompropvalue name="v" type="vector2">
+                   <input name="geomprop" type="string" value="{prop}" />
+                 </geompropvalue>
+                 <image name="img" type="color3">
+                   <input name="file" type="filename" value="a.png" />
+                   <input name="texcoord" type="vector2" nodename="v" />
+                 </image>
+               </materialx>"#
+        ))
+        .unwrap();
+        let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+            Some(TextureRef(Arc::new(Flat([0.5; 4]))))
+        };
+        let mut c = Compiler::new(&d, &Host::new(&loader));
+        c.compile_named("", "img", None);
+        assert!(c.unsupported.is_empty(), "{prop}: {:?}", c.unsupported);
+        assert!(c.program.reads_curve(), "{prop}");
+        assert!(
+            c.program
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Texture { coord: Some(_), .. })),
+            "{prop}: the image reads the chart"
+        );
+    }
+}

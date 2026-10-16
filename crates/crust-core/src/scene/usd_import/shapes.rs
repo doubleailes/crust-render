@@ -371,7 +371,7 @@ pub(super) fn curve_segments(
     );
     Some(Curves {
         batches: (segments, cubic_segments),
-        strands: strands.map(|b| b.finish(prim)),
+        strands: strands.and_then(|b| b.finish(prim)),
     })
 }
 
@@ -848,7 +848,7 @@ pub(super) fn nurbs_curve_segments(
     );
     Some(Curves {
         batches: (segments, cubic_segments),
-        strands: strands.map(|b| b.finish(prim)),
+        strands: strands.and_then(|b| b.finish(prim)),
     })
 }
 
