@@ -1,8 +1,8 @@
 # Tasks
 
 Tasks 2.4 onward read curve properties and primvars through the strand
-tables of `curve-attributes-to-materials`, so they need that change in the
-branch. Group 1 reads geometry only.
+tables of `curve-attributes-to-materials`. No task starts until that change
+(PR #322) has merged and this branch is rebased onto `main`.
 
 ## 1. Measured spike
 
@@ -57,5 +57,5 @@ branch. Group 1 reads geometry only.
 
 ## Workflow follow-up
 
-- Rebase onto `main` once `curve-attributes-to-materials` (PR #322) has merged; until then group 2.4 onward builds on its branch.
+- Rebase onto `main` once `curve-attributes-to-materials` (PR #322) has merged, before task 1.1.
 - Archive the change after review.
