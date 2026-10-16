@@ -44,7 +44,7 @@
 ## 7. Integration
 
 - [x] 7.1 Add a sample groom (`samples/`) with a root-to-tip ramp, per-strand `curve:random` hue variation through `hsvtorgb`, and a `uniform` colour primvar, and an integration test loading it; verify it renders and `crust check` reports no warnings
-- [x] 7.2 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, `cargo deny --locked check`, and the pinned nightly clippy; verify all pass (one test, `loads_openpbr_showcase_usda`, fails on the base branch as well: commit 643cef8 raised its sample to 1280×720 without updating it)
+- [x] 7.2 Run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, `cargo deny --locked check`, and the pinned nightly clippy; verify all pass (after merging `main`, which brought 4facb2a's fix for `loads_openpbr_showcase_usda`: 2,208 passed, 0 failed)
 
 ## Workflow follow-up
 
