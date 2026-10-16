@@ -2,7 +2,7 @@
 //! expression can match — its scatter kind ([`Scatter`]), its OpenPBR
 //! component ([`LobeLabel`]) — and a BSDF value split by lobe
 //! ([`LobeSplit`]). Materials produce it; `crate::lpe` reads it (and
-//! re-exports it, so `crate::material::lobe::LobeSplit` still names it).
+//! re-exports it, so `crate::lpe::LobeSplit` still names it).
 
 /// The scatter kind of an event. Camera, volume and emission events have
 /// none, which only the `.` wildcard matches.

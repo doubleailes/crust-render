@@ -205,9 +205,11 @@ stays a mechanical move. From the bottom:
 | import | `scene/`, `world.rs`, `live`, `place` |
 | tools | `diagnostic/`, `inspect/`, `compare`, `stamp`, `check` |
 
-A module may name its own layer or a lower one, by module path or through a
-crate-root re-export; doc comments may link upward. `tests/layering.rs`
-enforces it, and fails on a top-level module with no layer. When something
+A module may name its own layer or a lower one, whether by module path,
+through a crate-root re-export (the `pub use material::*` glob included) or by
+a `super::` chain that reaches the root; test-only items and doc comments may
+reach upward. `tests/layering.rs` enforces it, and fails on a top-level module
+with no layer. When something
 low needs something high, the item is usually in the wrong place: move it
 down (as `PixelRect`, `Structural` and the lobe vocabulary were) rather than
 adding a trait.
