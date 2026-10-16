@@ -8,7 +8,7 @@
 
 ## 2. Luminance trace and the shared decision step (rendering)
 
-- [ ] 2.1 Make `adaptive_check_points`, `batch_schedule`, `held_by_neighbour` and `PixelState::finish_round` reachable from `diagnostic/`. Factor the round loop's "freeze indices → decide stops" step into one `pub(crate)` function that the pass calls. Verify that `cargo test -p crust-core` passes unchanged and `scripts/check_images.sh check` reports no image change.
+- [x] 2.1 Make `adaptive_check_points`, `batch_schedule`, `held_by_neighbour` and `PixelState::finish_round` reachable from `diagnostic/`. Factor the round loop's "freeze indices → decide stops" step into one `pub(crate)` function that the pass calls. Verify that `cargo test -p crust-core` passes unchanged and `scripts/check_images.sh check` reports no image change.
 - [x] 2.2 Add `Instruments::luminance_trace`: the final pass keeps, per region pixel, each sample's f64 luminance in sample order, returned on `Measured`. Verify with a test that the trace's in-order f64 sums equal the pass's `lum_sum` / `lum_sq` bitwise, and that a render without the instrument is bit-identical to before (callgrind instruction count on cornellbox at `-s 2` within noise, as CLAUDE.md describes).
 
 ## 3. Replay and sweep (diagnostics)
