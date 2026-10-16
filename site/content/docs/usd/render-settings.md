@@ -169,7 +169,7 @@ gets there.
 
 ### crust:minSamplesPerPixel
 
-`int`, default **32**.
+`int`, default **32**. CLI: [`--min-samples`](@/docs/reference/command-line.md#min-samples).
 
 The number of samples every pixel takes before adaptive sampling may stop it. It is never
 lower than ⌈√`samplesPerPixel`⌉. A negative value is refused with a warning, and the
@@ -180,7 +180,7 @@ pixel early: every pixel takes the full count.
 
 ### crust:varianceThreshold
 
-`float`, default **0.05**.
+`float`, default **0.05**. CLI: [`--variance-threshold`](@/docs/reference/command-line.md#variance-threshold).
 
 The adaptive sampling target. A pixel stops once the relative standard error of its
 estimate is below this value, after at least `crust:minSamplesPerPixel` samples. A pixel
@@ -190,7 +190,7 @@ Lower values mean less noise and longer renders.
 
 ### crust:adaptiveNeighbourTolerance
 
-`float`, default **1.0**.
+`float`, default **1.0**. CLI: [`--neighbour-tolerance`](@/docs/reference/command-line.md#neighbour-tolerance).
 
 A pixel is not allowed to stop while one of its four direct neighbours is much less
 converged than it is. This value is how much less converged a neighbour may be, in units

@@ -1742,14 +1742,20 @@ pub fn effective_settings(s: &RenderSettings, flags: &SceneFlags) -> Vec<Setting
         row(
             "variance_threshold",
             s.variance_threshold().to_string(),
-            None,
+            Some("--variance-threshold"),
             Some("crust:varianceThreshold"),
         ),
         row(
             "min_samples_per_pixel",
             s.min_samples_per_pixel().to_string(),
-            None,
+            Some("--min-samples"),
             Some("crust:minSamplesPerPixel"),
+        ),
+        row(
+            "adaptive_neighbour_tolerance",
+            s.adaptive_neighbour_tolerance().to_string(),
+            Some("--neighbour-tolerance"),
+            Some("crust:adaptiveNeighbourTolerance"),
         ),
         row(
             "subdivision_level",
