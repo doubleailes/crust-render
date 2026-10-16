@@ -1542,3 +1542,203 @@ fn progress_steps_count_samples_and_reach_their_total() {
         }
     }
 }
+
+/// The `sampleCount` and `variance` AOVs alone.
+fn count_and_variance() -> crate::AovRequest {
+    use crate::{AovProduct, AovRequest, AovSource, AovVar, Precision};
+    let var = |name: &str, source: AovSource| AovVar {
+        prim_path: format!("/Render/Vars/{name}"),
+        name: name.to_owned(),
+        channel_prefix: None,
+        source,
+        components: source.components(),
+        precision: Precision::Float,
+        accumulation: source.default_accumulation(),
+        clear: source.default_clear(),
+        expression: None,
+        raw: false,
+        variance: false,
+    };
+    AovRequest {
+        products: vec![AovProduct {
+            prim_path: "/Render/p".into(),
+            name: "p.exr".into(),
+            vars: vec![
+                var("sampleCount", AovSource::SampleCount),
+                var("variance", AovSource::Variance),
+            ],
+            attributes: Vec::new(),
+        }],
+    }
+}
+
+/// A top-down AOV plane of a `w`-wide region, in raster order
+/// (`PixelRect::index`), as a trace and a replay hold it.
+fn raster_order(plane: &[f32], w: usize) -> Vec<f32> {
+    let h = plane.len() / w;
+    let mut out = vec![0.0; plane.len()];
+    for (i, &v) in plane.iter().enumerate() {
+        out[(h - 1 - i / w) * w + i % w] = v;
+    }
+    out
+}
+
+/// The luminance trace is what the pass added to its stop-rule sums: a
+/// replay of the fixed count over it gives every pixel's variance bit for
+/// bit. Only a fixed-count pass that asks keeps one, and asking changes no
+/// pixel of the image.
+#[test]
+fn the_luminance_trace_is_what_the_pass_summed() {
+    use super::{AdaptiveSetting, Instruments, replay};
+    use crate::Renderer;
+    let scene = sample_scene("veach_mis.usda");
+    let s = scene
+        .settings
+        .with_resolution(40, 24)
+        .with_samples_per_pixel(24)
+        .with_adaptive_sampling(24, 0.0);
+    let r = Renderer::new(scene.camera, scene.world, scene.lights, s);
+    let plain = r.render_measured(
+        None,
+        Instruments {
+            variance: true,
+            ..Instruments::default()
+        },
+    );
+    assert!(plain.trace.is_none(), "not asked for");
+    let m = r.render_measured(
+        None,
+        Instruments {
+            variance: true,
+            luminance_trace: true,
+            tile_times: true,
+            ..Instruments::default()
+        },
+    );
+    assert!(
+        bits(&plain.buffer) == bits(&m.buffer),
+        "the trace is a measurement only"
+    );
+    let trace = m.trace.expect("a fixed-count pass keeps its trace");
+    assert_eq!((trace.spp(), trace.rect().area()), (24, 960));
+    assert_eq!(trace.tiles().len(), m.tiles.len());
+    assert_eq!(trace.bytes(), 960 * 24 * 8 + 960 * 8);
+    let setting = AdaptiveSetting {
+        spp: 24,
+        min_samples: 24,
+        threshold: 0.0,
+        tolerance: 1.0,
+    };
+    let out = replay(&trace, setting);
+    assert!(out.taken.iter().all(|&n| n == 24));
+    assert_eq!(out.early_stopped, 0);
+    let a: Vec<u64> = out.variance.iter().map(|v| v.to_bits()).collect();
+    let b: Vec<u64> = m.var_map.iter().map(|v| v.to_bits()).collect();
+    assert!(a == b, "the replayed sums are the pass's");
+
+    // An adaptive pass keeps none: its pixels hold different counts.
+    let adaptive = Renderer::new(
+        sample_scene("veach_mis.usda").camera,
+        sample_scene("veach_mis.usda").world,
+        sample_scene("veach_mis.usda").lights,
+        s.with_adaptive_sampling(4, 0.05),
+    );
+    let m = adaptive.render_measured(
+        None,
+        Instruments {
+            luminance_trace: true,
+            ..Instruments::default()
+        },
+    );
+    assert!(m.trace.is_none());
+}
+
+/// The replay decides as the renderer does (design D1): over one recorded
+/// fixed-count pass, every threshold, minimum, tolerance and cap gives the
+/// `sampleCount` an adaptive render of the same region takes, in every
+/// pixel, and the `variance` it ends with, bit for bit — the per-pixel rule
+/// and the neighbour rule alike, in a full frame and in a region.
+#[test]
+fn a_replay_takes_the_samples_an_adaptive_render_takes() {
+    use super::{AdaptiveSetting, Instruments, PixelRect, replay};
+    use crate::{AovSource, Renderer};
+    let request = count_and_variance();
+    for name in ["cornellbox.usda", "veach_mis.usda"] {
+        for region in [None, Some(PixelRect::new(7, 5, 37, 26))] {
+            let base = {
+                let s = sample_scene(name)
+                    .settings
+                    .with_resolution(48, 32)
+                    .with_samples_per_pixel(128);
+                match region {
+                    Some(r) => s.with_region(r).expect("inside the frame"),
+                    None => s,
+                }
+            };
+            let scene = sample_scene(name);
+            let mut r = Renderer::new(
+                scene.camera,
+                scene.world,
+                scene.lights,
+                base.with_adaptive_sampling(128, 0.0),
+            );
+            let trace = r
+                .render_measured(
+                    None,
+                    Instruments {
+                        luminance_trace: true,
+                        ..Instruments::default()
+                    },
+                )
+                .trace
+                .expect("recorded");
+            let w = trace.rect().width();
+            let mut stopped_some = false;
+            for (spp, min, threshold, tolerance) in [
+                (128, 8, 0.05, -1.0),
+                (128, 8, 0.05, 1.0),
+                (128, 16, 0.1, 0.0),
+                (64, 8, 0.02, 1.0),
+                (96, 32, 0.05, 2.0),
+                (128, 8, 0.0, 1.0),
+            ] {
+                let setting = AdaptiveSetting {
+                    spp,
+                    min_samples: min,
+                    threshold,
+                    tolerance,
+                };
+                let predicted = replay(&trace, setting);
+                r.reconfigure(
+                    base.with_samples_per_pixel(spp)
+                        .with_adaptive_sampling(min, threshold)
+                        .with_adaptive_neighbour_tolerance(tolerance),
+                );
+                let m = r.render_measured(
+                    Some(&request),
+                    Instruments {
+                        variance: true,
+                        ..Instruments::default()
+                    },
+                );
+                let film = m.film.as_ref().expect("a film");
+                let vars = &request.products[0].vars;
+                assert_eq!(vars[0].source, AovSource::SampleCount);
+                let counts = raster_order(&film.var_channels(&m.buffer, &vars[0])[0], w);
+                let want: Vec<f32> = predicted.taken.iter().map(|&n| n as f32).collect();
+                assert!(
+                    counts == want,
+                    "{name} {region:?} {setting:?}: {} pixels differ",
+                    counts.iter().zip(&want).filter(|(a, b)| a != b).count()
+                );
+                let a: Vec<u64> = predicted.variance.iter().map(|v| v.to_bits()).collect();
+                let b: Vec<u64> = m.var_map.iter().map(|v| v.to_bits()).collect();
+                assert!(a == b, "{name} {region:?} {setting:?}: variance differs");
+                assert_eq!(predicted.early_stopped, m.rays.early_stopped);
+                assert_eq!(predicted.held, m.rays.neighbour_held);
+                stopped_some |= predicted.early_stopped > 0;
+            }
+            assert!(stopped_some, "{name}: no setting stopped a pixel early");
+        }
+    }
+}

@@ -114,12 +114,19 @@ from the crop's measured cost.
 - **THEN** the sweep still runs, the authored point is the fixed-count render,
   and the report says that adaptive sampling is off as authored
 
+#### Scenario: Guided tier-1 settings
+
+- **WHEN** the best tier-1 settings turn path guiding on
+- **THEN** the sweep records and verifies them with guiding off, and
+  `sample_budget.adaptive.unguided` is true
+
 ### Requirement: The best adaptive setting at the target
 
 Tier 2 SHALL name, as `sample_budget.adaptive.best`, the grid setting whose
 predicted MRSE is at or below the target on every crop with the least summed
-predicted time. When no setting reaches the target, it SHALL name the one with
-the lowest predicted MRSE and say that the target was not reached.
+predicted time. Without a target, each crop's bar SHALL be the authored point's
+own MRSE. When no setting reaches the bar, it SHALL name the one with the lowest
+predicted MRSE and say that the target was not reached.
 
 #### Scenario: A lower threshold with a higher cap
 
@@ -173,9 +180,9 @@ cite the sweep and the verifications as evidence.
 
 - **WHEN** every crop's verification matched and `best` reaches the target in
   0.7× the authored setting's predicted time at no higher MRSE
-- **THEN** a suggestion `adaptive_sampling` gives the changed
-  `--variance-threshold`, `--min-samples`, `--neighbour-tolerance` and `-s`
-  values, with their attributes, and `suggested_command` applies them
+- **THEN** one suggestion per changed value, `adaptive_sampling.<setting>`,
+  gives its `--variance-threshold`, `--min-samples`, `--neighbour-tolerance` or
+  `-s` value with its attribute, and `suggested_command` applies them
 
 #### Scenario: Within the bar
 
@@ -201,4 +208,5 @@ SHALL name the file and its layers.
 
 - **WHEN** `--adaptive-maps maps.exr` is given and the budget ran out before
   tier 2
-- **THEN** no maps file is written, and the report says why
+- **THEN** no maps file is written, and `not_tried` holds `adaptive_maps` with
+  the reason

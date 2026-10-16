@@ -143,7 +143,7 @@ pub(super) fn fixture() -> Report {
             estimate: true,
             spp_to_target: Some(n(48.0)),
             projected_render_s: Some(n(9.6)),
-            adaptive: Vec::new(),
+            adaptive: Some(fixture_sweep()),
             projected_setup_s: Some(n(0.0)),
         }),
         picture_changing: PictureChanging {
@@ -186,6 +186,75 @@ pub(super) fn fixture() -> Report {
             comparable: false,
             note: Some("not comparable: a different camera".into()),
             ..Deltas::default()
+        }),
+        adaptive_maps: None,
+    }
+}
+
+/// The fixture's adaptive sweep: the authored point and a verified best
+/// on one crop.
+fn fixture_sweep() -> AdaptiveSweep {
+    let n = |x: f64| Num(x);
+    let values = |spp, min, t: f64, tol: f64| AdaptiveValues {
+        samples_per_pixel: spp,
+        min_samples_per_pixel: min,
+        variance_threshold: n(t),
+        adaptive_neighbour_tolerance: n(tol),
+    };
+    let point = |mean: f64, mrse: f64, s: f64, reaches| AdaptivePoint {
+        crop: "crop_a".into(),
+        mean_spp: n(mean),
+        early_stopped_share: n(0.4),
+        neighbour_held_share: n(0.05),
+        mrse: n(mrse),
+        predicted_render_s: n(s),
+        reaches_target: reaches,
+    };
+    AdaptiveSweep {
+        spp_recorded: 256,
+        authored_spp_capped: false,
+        adaptive_off_as_authored: false,
+        unguided: false,
+        target_from: "variance_threshold".into(),
+        grid: AdaptiveGrid {
+            variance_thresholds: vec![n(0.0125), n(0.025), n(0.05), n(0.1)],
+            min_samples_per_pixel: vec![8, 16, 32, 64],
+            adaptive_neighbour_tolerances: vec![n(-1.0), n(0.0), n(1.0), n(2.0)],
+            samples_per_pixel: vec![64, 128, 256],
+            settings: 192,
+        },
+        authored: AdaptivePick {
+            setting: values(128, 32, 0.05, 1.0),
+            per_crop: vec![point(90.0, 0.003, 1.2, false)],
+        },
+        best: AdaptivePick {
+            setting: values(256, 16, 0.025, 1.0),
+            per_crop: vec![point(110.0, 0.0024, 1.4, true)],
+        },
+        target_reached: true,
+        delta_eff_over_authored: n(1.071),
+        front: vec![AdaptiveFront {
+            crop: "crop_a".into(),
+            points: vec![AdaptiveCandidate {
+                setting: values(256, 16, 0.025, 1.0),
+                mean_spp: n(110.0),
+                mrse: n(0.0024),
+                predicted_render_s: n(1.4),
+            }],
+        }],
+        verification: vec![AdaptiveVerification {
+            crop: "crop_a".into(),
+            sample_count_matches: true,
+            mismatched_pixels: 0,
+            predicted_render_s: n(1.4),
+            measured_render_s: n(1.5),
+        }],
+        replay_s: n(0.21),
+        maps: Some(AdaptiveMapsInfo {
+            path: "maps.exr".into(),
+            layers: ADAPTIVE_MAP_LAYERS.iter().map(|l| (*l).into()).collect(),
+            written: true,
+            reason: None,
         }),
     }
 }
@@ -563,6 +632,118 @@ fn converged_needs_no_better_trial_and_no_actionable_finding() {
     assert!(super::converged(&t, &f));
 }
 
+fn adaptive(
+    spp: u32,
+    min_samples: u32,
+    threshold: f32,
+    tolerance: f32,
+) -> crate::tracer::AdaptiveSetting {
+    crate::tracer::AdaptiveSetting {
+        spp,
+        min_samples,
+        threshold,
+        tolerance,
+    }
+}
+
+fn verified(crop: &str, matches: bool) -> AdaptiveVerification {
+    AdaptiveVerification {
+        crop: crop.into(),
+        sample_count_matches: matches,
+        mismatched_pixels: if matches { 0 } else { 12 },
+        predicted_render_s: Num(1.0),
+        measured_render_s: Num(1.1),
+    }
+}
+
+/// The spec's scenario "A verified gain": every crop matched and `best`
+/// is ΔEff 1.43 over the authored point, so each value it changes is a
+/// suggestion with its flag and attribute, citing the sweep and the
+/// verifications; and `suggested_command` applies them.
+#[test]
+fn a_verified_adaptive_gain_is_suggested() {
+    let authored = adaptive(128, 32, 0.05, 1.0);
+    let best = adaptive(256, 16, 0.025, 1.0);
+    let v = [verified("crop_a", true), verified("crop_b", true)];
+    let s = super::adaptive_suggestions_for(authored, Some(best), 1.43, &v, 2);
+    let got: Vec<(&str, &str, &str, &str)> = s
+        .iter()
+        .map(|x| {
+            (
+                x.id.as_str(),
+                x.flag.as_deref().unwrap(),
+                x.usd_attribute.as_deref().unwrap(),
+                x.value.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "adaptive_sampling.samples_per_pixel",
+                "-s",
+                "crust:samplesPerPixel",
+                "256"
+            ),
+            (
+                "adaptive_sampling.variance_threshold",
+                "--variance-threshold",
+                "crust:varianceThreshold",
+                "0.025"
+            ),
+            (
+                "adaptive_sampling.min_samples_per_pixel",
+                "--min-samples",
+                "crust:minSamplesPerPixel",
+                "16"
+            ),
+        ]
+    );
+    assert!(s.iter().all(|x| x.expected_delta_eff_at_target.0 == 1.43));
+    assert_eq!(
+        s[0].evidence,
+        [
+            "adaptive_sampling",
+            "adaptive_verify@crop_a",
+            "adaptive_verify@crop_b"
+        ]
+    );
+    let o = super::Options::new("scene.usda");
+    let cmd = super::command(&o, &crate::RenderSettings::default(), &s, None);
+    assert!(
+        cmd.ends_with("-s 256 --variance-threshold 0.025 --min-samples 16"),
+        "{cmd}"
+    );
+    assert!(!cmd.contains('#'), "{cmd}");
+    // A negative tolerance is passed as the flag's value.
+    let s =
+        super::adaptive_suggestions_for(authored, Some(adaptive(128, 32, 0.05, -1.0)), 1.2, &v, 2);
+    let cmd = super::command(&o, &crate::RenderSettings::default(), &s, None);
+    assert!(cmd.ends_with("--neighbour-tolerance -1"), "{cmd}");
+}
+
+/// The spec's scenarios "Within the bar", "The prediction does not
+/// reproduce" and "The budget cannot verify": nothing is suggested.
+#[test]
+fn an_adaptive_setting_is_suggested_only_when_verified_past_the_bar() {
+    let authored = adaptive(128, 32, 0.05, 1.0);
+    let best = Some(adaptive(256, 16, 0.025, 1.0));
+    let both = [verified("crop_a", true), verified("crop_b", true)];
+    assert!(super::adaptive_suggestions_for(authored, best, 1.05, &both, 2).is_empty());
+    let one_off = [verified("crop_a", true), verified("crop_b", false)];
+    assert!(super::adaptive_suggestions_for(authored, best, 1.5, &one_off, 2).is_empty());
+    // crop_b's verification did not fit the budget.
+    assert!(super::adaptive_suggestions_for(authored, best, 1.5, &both[..1], 2).is_empty());
+    // The authored point is best: nothing to change.
+    assert!(super::adaptive_suggestions_for(authored, None, 1.5, &both, 2).is_empty());
+    assert!(super::adaptive_suggestions_for(authored, best, 1.5, &[], 0).is_empty());
+    assert_eq!(
+        super::adaptive_suggestions_for(authored, best, 1.5, &both, 2).len(),
+        3
+    );
+}
+
 #[test]
 fn the_suggested_command_applies_every_suggestion() {
     let mut o = super::Options::new("shots/a b.usda");
@@ -903,11 +1084,35 @@ fn a_report_from_before_the_hardening_still_compares() {
     assert_eq!(c.noise_floor, None);
     assert!(back.run.seeds.is_empty());
     assert!(back.picture_changing.light_sampling_reach.is_none());
+    assert!(back.sample_budget.as_ref().unwrap().adaptive.is_none());
     let mut now = previous();
     now.suggestions.clear();
     let d = super::compare::deltas(old, &now);
     assert!(d.comparable, "{:?}", d.note);
     assert_eq!(d.suggestions_gone, ["light_samples=2"]);
+}
+
+/// `--baseline` reads a report whose `sample_budget.adaptive` is the
+/// per-crop array of before the sweep: as absent, and the comparison still
+/// runs.
+#[test]
+fn a_report_with_the_per_crop_adaptive_array_still_compares() {
+    let mut v: serde_json::Value = serde_json::from_str(&previous().to_json()).expect("valid JSON");
+    v["sample_budget"]["adaptive"] = serde_json::json!([{
+        "crop": "crop_a",
+        "variance_threshold": 0.05,
+        "spp": 128,
+        "mean_spp": 90.0,
+        "early_stopped_share": 0.4,
+        "time_adaptive_s": 1.0,
+        "time_fixed_estimate_s": 1.3,
+        "time_saved_share": 0.23
+    }]);
+    let old = serde_json::to_string_pretty(&v).unwrap();
+    let back: Report = serde_json::from_str(&old).expect("an older report parses");
+    assert!(back.sample_budget.as_ref().unwrap().adaptive.is_none());
+    let d = super::compare::deltas(&old, &previous());
+    assert!(d.comparable, "{:?}", d.note);
 }
 
 /// Light seen directly or in a reflection is never what the brightest
@@ -968,4 +1173,50 @@ fn tree_setup_is_counted() {
     assert_eq!(selection_s(LightSelection::Power), (0.0, 0.25));
     assert_eq!(selection_s(LightSelection::Uniform), (0.0, 0.25));
     assert!(!setup_measured_first("light_selection", "tree"));
+}
+
+/// The sweep's costs (design D2) put the recording's wall-clock time on its
+/// tiles by their measured share: a fixed-count setting predicts the
+/// recording's own `render_s`, however many threads the tiles' seconds
+/// were spread over.
+#[test]
+fn a_recording_s_costs_add_up_to_its_wall_time() {
+    use crate::tracer::{AdaptiveSetting, replay};
+    let scene = sample("veach_mis.usda");
+    let s = scene
+        .settings
+        .with_resolution(40, 24)
+        .with_samples_per_pixel(16)
+        .with_adaptive_sampling(16, 0.0);
+    let r = Renderer::new(scene.camera, scene.world, scene.lights, s);
+    let m = r.render_measured(
+        None,
+        Instruments {
+            tile_times: true,
+            luminance_trace: true,
+            ..Instruments::default()
+        },
+    );
+    let trace = m.trace.as_ref().expect("recorded");
+    let costs = super::adaptive::pixel_costs(trace, m.render_s);
+    let fixed = replay(
+        trace,
+        AdaptiveSetting {
+            spp: 16,
+            min_samples: 16,
+            threshold: 0.0,
+            tolerance: 1.0,
+        },
+    );
+    let lum = vec![1.0; costs.len()];
+    let p = super::adaptive::point(&fixed, &lum, 1.0, &costs);
+    assert!(
+        (p.time_s - m.render_s).abs() <= 1e-9 * m.render_s.max(1.0),
+        "{} vs {}",
+        p.time_s,
+        m.render_s
+    );
+    // Untimed, the time is spread evenly and still adds up.
+    let even = super::adaptive::pixel_costs(trace, 2.0);
+    assert!(even.iter().all(|&c| c > 0.0));
 }

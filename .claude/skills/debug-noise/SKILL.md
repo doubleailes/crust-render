@@ -78,6 +78,13 @@ land at `/`.
      here"; `insufficient_samples` means "rerun with a larger `--budget` or a `--region`".
      A `biased` tier-1 trial is a renderer bug: report it as such, don't recommend it.
    - **`crops`**: the `highest_relative_variance` crop's `rect` is where to look next.
+   - **`sample_budget.adaptive`** (the adaptive sampling sweep): `authored` and `best` give
+     each crop's predicted mean spp, error and time, and `target_reached` says whether any
+     setting reaches the target. `front` is the time/error trade per crop. Trust `best` only
+     when every `verification[].sample_count_matches` is true; an `adaptive_sampling.*`
+     suggestion already needs that. When the user asks where adaptive sampling spends its
+     time, rerun with `--adaptive-maps $OUT/adaptive.exr`. Its `authored.sampleCount` layer
+     shows where the samples went, and `authored.variance` whether they were enough there.
 
 3. **Decide whether to inspect paths.** Go to step 4 when any of these hold:
    `firefly_energy` or `light_sampling_misses` fired; the dominant row is indirect or
@@ -136,6 +143,8 @@ land at `/`.
    | measured | recommend |
    |----------|-----------|
    | a diagnostic suggestion | its flag / `crust:*` attribute, with its ΔEff; then verify it (step 7) |
+   | `adaptive_sampling.*` suggestions | their `-s`, `--variance-threshold`, `--min-samples`, `--neighbour-tolerance` values together (one setting), with `delta_eff_over_authored`; `unguided: true` means the sweep did not measure guiding with them |
+   | `target_reached: false` | no adaptive setting up to `spp_recorded` reaches the target: more samples (`sample_budget.spp_to_target`) or a looser `--target-mrse`, the user's call |
    | direct rows dominate, many lights, no suggestion | `--light-selection` / `--light-samples` are already measured: report their verdicts, not a guess |
    | a rare path through a specular or refractive vertex ending on a light (caustic), with `light_sampling_misses` | no setting makes it reachable by light sampling. Options, all the user's call: more samples (`sample_budget`), the `--indirect-clamp` trade (state the energy `clamp_removed_share` / `luma_share_clamped` say it removes), or a scene change (roughen the specular surface, light-link the light) |
    | `O` paths / large `unlit_emitters` | emissive geometry no shadow ray can find: author a UsdLux light in its place (e.g. a `RectLight` / `SphereLight` of the same shape and power) so NEE samples it — `MeshLightAPI` is not supported |

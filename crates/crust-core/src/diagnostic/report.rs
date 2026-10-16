@@ -35,6 +35,10 @@ pub struct Report {
     /// Only with `--baseline`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deltas: Option<Deltas>,
+    /// The `--adaptive-maps` planes, for the host to write; never in the
+    /// JSON.
+    #[serde(skip)]
+    pub adaptive_maps: Option<AdaptiveMaps>,
 }
 
 impl Report {
@@ -444,9 +448,12 @@ pub struct CropTrial {
     pub noise_floor: Option<Num>,
 }
 
-/// Tier 2. Projections are estimates and never produce suggestions.
+/// Tier 2. Projections are estimates; the one that may produce a
+/// suggestion is a verified adaptive setting ([`AdaptiveSweep`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SampleBudget {
+    /// `null` when adaptive sampling is off as authored and no
+    /// `--target-mrse` was given.
     pub target_mrse: Num,
     /// `variance_threshold` (its square) or `--target-mrse`.
     pub target_from: String,
@@ -457,25 +464,171 @@ pub struct SampleBudget {
     pub spp_to_target: Option<Num>,
     /// Full frame, sampling only (setup excluded).
     pub projected_render_s: Option<Num>,
-    pub adaptive: Vec<AdaptiveCrop>,
+    /// The adaptive sampling sweep; `null` when it did not run (see
+    /// `not_tried`). A report of the shape before the sweep, a per-crop
+    /// array, reads as `null`.
+    #[serde(default, deserialize_with = "sweep_or_absent")]
+    pub adaptive: Option<AdaptiveSweep>,
     /// The settings' setup at full-frame scale, apart from the render.
     #[serde(default)]
     pub projected_setup_s: Option<Num>,
 }
 
-/// One crop rendered with adaptive sampling on at the authored threshold.
+/// An `adaptive` that is not a sweep — the earlier per-crop array — is
+/// absent, not an error, so an older report still loads as `--baseline`.
+fn sweep_or_absent<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<AdaptiveSweep>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
+}
+
+/// The adaptive sampling sweep: each crop recorded once at a fixed count,
+/// the stop rule replayed over the recording for every setting of a grid,
+/// and the best setting rendered once per crop to verify the replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdaptiveCrop {
-    pub crop: String,
+pub struct AdaptiveSweep {
+    /// The samples every pixel of the recordings took: the largest cap the
+    /// sweep can replay.
+    pub spp_recorded: u32,
+    /// The authored sample count was above `spp_recorded`, so the authored
+    /// point is replayed at `spp_recorded`.
+    pub authored_spp_capped: bool,
+    /// `crust:varianceThreshold` is 0: the authored point is the
+    /// fixed-count render.
+    pub adaptive_off_as_authored: bool,
+    /// The tier-1 settings are guided, and the sweep ran them unguided: a
+    /// guided render's final pass follows a wall-clock measurement, so no
+    /// replay reproduces it.
+    #[serde(default)]
+    pub unguided: bool,
+    /// What `best` must reach on every crop: `target_mrse`, or the authored
+    /// point's own MRSE without a target (`authored`).
+    pub target_from: String,
+    /// What the grid tried, by value, and how many settings that made.
+    pub grid: AdaptiveGrid,
+    pub authored: AdaptivePick,
+    /// The cheapest setting at the target on every crop, or the lowest
+    /// MRSE when none reaches it.
+    pub best: AdaptivePick,
+    pub target_reached: bool,
+    /// Summed time × summed MRSE of the authored point over `best`'s.
+    pub delta_eff_over_authored: Num,
+    /// Per crop, the settings no other beats on both predicted time and
+    /// MRSE, by increasing time.
+    pub front: Vec<AdaptiveFront>,
+    /// Per crop, `best` rendered with the `sampleCount` and `variance`
+    /// AOVs; a crop the budget could not fit is under `not_tried`.
+    pub verification: Vec<AdaptiveVerification>,
+    /// Wall-clock seconds the replays took, every crop and setting.
+    pub replay_s: Num,
+    /// `--adaptive-maps`, when given.
+    #[serde(default)]
+    pub maps: Option<AdaptiveMapsInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveGrid {
+    pub variance_thresholds: Vec<Num>,
+    pub min_samples_per_pixel: Vec<u32>,
+    pub adaptive_neighbour_tolerances: Vec<Num>,
+    pub samples_per_pixel: Vec<u32>,
+    pub settings: usize,
+}
+
+/// One adaptive setting, by the names of the settings it sets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveValues {
+    pub samples_per_pixel: u32,
+    pub min_samples_per_pixel: u32,
     pub variance_threshold: Num,
-    pub spp: u32,
+    pub adaptive_neighbour_tolerance: Num,
+}
+
+/// A setting and its predicted outcome on every crop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptivePick {
+    pub setting: AdaptiveValues,
+    pub per_crop: Vec<AdaptivePoint>,
+}
+
+/// A setting's prediction on one crop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptivePoint {
+    pub crop: String,
     pub mean_spp: Num,
     pub early_stopped_share: Num,
-    pub time_adaptive_s: Num,
-    /// The same crop at `spp` fixed, from its measured per-sample time.
-    pub time_fixed_estimate_s: Num,
-    pub time_saved_share: Num,
+    pub neighbour_held_share: Num,
+    pub mrse: Num,
+    /// Seconds of sampling, at the recording's measured cost per sample of
+    /// each tile: an estimate.
+    pub predicted_render_s: Num,
+    pub reaches_target: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveFront {
+    pub crop: String,
+    pub points: Vec<AdaptiveCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveCandidate {
+    pub setting: AdaptiveValues,
+    pub mean_spp: Num,
+    pub mrse: Num,
+    pub predicted_render_s: Num,
+}
+
+/// `best` rendered on one crop, against its replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveVerification {
+    pub crop: String,
+    /// The rendered `sampleCount` equals the replay's in every pixel.
+    pub sample_count_matches: bool,
+    pub mismatched_pixels: u64,
+    pub predicted_render_s: Num,
+    /// One run: a sign, not a timing comparison.
+    pub measured_render_s: Num,
+}
+
+/// The `--adaptive-maps` EXR: its path, its layers, and why it was not
+/// written when it was not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveMapsInfo {
+    pub path: String,
+    pub layers: Vec<String>,
+    pub written: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The planes `--adaptive-maps` writes, for the host (not serialised): per
+/// crop, top-down rows inside its rectangle (image space, `[x0, y0, x1,
+/// y1)`). The authored ones are the replay's prediction, `best`'s the
+/// verifying render's (zero where a crop was not verified).
+#[derive(Debug, Clone, Default)]
+pub struct AdaptiveMaps {
+    pub resolution: [usize; 2],
+    pub crops: Vec<CropMaps>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CropMaps {
+    pub rect: [usize; 4],
+    pub authored_sample_count: Vec<f32>,
+    pub authored_variance: Vec<f32>,
+    pub best_sample_count: Vec<f32>,
+    pub best_variance: Vec<f32>,
+}
+
+/// The layers of the maps EXR, in the order a host writes them.
+pub const ADAPTIVE_MAP_LAYERS: [&str; 4] = [
+    "authored.sampleCount",
+    "authored.variance",
+    "best.sampleCount",
+    "best.variance",
+];
 
 /// Tier 3: settings that change the picture. Measured, never ranked.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

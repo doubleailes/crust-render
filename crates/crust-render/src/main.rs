@@ -167,6 +167,12 @@ struct DiagnosticArgs {
     /// to the square of the scene's adaptive variance threshold.
     #[arg(long, value_name = "MRSE", value_parser = parse_target)]
     target_mrse: Option<f64>,
+    /// Also write one EXR of the adaptive sampling sweep's evidence, at the
+    /// scene's resolution: per crop, the authored setting's predicted
+    /// `sampleCount` and `variance` and the best setting's rendered ones
+    /// (layers `authored.*`, `best.*`; 0 outside the crops).
+    #[arg(long, value_name = "PATH")]
+    adaptive_maps: Option<std::path::PathBuf>,
 }
 
 #[derive(Args)]
@@ -1416,6 +1422,7 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
         subdivision_level: args.scene.subdiv_level,
         subdivision_edge_length: args.scene.subdiv_edge_length,
         cache_stats: Some(&cache_stats),
+        adaptive_maps: args.adaptive_maps.as_ref().map(|p| p.display().to_string()),
         ..crust_core::diagnostic::Options::new(input.clone())
     };
     let report = crust_core::diagnostic::run(scene, &options);
@@ -1426,6 +1433,13 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
     info!("Report written to {}", args.json.display());
+    if let (Some(path), Some(maps)) = (&args.adaptive_maps, &report.adaptive_maps) {
+        if let Err(e) = products::write_adaptive_maps(path, maps) {
+            error!("--adaptive-maps {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+        info!("Adaptive maps written to {}", path.display());
+    }
     match report.run.exit {
         0 => ExitCode::SUCCESS,
         code => ExitCode::from(code as u8),

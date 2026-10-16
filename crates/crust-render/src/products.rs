@@ -12,6 +12,7 @@
 //! tiled files (`docs/material_fidelity.md`). The no-products render does not
 //! come through here at all — it keeps `write_rgb_file`, byte for byte.
 
+use crust_core::diagnostic::report::{ADAPTIVE_MAP_LAYERS, AdaptiveMaps};
 use crust_core::stamp::{STAMP_PREFIX, SamplingStamp, StampValue};
 use crust_core::{AovFilm, AovProduct, AovVar, Buffer, ChannelKind, Precision};
 use exr::meta::attribute::{AttributeValue, IntegerBounds};
@@ -407,6 +408,61 @@ pub fn write_product(
         .to_file(path)
         .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
     Ok(names)
+}
+
+/// Writes `crust diagnostic --adaptive-maps`: one EXR at the scene's
+/// resolution whose layers are [`ADAPTIVE_MAP_LAYERS`] (channels
+/// `authored.sampleCount`, …), each crop's planes inside its rectangle and 0
+/// everywhere else. Creates the parent directories.
+pub fn write_adaptive_maps(path: &Path, maps: &AdaptiveMaps) -> io::Result<()> {
+    let [w, h] = maps.resolution;
+    let mut planes = vec![vec![0.0f32; w * h]; ADAPTIVE_MAP_LAYERS.len()];
+    for c in &maps.crops {
+        let [x0, y0, x1, y1] = c.rect;
+        let cw = x1 - x0;
+        let sources = [
+            &c.authored_sample_count,
+            &c.authored_variance,
+            &c.best_sample_count,
+            &c.best_variance,
+        ];
+        for (plane, source) in planes.iter_mut().zip(sources) {
+            for (i, &v) in source.iter().enumerate() {
+                let (x, y) = (x0 + i % cw, y0 + i / cw);
+                if x < x1 && y < y1 && x < w && y < h {
+                    plane[y * w + x] = v;
+                }
+            }
+        }
+    }
+    let channels = ADAPTIVE_MAP_LAYERS
+        .iter()
+        .zip(planes)
+        .map(|(name, plane)| {
+            let name = Text::new_or_none(*name).expect("a valid channel name");
+            AnyChannel::new(name, FlatSamples::F32(plane))
+        })
+        .collect();
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let layer = Layer::new(
+        (w, h),
+        LayerAttributes {
+            software_name: Text::new_or_none(concat!("crust-render ", env!("CARGO_PKG_VERSION"))),
+            ..LayerAttributes::default()
+        },
+        Encoding {
+            compression: Compression::ZIP16,
+            blocks: Blocks::ScanLines,
+            line_order: LineOrder::Increasing,
+        },
+        AnyChannels::sort(channels),
+    );
+    Image::from_layer(layer)
+        .write()
+        .to_file(path)
+        .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))
 }
 
 #[cfg(test)]

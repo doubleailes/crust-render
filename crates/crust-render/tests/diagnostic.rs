@@ -267,3 +267,98 @@ fn the_adaptive_flags_are_shared() {
         assert_eq!(r["usd_attribute"], attr, "{name}");
     }
 }
+
+/// The spec's scenarios "Asking for the adaptive maps", "Layers of the
+/// maps" and "Tier 2 did not run": with `--adaptive-maps`, the EXR (and no
+/// PNG) beside the JSON, its four layers at the scene's resolution, non-zero
+/// only inside the crop, and named in the report; with no budget for tier 2,
+/// no file and the reason.
+#[test]
+fn the_adaptive_maps_are_one_exr_of_four_layers() {
+    use exr::prelude::{ReadChannels, ReadLayers, read};
+    let dir = work_dir("adaptive_maps");
+    let stage = cornellbox();
+    let samples = snapshot(stage.parent().unwrap());
+    let out = crust(
+        &dir,
+        &[
+            "-i",
+            stage.to_str().unwrap(),
+            "--region",
+            "8,8,40,40",
+            "--budget",
+            "20s",
+            "--repeats",
+            "1",
+            "--adaptive-maps",
+            "maps.exr",
+        ],
+    );
+    assert!(matches!(out.status.code(), Some(0) | Some(3)), "{out:?}");
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("crust-diagnostic.json")).expect("the JSON report"),
+    )
+    .unwrap();
+    let maps = &report["sample_budget"]["adaptive"]["maps"];
+    let written: Vec<_> = snapshot(&dir).into_iter().map(|(p, _)| p).collect();
+    assert!(
+        snapshot(stage.parent().unwrap()) == samples,
+        "a file beside the stage changed"
+    );
+    if maps.is_null() {
+        // A machine too slow for tier 2 in the budget: no file, and why.
+        assert_eq!(written, [dir.join("crust-diagnostic.json")]);
+        assert!(
+            report["not_tried"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["id"] == "adaptive_maps"),
+            "{report}"
+        );
+        return;
+    }
+    assert_eq!(maps["path"], "maps.exr");
+    assert_eq!(maps["written"], true);
+    let layers = [
+        "authored.sampleCount",
+        "authored.variance",
+        "best.sampleCount",
+        "best.variance",
+    ];
+    assert_eq!(maps["layers"], serde_json::json!(layers));
+    assert_eq!(
+        written,
+        [dir.join("crust-diagnostic.json"), dir.join("maps.exr")]
+    );
+    let image = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(dir.join("maps.exr"))
+        .expect("a readable EXR");
+    let res = report["scene"]["resolution"].as_array().unwrap();
+    let (w, h) = (
+        res[0].as_u64().unwrap() as usize,
+        res[1].as_u64().unwrap() as usize,
+    );
+    let layer = &image.layer_data;
+    assert_eq!((layer.size.0, layer.size.1), (w, h));
+    let names: Vec<String> = layer
+        .channel_data
+        .list
+        .iter()
+        .map(|c| c.name.to_string())
+        .collect();
+    assert_eq!(names, layers);
+    let count = &layer.channel_data.list[0].sample_data;
+    for y in 0..h {
+        for x in 0..w {
+            let v = count.value_by_flat_index(y * w + x).to_f32();
+            let inside = (8..40).contains(&x) && (8..40).contains(&y);
+            assert_eq!(v > 0.0, inside, "({x}, {y}): {v}");
+        }
+    }
+}

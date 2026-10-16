@@ -952,16 +952,17 @@ crust diff before.exr after.exr && echo identical
 
 ## diagnostic
 
-`crust diagnostic -i <SCENE> [--budget 120s] [--json PATH] [--baseline PREV.json] [OPTIONS]`
+`crust diagnostic -i <SCENE> [--budget 120s] [--json PATH] [--baseline PREV.json] [--adaptive-maps PATH] [OPTIONS]`
 
 Imports the stage once and measures how to make its render faster or cleaner: a
 full-frame baseline, then every unbiased setting tried on up to three crops of the frame
-and judged by efficiency (time × error). It writes **no image** and changes no file
-beside the stage. Its outputs are:
+and judged by efficiency (time × error). It writes **no image** unless `--adaptive-maps`
+asks for one, and changes no file beside the stage. Its outputs are:
 
 - the Markdown report on stdout, and nothing else there;
 - the JSON report, format `crust-diagnostic/1`, at `--json` (default
   `crust-diagnostic.json` in the working directory);
+- with `--adaptive-maps`, one EXR of the adaptive sampling sweep's evidence;
 - the log on stderr.
 
 Reading the report, its verdicts and the loop it is made for are in
@@ -992,7 +993,8 @@ Its own flags:
 | `--json` | path | `crust-diagnostic.json` | Where to write the JSON report. |
 | `--baseline` | path | — | A previous report of the same scene, frame, camera, resolution and region. Adds a `deltas` section (what changed in time, error, settings, findings and suggestions); a report of anything else is marked *not comparable*. |
 | `--repeats` | count | 3 | Interleaved baseline/trial pairs per crop, each with its own sampler seed. More resolves smaller differences on a busy machine, at the cost of fewer trials. With 1 there is no noise floor, and no trial can read `insufficient_samples`. |
-| `--target-mrse` | number | threshold² | The mean relative squared error the sample-budget estimate aims for. Defaults to the square of the scene's adaptive variance threshold (0.05 → 0.0025). |
+| `--target-mrse` | number | threshold² | The mean relative squared error the sample-budget estimate and the adaptive sweep aim for. Defaults to the square of the scene's adaptive variance threshold (0.05 → 0.0025). |
+| `--adaptive-maps` | path | — | Also write the [adaptive sampling sweep](@/docs/help/diagnosing-a-render.md#tuning-adaptive-sampling)'s evidence as one EXR at the scene's resolution: per crop, the authored setting's `sampleCount` and `variance` as the replay predicts them (`authored.*`), and the best setting's as its verifying render wrote them (`best.*`); 0 outside the crops. Not written when tier 2 recorded no crop, which `not_tried` then says. |
 
 ```bash
 $ crust diagnostic -i samples/veach_mis.usda --budget 30s > report.md

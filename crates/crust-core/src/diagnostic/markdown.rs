@@ -4,7 +4,13 @@
 
 use std::fmt::Write;
 
-use super::report::{Action, Finding, FindingKind, Num, Report, Verdict};
+/// The points of a crop's adaptive front the Markdown lists; the JSON has
+/// them all.
+const MAX_FRONT_POINTS: usize = 6;
+
+use super::report::{
+    Action, AdaptivePick, AdaptivePoint, AdaptiveValues, Finding, FindingKind, Num, Report, Verdict,
+};
 
 /// `x` as the JSON writes it (four significant digits), or `–`.
 fn n(x: Num) -> String {
@@ -419,20 +425,121 @@ impl Report {
                     opt(sb.projected_render_s),
                     opt(sb.projected_setup_s)
                 )?;
-                for a in &sb.adaptive {
+                if let Some(a) = &sb.adaptive {
+                    let v = |s: &AdaptiveValues| {
+                        format!(
+                            "{} spp, min {}, threshold {}, tolerance {}",
+                            s.samples_per_pixel,
+                            s.min_samples_per_pixel,
+                            n(s.variance_threshold),
+                            n(s.adaptive_neighbour_tolerance)
+                        )
+                    };
+                    let sum = |p: &AdaptivePick, f: fn(&AdaptivePoint) -> f64| {
+                        p.per_crop.iter().map(f).sum::<f64>()
+                    };
+                    writeln!(o)?;
                     writeln!(
                         o,
-                        "- adaptive on {} (threshold {}, {} spp): mean {} spp, {} stopped early, \
-                         {} s against an estimated {} s fixed ({} saved)",
-                        a.crop,
-                        n(a.variance_threshold),
-                        a.spp,
-                        n(a.mean_spp),
-                        pct(a.early_stopped_share),
-                        n(a.time_adaptive_s),
-                        n(a.time_fixed_estimate_s),
-                        pct(a.time_saved_share)
+                        "### Adaptive sampling ({} settings replayed over {} spp recordings in {} s)",
+                        a.grid.settings,
+                        a.spp_recorded,
+                        n(a.replay_s)
                     )?;
+                    writeln!(o)?;
+                    for (label, p) in [("authored", &a.authored), ("best", &a.best)] {
+                        writeln!(
+                            o,
+                            "- {label}: {}; predicted {} s and MRSE {} over the crops ({})",
+                            v(&p.setting),
+                            n(Num(sum(p, |c| c.predicted_render_s.0))),
+                            n(Num(sum(p, |c| c.mrse.0))),
+                            p.per_crop
+                                .iter()
+                                .map(|c| format!(
+                                    "{}: mean {} spp, {} stopped early{}",
+                                    c.crop,
+                                    n(c.mean_spp),
+                                    pct(c.early_stopped_share),
+                                    if c.reaches_target {
+                                        ""
+                                    } else {
+                                        ", misses the target"
+                                    }
+                                ))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )?;
+                    }
+                    if a.adaptive_off_as_authored {
+                        writeln!(o, "- adaptive sampling is off as authored (threshold 0)")?;
+                    }
+                    if a.authored_spp_capped {
+                        writeln!(
+                            o,
+                            "- the authored samples are above the recording's {}: the authored point is replayed at it",
+                            a.spp_recorded
+                        )?;
+                    }
+                    writeln!(
+                        o,
+                        "- best against authored: ΔEff {}, target ({}) {}",
+                        n(a.delta_eff_over_authored),
+                        a.target_from,
+                        if a.target_reached {
+                            "reached"
+                        } else {
+                            "not reached by any setting"
+                        }
+                    )?;
+                    for ver in &a.verification {
+                        writeln!(
+                            o,
+                            "- verified on {}: sampleCount {}, {} s rendered against {} s predicted (one run)",
+                            ver.crop,
+                            if ver.sample_count_matches {
+                                "matches the replay in every pixel".to_owned()
+                            } else {
+                                format!(
+                                    "differs in {} pixels: not suggested",
+                                    ver.mismatched_pixels
+                                )
+                            },
+                            n(ver.measured_render_s),
+                            n(ver.predicted_render_s)
+                        )?;
+                    }
+                    for f in &a.front {
+                        writeln!(
+                            o,
+                            "- front on {} (time, MRSE): {}",
+                            f.crop,
+                            f.points
+                                .iter()
+                                .take(MAX_FRONT_POINTS)
+                                .map(|c| format!(
+                                    "{} s / {} at {}",
+                                    n(c.predicted_render_s),
+                                    n(c.mrse),
+                                    v(&c.setting)
+                                ))
+                                .chain((f.points.len() > MAX_FRONT_POINTS).then(|| format!(
+                                    "and {} more in the JSON",
+                                    f.points.len() - MAX_FRONT_POINTS
+                                )))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )?;
+                    }
+                    if a.unguided {
+                        writeln!(
+                            o,
+                            "- the sweep ran without guiding: a guided render's final pass cannot be replayed"
+                        )?;
+                    }
+                    if let Some(m) = &a.maps {
+                        writeln!(o, "- maps: {} ({})", m.path, m.layers.join(", "))?;
+                    }
                 }
             }
         }
