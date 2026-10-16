@@ -204,3 +204,66 @@ fn a_baseline_of_another_camera_is_not_comparable() {
         "not comparable: a different camera"
     );
 }
+
+/// The adaptive flags are scene flags: the report's effective settings show
+/// what they set, with the flag and attribute of each, as a render with the
+/// same flags would use.
+#[test]
+fn the_adaptive_flags_are_shared() {
+    let dir = work_dir("adaptive_flags");
+    let json = dir.join("r.json");
+    let out = crust(
+        &dir,
+        &[
+            "-i",
+            cornellbox().to_str().unwrap(),
+            "--budget",
+            "1s",
+            "--variance-threshold",
+            "0.02",
+            "--min-samples",
+            "16",
+            "--neighbour-tolerance",
+            "0.5",
+            "--json",
+            json.to_str().unwrap(),
+        ],
+    );
+    assert!(matches!(out.status.code(), Some(0 | 3)), "{out:?}");
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).expect("written")).unwrap();
+    let row = |name: &str| {
+        report["effective_settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .clone()
+    };
+    for (name, value, flag, attr) in [
+        (
+            "variance_threshold",
+            "0.02",
+            "--variance-threshold",
+            "crust:varianceThreshold",
+        ),
+        (
+            "min_samples_per_pixel",
+            "16",
+            "--min-samples",
+            "crust:minSamplesPerPixel",
+        ),
+        (
+            "adaptive_neighbour_tolerance",
+            "0.5",
+            "--neighbour-tolerance",
+            "crust:adaptiveNeighbourTolerance",
+        ),
+    ] {
+        let r = row(name);
+        assert_eq!(r["value"], value, "{name}");
+        assert_eq!(r["flag"], flag, "{name}");
+        assert_eq!(r["usd_attribute"], attr, "{name}");
+    }
+}

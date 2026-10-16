@@ -2,9 +2,9 @@
 
 ## 1. Adaptive sampling flags (cli)
 
-- [ ] 1.1 Add `--variance-threshold` (≥ 0), `--min-samples` (≥ 1) and `--neighbour-tolerance` to `SceneArgs` in `crust-render/src/main.rs`, applied as overrides of `crust:varianceThreshold` / `crust:minSamplesPerPixel` / `crust:adaptiveNeighbourTolerance`. Verify with parse tests: shared by `render`, `diagnostic`, `check` and `light-paths`; `--variance-threshold -1` is a usage error.
-- [ ] 1.2 Add the `adaptive_neighbour_tolerance` row to the diagnostic's and `check`'s effective settings, and give the threshold and minimum rows their new flags. Verify with the cli spec's scenario "The adaptive flags are shared" as a test (`crust diagnostic --variance-threshold 0.02 --min-samples 16` → effective settings).
-- [ ] 1.3 Document the three flags in `site/content/docs/reference/command-line.md` § Sampling and time, linking to their `render-settings.md` attributes, and mention them in each attribute's section. Verify that `zola build` in `site/` passes its link and anchor check.
+- [x] 1.1 Add `--variance-threshold` (≥ 0), `--min-samples` (≥ 1) and `--neighbour-tolerance` to `SceneArgs` in `crust-render/src/main.rs`, applied as overrides of `crust:varianceThreshold` / `crust:minSamplesPerPixel` / `crust:adaptiveNeighbourTolerance`. Verify with parse tests: shared by `render`, `diagnostic`, `check` and `light-paths`; `--variance-threshold -1` is a usage error.
+- [x] 1.2 Add the `adaptive_neighbour_tolerance` row to the diagnostic's and `check`'s effective settings, and give the threshold and minimum rows their new flags. Verify with the cli spec's scenario "The adaptive flags are shared" as a test (`crust diagnostic --variance-threshold 0.02 --min-samples 16` → effective settings).
+- [x] 1.3 Document the three flags in `site/content/docs/reference/command-line.md` § Sampling and time, linking to their `render-settings.md` attributes, and mention them in each attribute's section. Verify that `zola build` in `site/` passes its link and anchor check.
 
 ## 2. Luminance trace and the shared decision step (rendering)
 

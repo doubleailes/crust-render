@@ -63,6 +63,9 @@ The flags of `crust render`:
 | [`-o`, `--output`](#output) | path | `output.exr` | first `productName` |
 | [`--region`](#region) | `X0,Y0,X1,Y1` | scene / full frame | `dataWindowNDC` |
 | [`-s`, `--samples`](#samples) | integer | scene / 128 | `crust:samplesPerPixel` |
+| [`--variance-threshold`](#variance-threshold) | number | scene / 0.05 | `crust:varianceThreshold` |
+| [`--min-samples`](#min-samples) | count | scene / 32 | `crust:minSamplesPerPixel` |
+| [`--neighbour-tolerance`](#neighbour-tolerance) | number | scene / 1 | `crust:adaptiveNeighbourTolerance` |
 | [`-f`, `--frame`](#frame) | number | default values | `crust:frame` (seed) |
 | [`--camera`](#camera) | prim path | `RenderSettings.camera` | `rel camera` |
 | [`--subdiv-level`](#subdiv-level) | 0–6 | scene / 0 | `crust:subdivisionLevel` |
@@ -209,6 +212,38 @@ To compare two images pixel by pixel, render both at `-s 16`. Every pixel then t
 exactly 16 samples. At higher counts, a tiny difference can change how many samples a
 pixel takes, and the whole image looks different.
 {% end %}
+
+### variance-threshold
+
+`--variance-threshold <T>`
+
+The adaptive sampling target: a pixel may stop once the relative standard error of its
+mean is below `T`. Lower means less noise and a longer render; `0` turns adaptive
+sampling off, so every pixel takes [`-s`](#samples) samples. Overrides
+[`crust:varianceThreshold`](@/docs/usd/render-settings.md#crust-variancethreshold)
+(default 0.05). A negative or non-finite value is a usage error.
+
+### min-samples
+
+`--min-samples <N>`
+
+The samples every pixel takes before adaptive sampling may stop it, at least 1. The
+render never uses fewer than ⌈√`-s`⌉, nor fewer than 2. Overrides
+[`crust:minSamplesPerPixel`](@/docs/usd/render-settings.md#crust-minsamplesperpixel)
+(default 32).
+
+### neighbour-tolerance
+
+`--neighbour-tolerance <T>`
+
+How much less converged one of a pixel's four direct neighbours may be, while it is still
+sampling, before it holds the pixel back. A negative value turns the comparison off: each
+pixel then stops on its own noise alone. Overrides
+[`crust:adaptiveNeighbourTolerance`](@/docs/usd/render-settings.md#crust-adaptiveneighbourtolerance)
+(default 1). A non-finite value is a usage error.
+
+[`crust diagnostic`](#diagnostic) measures which values of these three and of `-s` reach
+its target error soonest.
 
 ### frame
 
@@ -812,8 +847,10 @@ values and defaults: [`-i`](#input) (required), [`-f`](#frame), [`--camera`](#ca
 [`--region`](#region), [`--strategy`](#strategy), [`--light-selection`](#light-selection),
 [`--light-samples`](#light-samples), [`--light-samples-indirect`](#light-samples-indirect),
 [`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
-[`--filter-radius`](#filter-radius), [`--subdiv-level`](#subdiv-level),
-[`--subdiv-edge-length`](#subdiv-edge-length) and [`--auto-tx`](#auto-tx). The rest of
+[`--filter-radius`](#filter-radius), [`--variance-threshold`](#variance-threshold),
+[`--min-samples`](#min-samples), [`--neighbour-tolerance`](#neighbour-tolerance),
+[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
+[`--auto-tx`](#auto-tx). The rest of
 `render`'s flags (`-s`, `-o`, the colour and statistics flags) are refused. Its own flags:
 
 | flag | value | default | what it does |
@@ -937,8 +974,10 @@ and defaults as `render`, so a suggestion made as a flag can be passed straight 
 [`--strategy`](#strategy), [`--light-selection`](#light-selection),
 [`--light-samples`](#light-samples), [`--light-samples-indirect`](#light-samples-indirect),
 [`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
-[`--filter-radius`](#filter-radius), [`--subdiv-level`](#subdiv-level),
-[`--subdiv-edge-length`](#subdiv-edge-length) and [`--auto-tx`](#auto-tx).
+[`--filter-radius`](#filter-radius), [`--variance-threshold`](#variance-threshold),
+[`--min-samples`](#min-samples), [`--neighbour-tolerance`](#neighbour-tolerance),
+[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
+[`--auto-tx`](#auto-tx).
 
 With `--region`, that region is the only crop the trials render. `--auto-tx` is the one
 flag that writes beside the stage: the `.tx` files it creates, as a render would.
@@ -1002,7 +1041,8 @@ same names, values and defaults: [`-i`](#input) (required), [`-f`](#frame),
 [`--light-selection`](#light-selection), [`--light-samples`](#light-samples),
 [`--light-samples-indirect`](#light-samples-indirect), [`--indirect-clamp`](#indirect-clamp),
 [`--filter`](#filter), [`--filter-radius`](#filter-radius),
-[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
+[`--variance-threshold`](#variance-threshold), [`--min-samples`](#min-samples),
+[`--neighbour-tolerance`](#neighbour-tolerance), [`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
 [`--auto-tx`](#auto-tx); and `render`'s [`-s`](#samples), so it reproduces a render made
 at that count. The rest of `render`'s flags (`-o`, the colour and statistics flags,
 `--scanline`, `--log-file`) are refused. Its own flags:
