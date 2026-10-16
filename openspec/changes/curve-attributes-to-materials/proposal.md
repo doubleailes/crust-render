@@ -23,8 +23,9 @@ strand's position along its length and its identity.
   within its prim.
 - **Materials can read them.** MaterialX `geompropvalue` gains curve
   properties: the position along the strand, the curve index, and a per-curve
-  hash of it in [0, 1) for random variation that does not depend on how the
-  curves are ordered.
+  hash of it in [0, 1) for random variation, stable as long as the prim keeps
+  its curves in the same order (a stable authored id primvar can seed it
+  instead).
 - **`BasisCurves` / `NurbsCurves` primvars reach materials.** `constant`,
   `uniform` (per curve), `vertex` and `varying` primvars of `float`, `float2`,
   `float3` and colour types are read and interpolated along the strand, and
