@@ -9,7 +9,7 @@ curve within its prim and `v`, its position along the whole strand in [0, 1]:
 the curve's parameter normalised so the first authored point (or the start of
 the NURBS domain, narrowed by `ranges`) is 0 and the last is 1. `v` SHALL be
 continuous across span boundaries and SHALL hold at every placement: top-level,
-instanced, `PointInstancer`-placed and motion-blurred.
+instanced and `PointInstancer`-placed (curves carry no motion blur).
 
 #### Scenario: v runs root to tip on a cubic strand
 

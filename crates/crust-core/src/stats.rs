@@ -147,6 +147,11 @@ pub struct SceneCounters {
     /// is itself informative.
     #[serde(rename = "kernel_memory", serialize_with = "footprint_json")]
     pub footprint: crate::rt::MemoryFootprint,
+    /// Bytes of the curves' strand tables ([`crate::StrandTable`]), each
+    /// counted once however many placements share it: host-side, so not in
+    /// `kernel_memory`, and zero unless a curve's material reads a curve
+    /// property, primvar or chart.
+    pub strand_tables_bytes: usize,
 }
 
 /// Work the integrator did, in rays and path vertices.
@@ -1292,6 +1297,14 @@ impl RenderStats {
                 )?;
             }
         }
+        if s.strand_tables_bytes > 0 {
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "curve strand tables",
+                human_bytes(s.strand_tables_bytes as u64)
+            )?;
+        }
         if let Some(peak) = self.peak_memory_bytes {
             writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
         }
@@ -2383,6 +2396,7 @@ mod tests {
             "scene.kernel_memory.vertex_normals_bytes",
             "scene.kernel_memory.vertices_bytes",
             "scene.lights",
+            "scene.strand_tables_bytes",
             "scene.top_level",
             "scene.top_level.cubic_curve_spans",
             "scene.top_level.curve_segments",

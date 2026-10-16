@@ -544,6 +544,11 @@ impl Gen<'_> {
             | Op::HsvAdjust { .. }
             | Op::HeightToNormal { .. } => Some(3),
             Op::Combine2 { a, b } => Some(w(a)? + w(b)?).map(|n| n.min(4)),
+            // A `color4` keeps its alpha; anything else is a colour.
+            Op::RgbToHsv { a } | Op::HsvToRgb { a } => w(a).map(|n| if n == 4 { 4 } else { 3 }),
+            Op::Select { in1, in2, .. } => max(&[in1, in2]),
+            Op::CellNoise2 { .. } => Some(1),
+            Op::Curve { arity, .. } | Op::Primvar { arity, .. } => Some(*arity),
         }
     }
 

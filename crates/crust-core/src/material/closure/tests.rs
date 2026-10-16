@@ -43,13 +43,14 @@ fn tree(doc: &str, root: &str) -> (Closures, Vec<Val>) {
             view: -Vec3A::Z,
             position: Vec3A::ZERO,
             uv_width: 0.0,
+            curve: None,
         },
         &mut slots,
     );
     (out, slots)
 }
 
-fn hit(front: bool) -> HitRecord {
+fn hit(front: bool) -> HitRecord<'static> {
     let mut rec = HitRecord::new();
     rec.p = Vec3A::ZERO;
     rec.normal = Vec3A::Z;

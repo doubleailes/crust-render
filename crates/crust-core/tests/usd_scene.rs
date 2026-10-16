@@ -1625,7 +1625,7 @@ def Xform "World"
         )
         .expect("the cage is hit");
     assert_eq!(
-        hit.rec.face.expect("a Ptex face hit").id,
+        hit.rec.face().expect("a Ptex face hit").id,
         0,
         "the hit resolves to the authored triangle"
     );
@@ -1913,20 +1913,19 @@ fn a_materialx_reference_resolves_to_a_real_material() {
 }
 
 /// A probe hit looking straight down at a flat, upward-facing patch.
-fn probe_hit() -> (crust_core::HitRecord, crust_core::Ray) {
+fn probe_hit() -> (crust_core::HitRecord<'static>, crust_core::Ray) {
     use crust_core::{HitRecord, Ray, Vec3A};
     let rec = HitRecord {
         p: Vec3A::ZERO,
         normal: Vec3A::Z,
         t: 1.0,
         front_face: true,
-        face: None,
+        part: crust_core::HitPart::None,
         uv: Some((0.5, 0.5)),
         tangent: Vec3A::X,
         // Point-sample: this probe reports what the graph evaluates to at a
         // named (u, v), not what a filtered render would show there.
         uv_width: 0.0,
-        face_width: 0.0,
     };
     (rec, Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z))
 }

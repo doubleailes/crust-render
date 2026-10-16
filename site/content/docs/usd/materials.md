@@ -377,6 +377,61 @@ shadowing each other. See [limitations](@/docs/architecture/limitations.md#mater
 The node also works on a mesh, such as a hair card. There, `curve_direction` defaults to
 the mesh's UV tangent, so the card needs UVs whose `u` runs along the hair.
 
+### Variation nodes
+
+A hair material can read where on its strand a hit lies, which curve it is, a random
+value per curve, and the groom's own primvars, through `geompropvalue`: see
+[curve attributes](@/docs/usd/geometry.md#curve-attributes-in-materials). These
+MaterialX nodes are what a per-strand look is usually built from:
+
+| node | what it does |
+|------|--------------|
+| `rgbtohsv`, `hsvtorgb` | convert a colour (`color3`, or `color4` keeping its alpha) between RGB and hue, saturation and value, so a hue shift is an `add` on the first channel |
+| `ifgreater`, `ifgreatereq`, `ifequal` | `in1` when `value1` is greater than (at least, equal to) `value2`, else `in2`. The `boolean` form answers 1 or 0 |
+| `randomfloat` | a value in [`min`, `max`] that depends only on `in` and `seed`, so the same inputs give the same value at every hit, frame and render |
+| `randomcolor` | a colour whose hue, saturation and brightness each fall in their own range, chosen by `in` and `seed` |
+| `cellnoise2d` | one value in [0, 1] per unit cell of `texcoord`; the random nodes are built from it |
+
+They evaluate as MaterialX's own implementation does, random values included, so a look
+built for another MaterialX renderer draws the same values here. `randomfloat` reads a
+`float` `in` in steps of 1/4096, as MaterialX defines it, so two inputs closer than that
+draw the same value.
+
+A per-strand hue shift, for instance, is `curve:random` remapped to a small range and
+added to the hue:
+
+```xml
+<geompropvalue name="rand" type="float">
+  <input name="geomprop" type="string" value="curve:random" />
+</geompropvalue>
+<remap name="shift" type="float">
+  <input name="in" type="float" nodename="rand" />
+  <input name="outlow" type="float" value="-0.03" />
+  <input name="outhigh" type="float" value="0.03" />
+</remap>
+<rgbtohsv name="hsv" type="color3"><input name="in" type="color3" value="0.35, 0.2, 0.1" /></rgbtohsv>
+<combine3 name="delta" type="color3">
+  <input name="in1" type="float" nodename="shift" />
+</combine3>
+<add name="shifted" type="color3">
+  <input name="in1" type="color3" nodename="hsv" />
+  <input name="in2" type="color3" nodename="delta" />
+</add>
+<hsvtorgb name="hair_colour" type="color3"><input name="in" type="color3" nodename="shifted" /></hsvtorgb>
+```
+
+`curve:random` changes when a prim's curves are reordered. For variation that survives
+that, author a stable id per curve and feed it to `randomfloat`:
+
+```xml
+<geompropvalue name="id" type="integer">
+  <input name="geomprop" type="string" value="strandId" />
+</geompropvalue>
+<randomfloat name="rand" type="float">
+  <input name="in" type="integer" nodename="id" />
+</randomfloat>
+```
+
 ## Displacement
 
 A material can move the surface it's bound to, not just shade it. Crust Render reads a

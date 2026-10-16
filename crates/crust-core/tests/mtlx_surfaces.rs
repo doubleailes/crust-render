@@ -40,17 +40,16 @@ fn try_load(tag: &str, surface: &str) -> Result<Loaded, crust_core::mtlx::MtlxEr
     loaded
 }
 
-fn hit(u: f32, v: f32) -> HitRecord {
+fn hit(u: f32, v: f32) -> HitRecord<'static> {
     HitRecord {
         p: Vec3A::ZERO,
         normal: Vec3A::Z,
         t: 1.0,
         front_face: true,
-        face: None,
+        part: crust_core::HitPart::None,
         uv: Some((u, v)),
         tangent: Vec3A::X,
         uv_width: 0.0,
-        face_width: 0.0,
     }
 }
 

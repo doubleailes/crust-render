@@ -42,7 +42,7 @@ fn eval(p: &Program, ctx: &ShadeCtx) -> Vec<Val> {
 
 /// Shading points spread over two UDIM tiles, both faces, a spread of
 /// normals, tangents and footprints.
-fn shading_points() -> Vec<ShadeCtx> {
+fn shading_points() -> Vec<ShadeCtx<'static>> {
     let mut out = Vec::new();
     for i in 0..64 {
         let t = i as f32 / 64.0;
@@ -54,6 +54,7 @@ fn shading_points() -> Vec<ShadeCtx> {
             view: -Vec3A::new(0.2, (t * 3.0).sin(), 1.0).normalize(),
             position: Vec3A::new(t, 1.0 - t, t * t),
             uv_width: if i % 3 == 0 { 0.0 } else { t * 0.01 },
+            curve: None,
         });
     }
     out

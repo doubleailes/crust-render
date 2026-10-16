@@ -84,6 +84,7 @@ mod preview;
 mod products;
 mod settings;
 mod shapes;
+mod strands;
 mod time;
 mod volume;
 mod xform;
@@ -114,6 +115,7 @@ use settings::{
     render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
 use shapes::{curve_segments, emit_curves, emit_sphere, nurbs_curve_segments};
+use strands::StrandRequest;
 use time::EvalTimeScope;
 use volume::emit_volume;
 use xform::compose_with_parent;
@@ -394,12 +396,14 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             emit_sphere(&mut ctx.world, &prim, &sphere, this_world, mat);
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let batches = curve_segments(&prim, &curves);
-            emit_curves(&mut ctx.world, &prim, batches, this_world, mat);
+            let request = StrandRequest::of(&*mat, ctx.caches.working);
+            let imported = curve_segments(&prim, &curves, request.as_ref());
+            emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Ok(Some(curves)) = UsdNurbsCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let batches = nurbs_curve_segments(&prim, &curves);
-            emit_curves(&mut ctx.world, &prim, batches, this_world, mat);
+            let request = StrandRequest::of(&*mat, ctx.caches.working);
+            let imported = nurbs_curve_segments(&prim, &curves, request.as_ref());
+            emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Some(shape) = Shape::read(&prim) {
             let bound = undisplaced(&prim, resolve_bound(stage, &prim, &mut ctx.caches));
             let src =
@@ -1143,6 +1147,7 @@ pub(crate) fn load_scene(
         top_level: committed.primitive_breakdown().into(),
         unique: committed.unique_primitive_breakdown().into(),
         footprint: committed.memory_footprint(),
+        strand_tables_bytes: committed.strand_table_bytes(),
         lights: ctx.lights.count(),
         volumes: ctx.volumes.len(),
     };

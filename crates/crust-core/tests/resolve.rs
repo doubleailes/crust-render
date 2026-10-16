@@ -52,16 +52,17 @@ fn uv_input(output: TexOutput) -> UvInput {
     }
 }
 
-fn hit() -> HitRecord {
+fn hit() -> HitRecord<'static> {
     HitRecord {
         p: Vec3A::new(0.1, -0.2, 0.0),
         normal: Vec3A::Z,
         tangent: Vec3A::X,
         t: 1.0,
         front_face: true,
-        face: Some(crust_core::FaceHit {
+        part: crust_core::HitPart::Face(crust_core::FaceHit {
             id: 3,
             uv: (0.3, 0.7),
+            width: 0.0,
         }),
         uv: Some((0.4, 0.6)),
         ..HitRecord::default()
@@ -93,7 +94,11 @@ fn same_ray(a: &Ray, b: &Ray, what: &str) {
 /// Every query a [`ShadingPoint`] answers, against the material's own
 /// method at the same hit.
 fn assert_resolve_matches(name: &str, mat: &dyn Material) {
-    let rec = hit();
+    assert_resolve_matches_at(name, mat, hit());
+}
+
+/// [`assert_resolve_matches`] at `rec`.
+fn assert_resolve_matches_at(name: &str, mat: &dyn Material, rec: HitRecord<'_>) {
     for dir in [
         Vec3A::new(0.3, -0.2, -1.0).normalize(),
         Vec3A::new(-0.7, 0.1, -0.4).normalize(),
@@ -348,4 +353,68 @@ fn straight_transmission_is_declared_and_split_from_the_resolution() {
         }
     }
     assert_eq!(thin, 2 * 5, "every thin-walled material, both directions");
+}
+
+/// On a curve hit, a material reading the strand and a primvar resolves to
+/// what per-query shading of the same hit gives.
+#[test]
+fn a_curve_reading_material_resolves_as_it_shades() {
+    use crust_core::{CurveHit, StrandSpan, StrandTable, StrandValues, mtlx::Val};
+    let dir = std::env::temp_dir().join("crust_resolve_curve");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mtlx = dir.join("hair.mtlx");
+    std::fs::write(
+        &mtlx,
+        r#"<?xml version="1.0"?>
+<materialx version="1.39">
+  <geompropvalue name="v" type="float"><input name="geomprop" type="string" value="curve:v" /></geompropvalue>
+  <geompropvalue name="r" type="float"><input name="geomprop" type="string" value="curve:random" /></geompropvalue>
+  <geompropvalue name="tint" type="color3"><input name="geomprop" type="string" value="tint" /></geompropvalue>
+  <mix name="ramp" type="color3">
+    <input name="bg" type="color3" nodename="tint" />
+    <input name="fg" type="color3" value="0.9, 0.8, 0.6" />
+    <input name="mix" type="float" nodename="v" />
+  </mix>
+  <standard_surface name="s" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="ramp" />
+    <input name="specular_roughness" type="float" nodename="r" />
+    <input name="emission" type="float" nodename="v" />
+    <input name="emission_color" type="color3" nodename="tint" />
+  </standard_surface>
+  <surfacematerial name="m" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s" /></surfacematerial>
+</materialx>
+"#,
+    )
+    .unwrap();
+    let loaded = materialx::load(&mtlx, Some("m"), &crust_core::mtlx::Host::new(&|_, _| None))
+        .expect("loads");
+    let table = StrandTable::new(
+        vec![
+            StrandSpan {
+                curve: 0,
+                v0: 0.0,
+                v1: 0.5,
+            },
+            StrandSpan {
+                curve: 3,
+                v0: 0.5,
+                v1: 1.0,
+            },
+        ],
+        "/World/Groom",
+    )
+    .with_primvars(vec![Some(StrandValues::PerCurve(vec![
+        Val::vec3(0.2, 0.1, 0.05),
+        Val::vec3(0.1, 0.1, 0.1),
+        Val::vec3(0.3, 0.3, 0.3),
+        Val::vec3(0.5, 0.2, 0.1),
+    ]))]);
+    for (prim, u) in [(0, 0.3), (1, 0.75)] {
+        let rec = HitRecord {
+            part: crust_core::HitPart::Curve(CurveHit::new(&table, prim, u).expect("a span")),
+            ..hit()
+        };
+        assert!(rec.curve().is_some());
+        assert_resolve_matches_at(&format!("curve span {prim}"), loaded.material.as_ref(), rec);
+    }
 }

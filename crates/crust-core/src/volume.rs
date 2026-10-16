@@ -17,6 +17,7 @@ use crate::medium::hg_phase;
 use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Mat4, Vec3, Vec3A};
 use openqmc::pcg::Rng;
+use utils::hash3;
 
 /// Spatial density in local box coordinates, normalized to `[0, 1]^3`.
 /// Values are dimensionless multipliers on the region's coefficients.
@@ -78,21 +79,6 @@ impl DensityField {
             DensityField::Grid { data, .. } => data.iter().copied().fold(0.0f32, f32::max),
         }
     }
-}
-
-/// Integer hash → f32 in [0, 1). Pure integer mixing (no `std::hash`), so
-/// noise is bit-identical across platforms and runs.
-fn hash3(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
-    let mut h = (ix as u32).wrapping_mul(0x8da6b343)
-        ^ (iy as u32).wrapping_mul(0xd8163841)
-        ^ (iz as u32).wrapping_mul(0xcb1ab31f)
-        ^ seed.wrapping_mul(0x9e3779b9);
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x2c1b3c6d);
-    h ^= h >> 12;
-    h = h.wrapping_mul(0x297a2d39);
-    h ^= h >> 15;
-    (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
 fn smoothstep(t: f32) -> f32 {

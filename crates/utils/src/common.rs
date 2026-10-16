@@ -139,6 +139,23 @@ pub fn align_to_normal(local: Vec3A, normal: Vec3A) -> Vec3A {
     local.x * tangent + local.y * bitangent + local.z * normal
 }
 
+/// Integer hash → f32 in [0, 1). Pure integer mixing (no `std::hash`), so
+/// what it feeds — volume noise, a curve's `curve:random` — is bit-identical
+/// across platforms and runs. A deterministic function of its arguments, not
+/// a random draw: sampling goes through openqmc.
+pub fn hash3(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
+    let mut h = (ix as u32).wrapping_mul(0x8da6b343)
+        ^ (iy as u32).wrapping_mul(0xd8163841)
+        ^ (iz as u32).wrapping_mul(0xcb1ab31f)
+        ^ seed.wrapping_mul(0x9e3779b9);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2c1b3c6d);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297a2d39);
+    h ^= h >> 15;
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -479,13 +479,13 @@ impl OpenPBR {
     fn shaded(&self, rec: &HitRecord) -> Option<ResolvedOpenPBR> {
         // Geometry the importer could not give a face identity (a sphere, a
         // curve, an n-gon) falls back to the authored constant.
-        let (Some(tex), Some(face)) = (self.base_color_ptex.as_ref(), rec.face.as_ref()) else {
+        let (Some(tex), Some(face)) = (self.base_color_ptex.as_ref(), rec.face()) else {
             return None;
         };
         let (u, v) = face.uv;
         Some(ResolvedOpenPBR(
             OpenPBR {
-                base_color: tex.eval(face.id, u, v, rec.face_width),
+                base_color: tex.eval(face.id, u, v, face.width),
                 base_color_ptex: None,
                 ..self.clone()
             },
@@ -851,12 +851,12 @@ impl Material for OpenPBR {
         }
     }
 
-    fn resolve(
+    fn resolve<'w>(
         &self,
         _r_in: &Ray,
-        rec: &HitRecord,
+        rec: &HitRecord<'w>,
         cos_theta_o: f32,
-    ) -> Option<crate::material::Resolution> {
+    ) -> Option<crate::material::Resolution<'w>> {
         // Only a Ptex lookup is per-hit work; an untextured surface is
         // queried in place, with no copy. Emission is the default
         // `emitted_at`: the unresolved material's, constant `base_color` and

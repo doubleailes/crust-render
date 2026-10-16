@@ -102,6 +102,7 @@ impl<'a> Compiler<'a> {
             view: -Vec3A::Z,
             position: Vec3A::ZERO,
             uv_width: 0.0,
+            curve: None,
         };
         Some(apply(op, &slots, &ctx))
     }
@@ -370,6 +371,38 @@ impl<'a> Compiler<'a> {
                 self.compile_deon_hair_absorption_from_melanin(node)
             }
             "colorcorrect" => self.compile_colorcorrect(node),
+            "rgbtohsv" => {
+                let a = self.input_or(node, "in", Val::ZERO);
+                self.emit(Op::RgbToHsv { a })
+            }
+            "hsvtorgb" => {
+                let a = self.input_or(node, "in", Val::ZERO);
+                self.emit(Op::HsvToRgb { a })
+            }
+            "geompropvalue" => self.compile_geompropvalue(node, arity),
+            "ifgreater" => self.compile_conditional(node, CmpOp::Greater),
+            "ifgreatereq" => self.compile_conditional(node, CmpOp::GreaterEq),
+            "ifequal" => self.compile_conditional(node, CmpOp::Equal),
+            "cellnoise2d" => {
+                // The nodedef's `defaultgeomprop="UV0"`: unauthored, it reads
+                // the shading point's chart.
+                let a = match node.input("texcoord") {
+                    Some(_) => self.input_or(node, "texcoord", Val::ZERO),
+                    None => self.emit(Op::TexCoord {
+                        shift: self.uv_shift,
+                    }),
+                };
+                self.emit(Op::CellNoise2 { a })
+            }
+            "randomfloat" => {
+                let min = self.input_or(node, "min", Val::ZERO);
+                let max = self.input_or(node, "max", Val::ONE);
+                // `NG_randomfloat_float` spreads a float signal over cells
+                // 1/4096 wide; the `integer` variant uses the value itself.
+                let scale = node.input("in").is_none_or(|i| i.type_name != "integer");
+                self.random_float(node, scale, min, max, None)
+            }
+            "randomcolor" => self.compile_randomcolor(node),
             "heighttonormal" => {
                 let scale = self.input_or(node, "scale", Val::ONE);
                 // Half a footprint either side, so the difference spans one.
@@ -403,6 +436,202 @@ impl<'a> Compiler<'a> {
         let slot = self.input_or(node, input, Val::ZERO);
         self.uv_shift = outer;
         slot
+    }
+
+    /// `geompropvalue`: the default chart for `st`, a curve hit's strand for
+    /// the reserved `curve:v` / `curve:index` / `curve:random`, and any other
+    /// name a primvar the host supplies per hit ([`Program::primvars`]) —
+    /// each falling back to the node's `default` where the hit has none.
+    fn compile_geompropvalue(&mut self, node: &Node, arity: u8) -> u32 {
+        let name = node
+            .input("geomprop")
+            .and_then(|i| i.text.as_deref())
+            .map(str::trim)
+            .unwrap_or("");
+        let name = name.strip_prefix("primvars:").unwrap_or(name);
+        // The nodedef's `default` is a typed zero; an authored one is a
+        // literal like any other (a colour converted into the working
+        // space). A connected one cannot be folded into the op.
+        let fallback = match self.literal_of(node, "default") {
+            Some(v) => v.broadcast_to(arity),
+            None => {
+                if node.input("default").is_some() {
+                    self.unsupported
+                        .insert("geompropvalue (connected default)".into());
+                }
+                Val::ZERO.broadcast_to(arity)
+            }
+        };
+        let prop = match name {
+            "st" => {
+                let chart = self.emit(Op::TexCoord {
+                    shift: self.uv_shift,
+                });
+                return if arity == 2 {
+                    chart
+                } else {
+                    self.emit(Op::Convert { a: chart, arity })
+                };
+            }
+            "curve:v" => CurveProp::V,
+            "curve:index" => CurveProp::Index,
+            "curve:random" => CurveProp::Random,
+            // An unknown property in the reserved namespace, or no name.
+            other if other.is_empty() || other.starts_with("curve:") => {
+                self.unsupported
+                    .insert(format!("geompropvalue \"{other}\""));
+                return self.constant(fallback);
+            }
+            other => {
+                let channel = match self.program.primvars.iter().position(|p| p == other) {
+                    Some(i) => i,
+                    None => {
+                        self.program.primvars.push(other.to_string());
+                        self.program.primvars.len() - 1
+                    }
+                };
+                return self.emit(Op::Primvar {
+                    channel: channel as u32,
+                    arity,
+                    fallback,
+                });
+            }
+        };
+        self.emit(Op::Curve {
+            prop,
+            arity,
+            fallback,
+        })
+    }
+
+    /// `ifgreater` / `ifgreatereq` / `ifequal`: `in1` when `value1 cmp
+    /// value2`, else `in2`. The `boolean` signatures have no branches and
+    /// answer 1 or 0, as genosl's `mx_ternary(…, 1, 0)` does.
+    ///
+    /// The unauthored `value1` is 1 for `ifgreater` and `ifgreatereq`, and 0
+    /// for `ifequal` — except `ND_ifequal_boolean`, whose float values default
+    /// to 1 and 0 like the others. Nothing but the output type tells that
+    /// signature from `ND_ifequal_booleanB` (boolean values, both false), so
+    /// a boolean `ifequal` authoring a `boolean` value takes the latter's.
+    fn compile_conditional(&mut self, node: &Node, cmp: CmpOp) -> u32 {
+        let boolean_out = node.type_name == "boolean";
+        let boolean_values = ["value1", "value2"]
+            .iter()
+            .any(|n| node.input(n).is_some_and(|i| i.type_name == "boolean"));
+        let v1_default = match cmp {
+            CmpOp::Equal if !boolean_out || boolean_values => 0.0,
+            _ => 1.0,
+        };
+        let value1 = self.input_or(node, "value1", Val::float(v1_default));
+        let value2 = self.input_or(node, "value2", Val::ZERO);
+        let (in1, in2) = if boolean_out {
+            (self.constant(Val::ONE), self.constant(Val::ZERO))
+        } else {
+            (
+                self.input_or(node, "in1", Val::ZERO),
+                self.input_or(node, "in2", Val::ZERO),
+            )
+        };
+        self.emit(Op::Select {
+            cmp,
+            value1,
+            value2,
+            in1,
+            in2,
+        })
+    }
+
+    /// `NG_randomfloat_*`: `cellnoise2d` of `(in · 4096, seed)` (`in` as is
+    /// when `scale` is false), `range`d from [0, 1] onto `[min, max]` and
+    /// clamped there. `seed` is the node's own input unless a slot is given,
+    /// as `randomcolor`'s expansion gives one per channel.
+    ///
+    /// `range`'s first remap and its gamma stage are left out: at the
+    /// nodegraph's `inlow` 0, `inhigh` 1 and `gamma` 1 they are exact
+    /// identities (`x / 1`, `|x|^1 · sign x`) on a noise value in [0, 1].
+    fn random_float(
+        &mut self,
+        node: &Node,
+        scale: bool,
+        min: u32,
+        max: u32,
+        seed: Option<u32>,
+    ) -> u32 {
+        let mut signal = self.input_or(node, "in", Val::ZERO);
+        if scale {
+            let k = self.constant(Val::float(4096.0));
+            signal = self.emit(Op::Binary {
+                op: BinOp::Mul,
+                a: signal,
+                b: k,
+            });
+        }
+        let seed = match seed {
+            Some(s) => s,
+            None => self.input_or(node, "seed", Val::ZERO),
+        };
+        // Both are scalars in the nodedef; one lane each, so `combine2`
+        // makes a `vector2` whatever is wired in.
+        let signal = self.emit(Op::Convert {
+            a: signal,
+            arity: 1,
+        });
+        let seed = self.emit(Op::Convert { a: seed, arity: 1 });
+        let coord = self.emit(Op::Combine2 { a: signal, b: seed });
+        let noise = self.emit(Op::CellNoise2 { a: coord });
+        let (zero, one) = (self.constant(Val::ZERO), self.constant(Val::ONE));
+        let ranged = self.emit(Op::Remap {
+            a: noise,
+            in_low: zero,
+            in_high: one,
+            out_low: min,
+            out_high: max,
+        });
+        self.emit(Op::Clamp {
+            a: ranged,
+            low: min,
+            high: max,
+        })
+    }
+
+    /// `NG_randomcolor_float` (the `integer` variant only converts `in` and
+    /// calls it): hue, saturation and brightness each a `randomfloat` of the
+    /// same signal under its own seed, `ceil(seed + offset)`, `range`d onto
+    /// the authored interval (unclamped), then `hsvtorgb`.
+    fn compile_randomcolor(&mut self, node: &Node) -> u32 {
+        let seed = self.input_or(node, "seed", Val::ZERO);
+        let channels = [
+            (413.3, "huelow", 0.0, "huehigh", 1.0),
+            (1522.4, "saturationlow", 0.825, "saturationhigh", 1.0),
+            (1813.8, "brightnesslow", 1.0, "brightnesshigh", 1.0),
+        ];
+        let mut hsv = [0u32; 3];
+        for (slot, (offset, lo, lo_default, hi, hi_default)) in hsv.iter_mut().zip(channels) {
+            let k = self.constant(Val::float(offset));
+            let shifted = self.emit(Op::Binary {
+                op: BinOp::Add,
+                a: seed,
+                b: k,
+            });
+            let channel_seed = self.emit(Op::Unary {
+                op: UnOp::Ceil,
+                a: shifted,
+            });
+            let (zero, one) = (self.constant(Val::ZERO), self.constant(Val::ONE));
+            let r = self.random_float(node, true, zero, one, Some(channel_seed));
+            let out_low = self.input_or(node, lo, Val::float(lo_default));
+            let out_high = self.input_or(node, hi, Val::float(hi_default));
+            *slot = self.emit(Op::Remap {
+                a: r,
+                in_low: zero,
+                in_high: one,
+                out_low,
+                out_high,
+            });
+        }
+        let [a, b, c] = hsv;
+        let combined = self.emit(Op::Combine3 { a, b, c });
+        self.emit(Op::HsvToRgb { a: combined })
     }
 
     /// MaterialX `colorcorrect` (`color3`), lowered to the stdlib's own
@@ -595,11 +824,13 @@ impl<'a> Compiler<'a> {
     /// `None` covers the unconnected input and a connection to the default
     /// chart itself (`texcoord` index 0, or `geompropvalue` of `st`), which is
     /// how nearly every document spells it; those keep the op on the JIT's
-    /// inline texture path. A connection whose subgraph meets an operator
-    /// this compiler lacks (`place2d`, a second UV set) also takes `None`:
-    /// the chart is a better stand-in for an unknown coordinate than the
-    /// constant the unknown node would compile to, and that node is already
-    /// reported.
+    /// inline texture path. So does a `geompropvalue` naming another UV set:
+    /// the chart is the one the host chose for the geometry, which is what
+    /// such an image read before `geompropvalue` compiled at all. A
+    /// connection whose subgraph meets an operator this compiler lacks
+    /// (`place2d`) also takes `None`: the chart is a better stand-in for an
+    /// unknown coordinate than the constant the unknown node would compile
+    /// to, and that node is already reported.
     fn image_coord(&mut self, node: &Node) -> Option<u32> {
         let input = node.input("texcoord")?;
         if let Source::Node { name, .. } = &input.source {
@@ -664,8 +895,10 @@ impl Compiler<'_> {
     }
 }
 
-/// Whether `node` is the shading point's default chart: `texcoord` with
-/// index 0, or `geompropvalue` reading `st` — what `ShadeCtx::uv` holds.
+/// Whether an image reads `node` as the shading point's chart, what
+/// `ShadeCtx::uv` holds: `texcoord` with index 0, or a `geompropvalue` of
+/// `st` or of any other primvar but the `curve:` properties (see
+/// `Compiler::image_coord`).
 fn is_default_chart(node: &Node) -> bool {
     let text = |name: &str| {
         node.input(name)
@@ -674,7 +907,7 @@ fn is_default_chart(node: &Node) -> bool {
     };
     match node.category.as_str() {
         "texcoord" => text("index").is_none_or(|i| i == "0"),
-        "geompropvalue" => text("geomprop") == Some("st"),
+        "geompropvalue" => text("geomprop").is_some_and(|g| !g.starts_with("curve:")),
         _ => false,
     }
 }

@@ -21,7 +21,7 @@ fn load_inline(name: &str, body: &str) -> Result<Loaded, MtlxError> {
     loaded
 }
 
-fn upward() -> (Ray, HitRecord) {
+fn upward() -> (Ray, HitRecord<'static>) {
     let mut rec = HitRecord::new();
     rec.p = Vec3A::ZERO;
     rec.normal = Vec3A::Z;

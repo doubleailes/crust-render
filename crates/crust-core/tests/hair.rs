@@ -272,11 +272,10 @@ fn a_mixed_fibre_keeps_both_leaves() {
         normal: Vec3A::Z,
         t: 1.0,
         front_face: true,
-        face: None,
+        part: crust_core::HitPart::None,
         uv: None,
         tangent: Vec3A::X,
         uv_width: 0.0,
-        face_width: 0.0,
     };
     let probe = l.material.probe(&Ray::new(Vec3A::Z, -Vec3A::Z), &rec);
     let leaves = probe.closure.leaves();

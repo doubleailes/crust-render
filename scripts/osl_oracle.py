@@ -50,17 +50,39 @@ import MaterialX.PyMaterialXGenShader as mx_gen
 # minus the ones that read something a one-shot `testshade` run cannot pin:
 # `image` / `tiledimage` (a texture file) and `texcoord` / `normal` /
 # `position` / `viewdirection` (the shading globals). `normalmap` stays: its
-# frame is authored through its `normal` / `tangent` / `bitangent` inputs.
+# frame is authored through its `normal` / `tangent` / `bitangent` inputs, as
+# `cellnoise2d`'s coordinate is through `texcoord`.
 CATEGORIES = [
     "constant", "add", "subtract", "multiply", "divide", "power", "min", "max",
     "modulo", "absval", "ln", "exp", "sin", "cos", "asin", "acos", "sqrt",
     "sign", "floor", "ceil", "normalize", "luminance", "dotproduct", "mix",
     "clamp", "contrast", "remap", "invert", "smoothstep", "convert", "extract",
-    "combine2", "combine3", "normalmap", "artistic_ior",
+    "combine2", "combine3", "normalmap", "artistic_ior", "rgbtohsv", "hsvtorgb",
+    "ifgreater", "ifgreatereq", "ifequal", "cellnoise2d", "randomfloat", "randomcolor",
 ]
 
+# Categories whose signatures may take `integer` inputs (the conditionals'
+# `...I` variants, the random nodes' `seed`) or give `integer` / `boolean`
+# outputs, all of which crust carries as a one-lane float. `extract`'s
+# `index` is the other integer input.
+INTEGER_CATEGORIES = {"extract", "ifgreater", "ifgreatereq", "ifequal", "randomfloat", "randomcolor"}
+SCALAR_OUTPUTS = {"integer": "%d", "boolean": "%d"}
+
+# Integer literals for those inputs.
+INT_POOL = ["0", "1", "-1", "2", "-3", "4", "7", "10"]
+
+# A conditional's `value1` / `value2`, from a pool small enough that
+# `ifequal` meets equal values in a fair share of cases.
+COMPARE_POOL = ["0", "1", "0.5", "-1"]
+
+# Inputs that declare a `defaultgeomprop`, which genosl binds in place of an
+# authored literal (`N`, `dPdu`, `dPdv`, the UV chart), so they are always
+# authored, and fed through a connection.
+GEOMPROP_INPUTS = {"normal", "tangent", "bitangent", "texcoord"}
+
 # The value types crust-mtlx models (`value::arity_of`). A signature using any
-# other type (integer, boolean, matrix, string, closures) is not generated.
+# other type (matrix, string, closures; integer and boolean outside
+# `INTEGER_CATEGORIES`) is not generated.
 ARITY = {"float": 1, "vector2": 2, "vector3": 3, "color3": 3, "vector4": 4, "color4": 4}
 
 # Every literal is drawn from here. Each has at most three decimals, so the
@@ -121,16 +143,21 @@ def signatures(lib):
             continue
         ins = [(i.getName(), i.getType()) for i in nd.getInputs()]
         outs = [o.getType() for o in nd.getOutputs()]
-        allowed = set(ARITY) | ({"integer"} if cat == "extract" else set())
-        if any(t not in allowed for _, t in ins) or any(t not in ARITY for t in outs):
+        allowed = set(ARITY) | ({"integer"} if cat in INTEGER_CATEGORIES else set())
+        outputs = set(ARITY) | (set(SCALAR_OUTPUTS) if cat in INTEGER_CATEGORIES else set())
+        if any(t not in allowed for _, t in ins) or any(t not in outputs for t in outs):
             continue
         out.append((nd.getName(), cat, ins, outs, [o.getName() for o in nd.getOutputs()]))
     return sorted(out)
 
 
 def random_value(rng, cat, name, ty, arity_of_in):
-    if ty == "integer":  # extract's index
+    if ty == "integer" and cat == "extract":
         return str(rng.randrange(arity_of_in))
+    if ty == "integer":
+        return rng.choice(INT_POOL)
+    if cat in ("ifgreater", "ifgreatereq", "ifequal") and name in ("value1", "value2"):
+        return rng.choice(COMPARE_POOL)
     lanes = [rng.choice(POOL) for _ in range(ARITY[ty])]
     if cat == "normalmap" and name == "in":
         # An encoded normal lives in [0, 1]; its z must stay positive for the
@@ -148,7 +175,6 @@ def cases_for(sig, n):
     rng = random.Random(nd)
     selections = out_names if len(outs) > 1 else [None]
     wide = max([ARITY.get(t, 1) for _, t in ins] or [1])
-    frame_inputs = {"normal", "tangent", "bitangent"}
     result = []
     for sel in selections:
         for k in range(n + 1):
@@ -156,9 +182,12 @@ def cases_for(sig, n):
             if cat == "normalmap":
                 frame = FRAMES[k % len(FRAMES)]
                 vals.update(zip(["normal", "tangent", "bitangent"], (", ".join(v) for v in frame)))
+            if cat == "cellnoise2d":
+                # crust's unauthored chart is the host's, not testshade's.
+                vals["texcoord"] = random_value(rng, cat, "texcoord", "vector2", wide)
             if k > 0:
                 for name, ty in ins:
-                    if name in frame_inputs:
+                    if name in GEOMPROP_INPUTS:
                         continue
                     # Leave roughly one input in five unauthored, so the
                     # defaults are checked in combination, not only all at once.
@@ -178,10 +207,10 @@ def build_doc(lib, sig, inputs, sel):
     node = graph.addNode(cat, "n", "multioutput" if len(outs) > 1 else outs[0])
     node.setNodeDefString(nd)
     for name, ty, text in inputs:
-        if name in ("normal", "tangent", "bitangent"):
+        if name in GEOMPROP_INPUTS:
             # These declare a `defaultgeomprop`, which genosl binds in place
-            # of an authored literal (it reads `N` / `dPdu` / `dPdv`), so the
-            # frame is fed through a connection instead.
+            # of an authored literal (it reads `N` / `dPdu` / `dPdv` / `u, v`),
+            # so the value is fed through a connection instead.
             src = graph.addNode("constant", f"frame_{name}", ty)
             src.setInputValue("value", text, ty)
             node.addInput(name, ty).setConnectedNode(src)
@@ -195,6 +224,8 @@ def build_doc(lib, sig, inputs, sel):
 
 
 def print_statement(ty):
+    if ty in SCALAR_OUTPUTS:
+        return f'    printf("ORACLE {SCALAR_OUTPUTS[ty]}\\n", out);\n'
     lanes = {
         "float": ["out"],
         "vector2": ["out.x", "out.y"],

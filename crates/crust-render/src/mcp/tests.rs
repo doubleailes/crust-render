@@ -2143,3 +2143,106 @@ fn a_scatter_under_an_instance_is_refused() {
     }
     assert_eq!(std::fs::read(&layer).unwrap(), bytes, "nothing authored");
 }
+
+/// A groom whose MaterialX material is authored inline, and whose curves
+/// author a per-strand colour the material does not read yet.
+fn groom_stage() -> String {
+    r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (40, 24)
+        int crust:maxDepth = 3
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 30
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 1
+    }
+
+    def BasisCurves "Groom" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform token type = "linear"
+        int[] curveVertexCounts = [2, 2, 2]
+        point3f[] points = [(-2, -1, 0), (2, -1, 0), (-2, 0, 0), (2, 0, 0), (-2, 1, 0), (2, 1, 0)]
+        float[] widths = [0.4] (interpolation = "constant")
+        color3f[] primvars:hairColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1)] (
+            interpolation = "uniform"
+        )
+        rel material:binding = </World/Looks/Hair>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Hair"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/Hair/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader_100"
+                color3f inputs:base_color = (0.8, 0.6, 0.3)
+                token outputs:out
+            }
+
+            def Shader "Strand"
+            {
+                uniform token info:id = "ND_geompropvalue_color3"
+                string inputs:geomprop = "hairColor"
+                color3f outputs:out
+            }
+        }
+    }
+}
+"#
+    .to_owned()
+}
+
+/// A curve material that keeps reading what it read is swapped in place;
+/// one that starts reading a primvar needs the strand table its curves were
+/// imported without, so the edit is `full`. Either way, a render after it is
+/// a full import's of the same layer, bit for bit.
+#[test]
+fn a_curve_material_reading_a_new_primvar_reimports() {
+    let (mut state, dir) = session_on("groom_primvar", &groom_stage());
+    assert_eq!(
+        author(
+            &mut state,
+            r#"over "World" { over "Looks" { over "Hair" { over "Surface" {
+                color3f inputs:base_color = (0.2, 0.4, 0.9) } } } }"#,
+        ),
+        "materials"
+    );
+    same_as_full_import(&mut state, &dir, "groom base colour");
+    assert_eq!(
+        author(
+            &mut state,
+            r#"over "World" { over "Looks" { over "Hair" { over "Surface" {
+                color3f inputs:base_color.connect = </World/Looks/Hair/Strand.outputs:out> } } } }"#,
+        ),
+        "full"
+    );
+    same_as_full_import(&mut state, &dir, "groom reads its primvar");
+    assert_eq!(undo(&mut state), "full");
+    same_as_full_import(&mut state, &dir, "groom primvar undone");
+}

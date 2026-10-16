@@ -16,11 +16,13 @@ use tracing::debug;
 
 use crate::material::Material;
 use crate::rt_world::WorldBuilder;
+use crate::strands::StrandTable;
 
 use super::attrs::{
     attr_f32, custom_token, decode_f32_array, decode_f64_array, decode_i32_array,
     decode_vec3f_array, prim_motion_translate, prim_ray_mask, value_at,
 };
+use super::strands::{CurveCounts, StrandBuilder, StrandRequest, VertexRecipe};
 
 // -----------------------------------------------------------------------
 // Sphere
@@ -156,6 +158,20 @@ fn span_end_values(m: &[[f32; 4]; 4], w: [f32; 4]) -> (f32, f32) {
     (at(start), at(end))
 }
 
+/// [`basis_to_bezier`] as weights: Bézier control point `j` of a span is
+/// `Σ_c w[j][c] · cp[c]` under basis `m`. The same four formulas, written
+/// out per control point, so a primvar runs through exactly the conversion
+/// its span's points do.
+fn basis_weights(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let (a, b, c, d) = (m[0], m[1], m[2], m[3]);
+    [
+        d,
+        std::array::from_fn(|i| d[i] + c[i] / 3.0),
+        std::array::from_fn(|i| d[i] + c[i] * (2.0 / 3.0) + b[i] / 3.0),
+        std::array::from_fn(|i| a[i] + b[i] + c[i] + d[i]),
+    ]
+}
+
 /// Import a `UsdGeomBasisCurves` batch as round (sphere-swept) curves:
 /// `linear` curves directly as [`CurveSegment`]s, `cubic` curves (bezier /
 /// bspline / catmullRom) as one [`CubicCurveSegment`] per span — its
@@ -171,7 +187,16 @@ fn span_end_values(m: &[[f32; 4]; 4], w: [f32; 4]) -> (f32, f32) {
 /// vectors live in local space under an `Instance`, like meshes. Shared by
 /// the top-level emitter and the prototype collector; the caller supplies
 /// the placement.
-pub(super) fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<CurveBatches> {
+///
+/// With a `request` (the bound material reads the strand, a primvar or the
+/// chart), the spans' strand table is built beside them: curve `k` of `n`
+/// points covers `v` from `0` to `1` over its `n − 1` linear segments, or
+/// over its cubic spans in equal steps of its parameter.
+pub(super) fn curve_segments(
+    prim: &Prim,
+    curves: &UsdBasisCurves,
+    request: Option<&StrandRequest>,
+) -> Option<Curves> {
     let points = value_at(&curves.points_attr()).and_then(decode_vec3f_array);
     let counts = value_at(&curves.curve_vertex_counts_attr()).and_then(decode_i32_array);
     let (points, counts) = match (points, counts) {
@@ -225,9 +250,33 @@ pub(super) fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Cur
         }
     };
 
+    let linear = ty == "linear";
+    let mut strands = request.map(|r| {
+        // `varying` has one value per span end: a linear curve's points, a
+        // cubic curve's span count plus one.
+        let varying = counts
+            .iter()
+            .map(|&c| {
+                let c = c.max(0) as usize;
+                match (linear, c >= 4) {
+                    (true, _) => c,
+                    (false, true) => (c - 4) / vstep + 2,
+                    (false, false) => 0,
+                }
+            })
+            .sum();
+        let shape = CurveCounts {
+            points: n_points,
+            curves: n_curves,
+            varying,
+        };
+        StrandBuilder::new(prim, r, shape)
+    });
+    let weights = basis_weights(basis);
     let mut segments: Vec<CurveSegment> = Vec::new();
     let mut cubic_segments: Vec<CubicCurveSegment> = Vec::new();
     let mut offset = 0usize;
+    let mut varying_offset = 0usize;
     for (curve_idx, &cnt) in counts.iter().enumerate() {
         let cnt = cnt as usize;
         if offset + cnt > pts.len() {
@@ -242,15 +291,27 @@ pub(super) fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Cur
         let cp = &pts[offset..offset + cnt];
         let radius = |k: usize| 0.5 * width_of(offset + k, curve_idx).max(1e-6);
 
-        if ty == "linear" {
-            for k in 0..cnt.saturating_sub(1) {
+        if linear {
+            let last = cnt.saturating_sub(1);
+            for k in 0..last {
                 segments.push(CurveSegment {
                     p0: cp[k],
                     p1: cp[k + 1],
                     r0: radius(k),
                     r1: radius(k + 1),
                 });
+                if let Some(b) = &mut strands {
+                    let (i, v) = (offset + k, |k: usize| k as f32 / last as f32);
+                    b.span(
+                        curve_idx,
+                        v(k),
+                        v(k + 1),
+                        &VertexRecipe::linear(i, i + 1),
+                        [i, i + 1],
+                    );
+                }
             }
+            varying_offset += cnt;
         } else {
             // Cubic: one CubicCurveSegment per span. Span k uses control
             // points [k·vstep .. k·vstep+3], converted to Bézier form;
@@ -278,7 +339,20 @@ pub(super) fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Cur
                     r0,
                     r1,
                 });
+                if let Some(b) = &mut strands {
+                    let i = offset + base;
+                    let recipe = VertexRecipe {
+                        idx: [i, i + 1, i + 2, i + 3],
+                        m: 4,
+                        w: weights,
+                        n: 4,
+                    };
+                    let v = |s: usize| s as f32 / n_spans as f32;
+                    let ends = [varying_offset + s, varying_offset + s + 1];
+                    b.span(curve_idx, v(s), v(s + 1), &recipe, ends);
+                }
             }
+            varying_offset += n_spans + 1;
         }
         offset += cnt;
     }
@@ -295,12 +369,23 @@ pub(super) fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Cur
         segments.len(),
         cubic_segments.len()
     );
-    Some((segments, cubic_segments))
+    Some(Curves {
+        batches: (segments, cubic_segments),
+        strands: strands.map(|b| b.finish(prim)),
+    })
 }
 
 /// The two primitive batches one curves prim imports as: linear segments
 /// and cubic (Bézier-form) spans.
 pub(super) type CurveBatches = (Vec<CurveSegment>, Vec<CubicCurveSegment>);
+
+/// A curves prim as imported: its batches, and its strand table when its
+/// material asked for one. The table indexes the one batch that is not
+/// empty (see [`nurbs_curve_segments`] for a prim of both kinds).
+pub(super) struct Curves {
+    pub(super) batches: CurveBatches,
+    pub(super) strands: Option<StrandTable>,
+}
 
 /// One kernel scene holding a curves prim's batches, in its local space.
 pub(super) fn curves_scene(batches: CurveBatches) -> crust_rt::Scene {
@@ -323,11 +408,11 @@ pub(super) fn curves_scene(batches: CurveBatches) -> crust_rt::Scene {
 pub(super) fn emit_curves(
     world: &mut WorldBuilder,
     prim: &Prim,
-    batches: Option<CurveBatches>,
+    curves: Option<Curves>,
     world_xf: GMat4,
     material: Arc<dyn Material>,
 ) {
-    let Some(batches) = batches else {
+    let Some(Curves { batches, strands }) = curves else {
         return;
     };
     if world_xf.determinant().abs() < 1e-12 {
@@ -339,7 +424,7 @@ pub(super) fn emit_curves(
         );
         return;
     }
-    world.attach_masked(
+    let id = world.attach_masked(
         Geometry::Instance {
             scene: Arc::new(curves_scene(batches)),
             transform: Affine3A::from_mat4(world_xf),
@@ -348,6 +433,10 @@ pub(super) fn emit_curves(
         material,
         prim_ray_mask(prim),
     );
+    match strands {
+        Some(table) => world.set_strands(id, Arc::new(table)),
+        None => world.mark_curves(id),
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -411,6 +500,58 @@ fn nurbs_span_bezier(
         .collect()
 }
 
+/// [`nurbs_span_bezier`] as weights over the span's `p + 1` control values:
+/// the blossom is linear in them, so running it on unit vectors gives each
+/// Bézier control point's weight of each. Degree 2 is elevated to a cubic,
+/// as its points are; degree 1 stays linear unless `elevate`.
+fn nurbs_span_recipe(
+    knots: &[f64],
+    span: usize,
+    p: usize,
+    (s, e): (f64, f64),
+    first: usize,
+    elevate: bool,
+) -> VertexRecipe {
+    let units: Vec<NurbsVertex> = (0..=p)
+        .map(|i| std::array::from_fn(|lane| if lane == i { 1.0 } else { 0.0 }))
+        .collect();
+    let bez = nurbs_span_bezier(&units, knots, span, p, s, e);
+    let w = |j: usize| -> [f32; 4] { std::array::from_fn(|i| bez[j][i] as f32) };
+    let idx = std::array::from_fn(|i| first + (span - p) + i.min(p));
+    let recipe = match p {
+        1 => VertexRecipe {
+            idx,
+            m: 2,
+            w: [w(0), w(1), [0.0; 4], [0.0; 4]],
+            n: 2,
+        },
+        2 => {
+            let (q0, q1, q2) = (w(0), w(1), w(2));
+            let mix = |a: [f32; 4], b: [f32; 4], s: f32, t: f32| -> [f32; 4] {
+                std::array::from_fn(|i| s * a[i] + t * b[i])
+            };
+            VertexRecipe {
+                idx,
+                m: 3,
+                w: [
+                    q0,
+                    mix(q0, q1, 1.0 / 3.0, 2.0 / 3.0),
+                    mix(q1, q2, 2.0 / 3.0, 1.0 / 3.0),
+                    q2,
+                ],
+                n: 4,
+            }
+        }
+        _ => VertexRecipe {
+            idx,
+            m: 4,
+            w: [w(0), w(1), w(2), w(3)],
+            n: 4,
+        },
+    };
+    if elevate { recipe.elevated() } else { recipe }
+}
+
 /// A `double2[]` (`ranges`) as `(min, max)` pairs.
 fn decode_ranges(v: sdf::Value) -> Option<Vec<(f64, f64)>> {
     match v {
@@ -439,7 +580,18 @@ fn decode_ranges(v: sdf::Value) -> Option<Vec<(f64, f64)>> {
 /// each span's Bézier control points are projected out of homogeneous
 /// space, which keeps the span's ends and end tangents' directions but not
 /// its exact shape (`curves.rational_approximated`).
-pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Option<CurveBatches> {
+///
+/// With a `request`, the strand table is built beside the spans, `v` running
+/// over each curve's rendered domain (`ranges` narrows it). A table indexes
+/// one batch only, and the kernel numbers each batch's primitives from 0, so
+/// a prim with both linear and cubic curves then carries its linear spans as
+/// the straight cubics tracing them. Primvars are blossomed unweighted: a
+/// rational curve's are approximated with it.
+pub(super) fn nurbs_curve_segments(
+    prim: &Prim,
+    curves: &UsdNurbsCurves,
+    request: Option<&StrandRequest>,
+) -> Option<Curves> {
     let points = value_at(&curves.points_attr()).and_then(decode_vec3f_array);
     let counts = value_at(&curves.curve_vertex_counts_attr()).and_then(decode_i32_array);
     let (points, counts) = match (points, counts) {
@@ -519,6 +671,23 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
         })
     };
 
+    let elevate =
+        request.is_some() && orders.contains(&2) && orders.iter().any(|&o| o == 3 || o == 4);
+    let mut strands = request.map(|r| {
+        // `varying` has one value per segment end: `count - order + 2`.
+        let varying = counts
+            .iter()
+            .zip(&orders)
+            .map(|(&c, &o)| (i64::from(c) - i64::from(o) + 2).max(0) as usize)
+            .sum();
+        let shape = CurveCounts {
+            points: n_points,
+            curves: n_curves,
+            varying,
+        };
+        StrandBuilder::new(prim, r, shape)
+    });
+    let mut varying_offset = 0usize;
     let mut segments: Vec<CurveSegment> = Vec::new();
     let mut cubic_segments: Vec<CubicCurveSegment> = Vec::new();
     let mut rational = false;
@@ -543,6 +712,8 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
         let u = &knots[knot_offset..knot_offset + n_knots];
         offset += cnt;
         knot_offset += n_knots;
+        let varying_first = varying_offset;
+        varying_offset += (cnt + 2).saturating_sub(order as usize);
         if !(2..=4).contains(&order) {
             unsupported_order.get_or_insert(order);
             continue;
@@ -597,7 +768,21 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
             };
             let radius = |v: &NurbsVertex| 0.5 * (v[3] as f32).max(1e-6);
             let (first_v, last_v) = (&bez[0], &bez[p]);
+            if let Some(b) = &mut strands {
+                let recipe = nurbs_span_recipe(u, span, p, (s, e), first, elevate);
+                let v = |t: f64| ((t - lo) / (hi - lo)) as f32;
+                let j = varying_first + (span - p);
+                b.span(curve_idx, v(s), v(e), &recipe, [j, j + 1]);
+            }
             match p {
+                1 if elevate => {
+                    let (q0, q1) = (pos(first_v), pos(last_v));
+                    cubic_segments.push(CubicCurveSegment {
+                        cp: [q0, (q0 * 2.0 + q1) / 3.0, (q0 + q1 * 2.0) / 3.0, q1],
+                        r0: radius(first_v),
+                        r1: radius(last_v),
+                    });
+                }
                 1 => segments.push(CurveSegment {
                     p0: pos(first_v),
                     p1: pos(last_v),
@@ -661,7 +846,10 @@ pub(super) fn nurbs_curve_segments(prim: &Prim, curves: &UsdNurbsCurves) -> Opti
         segments.len(),
         cubic_segments.len()
     );
-    Some((segments, cubic_segments))
+    Some(Curves {
+        batches: (segments, cubic_segments),
+        strands: strands.map(|b| b.finish(prim)),
+    })
 }
 
 #[cfg(test)]

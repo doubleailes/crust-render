@@ -24,7 +24,7 @@ pub fn procedural(_: &str, _: Option<&str>) -> Option<TextureRef> {
 const POINTS: usize = 4096;
 const REPEATS: usize = 15;
 
-pub fn points() -> Vec<ShadeCtx> {
+pub fn points() -> Vec<ShadeCtx<'static>> {
     (0..POINTS)
         .map(|i| {
             let t = i as f32 / POINTS as f32;
@@ -35,6 +35,7 @@ pub fn points() -> Vec<ShadeCtx> {
                 view: -Vec3A::new(0.2, (t * 3.0).sin(), 1.0).normalize(),
                 position: Vec3A::new(t, 1.0 - t, t * t),
                 uv_width: t * 0.01,
+                curve: None,
             }
         })
         .collect()

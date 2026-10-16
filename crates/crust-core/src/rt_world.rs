@@ -5,9 +5,10 @@
 //! state out of the intersection kernel.
 
 use crate::error::Structural;
-use crate::hittable::HitRecord;
+use crate::hittable::{FaceHit, HitPart, HitRecord};
 use crate::material::Material;
 use crate::ray::Ray;
+use crate::strands::{CurveHit, StrandTable};
 use crate::warning;
 use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, RayMask, SceneBuilder};
 use glam::{Affine3A, Vec3A};
@@ -543,6 +544,18 @@ impl MotionRecord {
 struct SideTables {
     map: Option<Arc<FaceMap>>,
     uv: Option<Arc<UvMap>>,
+    /// A curves geometry's span → strand map, when its material reads a
+    /// curve property, primvar or chart ([`crate::StrandTable`]).
+    strands: Option<Arc<StrandTable>>,
+    /// Whether the geometry is curves, table or not: what a material swapped
+    /// into its slot must then agree on is also what the import decoded for
+    /// it ([`Signature`]).
+    curves: bool,
+    /// None of `map`, `uv` and `strands` is set: a hit is only its surface.
+    /// One flag for the three, kept by their setters, so the overwhelming
+    /// majority of hits ([`World::intersect`]) test one byte, not three
+    /// pointers.
+    plain: bool,
     swapped: bool,
     /// Where a hit's triangle vertices may be read from, decided when the
     /// geometry is attached — see [`VertexSource`].
@@ -568,6 +581,9 @@ impl Default for SideTables {
         SideTables {
             map: None,
             uv: None,
+            strands: None,
+            curves: false,
+            plain: true,
             swapped: false,
             vertices: VertexSource::Unresolved,
             scale: 1.0,
@@ -753,6 +769,7 @@ impl WorldBuilder {
         let t = &mut self.faces[id as usize];
         t.map = Some(map);
         t.swapped = swapped;
+        t.plain = false;
     }
 
     /// Records the per-triangle UV table for a geometry, so hits on it report
@@ -768,6 +785,30 @@ impl WorldBuilder {
         let t = &mut self.faces[id as usize];
         t.uv = Some(map);
         t.swapped = swapped;
+        t.plain = false;
+    }
+
+    /// Records the strand table of a curves geometry, so hits on it report
+    /// where on their strand they lie, the chart, and the primvars its
+    /// material reads ([`HitRecord::curve`]).
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_strands(&mut self, id: u32, table: Arc<StrandTable>) {
+        let t = &mut self.faces[id as usize];
+        t.strands = Some(table);
+        t.curves = true;
+        t.plain = false;
+    }
+
+    /// Marks a geometry as curves, whether or not it carries a strand table:
+    /// a material swapped into its slot must then ask the same of the curve
+    /// ([`World::check_materials`]).
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn mark_curves(&mut self, id: u32) {
+        self.faces[id as usize].curves = true;
     }
 
     /// Records the uniform scale of this geometry's placement, which converts
@@ -934,7 +975,7 @@ impl WorldBuilder {
 /// the material looked up from the hit's `geom_id`, and the IDs
 /// themselves (the integrator attributes bounce-hit lights by `geom_id`).
 pub struct WorldHit<'a> {
-    pub rec: HitRecord,
+    pub rec: HitRecord<'a>,
     pub mat: &'a dyn Material,
     pub geom_id: u32,
     pub prim_id: u32,
@@ -1004,9 +1045,32 @@ impl World {
         // needs the polygon they belong to. Geometries without a table (the
         // overwhelming majority) skip straight past this.
         let tables = &self.faces[h.geom_id as usize];
+        // No table: the surface alone, and a curve's direction, as below.
+        if tables.plain {
+            return Some(WorldHit {
+                rec: HitRecord {
+                    p: ray.at(h.t),
+                    normal: h.normal,
+                    t: h.t,
+                    front_face: h.front_face,
+                    part: HitPart::None,
+                    uv: None,
+                    tangent: if h.dpdu == Vec3A::ZERO {
+                        Vec3A::ZERO
+                    } else {
+                        h.dpdu.normalize_or_zero()
+                    },
+                    uv_width: 0.0,
+                },
+                mat: self.materials[h.geom_id as usize].as_ref(),
+                geom_id: h.geom_id,
+                prim_id: h.prim_id,
+                placement: h.placement,
+            });
+        }
         let face = tables.map.as_ref().and_then(|m| {
             m.resolve(h.prim_id, h.u, h.v, tables.swapped)
-                .map(|(id, u, v)| crate::hittable::FaceHit { id, uv: (u, v) })
+                .map(|(id, u, v)| (id, (u, v)))
         });
         let (uv, tangent) = match &tables.uv {
             Some(m) => {
@@ -1022,6 +1086,16 @@ impl World {
             // nearly every hit has none, and the square root is not free.
             None if h.dpdu == Vec3A::ZERO => (None, Vec3A::ZERO),
             None => (None, h.dpdu.normalize_or_zero()),
+        };
+        // A curve's place on its strand, where its material reads one; the
+        // chart is then the strand table's, a curve having no UV map.
+        let curve = tables
+            .strands
+            .as_deref()
+            .and_then(|t| CurveHit::new(t, h.prim_id, h.u));
+        let uv = match &curve {
+            Some(c) => c.chart(),
+            None => uv,
         };
         // The ray's texture footprint, converted into each parameterisation
         // the shader might index. Zero unless the ray carries a cone *and*
@@ -1053,11 +1127,18 @@ impl World {
                 normal: h.normal,
                 t: h.t,
                 front_face: h.front_face,
-                face,
+                part: match (face, curve) {
+                    (Some((id, uv)), _) => HitPart::Face(FaceHit {
+                        id,
+                        uv,
+                        width: face_width,
+                    }),
+                    (None, Some(c)) => HitPart::Curve(c),
+                    (None, None) => HitPart::None,
+                },
                 uv,
                 tangent,
                 uv_width,
-                face_width,
             },
             mat: self.materials[h.geom_id as usize].as_ref(),
             geom_id: h.geom_id,
@@ -1232,6 +1313,18 @@ impl World {
         self.scene.has_motion()
     }
 
+    /// Bytes held by the curves' strand tables, each counted once however
+    /// many geometries (placements of one prototype) share it.
+    pub fn strand_table_bytes(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        self.faces
+            .iter()
+            .filter_map(|t| t.strands.as_ref())
+            .filter(|t| seen.insert(Arc::as_ptr(t)))
+            .map(|t| t.bytes())
+            .sum()
+    }
+
     /// Exact kernel-resident bytes — see
     /// [`crust_rt::Scene::memory_footprint`].
     pub fn memory_footprint(&self) -> crust_rt::MemoryFootprint {
@@ -1262,19 +1355,21 @@ impl World {
     /// material says differently ([`crate::live`]): its cutout, straight
     /// transmission or medium boundary (the flags [`WorldBuilder::commit`]
     /// derives), whether it emits, its kind, or the UV and per-face tables
-    /// the import gave the geometry. Everything else about a material is
+    /// the import gave the geometry — and, on curves, the strand table
+    /// ([`Material::curve_needs`]). Everything else about a material is
     /// read per hit, so a swap that passes renders as a fresh import would.
     pub fn check_materials(
         &self,
         swaps: &[(&[u32], &Arc<dyn Material>)],
     ) -> Result<(), Structural> {
         for (slots, new) in swaps {
-            let wanted = Signature::of(new.as_ref());
             for &slot in *slots {
                 let Some(old) = self.materials.get(slot as usize) else {
                     return Err(Structural(format!("the world has no slot {slot}")));
                 };
-                let had = Signature::of(old.as_ref());
+                let curves = self.faces[slot as usize].curves;
+                let wanted = Signature::of(new.as_ref(), curves);
+                let had = Signature::of(old.as_ref(), curves);
                 if had != wanted {
                     return Err(Structural(format!(
                         "the material in slot {slot} would change from {had:?} to {wanted:?}"
@@ -1314,11 +1409,20 @@ pub(crate) struct Signature {
     uv: bool,
     uv_primvar: Option<String>,
     face_texture: Option<usize>,
+    /// On a curves slot: the chart, the strand and the primvars by name its
+    /// strand table was decoded for. `None` elsewhere, so a mesh material's
+    /// edit is never refused over what only a curve would read.
+    curve: Option<(bool, bool, Vec<String>)>,
 }
 
 impl Signature {
-    pub(crate) fn of(m: &dyn Material) -> Signature {
+    pub(crate) fn of(m: &dyn Material, curves: bool) -> Signature {
+        let curve = curves.then(|| {
+            let n = m.curve_needs();
+            (n.chart, n.strand, n.primvars.to_vec())
+        });
         Signature {
+            curve,
             kind: m.kind(),
             cutout: m.has_cutout(),
             straight: m.has_straight_transmission(),

@@ -1783,7 +1783,7 @@ fn only_a_thin_transmissive_wall_has_straight_transmission() {
 
 /// The ray toward a shading point at the origin (normal +Z) from view
 /// direction `v`, and its hit.
-fn fuzz_hit(v: Vec3A) -> (Ray, HitRecord) {
+fn fuzz_hit(v: Vec3A) -> (Ray, HitRecord<'static>) {
     let rec = HitRecord {
         normal: Vec3A::Z,
         front_face: true,

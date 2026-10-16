@@ -780,11 +780,13 @@
     `Compiler` + `Program::eval` and compares every lane with the value
     MaterialX's own OSL code generator (`genosl`) produces for the same
     document, compiled by `oslc` and run once by `testshade`. That covers all
-    259 stdlib signatures of the pattern nodes crust compiles, over the six
-    value types it models, with a zero-input "defaults" case plus 16 seeded
+    316 stdlib signatures of the pattern nodes crust compiles, over the six
+    value types it models (plus the `integer` and `boolean` inputs and outputs
+    of the conditionals and random nodes, carried as one-lane floats), with a
+    zero-input "defaults" case plus 16 seeded
     random ones each (a fifth of the inputs are left unauthored, so defaults
     are also checked in combination). The expected values live in
-    `tests/data/osl_oracle.txt` (committed, ~360 KiB), so `cargo test` needs
+    `tests/data/osl_oracle.txt` (committed, ~450 KiB), so `cargo test` needs
     neither OSL nor MaterialX; `scripts/osl_oracle.py` regenerates it. Inputs
     are drawn from literals with at most three decimals, so genosl's `%f`
     printing and crust's parse give both sides bit-identical inputs, and lanes
@@ -869,7 +871,13 @@
     Ubuntu 24.04 the dependencies are the distribution's
     `libopenimageio-dev`, `llvm-17-dev`, `libclang-17-dev`, `libboost-dev`,
     `libpugixml-dev`, `flex` and `bison`, plus an empty `/usr/include/opencv4`
-    (OIIO's CMake config names it); MaterialX is `pip install materialx`.
+    (OIIO's CMake config names it); MaterialX is `pip install materialx`. A
+    minimal image also needs `libboost-filesystem-dev`,
+    `libboost-thread-dev`, `libopenexr-dev` and `openimageio-tools` (OIIO's
+    CMake targets name its `iconvert`), and `-DCMAKE_CXX_STANDARD=17`: OSL
+    defaults to C++14, which LLVM 17's headers do not compile under. Such a
+    build reproduced the committed fixture row for row before the HSV,
+    conditional and random signatures were added.
   - Sample scenes: `samples/materialx_basic.usda` + `.mtlx` (self-contained, 20
     KiB of textures, what `tests/usd_scene.rs` runs against; its `mtlx_lacquer`
     is a two-dielectric stack whose interfaces stay separate leaves — α 0.02 at
@@ -1033,9 +1041,13 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
 - **Hair: far-field only, one fibre at a time.** There is no dual scattering or
   other multiple-scattering approximation, so a dense groom converges by
   tracing bounces, and there is no near-field azimuthal term for a tube wider
-  than the pixel. Ribbons (`BasisCurves` `normals`) are not read, and curve
-  primvars do not reach materials, so a per-strand colour cannot be authored
-  yet.
+  than the pixel. Ribbons (`BasisCurves` `normals`) are not read.
+- **Curve primvars: curves only, and not `faceVarying`.** `geompropvalue` reads a
+  primvar by name on a curve hit (§ MaterialX, "Curve properties and primvars");
+  on a mesh it reads only the chart (`st`), and a mesh's other primvars give the
+  node's `default`. `curve:v` is the curve's parameter, not arc length: on a
+  strand with unevenly spaced control points a `v` ramp follows the parameter, as
+  USD's `vertex` primvars do.
 - **Not applied.** glTF `occlusion` is reported, not implemented: a path
   tracer computes its own. Dispersion is ignored where MaterialX's own graphs
   ignore it, and reported.
@@ -1100,10 +1112,15 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   semantics are checked"): `image` / `tiledimage` (a texture file), `texcoord`,
   `normal`, `position` and `viewdirection` (the shading globals) are not in it,
   nor are `hsvadjust`, `colorcorrect` and `heighttonormal` (not yet in the
-  script's `CATEGORIES`), nor anything the closure and surface builders
+  script's `CATEGORIES`), nor `geompropvalue` (it reads the host's primvars),
+  nor anything the closure and surface builders
   (`bsdf.rs`, `surface/`) emit, which the pattern ops they lower to are
-  checked through. `integer`, `boolean` and matrix signatures are not generated
-  because crust has no such values.
+  checked through. Matrix signatures are not generated because crust has no
+  such values, and `integer` / `boolean` ones only for the conditionals and
+  random nodes (the conditionals' `...B` variants, with `boolean` values, not
+  at all). `cellnoise2d`'s `texcoord` is always authored, through a
+  connection like `normalmap`'s frame: unauthored, crust reads the host's
+  chart and `testshade` its own `u, v`.
 - **Stdlib nodegraphs lowered by hand.** `colorcorrect` (`color3`) is compiled to
   `NG_colorcorrect_color3`'s own chain (`hsvadjust` → `saturate` → `range` gamma →
   lift → gain → `contrast` → exposure) out of existing ops plus `HsvAdjust`, with a
@@ -1111,6 +1128,45 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   by a test, since swapping any two still renders plausibly. `colorcorrect` on
   `color4` is refused and reported, because there is no `combine4` to route alpha
   around the chain.
+- **Curve properties and primvars** (`geompropvalue`). `ShadeCtx::curve`
+  (`CurveCtx`: `v`, `index`, `random` and the hit's primvar values) is `Some` on a
+  curve hit whose geometry carries a strand table (usd-scene-import record,
+  "Curve attributes"), `None` anywhere else. `geompropvalue` compiles `st` to the
+  chart, `curve:v` / `curve:index` / `curve:random` to `Op::Curve`, and any other
+  name to `Op::Primvar` on a channel of `Program::primvars` (the names, in the order
+  compilation met them, which the host decodes and supplies in that order); each
+  falls back to the node's `default`, as MaterialX specifies for an absent
+  property, and converts as `convert` does (a `float` broadcasts). An unknown
+  `curve:` name is reported. An image whose `texcoord` is a `geompropvalue` of a
+  named primvar keeps reading the chart (below), so this changed no mesh image.
+  `ShadeCtx` borrows the primvar values, hence its lifetime; the JIT reads the
+  context only through the interpreter's ops, which it hands both new ops to.
+  **Cost.** Measured against the commit before (callgrind, `-s 2`, one thread):
+  cornellbox −0.24% and `samples/curves.usda` −0.16% instructions, and every
+  sample scene bit-identical. The record a hit carries for its strand costs
+  nothing per hit once it shares `HitRecord::part` with the Ptex face (beside it,
+  +0.47%: `WorldHit` passed 128 bytes and every move became a `memcpy`), and the
+  no-table fast path in `World::intersect` saves more than the strand test adds
+  (usd-scene-import record, "Curve attributes").
+- **HSV, conditionals and random nodes.** `rgbtohsv` / `hsvtorgb` are ops over
+  the `hsvadjust` transcriptions of OSL's `transformc` (Foley & van Dam); a
+  `color4` keeps its alpha. `ifgreater` / `ifgreatereq` / `ifequal` are one
+  `Select` op whose width is the wider branch's whichever is taken, so the
+  JIT knows it without evaluating the comparison (a mistyped document with a
+  `vector2` and a `color3` branch is where that shows). The unauthored
+  `value1` is 1, but 0 for `ifequal`, except `ND_ifequal_boolean`'s; nothing
+  but the output type tells that signature from `ND_ifequal_booleanB`, so a
+  boolean `ifequal` authoring a `boolean` value takes the latter's (0).
+  `randomfloat` and `randomcolor` are lowered to their stdlib nodegraphs
+  (`NG_randomfloat_*`: `cellnoise2d` of `(in · 4096, seed)`, `range`d and
+  clamped; `NG_randomcolor_float`: three of those under the seeds
+  `ceil(seed + 413.3)`, `+ 1522.4`, `+ 1813.8`, then `hsvtorgb`), leaving out
+  `range`'s first remap and gamma stage, exact identities at the nodegraph's
+  constants. `cellnoise2d` is OSL's `cellnoise(x, y)`, lookup3's `final` over
+  the floored cell (seed `0xdeadbeef + 21`) scaled by 2⁻³², transcribed from
+  MaterialX's `mx_noise.glsl`; the oracle matches it bit for bit, so a look
+  draws the same random values here as in any MaterialX renderer. The JIT
+  hands all four ops to the interpreter.
 - **`heighttonormal` differentiates over the ray footprint.** The OSL reference is
   `normalize(-Dx(h), Dy(h), scale·√…)`, which uses screen-space derivatives. There
   is no `Dx` here, so the compiler builds the `in` subgraph four more times with
@@ -1124,8 +1180,12 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   zero, and so does an image at a constant `texcoord`.
 - **An image's `texcoord` connection is honoured** (`Op::Texture::coord`).
   The default chart spelled out (`texcoord` index 0, `geompropvalue st`) stays
-  `None`, which keeps the lookup on the JIT's inline path. A coordinate
-  subgraph that hits an unsupported node (`place2d`, a second UV set) also
+  `None`, which keeps the lookup on the JIT's inline path, and so does a
+  `geompropvalue` naming any other primvar (a second UV set): it reads the
+  chart the host chose for the geometry, as it did while `geompropvalue` did
+  not compile, so a mesh renders as before. Only a `curve:` property, or a
+  subgraph over one, is a coordinate of its own. A coordinate
+  subgraph that hits an unsupported node (`place2d`) also
   falls back to the chart, because the constant that node would compile to
   pins the lookup to a single texel. The JIT sends shifted lookups back to the interpreter, which keeps its
   inline texture path, and so the bit-identity pin, untouched.

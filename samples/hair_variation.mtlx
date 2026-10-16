@@ -1,0 +1,97 @@
+<?xml version="1.0"?>
+<!--
+  Per-strand variation built from curve attributes (see hair_variation.usda).
+
+  The fibre colour is, in order:
+    1. the curve's own root colour, a `uniform` primvar read by name;
+    2. ramped to a blond tip along the strand by `curve:v`;
+    3. its hue shifted by up to ±0.04 by `curve:random`;
+    4. replaced by grey on one strand in ten (`curve:random` above 0.9).
+  It then sets the fibre's absorption, as `mtlx_hair_color` in hair.mtlx does,
+  and the colour of a diffuse share of the strand.
+-->
+<materialx version="1.39">
+
+  <geompropvalue name="root_color" type="color3">
+    <input name="geomprop" type="string" value="rootColor" />
+    <input name="default" type="color3" value="0.3, 0.17, 0.08" />
+  </geompropvalue>
+  <geompropvalue name="along" type="float">
+    <input name="geomprop" type="string" value="curve:v" />
+  </geompropvalue>
+  <geompropvalue name="strand_random" type="float">
+    <input name="geomprop" type="string" value="curve:random" />
+  </geompropvalue>
+
+  <!-- 2. Root to tip: the blond comes in over the outer half. -->
+  <smoothstep name="tip_weight" type="float">
+    <input name="in" type="float" nodename="along" />
+    <input name="low" type="float" value="0.45" />
+    <input name="high" type="float" value="1.0" />
+  </smoothstep>
+  <mix name="ramp" type="color3">
+    <input name="bg" type="color3" nodename="root_color" />
+    <input name="fg" type="color3" value="0.85, 0.7, 0.45" />
+    <input name="mix" type="float" nodename="tip_weight" />
+  </mix>
+
+  <!-- 3. A small hue shift per strand. -->
+  <remap name="hue_shift" type="float">
+    <input name="in" type="float" nodename="strand_random" />
+    <input name="outlow" type="float" value="-0.04" />
+    <input name="outhigh" type="float" value="0.04" />
+  </remap>
+  <rgbtohsv name="ramp_hsv" type="color3">
+    <input name="in" type="color3" nodename="ramp" />
+  </rgbtohsv>
+  <combine3 name="hsv_delta" type="color3">
+    <input name="in1" type="float" nodename="hue_shift" />
+  </combine3>
+  <add name="shifted_hsv" type="color3">
+    <input name="in1" type="color3" nodename="ramp_hsv" />
+    <input name="in2" type="color3" nodename="hsv_delta" />
+  </add>
+  <hsvtorgb name="varied" type="color3">
+    <input name="in" type="color3" nodename="shifted_hsv" />
+  </hsvtorgb>
+
+  <!-- 4. One strand in ten is grey. -->
+  <ifgreater name="fibre_color" type="color3">
+    <input name="value1" type="float" nodename="strand_random" />
+    <input name="value2" type="float" value="0.9" />
+    <input name="in1" type="color3" value="0.62, 0.62, 0.64" />
+    <input name="in2" type="color3" nodename="varied" />
+  </ifgreater>
+
+  <chiang_hair_roughness name="rough" type="multioutput">
+    <input name="longitudinal" type="float" value="0.25" />
+    <input name="azimuthal" type="float" value="0.3" />
+  </chiang_hair_roughness>
+  <chiang_hair_absorption_from_color name="absorption" type="vector3">
+    <input name="color" type="color3" nodename="fibre_color" />
+    <input name="azimuthal_roughness" type="float" value="0.3" />
+  </chiang_hair_absorption_from_color>
+  <chiang_hair_bsdf name="fibre" type="BSDF">
+    <input name="roughness_R" type="vector2" nodename="rough" output="roughness_R" />
+    <input name="roughness_TT" type="vector2" nodename="rough" output="roughness_TT" />
+    <input name="roughness_TRT" type="vector2" nodename="rough" output="roughness_TRT" />
+    <input name="absorption_coefficient" type="vector3" nodename="absorption" />
+  </chiang_hair_bsdf>
+  <!-- A sparse groom shows mostly its white primary highlight; a share of
+       diffuse in the strand's own colour keeps the variation readable. -->
+  <oren_nayar_diffuse_bsdf name="body" type="BSDF">
+    <input name="color" type="color3" nodename="fibre_color" />
+  </oren_nayar_diffuse_bsdf>
+  <mix name="fibre_and_body" type="BSDF">
+    <input name="fg" type="BSDF" nodename="fibre" />
+    <input name="bg" type="BSDF" nodename="body" />
+    <input name="mix" type="float" value="0.6" />
+  </mix>
+  <surface name="fibre_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="fibre_and_body" />
+  </surface>
+  <surfacematerial name="mtlx_hair_variation" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="fibre_surface" />
+  </surfacematerial>
+
+</materialx>

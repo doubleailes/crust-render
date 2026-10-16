@@ -403,3 +403,86 @@ def Xform "W"
     assert_eq!(scene.lights.count(), 4, "Dead illuminates nothing");
     assert!(prov.light("/W/Dead").is_none());
 }
+
+/// What a curve's strand table was decoded for is part of what a swap must
+/// keep, on curves only: a material that starts reading a primvar is refused
+/// on a curves slot (its table lacks the primvar) and taken on a mesh's.
+#[test]
+fn a_curve_material_swap_is_refused_when_it_reads_something_new() {
+    let dir = std::env::temp_dir().join("crust_live_curve_swap");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mtlx = dir.join("looks.mtlx");
+    std::fs::write(
+        &mtlx,
+        r#"<?xml version="1.0"?>
+<materialx version="1.39">
+  <constant name="grey" type="color3"><input name="value" type="color3" value="0.5, 0.5, 0.5" /></constant>
+  <constant name="red" type="color3"><input name="value" type="color3" value="0.9, 0.1, 0.1" /></constant>
+  <geompropvalue name="tint" type="color3"><input name="geomprop" type="string" value="tint" /></geompropvalue>
+  <standard_surface name="s_plain" type="surfaceshader"><input name="base_color" type="color3" nodename="grey" /></standard_surface>
+  <standard_surface name="s_red" type="surfaceshader"><input name="base_color" type="color3" nodename="red" /></standard_surface>
+  <standard_surface name="s_reads" type="surfaceshader"><input name="base_color" type="color3" nodename="tint" /></standard_surface>
+  <surfacematerial name="plain" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s_plain" /></surfacematerial>
+  <surfacematerial name="red" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s_red" /></surfacematerial>
+  <surfacematerial name="reads" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s_reads" /></surfacematerial>
+</materialx>
+"#,
+    )
+    .unwrap();
+    let stage = dir.join("stage.usda");
+    std::fs::write(
+        &stage,
+        format!(
+            r#"#usda 1.0
+def Xform "World"
+{{
+    def Material "Plain" (prepend references = @{}@</MaterialX/Materials/plain>) {{ }}
+    def BasisCurves "Curve" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token type = "linear"
+        int[] curveVertexCounts = [2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        rel material:binding = </World/Plain>
+    }}
+    def Mesh "Card" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 2, 0), (1, 2, 0), (0, 3, 0)]
+        rel material:binding = </World/Plain>
+    }}
+}}
+"#,
+            mtlx.display()
+        ),
+    )
+    .unwrap();
+    let scene = Scene::from_usd(&stage).expect("imports");
+    let prov = consistent(&scene);
+    let slot = |prim: &str| {
+        let slots = &prov.material("/World/Plain").expect("bound").slots;
+        *slots
+            .iter()
+            .find(|&&s| prov.prim_of_geometry(s) == Some(prim))
+            .unwrap_or_else(|| panic!("{prim}'s slot"))
+    };
+    let (curve, card) = (slot("/World/Curve"), slot("/World/Card"));
+    let load = |name: &str| -> Arc<dyn Material> {
+        crust_core::materialx::load(
+            &mtlx,
+            Some(name),
+            &crust_core::mtlx::Host::new(&|_, _| None),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+        .material
+    };
+    assert!(swap_check(&scene, &[curve], load("red")), "same needs");
+    assert!(
+        !swap_check(&scene, &[curve], load("reads")),
+        "a new primvar"
+    );
+    assert!(
+        swap_check(&scene, &[card], load("reads")),
+        "a mesh reads no table"
+    );
+}

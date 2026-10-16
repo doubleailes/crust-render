@@ -19,7 +19,7 @@ fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
     None
 }
 
-fn ctx() -> ShadeCtx {
+fn ctx() -> ShadeCtx<'static> {
     ShadeCtx {
         uv: (0.25, 0.75),
         normal: Vec3A::Z,
@@ -27,6 +27,7 @@ fn ctx() -> ShadeCtx {
         view: -Vec3A::Z,
         position: Vec3A::new(1.0, 2.0, 3.0),
         uv_width: 0.0,
+        curve: None,
     }
 }
 
@@ -2205,5 +2206,320 @@ fn a_hair_leaf_reads_its_helpers_and_curve_direction() {
     assert!(
         sigma.z > sigma.y && sigma.y > sigma.x && sigma.x > 0.0,
         "{sigma:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HSV, conditional and random nodes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hsv_round_trip_returns_the_colour() {
+    let doc = r#"<materialx>
+          <rgbtohsv name="hsv" type="color3">
+            <input name="in" type="color3" value="0.2, 0.5, 0.8" />
+          </rgbtohsv>
+          <hsvtorgb name="rgb" type="color3">
+            <input name="in" type="color3" nodename="hsv" />
+          </hsvtorgb>
+        </materialx>"#;
+    let v = run(doc, "rgb");
+    assert_eq!(v.arity, 3);
+    for (got, want) in v.v[..3].iter().zip([0.2, 0.5, 0.8]) {
+        assert!((got - want).abs() <= 1e-5 * want, "{:?}", v.v);
+    }
+}
+
+#[test]
+fn hsv_nodes_keep_a_color4_alpha() {
+    let v = run(&unary("rgbtohsv", "color4", "1, 0, 0, 0.3"), "n");
+    assert_eq!(v.arity, 4);
+    assert_eq!(v.v, [0.0, 1.0, 1.0, 0.3]);
+}
+
+/// `ifgreater` of colours: `in1` when `value1 > value2`, else `in2`.
+fn ifgreater(value1: &str) -> String {
+    format!(
+        r#"<materialx>
+             <ifgreater name="n" type="color3">
+               <input name="value1" type="float" value="{value1}" />
+               <input name="value2" type="float" value="0.5" />
+               <input name="in1" type="color3" value="1, 0, 0" />
+               <input name="in2" type="color3" value="0, 0, 1" />
+             </ifgreater>
+           </materialx>"#
+    )
+}
+
+#[test]
+fn a_conditional_picks_a_branch() {
+    assert_eq!(run(&ifgreater("0.7"), "n").v[..3], [1.0, 0.0, 0.0]);
+    assert_eq!(run(&ifgreater("0.3"), "n").v[..3], [0.0, 0.0, 1.0]);
+    // At equality only the inclusive comparisons take `in1`.
+    assert_eq!(run(&ifgreater("0.5"), "n").v[..3], [0.0, 0.0, 1.0]);
+    let eq = ifgreater("0.5").replace("ifgreater", "ifgreatereq");
+    assert_eq!(run(&eq, "n").v[..3], [1.0, 0.0, 0.0]);
+    let eq = ifgreater("0.5").replace("ifgreater", "ifequal");
+    assert_eq!(run(&eq, "n").v[..3], [1.0, 0.0, 0.0]);
+}
+
+#[test]
+fn boolean_conditionals_answer_one_or_zero() {
+    let doc = |cat: &str, v1: &str| {
+        format!(
+            r#"<materialx><{cat} name="n" type="boolean">
+                 <input name="value1" type="float" value="{v1}" />
+               </{cat}></materialx>"#
+        )
+    };
+    // `value2` defaults to 0.
+    assert_eq!(run(&doc("ifgreater", "1"), "n").x(), 1.0);
+    assert_eq!(run(&doc("ifgreater", "-1"), "n").x(), 0.0);
+    assert_eq!(run(&doc("ifequal", "0"), "n").x(), 1.0);
+    // Unauthored, `ND_ifequal_boolean` compares 1 with 0.
+    let bare = r#"<materialx><ifequal name="n" type="boolean" /></materialx>"#;
+    assert_eq!(run(bare, "n").x(), 0.0);
+}
+
+fn randomfloat(input: &str, seed: &str) -> String {
+    format!(
+        r#"<materialx>
+             <randomfloat name="n" type="float">
+               <input name="in" type="float" value="{input}" />
+               <input name="min" type="float" value="0" />
+               <input name="max" type="float" value="1" />
+               <input name="seed" type="integer" value="{seed}" />
+             </randomfloat>
+           </materialx>"#
+    )
+}
+
+#[test]
+fn a_random_node_depends_only_on_its_seed_and_input() {
+    let a = run(&randomfloat("0.25", "3"), "n").x();
+    assert_eq!(run(&randomfloat("0.25", "3"), "n").x(), a);
+    assert!((0.0..1.0).contains(&a), "{a}");
+    // A different seed, or an input in another 1/4096 cell, moves it.
+    assert_ne!(run(&randomfloat("0.25", "4"), "n").x(), a);
+    assert_ne!(run(&randomfloat("0.2503", "3"), "n").x(), a);
+    // The same cell does not.
+    assert_eq!(run(&randomfloat("0.2501", "3"), "n").x(), a);
+}
+
+#[test]
+fn randomfloat_is_uniform_over_its_range() {
+    let mut bins = [0usize; 10];
+    let n = 10_000;
+    for seed in 0..n {
+        let doc = randomfloat("0", &seed.to_string())
+            .replace(
+                r#"name="min" type="float" value="0""#,
+                r#"name="min" type="float" value="2""#,
+            )
+            .replace(
+                r#"name="max" type="float" value="1""#,
+                r#"name="max" type="float" value="4""#,
+            );
+        let x = run(&doc, "n").x();
+        assert!((2.0..=4.0).contains(&x), "seed {seed}: {x}");
+        bins[(((x - 2.0) / 2.0 * 10.0) as usize).min(9)] += 1;
+    }
+    for (i, &b) in bins.iter().enumerate() {
+        let expected = n / 10;
+        // 10% is 3.3 standard deviations of a bin of 1000.
+        assert!(b.abs_diff(expected) * 10 <= expected, "bin {i}: {b} of {n}");
+    }
+}
+
+#[test]
+fn randomcolor_spans_its_hue_range_at_full_saturation_by_default() {
+    let doc = |seed: u32| {
+        format!(
+            r#"<materialx><randomcolor name="n" type="color3">
+                 <input name="in" type="float" value="0.5" />
+                 <input name="seed" type="integer" value="{seed}" />
+               </randomcolor></materialx>"#
+        )
+    };
+    let colours: Vec<Val> = (0..64).map(|s| run(&doc(s), "n")).collect();
+    for c in &colours {
+        assert_eq!(c.arity, 3);
+        // Brightness defaults to exactly 1: the largest channel is 1.
+        assert!((c.rgb().max_element() - 1.0).abs() < 1e-6, "{:?}", c.v);
+    }
+    assert!(colours.windows(2).any(|w| w[0] != w[1]));
+}
+
+#[test]
+fn cellnoise2d_unauthored_reads_the_chart() {
+    let bare = run(
+        r#"<materialx><cellnoise2d name="n" type="float" /></materialx>"#,
+        "n",
+    );
+    // The default context's chart, (0.25, 0.75), is in cell (0, 0).
+    let authored = run(
+        r#"<materialx><cellnoise2d name="n" type="float">
+             <input name="texcoord" type="vector2" value="0.9, 0.1" />
+           </cellnoise2d></materialx>"#,
+        "n",
+    );
+    assert_eq!(bare.x(), authored.x());
+}
+
+// ---------------------------------------------------------------------------
+// geompropvalue: curve properties and primvars
+// ---------------------------------------------------------------------------
+
+/// Compiles `name` of `doc` and evaluates it with `curve` as the strand.
+fn run_on_curve(doc: &str, name: &str, curve: Option<crust_mtlx::CurveCtx<'_>>) -> (Val, Program) {
+    let d = Doc::parse(doc).expect("document parses");
+    let mut c = Compiler::new(&d, &Host::new(&decline));
+    let slot = c.compile_named("", name, None);
+    assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
+    let mut slots = Vec::new();
+    c.program.eval(&ShadeCtx { curve, ..ctx() }, &mut slots);
+    (slots[slot as usize], c.program)
+}
+
+fn geomprop(ty: &str, prop: &str, default: &str) -> String {
+    format!(
+        r#"<materialx>
+             <geompropvalue name="g" type="{ty}">
+               <input name="geomprop" type="string" value="{prop}" />
+               <input name="default" type="{ty}" value="{default}" />
+             </geompropvalue>
+           </materialx>"#
+    )
+}
+
+/// The lanes a value means, and its width — not the unused lanes above it.
+fn lanes(v: Val) -> (Vec<f32>, u8) {
+    (v.v[..v.arity as usize].to_vec(), v.arity)
+}
+
+fn strand(primvars: &[Option<Val>]) -> Option<crust_mtlx::CurveCtx<'_>> {
+    Some(crust_mtlx::CurveCtx {
+        v: 0.625,
+        index: 7,
+        random: 0.3,
+        primvars,
+    })
+}
+
+#[test]
+fn curve_properties_read_the_strand() {
+    for (prop, want) in [
+        ("curve:v", 0.625),
+        ("curve:index", 7.0),
+        ("curve:random", 0.3),
+    ] {
+        let (v, p) = run_on_curve(&geomprop("float", prop, "0.5"), "g", strand(&[]));
+        assert_eq!(lanes(v), lanes(Val::float(want)), "{prop}");
+        assert!(p.reads_curve() && p.primvars.is_empty() && !p.reads_chart());
+    }
+    // A colour reading a property is grey.
+    let (v, _) = run_on_curve(&geomprop("color3", "curve:v", "0, 0, 0"), "g", strand(&[]));
+    assert_eq!((v.v[..3].to_vec(), v.arity), (vec![0.625; 3], 3));
+}
+
+#[test]
+fn curve_properties_off_a_curve_read_the_default() {
+    let (v, _) = run_on_curve(&geomprop("float", "curve:v", "0.5"), "g", None);
+    assert_eq!(lanes(v), lanes(Val::float(0.5)));
+    let (v, _) = run_on_curve(
+        &geomprop("color3", "curve:random", "0.1, 0.2, 0.3"),
+        "g",
+        None,
+    );
+    assert_eq!(lanes(v), lanes(Val::vec3(0.1, 0.2, 0.3)));
+}
+
+#[test]
+fn primvars_are_read_by_name_in_program_order() {
+    let doc = r#"<materialx>
+          <geompropvalue name="a" type="color3">
+            <input name="geomprop" type="string" value="hairColor" />
+          </geompropvalue>
+          <geompropvalue name="b" type="float">
+            <input name="geomprop" type="string" value="primvars:melanin" />
+            <input name="default" type="float" value="0.25" />
+          </geompropvalue>
+          <add name="sum" type="color3">
+            <input name="in1" type="color3" nodename="a" />
+            <input name="in2" type="float" nodename="b" />
+          </add>
+        </materialx>"#;
+    let values = [Some(Val::vec3(0.1, 0.2, 0.3)), Some(Val::float(1.0))];
+    let (v, p) = run_on_curve(doc, "sum", strand(&values));
+    assert_eq!(p.primvars, ["hairColor", "melanin"]);
+    assert_eq!(lanes(v), lanes(Val::vec3(1.1, 1.2, 1.3)));
+    // Absent on this curve, or off a curve: the default (and the colour's
+    // unauthored default, zero).
+    let (v, _) = run_on_curve(doc, "sum", strand(&[Some(Val::vec3(0.1, 0.2, 0.3)), None]));
+    assert_eq!(lanes(v), lanes(Val::vec3(0.35, 0.45, 0.55)));
+    let (v, _) = run_on_curve(doc, "sum", None);
+    assert_eq!(lanes(v), lanes(Val::vec3(0.25, 0.25, 0.25)));
+}
+
+#[test]
+fn a_float_primvar_into_a_colour_broadcasts() {
+    let values = [Some(Val::float(0.4))];
+    let (v, _) = run_on_curve(
+        &geomprop("color3", "density", "0, 0, 0"),
+        "g",
+        strand(&values),
+    );
+    assert_eq!(lanes(v), lanes(Val::vec3(0.4, 0.4, 0.4)));
+    // And a colour into a float keeps its first lane.
+    let values = [Some(Val::vec3(0.7, 0.1, 0.1))];
+    let (v, _) = run_on_curve(&geomprop("float", "tint", "0"), "g", strand(&values));
+    assert_eq!(lanes(v), lanes(Val::float(0.7)));
+}
+
+#[test]
+fn geompropvalue_st_reads_the_chart() {
+    let (v, p) = run_on_curve(&geomprop("vector2", "st", "0, 0"), "g", None);
+    assert_eq!(lanes(v), lanes(Val::vec2(0.25, 0.75)));
+    assert!(p.reads_chart() && !p.reads_curve());
+}
+
+#[test]
+fn an_unknown_curve_property_is_reported() {
+    let d = Doc::parse(&geomprop("float", "curve:u", "0.5")).unwrap();
+    let mut c = Compiler::new(&d, &Host::new(&decline));
+    c.compile_named("", "g", None);
+    assert_eq!(
+        c.unsupported.iter().collect::<Vec<_>>(),
+        [r#"geompropvalue "curve:u""#]
+    );
+}
+
+#[test]
+fn an_image_at_a_named_uv_set_reads_the_chart() {
+    // As it did before `geompropvalue` compiled: the lookup stays on the
+    // chart (and the JIT's inline path), not on a per-hit primvar.
+    let d = Doc::parse(
+        r#"<materialx>
+             <geompropvalue name="uv1" type="vector2">
+               <input name="geomprop" type="string" value="uvSet1" />
+             </geompropvalue>
+             <image name="img" type="color3">
+               <input name="file" type="filename" value="a.png" />
+               <input name="texcoord" type="vector2" nodename="uv1" />
+             </image>
+           </materialx>"#,
+    )
+    .unwrap();
+    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Flat([0.5; 4]))))
+    };
+    let mut c = Compiler::new(&d, &Host::new(&loader));
+    c.compile_named("", "img", None);
+    assert!(c.program.primvars.is_empty());
+    assert!(
+        c.program
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::Texture { coord: None, .. }))
     );
 }
