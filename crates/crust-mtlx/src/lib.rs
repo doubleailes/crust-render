@@ -56,7 +56,8 @@ pub use bsdf::{
     ThinFilm, Volume, flatten, flatten_volume,
 };
 pub use eval::{
-    BinOp, Compiler, Op, Program, ShadeCtx, UnOp, perturb_normal, reflectivity_from_ior,
+    BinOp, CmpOp, Compiler, CurveCtx, CurveProp, Op, Program, ShadeCtx, UnOp, perturb_normal,
+    reflectivity_from_ior,
 };
 /// The nodedef input tables the hair nodes and the surface-shader expansions
 /// are built from, transcribed from MaterialX's own `stdlib` / `pbrlib`

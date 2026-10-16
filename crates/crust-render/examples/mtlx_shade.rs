@@ -123,13 +123,12 @@ fn main() {
             normal: Vec3A::Z,
             t: 1.0,
             front_face: true,
-            face: None,
+            part: crust_core::HitPart::None,
             uv: Some((u, v)),
             tangent: Vec3A::X,
             // Point-sample: this probe reports what the graph evaluates to at a
             // named (u, v), not what a filtered render would show there.
             uv_width: 0.0,
-            face_width: 0.0,
         };
         let eye = Vec3A::new(theta.sin(), 0.0, theta.cos());
         let r = Ray::new(eye, -eye);

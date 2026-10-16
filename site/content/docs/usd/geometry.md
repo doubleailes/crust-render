@@ -184,6 +184,84 @@ def Mesh "Cliff" (prepend apiSchemas = ["MaterialBindingAPI"])
 }
 ```
 
+## Curve attributes in materials
+
+A material bound to `BasisCurves` or `NurbsCurves` can read where on its strand a hit
+lies, and the curve primvars the groom authors, through MaterialX `geompropvalue`. That
+is what root-to-tip ramps, faded tips and per-strand colour variation are built from.
+
+| `geomprop` | type | value on a curve hit |
+|------------|------|----------------------|
+| `curve:v` | `float` | position along the whole strand, 0 at its first point and 1 at its last: the curve's parameter, so a `v` ramp agrees with a `vertex` primvar ramp on the same strand. A trimmed `NurbsCurves` runs 0 to 1 over its `ranges` |
+| `curve:index` | `float` | the curve's index within its prim, from 0 |
+| `curve:random` | `float` | a value in [0, 1) per curve: the same strand gets the same value on every frame and render, neighbouring curves and different prims get unrelated ones |
+| any other name | as authored | the primvar of that name (`hairColor` reads `primvars:hairColor`) |
+
+Anywhere else, on a mesh or a sphere, `geompropvalue` gives its `default`. A curve prim
+that does not author the primvar, or authors one that can't be read, gives the `default`
+there too.
+
+Curve primvars are read with any of these interpolations:
+
+| interpolation | values | at a hit |
+|---------------|--------|----------|
+| `constant` | 1 | that value |
+| `uniform` | one per curve | the curve's value |
+| `varying` | one per span end | linear between the span's two ends |
+| `vertex` | one per point | through the curve's basis, as its points are: a `bspline` ramp is a B-spline inside each span too |
+
+The types read are `float`, `float2`, `float3`, `color3f` (converted from its
+`colorSpace`) and `int` (read as a float); indexed primvars (`primvars:<name>:indices`)
+are expanded. A `faceVarying` primvar, any other type, or an array whose length does
+not match its interpolation is refused with
+[`curves.unsupported_primvar`](@/docs/reference/warnings.md#curves-and-volumes).
+
+`primvars:st` on a curve is its chart, read by `texcoord` and by images, as on a mesh.
+A curve with no `st` reads the chart at (0, 0), without a warning.
+
+The `curve:` names belong to Crust Render. A primvar authored under `primvars:curve:`
+is not read, and is reported with
+[`curves.reserved_primvar`](@/docs/reference/warnings.md#curves-and-volumes).
+
+```usda
+def BasisCurves "Groom" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token type = "cubic"
+    uniform token basis = "bspline"
+    int[] curveVertexCounts = [6, 6]
+    point3f[] points = [...]
+    float[] widths = [0.02] (interpolation = "constant")
+    color3f[] primvars:hairColor = [(0.3, 0.2, 0.1), (0.2, 0.15, 0.1)] (
+        interpolation = "uniform"
+    )
+    rel material:binding = </World/Looks/Hair>
+}
+```
+
+```xml
+<geompropvalue name="root_colour" type="color3">
+  <input name="geomprop" type="string" value="hairColor" />
+</geompropvalue>
+<geompropvalue name="along" type="float">
+  <input name="geomprop" type="string" value="curve:v" />
+</geompropvalue>
+<mix name="ramp" type="color3">
+  <input name="bg" type="color3" nodename="root_colour" />
+  <input name="fg" type="color3" value="0.9, 0.8, 0.6" />
+  <input name="mix" type="float" nodename="along" />
+</mix>
+```
+
+`curve:random` is stable only while a prim keeps its curves in the same order, which a
+simulation cache with constant topology does. If the order can change, author a stable
+per-curve id as a `uniform` `int` primvar and use it as a `randomfloat`'s `in`, or its
+`seed` (see [variation nodes](@/docs/usd/materials.md#variation-nodes)).
+
+These attributes cost nothing unless a material reads them. A curve whose material reads
+none of them carries no extra data, and renders as it did before they existed. One that
+does carries a table of its spans and of the primvars it reads, decoded for that
+material only; `--stats` reports its size as `curve strand tables`.
+
 ## Standard geometry attributes
 
 Crust Render reads these standard `UsdGeom` attributes without any `crust:` attribute.
@@ -192,7 +270,7 @@ Crust Render reads these standard `UsdGeom` attributes without any `crust:` attr
 |-----------|--------|
 | `subdivisionScheme` | any value other than `none` makes a mesh a subdivision mesh. Unauthored means `catmullClark`. The refinement level comes from [`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel). A `none` mesh whose material [displaces](@/docs/usd/materials.md#displacement) it is refined as `bilinear`: its faces stay flat until displaced. Its hard edges then soften, since the displaced mesh shades with smooth normals. The exception is a mesh with any non-quad face whose displacement reads Ptex: refining it would leave its triangles' children with no Ptex face, so it stays its cage, with a warning. |
 | `visibility`, `purpose` | a prim with `visibility = "invisible"` is skipped with its whole subtree. Prims with purpose `guide` or `proxy` are skipped. |
-| `primvars:st` | UV coordinates for UV and UDIM textures |
+| `primvars:st` | UV coordinates for UV and UDIM textures, on meshes and on [curves](#curve-attributes-in-materials) |
 | `PointInstancer` and native instancing | prototypes are stored once and placed per instance. Both nest: a `PointInstancer` or an `instanceable` prim inside a prototype is imported too, its prototype still stored once. |
 | `xformOp:*`, `xformOpOrder` | every `UsdGeomXformOp` kind composes (single- and three-axis rotations, `translateX`-style single-axis ops, `orient`, `transform`, `!invert!`, `:suffix` ops), on any `Xformable` prim type, as in USD itself: `!resetXformStack!` drops the parent's transform and every op listed before it, and ops authored on a prim that is not `Xformable` (an untyped prim, a `Scope`) are ignored. Every `Xformable` type composes its ops, including the ones of families Crust Render does not otherwise read (`SkelRoot`, `Skeleton`, `Volume` and its fields, `GenerativeProcedural`, `SpatialAudio`). A prim of a type Crust Render does not know (a plugin or studio schema) is not `Xformable` either: its ops are ignored, with an `xform.unknown_type` warning. An op name that is not a `UsdGeomXformOp` kind is read as identity, with a warning. |
 | `BasisCurves` | round tubes of the authored `widths`: `linear`, or `cubic` with a `bezier`, `bspline` or `catmullRom` basis. Per-vertex widths follow the basis; per-curve and constant widths are read too. A hit on a curve shades along the strand, so a [hair material](@/docs/usd/materials.md#hair) sees its direction at every placement. `normals` (ribbons) and `wrap` (periodic curves) are not read: every curve is a round, open tube. |

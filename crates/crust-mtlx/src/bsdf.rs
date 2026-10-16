@@ -1321,6 +1321,7 @@ mod tests {
                 view: -Vec3A::Z,
                 position: Vec3A::ZERO,
                 uv_width: 0.0,
+                curve: None,
             },
             &mut slots,
         );
@@ -1553,7 +1554,7 @@ mod tests {
         ));
     }
 
-    fn test_ctx() -> ShadeCtx {
+    fn test_ctx() -> ShadeCtx<'static> {
         ShadeCtx {
             uv: (0.0, 0.0),
             normal: Vec3A::Z,
@@ -1561,6 +1562,7 @@ mod tests {
             view: -Vec3A::Z,
             position: Vec3A::ZERO,
             uv_width: 0.0,
+            curve: None,
         }
     }
 

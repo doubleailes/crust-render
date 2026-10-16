@@ -10,7 +10,7 @@ use utils::exp3;
 
 use crate::aov::FirstHit;
 use crate::guiding::SampleData;
-use crate::hittable::HitRecord;
+use crate::hittable::{FaceHit, HitPart, HitRecord};
 use crate::material::{Material, ScatterSample, ShadingPoint};
 use crate::medium::{Medium, hg_phase, sample_henyey_greenstein};
 use crate::pdf::PdfSolidAngle;
@@ -505,7 +505,7 @@ struct ThinWalls {
     /// The first thin wall passed, as the camera's first hit when this is
     /// the camera's segment: its `t`, the hit there and its `geom_id` (for
     /// the wall's motion, read in the AOV instantiation only).
-    first: Option<(f32, HitRecord, u32)>,
+    first: Option<(f32, HitRecord<'static>, u32)>,
     /// The hidden light sources the segment crossed, in order. Written by
     /// every [`pass_cutouts`], in a world with any.
     crossed: Vec<Crossing>,
@@ -605,7 +605,7 @@ pub(super) struct PrevBounce<'a> {
     /// What a fresh `eval` would be asked, kept only to check the claim
     /// above in debug builds.
     #[cfg(debug_assertions)]
-    pub(super) check: (Ray, HitRecord, &'a dyn Material, Vec3A),
+    pub(super) check: (Ray, HitRecord<'a>, &'a dyn Material, Vec3A),
     #[cfg(not(debug_assertions))]
     pub(super) _mat: std::marker::PhantomData<&'a dyn Material>,
 }
@@ -1506,10 +1506,13 @@ fn walls_through<S: SamplerImpl>(
 /// itself: a mip level of an alpha mask is a blurred mask, where
 /// stochastic presence already averages the real one over the pixel.
 #[inline]
-fn point_sampled(rec: &HitRecord) -> HitRecord {
+fn point_sampled<'w>(rec: &HitRecord<'w>) -> HitRecord<'w> {
     HitRecord {
         uv_width: 0.0,
-        face_width: 0.0,
+        part: match rec.part {
+            HitPart::Face(f) => HitPart::Face(FaceHit { width: 0.0, ..f }),
+            part => part,
+        },
         ..*rec
     }
 }
@@ -1683,7 +1686,8 @@ fn pass_walls<'w, S: SamplerImpl>(
             }
             thin.passes.push((h.rec.t, p / q));
             if thin.first.is_none() {
-                thin.first = Some((h.rec.t, h.rec, h.geom_id));
+                // Kept for its geometry only, past this world's borrow.
+                thin.first = Some((h.rec.t, h.rec.detached(), h.geom_id));
             }
         } else {
             if opacity >= 1.0 {
@@ -3665,7 +3669,7 @@ pub(super) fn trace_path<
 /// is on.
 #[derive(Default)]
 struct PendingExit {
-    rec: HitRecord,
+    rec: HitRecord<'static>,
     dir: Vec3A,
     owner: u32,
 }

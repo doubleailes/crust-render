@@ -83,7 +83,7 @@ fn intersect_resolves_the_hit_material_and_geometry() {
     assert!(hit.rec.p.abs_diff_eq(ray.at(hit.rec.t), 1e-6));
     assert!(hit.rec.normal.abs_diff_eq(-Vec3A::Z, 1e-5));
     assert!(hit.rec.front_face);
-    assert_eq!(hit.rec.face, None, "no face table was installed");
+    assert_eq!(hit.rec.face(), None, "no face table was installed");
     assert!(hit.rec.uv.is_none());
     assert_eq!(hit.rec.tangent, Vec3A::ZERO);
     assert!(
@@ -323,16 +323,16 @@ fn world_hits_carry_ptex_face_coordinates() {
         let hit = world
             .intersect(&Ray::new(Vec3A::new(x, y, -1.0), Vec3A::Z), 1e-3, 10.0)
             .unwrap();
-        assert_eq!(hit.rec.face.map(|f| f.id), Some(0));
+        assert_eq!(hit.rec.face().map(|f| f.id), Some(0));
         assert!(
-            approx(hit.rec.face.expect("a face hit").uv.0, x, 1e-4),
+            approx(hit.rec.face().expect("a face hit").uv.0, x, 1e-4),
             "({x},{y}) -> {:?}",
-            hit.rec.face
+            hit.rec.face()
         );
         assert!(
-            approx(hit.rec.face.expect("a face hit").uv.1, y, 1e-4),
+            approx(hit.rec.face().expect("a face hit").uv.1, y, 1e-4),
             "({x},{y}) -> {:?}",
-            hit.rec.face
+            hit.rec.face()
         );
     }
 }
@@ -365,16 +365,16 @@ fn a_mirrored_placement_swaps_the_face_parameterisation() {
             10.0,
         )
         .unwrap();
-    assert_eq!(hit.rec.face.map(|f| f.id), Some(0));
+    assert_eq!(hit.rec.face().map(|f| f.id), Some(0));
     assert!(
-        approx(hit.rec.face.expect("a face hit").uv.0, 0.75, 1e-4),
+        approx(hit.rec.face().expect("a face hit").uv.0, 0.75, 1e-4),
         "{:?}",
-        hit.rec.face
+        hit.rec.face()
     );
     assert!(
-        approx(hit.rec.face.expect("a face hit").uv.1, 0.25, 1e-4),
+        approx(hit.rec.face().expect("a face hit").uv.1, 0.25, 1e-4),
         "{:?}",
-        hit.rec.face
+        hit.rec.face()
     );
 }
 
@@ -544,7 +544,7 @@ fn world_hits_carry_uv_and_tangent_from_the_uv_map() {
         );
         assert!(hit.rec.tangent.abs_diff_eq(Vec3A::X, 1e-5));
         // The face table was not installed, so Ptex fields stay unset.
-        assert_eq!(hit.rec.face, None);
+        assert_eq!(hit.rec.face(), None);
     }
 }
 
@@ -558,15 +558,15 @@ fn a_geometry_may_carry_both_side_tables() {
     let hit = world
         .intersect(&Ray::new(Vec3A::new(0.6, 0.2, -1.0), Vec3A::Z), 1e-3, 10.0)
         .unwrap();
-    assert_eq!(hit.rec.face.map(|f| f.id), Some(0));
+    assert_eq!(hit.rec.face().map(|f| f.id), Some(0));
     assert!(hit.rec.uv.is_some());
     assert!(approx(
-        hit.rec.face.expect("a face hit").uv.0,
+        hit.rec.face().expect("a face hit").uv.0,
         hit.rec.uv.unwrap().0,
         1e-5
     ));
     assert!(approx(
-        hit.rec.face.expect("a face hit").uv.1,
+        hit.rec.face().expect("a face hit").uv.1,
         hit.rec.uv.unwrap().1,
         1e-5
     ));
@@ -592,12 +592,12 @@ fn side_tables_are_per_geometry() {
     let a = world
         .intersect(&Ray::new(Vec3A::new(0.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
         .unwrap();
-    assert_eq!(a.rec.face.map(|f| f.id), Some(0));
+    assert_eq!(a.rec.face().map(|f| f.id), Some(0));
     let p = world
         .intersect(&Ray::new(Vec3A::new(2.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
         .unwrap();
     assert_eq!(p.geom_id, plain);
-    assert_eq!(p.rec.face, None);
+    assert_eq!(p.rec.face(), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -767,7 +767,7 @@ fn emissive_material_emits_and_never_scatters() {
     let _ = format!("{e:?}");
 }
 
-fn upward_hit() -> (Ray, HitRecord) {
+fn upward_hit() -> (Ray, HitRecord<'static>) {
     let rec = HitRecord {
         p: Vec3A::ZERO,
         normal: Vec3A::Z,

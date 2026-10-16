@@ -183,7 +183,12 @@ pub trait Material: Send + Sync {
     /// *fully* resolved — its own per-hit lookups (Ptex) already applied, see
     /// [`OpenPBR::into_resolved`] — for the BSDF queries.
     #[must_use]
-    fn resolve(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Option<Resolution> {
+    fn resolve<'w>(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord<'w>,
+        cos_theta_o: f32,
+    ) -> Option<Resolution<'w>> {
         let _ = (r_in, rec, cos_theta_o);
         None
     }
@@ -239,6 +244,20 @@ pub trait Material: Send + Sync {
     /// texture coordinate. Those meshes should pay nothing.
     fn uses_uv(&self) -> bool {
         false
+    }
+
+    /// What a curve bound to this material must carry to its hits: the
+    /// chart, the strand (`curve:v`, `curve:index`, `curve:random`), and
+    /// which primvars by name — see [`crate::StrandTable`], which the import
+    /// builds only when [`CurveNeeds::any`] says so.
+    ///
+    /// The default asks for the chart exactly when [`Material::uses_uv`]
+    /// does, and for nothing else.
+    fn curve_needs(&self) -> CurveNeeds<'_> {
+        CurveNeeds {
+            chart: self.uses_uv(),
+            ..CurveNeeds::NOTHING
+        }
     }
 
     /// The primvar holding the chart this material reads, when it names one
@@ -383,17 +402,47 @@ pub trait Material: Send + Sync {
     }
 }
 
+/// What a curve bound to a material must carry to its hits
+/// ([`Material::curve_needs`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CurveNeeds<'a> {
+    /// The chart (`primvars:st`, or the material's own), for `texcoord` and
+    /// images.
+    pub chart: bool,
+    /// The strand: `curve:v`, `curve:index` and `curve:random`, or any
+    /// primvar (which needs the strand to be interpolated along).
+    pub strand: bool,
+    /// The primvars read by name, in the order the material's program
+    /// numbers them ([`crust_mtlx::Program::primvars`]).
+    pub primvars: &'a [String],
+}
+
+impl CurveNeeds<'_> {
+    /// Nothing at all: what a curve with such a material carries is no
+    /// table.
+    pub const NOTHING: CurveNeeds<'static> = CurveNeeds {
+        chart: false,
+        strand: false,
+        primvars: &[],
+    };
+
+    /// Whether the curve needs a strand table at all.
+    pub fn any(&self) -> bool {
+        self.chart || self.strand || !self.primvars.is_empty()
+    }
+}
+
 /// What [`Material::resolve`] hands back for one hit.
 ///
 /// Built only by [`Resolution::new`] (and, for a bare `OpenPBR`,
 /// `Resolution::of_openpbr`), which read the emission from the parameters
 /// *before* resolving them: the order the trap in the materials design record
 /// is about is now the only one that compiles.
-pub struct Resolution {
+pub struct Resolution<'w> {
     /// The fully resolved BSDF.
     pub(crate) bsdf: ResolvedBsdf,
     /// The record the BSDF shades with (the shading normal applied).
-    pub(crate) rec: HitRecord,
+    pub(crate) rec: HitRecord<'w>,
     /// [`Material::emitted_at`] at this hit, computed from the parameters the
     /// network already produced. Taken *before* Ptex is applied, as
     /// `emitted_at` itself does: OpenPBR's coat emission factor reads
@@ -410,12 +459,12 @@ pub(crate) enum ResolvedBsdf {
     Closure(PooledClosure),
 }
 
-impl Resolution {
+impl<'w> Resolution<'w> {
     /// The resolution of a MaterialX closure tree at `rec`: `emitted` is the
     /// graph's emission there, read from the same evaluated program as the
     /// closure — there is no parameter set for a later lookup to replace, so
     /// the order the OpenPBR constructor enforces is trivially kept.
-    pub fn closure(emitted: Vec3A, bsdf: PooledClosure, rec: HitRecord) -> Resolution {
+    pub fn closure(emitted: Vec3A, bsdf: PooledClosure, rec: HitRecord<'w>) -> Resolution<'w> {
         Resolution {
             bsdf: ResolvedBsdf::Closure(bsdf),
             rec,
@@ -428,7 +477,12 @@ impl Resolution {
     /// `cos_theta_o` read from `params` as they are (zero unless `can_emit`),
     /// then `params` resolved at `rec`.
     #[inline]
-    pub fn new(params: OpenPBR, rec: HitRecord, can_emit: bool, cos_theta_o: f32) -> Resolution {
+    pub fn new(
+        params: OpenPBR,
+        rec: HitRecord<'w>,
+        can_emit: bool,
+        cos_theta_o: f32,
+    ) -> Resolution<'w> {
         let emitted = if can_emit {
             params.emitted_directional(cos_theta_o)
         } else {
@@ -447,9 +501,9 @@ impl Resolution {
     #[inline(always)]
     pub(crate) fn of_openpbr(
         unresolved: &OpenPBR,
-        rec: &HitRecord,
+        rec: &HitRecord<'w>,
         cos_theta_o: f32,
-    ) -> Option<Resolution> {
+    ) -> Option<Resolution<'w>> {
         unresolved.resolved_at(rec).map(|bsdf| Resolution {
             bsdf: ResolvedBsdf::OpenPBR(bsdf),
             rec: *rec,
@@ -474,7 +528,7 @@ impl Resolution {
     }
 
     /// The record the BSDF shades with.
-    pub fn rec(&self) -> &HitRecord {
+    pub fn rec(&self) -> &HitRecord<'w> {
         &self.rec
     }
 
@@ -489,7 +543,7 @@ impl Resolution {
 /// material's own method would at the same hit — it only stops repeating the
 /// pattern network and texture fetches between queries.
 pub struct ShadingPoint<'a> {
-    rec: HitRecord,
+    rec: HitRecord<'a>,
     emitted: Vec3A,
     bsdf: Resolved<'a>,
 }
@@ -512,7 +566,7 @@ enum Resolved<'a> {
 impl<'a> ShadingPoint<'a> {
     /// Runs `mat`'s per-hit work at `rec`, once. `cos_theta_o` is what
     /// [`Material::emitted_at`] would be given.
-    pub fn new(mat: &'a dyn Material, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Self {
+    pub fn new(mat: &'a dyn Material, r_in: &Ray, rec: &HitRecord<'a>, cos_theta_o: f32) -> Self {
         match mat.resolve(r_in, rec, cos_theta_o) {
             Some(r) => ShadingPoint {
                 rec: r.rec,

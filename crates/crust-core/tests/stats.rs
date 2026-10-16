@@ -198,6 +198,20 @@ fn kernel_footprint_is_reported_by_structure() {
     assert!(!out.contains("triangle packets"), "zero rows are skipped");
     // No footprint at all: the block is absent.
     assert!(!RenderStats::default().report().contains("kernel memory"));
+    // The curves' strand tables, host-side: their own row, when there are any.
+    assert!(!out.contains("curve strand tables"), "{out}");
+    let with_tables = RenderStats {
+        scene: SceneCounters {
+            strand_tables_bytes: 3 * 1024,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let text = with_tables.report();
+    assert!(
+        text.contains("curve strand tables") && text.contains("3.00 KiB"),
+        "{text}"
+    );
 }
 
 #[test]

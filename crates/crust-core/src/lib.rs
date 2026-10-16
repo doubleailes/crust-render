@@ -60,6 +60,7 @@ pub mod stamp;
 /// crate, re-exported below as [`mtlx`].
 pub use material::materialx;
 mod stats;
+mod strands;
 mod subsurface;
 mod texture;
 mod tracer;
@@ -105,7 +106,7 @@ pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};
 pub use glam::{Mat3A, Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
-pub use hittable::{FaceHit, HitRecord};
+pub use hittable::{FaceHit, HitPart, HitRecord};
 pub use light::{
     AffineShape, AreaLight, AreaShape, DistantLight, DomeLight, EVERY_CLASS, FoundAlong, Light,
     LightBounds, LightKind, LightLinks, LightList, LightSample, LightSelection, LightShape,
@@ -125,6 +126,7 @@ pub use ray::{
 pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
 pub use sampler::SamplerKind;
 pub use scene::Scene;
+pub use strands::{CurveHit, StrandSpan, StrandTable, StrandValues};
 /// The implicit-shape tessellators, exposed for `tests/geomutil_oracle.rs`
 /// only: not a supported API.
 #[doc(hidden)]

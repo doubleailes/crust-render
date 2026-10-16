@@ -71,8 +71,10 @@ const RR_MIN_PROB: f32 = 0.05;
 pub struct WalkExit {
     /// The exit hit, as seen from **outside**: `normal` points out of the
     /// object and `front_face` is true, so the exit vertex shades it like any
-    /// surface a ray arrived at from the outside.
-    pub rec: HitRecord,
+    /// surface a ray arrived at from the outside. Detached from its strand
+    /// ([`HitRecord::detached`]): the exit Lambertian, not the owner's
+    /// material, shades it.
+    pub rec: HitRecord<'static>,
     /// The walk's last direction, interior to exterior.
     pub dir: Vec3A,
     /// The walk's throughput, per channel — what the path is multiplied by.
@@ -234,7 +236,7 @@ fn trace_owner(
     t_max: f32,
     time: f32,
     cost: &mut WalkCost,
-) -> Option<HitRecord> {
+) -> Option<HitRecord<'static>> {
     if !t_max.is_finite() {
         return None;
     }
@@ -250,7 +252,7 @@ fn trace_owner(
             return None;
         }
         if hit.geom_id == owner {
-            return Some(HitRecord { t, ..hit.rec });
+            return Some(HitRecord { t, ..hit.rec }.detached());
         }
         // Past this surface; relative at large `t`, where `BIAS` is below
         // an ulp and would not move the search.

@@ -409,7 +409,7 @@ fn recycle(b: Box<ResolvedClosure>) {
 /// What the tree walk needs besides the tree.
 struct Walk<'a> {
     slots: &'a [Val],
-    rec: &'a HitRecord,
+    rec: &'a HitRecord<'a>,
     v_world: Vec3A,
     thin_walled: bool,
     /// The working space's luminance weights, for lobe selection.

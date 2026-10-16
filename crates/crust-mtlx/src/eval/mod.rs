@@ -31,9 +31,26 @@ use apply::apply;
 pub use apply::{perturb_normal, reflectivity_from_ior};
 pub use compile::Compiler;
 
+/// What a hit on a curve knows about its strand, for `geompropvalue`'s curve
+/// properties and curve primvars (see [`ShadeCtx::curve`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CurveCtx<'a> {
+    /// Position along the whole strand, 0 at its first point and 1 at its
+    /// last — `curve:v`.
+    pub v: f32,
+    /// The curve's index within its prim — `curve:index`.
+    pub index: u32,
+    /// A per-curve value in [0, 1) — `curve:random`.
+    pub random: f32,
+    /// The hit's value of each primvar [`Program::primvars`] names, in that
+    /// order: `None` where the curve has no readable primvar of that name,
+    /// and a slice shorter than the list reads `None` past its end.
+    pub primvars: &'a [Option<Val>],
+}
+
 /// The shading point a [`Program`] is evaluated at.
 #[derive(Clone, Copy)]
-pub struct ShadeCtx {
+pub struct ShadeCtx<'a> {
     /// `primvars:st`, unwrapped — the integer part selects a UDIM tile.
     pub uv: (f32, f32),
     /// Geometric (ray-facing) world-space normal.
@@ -52,6 +69,20 @@ pub struct ShadeCtx {
     /// every texture in the graph to point-sample, which is what a host that
     /// tracks no footprint should leave it at.
     pub uv_width: f32,
+    /// The strand, on a curve hit; `None` anywhere else, where a curve
+    /// property or primvar reads its `geompropvalue`'s `default`.
+    pub curve: Option<CurveCtx<'a>>,
+}
+
+/// A property of the strand a curve hit lies on, read by `geompropvalue`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveProp {
+    /// `curve:v`.
+    V,
+    /// `curve:index`.
+    Index,
+    /// `curve:random`.
+    Random,
 }
 
 /// A componentwise binary operator.
@@ -66,6 +97,15 @@ pub enum BinOp {
     Max,
     /// `a` with `b` lanes, for `combine`-style plumbing.
     Modulo,
+}
+
+/// The comparison a MaterialX conditional (`ifgreater`, `ifgreatereq`,
+/// `ifequal`) makes between its `value1` and `value2`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmpOp {
+    Greater,
+    GreaterEq,
+    Equal,
 }
 
 /// A componentwise unary operator.
@@ -117,6 +157,21 @@ pub enum Op {
     /// exactly as [`Op::Texture`] is.
     TexCoord {
         shift: [f32; 2],
+    },
+    /// A property of the strand a curve hit lies on, broadcast to `arity`
+    /// lanes, or `fallback` (the `geompropvalue`'s `default`) anywhere else.
+    Curve {
+        prop: CurveProp,
+        arity: u8,
+        fallback: Val,
+    },
+    /// The hit's value of the primvar [`Program::primvars`] lists at
+    /// `channel`, converted to `arity` lanes, or `fallback` where the hit has
+    /// none.
+    Primvar {
+        channel: u32,
+        arity: u8,
+        fallback: Val,
     },
     /// World-space geometric normal.
     Normal,
@@ -213,6 +268,29 @@ pub enum Op {
         a: u32,
         amount: u32,
     },
+    /// MaterialX `rgbtohsv`; a `color4` keeps its alpha.
+    RgbToHsv {
+        a: u32,
+    },
+    /// MaterialX `hsvtorgb`; a `color4` keeps its alpha.
+    HsvToRgb {
+        a: u32,
+    },
+    /// A MaterialX conditional: `in1` when `value1 cmp value2` holds on the
+    /// first lanes, else `in2`, at the wider of the two branches' widths.
+    Select {
+        cmp: CmpOp,
+        value1: u32,
+        value2: u32,
+        in1: u32,
+        in2: u32,
+    },
+    /// MaterialX `cellnoise2d`: OSL's `cellnoise(x, y)`, a hash of the cell
+    /// `(floor x, floor y)` to [0, 1]. What `randomfloat` and `randomcolor`
+    /// are built from.
+    CellNoise2 {
+        a: u32,
+    },
     /// MaterialX `heighttonormal`, from the height at half a footprint either
     /// side of the shading point along `u` (`xp`, `xm`) and `v` (`yp`, `ym`).
     /// The result is encoded in `[0, 1]`, like a normal-map texel.
@@ -234,8 +312,31 @@ impl Op {
                     f(c);
                 }
             }
-            Op::Const(_) | Op::TexCoord { .. } | Op::Normal | Op::ViewDirection | Op::Position => {}
-            Op::Unary { a, .. } | Op::Convert { a, .. } | Op::Extract { a, .. } => f(a),
+            Op::Const(_)
+            | Op::TexCoord { .. }
+            | Op::Curve { .. }
+            | Op::Primvar { .. }
+            | Op::Normal
+            | Op::ViewDirection
+            | Op::Position => {}
+            Op::Unary { a, .. }
+            | Op::Convert { a, .. }
+            | Op::Extract { a, .. }
+            | Op::RgbToHsv { a }
+            | Op::HsvToRgb { a }
+            | Op::CellNoise2 { a } => f(a),
+            Op::Select {
+                value1,
+                value2,
+                in1,
+                in2,
+                ..
+            } => {
+                f(value1);
+                f(value2);
+                f(in1);
+                f(in2);
+            }
             Op::Binary { a, b, .. }
             | Op::Invert { a, amount: b }
             | Op::Combine2 { a, b }
@@ -306,6 +407,8 @@ impl Op {
         match self {
             Op::Texture { tex, .. } => tex.is_none(),
             Op::TexCoord { .. }
+            | Op::Curve { .. }
+            | Op::Primvar { .. }
             | Op::Normal
             | Op::ViewDirection
             | Op::Position
@@ -326,6 +429,12 @@ impl Op {
 pub struct Program {
     pub consts: Vec<Val>,
     pub ops: Vec<Op>,
+    /// The primvars the program reads by name (`geompropvalue` of anything
+    /// but the chart and the `curve:` properties), without their
+    /// `primvars:` prefix: [`Op::Primvar`]'s `channel` indexes this, and so
+    /// does [`CurveCtx::primvars`]. What a host decodes for the geometry the
+    /// program shades, and nothing more.
+    pub primvars: Vec<String>,
 }
 
 impl Program {
@@ -336,6 +445,31 @@ impl Program {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Whether an evaluation reads the shading point's chart
+    /// ([`ShadeCtx::uv`]): a `texcoord`, or a texture looked up at it. What
+    /// a host asks before decoding a chart that nothing else needs.
+    pub fn reads_chart(&self) -> bool {
+        self.ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::TexCoord { .. }
+                    | Op::Texture {
+                        tex: Some(_),
+                        coord: None,
+                        ..
+                    }
+            )
+        })
+    }
+
+    /// Whether an evaluation reads [`ShadeCtx::curve`]: a curve property or
+    /// a primvar.
+    pub fn reads_curve(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(op, Op::Curve { .. } | Op::Primvar { .. }))
     }
 
     /// Whether every operand refers to a slot strictly before its user's —
@@ -416,6 +550,7 @@ impl Program {
             view: -Vec3A::Z,
             position: Vec3A::ZERO,
             uv_width: 0.0,
+            curve: None,
         };
         let mut scratch: Vec<Val> = vec![Val::ZERO; n];
         for (i, op) in self.ops.iter().enumerate() {
@@ -452,7 +587,10 @@ impl Program {
         }
 
         // Constants first, deduplicated bitwise, then the surviving ops.
-        let mut out = Program::default();
+        let mut out = Program {
+            primvars: self.primvars.clone(),
+            ..Program::default()
+        };
         let mut remap: Vec<Option<u32>> = vec![None; n];
         let key = |v: &Val| (v.v.map(f32::to_bits), v.arity);
         let mut seen: std::collections::HashMap<([u32; 4], u8), u32> = Default::default();

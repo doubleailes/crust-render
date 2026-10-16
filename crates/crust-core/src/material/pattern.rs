@@ -28,7 +28,7 @@ pub(crate) trait PatternMaterial: Send + Sync {
     /// Runs the network at a hit: the `OpenPBR` it reduces to — its own Ptex
     /// lookups not yet applied — and the record with the network's shading
     /// normal applied.
-    fn run(&self, r_in: &Ray, rec: &HitRecord) -> (OpenPBR, HitRecord);
+    fn run<'w>(&self, r_in: &Ray, rec: &HitRecord<'w>) -> (OpenPBR, HitRecord<'w>);
 
     /// Whether the surface can emit at all. Asked before any emission query
     /// runs the network: `emitted_at` is asked of every surface hit, and a
@@ -109,7 +109,12 @@ impl<T: PatternMaterial> Material for T {
         params.eval(r_in, &rec, wi)
     }
 
-    fn resolve(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Option<Resolution> {
+    fn resolve<'w>(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord<'w>,
+        cos_theta_o: f32,
+    ) -> Option<Resolution<'w>> {
         let (params, rec) = self.run(r_in, rec);
         // `emitted_at`'s answer from the run already made rather than a second
         // one — and, by construction, from the parameters before Ptex is

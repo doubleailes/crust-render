@@ -380,7 +380,7 @@ impl PreviewSurface {
     /// [`PreviewSurface::probe`] as the BSDF shades it: the parameters, and
     /// the record with the shading normal applied.
     #[inline(always)]
-    fn shaded(&self, rec: &HitRecord) -> (OpenPBR, HitRecord) {
+    fn shaded<'w>(&self, rec: &HitRecord<'w>) -> (OpenPBR, HitRecord<'w>) {
         let (params, normal) = self.probe(rec);
         let mut rec = *rec;
         rec.normal = normal;
@@ -430,7 +430,7 @@ impl PatternMaterial for PreviewSurface {
     }
 
     #[inline(always)]
-    fn run(&self, _r_in: &Ray, rec: &HitRecord) -> (OpenPBR, HitRecord) {
+    fn run<'w>(&self, _r_in: &Ray, rec: &HitRecord<'w>) -> (OpenPBR, HitRecord<'w>) {
         self.shaded(rec)
     }
 
@@ -543,7 +543,7 @@ mod tests {
         }
     }
 
-    fn hit(u: f32) -> HitRecord {
+    fn hit(u: f32) -> HitRecord<'static> {
         HitRecord {
             normal: Vec3A::Z,
             tangent: Vec3A::X,

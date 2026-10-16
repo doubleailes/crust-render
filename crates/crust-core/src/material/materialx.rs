@@ -31,7 +31,7 @@ use crate::hittable::HitRecord;
 use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure, volume_medium};
 use crate::material::{BsdfDraw, Material, Resolution, ScatterSample};
 use crate::ray::Ray;
-use crust_mtlx::{Closures, Host, Program, ShadeCtx, Val};
+use crust_mtlx::{Closures, CurveCtx, Host, Program, ShadeCtx, Val};
 use glam::Vec3A;
 
 pub use crust_mtlx::MtlxError;
@@ -112,6 +112,7 @@ impl MtlxDisplacement {
             view: -ctx.normal,
             position: ctx.position,
             uv_width: ctx.uv_width,
+            curve: None,
         };
         let _ = use_jit;
         SLOTS.with(|cell| {
@@ -168,6 +169,10 @@ thread_local! {
     /// One buffer per render thread, reused for every shading call. The
     /// alternative — a `Vec` per call — allocates at every path vertex.
     static SLOTS: std::cell::RefCell<Vec<Val>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A curve hit's primvar values, in the program's order, for the same
+    /// reason.
+    static PRIMVARS: std::cell::RefCell<Vec<Option<Val>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// What [`MtlxMaterial::probe`] reports at one hit.
@@ -273,6 +278,39 @@ fn run<R>(
     rec: &HitRecord,
     f: impl FnOnce(&[Val]) -> R,
 ) -> R {
+    let strand = |c: &crate::CurveHit, primvars| CurveCtx {
+        v: c.v(),
+        index: c.index(),
+        random: c.random(),
+        primvars,
+    };
+    match rec.curve() {
+        None => run_at(program, jit, r_in, rec, None, f),
+        Some(c) if program.primvars.is_empty() || !c.has_primvars() => {
+            run_at(program, jit, r_in, rec, Some(strand(c, &[])), f)
+        }
+        // The hit's primvars, looked up into a buffer reused per thread —
+        // taken rather than borrowed, so a program run from inside `f`
+        // cannot find it borrowed.
+        Some(c) => {
+            let mut primvars = PRIMVARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+            c.primvars_into(&mut primvars);
+            let out = run_at(program, jit, r_in, rec, Some(strand(c, &primvars)), f);
+            PRIMVARS.with(|cell| *cell.borrow_mut() = primvars);
+            out
+        }
+    }
+}
+
+/// [`run`] with the curve record already looked up.
+fn run_at<R>(
+    program: &Program,
+    jit: Option<&Jit>,
+    r_in: &Ray,
+    rec: &HitRecord,
+    curve: Option<CurveCtx<'_>>,
+    f: impl FnOnce(&[Val]) -> R,
+) -> R {
     let ctx = ShadeCtx {
         uv: rec.uv.unwrap_or((0.0, 0.0)),
         normal: rec.normal,
@@ -280,6 +318,7 @@ fn run<R>(
         view: r_in.direction(),
         position: rec.p,
         uv_width: rec.uv_width,
+        curve,
     };
     SLOTS.with(|cell| {
         let mut slots = cell.borrow_mut();
@@ -383,7 +422,12 @@ impl Material for MtlxMaterial {
 
     /// One program run per vertex: the emission and the collapsed closure
     /// both come from the same evaluated slots.
-    fn resolve(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Option<Resolution> {
+    fn resolve<'w>(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord<'w>,
+        cos_theta_o: f32,
+    ) -> Option<Resolution<'w>> {
         Some(self.with_slots(r_in, rec, |s| {
             let emitted = if self.can_emit() {
                 self.emission(s, cos_theta_o)
@@ -414,6 +458,17 @@ impl Material for MtlxMaterial {
     /// chart.
     fn uses_uv(&self) -> bool {
         true
+    }
+
+    /// Exactly what the program reads: on a curve, `uses_uv`'s blanket
+    /// answer would build a chart table for every groom bound to any
+    /// MaterialX material.
+    fn curve_needs(&self) -> crate::material::CurveNeeds<'_> {
+        crate::material::CurveNeeds {
+            chart: self.program.reads_chart(),
+            strand: self.program.reads_curve(),
+            primvars: &self.program.primvars,
+        }
     }
 
     fn may_emit(&self) -> bool {

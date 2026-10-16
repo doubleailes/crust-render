@@ -415,8 +415,64 @@ Schema mapping:
   `UsdPreviewSurface` and `Emissive` ignore the tangent, so curves with those materials
   render as before. A MaterialX closure's frame on a curve is now the strand's instead of
   `tangent_frame(n)`'s arbitrary one: an isotropic lobe changes only its sample pattern,
-  and an anisotropic one stretches along the strand. `normals` (ribbons), `wrap` and
-  curve primvars are not read.
+  and an anisotropic one stretches along the strand. `normals` (ribbons) and `wrap` are
+  not read.
+- **Curve attributes (strand tables).** A curve hit can tell a material where on its
+  strand it lies (`curve:v`), which curve it is (`curve:index`, and `curve:random`, a
+  `utils::hash3` of the prim path's FNV-1a hash and the index), and any primvar the
+  material names. The kernel knows spans, not strands, as it knows triangles, not
+  polygons, so the map is the host's: `crate::StrandTable`, one per curves geometry,
+  in `SideTables` beside the face and UV maps, holding per kernel primitive its curve and
+  `[v0, v1]` interval of that curve's parameter (normalised to the first point → 0, the
+  last → 1; for NURBS, the rendered domain). `World::intersect` turns a hit on a geometry
+  with a table into `HitPart::Curve` (`CurveHit`: the table, the span and `u`, borrowing
+  the table — which is why `HitRecord` carries the world's lifetime) and fills `uv` from
+  the table's chart. The strand shares `HitRecord::part` with the Ptex face (which took
+  the face footprint width into `FaceHit`), because no hit lies on both, and because the
+  record must stay at 96 bytes: `WorldHit` is then exactly 128, the most LLVM copies
+  inline, and the integrator moves one per vertex. Beside the face, the strand made it
+  144 and every move a `memcpy` call (+0.6% of cornellbox's instructions; pinned by
+  `a_world_hit_stays_an_inline_copy`). A geometry with no table at all — nearly every
+  hit — takes one flag (`SideTables::plain`) to the plain record, past every table test.
+  Primvar values are looked up only inside a MaterialX program run that reads them
+  (`materialx::run`), into a per-thread buffer, so neither a mesh hit nor a curve hit
+  whose program reads no primvar touches them. A record kept past its world for its
+  geometry alone (a data AOV's first thin wall, a random walk's exit) is
+  `HitRecord::detached`, without the borrow.
+  - **Built only when read.** `Material::curve_needs` says what a material reads — the
+    chart, the strand, primvars by name; for MaterialX, exactly what its program reads
+    (`Program::reads_chart` / `reads_curve` / `primvars`), not `uses_uv`'s blanket
+    `true`, which would build a chart table for every MaterialX groom. With no need,
+    no table, and the import and the image are what they were (`samples/curves.usda`
+    and `hair.usda` bit-identical). Only the named primvars are decoded, on the prims
+    bound to the material.
+  - **One recipe for every primvar.** A span's `vertex` values are fixed linear
+    combinations of at most four authored values — `basis_to_bezier` and the NURBS
+    blossom are both linear in the control values — so the span loops hand the strand
+    builder (`usd_import/strands.rs`) a `VertexRecipe`: `basis_weights` for
+    `BasisCurves`, the blossom run on unit vectors for NURBS (`nurbs_span_recipe`,
+    degree 2 elevated to a cubic as its points are). A cubic span stores four Bézier
+    values per channel, evaluated as a cubic in `u`: linear-between-ends (what widths
+    do) would flatten a colour ramp authored on a few control points. `varying` is one
+    value per span end, linear in `u`; `uniform` per curve; `constant` once. `color3f`
+    is converted from its `colorSpace`; `:indices` are expanded. A `faceVarying`
+    primvar, another type or a length that does not match the interpolation is refused
+    (`curves.unsupported_primvar`), as is anything under `primvars:curve:`
+    (`curves.reserved_primvar`).
+  - **One `prim_id` space per table.** A curves prim is an instance of up to two kernel
+    geometries (linear segments, cubic spans) whose primitives each number from 0, and an
+    instance reports its own `geom_id`. `BasisCurves` fill one or the other; a
+    `NurbsCurves` prim mixing order 2 with orders 3–4 would fill both, so when it needs a
+    table its linear spans are emitted as the straight cubics tracing them
+    (`elevate`). A prim that needs no table keeps its linear segments.
+  - **Prototypes** carry their table on the part's slot (`PartSlot::strands`), set on
+    every placement's `geom_id` like the UV map; `World::strand_table_bytes` counts a
+    shared table once (`--stats`: `curve strand tables`). Curves carry no motion blur:
+    `crust:motion:translate` is not read on them.
+  - **Live edits.** What a table was decoded for is part of `Signature` on a curves slot
+    only (`SideTables::curves`, set for every curves geometry, table or not): a curve
+    material edit that starts reading a primvar or the strand re-imports, while a mesh
+    material's edit is never refused over what only a curve would read.
 - `UsdGeomNurbsCurves` → the same two batches (`nurbs_curve_segments`), read through
   openusd-schemas' typed `NurbsCurves` (generated from its vendored `usdGeom` schema, so
   absent from the crate's hand-written `src/`). Each knot interval `[u_i, u_i+1]` inside the domain `[u_p, u_n+1]` (narrowed

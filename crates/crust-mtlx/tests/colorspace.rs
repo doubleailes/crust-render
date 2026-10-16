@@ -36,7 +36,7 @@ impl Texture for Flat {
     }
 }
 
-fn ctx() -> ShadeCtx {
+fn ctx() -> ShadeCtx<'static> {
     ShadeCtx {
         uv: (0.25, 0.75),
         normal: Vec3A::Z,
@@ -44,6 +44,7 @@ fn ctx() -> ShadeCtx {
         view: -Vec3A::Z,
         position: Vec3A::ZERO,
         uv_width: 0.0,
+        curve: None,
     }
 }
 

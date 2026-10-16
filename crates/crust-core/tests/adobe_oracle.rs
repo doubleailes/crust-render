@@ -186,7 +186,7 @@ fn scalar(m: &OpenPBR, name: &str) -> f32 {
 /// The ray toward the shading point along the case's view direction, and the
 /// hit it makes: outward normal +Z, so a view below the plane meets the back
 /// face, which the hit record face-forwards as crust's intersector does.
-fn hit(case: &Case) -> (Ray, HitRecord) {
+fn hit(case: &Case) -> (Ray, HitRecord<'static>) {
     let mut rec = HitRecord::new();
     rec.p = Vec3A::ZERO;
     rec.front_face = !case.back_facing();

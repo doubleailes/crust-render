@@ -3,7 +3,7 @@
 
 use glam::Vec3A;
 
-use super::{BinOp, Op, ShadeCtx, UnOp};
+use super::{BinOp, CmpOp, CurveProp, Op, ShadeCtx, UnOp};
 use crate::value::Val;
 
 /// One instruction's value, given the slots computed before it.
@@ -62,6 +62,33 @@ pub(super) fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             let (u, v) = shifted_uv(ctx, *shift);
             Val::vec2(u, v)
         }
+        Op::Curve {
+            prop,
+            arity,
+            fallback,
+        } => match ctx.curve {
+            Some(c) => Val::float(match prop {
+                CurveProp::V => c.v,
+                CurveProp::Index => c.index as f32,
+                CurveProp::Random => c.random,
+            })
+            .broadcast_to(*arity),
+            None => *fallback,
+        },
+        Op::Primvar {
+            channel,
+            arity,
+            fallback,
+        } => match ctx
+            .curve
+            .and_then(|c| c.primvars.get(*channel as usize).copied().flatten())
+        {
+            // A `float` value broadcasts into a wider type and a wider one
+            // keeps its leading lanes, as MaterialX's `convert` nodes do.
+            Some(v) if v.arity == 1 => v.broadcast_to(*arity),
+            Some(v) => convert(v, *arity),
+            None => *fallback,
+        },
         Op::Normal => ctx.normal.into(),
         Op::ViewDirection => ctx.view.into(),
         Op::Position => ctx.position.into(),
@@ -185,6 +212,45 @@ pub(super) fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             let m = g(*amount).rgb();
             hsv_to_rgb(Vec3A::new(hsv.x + m.x, hsv.y * m.y, hsv.z * m.z)).into()
         }
+        Op::RgbToHsv { a } => with_alpha(g(*a), rgb_to_hsv),
+        Op::HsvToRgb { a } => with_alpha(g(*a), hsv_to_rgb),
+        Op::Select {
+            cmp,
+            value1,
+            value2,
+            in1,
+            in2,
+        } => {
+            let (x, y) = (g(*value1).x(), g(*value2).x());
+            let take = match cmp {
+                CmpOp::Greater => x > y,
+                CmpOp::GreaterEq => x >= y,
+                CmpOp::Equal => x == y,
+            };
+            // The width is the wider branch's whichever is taken, so that
+            // it is known without evaluating the comparison (crust-jit
+            // relies on it). MaterialX types both branches alike; a `float`
+            // one broadcasts, and a narrower vector widens as `convert`
+            // widens it.
+            let (a, b) = (g(*in1), g(*in2));
+            let n = a.arity.max(b.arity);
+            let pick = if take { a } else { b };
+            if pick.arity == 1 {
+                pick.broadcast_to(n)
+            } else {
+                convert(pick, n)
+            }
+        }
+        Op::CellNoise2 { a } => {
+            let a = g(*a);
+            // A `float` coordinate is both axes, as for a texture's.
+            let (x, y) = if a.arity == 1 {
+                (a.x(), a.x())
+            } else {
+                (a.v[0], a.v[1])
+            };
+            Val::float(cell_noise_2d(x, y))
+        }
         Op::HeightToNormal {
             xp,
             xm,
@@ -282,6 +348,58 @@ pub(super) fn hsv_to_rgb(hsv: Vec3A) -> Vec3A {
         4 => Vec3A::new(t, p, v),
         _ => Vec3A::new(v, p, q),
     }
+}
+
+/// `f` over the colour of `c` (a `float` broadcast to grey), keeping a
+/// `color4`'s alpha — how MaterialX's `color4` variants of the HSV nodes
+/// wrap their `color3` ones.
+fn with_alpha(c: Val, f: impl Fn(Vec3A) -> Vec3A) -> Val {
+    let rgb = f(c.rgb());
+    if c.arity == 4 {
+        Val::vec4(rgb.x, rgb.y, rgb.z, c.v[3])
+    } else {
+        rgb.into()
+    }
+}
+
+/// OSL's `cellnoise(x, y)`, which MaterialX's genosl `cellnoise2d` calls and
+/// its genglsl `mx_cell_noise_float` transcribes: Bob Jenkins' lookup3
+/// `final` mix of the cell's integer coordinates, scaled to [0, 1].
+///
+/// The cell is `floor` of each coordinate; a coordinate beyond `i32`'s range
+/// saturates (OSL's `quick_floor` is undefined there), and NaN lands in
+/// cell 0.
+pub(super) fn cell_noise_2d(x: f32, y: f32) -> f32 {
+    let (ix, iy) = (x.floor() as i32, y.floor() as i32);
+    // `uint(0xdeadbeef) + (len << 2) + 13` for two words.
+    let seed = 0xdead_beef_u32.wrapping_add((2 << 2) + 13);
+    let bits = bj_final(
+        seed.wrapping_add(ix as u32),
+        seed.wrapping_add(iy as u32),
+        seed,
+    );
+    // `float(bits) / float(0xffffffff)`: the divisor rounds to 2^32 in single
+    // precision, so this is an exact scaling of the rounded numerator.
+    bits as f32 / u32::MAX as f32
+}
+
+/// lookup3's `final(a, b, c)`, returning `c`.
+fn bj_final(mut a: u32, mut b: u32, mut c: u32) -> u32 {
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(14));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(11));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(25));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(16));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(4));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(14));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(24));
+    c
 }
 
 /// MaterialX `normalize`, over the value's own lanes. A zero-length input is

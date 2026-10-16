@@ -48,7 +48,7 @@ prim's curves SHALL reassign the values.
 
 - **WHEN** `curve:random` is read for 10 000 curves of one prim
 - **THEN** every value is in [0, 1), and their histogram over ten equal bins
-  is within 5% of uniform in each bin
+  is within 10% of uniform in each bin (3.3 standard deviations of a bin)
 
 ### Requirement: geompropvalue reads curve primvars by name
 

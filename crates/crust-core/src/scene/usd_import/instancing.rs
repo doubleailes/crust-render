@@ -44,9 +44,11 @@ use super::attrs::{
 use super::implicit::{Shape, undisplaced};
 use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
-use super::shapes::{curve_segments, curves_scene, nurbs_curve_segments, sphere_radius};
+use super::shapes::{Curves, curve_segments, curves_scene, nurbs_curve_segments, sphere_radius};
+use super::strands::StrandRequest;
 use super::xform::compose_with_parent;
 use super::{ImportCaches, WalkScope, prim_at, prune_reason};
+use crate::strands::StrandTable;
 
 /// How deep prototypes may nest before the importer gives up. USD forbids
 /// an instancing cycle, but a malformed stage can still describe one, and
@@ -57,6 +59,12 @@ const MAX_INSTANCE_NESTING: usize = 8;
 /// How a prototype version is placed, which decides how adaptive subdivision
 /// refines its meshes (see "Only unshared geometry is adaptive" in the design
 /// record). In uniform subdivision every version is [`ProtoPlace::Shared`].
+/// A curves prim in a prototype, read under whichever schema it has.
+enum Curve {
+    Basis(UsdBasisCurves),
+    Nurbs(UsdNurbsCurves),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum ProtoPlace {
     /// Placed more than once: refined to the uniform level, built once and
@@ -89,6 +97,12 @@ pub(super) struct PartSlot {
     /// the geometric normal there); a direct instance of a mesh gets its
     /// tangent at the hit.
     uvs: Option<Arc<UvMap>>,
+    /// A curves slot's strand table, when its material reads the strand, a
+    /// primvar or the chart. Carried on the same terms as `faces`: the
+    /// `prim_id` a hit reports is the prototype's own span.
+    strands: Option<Arc<StrandTable>>,
+    /// Whether the slot is curves, table or not ([`WorldBuilder::mark_curves`]).
+    curves: bool,
     /// Uniform scale from the slot's own geometry frame, which its tables'
     /// densities are in, to the part's frame. 1 for a leaf part; inside a
     /// group, the member's placement. Nested *instancer* placements are not
@@ -133,6 +147,8 @@ impl ProtoPart {
                 material,
                 faces,
                 uvs,
+                strands: None,
+                curves: false,
                 scale: 1.0,
             }]),
         }
@@ -283,23 +299,32 @@ pub(super) fn collect_proto_parts(
                 None,
                 None,
             ));
-        } else if let Some(batches) = match UsdBasisCurves::get(stage, prim.path().clone()) {
-            Ok(Some(curves)) => Some(curve_segments(&prim, &curves)),
+        } else if let Some(read) = match UsdBasisCurves::get(stage, prim.path().clone()) {
+            Ok(Some(curves)) => Some(Curve::Basis(curves)),
             _ => match UsdNurbsCurves::get(stage, prim.path().clone()) {
-                Ok(Some(curves)) => Some(nurbs_curve_segments(&prim, &curves)),
+                Ok(Some(curves)) => Some(Curve::Nurbs(curves)),
                 _ => None,
             },
         } {
             let material = resolve_material(stage, &prim, caches);
-            if let Some(batches) = batches {
-                parts.push(ProtoPart::leaf(
+            let request = StrandRequest::of(&*material, caches.working);
+            let imported = match &read {
+                Curve::Basis(c) => curve_segments(&prim, c, request.as_ref()),
+                Curve::Nurbs(c) => nurbs_curve_segments(&prim, c, request.as_ref()),
+            };
+            if let Some(Curves { batches, strands }) = imported {
+                let mut part = ProtoPart::leaf(
                     Arc::new(curves_scene(batches)),
                     this_local,
                     mask,
                     material,
                     None,
                     None,
-                ));
+                );
+                let slot = &mut Arc::make_mut(&mut part.slots)[0];
+                slot.curves = true;
+                slot.strands = strands.map(Arc::new);
+                parts.push(part);
             }
         } else if let Some(shape) = Shape::read(&prim) {
             // An implicit shape is a mesh once tessellated, so it is a part
@@ -747,6 +772,11 @@ fn attach_proto_parts(
             }
             if let Some(map) = &slot.uvs {
                 world.set_uv_map(id, map.clone(), false);
+            }
+            match &slot.strands {
+                Some(table) => world.set_strands(id, table.clone()),
+                None if slot.curves => world.mark_curves(id),
+                None => {}
             }
             world.set_placement_scale(id, scale * slot.scale);
         }

@@ -284,6 +284,10 @@ warning_codes! {
         "NurbsCurves whose order or knots do not match their points; the curves are skipped.";
     CurvesRationalApproximated => "curves.rational_approximated", Approximated, Each,
         "NurbsCurves with unequal pointWeights are approximated by polynomial spans; non-positive or non-finite weights are ignored.";
+    CurvesUnsupportedPrimvar => "curves.unsupported_primvar", Skipped, Each,
+        "A curve primvar a material reads has a type, interpolation or length crust cannot read; the material reads its geompropvalue's default there.";
+    CurvesReservedPrimvar => "curves.reserved_primvar", Skipped, Each,
+        "A curve primvar is authored under primvars:curve:, the namespace of the curve properties; the material reads the property, not the primvar.";
     VolumeUnknownType => "volume.unknown_type", Skipped, Each,
         "crust:volume:type is not homogeneous, smoke or grid.";
     VolumeInvalidGrid => "volume.invalid_grid", Skipped, Each,

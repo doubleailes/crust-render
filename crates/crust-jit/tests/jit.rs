@@ -3,7 +3,8 @@
 
 use crust_jit::JitProgram;
 use crust_mtlx::{
-    BinOp, Compiled, Doc, Host, Op, Program, ShadeCtx, Texture, TextureRef, UnOp, Val, compile,
+    BinOp, CmpOp, Compiled, Compiler, CurveCtx, Doc, Host, Op, Program, ShadeCtx, Texture,
+    TextureRef, UnOp, Val, compile,
 };
 use glam::Vec3A;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,7 @@ fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn shading_points() -> Vec<ShadeCtx> {
+fn shading_points() -> Vec<ShadeCtx<'static>> {
     (0..96)
         .map(|i| {
             let t = i as f32 / 96.0;
@@ -47,6 +48,7 @@ fn shading_points() -> Vec<ShadeCtx> {
                 view: -Vec3A::new(0.2, (t * 3.0).sin(), 1.0).normalize(),
                 position: Vec3A::new(t, 1.0 - t, t * t),
                 uv_width: if i % 3 == 0 { 0.0 } else { t * 0.01 },
+                curve: None,
             }
         })
         .collect()
@@ -58,9 +60,14 @@ fn bits(v: &Val) -> ([u32; 4], u8) {
 
 /// Every slot, bitwise, at every point; returns (inline, host) op counts.
 fn same(program: &Program, what: &str) -> (usize, usize) {
+    same_at(program, what, &shading_points())
+}
+
+/// [`same`] at the given points.
+fn same_at(program: &Program, what: &str, points: &[ShadeCtx<'_>]) -> (usize, usize) {
     let jit = JitProgram::new(program).expect("compiles for the host");
     let (mut r, mut j) = (Vec::new(), Vec::new());
-    for ctx in shading_points() {
+    for &ctx in points {
         program.eval(&ctx, &mut r);
         jit.eval(&ctx, &mut j);
         assert_eq!(r.len(), j.len(), "{what}: slot count");
@@ -256,6 +263,207 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
     });
     let (inline, host) = same(&p, "synthetic");
     assert!(inline > 900 && host >= 6, "inline {inline}, host {host}");
+}
+
+#[test]
+fn the_hsv_conditional_and_noise_ops_match_across_widths() {
+    // All interpreter calls: what must hold is the width the generated code
+    // assumes for each, which the inlined consumers below read.
+    let tex = |arity: u8| Op::Texture {
+        tex: procedural("", None),
+        fallback: Val::float(0.5),
+        scale: [3.0, 2.0],
+        offset: [0.0, 0.0],
+        arity,
+        shift: [0.0, 0.0],
+        coord: None,
+    };
+    let mut p = Program::default();
+    let mut push = |op: Op| {
+        p.ops.push(op);
+        (p.ops.len() - 1) as u32
+    };
+    let f = push(tex(1));
+    let v2 = push(tex(2));
+    let c3 = push(tex(3));
+    let c4 = push(tex(4));
+    let half = push(Op::Const(Val::float(0.5)));
+    let operands = [f, v2, c3, c4, half];
+    for &a in &operands {
+        for op in [Op::RgbToHsv { a }, Op::HsvToRgb { a }, Op::CellNoise2 { a }] {
+            let r = push(op);
+            push(Op::Binary {
+                op: BinOp::Mul,
+                a: r,
+                b: c3,
+            });
+            push(Op::Combine2 { a: r, b: f });
+        }
+        for &b in &operands {
+            for cmp in [CmpOp::Greater, CmpOp::GreaterEq, CmpOp::Equal] {
+                let r = push(Op::Select {
+                    cmp,
+                    value1: f,
+                    value2: half,
+                    in1: a,
+                    in2: b,
+                });
+                push(Op::Binary {
+                    op: BinOp::Add,
+                    a: r,
+                    b: f,
+                });
+                push(Op::Convert { a: r, arity: 4 });
+            }
+        }
+    }
+    let (_, host) = same(&p, "hsv / select / cellnoise");
+    assert!(host >= 5 * 3 + 5 * 5 * 3, "host {host}");
+}
+
+#[test]
+fn the_random_nodes_jit_like_any_graph() {
+    // `randomfloat` / `randomcolor` expand to their nodegraphs' ops; driven
+    // by the chart so that every shading point lands in another cell.
+    let doc = Doc::parse(
+        r#"<materialx>
+             <texcoord name="uv" type="vector2" />
+             <extract name="u" type="float"><input name="in" type="vector2" nodename="uv" /></extract>
+             <randomfloat name="rf" type="float">
+               <input name="in" type="float" nodename="u" />
+               <input name="min" type="float" value="-1" />
+               <input name="max" type="float" value="3" />
+               <input name="seed" type="integer" value="7" />
+             </randomfloat>
+             <randomcolor name="rc" type="color3">
+               <input name="in" type="float" nodename="rf" />
+               <input name="saturationlow" type="float" value="0.2" />
+               <input name="brightnesslow" type="float" value="0.5" />
+             </randomcolor>
+             <ifgreatereq name="sel" type="color3">
+               <input name="value1" type="float" nodename="rf" />
+               <input name="value2" type="float" value="1" />
+               <input name="in1" type="color3" nodename="rc" />
+               <input name="in2" type="color3" value="0.1, 0.2, 0.3" />
+             </ifgreatereq>
+           </materialx>"#,
+    )
+    .unwrap();
+    let mut c = Compiler::new(&doc, &Host::new(&procedural));
+    let root = c.compile_named("", "sel", None);
+    assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
+    same(&c.program, "random nodes (compiled)");
+    let (optimised, remap) = c.program.optimize(&[root]);
+    assert!(remap[root as usize].is_some());
+    same(&optimised, "random nodes (optimised)");
+}
+
+/// A curve's primvars at one hit: one of each width, and one the curve
+/// does not have.
+static PRIMVARS: [Option<Val>; 5] = [
+    Some(Val::float(0.75)),
+    Some(Val::vec2(0.2, -1.5)),
+    Some(Val::vec3(0.9, 0.4, 0.1)),
+    Some(Val::vec4(0.1, 0.2, 0.3, 0.5)),
+    None,
+];
+
+#[test]
+fn the_jit_matches_the_interpreter_on_curves() {
+    let doc = Doc::parse(
+        r#"<materialx>
+             <geompropvalue name="v" type="float">
+               <input name="geomprop" type="string" value="curve:v" />
+               <input name="default" type="float" value="0.5" />
+             </geompropvalue>
+             <geompropvalue name="index" type="float">
+               <input name="geomprop" type="string" value="curve:index" />
+             </geompropvalue>
+             <geompropvalue name="random" type="color3">
+               <input name="geomprop" type="string" value="curve:random" />
+               <input name="default" type="color3" value="0.1, 0.2, 0.3" />
+             </geompropvalue>
+             <geompropvalue name="p0" type="color3">
+               <input name="geomprop" type="string" value="melanin" />
+             </geompropvalue>
+             <geompropvalue name="p1" type="vector2">
+               <input name="geomprop" type="string" value="offset" />
+             </geompropvalue>
+             <geompropvalue name="p2" type="color3">
+               <input name="geomprop" type="string" value="hairColor" />
+             </geompropvalue>
+             <geompropvalue name="p3" type="color4">
+               <input name="geomprop" type="string" value="tint" />
+             </geompropvalue>
+             <geompropvalue name="p4" type="float">
+               <input name="geomprop" type="string" value="missing" />
+               <input name="default" type="float" value="2" />
+             </geompropvalue>
+             <mix name="ramp" type="color3">
+               <input name="bg" type="color3" nodename="p2" />
+               <input name="fg" type="color3" nodename="random" />
+               <input name="mix" type="float" nodename="v" />
+             </mix>
+             <rgbtohsv name="hsv" type="color3"><input name="in" type="color3" nodename="ramp" /></rgbtohsv>
+             <hsvtorgb name="rgb" type="color3"><input name="in" type="color3" nodename="hsv" /></hsvtorgb>
+             <randomfloat name="rf" type="float">
+               <input name="in" type="float" nodename="index" />
+               <input name="seed" type="integer" nodename="p4" />
+             </randomfloat>
+             <randomcolor name="rc" type="color3"><input name="in" type="float" nodename="rf" /></randomcolor>
+             <cellnoise2d name="cn" type="float"><input name="texcoord" type="vector2" nodename="p1" /></cellnoise2d>
+             <ifequal name="pick" type="color3">
+               <input name="value1" type="float" nodename="cn" />
+               <input name="value2" type="float" nodename="v" />
+               <input name="in1" type="color3" nodename="rc" />
+               <input name="in2" type="color3" nodename="rgb" />
+             </ifequal>
+             <multiply name="m0" type="color3">
+               <input name="in1" type="color3" nodename="pick" />
+               <input name="in2" type="color3" nodename="p0" />
+             </multiply>
+             <convert name="c4" type="color4"><input name="in" type="color3" nodename="m0" /></convert>
+             <add name="out" type="color4">
+               <input name="in1" type="color4" nodename="c4" />
+               <input name="in2" type="color4" nodename="p3" />
+             </add>
+           </materialx>"#,
+    )
+    .unwrap();
+    let mut c = Compiler::new(&doc, &Host::new(&procedural));
+    let root = c.compile_named("", "out", None);
+    assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
+    // Listed in the order compilation meets them.
+    let mut names = c.program.primvars.clone();
+    names.sort();
+    assert_eq!(names, ["hairColor", "melanin", "missing", "offset", "tint"]);
+    // Every point twice: on a strand (whose properties vary, and whose
+    // primvar list is cut short at some), and off any curve.
+    let points: Vec<ShadeCtx<'static>> = shading_points()
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, ctx)| {
+            let t = i as f32 / 96.0;
+            let curve = CurveCtx {
+                v: t,
+                index: i as u32 * 37,
+                random: (t * 7.0).fract(),
+                primvars: &PRIMVARS[..5 - i % 4],
+            };
+            [
+                ShadeCtx {
+                    curve: Some(curve),
+                    ..ctx
+                },
+                ctx,
+            ]
+        })
+        .collect();
+    same_at(&c.program, "curve graph (compiled)", &points);
+    let (optimised, remap) = c.program.optimize(&[root]);
+    assert!(remap[root as usize].is_some());
+    assert_eq!(optimised.primvars, c.program.primvars);
+    same_at(&optimised, "curve graph (optimised)", &points);
 }
 
 #[test]

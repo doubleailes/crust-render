@@ -118,6 +118,7 @@ fn eval(case: &Case) -> Val {
         view: -Vec3A::Z,
         position: Vec3A::ZERO,
         uv_width: 0.0,
+        curve: None,
     };
 
     let doc = Doc::parse(&xml).unwrap_or_else(|e| panic!("line {}: {e:?}", case.line));
