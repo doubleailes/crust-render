@@ -8,7 +8,7 @@
 use glam::Vec3A;
 use utils::exp3;
 
-use crate::aov::FirstHit;
+use super::FirstHit;
 use crate::guiding::SampleData;
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample, ShadingPoint};
@@ -25,8 +25,8 @@ use openqmc::{Sampler, SamplerImpl};
 
 use super::GuidingContext;
 use super::route::{Arrival, NO_EVENT, NO_LIGHT, Route, RouteCtx};
-use super::settings::SamplingStrategy;
 use crate::lpe::LobeSplit;
+use crate::settings::SamplingStrategy;
 
 // OpenQMC domain-tree keys. The camera and the path subtree hang off the root
 // (per-pixel, per-sample) sampler; each per-event sub-domain hangs off the

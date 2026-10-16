@@ -147,62 +147,62 @@ impl SamplingStrategy {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderSettings {
-    pub(super) samples_per_pixel: u32,
-    pub(super) max_depth: u32,
-    pub(super) width: usize,
-    pub(super) height: usize,
+    samples_per_pixel: u32,
+    max_depth: u32,
+    width: usize,
+    height: usize,
     // The pixels the render traces, in image space (top-left origin); the
     // whole frame unless `with_region` says otherwise. Always non-empty and
     // inside `width` × `height`.
-    pub(super) region: PixelRect,
+    region: PixelRect,
     // Adaptive sampling: a pixel may stop early once it has taken at least
     // `min_samples_per_pixel` samples and the relative standard error of its
     // mean drops below `variance_threshold` (0 disables early stopping).
-    pub(super) min_samples_per_pixel: u32,
-    pub(super) variance_threshold: f32,
+    min_samples_per_pixel: u32,
+    variance_threshold: f32,
     // How far a still-sampling cross neighbour's convergence index may sit
     // above a pixel's own before it holds the pixel back (see
     // `with_adaptive_neighbour_tolerance`). Negative: no comparison.
-    pub(super) adaptive_neighbour_tolerance: f32,
-    pub(super) frame: isize,
+    adaptive_neighbour_tolerance: f32,
+    frame: isize,
     // Path guiding (opt-in via `crust:pathGuiding`; see `with_guiding`).
-    pub(super) guiding: bool,
-    pub(super) guiding_train_iterations: u32,
-    pub(super) guiding_prob: f32,
+    guiding: bool,
+    guiding_train_iterations: u32,
+    guiding_prob: f32,
     // MIS strategy (see `SamplingStrategy`; `crust:samplingStrategy` /
     // `--strategy`).
-    pub(super) sampling_strategy: SamplingStrategy,
+    sampling_strategy: SamplingStrategy,
     // Pixel reconstruction filter (see `PixelFilter`; `crust:pixelFilter` /
     // `--filter`). Applied by filter importance sampling in `render_pixel`.
-    pub(super) pixel_filter: PixelFilter,
+    pixel_filter: PixelFilter,
     // The QMC sampler every pass draws from (see `SamplerKind`;
     // `crust:sampler` / `--sampler`). Chosen once per pass in
     // `Renderer::render_pass`; the `learned` light-selection pre-pass stays
     // on Sobol whatever this says.
-    pub(super) sampler: SamplerKind,
+    sampler: SamplerKind,
     // How NEE picks a light (see `LightSelection`; `crust:lightSelection` /
     // `--light-selection`). Applied once, in `Renderer::new`.
-    pub(super) light_selection: LightSelection,
+    light_selection: LightSelection,
     // Firefly clamp on each camera sample's indirect light (see
     // `with_indirect_clamp`; `crust:indirectClamp` / `--indirect-clamp`).
     // `DEFAULT_INDIRECT_CLAMP` unless overridden; `None` is off (an authored
     // 0). Validated at construction: `Some` is always finite and positive.
-    pub(super) indirect_clamp: Option<f32>,
+    indirect_clamp: Option<f32>,
     // How many light samples NEE takes at the camera vertex and at every
     // later surface or volume vertex (see `with_light_samples`;
     // `crust:lightSamples` / `--light-samples` and
     // `crust:lightSamplesIndirect` / `--light-samples-indirect`). At least 1.
-    pub(super) light_samples: u32,
-    pub(super) light_samples_indirect: u32,
+    light_samples: u32,
+    light_samples_indirect: u32,
     // Whether camera rays sample the shutter at all (see `with_motion_blur`;
     // `disableMotionBlur` / `instantaneousShutter` on the render settings).
     // Off, every ray is traced at shutter open and moving geometry renders
     // sharp at its authored position; its motion stays in the scene.
-    pub(super) motion_blur: bool,
+    motion_blur: bool,
     // The render camera's linear exposure scale (see `with_exposure_scale`;
     // the camera's `exposure` attributes). Finite and positive; 1 leaves the
     // film untouched.
-    pub(super) exposure_scale: f32,
+    exposure_scale: f32,
 }
 /// The settings a stage that authors none renders with: 640×360 at 128 spp,
 /// paths up to 32 vertices, adaptive sampling stopping no earlier than 32
@@ -394,7 +394,7 @@ impl RenderSettings {
     /// its largest channel, scaling the colour down whole so the hue
     /// survives. Defaults to [`DEFAULT_INDIRECT_CLAMP`]; `0`, a negative or a
     /// non-finite value disables it, which is the unbiased estimator. See
-    /// [`clamp_indirect`](super::path::clamp_indirect) for what counts as indirect.
+    /// `clamp_indirect` (`tracer/path.rs`) for what counts as indirect.
     ///
     /// Biased on purpose — energy is removed exactly where it is rare and
     /// bright — and the standard trade in production renderers (Cycles'
@@ -530,4 +530,29 @@ impl From<&RenderSettings> for ImageCounters {
             max_depth: s.max_depth(),
         }
     }
+}
+
+/// The adaptive minimum and the first check point of a `spp` budget whose
+/// authored minimum is `authored_min`.
+///
+/// The minimum grows with the budget: an authored minimum of 8 at 1024 spp
+/// takes at least 32. A floor, not a default, so that the unauthored 32 still
+/// keeps a 16 spp render (the goldens) from ever stopping early. Two at
+/// least, or there is no variance to test. Checks happen every 4th sample
+/// from the minimum on, so the first one is at the smallest multiple of 4
+/// that is at least the minimum — if the budget reaches that far at all.
+/// Checked: a minimum within 3 of `u32::MAX` must saturate, not wrap to a
+/// check point of 0 that would let every pixel stop after 4 samples.
+pub(crate) fn adaptive_check_points(spp: u32, authored_min: u32) -> (u32, u32) {
+    let min_spp = authored_min.max((spp as f64).sqrt().ceil() as u32).max(2);
+    let first_check = min_spp.checked_next_multiple_of(4).unwrap_or(u32::MAX);
+    (min_spp, first_check)
+}
+
+/// Whether a render of `spp` samples, authored minimum `authored_min` and
+/// variance threshold `threshold` can stop a pixel early: the threshold is
+/// on and the budget passes the first check point, so `batch_schedule` (`tracer/mod.rs`)
+/// has a round. What `crust diff`'s comparability reads off two stamps.
+pub(crate) fn samples_adaptively(spp: u32, authored_min: u32, threshold: f32) -> bool {
+    threshold > 0.0 && adaptive_check_points(spp, authored_min).1 < spp
 }

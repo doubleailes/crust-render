@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::buffer::Buffer;
 
-use super::PixelRect;
+use crate::region::PixelRect;
 
 /// The handle a host passes to
 /// [`Renderer::render_with_control`](crate::Renderer::render_with_control)

@@ -11,7 +11,7 @@ use crate::color::Space;
 use crate::filter::PixelFilter;
 use crate::light::LightSelection;
 use crate::sampler::SamplerKind;
-use crate::tracer::{RenderSettings, SamplingStrategy};
+use crate::settings::{RenderSettings, SamplingStrategy};
 
 use super::attrs::{custom_bool, custom_f32, custom_i32, custom_token, value_at};
 use super::prim_at;
@@ -310,7 +310,7 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     // largest channel of one sample's indirect radiance). Unauthored takes
     // the engine default; an authored 0 leaves the estimator unbiased.
     let indirect_clamp =
-        custom_f32(&prim, "crust:indirectClamp").unwrap_or(crate::tracer::DEFAULT_INDIRECT_CLAMP);
+        custom_f32(&prim, "crust:indirectClamp").unwrap_or(crate::settings::DEFAULT_INDIRECT_CLAMP);
     // Adaptive sampling's cross-neighbour tolerance, in convergence-index
     // units; negative turns the comparison off. A non-finite value cannot
     // be compared against, so it is refused rather than silently disabling
@@ -322,11 +322,11 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
                 SettingsInvalidValue,
                 at = prim.path(),
                 "crust:adaptiveNeighbourTolerance = {t} is not finite — using {}",
-                crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE
+                crate::settings::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE
             );
-            crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE
+            crate::settings::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE
         }
-        None => crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
+        None => crate::settings::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
     };
 
     // Light samples per vertex: at the camera vertex and at every later one.
@@ -379,7 +379,7 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
 /// typo there is a render that never ends), else the default with a warning.
 /// Unauthored is the default.
 fn light_sample_count(prim: &Prim, name: &str) -> u32 {
-    use crate::tracer::{DEFAULT_LIGHT_SAMPLES, MAX_LIGHT_SAMPLES};
+    use crate::settings::{DEFAULT_LIGHT_SAMPLES, MAX_LIGHT_SAMPLES};
     match custom_i32(prim, name) {
         Some(n) if n >= 1 && n as u32 > MAX_LIGHT_SAMPLES => {
             warning!(

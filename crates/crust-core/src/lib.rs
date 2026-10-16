@@ -16,6 +16,7 @@
 
 mod aabb;
 pub mod aov;
+mod assets;
 mod buffer;
 mod camera;
 /// The `crust-check/2` report `crust check` writes.
@@ -24,6 +25,7 @@ pub mod color;
 /// `crust diff`'s comparison of two decoded images.
 pub mod compare;
 pub mod config;
+mod control;
 pub mod diagnostic;
 mod distribution;
 mod environment;
@@ -53,6 +55,7 @@ pub mod report;
 mod rt_world;
 mod sampler;
 mod scene;
+mod settings;
 /// What every EXR records about how it was sampled.
 pub mod stamp;
 /// MaterialX surfaces — `MtlxMaterial`, which evaluates a document's closure
@@ -83,9 +86,7 @@ pub use crust_mtlx as mtlx;
 pub use crust_rt as rt;
 
 pub use aabb::AABB;
-pub use aov::{
-    Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, Precision,
-};
+pub use aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, Precision};
 pub use buffer::Buffer;
 pub use camera::Camera;
 pub use config::{
@@ -133,11 +134,18 @@ pub mod implicit_shapes {
         Axis, MIN_CAP_AXIAL, MIN_RADIAL, Tessellation, capsule, cone, cuboid, cylinder, plane,
     };
 }
+pub use assets::{AssetLoader, NoAssets};
+pub use control::{RenderControl, RenderOutcome};
+pub use region::PixelRect;
 #[cfg(feature = "traversal-stats")]
 pub use rt_world::traversal_report;
 pub use scene::{
-    AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
-    MaterialRecord, NoAssets, UsdImportOptions, usd_schema_registry,
+    CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing, MaterialRecord,
+    UsdImportOptions, usd_schema_registry,
+};
+pub use settings::{
+    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, DEFAULT_LIGHT_SAMPLES,
+    MAX_LIGHT_SAMPLES, RenderSettings, SamplingStrategy,
 };
 pub use stats::{
     DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,
@@ -146,9 +154,7 @@ pub use stats::{
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};
 pub use tracer::{
-    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, DEFAULT_LIGHT_SAMPLES,
-    MAX_LIGHT_SAMPLES, PixelRect, ProgressCallback, RenderControl, RenderOutcome, RenderSettings,
-    Rendered, Renderer, SamplingStrategy, ray_color, ray_color_with_light_samples,
+    AovFilm, ProgressCallback, Rendered, Renderer, ray_color, ray_color_with_light_samples,
 };
 pub use utils::Luma;
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};

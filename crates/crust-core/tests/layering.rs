@@ -36,25 +36,17 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("rays", &["aabb", "hittable", "medium", "ray"]),
     ("materials", &["lpe", "material"]),
     ("world", &["rt_world"]),
-    ("lights", &["environment", "light"]),
+    ("lights", &["assets", "environment", "light"]),
     (
-        "integrator",
+        "contents",
         &[
-            "aov",
-            "camera",
-            "filter",
-            "guiding",
-            "sampler",
-            "subsurface",
-            "tracer",
+            "aov", "camera", "compare", "control", "filter", "sampler", "settings", "stamp",
             "volume",
         ],
     ),
+    ("integrator", &["guiding", "subsurface", "tracer"]),
     ("import", &["live", "place", "scene", "world"]),
-    (
-        "tools",
-        &["check", "compare", "diagnostic", "inspect", "stamp"],
-    ),
+    ("tools", &["check", "diagnostic", "inspect"]),
 ];
 
 fn layer_of() -> HashMap<&'static str, usize> {

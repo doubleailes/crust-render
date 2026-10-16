@@ -42,14 +42,14 @@ use std::time::{Duration, Instant};
 use glam::{Mat4 as GMat4, Vec3};
 use tracing::{debug, info};
 
+use crate::assets::AssetLoader;
 use crate::camera::Camera;
 use crate::light::LightList;
 use crate::live::{LightOrigin, Provenance, StageFacts};
 use crate::rt_world::WorldBuilder;
-use crate::scene::AssetLoader;
 use crate::scene::Scene;
+use crate::settings::RenderSettings;
 use crate::stats::{MemorySample, RenderStats, SceneCounters, SubdivisionCounters};
-use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
 #[cfg(feature = "mmap")]

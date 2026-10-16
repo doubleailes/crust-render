@@ -1,5 +1,5 @@
-use super::SamplingStrategy;
 use crate::pdf::PdfSolidAngle;
+use crate::settings::SamplingStrategy;
 
 /// The clamp caps the brightest channel and scales the others with it,
 /// so a saturated firefly keeps its hue; below the limit it is exact.

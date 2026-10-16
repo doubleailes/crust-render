@@ -1,7 +1,7 @@
 //! Lat-long environment maps for [`crate::light::DomeLight`].
 //!
 //! crust-core decodes nothing: the host hands it pixels through
-//! [`crate::scene::AssetLoader`], which is what keeps this crate free of
+//! [`crate::assets::AssetLoader`], which is what keeps this crate free of
 //! image dependencies. What lives here is the part that is renderer
 //! business — the direction↔pixel mapping and the importance sampling that
 //! stops a small bright sun in a 4K HDRI from becoming a firefly farm.

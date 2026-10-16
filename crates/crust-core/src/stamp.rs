@@ -13,8 +13,9 @@
 //! value (`crust:indirectClamp`), so one vocabulary runs through USD, the CLI
 //! and the EXR.
 
+use crate::control::RenderOutcome;
+use crate::settings::RenderSettings;
 use crate::stats::RayStats;
-use crate::tracer::{RenderOutcome, RenderSettings};
 
 /// The prefix every stamped attribute carries, and that a RenderProduct may
 /// not author.

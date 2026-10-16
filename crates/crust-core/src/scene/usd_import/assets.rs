@@ -1,7 +1,7 @@
 //! Asset paths and host decodes: the one rule that turns an `asset`-valued
 //! attribute into a filesystem path ([`asset_path`]), and the one memoized,
 //! timed route every decode takes through the host's
-//! [`AssetLoader`](crate::scene::AssetLoader) ([`cached_asset`]).
+//! [`AssetLoader`](crate::assets::AssetLoader) ([`cached_asset`]).
 //! crust-core decodes nothing itself.
 
 use crate::record_warning;

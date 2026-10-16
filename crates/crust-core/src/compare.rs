@@ -492,7 +492,7 @@ const COMPARED: [&str; 11] = [
 ];
 
 /// Whether a stamp shows adaptive sampling at work: a render the tracer's
-/// own rule ([`crate::tracer::samples_adaptively`]) lets stop early — the
+/// own rule ([`crate::settings::samples_adaptively`]) lets stop early — the
 /// threshold on, and the budget past the first check point — or pixels that
 /// took different counts.
 fn adaptive(s: &Stamp) -> bool {
@@ -503,7 +503,7 @@ fn adaptive(s: &Stamp) -> bool {
     ) {
         (Some(spp), Some(min), Some(threshold)) => {
             let count = |v: i64| u32::try_from(v.max(0)).unwrap_or(u32::MAX);
-            crate::tracer::samples_adaptively(count(spp), count(min), threshold)
+            crate::settings::samples_adaptively(count(spp), count(min), threshold)
         }
         _ => false,
     };

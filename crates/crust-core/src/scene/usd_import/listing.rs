@@ -38,7 +38,7 @@ use super::{
     Prune, WalkScope, open_stage, prim_at, prune_reason, release_stage, stage_builder, stream_roots,
 };
 use crate::scene::{CameraRecord, LightRecord, ListKind, ListRecord, MaterialRecord};
-use crate::tracer::RenderSettings;
+use crate::settings::RenderSettings;
 
 /// Every `kind` prim on the stage at `path`, in namespace order (a parent's
 /// children in their authored order), as absolute prim paths.

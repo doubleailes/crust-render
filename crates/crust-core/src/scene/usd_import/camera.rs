@@ -6,7 +6,7 @@ use openusd_schemas::geom::{Camera as UsdCamera, CameraSchema};
 use tracing::debug;
 
 use crate::camera::Camera;
-use crate::tracer::RenderSettings;
+use crate::settings::RenderSettings;
 
 use super::attrs::attr_f32;
 use super::prim_at;

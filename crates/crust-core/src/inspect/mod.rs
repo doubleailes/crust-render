@@ -106,7 +106,7 @@ fn reproduces(settings: &RenderSettings) -> Result<(), String> {
                 .into(),
         );
     }
-    let adaptive = crate::tracer::samples_adaptively(
+    let adaptive = crate::settings::samples_adaptively(
         settings.samples_per_pixel(),
         settings.min_samples_per_pixel(),
         settings.variance_threshold(),

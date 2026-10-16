@@ -4,7 +4,7 @@ use glam::Vec3A;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
-use crate::aov::{AovFilm, AovLayout, AovRequest, SampleExtras, UnitAov};
+use crate::aov::AovRequest;
 use crate::buffer::{Buffer, var_of_mean};
 use crate::camera::{Camera, CameraFrame};
 use crate::filter::FilterSampler;
@@ -12,29 +12,28 @@ use crate::guiding::{GuidingConfig, GuidingField, SampleData};
 use crate::profile::{self, Section};
 use crate::rt_world::World;
 use crate::sampler::SamplerKind;
+use crate::settings::adaptive_check_points;
 use crate::stats::{RayStats, RenderStats};
 use crate::volume::Volumes;
 use crate::{LightList, LightSelection};
 use openqmc::{Sampler, SamplerImpl};
 
-mod control;
+mod film;
 pub(crate) mod inspection;
 mod light_cache;
 mod light_visibility;
 mod path;
 pub(crate) use path::{past_medium_boundaries, surface_visibility};
 mod route;
-mod settings;
 
+pub use film::AovFilm;
+pub(crate) use film::{AovLayout, FirstHit, SampleExtras, UnitAov};
 use path::{K_CAMERA, K_TIME, PathContext, ray_cones_enabled, trace_path};
 
+use crate::control::{RenderControl, RenderOutcome};
 pub use crate::region::PixelRect;
-pub use control::{RenderControl, RenderOutcome};
+use crate::settings::RenderSettings;
 pub use path::{ray_color, ray_color_with_light_samples};
-pub use settings::{
-    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, DEFAULT_LIGHT_SAMPLES,
-    MAX_LIGHT_SAMPLES, RenderSettings, SamplingStrategy,
-};
 
 pub(crate) use path::PathScratch;
 pub(crate) use route::{NO_LIGHT, PathTerm, RouteCtx};
@@ -330,7 +329,7 @@ impl Renderer {
     /// rebuild. `reconfigure` itself always rebuilds, because `crust
     /// diagnostic` reports that setup as each trial's cost.
     pub fn retune(&mut self, settings: RenderSettings) -> std::time::Duration {
-        let builds_from = |s: &RenderSettings| (s.light_selection(), s.width, s.height, s.frame);
+        let builds_from = |s: &RenderSettings| (s.light_selection(), s.get_dimensions(), s.frame());
         let keep = builds_from(&self.settings) == builds_from(&settings);
         self.settings = settings;
         if keep {
@@ -351,9 +350,9 @@ impl Renderer {
                 &self.world,
                 &self.camera,
                 &self.lights,
-                settings.width,
-                settings.height,
-                settings.frame,
+                settings.get_dimensions().0,
+                settings.get_dimensions().1,
+                settings.frame(),
             ) {
                 Some(cache) => {
                     debug!(
@@ -372,9 +371,9 @@ impl Renderer {
                 &self.world,
                 &self.camera,
                 &self.lights,
-                settings.width,
-                settings.height,
-                settings.frame,
+                settings.get_dimensions().0,
+                settings.get_dimensions().1,
+                settings.frame(),
             ) {
                 Some(cache) => self.lights.set_visibility(cache),
                 None => debug!("neural light selection: nothing to learn, picking by power"),
@@ -573,7 +572,7 @@ impl Renderer {
         instruments: Instruments,
         control: Option<&RenderControl>,
     ) -> Measured {
-        let mut m = if self.settings.guiding {
+        let mut m = if self.settings.guiding() {
             self.render_guided(tiled, progress, layout, instruments, control)
         } else {
             self.render_unguided(tiled, progress, layout, instruments, control)
@@ -582,7 +581,7 @@ impl Renderer {
         // pass (and a guided render's blend): the samples, the clamp and the
         // stopping rule all worked in scene radiance. Scale 1, every camera
         // without an exposure, is skipped, so its image is the bits it was.
-        let scale = self.settings.exposure_scale;
+        let scale = self.settings.exposure_scale();
         if scale != 1.0 {
             m.apply_exposure(scale);
         }
@@ -630,15 +629,15 @@ impl Renderer {
     /// that does move (the motion stays in the scene for the `motionvector`
     /// AOV).
     fn shutter(&self) -> bool {
-        self.world.has_motion() && self.settings.motion_blur
+        self.world.has_motion() && self.settings.motion_blur()
     }
 
     /// Config of a final (image-quality) pass: full budget, adaptive
     /// sampling.
     fn final_pass_config(&self, tiled: bool, instruments: Instruments) -> PassConfig {
         PassConfig {
-            spp: self.settings.samples_per_pixel,
-            seed: self.settings.frame as u32,
+            spp: self.settings.samples_per_pixel(),
+            seed: self.settings.frame() as u32,
             tiled,
             adaptive: true,
             shutter: self.shutter(),
@@ -648,7 +647,7 @@ impl Renderer {
             // nothing left for the measurement to remove.
             measure_clamp: instruments
                 .clamp
-                .filter(|_| self.settings.indirect_clamp.is_none()),
+                .filter(|_| self.settings.indirect_clamp().is_none()),
             staged: !instruments.unstaged,
         }
     }
@@ -714,12 +713,12 @@ impl Renderer {
             }
         };
         let cfg = GuidingConfig {
-            train_iterations: self.settings.guiding_train_iterations,
-            guide_prob: self.settings.guiding_prob,
+            train_iterations: self.settings.guiding_train_iterations(),
+            guide_prob: self.settings.guiding_prob(),
             ..GuidingConfig::default()
         };
         let mut field = GuidingField::new(bounds, cfg);
-        let base_seed = self.settings.frame as u32;
+        let base_seed = self.settings.frame() as u32;
         let mut passes: Vec<(Buffer, f64)> = Vec::new();
         // Each pass's AOVs, blended with the beauty's own weights at the end.
         let mut films: Vec<AovFilm> = Vec::new();
@@ -851,7 +850,7 @@ impl Renderer {
 
             debug!(
                 "path guiding: final pass at {} spp ({})",
-                self.settings.samples_per_pixel,
+                self.settings.samples_per_pixel(),
                 if guide_final { "guided" } else { "unguided" }
             );
             let gctx = GuidingContext {
@@ -992,7 +991,11 @@ impl Renderer {
                 .collect::<Vec<_>>()
         );
         let rect = self.settings.raster_region();
-        let mut out = Buffer::for_raster_rect(self.settings.width, self.settings.height, rect);
+        let mut out = Buffer::for_raster_rect(
+            self.settings.get_dimensions().0,
+            self.settings.get_dimensions().1,
+            rect,
+        );
         for y in rect.y0..rect.y1 {
             for x in rect.x0..rect.x1 {
                 let mut c = Vec3A::ZERO;
@@ -1047,7 +1050,7 @@ impl Renderer {
         // the blue-noise rankings) is built before the pass starts its
         // timer, so a first pass never counts the build as sampling; a
         // no-op once built, and for the cache-free samplers.
-        let kind = self.settings.sampler;
+        let kind = self.settings.sampler();
         let warm = std::time::Instant::now();
         kind.warm_cache();
         let warm = warm.elapsed();
@@ -1079,7 +1082,10 @@ impl Renderer {
         layout: Option<&AovLayout>,
         control: Option<&RenderControl>,
     ) -> (Buffer, Option<AovFilm>, PassSamples, PassStats) {
-        let (w, h) = (self.settings.width, self.settings.height);
+        let (w, h) = (
+            self.settings.get_dimensions().0,
+            self.settings.get_dimensions().1,
+        );
         // The pixels this pass traces, in raster space (rows bottom-up, as
         // `(i, j)` count them); every per-pixel plane is this size and is
         // indexed through `rect.index`.
@@ -1091,7 +1097,7 @@ impl Renderer {
         let mut var_map = vec![0.0f64; rect.area()];
         let pixel_count = rect.area() as f64;
         // One tabulation per pass, shared read-only by every worker.
-        let filter = FilterSampler::new(self.settings.pixel_filter);
+        let filter = FilterSampler::new(self.settings.pixel_filter());
         // Read once per pass and dispatched to one of two monomorphisations
         // of the integrator (see `profile::scope_if`), so an unprofiled
         // render carries no trace of the profiler. The clamp counter lives
@@ -1106,11 +1112,11 @@ impl Renderer {
         let cam = self.camera.frame(w, h);
         let aov = layout.is_some();
 
-        let threshold = self.settings.variance_threshold as f64;
-        let tolerance = self.settings.adaptive_neighbour_tolerance;
+        let threshold = self.settings.variance_threshold() as f64;
+        let tolerance = self.settings.adaptive_neighbour_tolerance();
         let adaptive = cfg.adaptive && threshold > 0.0;
         let (min_spp, first_check) =
-            adaptive_check_points(cfg.spp, self.settings.min_samples_per_pixel);
+            adaptive_check_points(cfg.spp, self.settings.min_samples_per_pixel());
         let sweep_to = if adaptive {
             cfg.spp.min(first_check)
         } else {
@@ -1149,12 +1155,12 @@ impl Renderer {
             stages.len(),
             cfg.adaptive,
             min_spp,
-            self.settings.variance_threshold,
+            self.settings.variance_threshold(),
             tolerance,
             rounds,
-            self.settings.pixel_filter.name(),
-            self.settings.pixel_filter.radius(),
-            self.settings.sampling_strategy,
+            self.settings.pixel_filter().name(),
+            self.settings.pixel_filter().radius(),
+            self.settings.sampling_strategy(),
             match gctx {
                 Some(g) if g.training => "training",
                 Some(_) => "guided",
@@ -1201,7 +1207,7 @@ impl Renderer {
         let route_ctx = layout.and_then(|l| l.route.clone());
         let motion_aov = layout.is_some_and(|l| l.motion);
         let scratch = || {
-            let mut s = PathScratch::new(self.settings.max_depth as usize);
+            let mut s = PathScratch::new(self.settings.max_depth() as usize);
             s.route_ctx = route_ctx.clone();
             s.motion = motion_aov;
             s
@@ -1219,7 +1225,7 @@ impl Renderer {
         // takes no snapshots.
         let display = control.filter(|c| c.takes_snapshots());
         // A snapshot shows the image as it will be written: exposed.
-        let exposure = self.settings.exposure_scale;
+        let exposure = self.settings.exposure_scale();
         let publish = |unit: &Unit| {
             if let Some(control) = display {
                 control.publish(w, h, rect, |display| {
@@ -1661,23 +1667,25 @@ impl Renderer {
         // out of the sample loop: it depends only on the camera and the
         // resolution, neither of which moves within a render.
         let pixel_span = ray_cones_enabled().then(|| {
-            self.camera
-                .pixel_span(self.settings.width, self.settings.height)
+            self.camera.pixel_span(
+                self.settings.get_dimensions().0,
+                self.settings.get_dimensions().1,
+            )
         });
 
         let path_cx = PathContext {
             world: &self.world,
             lights: &self.lights,
             volumes: &self.volumes,
-            depth: self.settings.max_depth as i32,
-            strategy: self.settings.sampling_strategy,
+            depth: self.settings.max_depth() as i32,
+            strategy: self.settings.sampling_strategy(),
             guiding: gctx,
-            light_samples: self.settings.light_samples,
-            light_samples_indirect: self.settings.light_samples_indirect,
+            light_samples: self.settings.light_samples(),
+            light_samples_indirect: self.settings.light_samples_indirect(),
             // A measured clamp rides in the clamp's own slot, flagged as
             // measured: the integrator reads the flag only where it would
             // clamp (see `PathContext::measure_clamp`).
-            indirect_clamp: cfg.measure_clamp.or(self.settings.indirect_clamp),
+            indirect_clamp: cfg.measure_clamp.or(self.settings.indirect_clamp()),
             measure_clamp: PROFILE && cfg.measure_clamp.is_some(),
         };
         let measuring = PROFILE && cfg.measure_clamp.is_some();
@@ -1698,8 +1706,8 @@ impl Renderer {
             // exactly. The historical `/ (w-1)` divisor stretched the pixel
             // grid over a plane 1 pixel too wide — a sub-pixel zoom of ~1/w
             // that also let the last row and column sample past v = 1.
-            let u = ((i as f32) + fx) / self.settings.width as f32;
-            let v = ((j as f32) + fy) / self.settings.height as f32;
+            let u = ((i as f32) + fx) / self.settings.get_dimensions().0 as f32;
+            let v = ((j as f32) + fy) / self.settings.get_dimensions().1 as f32;
             // `Ray::new` defaults `time` to 0.0, and `transforms_at` takes the
             // start transform at time 0, so this is the value a static scene
             // was already effectively using.
@@ -1889,31 +1897,6 @@ impl PixelState {
         };
         (mean, variance)
     }
-}
-
-/// The adaptive minimum and the first check point of a `spp` budget whose
-/// authored minimum is `authored_min`.
-///
-/// The minimum grows with the budget: an authored minimum of 8 at 1024 spp
-/// takes at least 32. A floor, not a default, so that the unauthored 32 still
-/// keeps a 16 spp render (the goldens) from ever stopping early. Two at
-/// least, or there is no variance to test. Checks happen every 4th sample
-/// from the minimum on, so the first one is at the smallest multiple of 4
-/// that is at least the minimum — if the budget reaches that far at all.
-/// Checked: a minimum within 3 of `u32::MAX` must saturate, not wrap to a
-/// check point of 0 that would let every pixel stop after 4 samples.
-pub(crate) fn adaptive_check_points(spp: u32, authored_min: u32) -> (u32, u32) {
-    let min_spp = authored_min.max((spp as f64).sqrt().ceil() as u32).max(2);
-    let first_check = min_spp.checked_next_multiple_of(4).unwrap_or(u32::MAX);
-    (min_spp, first_check)
-}
-
-/// Whether a render of `spp` samples, authored minimum `authored_min` and
-/// variance threshold `threshold` can stop a pixel early: the threshold is
-/// on and the budget passes the first check point, so [`batch_schedule`]
-/// has a round. What `crust diff`'s comparability reads off two stamps.
-pub(crate) fn samples_adaptively(spp: u32, authored_min: u32, threshold: f32) -> bool {
-    threshold > 0.0 && adaptive_check_points(spp, authored_min).1 < spp
 }
 
 /// The stages of a final pass's first sweep (design D1): 1, 2, 4, … spp

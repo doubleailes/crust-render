@@ -38,7 +38,7 @@ use crate::light::{LightKind, LightList};
 use crate::material::Material;
 use crate::rt_world::World;
 use crate::scene::Scene;
-use crate::tracer::RenderSettings;
+use crate::settings::RenderSettings;
 
 // Refusals come from the world and the light list too, so the type sits
 // below them.
