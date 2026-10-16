@@ -2487,11 +2487,18 @@ fn auto_chooses_the_node_format_per_tree() {
 }
 
 /// Under `Auto` a scene below the threshold commits exactly the `f32` tree.
+/// `Auto` is named, not defaulted, so a forced `CRUST_RT_NODES` run tests it too.
 #[test]
 fn auto_keeps_small_trees_on_the_f32_node() {
+    use crust_rt::{CommitOptions, NodeFormatChoice};
     let mut b = SceneBuilder::new();
     let (v, t) = grid(32);
     b.attach(mesh(v, t));
-    let fp = b.commit().memory_footprint();
+    let fp = b
+        .commit_with(CommitOptions {
+            nodes: NodeFormatChoice::Auto,
+            ..Default::default()
+        })
+        .memory_footprint();
     assert!(fp.bvh_nodes > 0 && fp.bvh_nodes_quantised == 0, "{fp:?}");
 }
