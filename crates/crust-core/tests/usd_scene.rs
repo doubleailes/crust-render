@@ -62,8 +62,8 @@ fn loads_openpbr_showcase_usda() {
         "expected 3 lights (SphereLight × 2 + DomeLight), got {}",
         scene.lights.count()
     );
-    // RenderSettings authored 640×360.
-    assert_eq!(scene.settings.get_dimensions(), (640, 360));
+    // RenderSettings authored 1280×720 (the README's render, 643cef8).
+    assert_eq!(scene.settings.get_dimensions(), (1280, 720));
 
     eprintln!(
         "openpbr_showcase: world={} lights={} dims={:?}",
