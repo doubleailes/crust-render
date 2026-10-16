@@ -305,4 +305,4 @@ measured on 2026-10-08:
   case the fixture holds, so neither has a rule.
 
 Every item above is test-pinned where implemented; the shader's regression
-suite lives in `openpbr/` (`cargo test -p crust-core`).
+suite lives in crust-shading's `material/openpbr/` (`cargo test -p crust-shading`).

@@ -8,7 +8,7 @@
   `purpose_binding_with_strength`; verify with `cargo test -p openusd-schemas` in the
   openusd checkout
 - [ ] 1.2 Once merged, move the workspace to that openusd `main` commit
-  (`cargo update -p openusd -p openusd-schemas`); verify `cargo test -p crust-core`
+  (`cargo update -p openusd -p openusd-schemas`); verify `cargo test -p crust-usd -p crust-core`
   passes and `cargo deny --locked check` is clean. If it has not landed when group 3
   starts, take the fallback in design Risks (lists limited to `[p]`, `[p, all]`,
   `[all]`) and record it as a known gap in group 3's docs

@@ -13,8 +13,8 @@ rust-version = "1.96"
 # SPDX form of LICENSE, so cargo-deny can check our own crates too.
 license = "MIT"
 version = "0.8.0"
-# Nothing here goes to crates.io: crust-core and crust-assets depend on git
-# repositories, which crates.io refuses. Releases are the GitHub binaries.
+# Nothing here goes to crates.io: crust-usd depends on a git repository
+# (opensubdiv-rs), which crates.io refuses. Releases are the GitHub binaries.
 publish = false
 
 [workspace.dependencies]
@@ -81,15 +81,15 @@ half = "2.7"
 # (doubleailes/ocio-rs#2); the committed `Cargo.lock` pins the exact version.
 ocio = "0.1.0"
 # The USD reader and its typed schema views, versioned in lockstep. Declared
-# once so crust-core (the import) and crust-render (the MCP session's override
+# once so crust-usd (the import) and crust-render (the MCP session's override
 # layer, the probe examples) can never name different versions of the stage
 # they share; `[patch.crates-io]` below swaps both for GitHub `main`. No
 # default features (openusd has none since 0.8): each member adds the ones it
-# needs — crust-core's `mmap` and schema families, crust-render's `serde`.
+# needs — crust-usd's `mmap` and schema families, crust-render's `serde`.
 openusd = { version = "0.8", default-features = false }
 openusd-schemas = { version = "0.8", default-features = false }
 
-# The hot loops are spread across crates: the integrator in `crust-core`
+# The hot loops are spread across crates: the integrator in `crust-integrator`
 # calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.
 # Every one of those is a small `#[inline]` function whose whole point is
 # to disappear into its caller — with the default 16 codegen units and no
@@ -108,7 +108,7 @@ openusd-schemas = { version = "0.8", default-features = false }
 lto = "fat"
 codegen-units = 1
 # No `catch_unwind` and no `should_panic` anywhere in the workspace, and
-# crust-core's "return `Error`, never exit" contract is about *recoverable*
+# the engine's "return `Error`, never exit" contract is about *recoverable*
 # errors — those are `Result` values, not panics — so nothing depends on
 # unwinding. Dropping it removes the landing pads around the `expect()`s and
 # the indexing in the bounce loop. Cargo forces `unwind` for the `test` and
