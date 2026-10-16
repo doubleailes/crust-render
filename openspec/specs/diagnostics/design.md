@@ -597,6 +597,22 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
 - **A replayed MRSE trusts each pixel's own variance estimate at its stop.** A pixel
   stops when that estimate is low, so an adaptive setting's predicted MRSE leans
   optimistic (Kirk & Arvo). The verification checks the sample counts, not the error.
+  Measured 2026-10-16 on `veach_mis` with `--target-mrse 0.006`, the first stage the
+  sweep made a suggestion on: threshold 0.02, minimum 8, tolerance −1 at 128 spp. The
+  sweep predicted the same MRSE as the authored fixed count at half the time
+  (ΔEff 1.97). Full frame, with the suggested tier-1 settings and the clamp off,
+  against an adaptive-off 2048 spp reference of another seed, three interleaved runs
+  each:
+
+  | | render (min / mean) | relMSE | trimmed |
+  |-|-|-|-|
+  | authored, 128 fixed | 30.3 / 31.3 s | 4.27e-4 | 9.55e-5 |
+  | suggested | 13.3 / 13.9 s | 6.44e-4 | 1.26e-4 |
+
+  The gain is real, 2.28× faster for 1.51× the error, so about 1.5× efficiency. That
+  is above the bar, but the predicted ΔEff overstated it by about a third. An error
+  measured from each pixel's replayed mean against a reference independent of the
+  recording (the tier-1 images alone) would not lean this way; it is the next step.
 - **The reach mixes bias with a heavy tail.** Light-only is unbiased wherever
   every light is reachable by a shadow ray, yet at a few samples its estimate of
   a sharp glossy reflection of a large light is mostly low, with rare large
