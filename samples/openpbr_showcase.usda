@@ -257,8 +257,8 @@ def Scope "Render"
 {
     def RenderSettings "settings"
     {
-        int2 resolution = (640, 360)
-        int crust:samplesPerPixel = 128
+        int2 resolution = (1280, 720)
+        int crust:samplesPerPixel = 4096
         int crust:maxDepth = 32
         int crust:minSamplesPerPixel = 32
         float crust:varianceThreshold = 0.05
