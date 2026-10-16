@@ -229,3 +229,96 @@ is the gradient energy of the normal and of the colour across the crossing
 line against the same measure away from it; the interpenetration is gone when
 the ratio reaches about 1. Then the same over a few consecutive frames of a
 simulated groom, for stability. The result goes into this design record.
+
+### What the spike measured
+
+`samples/mass_spike.usda` (from `scripts/gen_mass_spike.py`): two sheets of
+straight strands 0.04 apart and 0.05 wide (so neighbours overlap, as hair
+does), in the planes `z = ±0.25 x`, their strands 25° either side of the x
+axis, crossing along `x = 0`; and a round clump of 151 parallel strands. The
+`mass_spike` example (`crates/crust-render/examples/`) bakes a dense field as
+designed (width-weighted compact splat, coverage-weighted colour, fast-swept
+signed distance), casts orthographic rays straight down through the
+renderer's own world, and compares at each first hit the tube's normal and
+the strand's colour with the field's normal and colour. Gradient energy is
+the mean squared difference between neighbouring pixels, over hits on the
+sheets, in a band of two radii either side of the crossing line and in a band
+away from it (three radii clear of the sheets' ends, where the mass curls
+round).
+
+**The field removes the seam.** The tube normals show the crossing as a hard
+herringbone, the per-strand colour as a hard red/blue line; the mass normal
+and colour run through it. At the crossing the mass normal carries 0.04–0.09%
+of the tube normal's gradient energy, and the mass colour about 1% of the
+per-strand colour's, at every radius tried. The clump's normal is radial at
+its sides (mean `|n.x|` 0.85) and up over its axis (mean `n.z` 0.98).
+
+**The crossing/away ratio is not the measure to use.** The tube normal's own
+ratio is 0.98: each tube's curvature dominates everywhere, so the ratio cannot
+show the seam it should. Each sheet being one colour, the per-strand colour's
+ratio is undefined. The mass normal's ratio swings from 0.3 to 4.2 with how
+smooth the region away from the crossing is, because at the crossing it keeps
+the mass's genuine crease, where two planes meet, smoothed over about a
+radius. What shows the seam gone is the mass signal's energy at the crossing
+as a fraction of the per-strand signal's: under 0.1% for the normal and about
+1% for the colour.
+
+**Central differences of the trilinear distance band at the voxel size.**
+With a one-voxel step they equal the voxels' own central differences
+interpolated trilinearly. Either way, the normal is only continuous, and with
+fast sweeping's first-order error on a tilted plane, it shows faint bands one
+voxel apart, which diffuse shading would show as Mach bands. One separable
+binomial pass, `(1 2 1)/4` along each axis over the distance before taking
+gradients, removes most of it. Mass-normal energy away from the crossing:
+
+| radius (strand spacings) | design's gradient | after one smoothing pass |
+|---|---|---|
+| 0.08 (2) | 0.000253 | 0.000008 |
+| 0.12 (3) | 0.000185 | 0.000030 |
+| 0.16 (4) | 0.000655 | 0.000360 |
+
+(the tube normal's is about 0.20). At four spacings the voxel is 0.08 and the
+staircase outlasts one pass.
+
+**Stability scales with the radius against the strand spacing.** Five frames,
+every strand point displaced independently per frame by up to a fixed
+distance in each axis; the field's normal read at frame 0's hit points; the
+angle between consecutive frames, with the smoothing pass:
+
+| jitter per frame | radius 0.08: sheets / clump, mean (p95) | 0.12 | 0.16 |
+|---|---|---|---|
+| 0.008 (a fifth of the spacing) | 4.4° (10.7°) / 1.4° (3.5°) | 2.7° (6.8°) / 0.7° (1.8°) | 2.0° (4.9°) / 0.5° (1.3°) |
+| 0.02 (half of it) | — | 7.0° (17.9°) / 1.8° (4.3°) | — |
+| 0.04 (all of it) | — | 16.0° (41.2°) / 3.3° (8.0°) | — |
+
+Without the pass each figure is about half as large again (0.12, 0.008:
+4.1° / 1.05°). A one-layer sheet is the hard case: every hit on it lies
+within half a strand of the mass's medial surface, where the distance
+gradient turns over, so under a full spacing of jitter its normal can flip
+(maximum 170°) while the clump's stays under 14°. A groom many strands deep
+behaves like the clump.
+
+**Voxels finer than half the radius do not help.** At a quarter radius the
+seam measure is unchanged, the clump is less stable (the field resolves more
+of the jitter: 3.3° against 1.4° at 0.08, smoothed), and the bake is ten
+times slower. **A lower threshold does not either**: at 0.08, 0.3 trades a
+little of the clump's stability (1.7° against 1.4°) for a little of the
+sheets' (3.9° against 4.4°), and leaves the seam measure as it was.
+
+**Settled**: radius about three times the spacing between neighbouring
+strands (the documentation's guidance, since the radius is authored per
+groom), threshold 0.5, voxel half the radius, and one smoothing pass of the
+distance. The whole bake of the sample takes 0.1 s.
+
+### Amendments the spike proposes (pending review)
+
+- **The mass normal's decision** gains the smoothing pass: the normal is the
+  normalised gradient of the signed distance after one binomial pass along
+  each axis, interpolated from the voxels' central differences.
+- **Task 1.2's criterion** becomes the mass signal's gradient energy at the
+  crossing as a fraction of the per-strand signal's (under 1% for the normal,
+  a few percent for the colour), in place of the crossing/away ratio.
+- **A known gap**: a one-layer sheet of strands has every hit near the
+  mass's medial surface, so its mass normal is unstable under frame-to-frame
+  jitter of the order of the strand spacing; `crust_mass_density` lets a
+  material fade the mass there.
