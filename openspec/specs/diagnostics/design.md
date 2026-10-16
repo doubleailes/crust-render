@@ -406,9 +406,17 @@ the authored threshold and reported three numbers.
   own MRSE. When no setting reaches the bar, `best` is the lowest summed MRSE.
   `best` is rendered once per crop with the `sampleCount` and `variance` AOVs, and
   the rendered counts must equal the replay's in every pixel. The suggestion gate
-  (`adaptive_suggestions_for`) needs every crop verified and matched, `best` not the
-  authored point, and ΔEff ≥ 1.10, where ΔEff is the geometric mean over the crops of
-  time × MRSE, authored over best. It then
+  (`adaptive_suggestions_for`) needs every crop tier 2 *picked* recorded, verified
+  and matched, `best` not the authored point, and ΔEff ≥ 1.10. A crop the budget
+  skipped gave no evidence, so a partial sweep is reported and suggests nothing.
+  ΔEff is the geometric mean over the crops of time × MRSE, authored over best. A crop
+  whose MRSE floors at 0 on both sides compares by time; on one side only, ΔEff is
+  `null` and nothing is suggested. The values `best` changes are read against the
+  authored point as replayed, with its cap clamped. When the authored count was above
+  `spp_r`, a `best` at another count is not suggested, since the authored count was
+  never replayed. The command always carries the adaptive values the diagnosis ran
+  with, `--min-samples 16` given to it included, each replaced by a suggestion's.
+  It then
   makes one suggestion per changed value, `adaptive_sampling.<setting>`, whose flags
   `suggested_command` carries.
 - **Guided best settings are swept unguided.** A guided final pass is guided or not
@@ -629,6 +637,9 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
   above). The values it finds are for the unguided render.
 - **The adaptive grid is coarse:** thresholds step by factors of two. A second run
   with `--variance-threshold` near `best` refines it.
+- **The normalization, without tier-1 images of a crop,** is the full-frame baseline's
+  pixels, never the recording. The stopped means share the recording's samples, so
+  dividing by it would correlate the error with its own denominator.
 - **The sweep's error leaves fireflies out.** The top 0.1% of a crop's pixels by the
   two renders' disagreement is not measured. Elsewhere the error is unbiased, but one
   pair of renders estimates it, so on a firefly-dominated crop it is noisy: on

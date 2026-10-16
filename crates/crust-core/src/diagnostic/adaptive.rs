@@ -38,7 +38,8 @@ pub(super) fn recording_spp(
     trace_bytes: usize,
 ) -> u32 {
     let mut spp = authored_spp.clamp(64, 1024);
-    let bytes = |spp: u32| crop_pixels * spp as usize * 8;
+    // Eight bytes a sample, and the trace's index of eight bytes a pixel.
+    let bytes = |spp: u32| crop_pixels * (spp as usize + 1) * 8;
     let cost = |spp: u32| 3.0 * s_per_pixel_spp * crop_pixels as f64 * spp as f64;
     while spp > 64 && cost(spp) > 0.5 * left_s {
         spp /= 2;
@@ -395,18 +396,30 @@ pub(super) fn pick(per_crop: &[Vec<Point>], targets: &[f64]) -> (usize, bool) {
 /// The efficiency gain of setting `g` over setting `h`: per crop, `h`'s
 /// time × MRSE over `g`'s, and their geometric mean over the crops, as
 /// tier 1 combines crops — so a crop whose error is far larger than the
-/// others' does not decide alone. A crop where either side's product is
-/// not positive and finite is left out; with none left, 1.
+/// others' does not decide alone.
+///
+/// A crop where both MRSEs read 0 (floored: too small to measure apart)
+/// compares by time alone. A crop where only one does cannot be compared —
+/// it might be the one `g` makes worse — and then neither can the setting:
+/// the gain is NaN (`null` in the report), which no suggestion passes.
 pub(super) fn delta_eff(per_crop: &[Vec<Point>], g: usize, h: usize) -> f64 {
-    let ratios: Vec<f64> = per_crop
-        .iter()
-        .map(|c| (c[h].time_s * c[h].mrse) / (c[g].time_s * c[g].mrse))
-        .filter(|r| r.is_finite() && *r > 0.0)
-        .collect();
-    if ratios.is_empty() {
+    let mut logs = Vec::with_capacity(per_crop.len());
+    for c in per_crop {
+        let (a, b) = (&c[h], &c[g]);
+        let ratio = if a.mrse == 0.0 && b.mrse == 0.0 {
+            a.time_s / b.time_s
+        } else {
+            (a.time_s * a.mrse) / (b.time_s * b.mrse)
+        };
+        if !(ratio.is_finite() && ratio > 0.0) {
+            return f64::NAN;
+        }
+        logs.push(ratio.ln());
+    }
+    if logs.is_empty() {
         return 1.0;
     }
-    (ratios.iter().map(|r| r.ln()).sum::<f64>() / ratios.len() as f64).exp()
+    (logs.iter().sum::<f64>() / logs.len() as f64).exp()
 }
 
 #[cfg(test)]
@@ -594,6 +607,26 @@ mod tests {
         assert_eq!(delta_eff(&per_crop, 0, 0), 1.0);
     }
 
+    /// A crop whose error floors at 0 is not left out: on both sides it
+    /// compares by time; on one side only, the setting cannot be compared,
+    /// and its gain is NaN — the case of a setting that worsens a crop the
+    /// authored point measured as clean.
+    #[test]
+    fn a_crop_at_zero_error_is_not_left_out() {
+        let both = vec![
+            vec![p(1.0, 0.001), p(0.5, 0.001)],
+            vec![p(1.0, 0.0), p(0.5, 0.0)],
+        ];
+        assert!((delta_eff(&both, 1, 0) - 2.0).abs() < 1e-12);
+        let worse = vec![
+            vec![p(1.0, 0.001), p(0.25, 0.001)],
+            vec![p(1.0, 0.0), p(0.5, 0.01)],
+        ];
+        assert!(delta_eff(&worse, 1, 0).is_nan());
+        let better = vec![vec![p(1.0, 0.01), p(0.5, 0.0)]];
+        assert!(delta_eff(&better, 1, 0).is_nan());
+    }
+
     /// The front keeps the points nothing beats on both, by time.
     #[test]
     fn the_front_drops_dominated_points() {
@@ -641,8 +674,12 @@ mod tests {
         // 3 × 1e-7 s × 49152 px × spp ≤ 5 s: spp ≤ 339, so 256.
         assert_eq!(recording_spp(1024, px, 1e-7, 10.0, TRACE_BYTES), 256);
         assert_eq!(recording_spp(1024, px, 1.0, 10.0, TRACE_BYTES), 64);
-        // A forced-small bound: 49152 px × 8 B × spp ≤ 4 MiB → 10, so 8.
+        // A forced-small bound: 49152 px × 8 B × (spp + 1) ≤ 4 MiB → spp ≤ 9,
+        // so 8; and with the index counted, 8 MiB stops at 16, not 32.
         assert_eq!(recording_spp(1024, px, 0.0, 100.0, 4 << 20), 8);
+        let at_16 = px * 17 * 8;
+        assert_eq!(recording_spp(1024, px, 0.0, 100.0, at_16), 16);
+        assert_eq!(recording_spp(1024, px, 0.0, 100.0, at_16 - 1), 8);
         assert_eq!(recording_spp(1024, px, 0.0, 100.0, 1), 4);
     }
 

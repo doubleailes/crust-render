@@ -342,6 +342,18 @@ fn luminance(m: &Measured, rect: PixelRect, luma: utils::Luma) -> Vec<f64> {
     out
 }
 
+/// The pixels of `rect` from a plane over `frame` (both raster space), in
+/// `rect`'s order.
+fn crop_of(plane: &[f64], frame: PixelRect, rect: PixelRect) -> Vec<f64> {
+    let mut out = vec![0.0; rect.area()];
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            out[rect.index(x, y)] = plane[frame.index(x, y)];
+        }
+    }
+    out
+}
+
 /// Renders `settings` (switching the renderer to them) and measures it: the
 /// light selection's setup and guiding's training count as setup.
 fn shoot(renderer: &mut Renderer, settings: RenderSettings) -> (Shot, Measured) {
@@ -1358,8 +1370,14 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         // images of the crop, every one its own seed. On a crop tier 1
         // rendered nothing of, each pixel's own variance, which reads low
         // where pixels stop early.
+        // The steadiest estimate of each pixel's value, which the errors
+        // are relative to: tier 1's reference with the recording blended in;
+        // on a crop tier 1 rendered nothing of, the full-frame baseline's
+        // pixels, independent of the recording. Never the recording alone:
+        // the stopped means share its samples, so dividing by it would
+        // correlate the error with its own denominator.
         let norm = if refs[k].lum.is_empty() {
-            image.lum.clone()
+            crop_of(&p1_lum, frame_rect, rect)
         } else {
             trials::reference(&[&refs[k], &image]).lum
         };
@@ -1553,11 +1571,12 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             maps.crops.push(crop_maps);
         }
         adaptive_suggestions = adaptive_suggestions_for(
-            authored_setting,
+            grid[0],
+            authored_setting.spp > spp_r,
             (g != 0).then_some(best_setting),
             gain,
             &verification,
-            recorded.len(),
+            picked.len(),
         );
         adaptive_maps = Some(maps);
         Some(AdaptiveSweep {
@@ -1587,7 +1606,8 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         sw.maps = Some(AdaptiveMapsInfo {
             path: path.clone(),
             layers: ADAPTIVE_MAP_LAYERS.iter().map(|l| (*l).into()).collect(),
-            written: true,
+            // The host's to set, once it has written the file.
+            written: false,
             reason: None,
         });
     }
@@ -1844,22 +1864,31 @@ const COMBINED: &str = "combined";
 const ADAPTIVE_SUGGESTION: &str = "adaptive_sampling";
 
 /// The suggestions a sweep makes (`tune-adaptive-sampling-in-diagnostic`,
-/// design D5): one per value `best` changes from `authored`, by its flag
-/// and attribute, citing the sweep and the verifications. None unless
-/// `best` is not the authored point, every one of the `recorded` crops was
-/// verified and its `sampleCount` matched the replay, and the gain is at
-/// least the suggestion bar.
+/// design D5): one per value `best` changes from `authored` — the authored
+/// point as the sweep replayed it, its cap clamped to the recording — by
+/// its flag and attribute, citing the sweep and the verifications.
+///
+/// None unless `best` is not the authored point, every one of the `crops`
+/// tier 2 picked was recorded, verified and matched the replay (a crop the
+/// budget skipped contributed no evidence), and the gain is at least the
+/// suggestion bar. When the authored count was above the recording
+/// (`capped`), the authored count itself was never replayed: a `best` at
+/// another count is not suggested, and one at the recording's count
+/// suggests its other values only.
 fn adaptive_suggestions_for(
     authored: AdaptiveSetting,
+    capped: bool,
     best: Option<AdaptiveSetting>,
     gain: f64,
     verification: &[AdaptiveVerification],
-    recorded: usize,
+    crops: usize,
 ) -> Vec<Suggestion> {
-    let verified = recorded > 0
-        && verification.len() == recorded
+    let verified = crops > 0
+        && verification.len() == crops
         && verification.iter().all(|v| v.sample_count_matches);
-    let Some(best) = best.filter(|_| verified && gain >= trials::SUGGEST_ABOVE) else {
+    let Some(best) = best.filter(|b| {
+        verified && gain >= trials::SUGGEST_ABOVE && !(capped && b.spp != authored.spp)
+    }) else {
         return Vec::new();
     };
     let mut evidence = vec![ADAPTIVE_SUGGESTION.to_owned()];
@@ -2198,14 +2227,29 @@ fn command(
     if options.auto_tx {
         parts.push("--auto-tx".into());
     }
-    // The adaptive sweep's values, which the settings above do not carry.
-    for sug in suggestions
-        .iter()
-        .filter(|s| s.id.starts_with(ADAPTIVE_SUGGESTION))
-    {
-        if let Some(flag) = &sug.flag {
-            parts.extend([flag.clone(), sug.value.clone()]);
-        }
+    // The adaptive settings the diagnosis measured with — the stage's, or
+    // the overrides it was given — each replaced by the sweep's suggested
+    // value when there is one; and the sweep's `-s`, which the settings
+    // above do not carry.
+    let suggested = |flag: &str| {
+        suggestions
+            .iter()
+            .filter(|x| x.id.starts_with(ADAPTIVE_SUGGESTION))
+            .find(|x| x.flag.as_deref() == Some(flag))
+            .map(|x| x.value.clone())
+    };
+    if let Some(spp) = suggested("-s") {
+        parts.extend(["-s".into(), spp]);
+    }
+    for (flag, value) in [
+        ("--variance-threshold", s.variance_threshold().to_string()),
+        ("--min-samples", s.min_samples_per_pixel().to_string()),
+        (
+            "--neighbour-tolerance",
+            s.adaptive_neighbour_tolerance().to_string(),
+        ),
+    ] {
+        parts.extend([flag.into(), suggested(flag).unwrap_or(value)]);
     }
     let stage_only: Vec<String> = suggestions
         .iter()
