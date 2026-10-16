@@ -1,10 +1,17 @@
-//! crust-core's modules import only downward (`docs/architecture.md`
-//! § Layering): every `crate::` path outside a test module names a module of
-//! its own layer or one below, whether it spells the module
+//! The engine's modules import only downward (`docs/architecture.md`
+//! § Layering). Between its crates Cargo enforces it; this test checks it
+//! inside the two crates that hold two layers each (crust-base: foundation
+//! then rays; crust-world: world then lights), and that every module sits in
+//! its layer's crate.
+//!
+//! Every `crate::` path outside a test module names a module of its own
+//! layer or one below, whether it spells the module
 //! (`crate::light::LightList`), a crate-root re-export (`crate::LightList`,
 //! including the names `pub use material::*` brings), or reaches the root
-//! through `super::` (`super::super::tracer` from `light/list.rs`). A new
-//! top-level module fails here until it is given a layer.
+//! through `super::` (`super::super::tracer` from `light/list.rs`). Each
+//! crate glob-imports the crates below at its root, so a `crate::` path can
+//! name any lower crate's module or root name. A new top-level module fails
+//! here until it is given a layer.
 //!
 //! Test-only items (`#[cfg(test)]` modules, inline or declared, and helpers)
 //! and comment lines are skipped: a doc link may point upward.
@@ -12,10 +19,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-/// Lowest first. A module may import from its own layer and the ones before.
-const LAYERS: &[(&str, &[&str])] = &[
+/// Lowest first, with the crate each layer lives in. A module may import
+/// from its own layer and the ones before.
+const LAYERS: &[(&str, &str, &[&str])] = &[
     (
         "foundation",
+        "crust-base",
         &[
             "buffer",
             "color",
@@ -33,12 +42,13 @@ const LAYERS: &[(&str, &[&str])] = &[
             "warnings",
         ],
     ),
-    ("rays", &["aabb", "hittable", "medium", "ray"]),
-    ("materials", &["lpe", "material"]),
-    ("world", &["rt_world"]),
-    ("lights", &["environment", "light"]),
+    ("rays", "crust-base", &["aabb", "hittable", "medium", "ray"]),
+    ("materials", "crust-shading", &["lpe", "material"]),
+    ("world", "crust-world", &["rt_world"]),
+    ("lights", "crust-world", &["environment", "light"]),
     (
         "integrator",
+        "crust-integrator",
         &[
             "aov",
             "camera",
@@ -50,9 +60,10 @@ const LAYERS: &[(&str, &[&str])] = &[
             "volume",
         ],
     ),
-    ("import", &["live", "place", "scene", "world"]),
+    ("import", "crust-usd", &["live", "place", "scene", "world"]),
     (
         "tools",
+        "crust-tools",
         &["check", "compare", "diagnostic", "inspect", "stamp"],
     ),
 ];
@@ -61,8 +72,15 @@ fn layer_of() -> HashMap<&'static str, usize> {
     LAYERS
         .iter()
         .enumerate()
-        .flat_map(|(i, (_, modules))| modules.iter().map(move |m| (*m, i)))
+        .flat_map(|(i, (_, _, modules))| modules.iter().map(move |m| (*m, i)))
         .collect()
+}
+
+/// The engine crates, lowest first.
+fn crates() -> Vec<&'static str> {
+    let mut out: Vec<&str> = LAYERS.iter().map(|(_, c, _)| *c).collect();
+    out.dedup();
+    out
 }
 
 fn is_ident(c: char) -> bool {
@@ -395,51 +413,73 @@ fn walk(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
 #[test]
 fn modules_import_only_downward() {
     let modules = layer_of();
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let lib = std::fs::read_to_string(src.join("lib.rs")).expect("lib.rs");
-    let root = root_exports(&lib, &modules, |m| {
-        std::fs::read_to_string(src.join(m).join("mod.rs"))
-            .or_else(|_| std::fs::read_to_string(src.join(format!("{m}.rs"))))
-            .ok()
-    });
+    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let src = |krate: &str| crates_dir.join(krate).join("src");
+    // Every crate root's re-exports, each read against its own sources.
+    let mut root = HashMap::new();
+    for krate in crates() {
+        let dir = src(krate);
+        let lib = std::fs::read_to_string(dir.join("lib.rs")).expect("lib.rs");
+        root.extend(root_exports(&lib, &modules, |m| {
+            std::fs::read_to_string(dir.join(m).join("mod.rs"))
+                .or_else(|_| std::fs::read_to_string(dir.join(format!("{m}.rs"))))
+                .ok()
+        }));
+    }
     assert!(
         root.get("OpenPBR").is_some_and(|m| m == "material"),
         "the `pub use material::*` glob was not expanded"
     );
 
-    let mut files = Vec::new();
-    walk(&src, &mut files);
     let mut unclassified = Vec::new();
+    let mut misplaced = Vec::new();
     let mut upward: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for file in files {
-        let rel = file.strip_prefix(&src).expect("under src");
-        let top = rel.components().next().expect("a component");
-        let top = top.as_os_str().to_str().expect("utf-8 path");
-        let module = top.strip_suffix(".rs").unwrap_or(top);
-        let is_test = rel.components().any(|c| c.as_os_str() == "tests")
-            || rel.file_name().is_some_and(|f| f == "tests.rs");
-        if module == "lib" || is_test {
-            continue;
-        }
-        if !modules.contains_key(module) {
-            unclassified.push(module.to_owned());
-            continue;
-        }
-        // `a/b/mod.rs` is the module `a::b`, `a/b/c.rs` the module `a::b::c`.
-        let depth = rel.components().count() - usize::from(rel.ends_with("mod.rs"));
-        let text = std::fs::read_to_string(&file).expect("read");
-        for (to, name, line) in upward_imports(module, depth, &text, &modules, &root) {
-            upward
-                .entry(format!("{module} -> {to} ({name})"))
-                .or_default()
-                .push(format!("{}:{line}", rel.display()));
+    for krate in crates() {
+        let dir = src(krate);
+        let mut files = Vec::new();
+        walk(&dir, &mut files);
+        for file in files {
+            let rel = file.strip_prefix(&dir).expect("under src");
+            let top = rel.components().next().expect("a component");
+            let top = top.as_os_str().to_str().expect("utf-8 path");
+            let module = top.strip_suffix(".rs").unwrap_or(top);
+            let is_test = rel.components().any(|c| c.as_os_str() == "tests")
+                || rel.file_name().is_some_and(|f| f == "tests.rs");
+            if module == "lib" || is_test {
+                continue;
+            }
+            let Some(&layer) = modules.get(module) else {
+                unclassified.push(format!("{krate}: {module}"));
+                continue;
+            };
+            if LAYERS[layer].1 != krate {
+                misplaced.push(format!(
+                    "{module} is in {krate}, its layer in {}",
+                    LAYERS[layer].1
+                ));
+            }
+            // `a/b/mod.rs` is the module `a::b`, `a/b/c.rs` the module `a::b::c`.
+            let depth = rel.components().count() - usize::from(rel.ends_with("mod.rs"));
+            let text = std::fs::read_to_string(&file).expect("read");
+            for (to, name, line) in upward_imports(module, depth, &text, &modules, &root) {
+                upward
+                    .entry(format!("{module} -> {to} ({name})"))
+                    .or_default()
+                    .push(format!("{krate}/src/{}:{line}", rel.display()));
+            }
         }
     }
     unclassified.sort();
     unclassified.dedup();
+    misplaced.sort();
+    misplaced.dedup();
     assert!(
         unclassified.is_empty(),
         "give these top-level modules a layer in LAYERS: {unclassified:?}"
+    );
+    assert!(
+        misplaced.is_empty(),
+        "modules outside their layer's crate: {misplaced:?}"
     );
     assert!(
         upward.is_empty(),

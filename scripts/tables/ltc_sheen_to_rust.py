@@ -13,7 +13,7 @@ Jen-Yuan Chiang; see `THIRD-PARTY.md`):
     git clone https://github.com/tizian/ltc-sheen
     scripts/tables/ltc_sheen_to_rust.py ltc-sheen/pbrt-v3/src/materials/sheenltc.cpp \\
         [--check <openpbr-bsdf>/impl/data/openpbr_ltc_data.h] \\
-        > crates/crust-core/src/material/ltc_sheen_table.rs
+        > crates/crust-shading/src/material/ltc_sheen_table.rs
 
 `--check` refuses to write unless Adobe's copy holds the same 3072 values.
 """

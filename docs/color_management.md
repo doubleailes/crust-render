@@ -31,10 +31,10 @@ in a per-ray profile.
 
 The work is split across the two crates along the same seam as everything else:
 `crust-core` converts values it reads from USD *attributes* itself
-(`crust-core/src/scene/usd_import/`), but decodes no **asset** — every image and Ptex decoder lives
+(`crust-usd/src/scene/usd_import/`), but decodes no **asset** — every image and Ptex decoder lives
 in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 `PtexTexture` trait pins the contract at that boundary
-(`crust-core/src/texture.rs`, the `PtexTexture` trait): values returned from
+(`crust-base/src/texture.rs`, the `PtexTexture` trait): values returned from
 `eval` are linear, not
 display-encoded, so the host must have decoded them already.
 
@@ -42,7 +42,7 @@ display-encoded, so the host must have decoded them already.
 
 Every transfer curve, every gamut conversion and every colour-space name comes
 from one OpenColorIO config, through [`ocio`](https://crates.io/crates/ocio)
-— a pure-Rust port of OpenColorIO, with no `unsafe` — in `crust-core/src/color.rs`:
+— a pure-Rust port of OpenColorIO, with no `unsafe` — in `crust-base/src/color.rs`:
 
 - **The config** is the builtin ACES CG config, named by its full version
   (`ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`, `color::DEFAULT_CONFIG`) so an
@@ -212,7 +212,7 @@ OCIO's sRGB toe differs from IEC 61966-2-1's rounded constants: it derives the
 break point and slope from the exponent and offset so the two segments meet
 exactly (break 0.03929, slope 1/12.9232, against the standard's 0.04045 and
 1/12.92). The largest difference at any 8-bit code is 7.5e-7. The power laws
-are bit-identical to `powf`. `crust-core/src/color.rs` pins both, against
+are bit-identical to `powf`. `crust-base/src/color.rs` pins both, against
 formulas written out in the test rather than against OCIO itself.
 
 MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
@@ -226,9 +226,9 @@ which is the space crust already works in, so only the curve differs; a tag
 naming *different* primaries (`acescg`, `g22_ap1`) is deliberately left as
 `Raw` rather than decoded with the wrong gamut. Pinned by the decode tests in
 `crust-assets/src/uv_texture/` and the tag-mapping tests in
-`crust-core/src/texture.rs`.
+`crust-base/src/texture.rs`.
 
-[cs]: ../crates/crust-core/src/texture.rs
+[cs]: ../crates/crust-base/src/texture.rs
 
 The flat 2.2 curve is *not* a sloppy approximation of the standard one — it
 is matched to what the source content actually applies. The Moana island's shading
@@ -524,7 +524,7 @@ standards requirement. The OpenSpec change
 `openspec/changes/add-material-color-management/` proposes it.
 
 **2. Nothing forces a new colour attribute to name its space.** There is one
-implementation of every conversion (`crust-core/src/color.rs`), and the
+implementation of every conversion (`crust-base/src/color.rs`), and the
 importer's colour reads go through `attrs::in_working` / `custom_color`, but a
 newly added colour attribute read through `custom_color3` gets no conversion
 and no compile error. The `RawColor3` newtype of

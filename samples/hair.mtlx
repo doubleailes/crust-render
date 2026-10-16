@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  MaterialX hair: `chiang_hair_bsdf` (crates/crust-core/src/material/closure/
+  MaterialX hair: `chiang_hair_bsdf` (crates/crust-shading/src/material/closure/
   hair.rs, Chiang et al. 2016 as pbrt-v3 implements it) and its three helper
   nodes.
 

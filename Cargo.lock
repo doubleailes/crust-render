@@ -596,23 +596,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "crust-core"
+name = "crust-base"
 version = "0.8.0"
 dependencies = [
- "criterion",
- "crust-jit",
  "crust-mtlx",
- "crust-nn",
  "crust-rt",
  "glam",
  "ocio",
  "openqmc-rs",
- "opensubdiv-rs",
- "openusd",
- "openusd-schemas",
  "rayon",
  "serde",
  "serde_json",
+ "tracing",
+ "utils",
+]
+
+[[package]]
+name = "crust-core"
+version = "0.8.0"
+dependencies = [
+ "criterion",
+ "crust-base",
+ "crust-integrator",
+ "crust-shading",
+ "crust-tools",
+ "crust-usd",
+ "crust-world",
+ "glam",
+ "openqmc-rs",
+ "openusd",
+ "openusd-schemas",
+ "rayon",
+ "serde_json",
+ "tracing",
+ "utils",
+]
+
+[[package]]
+name = "crust-integrator"
+version = "0.8.0"
+dependencies = [
+ "crust-base",
+ "crust-nn",
+ "crust-rt",
+ "crust-shading",
+ "crust-world",
+ "glam",
+ "openqmc-rs",
+ "rayon",
  "tracing",
  "utils",
 ]
@@ -679,6 +710,71 @@ dependencies = [
  "glam",
  "openqmc-rs",
  "rayon",
+]
+
+[[package]]
+name = "crust-shading"
+version = "0.8.0"
+dependencies = [
+ "crust-base",
+ "crust-jit",
+ "crust-mtlx",
+ "crust-rt",
+ "glam",
+ "openqmc-rs",
+ "tracing",
+ "utils",
+]
+
+[[package]]
+name = "crust-tools"
+version = "0.8.0"
+dependencies = [
+ "crust-base",
+ "crust-integrator",
+ "crust-shading",
+ "crust-usd",
+ "crust-world",
+ "glam",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tracing",
+ "utils",
+]
+
+[[package]]
+name = "crust-usd"
+version = "0.8.0"
+dependencies = [
+ "crust-base",
+ "crust-integrator",
+ "crust-mtlx",
+ "crust-rt",
+ "crust-shading",
+ "crust-world",
+ "glam",
+ "opensubdiv-rs",
+ "openusd",
+ "openusd-schemas",
+ "rayon",
+ "serde",
+ "tracing",
+ "utils",
+]
+
+[[package]]
+name = "crust-world"
+version = "0.8.0"
+dependencies = [
+ "crust-base",
+ "crust-nn",
+ "crust-rt",
+ "crust-shading",
+ "glam",
+ "openqmc-rs",
+ "tracing",
+ "utils",
 ]
 
 [[package]]

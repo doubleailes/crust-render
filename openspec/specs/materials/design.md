@@ -19,14 +19,14 @@
   material node. It names the one thing it asks of its host — `Texture`, a
   `(u, v) → RGBA` sampler — and crust-core re-exports that trait as its own
   `Texture2D`, exactly as it adopts `crust_rt::Geometry`. How a renderer
-  evaluates a leaf is not decided here; crust's is in crust-core's
+  evaluates a leaf is not decided here; crust's is in crust-shading's
   `material/closure/`.
 
 ## Crate: crust-jit
 
 - **`crust-jit`** (lib name `crust_jit`) — a Cranelift JIT for `crust-mtlx`
-  programs (step 5 of `docs/shading_performance.md`), behind crust-core's `jit`
-  feature (on by default in `crust-render`; `--no-default-features` builds
+  programs (step 5 of `docs/shading_performance.md`), behind crust-shading's `jit`
+  feature (which crust-core forwards) (on by default in `crust-render`; `--no-default-features` builds
   without it) and `CRUST_SHADER_JIT=0` at run time. **Bit-identical to the
   interpreter by construction**: only exact IEEE ops (`+ − × ÷`, ordered
   compares and `select`, `fabs`, lane shuffles) are emitted inline, mirroring
@@ -261,7 +261,7 @@
 
 ## MaterialX
 
-- **MaterialX** (`crates/crust-mtlx`, crust-core's `material/materialx.rs` and
+- **MaterialX** (`crates/crust-mtlx`, crust-shading's `material/materialx.rs` and
   `material/closure/`) — `.mtlx` look-dev graphs, read directly.
   USD's own answer is a file-format plugin that composes a `.mtlx` into the
   stage as `UsdShade` prims; **openusd ships none**, so a `Material` prim whose

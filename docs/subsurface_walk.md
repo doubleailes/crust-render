@@ -1,6 +1,6 @@
 # The subsurface random walk: cost, measured variants, roadmap
 
-Scope: `crates/crust-core/src/subsurface.rs` (MaterialX `subsurface_bsdf`, the port of
+Scope: `crates/crust-integrator/src/subsurface.rs` (MaterialX `subsurface_bsdf`, the port of
 Typhoon's / Cycles' random walk; design record in `openspec/specs/materials/design.md`)
 and its call site in `tracer/path.rs`. The other walk
 the integrator runs, the carried-medium walk for OpenPBR scattering interiors, is

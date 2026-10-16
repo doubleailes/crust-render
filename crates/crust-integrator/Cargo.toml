@@ -1,0 +1,31 @@
+[package]
+name = "crust-integrator"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The integrator: Renderer, the path tracer, its AOVs and light path routing, pixel filters, samplers, path guiding, volumes, subsurface walks and the camera."
+
+[lib]
+name = "crust_integrator"
+path = "src/lib.rs"
+
+[dependencies]
+crust-base = { path = "../crust-base" }
+crust-shading = { path = "../crust-shading" }
+crust-world = { path = "../crust-world" }
+utils = { path = "../utils" }
+openqmc-rs = "0.2.4"
+crust-rt = { path = "../crust-rt" }
+rayon.workspace = true
+glam.workspace = true
+tracing.workspace = true
+# `neural` light selection trains its network with it
+# (`tracer/light_visibility.rs`).
+crust-nn = { path = "../crust-nn" }
+
+[dev-dependencies]
+# `std` for `tracing::subscriber::with_default`, which tests use to check
+# which warnings a call raises.
+tracing = { workspace = true, features = ["std"] }

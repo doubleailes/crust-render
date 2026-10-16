@@ -37,7 +37,8 @@ in `openusd` are worked around inside the importer and reported upstream.
 
 **Decision.** Every crate is `forbid(unsafe_code)`, with two audited exceptions:
 
-- `crust-core` allows `unsafe` for one test-only memory allocator.
+- `crust-usd`, the USD importer, allows `unsafe` for one test-only memory allocator and,
+  behind the `mmap` feature, its opt-in to openUSD's memory-mapped file reads.
 - `crust-jit` has four `unsafe` blocks, needed to call the machine code it generates.
 
 The ray tracing kernel, BVH, materials, MaterialX reader, volumes and path guiding are all
@@ -173,7 +174,7 @@ horizon, as pbrt-v4 and Cycles do), learn which lights reach each region of the 
 
 ## The engine decodes no files
 
-**Decision.** `crust-core` parses USD, but never decodes an image, texture, Ptex or IES
+**Decision.** The engine parses USD (in `crust-usd`), but never decodes an image, texture, Ptex or IES
 file. Every such read goes through the `AssetLoader` interface to `crust-assets`. A loader
 that returns nothing means "use the constant value", never an error.
 

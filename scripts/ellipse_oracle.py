@@ -2,12 +2,12 @@
 """Regenerate the elliptic-integral reference values the disk light's
 spherical-ellipse sampler is checked against.
 
-`crates/crust-core/src/light/ellipse.rs` implements Carlson's symmetric forms
+`crates/crust-world/src/light/ellipse.rs` implements Carlson's symmetric forms
 `R_F` and `R_J` by the duplication algorithm, and the incomplete elliptic
 integral of the third kind `Π(n; φ | m)` from them (Guillén et al. 2017,
 §4.2). This evaluates the same three functions with mpmath at 50 digits, an
 independent implementation, and writes them to
-`crates/crust-core/tests/data/ellipse_oracle.txt`, which the module's tests
+`crates/crust-world/tests/data/ellipse_oracle.txt`, which the module's tests
 replay to a relative 1e-12.
 
 The `(n, m, φ)` cases are the ones eq. 20 produces: for semi-axes
@@ -66,7 +66,7 @@ def main():
     p.add_argument(
         "--out",
         default=os.path.join(
-            os.path.dirname(__file__), "..", "crates", "crust-core", "tests", "data", "ellipse_oracle.txt"
+            os.path.dirname(__file__), "..", "crates", "crust-world", "tests", "data", "ellipse_oracle.txt"
         ),
     )
     p.add_argument("--seed", type=int, default=2017)

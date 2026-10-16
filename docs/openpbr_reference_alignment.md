@@ -1,7 +1,7 @@
 # OpenPBR reference alignment
 
 This document records the alignment work done on `crust-core`'s OpenPBR
-übershader (`crates/crust-core/src/material/openpbr/` +
+übershader (`crates/crust-shading/src/material/openpbr/` +
 `material/brdf.rs` + `medium.rs`) against the two public references:
 
 - **MaterialX nodegraph** — the normative surface-shader graph shipped with
@@ -257,7 +257,7 @@ measured on 2026-10-08:
   refract into their interior; they use the tinted-diffuse (EON)
   approximation. Needs an interface refraction event for the SSS fraction
   and an exit strategy (module header "Phase 5"). Both now exist for the
-  MaterialX `subsurface_bsdf` (`crust-core/src/subsurface.rs`: the walk, and
+  MaterialX `subsurface_bsdf` (`crust-integrator/src/subsurface.rs`: the walk, and
   the exit Lambertian the tracer resumes on); the native shader would need a
   subsurface lobe whose selection returns a `ScatterSample::subsurface`
   entry, and its `from_subsurface` van de Hulst medium replaced by the walk's

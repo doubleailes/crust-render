@@ -35,7 +35,7 @@
   It used to add `1e-4` to that denominator instead, an NEE bias of
   `1 + 1e-4/(cos θ_l · A)` (+12.7% measured on a 1.3e-3 m² disk,
   `docs/light_sampling.md` §3.10); do not reintroduce a finite stand-in.
-  The refusal is a type: light densities are `PdfSolidAngle` (`crust-core/src/pdf.rs`),
+  The refusal is a type: light densities are `PdfSolidAngle` (`crust-base/src/pdf.rs`),
   whose `new` refuses anything not finite and positive, the area density is an
   `InvPdfArea` whose `to_solid_angle` is the one conversion, and the MIS weights take
   nothing but `PdfSolidAngle`s. A dome's `escaped` answers `None` for the pdf of a

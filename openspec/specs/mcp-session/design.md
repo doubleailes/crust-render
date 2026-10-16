@@ -44,7 +44,7 @@
 
 - **The session's stage opens with the import's schema registry**
   (`crust_core::usd_schema_registry()`, which `usd_import::stage_builder()` uses too), so
-  the families are the import's by construction (crust-core's openusd-schemas
+  the families are the import's by construction (crust-usd's openusd-schemas
   features), not a second list kept in step. An attribute a prim's schema declares
   has its schema type and fallback before any layer authors it: `query` answers
   `source` `"fallback"`, and `set_attribute` takes the schema's type and refuses a

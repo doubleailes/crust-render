@@ -32,12 +32,16 @@ in the repository.
                      │    crust-assets ──► ptex-rs
                      │    (file decoders, texture caches)
                      ▼         │
-                    crust-core ◄┘
-         (USD import, integrator, materials, lights, volumes, guiding)
-          │       │        │         │        │         │          │
-          ▼       ▼        ▼         ▼        ▼         ▼          ▼
-      crust-rt crust-mtlx crust-jit crust-nn utils  openqmc-rs  openusd,
-      (kernel) (MaterialX) (JIT)   (networks) (math) (sampling)  opensubdiv-rs
+                    crust-core ◄┘   (re-exports the six engine crates below)
+                         │
+   the engine, one crate per layer, each built on the ones below it:
+     crust-tools        the diagnostic, light paths, diff, check
+     crust-usd          USD import                         ──► openusd, opensubdiv-rs
+     crust-integrator   the renderer, AOVs, guiding, volumes ──► crust-nn
+     crust-world        the scene's geometry and lights       ──► crust-nn
+     crust-shading      materials, light path expressions     ──► crust-mtlx, crust-jit
+     crust-base         settings, statistics, colour, rays    ──► crust-rt, crust-mtlx,
+                                                                   utils, openqmc-rs
 ```
 
 | crate | owns | knows nothing about |
@@ -46,7 +50,13 @@ in the repository.
 | `crust-mtlx` | reading `.mtlx` documents, compiling node graphs into programs, the BSDF closure tree | any Crust type |
 | `crust-jit` | compiling MaterialX programs to machine code (optional, the `jit` feature) | everything but `crust-mtlx` |
 | `crust-nn` | small neural networks — a hash-grid encoding, dense layers, their training — that `neural` light selection learns visibility with | any Crust type |
-| `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, path guiding, statistics, the diagnostic and its report | decoding images, textures or IES files |
+| `crust-base` | settings, warnings, statistics and the profile, colour management, texture references, rays | everything above it |
+| `crust-shading` | materials (OpenPBR, MaterialX, UsdPreviewSurface) and light path expressions | lights, the integrator, USD |
+| `crust-world` | the scene's geometry over the kernel, lights and how they are picked | the integrator, USD |
+| `crust-integrator` | the renderer: the path tracer, AOVs, pixel filters, samplers, path guiding, volumes, the camera | USD |
+| `crust-usd` | USD import, the scene, the fallback scene, live updates (the only engine crate that reads USD) | decoding images, textures or IES files |
+| `crust-tools` | the diagnostic and its report, the light path inspector, image comparison, `crust check` | — |
+| `crust-core` | nothing of its own: it gathers the six engine crates into one library | — |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the texture tile caches, `.tx` conversion | the integrator |
 | `crust-render` | the command line, logging, the progress bar, writing the EXR and PNG, printing and saving the diagnostic's report | decoding anything |
 | `utils` | stateless math: sampling warps, MIS heuristics, luminance | everything |
@@ -68,7 +78,7 @@ they could be extracted too.
 
 1. **Command line.** `crust-render` parses its flags and builds the asset loader, which
    reads the `CRUST_*` texture settings.
-2. **USD import** (`crust-core`). A light "index" stage is opened with payloads unloaded,
+2. **USD import** (`crust-usd`). A light "index" stage is opened with payloads unloaded,
    to read the render settings, pick the camera and list the top-level subtrees. Each
    subtree is then composed on its own masked stage, traversed and dropped. Prims become
    meshes, spheres, curves, instances, lights, volumes or the camera. Materials are

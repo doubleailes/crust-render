@@ -6,7 +6,7 @@ Define how surfaces scatter and emit light. Materials are the integrator's
 extension point: each implements a common trait exposing importance-sampled
 scattering and emission. This capability covers the material trait contract, the
 supported shading models, the shared microfacet helpers, and emissive surfaces.
-Lives in `crust-core/src/material/`.
+Lives in `crust-shading/src/material/`.
 
 ## Requirements
 
