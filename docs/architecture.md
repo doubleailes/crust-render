@@ -585,6 +585,24 @@ Cornell box aside: a guided render is not reproducible run to run, before or
 after), and the hot functions' instruction counts are unchanged under
 callgrind.
 
+Paid down by the crate split (2026-10-16, no rendered output changed):
+crust-core was one 79k-line crate, so any edit recompiled all of it and its
+`unsafe` allowance covered every module. Two moves first let the import stop
+depending on the integrator (`RenderSettings` and `RenderControl` out of
+`tracer/`, the AOV vocabulary apart from its film, `AssetLoader` beside the
+environment map); then the layers became the six crates of § Crates, with
+`crust-core` re-exporting the unchanged public surface. The crate boundary
+moved LLVM's inlining of a few hot callees the tracer reaches across it,
+which now carry `#[inline]`: under callgrind (2 spp, one thread) cornellbox
+runs +0.07% instructions and materialx_basic −0.25% against the pre-split
+binary. Every sample renders bit-identically at 16 spp under all five light
+selections, AOV products included. On four cores, a non-incremental dev
+build of the CLI after a one-line edit fell from 30 s to 23 s for an edit at
+the bottom (`config.rs`), 24 s in the tracer and 20 s in the import; cargo's
+default incremental build took 5–8 s before and after; and a release build
+after the bottom edit went from 396 s to 342 s, most of it the binary's
+fat-LTO link either way.
+
 Paid down by `compact-triangle-storage` (2026-10-01): the kernel stored every
 triangle three times (an 80-byte primitive node with its own vertex copy, the
 SIMD packet, and three unshared per-corner normals) and the importer kept
