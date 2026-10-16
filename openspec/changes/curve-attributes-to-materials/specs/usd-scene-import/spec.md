@@ -121,8 +121,9 @@ and the primvar once, and a material SHALL read the property.
 
 A scene in which no material bound to a curve reads a curve property, a curve
 primvar or the curve's chart SHALL build no per-span strand table and SHALL
-render bit-identically to its render before this change. Meshes SHALL render
-bit-identically whatever their materials read.
+render bit-identically to its render before this change. A mesh SHALL render
+bit-identically unless its material uses a node that did not compile before
+(it then had the reported unsupported-node grey).
 
 #### Scenario: The curves sample is unchanged
 
