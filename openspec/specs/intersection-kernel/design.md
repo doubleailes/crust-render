@@ -373,6 +373,142 @@ some rounds and none in others. Alternating inside one process removed the sprea
 lesson matches the one in `CLAUDE.md`: compare two variants within the same seconds,
 and when the variants are compile-time, make them runtime first.
 
+**Production scenes: the quantised node loses (task 5.3, 2026-10-16).** On the two production
+stages, `auto` makes the render **10–12 % slower** than all-`f32`, and forcing every tree
+quantised makes it 13 % slower. The soup sweep above does not predict production trees.
+The D9 gate therefore fails on production scenes, although it passed on the soup and the
+field.
+
+*Method.* The machine is the 72-vCPU VM of `docs/alab_profile.md`: Xeon E5-2699 v4 @
+2.2 GHz, one socket of 72 cores, no SMT, 16 MiB L3, 93 GiB RAM, RHEL 9 kernel 5.14. Every
+binary is baseline x86-64, as shipped. The branch is at `7d8e972` plus the census below,
+and `bin_main` is `main` at `84b6677`, built from a worktree. `bin_wide`, `bin_auto` and
+`bin_quant` are one branch binary behind wrappers (`exec env CRUST_BVH_NODES=wide4 crust
+"$@"`). Timings come from `scripts/bench_ab.sh -n 3 -p Render` at the default 128 spp:
+3 interleaved reps per pair, not 6, because each run re-imports the stage (Moana about 5
+min, ALab about 2). The spread is small: min and mean agree within 0.5 % in every row.
+µs per query and memory come from one `--profile --stats -l debug` run per arm.
+
+- **Moana:** `-i ~/Workspace/samples/island/usd/island.usda --camera /island/cam/shotCam`
+- **ALab:** `-i ~/Workspace/samples/ALab/entry.usda -f 1004 --camera
+  /root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam`
+
+*Which trees are quantised.* `-l debug` logs a census after the import's commit
+(`Scene::node_format_census`): every distinct tree, its reference count and its format.
+
+| scene | `auto`: `f32` trees | `auto`: quantised trees | largest quantised trees (refs) |
+| --- | --- | --- | --- |
+| Moana | 57 749 (largest 94 248 refs) | 39 (smallest 112 356) | 21 678 093 (top level), 21 357 212, 14 907 848, 4 263 648 |
+| ALab | 3 405 (largest 88 832 refs) | 16 (smallest 110 490) | 7 533 387, 1 991 393 (top level), 972 620, 448 702 |
+
+*Render time* (`Render` phase, seconds, min / mean of 3 interleaved reps, B against A):
+
+| scene | `wide4` → `auto` | `wide4` → `quant8` | `main` → `wide4` (the refactor) |
+| --- | --- | --- | --- |
+| Moana | 29.77 / 30.06 → 32.77 / 32.93: **+10.1 % / +9.6 %** | 28.99 / 29.20 → 32.78 / 32.93: +13.1 % / +12.8 % | 29.43 / 29.64 → 28.99 / 29.35: −1.5 % / −1.0 % |
+| ALab | 23.82 / 23.90 → 26.73 / 26.86: **+12.2 % / +12.4 %** | 23.84 / 23.90 → 27.06 / 27.08: +13.5 % / +13.3 % | 23.87 / 24.00 → 23.68 / 23.85: −0.8 % / −0.6 % |
+
+*Traversal and memory* (one profiled run per arm; peak RSS from `--stats`, which agrees
+with `/usr/bin/time`):
+
+| scene | arm | Trace µs / query | Occlusion µs / ray | BVH node bytes | kernel memory | commit peak | frame peak RSS |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Moana | `main` | 17.12 | 7.88 | 2.45 GiB `f32` | 13.54 GiB | 24.31 GiB | 24.31 GiB |
+| Moana | `wide4` | 17.12 | 7.99 | 2.45 GiB `f32` | 13.54 GiB | 24.16 GiB | 24.16 GiB |
+| Moana | `auto` | 19.15 (+12 %) | 8.32 (+4 %) | 371 MiB `f32` + 801 MiB quantised | 12.23 GiB | 23.16 GiB | 23.16 GiB |
+| Moana | `quant8` | 19.63 (+15 %) | 8.29 (+4 %) | 949 MiB quantised | 12.01 GiB | 23.16 GiB | 23.16 GiB |
+| ALab | `main` | 5.60 | 2.68 | 542 MiB `f32` | 2.71 GiB | 11.68 GiB | 11.97 GiB |
+| ALab | `wide4` | 5.34 | 2.55 | 542 MiB `f32` | 2.71 GiB | 11.72 GiB | 11.97 GiB |
+| ALab | `auto` | 6.89 (+29 %) | 3.16 (+24 %) | 120 MiB `f32` + 160 MiB quantised | 2.45 GiB | 11.53 GiB | 11.77 GiB |
+| ALab | `quant8` | 7.05 (+32 %) | 3.19 (+25 %) | 205 MiB quantised | 2.38 GiB | 11.41 GiB | 11.66 GiB |
+
+- **The memory saving is real, and the build transient does not cost it back.** A
+  quantised tree is collapsed to `f32` nodes and then converted, so for a moment it holds
+  both node arrays (raised in the PR's review). On Moana the frame's peak is set during
+  the commit in every arm, and under `auto` that peak is 1.0 GiB *lower* than under `wide4`
+  (23.16 against 24.16 GiB). The transient is per tree, released before the next tree is
+  built, and small next to what the quantised trees save. On ALab the peak comes after
+  the render (the texture cache grows), and the commit peak falls by 0.19 GiB.
+- **The refactor is free on production scenes too.** `main` against `wide4` is −1.5 % /
+  −0.8 % on min, within noise. The census adds 8 bytes per tree and a DEBUG line.
+
+*The hit sort (D7).* The sort is the insertion loop in `Bvh::hit_in`, `bvh/mod.rs` lines
+954–966 at this commit (`order`, the `while mask != 0` loop and the inner `while i > 0 &&
+order[i - 1].0 > t`). It is inlined into `Bvh::hit`, so callgrind (`--cache-sim=no`, built
+with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) attributes it by line, with every tree
+forced quantised so that those lines belong to the quantised instance only. `perf` is not
+installed on this machine.
+
+| subject | closest-hit Ir | sort lines | quantised `slab` |
+| --- | --- | --- | --- |
+| 1 M soup, `ray_throughput --nodes quant --large 1`, `intersect` behind an `#[inline(never)]` wrapper | 7 352 M | 591 M (**8.0 %**); 21.9 M of the 45.3 M conditional mispredicts (**48 %**, `--branch-sim=yes`) | 3 687 M (50 %), 23.7 M visits |
+| ALab, 64×64 crop (`--region 288,148,352,212`), 8 spp, `RAYON_NUM_THREADS=1`, `Bvh::hit` inclusive | 2 760 M | 136 M (**4.9 %**) | 1 056 M (38 %), 7.3 M visits |
+| for comparison: 1 M soup, `f32` node | 5 972 M | 628 M (10.5 %) | inlined |
+
+The sort is measurable: 5–8 % of quantised closest-hit instructions, and about half of its
+branch mispredicts. The slab test costs 5–8 times as much. `<QNode as NodeFormat<8>>::slab`
+is **not inlined**: it is an out-of-line call of about 144 instructions per visit, which
+includes sixteen scalar `u8 → f32` conversions per axis pair. The `f32` slab test is
+inlined into the traversal.
+
+*Why the soup and production disagree.* It is not the ISA. On this machine
+`ray_throughput --sweep 0.1,1,8` (in-process alternation, `taskset -c`) still finds the
+quantised node faster at baseline x86-64, by 7 / 7 % at 0.1 M, 14 / 17 % at 1 M and
+21 / 24 % at 8 M triangles (intersect / occluded), and at `x86-64-v3` by 10 / 9 %, 13 / 16 %
+and 26 / 30 %. A random soup is the worst case for node memory: every ray is
+incoherent and every box overlaps its neighbours. Production trees are spatially coherent,
+and the renderer's rays are coherent enough that the hot top levels stay in cache. Each
+visit then pays the full node-test cost and gains little from the 76-byte node. A tree's
+reference count, the only input `auto` reads, does not separate the two cases.
+
+*Images.* `crust diff` of `bin_wide` against `bin_auto` at `-s 16 --indirect-clamp 0` does
+**not** report 0 differing pixels: 897 / 230 400 on ALab and 6 724 / 230 400 on Moana. To
+test noise against bias at 16, 64 and 256 spp, the renders went through an overlay stage
+that sublayers each scene and sets `crust:minSamplesPerPixel = 100000` on
+`/Render/settings`, so that no pixel stops early. That changed nothing measurable.
+
+| scene | spp | differing pixels | rmse | rmse without the 1 000 largest | mean signed luminance difference |
+| --- | --- | --- | --- | --- | --- |
+| ALab | 16 / 64 / 256 | 897 / 2 753 / 6 602 | 1.0e-2 / 1.8e-2 / 3.0e-2 | 0 / 8.1e-5 / 1.6e-4 | +3.1e-5 / −3.3e-5 / +1.1e-5 (mean 0.63) |
+| Moana | 16 / 64 / 256 | 6 724 / 18 502 / 38 653 | 9.5e-3 / 2.5e-3 / 1.2e-3 | 5.4e-4 / 4.1e-4 / 2.9e-4 | +7.8e-5 / +6.4e-5 / +6.0e-5 (mean 0.27) |
+
+- **ALab behaves as noise.** A few firefly pixels set its rmse (at 256 spp one pixel
+  differs by 22.8 in R), as expected unclamped (`docs/alab_profile.md`). The mean signed
+  difference changes sign and is within its standard error (about 6e-5).
+- **Moana does not fall as 1/√N.** The rmse without the largest pixels falls 1.3–1.45×
+  per 4× spp, not 2×. The mean signed difference holds at +6e-5 to +8e-5, about 2e-4 of the
+  image mean and about 25 standard errors from zero. That is a small persistent
+  difference. It fits exact distance ties between coincident primitives, which each
+  format resolves consistently its own way; the spec allows this, but the difference does
+  not vanish with spp. Nothing here proves the cause, and a tie counter would settle it.
+
+*Recommendation (not made here).* `auto` should not select `quant8` by default. The D9
+fallback applies: set `AUTO_QUANT_MIN_REFS` to `None`, so that `auto` means `wide4`, and keep
+`CRUST_BVH_NODES=quant8` as an opt-in for memory-bound scenes. On Moana it saves 1.3 GiB of
+kernel memory and 1.0 GiB of peak for 10–13 % of render time. Raising the threshold would
+not help, because the largest production trees (14–22 M references) lose. Before the
+format is gated again, make the node test cheap: inline the quantised slab, and vectorise
+the byte-to-float widening. It costs 38–50 % of quantised closest-hit instructions against
+the sort's 5–8 %. Then re-run this section's A/B, which takes about 2 h at 3 reps. Phase 2
+(octant ordering, task 6.2) should wait until then.
+
+Reproduce:
+
+```bash
+B=../crust-bench    # bin_main, crust_branch and the bin_{wide,auto,quant} wrappers
+CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
+scripts/bench_ab.sh -a $B/bin_wide -b $B/bin_auto -n 3 -p Render \
+    -x "-f 1004 --camera $CAM" ~/Workspace/samples/ALab/entry.usda
+scripts/bench_ab.sh -a $B/bin_wide -b $B/bin_auto -n 3 -p Render \
+    -x "--camera /island/cam/shotCam" ~/Workspace/samples/island/usd/island.usda
+$B/bin_auto render -i ~/Workspace/samples/island/usd/island.usda \
+    --camera /island/cam/shotCam --profile --stats -l debug | grep -E 'node formats|Trace|Occlusion|BVH nodes|peak'
+CRUST_BVH_NODES=quant8 RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no \
+    target/release/crust render -i ~/Workspace/samples/ALab/entry.usda -f 1004 --camera $CAM \
+    --region 288,148,352,212 -s 8 -o /tmp/crop.exr     # line-tables build; about 75 min
+taskset -c 10 target/release/examples/ray_throughput --sweep 0.1,1,8
+```
+
 ## Known gaps: geometry and acceleration
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*

@@ -143,6 +143,11 @@ Phase 2 is built only if Phase 1's profile shows the sort is a measurable share 
 `quant8` closest-hit time on the soup (task 5.3 measures it). If it is not, Phase 2 is
 dropped by `/opsx:update` and the design record says why.
 
+**Answer (task 5.3, 2026-10-16):** the sort is measurable (8.0 % of quantised closest-hit
+instructions on the 1 M soup, 4.9 % on ALab, and 48 % of the soup's branch mispredicts), but
+Phase 2 should wait. The out-of-line quantised slab test costs 38–50 %, and the format is
+10–12 % slower than `wide4` on Moana and ALab, a gap removing the sort cannot close.
+
 ### D8. How far the measurements can be trusted
 
 The evidence is one shared 4-core VM and is noisy.

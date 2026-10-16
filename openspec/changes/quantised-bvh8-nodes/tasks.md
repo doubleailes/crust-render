@@ -77,7 +77,7 @@
       (43 k-triangle meshes about neutral, small sphere grids and prototypes 17–27 %);
       from a 50 k-triangle soup to 8 M it is 7–43 % faster on both queries. The threshold
       is `AUTO_QUANT_MIN_REFS = 100 000`, recorded with the numbers in `bvh/mod.rs`.*
-- [ ] 5.3 Repeat the out-of-cache A/B on the 8 M-triangle soup and the 2 M-instance field
+- [x] 5.3 Repeat the out-of-cache A/B on the 8 M-triangle soup and the 2 M-instance field
       with every variant interleaved as closely as the builds allow (design D8), and on
       a production-shaped scene (ALab or the island when present, otherwise the
       generated stress scene). Add a profile of how much of `quant8` closest-hit time is
@@ -89,6 +89,28 @@
       are 20–43 % faster quantised. **Not done:** a production-shaped scene (no ALab or
       island in this environment, and the stress scene was checked for images, not timed
       through the kernel), and the profile of the per-ray hit sort that D7 needs.
+      *Production scenes done (2026-10-16), with two deviations agreed for time: 3
+      interleaved reps per pair instead of 6, and callgrind instead of `perf`, which is not
+      installed. The hit sort was profiled on ALab and the 1 M soup, not Moana, whose import
+      under valgrind would take more than 3 h.* On the 72-vCPU VM, `bench_ab.sh -p Render`
+      at 128 spp finds `auto` **+10.1 % / +9.6 %** (min / mean) slower than `wide4` on
+      Moana and **+12.2 % / +12.4 %** on ALab, and `quant8` +13 % on both. `main` against
+      `wide4` is −1.5 % / −0.8 % on min. Trace rises 17.1 → 19.2 µs per query (Moana) and
+      5.3 → 6.9 µs (ALab). `auto` quantises 39 trees on Moana and 16 on ALab, the top level
+      included, and saves 1.3 GiB / 0.26 GiB of kernel memory. Moana's frame peak, set
+      during the commit, falls by 1.0 GiB (24.16 → 23.16 GiB), so the transient double node
+      array does not move it. `crust diff` of `wide4` against `auto` at 16 spp: 897
+      (ALab) and 6 724 (Moana) differing pixels. ALab's difference behaves as noise.
+      Moana's keeps a mean offset of about 2e-4 relative across 16, 64 and 256 spp,
+      consistent with exact ties between coincident primitives but not proven. **D9 fails
+      on production scenes.** **D7:** the sort is measurable, at 4.9 % (ALab) and 8.0 %
+      (soup) of quantised closest-hit instructions and 48 % of its branch mispredicts, but
+      6.2 should not go ahead yet. The out-of-line quantised slab test costs 38–50 %
+      (about 144 instructions per visit), so it is the first lever, and the format loses
+      on production either way. Numbers, method and recommendation are in
+      `openspec/specs/intersection-kernel/design.md`, under "Production scenes". This
+      contradicts 5.4's verdict; per that record, the recommendation is to make `auto`
+      select `wide4` (`AUTO_QUANT_MIN_REFS = None`), which is not done here.
 - [x] 5.4 Evaluate the gate (design D9) and write the numbers, methods and verdict into
       `openspec/specs/intersection-kernel/design.md`, including the negative case.
       Verify the record names the scenes, binaries and commands.
