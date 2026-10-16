@@ -6,10 +6,10 @@ tables of `curve-attributes-to-materials`. No task starts until that change
 
 ## 1. Measured spike
 
-- [ ] 1.1 Build `samples/mass_spike.usda` (two sheets of strands crossing at an angle, and one round clump) and a spike example that bakes a dense, unbricked field from its strands and ray-casts the camera's pixels, writing the per-pixel tube normal and mass normal at the first hit; verify it runs on the sample and writes both images
+- [x] 1.1 Build `samples/mass_spike.usda` (two sheets of strands crossing at an angle, and one round clump) and a spike example that bakes a dense, unbricked field from its strands and ray-casts the camera's pixels, writing the per-pixel tube normal and mass normal at the first hit; verify it runs on the sample and writes both images
 - [ ] 1.2 Measure the gradient energy of the normal across the crossing line against the same measure away from it, for the tube normal and for the mass normal, and the same for a per-strand colour against the coverage-weighted mass colour; verify the mass ratios are recorded beside the tube ones and the mass ratio is near 1
-- [ ] 1.3 Repeat 1.2 over five consecutive frames of a jittered groom (each strand's points displaced per frame by a fixed fraction of the radius) and measure the frame-to-frame change of the mass normal; verify the numbers are recorded
-- [ ] 1.4 Record the spike's measurements, and the radius and threshold they settle on, in `openspec/changes/curve-mass-field/design.md`; if the mass ratio does not approach 1 or the normal shimmers between frames, stop and revise the design before group 2
+- [x] 1.3 Repeat 1.2 over five consecutive frames of a jittered groom (each strand's points displaced per frame by a fixed fraction of the radius) and measure the frame-to-frame change of the mass normal; verify the numbers are recorded
+- [x] 1.4 Record the spike's measurements, and the radius and threshold they settle on, in `openspec/changes/curve-mass-field/design.md`; if the mass ratio does not approach 1 or the normal shimmers between frames, stop and revise the design before group 2
 
 ## 2. Import: attributes, grouping and the colour terminal
 
