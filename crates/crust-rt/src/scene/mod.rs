@@ -161,6 +161,18 @@ impl MemoryFootprint {
     }
 }
 
+/// The node format of every distinct tree in a committed [`Scene`] — the
+/// top level and each distinct instanced scene once — as each tree's
+/// primitive reference count (the count `auto` chooses by), largest first.
+/// See [`Scene::node_format_census`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeFormatCensus {
+    /// Trees with the `f32` node.
+    pub wide: Vec<usize>,
+    /// Trees with the quantised 8-wide node.
+    pub quantised: Vec<usize>,
+}
+
 /// Top-level primitives of a committed [`Scene`], split by kind. See
 /// [`Scene::primitive_breakdown`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -952,6 +964,26 @@ impl Scene {
         let mut acc = MemoryFootprint::default();
         self.accumulate_footprint_into(&mut visited, &mut acc);
         acc
+    }
+
+    /// Which node format each distinct tree was committed with — see
+    /// [`NodeFormatCensus`]. A report, not a query: it walks every
+    /// distinct instanced scene.
+    pub fn node_format_census(&self) -> NodeFormatCensus {
+        let mut visited = std::collections::HashSet::new();
+        let mut acc = NodeFormatCensus::default();
+        self.accumulate_census_into(&mut visited, &mut acc);
+        acc.wide.sort_unstable_by(|a, b| b.cmp(a));
+        acc.quantised.sort_unstable_by(|a, b| b.cmp(a));
+        acc
+    }
+
+    pub(crate) fn accumulate_census_into(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut NodeFormatCensus,
+    ) {
+        self.bvh.accumulate_census(visited, acc);
     }
 
     pub(crate) fn accumulate_footprint_into(

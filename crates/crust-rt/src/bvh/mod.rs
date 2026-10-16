@@ -373,6 +373,9 @@ pub(crate) struct Bvh {
     n_degenerate: usize,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
+    /// Primitive references the build started from (the count the node
+    /// format was chosen by); reported, never read by a query.
+    n_refs: usize,
 }
 
 /// One build reference: conservative bounds of (a fragment of) primitive
@@ -449,6 +452,7 @@ impl Bvh {
             .filter_map(|i| input.bbox(i).map(|bbox| PrimRef::new(bbox, i)))
             .collect();
 
+        let n_refs = refs.len();
         let quantised = match choice {
             NodeChoice::Wide => false,
             NodeChoice::Quantised => true,
@@ -509,6 +513,7 @@ impl Bvh {
             instances: input.instances.into_boxed_slice(),
             cubics: input.cubics.into_boxed_slice(),
             root_bbox,
+            n_refs,
         }
         // `input.order` and `input.instance_bounds` drop here: build-only.
     }
@@ -820,6 +825,24 @@ impl Bvh {
         for i in &self.instances {
             if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
                 i.scene.accumulate_unique_into(visited, acc);
+            }
+        }
+    }
+
+    /// Adds this tree's reference count to `acc` under its node format,
+    /// descending into each distinct instanced scene once.
+    pub(crate) fn accumulate_census(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut crate::scene::NodeFormatCensus,
+    ) {
+        match &self.nodes {
+            Nodes::Wide(_) => acc.wide.push(self.n_refs),
+            Nodes::Quant(_) => acc.quantised.push(self.n_refs),
+        }
+        for i in &self.instances {
+            if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                i.scene.accumulate_census_into(visited, acc);
             }
         }
     }

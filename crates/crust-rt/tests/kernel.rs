@@ -2502,3 +2502,30 @@ fn auto_keeps_small_trees_on_the_f32_node() {
         .memory_footprint();
     assert!(fp.bvh_nodes > 0 && fp.bvh_nodes_quantised == 0, "{fp:?}");
 }
+
+/// The census reports each tree under the format it was committed with, by
+/// the reference count the choice was made from.
+#[test]
+fn node_format_census_counts_each_tree_under_its_format() {
+    use crust_rt::{CommitOptions, NodeFormatChoice};
+    let census = |nodes| {
+        let mut b = SceneBuilder::new();
+        let (v, t) = grid(32);
+        let n = t.len();
+        b.attach(mesh(v, t));
+        let c = b
+            .commit_with(CommitOptions {
+                nodes,
+                ..Default::default()
+            })
+            .node_format_census();
+        (n, c)
+    };
+    let (n, wide) = census(NodeFormatChoice::Wide);
+    assert_eq!((wide.wide.as_slice(), wide.quantised.len()), (&[n][..], 0));
+    let (n, quant) = census(NodeFormatChoice::Quantised);
+    assert_eq!(
+        (quant.wide.len(), quant.quantised.as_slice()),
+        (0, &[n][..])
+    );
+}
