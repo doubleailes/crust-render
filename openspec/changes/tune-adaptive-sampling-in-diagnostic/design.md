@@ -61,10 +61,18 @@ forms `lum_sum` and `lum_sq` by adding the trace in the same order the renderer
 adds them, so the f64 sums are bit-identical. It then calls the same
 `finish_round` and `held_by_neighbour`.
 
-Those two functions, `adaptive_check_points` and `batch_schedule`, become
-`pub(crate)`, and the round loop's decision step is factored into one function that
-both the pass and the replay call. That keeps the pair "render ↔ replay" structural
-rather than a copy kept in step by a test.
+The replay itself lives in `tracer/replay.rs`, a child of the tracer module. There it
+uses the private `PixelState` directly. The round loop's decision step is factored into
+`keeps_sampling`, and the sums' update into `PixelState::add_luminance`. The pass and
+the replay call both, along with `finish_round`, `adaptive_check_points` and
+`batch_schedule`. That keeps the pair "render ↔ replay" structural rather than a copy
+kept in step by a test. `diagnostic/adaptive.rs` holds what is the diagnostic's own: the
+grid, the predictions, the front and the pick.
+
+*As built:* the pin test (`a_replay_takes_the_samples_an_adaptive_render_takes`,
+`tracer/tests.rs`) holds bitwise on `cornellbox` and `veach_mis`, full frame and
+region, at six settings: `sampleCount` in every pixel, the `variance` bits, and the
+early-stopped and held counters.
 
 - *Alternative: render each setting.* At around 100 settings × 3 crops that is
   hundreds of renders. It does not fit any budget the diagnostic uses.
@@ -83,9 +91,13 @@ squared error tier 1 uses, applied to the luminance of `μ_p(n_p)`. Luminance is
 used rather than RGB because the stop rule sees luminance only, and the trace
 stays at 8 B per sample.
 
-The predicted time is `Σ_tiles c_t · Σ_{p∈t} n_p`. Here `c_t` is the recorded
-render's measured seconds per sample of tile `t` (`tile_times`), so a glass tile
-costs what it costs. This ignores the per-round fork/join tail, which the design
+The predicted time is `Σ_tiles c_t · Σ_{p∈t} n_p`. Here `c_t` is tile `t`'s share
+of the recording's wall-clock `render_s`, by its measured seconds (`tile_times`), over
+its samples. A glass tile therefore costs what it costs. *As built:* the tiles' own
+seconds add up the workers' time, about N × the wall on N threads. Used directly, the
+first version predicted 6.8 s for a crop that rendered in 1.9 s on 4 threads. Scaled to
+`render_s`, the predictions on `cornellbox` and `veach_mis` came within 6–15% of each
+single verifying run. This ignores the per-round fork/join tail, which the design
 record measured as a few percent at 16 rounds. The verification's single-run time
 is reported beside the prediction so a gap is visible.
 
@@ -105,19 +117,34 @@ That is at most 6 × 6 × 5 × 3 = 540 settings. One replay is `O(pixels × roun
 operations, under a second on one thread; replays run in parallel with rayon over
 settings.
 
-`spp_r = clamp(4 · max(min_spp, 16), 128, 1024)`, the tier-2 spp of today with a
-floor of 128. That is enough rounds past every minimum on the grid to show early
-stopping. When `--target-mrse` asks for more than `spp_r` reaches, `target_reached`
-says so (spec).
+*As built:* `spp_r` is the authored sample count within 64..=1024, so the authored
+point can be replayed as authored. It is halved, down to 64, while a recording and a
+verification of every crop would take more than half of what the budget has left after
+the baseline. It is halved again, down to 4, while the traces would exceed the memory
+bound (D4). An authored count above `spp_r` is replayed at `spp_r`, and
+`authored_spp_capped` says so. The grid's caps include the authored count. When
+`--target-mrse` asks for more than `spp_r` reaches, `target_reached` says so (spec).
+
+Without a target (adaptive sampling off as authored, and no `--target-mrse`), each
+crop's bar is the authored point's own MRSE (`target_from: "authored"`). A fixed count
+is the cleanest the grid holds, so such a stage keeps its authored point: pass
+`--target-mrse` to tune it.
+
+`front` keeps each predicted outcome once. Many tolerances, or thresholds no pixel
+passes, predict the same time and MRSE. The Markdown lists six points per crop; the
+JSON has them all.
 
 ### D4. Memory bound
 
 The trace takes `pixels × spp_r × 8 B`, up to 128 MiB for a 128×128 crop at 1024
 spp. Only one crop's trace is alive at a time: record, replay, verify, drop.
 
-If a crop's trace would exceed 256 MiB (a crop larger than today's default), `spp_r`
-halves until it fits, and the report says which spp was used. `f32` storage was
-rejected because the replay must reproduce f64 sums bit for bit.
+*As built:* `best` is picked across all crops before any crop is verified, and
+verifying a crop needs its trace again. So every crop's trace stays alive until the
+verifications, under one bound of 512 MiB across the crops (`adaptive::TRACE_BYTES`).
+The default three 128×128 crops at 1024 spp take 384 MiB. `spp_r` halves until the
+traces fit, and the report gives `spp_recorded`. `f32` storage was rejected because
+the replay must reproduce f64 sums bit for bit.
 
 ### D5. Verification and the suggestion
 
@@ -135,6 +162,17 @@ renderer's behaviour, which is what licenses using it.
 This is why tier 2's "projections never produce suggestions" can be relaxed for
 this case alone: the projection is checked against a real render before anything
 is suggested.
+
+### D5b. Suggestions as built
+
+There is one suggestion per value `best` changes, with id
+`adaptive_sampling.<setting>` (`samples_per_pixel`, `variance_threshold`,
+`min_samples_per_pixel`, `adaptive_neighbour_tolerance`). Each has its flag and
+attribute, and the same ΔEff and evidence (`adaptive_sampling` and every
+`adaptive_verify@<crop>`). The gate (`adaptive_suggestions_for`) is a pure function,
+so its refusals are unit-tested directly: a mismatch, a crop not verified, a gain under
+the bar, and `best` being the authored point. A mismatching replay cannot be forced in
+a real render.
 
 ### D6. Where the suggestion's values go
 
@@ -155,12 +193,13 @@ best maps show the change.
 
 ## Risks / Trade-offs
 
-- **[Guided scenes]** The final pass is adaptive under a guiding field trained by
-  non-adaptive passes, and the image is a blend of passes. The replay's sample
-  counts are still exact, because the decision is the final pass's own. Its MRSE
-  covers the final pass alone, though, not the blend. → Recorded with
-  `best_settings` as tier 1 measured them. For a guided best setting the report
-  labels the MRSE "final pass only", and the gap is listed in `design.md` Known
+- **[Guided scenes]** *Found in implementation; the plan's claim was wrong.* A
+  guided render decides whether its final pass is guided from a ΔEff measured in
+  wall-clock time, and its image blends every pass. On `cornellbox`, whose best
+  tier-1 settings are guided, the verifying render's `sampleCount` differed from the
+  replay in every pixel. → When the best tier-1 settings are guided, the sweep records
+  and verifies them with guiding off, and the report says so (`unguided: true`). The
+  adaptive values it finds are for the unguided render; this is listed in Known
   gaps.
 - **[Single-sample-ordered sums]** If the accumulation ever reorders its additions
   (SIMD over samples, say), the replay's f64 sums drift by an ulp and the

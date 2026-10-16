@@ -23,6 +23,7 @@ mod light_cache;
 mod light_visibility;
 mod path;
 pub(crate) use path::{past_medium_boundaries, surface_visibility};
+mod replay;
 mod route;
 mod settings;
 
@@ -37,6 +38,7 @@ pub use settings::{
 };
 
 pub(crate) use path::PathScratch;
+pub(crate) use replay::{AdaptiveSetting, LuminanceTrace, Replayed, replay};
 pub(crate) use route::{NO_LIGHT, PathTerm, RouteCtx};
 
 /// Render-progress callback: invoked with `(completed, total)` steps as a
@@ -107,6 +109,8 @@ struct PassConfig {
     /// their unit's buffer, and for the unstaged reference the tests pin
     /// staging against ([`Instruments::unstaged`]).
     staged: bool,
+    /// Keep every sample's luminance ([`Instruments::luminance_trace`]).
+    trace: bool,
 }
 
 /// What a diagnostic render measures beside its image
@@ -127,6 +131,13 @@ pub(crate) struct Instruments {
     /// The render is one of many (the diagnostic's trials): what a render
     /// says once at `INFO` goes to `DEBUG`, so the log stays bounded.
     pub(crate) quiet: bool,
+    /// Keep, per pixel of the final pass, the luminance every sample added
+    /// to the stop rule's sums, in sample order: what tier 2 replays the
+    /// rule over ([`LuminanceTrace`]). Only a pass that is not adaptive
+    /// keeps one, so every pixel holds the same count. It rides in the
+    /// instrumented instantiation, as the clamp counter does, so a render
+    /// that does not ask for it carries no trace of it.
+    pub(crate) luminance_trace: bool,
     /// Sweep the final pass to its first check point in one go, as before
     /// the sweep was staged: the reference the staged sweep is pinned
     /// bit-identical against. For tests; no render sets it.
@@ -168,6 +179,10 @@ pub(crate) struct Measured {
     /// The light path inspector's records of the final pass, when the
     /// layout asked for them ([`Renderer::render_inspection`]).
     pub(crate) inspection: Option<inspection::Collected>,
+    /// The final pass's luminance trace, when [`Instruments::luminance_trace`]
+    /// asked for one and the pass was not adaptive. In scene radiance:
+    /// before the camera's exposure, as the stop rule saw it.
+    pub(crate) trace: Option<LuminanceTrace>,
 }
 
 impl Measured {
@@ -248,6 +263,8 @@ struct PassStats {
     interrupted: bool,
     /// The pass's light path records, when its layout inspects.
     inspection: Option<inspection::Collected>,
+    /// The pass's luminance trace, when it kept one.
+    trace: Option<LuminanceTrace>,
 }
 
 /// A guided render's pass that a [`RenderControl`] cut short: what the end
@@ -620,6 +637,7 @@ impl Renderer {
             setup_s: 0.0,
             render_s: start.elapsed().as_secs_f64(),
             inspection: pass.inspection,
+            trace: pass.trace,
         }
     }
 
@@ -650,6 +668,7 @@ impl Renderer {
                 .clamp
                 .filter(|_| self.settings.indirect_clamp.is_none()),
             staged: !instruments.unstaged,
+            trace: instruments.luminance_trace,
         }
     }
 
@@ -755,6 +774,8 @@ impl Renderer {
                 measure_clamp: None,
                 // A training pass's samples must sit contiguously per pixel.
                 staged: false,
+                // Training passes are setup, not the image's sampling.
+                trace: false,
             };
             let start = std::time::Instant::now();
             let (buffer, film, samples, stats) =
@@ -808,6 +829,8 @@ impl Renderer {
         // The final pass's records alone: the training passes' samples are
         // other samples of the same pixels.
         let mut inspection = None;
+        // So is the trace: the stop rule decides on the final pass alone.
+        let mut trace = None;
         if interrupted.is_none() {
             let guide_final = match (&eff_unguided, &eff_guided) {
                 (Some((var_pt, cost_pt)), Some((var_pg, cost_pg))) if *cost_pg > 0.0 => {
@@ -872,6 +895,7 @@ impl Renderer {
             add_tiles(&final_stats.tiles);
             clamp = final_stats.clamp;
             inspection = final_stats.inspection.take();
+            trace = final_stats.trace.take();
             if final_stats.interrupted {
                 debug!(
                     "path guiding: final pass cancelled at {} spp or more per pixel",
@@ -912,6 +936,7 @@ impl Renderer {
                     render_s,
                     outcome,
                     inspection,
+                    trace,
                 };
             }
             // A pixel at fewer than two samples has no variance estimate, and
@@ -972,6 +997,7 @@ impl Renderer {
             render_s,
             outcome,
             inspection,
+            trace,
         }
     }
 
@@ -1100,7 +1126,7 @@ impl Renderer {
         // (callgrind, cornellbox at 2 spp) — so a pass that measures it
         // takes that instantiation too; its sections record nothing unless
         // profiling is on.
-        let profiling = profile::enabled() || cfg.measure_clamp.is_some();
+        let profiling = profile::enabled() || cfg.measure_clamp.is_some() || cfg.trace;
         // The same for the film: the AOV instantiation runs only when a
         // product asks for something beyond the beauty.
         let cam = self.camera.frame(w, h);
@@ -1130,6 +1156,8 @@ impl Renderer {
             Vec::new()
         };
         let rounds = schedule.len();
+        // A trace is a fixed-count pass's: every pixel holds `spp` samples.
+        let tracing = cfg.trace && !adaptive;
 
         // Per *pass*, never per pixel or per ray: a guided render runs a
         // handful of these and an ordinary one exactly one, so the whole
@@ -1169,7 +1197,10 @@ impl Renderer {
         };
         let mut units: Vec<Unit> = tiles
             .into_iter()
-            .map(|tile| Unit::new(tile, layout, cam, cfg.measure_clamp.is_some()))
+            .map(|tile| {
+                let samples = if tracing { cfg.spp as usize } else { 0 };
+                Unit::new(tile, layout, cam, cfg.measure_clamp.is_some(), samples)
+            })
             .collect();
         // Each unit's steps follow its samples: the stages add 1, 1, 2, 4, …
         // samples and the rounds a quarter more each, so counting units alone
@@ -1349,16 +1380,8 @@ impl Renderer {
                                     skipped = true;
                                     return;
                                 }
-                                // The stop rule: past the minimum (always, by
-                                // now), its own test, and no still-sampling
-                                // cross neighbour much less converged than it is.
-                                if st.converged {
-                                    if held_by_neighbour(index, active, rect, i, j, tolerance) {
-                                        st.held = true;
-                                    } else {
-                                        st.stopped = true;
-                                        return;
-                                    }
+                                if !keeps_sampling(st, index, active, rect, i, j, tolerance) {
+                                    return;
                                 }
                                 self.advance::<S, $aov>(
                                     profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
@@ -1524,6 +1547,15 @@ impl Renderer {
                 }
             }
         }
+        // Moved out of the units, not copied: the trace can be the largest
+        // thing a pass holds. A cancelled pass's is incomplete, so it has none.
+        let trace = (tracing && !interrupted).then(|| {
+            let parts = units
+                .iter_mut()
+                .map(|u| (u.tile, std::mem::take(&mut u.work.trace)))
+                .collect();
+            LuminanceTrace::new(rect, cfg.spp, parts, tile_times.clone())
+        });
         all_samples.buffers = units.into_iter().map(|u| u.work.samples).collect();
 
         let elapsed = pass_start.elapsed();
@@ -1560,6 +1592,7 @@ impl Renderer {
                 min_taken,
                 interrupted,
                 inspection,
+                trace,
             },
         )
     }
@@ -1681,6 +1714,10 @@ impl Renderer {
             measure_clamp: PROFILE && cfg.measure_clamp.is_some(),
         };
         let measuring = PROFILE && cfg.measure_clamp.is_some();
+        // A unit holds a trace only when its pass keeps one; this pixel's
+        // samples start at `trace_at`.
+        let tracing = PROFILE && !unit.trace.is_empty();
+        let trace_at = p * cfg.spp as usize;
         for sample in state.taken..target {
             let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);
             let root = Sampler::<S>::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
@@ -1770,8 +1807,10 @@ impl Renderer {
             state.sum += color;
             state.weight_sum += wx * wy;
             let lum = self.lights.luma().of(color) as f64;
-            state.lum_sum += lum;
-            state.lum_sq += lum * lum;
+            state.add_luminance(lum);
+            if tracing {
+                unit.trace[trace_at + sample as usize] = lum;
+            }
         }
         state.taken = target;
         state.samples_end = unit.samples.len() as u32;
@@ -1837,6 +1876,15 @@ impl PixelState {
             stopped: false,
             held: false,
         }
+    }
+
+    /// One sample's luminance into the stop rule's sums. The one place they
+    /// grow — the pass's samples and [`replay`]'s recorded ones alike — so
+    /// a replay adds exactly what the pass added, in the same order.
+    #[inline(always)]
+    fn add_luminance(&mut self, lum: f64) {
+        self.lum_sum += lum;
+        self.lum_sq += lum * lum;
     }
 
     /// Unbiased variance of the pixel-mean luminance over `taken` samples.
@@ -1957,6 +2005,33 @@ fn batch_schedule(spp: u32, first_check: u32) -> Vec<u32> {
     schedule
 }
 
+/// A still-sampling pixel's decision at a round boundary, against the
+/// frozen `index` and `active` buffers: past the minimum (always, by then),
+/// its own test, and no still-sampling cross neighbour much less converged
+/// than it is ([`held_by_neighbour`]). Marks the pixel stopped, or held, and
+/// returns whether it takes the round's batch. What a pass and [`replay`]
+/// both decide with.
+#[inline(always)]
+fn keeps_sampling(
+    st: &mut PixelState,
+    index: &[f32],
+    active: &[bool],
+    rect: PixelRect,
+    x: usize,
+    y: usize,
+    tolerance: f32,
+) -> bool {
+    if st.converged {
+        if held_by_neighbour(index, active, rect, x, y, tolerance) {
+            st.held = true;
+        } else {
+            st.stopped = true;
+            return false;
+        }
+    }
+    true
+}
+
 /// The cross-neighbour rule: is pixel `(x, y)` held back by one of its up,
 /// down, left or right neighbours that is still sampling and whose
 /// convergence index exceeds its own by more than `tolerance`? One-sided —
@@ -2005,6 +2080,9 @@ struct UnitWork {
     clamp: Vec<f32>,
     /// The unit's light path records, when the layout inspects.
     inspect: Option<Box<inspection::UnitStore>>,
+    /// Pixel-major, `spp` a pixel: each sample's luminance, when the pass
+    /// keeps a [`LuminanceTrace`]; empty otherwise.
+    trace: Vec<f64>,
 }
 
 /// One work unit of a pass — a tile or a row — and its pixels' state.
@@ -2016,7 +2094,14 @@ struct Unit {
 }
 
 impl Unit {
-    fn new(tile: Tile, layout: Option<&AovLayout>, cam: CameraFrame, clamp: bool) -> Self {
+    /// `trace` samples a pixel of luminance trace, 0 for none.
+    fn new(
+        tile: Tile,
+        layout: Option<&AovLayout>,
+        cam: CameraFrame,
+        clamp: bool,
+        trace: usize,
+    ) -> Self {
         let pixels = tile.width * tile.height;
         Unit {
             pixels: vec![PixelState::new(); pixels],
@@ -2024,6 +2109,7 @@ impl Unit {
             work: UnitWork {
                 aov: layout.map(|l| UnitAov::new(l, cam, pixels)),
                 clamp: if clamp { vec![0.0; pixels] } else { Vec::new() },
+                trace: vec![0.0; pixels * trace],
                 inspect: layout
                     .and_then(|l| l.inspect.clone())
                     .map(|c| Box::new(inspection::UnitStore::new(c))),
@@ -2122,6 +2208,7 @@ pub(crate) fn mean_relative_error(var_map: &[f64], ref_lum: &[f64]) -> f64 {
         / n
 }
 
+#[derive(Clone, Copy)]
 struct Tile {
     pub x: usize,
     pub y: usize,

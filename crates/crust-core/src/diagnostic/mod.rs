@@ -24,6 +24,7 @@
 //! The engine writes nothing: [`run`] returns a [`Report`], which the host
 //! prints ([`Report::to_markdown`]) and saves ([`Report::to_json`]).
 
+mod adaptive;
 pub mod checks;
 mod compare;
 mod crops;
@@ -40,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
-use crate::tracer::{Instruments, Measured};
+use crate::tracer::{AdaptiveSetting, Instruments, Measured};
 use crate::{
     LightSelection, PixelRect, PtexCacheStats, RenderSettings, Renderer, SamplingStrategy, Scene,
     TextureCacheStats, profile,
@@ -78,6 +79,9 @@ pub struct Options<'a> {
     pub subdivision_level: Option<u32>,
     pub subdivision_edge_length: Option<f32>,
     pub cache_stats: Option<CacheStats<'a>>,
+    /// `--adaptive-maps PATH`: the host writes [`Report::adaptive_maps`]
+    /// there, and the report names it.
+    pub adaptive_maps: Option<String>,
 }
 
 impl Options<'_> {
@@ -97,6 +101,7 @@ impl Options<'_> {
             subdivision_level: None,
             subdivision_edge_length: None,
             cache_stats: None,
+            adaptive_maps: None,
         }
     }
 }
@@ -864,8 +869,17 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let per_px_spp = p1.render_s / (pixels * spp_p1 as f64);
     // What tiers 2 and 3 will render, reserved before tier 1 starts (D10).
     let threshold = authored.variance_threshold() as f64;
-    // A budget the adaptive test can act on: well past its minimum.
-    let spp_a = (4 * authored.min_samples_per_pixel().max(2)).clamp(64, 1024);
+    // What tier 2 records each crop at, for its adaptive sweep (design
+    // D3-D4): the authored count, bounded by the budget and the traces'
+    // memory.
+    sched.set_spent(elapsed());
+    let spp_r = adaptive::recording_spp(
+        authored.samples_per_pixel(),
+        crop_pixels,
+        per_px_spp,
+        sched.remaining_s(),
+        adaptive::TRACE_BYTES,
+    );
     let max_depth = authored.max_depth();
     let half_depth_applies = max_depth >= 2 && !picked.is_empty();
     let reach_applies: Result<(), &str> = if light_count == 0 {
@@ -884,13 +898,11 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     // not known yet, so its reserve assumes them too.
     let setup_at = |k: usize| p1_selection + p1_training * areas[k] as f64 / pixels;
     let later = schedule::Later {
-        tier2_s: if threshold > 0.0 {
-            (0..areas.len())
-                .map(|k| schedule::render_cost_s(per_px_spp, areas[k], spp_a, 1.0, setup_at(k)))
-                .sum()
-        } else {
-            0.0
-        },
+        // A recording and a verification of every crop, the second at
+        // most the first's samples.
+        tier2_s: (0..areas.len())
+            .map(|k| schedule::render_cost_s(per_px_spp, areas[k], spp_r, 2.0, setup_at(k)))
+            .sum(),
         tier3_pixels: if half_depth_applies {
             2.0 * repeats as f64 * areas[0] as f64
         } else {
@@ -1260,93 +1272,303 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let projected_setup = best
         .and_then(|t| runs.iter().find(|r| r.id == t.id))
         .map_or(p1_setup, |r| full_frame_setup(r, &areas, pixels));
-    let mut adaptive = Vec::new();
-    // Every measurement the budget cannot fit is listed, whatever tier 1
-    // left of it (D10).
-    if threshold > 0.0 {
-        for (k, p) in picked.iter().enumerate() {
-            let fixed = crop_settings(best_settings, k, spp_a);
-            // The best settings' setup on this crop, as tier 1 measured it.
-            let setup = runs
+    // The adaptive sampling sweep (`tune-adaptive-sampling-in-diagnostic`):
+    // each crop recorded once at `spp_r`, fixed, with every sample's
+    // luminance; the stop rule replayed over it for every setting of the
+    // grid; the best setting across the crops rendered once per crop to
+    // check the replay. Every measurement the budget cannot fit is listed,
+    // whatever tier 1 left of it (D10).
+    let authored_setting = AdaptiveSetting {
+        spp: authored.samples_per_pixel(),
+        min_samples: authored.min_samples_per_pixel(),
+        threshold: authored.variance_threshold(),
+        tolerance: authored.adaptive_neighbour_tolerance(),
+    };
+    let grid = adaptive::grid(authored_setting, target, spp_r);
+    // Guided, the final pass is guided or not by a wall-clock measurement of
+    // the training passes, and the image blends them: no replay of one
+    // recording can say what a guided render takes. The sweep runs on the
+    // best settings without guiding, and says so.
+    let sweep_settings = best_settings.with_guiding(
+        false,
+        best_settings.guiding_train_iterations(),
+        best_settings.guiding_prob(),
+    );
+    let guiding_dropped = best_settings.guiding();
+    let exposure = authored.exposure_scale();
+    let refs = references(&runs, areas.len());
+    // The best settings' setup on crop `k`, as tier 1 measured it.
+    let best_setup = |k: usize| {
+        runs.iter()
+            .find(|r| best.is_some_and(|b| b.id == r.id))
+            .map_or_else(
+                || setup_at(k),
+                |r| median(r.per_crop[k].pairs.iter().map(|(_, t)| t.setup_s())),
+            )
+    };
+    // Per recorded crop: its index, trace and predictions over the grid.
+    let mut recorded: Vec<(usize, crate::tracer::LuminanceTrace, Vec<adaptive::Point>)> =
+        Vec::new();
+    let mut replay_s = 0.0;
+    for (k, p) in picked.iter().enumerate() {
+        let estimate = schedule::render_cost_s(
+            per_px_spp * time_ratio,
+            p.rect.area(),
+            spp_r,
+            1.0,
+            best_setup(k),
+        );
+        sched.set_spent(elapsed());
+        if !sched.fits(2, estimate) {
+            not_tried.push(NotTried {
+                id: format!("adaptive_record@{}", crops_out[k].id),
+                tier: 2,
+                reason: "budget".into(),
+                detail: None,
+            });
+            continue;
+        }
+        let settings = crop_settings(sweep_settings, k, spp_r);
+        renderer.reconfigure(settings);
+        let mut m = renderer.render_measured(
+            None,
+            Instruments {
+                variance: true,
+                quiet: true,
+                tile_times: true,
+                luminance_trace: true,
+                ..Instruments::default()
+            },
+        );
+        let rect = settings.region().flip_y(h);
+        let image = CropImage {
+            lum: luminance(&m, rect, luma),
+            var: std::mem::take(&mut m.var_map),
+        };
+        // The crop's reference, with the recording blended in: on a crop
+        // tier 1 rendered nothing of, the recording alone.
+        let reference = if refs[k].lum.is_empty() {
+            image
+        } else {
+            trials::reference(&[&refs[k], &image])
+        };
+        let trace = m
+            .trace
+            .take()
+            .expect("a fixed-count render keeps its trace");
+        let costs = adaptive::pixel_costs(&trace, m.render_s);
+        let clock = Instant::now();
+        let points = adaptive::sweep(&trace, &grid, &reference.lum, exposure, &costs);
+        replay_s += clock.elapsed().as_secs_f64();
+        debug!(
+            "diagnostic adaptive: {} recorded at {spp_r} spp ({} MiB of trace), {} settings \
+             replayed",
+            crops_out[k].id,
+            trace.bytes() >> 20,
+            grid.len()
+        );
+        recorded.push((k, trace, points));
+    }
+    let mut adaptive_suggestions: Vec<Suggestion> = Vec::new();
+    let mut adaptive_maps: Option<AdaptiveMaps> = None;
+    let sweep = if recorded.is_empty() {
+        if picked.is_empty() {
+            not_tried.push(NotTried {
+                id: "adaptive".into(),
+                tier: 2,
+                reason: "not_applicable".into(),
+                detail: Some("no crop to record".into()),
+            });
+        }
+        None
+    } else {
+        let per_crop: Vec<Vec<adaptive::Point>> =
+            recorded.iter().map(|(_, _, pts)| pts.clone()).collect();
+        // Without a target, the authored point's own error on each crop:
+        // the cheapest setting at least as clean everywhere.
+        let targets: Vec<f64> = per_crop
+            .iter()
+            .map(|pts| target.unwrap_or(pts[0].mrse))
+            .collect();
+        let (g, target_reached) = adaptive::pick(&per_crop, &targets);
+        let best_setting = grid[g];
+        let gain = adaptive::delta_eff(&per_crop, g, 0);
+        let values = |s: AdaptiveSetting| AdaptiveValues {
+            samples_per_pixel: s.spp,
+            min_samples_per_pixel: s.min_samples,
+            variance_threshold: Num(s.threshold.into()),
+            adaptive_neighbour_tolerance: Num(s.tolerance.into()),
+        };
+        let pick_of = |g: usize| AdaptivePick {
+            setting: values(grid[g]),
+            per_crop: recorded
                 .iter()
-                .find(|r| best.is_some_and(|b| b.id == r.id))
-                .map_or_else(
-                    || setup_at(k),
-                    |r| median(r.per_crop[k].pairs.iter().map(|(_, t)| t.setup_s())),
-                );
-            let estimate =
-                schedule::render_cost_s(per_px_spp * time_ratio, p.rect.area(), spp_a, 1.0, setup);
+                .zip(&targets)
+                .map(|((k, _, pts), &t)| {
+                    let pt = &pts[g];
+                    AdaptivePoint {
+                        crop: crops_out[*k].id.clone(),
+                        mean_spp: pt.mean_spp.into(),
+                        early_stopped_share: pt.early_stopped_share.into(),
+                        neighbour_held_share: pt.held_share.into(),
+                        mrse: pt.mrse.into(),
+                        predicted_render_s: pt.time_s.into(),
+                        reaches_target: pt.mrse <= t,
+                    }
+                })
+                .collect(),
+        };
+        let front = recorded
+            .iter()
+            .map(|(k, _, pts)| AdaptiveFront {
+                crop: crops_out[*k].id.clone(),
+                points: adaptive::front(pts)
+                    .into_iter()
+                    .map(|f| AdaptiveCandidate {
+                        setting: values(grid[f]),
+                        mean_spp: pts[f].mean_spp.into(),
+                        mrse: pts[f].mrse.into(),
+                        predicted_render_s: pts[f].time_s.into(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        // Verify: `best` rendered on every recorded crop, its `sampleCount`
+        // against the replay's.
+        let request = adaptive::count_and_variance();
+        let vars = &request.products[0].vars;
+        let mut verification = Vec::new();
+        let mut maps = AdaptiveMaps {
+            resolution: [w, h],
+            crops: Vec::new(),
+        };
+        for (k, trace, pts) in &recorded {
+            let k = *k;
+            let rw = trace.rect().width();
+            let square = f64::from(exposure) * f64::from(exposure);
+            let authored_replay = crate::tracer::replay(trace, grid[0]);
+            let r = picked[k].rect;
+            let mut crop_maps = CropMaps {
+                rect: [r.x0, r.y0, r.x1, r.y1],
+                authored_sample_count: adaptive::top_down(&authored_replay.taken, rw)
+                    .into_iter()
+                    .map(|n| n as f32)
+                    .collect(),
+                authored_variance: adaptive::top_down(&authored_replay.variance, rw)
+                    .into_iter()
+                    .map(|v| (v * square) as f32)
+                    .collect(),
+                best_sample_count: vec![0.0; r.area()],
+                best_variance: vec![0.0; r.area()],
+            };
+            let estimate = schedule::render_cost_s(
+                per_px_spp * time_ratio,
+                r.area(),
+                pts[g].mean_spp.ceil() as u32,
+                1.0,
+                best_setup(k),
+            );
             sched.set_spent(elapsed());
             if !sched.fits(2, estimate) {
                 not_tried.push(NotTried {
-                    id: format!("adaptive@{}", crops_out[k].id),
+                    id: format!("adaptive_verify@{}", crops_out[k].id),
                     tier: 2,
                     reason: "budget".into(),
                     detail: None,
                 });
+                maps.crops.push(crop_maps);
                 continue;
             }
-            let on =
-                fixed.with_adaptive_sampling(authored.min_samples_per_pixel(), threshold as f32);
-            let (shot, m) = shoot(&mut renderer, on);
-            // The fixed side from what the tier-1 renders of this crop cost
-            // per sample, at the best settings.
-            let per_spp = runs
+            renderer.reconfigure(
+                crop_settings(sweep_settings, k, best_setting.spp)
+                    .with_adaptive_sampling(best_setting.min_samples, best_setting.threshold)
+                    .with_adaptive_neighbour_tolerance(best_setting.tolerance),
+            );
+            let m = renderer.render_measured(
+                Some(&request),
+                Instruments {
+                    quiet: true,
+                    ..Instruments::default()
+                },
+            );
+            let film = m.film.as_ref().expect("a film for the two AOVs");
+            let counts = film.var_channels(&m.buffer, &vars[0]).swap_remove(0);
+            let variance = film.var_channels(&m.buffer, &vars[1]).swap_remove(0);
+            let predicted =
+                adaptive::top_down(&crate::tracer::replay(trace, best_setting).taken, rw);
+            let mismatched = counts
                 .iter()
-                .find(|r| best.is_some_and(|b| b.id == r.id))
-                .map(|r| {
-                    trials::summary(
-                        &r.per_crop[k]
-                            .pairs
-                            .iter()
-                            .map(|(_, t)| t.render_s)
-                            .collect::<Vec<_>>(),
-                    )
-                    .0
-                })
-                .or_else(|| {
-                    runs.first().map(|r| {
-                        trials::summary(
-                            &r.per_crop[k]
-                                .pairs
-                                .iter()
-                                .map(|(b, _)| b.render_s)
-                                .collect::<Vec<_>>(),
-                        )
-                        .0
-                    })
-                })
-                .map(|s| s / spp_t as f64)
-                .unwrap_or(per_px_spp * p.rect.area() as f64);
-            let fixed_s = per_spp * spp_a as f64;
-            let px = m.rays.adaptive_pixels.max(1) as f64;
-            adaptive.push(AdaptiveCrop {
+                .zip(&predicted)
+                .filter(|&(&c, &n)| c != n as f32)
+                .count() as u64;
+            verification.push(AdaptiveVerification {
                 crop: crops_out[k].id.clone(),
-                variance_threshold: threshold.into(),
-                spp: spp_a,
-                mean_spp: (m.rays.adaptive_samples as f64 / px).into(),
-                early_stopped_share: (m.rays.early_stopped as f64 / px).into(),
-                time_adaptive_s: shot.render_s.into(),
-                time_fixed_estimate_s: fixed_s.into(),
-                time_saved_share: (1.0 - shot.render_s / fixed_s).into(),
+                sample_count_matches: mismatched == 0,
+                mismatched_pixels: mismatched,
+                predicted_render_s: pts[g].time_s.into(),
+                measured_render_s: m.render_s.into(),
             });
+            crop_maps.best_sample_count = counts;
+            crop_maps.best_variance = variance;
+            maps.crops.push(crop_maps);
         }
-    } else {
-        not_tried.push(NotTried {
-            id: "adaptive".into(),
-            tier: 2,
-            reason: "not_applicable".into(),
-            detail: Some("the scene's variance threshold is 0: adaptive sampling is off".into()),
+        adaptive_suggestions = adaptive_suggestions_for(
+            authored_setting,
+            (g != 0).then_some(best_setting),
+            gain,
+            &verification,
+            recorded.len(),
+        );
+        adaptive_maps = Some(maps);
+        Some(AdaptiveSweep {
+            spp_recorded: spp_r,
+            authored_spp_capped: authored_setting.spp > spp_r,
+            adaptive_off_as_authored: authored_setting.threshold <= 0.0,
+            unguided: guiding_dropped,
+            target_from: if target.is_some() {
+                target_from.into()
+            } else {
+                "authored".into()
+            },
+            grid: adaptive_grid(&grid),
+            authored: pick_of(0),
+            best: pick_of(g),
+            target_reached,
+            delta_eff_over_authored: gain.into(),
+            front,
+            verification,
+            replay_s: replay_s.into(),
+            maps: None,
+        })
+    };
+    drop(recorded);
+    let mut sweep = sweep;
+    if let (Some(path), Some(sw)) = (&options.adaptive_maps, sweep.as_mut()) {
+        sw.maps = Some(AdaptiveMapsInfo {
+            path: path.clone(),
+            layers: ADAPTIVE_MAP_LAYERS.iter().map(|l| (*l).into()).collect(),
+            written: true,
+            reason: None,
         });
     }
-    let sample_budget = target.map(|t| SampleBudget {
-        target_mrse: t.into(),
+    if options.adaptive_maps.is_none() {
+        adaptive_maps = None;
+    } else if sweep.is_none() {
+        not_tried.push(NotTried {
+            id: "adaptive_maps".into(),
+            tier: 2,
+            reason: "not_applicable".into(),
+            detail: Some("tier 2 recorded no crop, so there are no maps to write".into()),
+        });
+    }
+    let sample_budget = (target.is_some() || sweep.is_some()).then(|| SampleBudget {
+        target_mrse: Num(target.unwrap_or(f64::NAN)),
         target_from: target_from.into(),
         settings: best.map_or_else(|| "baseline".into(), |t| t.id.clone()),
         estimate: true,
         spp_to_target: spp_to_target.map(Num),
         projected_render_s: projected.map(Num),
-        adaptive,
+        adaptive: sweep,
         projected_setup_s: Some(Num(projected_setup)),
     });
     phases.push(PhaseRun {
@@ -1519,7 +1741,9 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     let static_findings = checks::run(&facts);
 
     // -- Report ---------------------------------------------------------------
-    let converged = converged(&trials_out, &static_findings);
+    let converged = converged(&trials_out, &static_findings) && adaptive_suggestions.is_empty();
+    let mut suggestions = suggestions;
+    suggestions.extend(adaptive_suggestions);
     let effective_settings = effective(&authored, options);
     let suggested_command = command(options, &best_settings, &suggestions, region);
     let exit = if tier1_complete { 0 } else { 3 };
@@ -1565,6 +1789,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         converged,
         suggested_command,
         deltas: None,
+        adaptive_maps,
     };
     if let Some(prev) = &options.previous {
         report.deltas = Some(compare::deltas(prev, &report));
@@ -1574,6 +1799,102 @@ pub fn run(scene: Scene, options: &Options) -> Report {
 
 /// The combined trial's id.
 const COMBINED: &str = "combined";
+
+/// The adaptive sweep's evidence id, and its suggestions' id prefix.
+const ADAPTIVE_SUGGESTION: &str = "adaptive_sampling";
+
+/// The suggestions a sweep makes (`tune-adaptive-sampling-in-diagnostic`,
+/// design D5): one per value `best` changes from `authored`, by its flag
+/// and attribute, citing the sweep and the verifications. None unless
+/// `best` is not the authored point, every one of the `recorded` crops was
+/// verified and its `sampleCount` matched the replay, and the gain is at
+/// least the suggestion bar.
+fn adaptive_suggestions_for(
+    authored: AdaptiveSetting,
+    best: Option<AdaptiveSetting>,
+    gain: f64,
+    verification: &[AdaptiveVerification],
+    recorded: usize,
+) -> Vec<Suggestion> {
+    let verified = recorded > 0
+        && verification.len() == recorded
+        && verification.iter().all(|v| v.sample_count_matches);
+    let Some(best) = best.filter(|_| verified && gain >= trials::SUGGEST_ABOVE) else {
+        return Vec::new();
+    };
+    let mut evidence = vec![ADAPTIVE_SUGGESTION.to_owned()];
+    evidence.extend(
+        verification
+            .iter()
+            .map(|v| format!("adaptive_verify@{}", v.crop)),
+    );
+    let changed = [
+        (
+            "samples_per_pixel",
+            best.spp != authored.spp,
+            "-s",
+            "crust:samplesPerPixel",
+            best.spp.to_string(),
+        ),
+        (
+            "variance_threshold",
+            best.threshold != authored.threshold,
+            "--variance-threshold",
+            "crust:varianceThreshold",
+            best.threshold.to_string(),
+        ),
+        (
+            "min_samples_per_pixel",
+            best.min_samples != authored.min_samples,
+            "--min-samples",
+            "crust:minSamplesPerPixel",
+            best.min_samples.to_string(),
+        ),
+        (
+            "adaptive_neighbour_tolerance",
+            best.tolerance != authored.tolerance,
+            "--neighbour-tolerance",
+            "crust:adaptiveNeighbourTolerance",
+            best.tolerance.to_string(),
+        ),
+    ];
+    changed
+        .into_iter()
+        .filter(|c| c.1)
+        .map(|(name, _, flag, attribute, value)| Suggestion {
+            id: format!("{ADAPTIVE_SUGGESTION}.{name}"),
+            flag: Some(flag.into()),
+            usd_attribute: Some(attribute.into()),
+            value,
+            expected_delta_eff: Num(gain),
+            evidence: evidence.clone(),
+            expected_delta_eff_at_target: Num(gain),
+        })
+        .collect()
+}
+
+/// What an adaptive grid tried, by value.
+fn adaptive_grid(grid: &[AdaptiveSetting]) -> AdaptiveGrid {
+    let mut thresholds: Vec<f32> = grid.iter().map(|s| s.threshold).collect();
+    let mut tolerances: Vec<f32> = grid.iter().map(|s| s.tolerance).collect();
+    for v in [&mut thresholds, &mut tolerances] {
+        v.sort_by(f32::total_cmp);
+        v.dedup_by_key(|x| x.to_bits());
+    }
+    let mut minimums: Vec<u32> = grid.iter().map(|s| s.min_samples).collect();
+    let mut caps: Vec<u32> = grid.iter().map(|s| s.spp).collect();
+    for v in [&mut minimums, &mut caps] {
+        v.sort_unstable();
+        v.dedup();
+    }
+    AdaptiveGrid {
+        variance_thresholds: thresholds.into_iter().map(|t| Num(t.into())).collect(),
+        min_samples_per_pixel: minimums,
+        adaptive_neighbour_tolerances: tolerances.into_iter().map(|t| Num(t.into())).collect(),
+        samples_per_pixel: caps,
+        settings: grid.len(),
+    }
+}
 
 /// The winners of tier 1 (D3): per factor, the index of its best `better`
 /// value and that value's overall ΔEff. A `biased` trial is never
@@ -1836,6 +2157,15 @@ fn command(
     }
     if options.auto_tx {
         parts.push("--auto-tx".into());
+    }
+    // The adaptive sweep's values, which the settings above do not carry.
+    for sug in suggestions
+        .iter()
+        .filter(|s| s.id.starts_with(ADAPTIVE_SUGGESTION))
+    {
+        if let Some(flag) = &sug.flag {
+            parts.extend([flag.clone(), sug.value.clone()]);
+        }
     }
     let stage_only: Vec<String> = suggestions
         .iter()
