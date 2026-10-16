@@ -326,7 +326,7 @@ sweep's, once a render has verified it (below).
 ## The adaptive sampling sweep (`tune-adaptive-sampling-in-diagnostic`)
 
 Tier 2 looks for the adaptive settings that reach the target soonest: the variance
-threshold, the minimum, the neighbour tolerance and the cap. It costs two renders per
+threshold, the minimum, the neighbour tolerance and the cap. It costs three renders per
 crop however many settings it tries. The first version rendered one adaptive crop at
 the authored threshold and reported three numbers.
 
@@ -346,9 +346,42 @@ the authored threshold and reported three numbers.
   (`tracer/tests.rs`) pins this bitwise on `cornellbox` and `veach_mis`, full frame
   and region, at six settings: `sampleCount` in every pixel, the `variance` bits,
   and the early-stopped and held counters.
-- **Predict.** A setting's MRSE is `trials::mrse` of the replayed variances, scaled
-  into the reference's units by the exposure, against the crop's reference with the
-  recording blended in. Its time is each pixel's samples at its tile's cost. That cost
+- **Predict the error.** Each crop is rendered a second time at `spp_r`, with the same
+  settings and another seed (`seed(frame, repeats + 1)`; the recording's is
+  `repeats`, past every pair's). The second render `b` is independent of every stop
+  the replay decides. A pixel stopped at mean `μ` has error `(μ − b)² − (μ_N − b)²
+  / 2`, where `μ_N` is the recording's full mean. Since `E[(μ − b)²] = MSE(μ) +
+  MSE(b)`, and `μ_N` and `b` are the same render but for the seed, this is unbiased
+  for the stopped mean's error, including the bias the stop put in its mean, and it
+  assumes nothing about the samples. Over a crop it is relative to tier 1's blended
+  reference with the recording in it. The pixels in the top `MRSE_TRIM` of `(μ_N −
+  b)² / 2` are left out, the same pixels for every setting: they are fireflies, whose
+  error two renders cannot measure. Crops combine by the geometric mean of their
+  efficiency ratios, as tier 1's do. Without room for the second render, a crop falls
+  back on each pixel's own variance (`error_from: "variance"`).
+
+  Three estimators were tried and measured against a full-frame reference before this
+  one (`veach_mis`, `--target-mrse 0.006`, the suggestion's tier-1 settings, clamp
+  off, against an adaptive-off 2048 spp render of another seed, three interleaved
+  runs of each side):
+
+  | error from | best | predicted ΔEff | full frame (time; relMSE) | measured ΔEff |
+  |-|-|-|-|-|
+  | each pixel's variance at its stop | 0.02 / 8 / −1 | 1.97 | 2.28× faster; 1.51× | 1.51 |
+  | held-out samples, i.i.d. correction | 0.1 / 8 / −1, 64 spp | 10.5 | not rendered | — |
+  | second render (shipped) | 0.1 / 8 / 2 | 3.94 | 5.56× faster; 1.41× | 3.95 |
+
+  The values are threshold / minimum / tolerance. Each pixel's own variance at its
+  stop is biased low, because a pixel stops when it is low (Kirk & Arvo). The
+  held-out mean of samples `n..N` is independent of the stop, but subtracting its
+  variance by the i.i.d. formula takes off too much for QMC samples, while the fixed
+  point kept the formula's overestimate: the two erred in opposite directions. Tier 1's
+  baseline images as the reference were tried next. At 3 × 16 spp they are too noisy
+  to measure a 128 spp image's error: quartering the samples moved the error 1.3×,
+  not 4×. Dividing by their mean also let dark pixels swamp a crop. Trimmed at 0.1%,
+  the shipped estimator's 2.2× by `crust diff`'s trimmed relMSE is lower: the sweep
+  predicts the untrimmed error, fireflies counted.
+- **Predict the time.** Its time is each pixel's samples at its tile's cost. That cost
   is the tile's share of the recording's wall-clock `render_s`, by its measured
   seconds, over its samples. The tiles' own seconds add up workers' time, about N ×
   the wall on N threads: used directly, the first version predicted 6.8 s for a crop
@@ -363,18 +396,19 @@ the authored threshold and reported three numbers.
   That makes 96–145 settings on the samples. `front` keeps each predicted outcome
   once.
 - **`spp_r`** is the authored count within 64..=1024, so the authored point replays
-  as authored. It halves, down to 64, while a recording and a verification of every
-  crop would take more than half of what is left after the baseline. It halves again,
-  down to 4, while the traces would pass 512 MiB together. They all stay alive until
-  the verifications, which wait for the pick across crops. The reserve is the
-  recording and the verification of every crop at `spp_r`.
+  as authored. It halves, down to 64, while a recording, a second render and a
+  verification of every crop would take more than half of what is left after the
+  baseline. It halves again, down to 4, while the traces would pass 512 MiB together.
+  They all stay alive until the verifications, which wait for the pick across crops.
+  The reserve is those three renders of every crop at `spp_r`.
 - **Pick and verify.** `best` is the least summed predicted time at or below the
   target on every crop. Without a target, each crop's bar is the authored point's
   own MRSE. When no setting reaches the bar, `best` is the lowest summed MRSE.
   `best` is rendered once per crop with the `sampleCount` and `variance` AOVs, and
   the rendered counts must equal the replay's in every pixel. The suggestion gate
   (`adaptive_suggestions_for`) needs every crop verified and matched, `best` not the
-  authored point, and ΔEff ≥ 1.10, where ΔEff is summed time × summed MRSE. It then
+  authored point, and ΔEff ≥ 1.10, where ΔEff is the geometric mean over the crops of
+  time × MRSE, authored over best. It then
   makes one suggestion per changed value, `adaptive_sampling.<setting>`, whose flags
   `suggested_command` carries.
 - **Guided best settings are swept unguided.** A guided final pass is guided or not
@@ -386,10 +420,10 @@ the authored threshold and reported three numbers.
 Measured 2026-10-16 on a 4-thread container, `--budget 2m`, three 128×128 crops at
 `spp_r = 128`. Every crop's verification matched. The replays took 0.65 s for 144
 settings (cornellbox) and 0.39 s for 145 (veach_mis), over 16 MiB of trace per
-crop. Predicted and single-run measured times were
-within 5–13%. Tier 2 took 10.0 s against 5.3 s before on cornellbox; on veach_mis,
-whose stage has adaptive sampling off, it took 8.8 s where it measured nothing
-before.
+crop. Predicted and single-run measured times were within 1–32%, five of six under 10%.
+Tier 2 took 13.3 s against 5.3 s before on cornellbox; on veach_mis, whose stage has
+adaptive sampling off, it took 13.5 s where it measured nothing before. With two
+renders per crop, before the second render, it took 10.0 s and 8.8 s.
 
 Tier 3: the clamp counter's result, `ended_depth / camera rays`, one half-depth
 crop trial, subdivision counts, and the **light-sampling reach**: per crop, one
@@ -587,32 +621,23 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
   trims (ALab, 4 spp: guiding read +8–13% where its bias is −7%). The verdict
   held; the number did not. More budget makes it a measure.
 - **Tier 2's adaptive sweep takes a share of a short budget.** It reserves a
-  recording and a verification of every crop at `spp_r`, about twice what the first
-  version's single adaptive render reserved (32.8 s on ALab at `--budget 2m`). It is
-  bounded at half of what the baseline leaves, by halving `spp_r` down to 64.
+  recording, a second render and a verification of every crop at `spp_r`, about three
+  times what the first version's single adaptive render reserved (32.8 s on ALab at
+  `--budget 2m`). It is bounded at half of what the baseline leaves, by halving
+  `spp_r` down to 64.
 - **The adaptive sweep runs unguided** when the best tier-1 settings are guided (see
   above). The values it finds are for the unguided render.
 - **The adaptive grid is coarse:** thresholds step by factors of two. A second run
   with `--variance-threshold` near `best` refines it.
-- **A replayed MRSE trusts each pixel's own variance estimate at its stop.** A pixel
-  stops when that estimate is low, so an adaptive setting's predicted MRSE leans
-  optimistic (Kirk & Arvo). The verification checks the sample counts, not the error.
-  Measured 2026-10-16 on `veach_mis` with `--target-mrse 0.006`, the first stage the
-  sweep made a suggestion on: threshold 0.02, minimum 8, tolerance −1 at 128 spp. The
-  sweep predicted the same MRSE as the authored fixed count at half the time
-  (ΔEff 1.97). Full frame, with the suggested tier-1 settings and the clamp off,
-  against an adaptive-off 2048 spp reference of another seed, three interleaved runs
-  each:
-
-  | | render (min / mean) | relMSE | trimmed |
-  |-|-|-|-|
-  | authored, 128 fixed | 30.3 / 31.3 s | 4.27e-4 | 9.55e-5 |
-  | suggested | 13.3 / 13.9 s | 6.44e-4 | 1.26e-4 |
-
-  The gain is real, 2.28× faster for 1.51× the error, so about 1.5× efficiency. That
-  is above the bar, but the predicted ΔEff overstated it by about a third. An error
-  measured from each pixel's replayed mean against a reference independent of the
-  recording (the tier-1 images alone) would not lean this way; it is the next step.
+- **The sweep's error leaves fireflies out.** The top 0.1% of a crop's pixels by the
+  two renders' disagreement is not measured. Elsewhere the error is unbiased, but one
+  pair of renders estimates it, so on a firefly-dominated crop it is noisy: on
+  `veach_mis`'s crop_c, a quarter of the samples moved it only 1.25×. The predicted
+  ΔEff matched the full frame on `veach_mis` (3.94 against 3.95). That is one scene,
+  not a calibration.
+- **The error compares luminance means**, Σ lum / taken. That equals the pixel's
+  luminance only for a filter whose weights are 1 (box, triangle: the default). Under
+  a Gaussian, Blackman or Mitchell filter, the recording does not keep the weights.
 - **The reach mixes bias with a heavy tail.** Light-only is unbiased wherever
   every light is reachable by a shadow ray, yet at a few samples its estimate of
   a sharp glossy reflection of a large light is mostly low, with rare large

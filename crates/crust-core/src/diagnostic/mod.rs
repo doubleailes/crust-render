@@ -898,10 +898,10 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     // not known yet, so its reserve assumes them too.
     let setup_at = |k: usize| p1_selection + p1_training * areas[k] as f64 / pixels;
     let later = schedule::Later {
-        // A recording and a verification of every crop, the second at
-        // most the first's samples.
+        // A recording, a second render and a verification of every crop,
+        // the last at most the first's samples.
         tier2_s: (0..areas.len())
-            .map(|k| schedule::render_cost_s(per_px_spp, areas[k], spp_r, 2.0, setup_at(k)))
+            .map(|k| schedule::render_cost_s(per_px_spp, areas[k], spp_r, 3.0, setup_at(k)))
             .sum(),
         tier3_pixels: if half_depth_applies {
             2.0 * repeats as f64 * areas[0] as f64
@@ -1289,15 +1289,19 @@ pub fn run(scene: Scene, options: &Options) -> Report {
     // the training passes, and the image blends them: no replay of one
     // recording can say what a guided render takes. The sweep runs on the
     // best settings without guiding, and says so.
-    let sweep_settings = best_settings.with_guiding(
-        false,
-        best_settings.guiding_train_iterations(),
-        best_settings.guiding_prob(),
-    );
+    // Its own seed, past every pair's (`seeds`), and the second render's
+    // past that: no two of them share a sample.
+    let sweep_settings = best_settings
+        .with_guiding(
+            false,
+            best_settings.guiding_train_iterations(),
+            best_settings.guiding_prob(),
+        )
+        .with_frame(seed(authored.frame(), repeats));
     let guiding_dropped = best_settings.guiding();
     let exposure = authored.exposure_scale();
-    let refs = references(&runs, areas.len());
     // The best settings' setup on crop `k`, as tier 1 measured it.
+    let refs = references(&runs, areas.len());
     let best_setup = |k: usize| {
         runs.iter()
             .find(|r| best.is_some_and(|b| b.id == r.id))
@@ -1306,9 +1310,14 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                 |r| median(r.per_crop[k].pairs.iter().map(|(_, t)| t.setup_s())),
             )
     };
-    // Per recorded crop: its index, trace and predictions over the grid.
-    let mut recorded: Vec<(usize, crate::tracer::LuminanceTrace, Vec<adaptive::Point>)> =
-        Vec::new();
+    // Per recorded crop: its index, trace, predictions over the grid, and
+    // what its errors were measured against.
+    let mut recorded: Vec<(
+        usize,
+        crate::tracer::LuminanceTrace,
+        Vec<adaptive::Point>,
+        &'static str,
+    )> = Vec::new();
     let mut replay_s = 0.0;
     for (k, p) in picked.iter().enumerate() {
         let estimate = schedule::render_cost_s(
@@ -1345,12 +1354,42 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             lum: luminance(&m, rect, luma),
             var: std::mem::take(&mut m.var_map),
         };
-        // The crop's reference, with the recording blended in: on a crop
-        // tier 1 rendered nothing of, the recording alone.
-        let reference = if refs[k].lum.is_empty() {
-            image
+        // What the predicted errors are measured against: tier 1's baseline
+        // images of the crop, every one its own seed. On a crop tier 1
+        // rendered nothing of, each pixel's own variance, which reads low
+        // where pixels stop early.
+        let norm = if refs[k].lum.is_empty() {
+            image.lum.clone()
         } else {
-            trials::reference(&[&refs[k], &image])
+            trials::reference(&[&refs[k], &image]).lum
+        };
+        // What the predicted errors are measured against: the crop again,
+        // the same count and settings, another seed, so independent of every
+        // stop the replay decides. Without room for it, each pixel's own
+        // variance, which reads low where pixels stop early.
+        sched.set_spent(elapsed());
+        let reference = if sched.fits(2, estimate) {
+            renderer.reconfigure(settings.with_frame(seed(authored.frame(), repeats + 1)));
+            let second = renderer.render_measured(
+                None,
+                Instruments {
+                    quiet: true,
+                    ..Instruments::default()
+                },
+            );
+            adaptive::ErrorReference::independent(
+                &luminance(&second, rect, luma),
+                &image.lum,
+                &norm,
+            )
+        } else {
+            not_tried.push(NotTried {
+                id: format!("adaptive_second@{}", crops_out[k].id),
+                tier: 2,
+                reason: "budget".into(),
+                detail: Some("errors from each pixel's own variance instead".into()),
+            });
+            adaptive::ErrorReference::variance(&norm)
         };
         let trace = m
             .trace
@@ -1358,7 +1397,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             .expect("a fixed-count render keeps its trace");
         let costs = adaptive::pixel_costs(&trace, m.render_s);
         let clock = Instant::now();
-        let points = adaptive::sweep(&trace, &grid, &reference.lum, exposure, &costs);
+        let points = adaptive::sweep(&trace, &grid, &reference, exposure, &costs);
         replay_s += clock.elapsed().as_secs_f64();
         debug!(
             "diagnostic adaptive: {} recorded at {spp_r} spp ({} MiB of trace), {} settings \
@@ -1367,7 +1406,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             trace.bytes() >> 20,
             grid.len()
         );
-        recorded.push((k, trace, points));
+        recorded.push((k, trace, points, reference.name()));
     }
     let mut adaptive_suggestions: Vec<Suggestion> = Vec::new();
     let mut adaptive_maps: Option<AdaptiveMaps> = None;
@@ -1383,7 +1422,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
         None
     } else {
         let per_crop: Vec<Vec<adaptive::Point>> =
-            recorded.iter().map(|(_, _, pts)| pts.clone()).collect();
+            recorded.iter().map(|(_, _, pts, _)| pts.clone()).collect();
         // Without a target, the authored point's own error on each crop:
         // the cheapest setting at least as clean everywhere.
         let targets: Vec<f64> = per_crop
@@ -1404,7 +1443,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             per_crop: recorded
                 .iter()
                 .zip(&targets)
-                .map(|((k, _, pts), &t)| {
+                .map(|((k, _, pts, from), &t)| {
                     let pt = &pts[g];
                     AdaptivePoint {
                         crop: crops_out[*k].id.clone(),
@@ -1414,13 +1453,14 @@ pub fn run(scene: Scene, options: &Options) -> Report {
                         mrse: pt.mrse.into(),
                         predicted_render_s: pt.time_s.into(),
                         reaches_target: pt.mrse <= t,
+                        error_from: (*from).into(),
                     }
                 })
                 .collect(),
         };
         let front = recorded
             .iter()
-            .map(|(k, _, pts)| AdaptiveFront {
+            .map(|(k, _, pts, _)| AdaptiveFront {
                 crop: crops_out[*k].id.clone(),
                 points: adaptive::front(pts)
                     .into_iter()
@@ -1442,7 +1482,7 @@ pub fn run(scene: Scene, options: &Options) -> Report {
             resolution: [w, h],
             crops: Vec::new(),
         };
-        for (k, trace, pts) in &recorded {
+        for (k, trace, pts, _) in &recorded {
             let k = *k;
             let rw = trace.rect().width();
             let square = f64::from(exposure) * f64::from(exposure);
