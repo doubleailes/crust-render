@@ -1,0 +1,32 @@
+[package]
+name = "crust-tools"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "What runs renders to answer a question: crust diagnostic, the light path inspector, crust diff's comparison, the sampling stamp and crust check's report."
+
+[lib]
+name = "crust_tools"
+path = "src/lib.rs"
+
+[dependencies]
+crust-base = { path = "../crust-base" }
+crust-shading = { path = "../crust-shading" }
+crust-world = { path = "../crust-world" }
+crust-integrator = { path = "../crust-integrator" }
+crust-usd = { path = "../crust-usd" }
+utils = { path = "../utils" }
+rayon.workspace = true
+glam.workspace = true
+tracing.workspace = true
+# The `crust diagnostic` report (`diagnostic/report.rs`): written as JSON
+# for a machine reader, and read back for `--baseline`.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# `std` for `tracing::subscriber::with_default`, which tests use to check
+# which warnings a call raises.
+tracing = { workspace = true, features = ["std"] }

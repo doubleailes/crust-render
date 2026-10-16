@@ -10,7 +10,7 @@ picture-changing tiers), the measurement rules that keep a comparison honest
 (unbiased probe conditions, interleaved pairs, per-crop verdicts), the choice of
 representative crops, the `crust-diagnostic/1` JSON report and the Markdown
 rendered from it, the `--baseline` comparison with a previous run, and the exit
-status. It lives in `crust-core/src/diagnostic/`, driven by the `crust-render`
+status. It lives in `crust-tools/src/diagnostic/`, driven by the `crust-render`
 CLI. The reasoning and measurements behind these requirements are in
 `design.md`.
 

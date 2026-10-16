@@ -106,12 +106,19 @@ See [`docs/alab_profile.md`](docs/alab_profile.md) for the measurements.
 | `crust-mtlx` | MaterialX reader and compiler |
 | `crust-jit` | Optional Cranelift JIT for MaterialX programs |
 | `crust-nn` | Small deterministic neural networks for light selection |
-| `crust-core` | The engine: USD import, integrator, materials, lights, volumes, guiding |
+| `crust-base` | Engine foundation: settings, statistics, colour management, rays |
+| `crust-shading` | Materials: OpenPBR, MaterialX, UsdPreviewSurface; light path expressions |
+| `crust-world` | The scene's geometry and lights, and how lights are picked |
+| `crust-integrator` | The path tracer: AOVs, sampling, path guiding, volumes, the camera |
+| `crust-usd` | USD import |
+| `crust-tools` | `crust diagnostic`, `crust light-paths`, `crust diff`, `crust check` |
+| `crust-core` | The six engine crates above as one library |
 | `crust-assets` | Image, Ptex and IES decoders and texture caches |
 | `crust-render` | The `crust` CLI |
 
-Every crate is `forbid(unsafe_code)` except `crust-core` and `crust-jit`, which use
-`deny` and allow a few audited exceptions.
+Every crate is `forbid(unsafe_code)` except `crust-usd` and `crust-jit`, which use
+`deny` and allow a few audited exceptions. The engine crates are layered: none depends on
+a crate listed below it ([`docs/architecture.md`](docs/architecture.md) § Layering).
 
 ## Status
 

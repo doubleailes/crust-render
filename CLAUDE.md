@@ -97,33 +97,51 @@ verifies shading **in numbers, not by eye**.
 
 ## Workspace
 
-Eight crates under `crates/` (ownership table in `docs/architecture.md`):
-`crust-rt` (intersection kernel, no crust deps), `crust-mtlx` (MaterialX reader, no crust
-deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-nn`
-(tiny bit-deterministic networks — hash grid, dense layers, Adam — for `neural` light
-selection; no dependencies at all, the caller brings threads and random numbers), `crust-core`
-(the engine library: import, integrator, materials, lights, volumes, guiding, stats),
-`crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
-`crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
-writes their files — the images, the reports — while the engine writes nothing: `main.rs`,
-`products.rs`, `logging.rs`) and `utils` (stateless math:
-warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
-`opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
-re-exports the public surface.
+Fourteen crates under `crates/` (ownership table in `docs/architecture.md`):
+
+- **Leaf libraries**, free of crust types: `crust-rt` (intersection kernel), `crust-mtlx`
+  (MaterialX reader), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`),
+  `crust-nn` (tiny bit-deterministic networks — hash grid, dense layers, Adam — for `neural`
+  light selection; no dependencies at all, the caller brings threads and random numbers)
+  and `utils` (stateless math: warps, MIS heuristics, the one Rec.709 `luminance`).
+- **The engine**, one crate per layer, each importing only from those below it
+  (`docs/architecture.md` § Layering): `crust-base` (config, names, warnings, reports,
+  stats, colour, textures, errors, rays), `crust-shading` (materials, light path
+  expressions), `crust-world` (the `World`, lights and their selection), `crust-integrator`
+  (`Renderer`, the path tracer, AOVs, filters, samplers, guiding, volumes, the camera),
+  `crust-usd` (USD import, the only one on openusd) and `crust-tools` (the diagnostic, the
+  light path inspector, `crust diff`, the stamp, `crust check`). `crust-core` holds no
+  code: it re-exports the six as `crust_core::…`, and keeps the integration tests.
+- **Hosts**: `crust-assets` (every file decoder and texture cache, behind
+  `crust_core::AssetLoader`) and `crust-render` (the CLI, binary `crust`; it drives a render,
+  a diagnosis or a comparison and writes their files — the images, the reports — while the
+  engine writes nothing: `main.rs`, `products.rs`, `logging.rs`).
+
+`openqmc-rs` (all sampling) and `opensubdiv-rs` / `ptex-rs` are external. Outside the
+engine, import from `crust_core::` roots. Inside it, each crate glob-imports the crates
+below at its root, so `crate::color` or `crate::LightList` names a lower crate's item as it
+did when the engine was one crate; a module a crate above needs is `#[doc(hidden)] pub`. A
+unit test that needs a crate above its own (a renderer test that loads USD) is an
+integration test in `crust-core/tests/`.
 
 ## Rules
 
 **Code shape**
 
-- Safe Rust everywhere: crates are `forbid(unsafe_code)` (`crust-nn` included) except `crust-core` (`deny`, one
+- Safe Rust everywhere: crates are `forbid(unsafe_code)` (`crust-nn` included) except `crust-usd` (`deny`, one
   test-only `GlobalAlloc` and, behind the `mmap` feature, the import's memory-mapped USD
   reads, `mapping_resolver` in `usd_import/mod.rs`) and `crust-jit` (`deny`, five audited blocks). Adding `unsafe`,
   or a dependency that carries it on the hot path, is a project decision, not a local one.
-- **crust-core decodes no assets.** Every image, Ptex or IES byte crosses `AssetLoader`
+- **The engine decodes no assets.** Every image, Ptex or IES byte crosses `AssetLoader`
   into `crust-assets`; a loader returning `None` means "fall back", never an error.
-- `crust-rt`, `crust-mtlx` and `crust-nn` stay free of crust types. crust-core adopts their
+- `crust-rt`, `crust-mtlx` and `crust-nn` stay free of crust types. The engine adopts their
   vocabulary (`crust_rt::Geometry`, `Texture2D = crust_mtlx::Texture`) instead of wrapping
   it — a wrapper adds a vtable hop per texel fetch that LTO cannot remove.
+- A small function a crate above calls per sample needs `#[inline]`: rustc inlines across
+  a crate boundary only what is marked (or trivially small), and fat LTO did not make up
+  for it — splitting the engine into crates cost +1.7% instructions on `materialx_basic`
+  until the ten functions that crossed into the integrator's loop were marked
+  (`docs/architecture.md` § Layering). Measure with callgrind, per function.
 - `scene/usd_import/` siblings share through `pub(super)` and import each other
   explicitly — no `use super::*`, so a file's `use` block is its real dependency list.
 - The USD import is single-threaded and reads the time code from a thread-local
@@ -175,7 +193,7 @@ sample. `--stats` output is an event on `STATS_TARGET`, which
 `-l` cannot silence. Details: `openspec/specs/cli/design.md` § Logging.
 
 **Environment switches** exist to A/B an optimization against the behaviour it replaced.
-Adding one: a field on `crust_core::Config` (`crust-core/src/config.rs`, the only place
+Adding one: a field on `crust_core::Config` (`crust-base/src/config.rs`, the only place
 the environment is read), a row in `docs/architecture.md` § Environment switches, a
 section in the user documentation (`site/`, below), and make the "off" side the old
 behaviour so the A/B is honest.

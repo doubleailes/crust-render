@@ -119,7 +119,7 @@ jobs:
       # probe that counts requested bytes through a global allocator, so it
       # has to run alone; the flags are the ones its documentation gives.
       - name: Subdivision memory probe
-        run: cargo test -p crust-core --lib subdivision_memory_probe -- --ignored --nocapture --test-threads=1
+        run: cargo test -p crust-usd --lib subdivision_memory_probe -- --ignored --nocapture --test-threads=1
 
   # Nightly Rust, the `bvh8` experiment included, runs in parallel as its
   # own workflow: .github/workflows/nightly.yml.

@@ -16,7 +16,7 @@ Imath 3.x):
         -I <imath>/include BSDL/src/genluts.cpp -pthread -o genluts
     mkdir -p out/SPI out/MTX && ./genluts out          # ~1 min on 4 cores
     scripts/tables/bsdl_luts_to_rust.py out/MTX/bsdf_dielectric_reflfront_luts.h \\
-        > crates/crust-core/src/material/closure/bsdl_tables.rs
+        > crates/crust-shading/src/material/closure/bsdl_tables.rs
 
 The baked values are deterministic (hashed QMC seeds); the output of this recipe
 matches Typhoon's own `dielectricReflFrontLut.h` bit for bit.

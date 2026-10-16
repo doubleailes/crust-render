@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <!--
   MaterialX subsurface scattering: `subsurface_bsdf` rendered as a random walk
-  (crates/crust-core/src/subsurface.rs, a port of NVIDIA Typhoon's walk).
+  (crates/crust-integrator/src/subsurface.rs, a port of NVIDIA Typhoon's walk).
 
   Three materials, one per way a document reaches the leaf:
 

@@ -5,73 +5,42 @@ edition = { workspace = true }
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "The engine as one library: re-exports crust-base, crust-shading, crust-world, crust-integrator, crust-usd and crust-tools."
 
 [lib]
 name = "crust_core"
 path = "src/lib.rs"
 
 [features]
-# Forwards crust-rt's traversal counters; see that crate's feature.
-traversal-stats = ["crust-rt/traversal-stats"]
-# Forwards crust-rt's nightly-only 8-wide BVH nodes; see that crate's feature.
-bvh8 = ["crust-rt/bvh8"]
-# Compile MaterialX programs to machine code with Cranelift (crust-jit, the
-# workspace's one crate with `unsafe` outside tests). Off here and on in
-# the renderer, so the engine library carries no JIT unless a host asks;
-# `CRUST_SHADER_JIT=0` turns it off at run time.
-jit = ["dep:crust-jit"]
-# Read the import's USD files through read-only memory mappings:
-# `usd_import::stage_builder` opts in through the crate's one non-test
-# `unsafe`, which this feature alone compiles. Off here and on in the
-# renderer, like `jit`; `CRUST_USD_MMAP=0` turns it off at run time.
-# openusd's own `mmap`, and with it `memmap2`, is compiled in only with this
-# feature: openusd has no default features since 0.8.
-mmap = ["openusd/mmap"]
+# Forward the layer crates' features; each is described where it is defined.
+traversal-stats = ["crust-world/traversal-stats"]
+bvh8 = ["crust-base/bvh8"]
+jit = ["crust-shading/jit"]
+mmap = ["crust-usd/mmap"]
 
 [dependencies]
-utils = { path = "../utils" }
-openqmc-rs = "0.2.4"
-crust-rt = { path = "../crust-rt" }
-rayon.workspace = true
-glam.workspace = true
-tracing.workspace = true
-openusd.workspace = true
-# The typed schema views (UsdGeom / UsdLux / UsdShade / UsdRender) left the
-# core crate in openusd 0.7 and ship separately, versioned in lockstep. UsdSkel,
-# UsdVol, UsdProc and UsdMedia are compiled in for their types alone: the import
-# composes a prim's xformOps only when the schema registry knows it is
-# Xformable, and a SkelRoot, Volume, GenerativeProcedural or SpatialAudio from a
-# family left out is unknown, so its transform would be dropped. With them,
-# every Xformable type C++ USD defines is known (the remaining families,
-# UsdPhysics, UsdUI and UsdSemantics, define none).
-openusd-schemas = { workspace = true, features = ["geom", "lux", "shade", "render", "skel", "vol", "proc", "media"] }
-# Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
-# Catmull-Clark subdivision at USD import: zero dependencies,
-# `forbid(unsafe_code)`. Pinned to a release tag; the committed `Cargo.lock`
-# records the commit it resolved to (c672796), so a moved tag changes nothing
-# until a `cargo update`, and then shows as a lock diff in review.
-opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", tag = "0.5.0" }
-# The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
-# graphs onto `Material` / `OpenPBR`.
-crust-mtlx = { path = "../crust-mtlx" }
-# The tiny-network kit `neural` light selection learns visibility with
-# (`light_visibility.rs`): no dependencies, `forbid(unsafe_code)`.
-crust-nn = { path = "../crust-nn" }
-ocio.workspace = true
-crust-jit = { path = "../crust-jit", optional = true }
-# The `crust diagnostic` report (`diagnostic/report.rs`): written as JSON
-# for a machine reader, and read back for `--baseline`. Both were already in
-# the lock (criterion's, a dev-dependency), so naming them adds no package;
-# they are new to the renderer's own build. Neither carries `unsafe` on any
-# hot path: they run once per diagnostic, after the renders.
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+crust-base = { path = "../crust-base" }
+crust-shading = { path = "../crust-shading" }
+crust-world = { path = "../crust-world" }
+crust-integrator = { path = "../crust-integrator" }
+crust-usd = { path = "../crust-usd" }
+crust-tools = { path = "../crust-tools" }
 
 [dev-dependencies]
 criterion = "0.8"
 # `std` for `tracing::subscriber::with_default`, which the import tests use
 # to check which warnings a stage's render settings produce.
 tracing = { workspace = true, features = ["std"] }
+# What the integration tests and the bench name directly, besides the
+# engine: they reached these through crust-core's own dependencies before
+# the engine split into crates.
+glam.workspace = true
+openqmc-rs = "0.2.4"
+openusd.workspace = true
+openusd-schemas = { workspace = true, features = ["geom", "lux", "shade", "render", "skel", "vol", "proc", "media"] }
+rayon.workspace = true
+serde_json = "1.0.151"
+utils = { path = "../utils" }
 
 [[bench]]
 name = "integrator"

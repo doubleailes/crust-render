@@ -37,13 +37,13 @@ The crate split is **sound at the top level**, and better than most projects thi
 | `crust-assets` | every file decoder and texture cache | crust-core (implements its `AssetLoader`) |
 | `crust-render` | CLI binary | crust-core, crust-assets |
 
-There are no cycles. The leaf crates (`crust-rt`, `crust-mtlx`) are kept free of renderer types. `crust-assets → crust-core` is a real dependency inversion: `AssetLoader` is defined in `crates/crust-core/src/scene.rs:184` and implemented in `crates/crust-assets/src/lib.rs:742`, so the engine has no image, EXR or Ptex dependency.
+There are no cycles. The leaf crates (`crust-rt`, `crust-mtlx`) are kept free of renderer types. `crust-assets → crust-core` is a real dependency inversion: `AssetLoader` is defined in `crates/crust-usd/src/scene.rs:184` and implemented in `crates/crust-assets/src/lib.rs:742`, so the engine has no image, EXR or Ptex dependency.
 
 The problems are **inside `crust-core`**, which holds 36.5k of the 56k production lines and is the de-facto monolith:
 
 - **USD import is a third of the engine.** `scene/usd_import/` plus `scene/subdiv.rs` is about 11.4k lines (31% of crust-core). One module tree mixes USD reading, tessellation policy, instancing, light linking, material binding and time evaluation. A `crust-usd` crate boundary would let the import be tested, versioned and (eventually) parallelised independently of the integrator. Today, any change to the importer recompiles and relinks the whole engine.
 - **God functions rather than god structs.**
-  - `trace_path` is about 660 lines (`crates/crust-core/src/tracer/path.rs:748-1408`). The entire integrator is one function: surface NEE, BSDF bounce, volume tracking, guiding and Russian roulette.
+  - `trace_path` is about 660 lines (`crates/crust-integrator/src/tracer/path.rs:748-1408`). The entire integrator is one function: surface NEE, BSDF bounce, volume tracking, guiding and Russian roulette.
   - `load_scene` is about 335 lines (`usd_import/mod.rs:528-862`).
   - The CLI `main()` is about 335 lines (`crates/crust-render/src/main.rs:343-677`).
   - `path.rs` has no unit tests of its own, so `trace_path` can be tested only through whole renders. This is the single largest barrier to refactoring the integrator safely.
@@ -106,7 +106,7 @@ The problems are **inside `crust-core`**, which holds 36.5k of the 56k productio
 ### What is good
 
 - **Typed errors, with no `anyhow`.**
-  - crust-core has `Error` (`crates/crust-core/src/error.rs:7`), which implements `source()` and keeps the openusd error whole.
+  - crust-core has `Error` (`crates/crust-base/src/error.rs:7`), which implements `source()` and keeps the openusd error whole.
   - crust-assets has `AssetError` (`crates/crust-assets/src/error.rs:15`), with a source per decoder and a `path()` accessor.
   - crust-mtlx has `MtlxError` (`parse.rs:109`).
 - **Very few panics in production code.** With inline `#[cfg(test)]` modules excluded, there are 12 `.unwrap()`, 36 `.expect()`, 1 `panic!` and 6 `unreachable!` in about 44k lines. Nearly all `expect`s state an invariant ("level 0 always exists", "lc > 0 implies bounds"). The one input-driven `unwrap` (`crust-assets/src/ies.rs:213,220`) is protected by the `n_h == 0` check at `ies.rs:92-96`.
@@ -176,7 +176,7 @@ Gaps:
 - Matching is generally exhaustive. There is one `_ => {}` in production code, and catch-all arms are rare.
 - **Exhaustiveness is defeated by error-conflating wildcards** in the importer, such as `_ => return Some(IDENTITY)` (`xform.rs:86`). These are the risky catch-alls: they swallow the `Err` arm, not a new enum variant.
 - **`#[non_exhaustive]` is used nowhere** (0 uses across 38 public enums). See section 2.
-- **A doc defect.** The rustdoc block written for `PtexMipSpace` (`crates/crust-core/src/config.rs:24-51`) is attached to `TriPackets` instead: two `///` blocks run together before `enum TriPackets` at `:58`. As a result `PtexMipSpace` (`:103`) is undocumented, and `TriPackets` shows the Ptex text in rustdoc. `missing_docs` reports it.
+- **A doc defect.** The rustdoc block written for `PtexMipSpace` (`crates/crust-base/src/config.rs:24-51`) is attached to `TriPackets` instead: two `///` blocks run together before `enum TriPackets` at `:58`. As a result `PtexMipSpace` (`:103`) is undocumented, and `TriPackets` shows the Ptex text in rustdoc. `missing_docs` reports it.
 
 ### Unsafe
 
@@ -292,15 +292,15 @@ The least-covered files are the **error and fallback paths**, the very code that
 | file | lines | covered |
 |---|---|---|
 | `crust-assets/src/uv_texture/decode.rs` | 96 | 40.6% |
-| `crust-core/src/error.rs` | 26 | 42.3% |
+| `crust-base/src/error.rs` | 26 | 42.3% |
 | `crust-assets/src/lib.rs` (the `FileAssets` seam) | 478 | 57.1% |
-| `crust-core/src/scene/usd_import/xform.rs` | 151 | **64.9%** (the hard-coded schema fallbacks of section 1) |
+| `crust-usd/src/scene/usd_import/xform.rs` | 151 | **64.9%** (the hard-coded schema fallbacks of section 1) |
 | `crust-assets/src/error.rs` | 47 | 66.0% |
-| `crust-core/src/stats.rs` | 912 | 68.0% |
+| `crust-base/src/stats.rs` | 912 | 68.0% |
 | `crust-render/src/main.rs` | 556 | 68.4% |
 | `crust-assets/src/ies.rs` | 224 | 75.5% |
-| `crust-core/src/scene/usd_import/materials.rs` | 438 | 84.0% |
-| `crust-core/src/scene/usd_import/instancing.rs` | 681 | 85.3% |
+| `crust-usd/src/scene/usd_import/materials.rs` | 438 | 84.0% |
+| `crust-usd/src/scene/usd_import/instancing.rs` | 681 | 85.3% |
 
 The happy paths are covered thoroughly. The ways input can fail are not.
 
@@ -397,7 +397,7 @@ What is missing, against the VGV-equivalent gate list:
 
   ```
   error: manual implementation of `Option::zip`
-    --> crates/crust-core/src/scene/usd_import/mesh.rs:1252
+    --> crates/crust-usd/src/scene/usd_import/mesh.rs:1252
   ```
 
   CI on 1.98.1 presumably passes. A contributor following `CLAUDE.md` literally on a slightly older stable gets a red gate on code they didn't touch. A `rust-toolchain.toml` with `channel = "1.98.1"` fixes this in one line.

@@ -112,7 +112,7 @@ recorded beside the code.
 
 | pattern | where | Rust feature |
 |---------|-------|--------------|
-| Profiling compiled away when off | `render_pixel::<PROFILE>` → `trace_path::<PROFILE>` → `profile::scope_if::<PROFILE>` (`crust-core/src/tracer/`, `profile.rs`) | const generic `bool`, branch once per pass; the runtime-check version cost +2.5% instructions |
+| Profiling compiled away when off | `render_pixel::<PROFILE>` → `trace_path::<PROFILE>` → `profile::scope_if::<PROFILE>` (`crust-integrator/src/tracer/`, `profile.rs`) | const generic `bool`, branch once per pass; the runtime-check version cost +2.5% instructions |
 | Texture payload chosen once per lookup | `StreamingTexture::eval_as::<HALF>` (`crust-assets/src/tiled/stream.rs`) | const generic; the comment records why closure and enum variants were slower |
 | Texel storage chosen once per lookup | `UvTexture::eval_tiles::<T: Texel>` (`crust-assets/src/uv_texture/`) | trait bound + one `match Storage` per lookup, not per texel |
 | Closed primitive set | `PrimNode` enum over the `Prim` trait (`crust-rt/src/prim.rs`) | enum dispatch replaced `Box<dyn Prim>`; `CubicCurve`/`Instance` boxed to keep the enum small |
@@ -139,7 +139,7 @@ whose variants the compiler checks exhaustively. Crust follows this for
 
 ### 1.1 `LightShape` → `enum AreaShape` (high payoff, medium risk)
 
-`AreaLight` holds `Box<dyn LightShape>` (`crust-core/src/light/area.rs`), and
+`AreaLight` holds `Box<dyn LightShape>` (`crust-world/src/light/area.rs`), and
 `AreaLight::sample_li` makes three or four virtual calls through it per NEE
 sample (`sample_solid_angle`, `sample_point`, `normal_at`, `inv_pdf_area` via
 `pdf_toward`). The three implementors — `SphereShape`, `AffineShape`,
@@ -326,7 +326,7 @@ bare `u32`. The clearest hazard is `WideNode.child[l]`, which indexes `leaves`
 or `wide` depending on a flag bit. `GeomId(u32)` / `PrimId(u32)` on the public
 API (`attach`, `RayHit`) and a `WideNode::child(l) -> Child { Node(NodeIdx),
 Leaf(LeafIdx) }` accessor make mix-ups unrepresentable at zero cost. Ray masks
-(`MASK_*` in `crust-core/src/ray.rs`) are the same story: a `RayMask(u32)`
+(`MASK_*` in `crust-base/src/ray.rs`) are the same story: a `RayMask(u32)`
 with `BitAnd`/`BitOr` and associated consts. This is a breaking change to the
 `crust_rt` vocabulary that crust-core adopts, so do it in one pass.
 

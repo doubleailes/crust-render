@@ -1,0 +1,36 @@
+[package]
+name = "crust-base"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The engine's foundation layer: configuration, names, coded warnings, reports, statistics and the render profile, colour management, texture references, UsdLux units, errors, pixel regions and buffers, and rays, hits and carried media."
+
+[lib]
+name = "crust_base"
+path = "src/lib.rs"
+
+[features]
+# Forwards crust-rt's nightly-only 8-wide BVH nodes; see that crate's feature.
+bvh8 = ["crust-rt/bvh8"]
+
+[dependencies]
+utils = { path = "../utils" }
+openqmc-rs = "0.2.4"
+crust-rt = { path = "../crust-rt" }
+# `texture.rs` adopts the reader's `Texture` as `Texture2D` rather than
+# wrapping it (a wrapper costs a vtable hop per texel fetch).
+crust-mtlx = { path = "../crust-mtlx" }
+rayon.workspace = true
+glam.workspace = true
+tracing.workspace = true
+ocio.workspace = true
+# The JSON reports (`report.rs`, `stats.rs`'s `crust-stats/1`).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# `std` for `tracing::subscriber::with_default`, which tests use to check
+# which warnings a call raises.
+tracing = { workspace = true, features = ["std"] }

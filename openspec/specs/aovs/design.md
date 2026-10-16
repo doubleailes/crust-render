@@ -902,7 +902,7 @@ Where the implementation departs from, or sharpens, the decisions above.
 - **The request lives on `Scene`, not `RenderSettings`** (`Scene::aovs`,
   an `AovRequest`). `RenderSettings` is `Copy` and is copied through every
   builder method; a list of products cannot be. The resolver is its own
-  sibling, `usd_import/products.rs`, and the vocabulary is `crust-core/src/aov.rs`.
+  sibling, `usd_import/products.rs`, and the vocabulary is `crust-integrator/src/aov.rs`.
 - **`Ng` is refused, not implemented.** The kernel's `RayHit` carries one
   normal — the interpolated one where a mesh has normals — so a geometric
   normal would mean widening the kernel's hit record (a `Tri4` bit-identity
@@ -938,7 +938,7 @@ Where the implementation departs from, or sharpens, the decisions above.
 
 ## Phase 2 as built
 
-Light path expressions (`crust-core/src/lpe/`), the per-lobe routing
+Light path expressions (`crust-shading/src/lpe/`), the per-lobe routing
 (`tracer/route.rs`), the albedo and light groups. Where it departs from, or
 sharpens, D10–D13:
 

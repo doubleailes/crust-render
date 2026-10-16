@@ -404,7 +404,7 @@ and the Moana island. So:
   one WARN counting the tile reads that used a fallback.
 
 **Import warnings carry a code.** Every WARN the USD import raises goes through
-`crust_core::warning!` (`crust-core/src/warnings.rs`) with a `WarningCode`, and the macro
+`crust_core::warning!` (`crust-base/src/warnings.rs`) with a `WarningCode`, and the macro
 writes the code into the message itself — `[light.degenerate_shape] RectLight at …` — so
 every subscriber shows it, `--log-file` included, and `logging.rs` is unchanged. One code
 per *cause*; each has one kind (`refused` / `approximated` / `skipped`) and one log

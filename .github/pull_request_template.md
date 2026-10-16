@@ -35,7 +35,7 @@
 - [ ] `cargo test --workspace --no-fail-fast`
 - [ ] Both halves of any pair in `docs/architecture.md` § Invariants changed together
       (NEE ↔ bounce weight, `Tri4` ↔ scalar, JIT ↔ interpreter, streamed ↔ preloaded, …)
-- [ ] No new `unsafe`, no new RNG outside `openqmc`, no asset decoding in `crust-core`
+- [ ] No new `unsafe`, no new RNG outside `openqmc`, no asset decoding in the engine crates
 - [ ] Logging levels follow the rules (nothing per ray/pixel/sample; per-prim output is `DEBUG`;
       import WARNs use `warning!` with a `WarningCode`)
 - [ ] User documentation in `site/` updated for any CLI flag, `CRUST_*` switch, `crust:*`

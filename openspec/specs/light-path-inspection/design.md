@@ -18,7 +18,7 @@ sample — shaped first for an agent to read.
 
 ## Shape
 
-- **Engine in `crust-core/src/inspect/`, thin hosts.** `inspect::run(&mut Renderer,
+- **Engine in `crust-tools/src/inspect/`, thin hosts.** `inspect::run(&mut Renderer,
   region, &Options) -> Report`; the CLI (`crust light-paths`) and the MCP tool both
   call it, print `Report::to_markdown()` or answer `Report::to_json()`'s value. The
   Markdown is rendered from the `Report`, so it cannot disagree with the JSON. The

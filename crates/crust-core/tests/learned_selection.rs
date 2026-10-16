@@ -268,3 +268,101 @@ fn one_light_learns_nothing() {
     let r = Renderer::new(camera, world.commit(), lights, settings);
     assert_eq!(r.lights.selection(), LightSelection::Power);
 }
+
+/// A training ray that meets a volume-only medium boundary crosses it,
+/// as a path does, and trains the surface behind it. Shaded as a
+/// receiver, the boundary's empty closure saw no light and ended the
+/// path there: the wall behind the fog was never trained.
+#[test]
+fn training_crosses_a_medium_boundary_to_the_wall_behind() {
+    let dir = std::env::temp_dir().join("crust_light_cache_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("fog_wall.usda");
+    // Three top-level prims, so the stage is imported whole and the
+    // bindings resolve.
+    std::fs::write(
+        &path,
+        r#"#usda 1.0
+(
+defaultPrim = "World"
+upAxis = "Y"
+)
+
+def Xform "World"
+{
+def Scope "Looks"
+{
+    def Material "Fog"
+    {
+        token outputs:mtlx:volume.connect = </World/Looks/Fog/Volume.outputs:out>
+        def Shader "Volume"
+        {
+            uniform token info:id = "ND_volume"
+            token inputs:vdf.connect = </World/Looks/Fog/Vdf.outputs:out>
+            token outputs:out
+        }
+        def Shader "Vdf"
+        {
+            uniform token info:id = "ND_absorption_vdf"
+            vector3f inputs:absorption = (0.01, 0.01, 0.01)
+            token outputs:out
+        }
+    }
+}
+def Xform "Geo"
+{
+    # A closed box, outward windings, from z = -1 to 1.
+    def Mesh "FogBox" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/Looks/Fog>
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 3, 2, 1, 4, 5, 6, 7, 0, 4, 7, 3, 1, 2, 6, 5, 0, 1, 5, 4, 3, 7, 6, 2]
+        point3f[] points = [(-3, -3, -1), (3, -3, -1), (3, 3, -1), (-3, 3, -1), (-3, -3, 1), (3, -3, 1), (3, 3, 1), (-3, 3, 1)]
+    }
+    def Mesh "Wall"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, -10, -3), (10, -10, -3), (10, 10, -3), (-10, 10, -3)]
+    }
+    def SphereLight "A"
+    {
+        float inputs:radius = 0.1
+        double3 xformOp:translate = (-1, 0, -2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "B"
+    {
+        float inputs:radius = 0.1
+        double3 xformOp:translate = (1, 0, -2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+def Camera "Cam"
+{
+    double3 xformOp:translate = (0, 0, 5)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+}
+"#,
+    )
+    .expect("write stage");
+    let mut scene = crust_core::Scene::from_usd(&path).expect("stage");
+    assert!(scene.world.has_medium_boundaries());
+    scene.lights.select_by(crust_core::LightSelection::Power);
+    let cache = crust_core::tracer::light_cache::train(
+        &scene.world,
+        &scene.camera,
+        &scene.lights,
+        64,
+        64,
+        0,
+    )
+    .expect("the wall is lit, so there is something to learn");
+    assert!(cache.trained_cells > 0);
+    assert!(
+        cache.lookup(Vec3A::new(0.0, 0.0, -3.0)).is_some(),
+        "the wall behind the fog trained no cell"
+    );
+}

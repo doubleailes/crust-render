@@ -348,7 +348,7 @@ Schema mapping:
     face-varying channel is a full parallel hierarchy). The returned mesh holds 44 B/face;
     84 with the Ptex table, 68 with a refined chart (48 / 88 / 72 before
     `compact-triangle-storage` unpadded the normals). Pinned by the allocation-counting
-    probe `cargo test --release -p crust-core --lib subdivision_memory_probe -- --ignored
+    probe `cargo test --release -p crust-usd --lib subdivision_memory_probe -- --ignored
     --nocapture --test-threads=1`, whose deterministic requested-byte ceilings sit ~20%
     above those numbers. The refiner is dropped before the result's copies are built;
     the probe counts requested bytes, not the live peak, so that shows in RSS rather
@@ -879,7 +879,7 @@ the 16 spp image is bit-identical on 92% of pixels, the rest consistent with noi
 
 **The import reads USD files through memory mappings** (`CRUST_USD_MMAP`, on), the other
 gain that issue reports (~30% on Moana, and a −19% to −42% heap peak, measured upstream).
-crust-core's `mmap` feature (off in the library, on in the renderer's defaults, like
+crust-usd's `mmap` feature (forwarded by crust-core; off in the library, on in the renderer's defaults, like
 `jit`) enables openusd's and compiles the opt-in: `stage_builder()` hands every import
 stage a `DefaultResolver::map_files()` resolver; a layer then holds no copy of its
 file, and a `.usdc` decodes its values from the mapped pages on demand. `map_files` is an
@@ -915,7 +915,7 @@ alone parses in 122.6 / 124.4 s against 126.1 / 127.8 s (−3%) and lowers the p
 196.4 s against 191.7 / 200.7 s (the two interleaved pairs disagreed in sign), at the same
 23.7–23.9 GiB peak, for the reason above. Both scenes render bit-identical with the
 switch on and off. The `mcp` feature's own `openusd`
-dependency unifies with crust-core's, so the feature is compiled into the session too;
+dependency unifies with crust-usd's, so the feature is compiled into the session too;
 only the opt-in decides whether anything maps. `--no-default-features` builds a renderer
 with no opt-in compiled, which never maps. It does not drop `memmap2` yet: openusd-schemas
 names openusd with its default features (`openusd.workspace = true`, no
