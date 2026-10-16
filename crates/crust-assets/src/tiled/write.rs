@@ -25,7 +25,7 @@
 
 use crate::TransferCurve;
 use crate::uv_texture::{channels, reduce_half};
-use crust_core::ResolvedColorSpace;
+use crust_world::ResolvedColorSpace;
 use std::io::{self, Write};
 use std::path::Path;
 use tiff::tags::Tag;
@@ -146,7 +146,7 @@ pub(crate) fn mip_space_tag(space: ResolvedColorSpace) -> String {
 }
 
 /// The stable spelling of a colour space in a `.tx`: the space the stored
-/// values are encoded in, by its [`label`](crust_core::color::Space::label)
+/// values are encoded in, by its [`label`](crust_world::color::Space::label)
 /// (`srgb_texture`, `g22_rec709`, `raw`, … or the OCIO config's own name for
 /// any other). Only the source is recorded: the levels were reduced through
 /// its curve, and the working space the file is later bound into changes no

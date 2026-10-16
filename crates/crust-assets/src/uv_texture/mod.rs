@@ -1,6 +1,6 @@
 //!! UV-addressed textures, single image or UDIM set, decoded at load.
 //!!
-//!! The host's implementation of `crust_core::Texture2D`. It answers the same
+//!! The host's implementation of `crust_world::Texture2D`. It answers the same
 //!! shape of problem as the Ptex decoder — a path tracer asks for texels from
 //!! every worker in an unpredictable order, so everything is decoded once at
 //!! load into an immutable buffer — but the addressing is different, and so is
@@ -59,10 +59,10 @@
 use std::num::NonZeroUsize;
 use std::path::Path;
 
-use crust_core::{ColorSpace, ResolvedColorSpace, Texture2D};
+use crust_world::{ColorSpace, ResolvedColorSpace, Texture2D};
 
 use crate::TransferCurve;
-use crust_core::warning;
+use crust_world::warning;
 
 use crate::error::AssetError;
 
@@ -106,7 +106,7 @@ pub struct UvTexture {
     /// an `f32` one was converted whole at load and carries `None`, except a
     /// marked `.tx` EXR, whose values are already linear on the source's
     /// primaries and which carries the matrix as its streamed twin does.
-    gamut: Option<crust_core::Mat3A>,
+    gamut: Option<crust_world::Mat3A>,
     /// Representative tile size, for the load message.
     width: usize,
     height: usize,
@@ -124,7 +124,7 @@ pub struct UvTexture {
 ///
 /// 1024 rather than full resolution for the reason in the module note above.
 /// It is a *cap*, not a resize: a smaller tile is kept as authored.
-pub const DEFAULT_MAX_EDGE: usize = crust_core::config::DEFAULT_TEX_MAX;
+pub const DEFAULT_MAX_EDGE: usize = crust_world::config::DEFAULT_TEX_MAX;
 
 /// The edge cap actually in effect, `CRUST_TEX_MAX` included.
 ///
@@ -135,7 +135,7 @@ pub const DEFAULT_MAX_EDGE: usize = crust_core::config::DEFAULT_TEX_MAX;
 ///
 /// [`max_log2_from_env`]: crate::max_log2_from_env
 pub fn max_edge_from_env() -> NonZeroUsize {
-    crust_core::config().tex_max
+    crust_world::config().tex_max
 }
 
 /// Are mip pyramids built? `CRUST_TEX_MIP=0` keeps each tile at its single
@@ -144,7 +144,7 @@ pub fn max_edge_from_env() -> NonZeroUsize {
 /// A/B for "did the pyramid change this, or did the footprint?", paired with
 /// `CRUST_RAY_CONES=0` on the other side.
 fn mip_enabled() -> bool {
-    crust_core::config().tex_mip
+    crust_world::config().tex_mip
 }
 
 impl UvTexture {
@@ -184,7 +184,7 @@ impl UvTexture {
 
     /// [`UvTexture::open_capped`], with the reason it failed: what
     /// [`FileAssets`](crate::FileAssets) calls with its own
-    /// [`Config`](crust_core::Config), and logs once.
+    /// [`Config`](crust_world::Config), and logs once.
     ///
     /// A tile of a UDIM set that exists but does not decode is skipped with a
     /// warning of its own — the set still renders on the tiles it has — and a
@@ -290,7 +290,7 @@ impl UvTexture {
             None => first
                 .as_deref()
                 .and_then(crate::tiled::exr_mip_space)
-                .and_then(|m| crust_core::color::Space::named(&m))
+                .and_then(|m| crust_world::color::Space::named(&m))
                 .map(|s| ResolvedColorSpace::new(s, space.working())),
         };
         let (space, decode, gamut) = match marked {
@@ -540,7 +540,7 @@ impl UvTexture {
 
 impl Texture2D for UvTexture {
     fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
-        let _p = crust_core::profile::scope(crust_core::profile::Section::Texture);
+        let _p = crust_world::profile::scope(crust_world::profile::Section::Texture);
         if !u.is_finite() || !v.is_finite() {
             return [0.0, 0.0, 0.0, 1.0];
         }

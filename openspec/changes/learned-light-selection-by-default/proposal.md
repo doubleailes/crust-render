@@ -64,10 +64,10 @@ change archives second must restate that requirement with both applied.
 
 - `crates/crust-core/src/light_cache.rs`: blended lookup and the visibility
   floor. The pre-pass is unchanged.
-- `crates/crust-core/src/light/list.rs` (`pick_index_at`, `pmf_at`,
+- `crates/crust-world/src/light/list.rs` (`pick_index_at`, `pmf_at`,
   `find_index_by_geom_at`, `infinite_at`): both MIS sides read the blended
   probability at the vertex NEE sampled from, as today.
-- The defaults in `tracer/settings.rs`, `scene/usd_import/settings.rs` and
+- The defaults in `settings.rs`, `scene/usd_import/settings.rs` and
   the CLI's `--light-selection` help.
 - Goldens: every checked-in sample is re-recorded. Each moves by noise alone,
   which the tasks verify.

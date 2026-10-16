@@ -1,0 +1,182 @@
+use crate::ray::Ray;
+use glam::Vec3A;
+use utils::concentric_disk;
+
+/// The camera's frame, for the camera-space sources, and its image plane,
+/// for the screen-space ones. Camera space is the USD camera's: `u` right,
+/// `v` up, looking down `−w`.
+#[derive(Debug, Clone, Copy)]
+pub struct CameraFrame {
+    pub origin: Vec3A,
+    pub u: Vec3A,
+    pub v: Vec3A,
+    pub w: Vec3A,
+    /// The image plane `Camera::get_ray` aims at: its lower-left corner
+    /// relative to `origin`, and its two extents (`lower_left_corner −
+    /// origin`, `horizontal`, `vertical`). `horizontal` is along `u`,
+    /// `vertical` along `v`.
+    pub lower_left: Vec3A,
+    pub horizontal: Vec3A,
+    pub vertical: Vec3A,
+    /// The image resolution, in pixels.
+    pub width: f32,
+    pub height: f32,
+}
+
+impl CameraFrame {
+    /// `d`, a world-space offset or direction, in camera space.
+    pub fn eye(&self, d: Vec3A) -> Vec3A {
+        Vec3A::new(d.dot(self.u), d.dot(self.v), d.dot(self.w))
+    }
+
+    /// Camera-space depth of `p`: positive in front of the camera.
+    pub fn depth(&self, p: Vec3A) -> f32 {
+        -(p - self.origin).dot(self.w)
+    }
+
+    /// The pinhole inverse of `Camera::get_ray` at the lens centre: the
+    /// viewport coordinates `(s, t)` whose ray passes through `p` — in
+    /// `[0, 1]²` on the frame, outside it off the frame, `t` growing along
+    /// `v` (up). Depth of field is ignored on purpose: the vector built on
+    /// this describes the in-focus image. `p` must be in front of the camera
+    /// (depth > 0); callers clip first.
+    pub fn proj(&self, p: Vec3A) -> (f32, f32) {
+        let d = p - self.origin;
+        // The plane lies `f` in front of the origin, and the ray through
+        // `(s, t)` lands on it at `lower_left + s·horizontal + t·vertical`,
+        // so scaling `d` onto the plane by depth gives that point.
+        let f = -self.lower_left.dot(self.w);
+        let on_plane = d * (f / self.depth(p));
+        let rel = on_plane - self.lower_left;
+        (
+            rel.dot(self.u) / self.horizontal.length(),
+            rel.dot(self.v) / self.vertical.length(),
+        )
+    }
+}
+
+/// The `Camera` struct represents a virtual camera in the ray tracing system.
+/// It is responsible for generating rays that simulate the perspective view of a scene.
+#[derive(Debug, Clone, Copy)]
+pub struct Camera {
+    /// The origin of the camera (position in 3D space).
+    origin: Vec3A,
+    /// The lower-left corner of the viewport.
+    lower_left_corner: Vec3A,
+    /// The horizontal vector of the viewport.
+    horizontal: Vec3A,
+    /// The vertical vector of the viewport.
+    vertical: Vec3A,
+    /// The camera's local horizontal axis.
+    u: Vec3A,
+    /// The camera's local vertical axis.
+    v: Vec3A,
+    /// The radius of the camera's lens (used for depth of field).
+    lens_radius: f32,
+}
+
+impl Camera {
+    /// Creates a new `Camera` with the specified parameters.
+    pub fn new(
+        lookfrom: Vec3A,
+        lookat: Vec3A,
+        vup: Vec3A,
+        vfov: f32, // Vertical field-of-view in degrees
+        aspect_ratio: f32,
+        aperture: f32,
+        focus_dist: f32,
+    ) -> Camera {
+        let theta = utils::degrees_to_radians(vfov);
+        let h = f32::tan(theta / 2.0);
+        let viewport_height = 2.0 * h;
+        let viewport_width = aspect_ratio * viewport_height;
+        let w = (lookfrom - lookat).normalize();
+        let u = vup.cross(w).normalize();
+        let v = w.cross(u);
+
+        let origin = lookfrom;
+        let horizontal = focus_dist * viewport_width * u;
+        let vertical = focus_dist * viewport_height * v;
+        let lower_left_corner = origin - horizontal / 2.0 - vertical / 2.0 - focus_dist * w;
+
+        let lens_radius = aperture / 2.0;
+
+        Camera {
+            origin,
+            lower_left_corner,
+            horizontal,
+            vertical,
+            u,
+            v,
+            lens_radius,
+        }
+    }
+
+    /// The world-space width one pixel spans at ray parameter `t = 1`.
+    ///
+    /// This is the numerator of a primary ray's cone spread. `get_ray` builds
+    /// its direction as `lower_left_corner + s·horizontal + t·vertical -
+    /// origin`, and `lower_left_corner` is offset from the origin by
+    /// `focus_dist · w` — so the direction lands *on the focus plane* at ray
+    /// parameter 1, and one pixel of `s` moves that landing point by exactly
+    /// `horizontal / res_w`. The two axes are averaged because the cone is
+    /// isotropic; a non-square pixel is filtered by the mean of its sides.
+    ///
+    /// `focus_dist` cancels: `|horizontal| = focus_dist · viewport_width` and
+    /// the direction's length at frame centre is `focus_dist`, so dividing by
+    /// it leaves `2·tan(vfov/2)/res_h` — the classic per-pixel angle, which is
+    /// what the unit test pins. The division is the caller's, per ray, because
+    /// the direction is longer towards the frame edge and that pixel really
+    /// does subtend a smaller angle.
+    /// The camera position at shutter open.
+    pub fn origin(&self) -> Vec3A {
+        self.origin
+    }
+
+    /// The camera's frame at shutter open, for the camera-space AOVs —
+    /// right, up, and backward (the view direction is `−w`, as in a USD
+    /// camera); `get_ray` builds `v = w × u`, so `w = u × v` — and its image
+    /// plane and resolution, for the screen-space ones.
+    pub fn frame(&self, width: usize, height: usize) -> CameraFrame {
+        CameraFrame {
+            origin: self.origin,
+            u: self.u,
+            v: self.v,
+            w: self.u.cross(self.v),
+            lower_left: self.lower_left_corner - self.origin,
+            horizontal: self.horizontal,
+            vertical: self.vertical,
+            width: width as f32,
+            height: height as f32,
+        }
+    }
+
+    pub fn pixel_span(&self, res_w: usize, res_h: usize) -> f32 {
+        0.5 * (self.horizontal.length() / res_w.max(1) as f32
+            + self.vertical.length() / res_h.max(1) as f32)
+    }
+
+    /// Generates a ray originating from the camera through the viewport.
+    ///
+    /// # Parameters
+    /// - `s`, `t`: Normalized viewport coordinates in `[0, 1]`.
+    /// - `lens_uv`: A 2D uniform sample used to sample the lens for depth of
+    ///   field. Ignored when the camera has zero aperture. Callers pass a QMC
+    ///   sample so this dimension is decorrelated from the pixel jitter.
+    /// - `time`: Shutter time in `[0, 1)`, carried on the ray for motion
+    ///   blur (moving instances interpolate their transform at this time).
+    pub fn get_ray(&self, s: f32, t: f32, lens_uv: [f32; 2], time: f32) -> Ray {
+        let offset = if self.lens_radius > 0.0 {
+            let rd = self.lens_radius * concentric_disk(lens_uv);
+            self.u * rd.x + self.v * rd.y
+        } else {
+            Vec3A::ZERO
+        };
+        Ray::new(
+            self.origin + offset,
+            self.lower_left_corner + s * self.horizontal + t * self.vertical - self.origin - offset,
+        )
+        .with_time(time)
+        .with_mask(crate::ray::MASK_CAMERA)
+    }
+}

@@ -117,7 +117,7 @@
   `diagnostic` and `light-paths` accept the flags.
 - [ ] 5.2 Add the effective-setting rows (`purposes`, `binding_purposes`, `payloads`,
   each with its flag and attribute) and the reproducing command-line parts in
-  `crust-core/src/diagnostic/mod.rs`; verify in `crust-render/tests/check.rs` that
+  `crust-tools/src/diagnostic/mod.rs`; verify in `crust-render/tests/check.rs` that
   `crust check --unloaded --purposes proxy --json -` reports them, and that a
   diagnostic's printed command line carries the view flags
 - [ ] 5.3 Add an end-to-end test in `crust-render/tests/` rendering the fixture with

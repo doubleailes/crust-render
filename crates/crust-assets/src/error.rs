@@ -1,6 +1,6 @@
 //! [`AssetError`]: why a file could not be decoded.
 //!
-//! The [`AssetLoader`](crust_core::AssetLoader) contract is that `None` means
+//! The [`AssetLoader`](crust_world::AssetLoader) contract is that `None` means
 //! "fall back" — a surface on its constants, a light untextured — and that
 //! stays. What this adds is inside crust-assets: the decoders return the
 //! failure rather than a bare `None` (or a `String`), so it is logged once, as

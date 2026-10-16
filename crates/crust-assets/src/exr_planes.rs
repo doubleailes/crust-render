@@ -1,10 +1,10 @@
 //! An EXR read whole for comparison: every channel of every layer as `f32`,
 //! and what the header records about how the file was rendered — `crust
-//! diff`'s input, compared by [`crust_core::compare`].
+//! diff`'s input, compared by [`crust_world::compare`].
 
 use crate::AssetError;
-use crust_core::compare::{Channel, Planes, Stamp};
-use crust_core::stamp::{STAMP_PREFIX, StampValue};
+use crust_world::compare::{Channel, Planes, Stamp};
+use crust_world::stamp::{STAMP_PREFIX, StampValue};
 use exr::meta::attribute::AttributeValue;
 use exr::prelude::*;
 use std::collections::BTreeMap;

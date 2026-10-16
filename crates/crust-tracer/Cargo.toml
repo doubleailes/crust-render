@@ -1,0 +1,30 @@
+[package]
+name = "crust-tracer"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crust Render's integrator: the Renderer, path tracing with MIS and NEE, the AOV film, path guiding, subsurface random walks and learned light selection"
+
+[lib]
+name = "crust_tracer"
+path = "src/lib.rs"
+
+[dependencies]
+crust-world = { path = "../crust-world" }
+utils = { path = "../utils" }
+openqmc-rs = "0.2.4"
+crust-rt = { path = "../crust-rt" }
+# The tiny-network kit `neural` light selection learns visibility with
+# (`tracer/light_visibility.rs`).
+crust-nn = { path = "../crust-nn" }
+rayon.workspace = true
+glam.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The integrator's unit tests render sample stages, which the import (a
+# sibling layer, not a dependency) loads.
+crust-usd = { path = "../crust-usd" }
+tracing = { workspace = true, features = ["std"] }

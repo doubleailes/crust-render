@@ -385,7 +385,7 @@ mod tests {
             .collect();
 
         let levels =
-            write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::SRGB).expect("write .tx");
+            write_tx(&path, &src, w, h, crust_world::ResolvedColorSpace::SRGB).expect("write .tx");
         // 150x100 -> 75x50 -> 38x25 -> 19x13 -> 10x7 -> 5x4 -> 3x2 -> 2x1 -> 1x1
         assert_eq!(levels.len(), 9, "{levels:?}");
         assert_eq!(levels[0], (w, h));
@@ -485,7 +485,7 @@ mod tests {
             })
             .collect();
         let levels =
-            write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+            write_tx(&path, &src, w, h, crust_world::ResolvedColorSpace::RAW).expect("write");
 
         let tf = TiledFile::open(&path).expect("open");
         assert_eq!(tf.tile_edge(), TILE_EDGE);
@@ -588,7 +588,7 @@ mod tests {
             })
             .collect();
 
-        let levels = write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW)
+        let levels = write_tx_exr(&path, &src, w, h, crust_world::ResolvedColorSpace::RAW)
             .expect("write exr");
         // Same `div_ceil` chain as the TIFF writer: 150x100 down to 1x1.
         assert_eq!(levels.len(), 9, "{levels:?}");
@@ -672,7 +672,7 @@ mod tests {
             8.0, 8.0, 8.0,
         ];
         let levels =
-            write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+            write_tx_exr(&path, &src, w, h, crust_world::ResolvedColorSpace::RAW).expect("write");
         assert_eq!(levels, vec![(2, 2), (1, 1)]);
 
         let tf = TiledFile::open(&path).expect("open");
@@ -707,7 +707,7 @@ mod tests {
             })
             .collect();
         let levels =
-            write_tx_rgba(&path, &src, w, h, crust_core::ResolvedColorSpace::SRGB).expect("write");
+            write_tx_rgba(&path, &src, w, h, crust_world::ResolvedColorSpace::SRGB).expect("write");
 
         let mut dec =
             tiff::decoder::Decoder::new(BufReader::new(std::fs::File::open(&path).expect("open")))
@@ -759,7 +759,7 @@ mod tests {
         // An RGBA EXR backing carries an `A` channel, read fourth.
         let exr = dir.join("rgba_exr.tx");
         let floats: Vec<f32> = src.iter().map(|&b| b as f32 / 255.0).collect();
-        write_tx_exr_rgba(&exr, &floats, w, h, crust_core::ResolvedColorSpace::RAW)
+        write_tx_exr_rgba(&exr, &floats, w, h, crust_world::ResolvedColorSpace::RAW)
             .expect("write exr");
         let tf = TiledFile::open(&exr).expect("open");
         assert!(tf.has_alpha() && tf.is_linear());

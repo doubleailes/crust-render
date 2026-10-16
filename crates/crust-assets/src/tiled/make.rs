@@ -11,7 +11,7 @@
 //! texel for texel (see "Streaming textures" in
 //! `openspec/specs/textures/design.md`).
 
-use crust_core::{ColorSpace, ResolvedColorSpace};
+use crust_world::{ColorSpace, ResolvedColorSpace};
 
 use crate::error::AssetError;
 use std::path::{Path, PathBuf};

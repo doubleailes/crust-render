@@ -4,7 +4,7 @@
 use std::num::NonZeroUsize;
 use std::path::Path;
 
-use crust_core::ResolvedColorSpace;
+use crust_world::ResolvedColorSpace;
 
 use crate::error::AssetError;
 
@@ -25,7 +25,7 @@ use super::tile::Tile;
 /// bytes either way.
 ///
 /// Also returns the source's pixel format as `(eight_bit, channels)` — what
-/// [`crust_core::ColorSpace::resolve_auto`] asks about, and gone once `to_rgb8` has run.
+/// [`crust_world::ColorSpace::resolve_auto`] asks about, and gone once `to_rgb8` has run.
 pub(super) fn decode_tile(
     path: &Path,
     number: u32,

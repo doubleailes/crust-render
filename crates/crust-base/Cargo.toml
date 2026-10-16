@@ -1,0 +1,31 @@
+[package]
+name = "crust-base"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crust Render's engine foundation: configuration, colour management, stats and profiling, coded warnings, reports, texture traits, rays and media"
+
+[lib]
+name = "crust_base"
+path = "src/lib.rs"
+
+[dependencies]
+utils = { path = "../utils" }
+openqmc-rs = "0.2.4"
+crust-rt = { path = "../crust-rt" }
+# `Texture2D` is `crust_mtlx::Texture`, adopted rather than wrapped.
+crust-mtlx = { path = "../crust-mtlx" }
+rayon.workspace = true
+glam.workspace = true
+tracing.workspace = true
+ocio.workspace = true
+# The JSON reports' envelope (`report.rs`) and the stats / profile / warning
+# records it carries. Neither carries `unsafe` on any hot path: they run once
+# per report, after the renders.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+tracing = { workspace = true, features = ["std"] }

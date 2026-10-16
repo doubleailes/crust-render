@@ -1,6 +1,6 @@
 //! Host-side asset decoders for Crust Render.
 //!
-//! `crust-core` decodes nothing — its [`crust_core::AssetLoader`] seam asks the
+//! `crust-core` decodes nothing — its [`crust_world::AssetLoader`] seam asks the
 //! host for an environment map, a Ptex sampler or a UV texture and takes
 //! whatever comes back. This crate is the host side of that seam for a program
 //! that reads files: [`FileAssets`] implements the trait over `exr`, `image`
@@ -72,18 +72,18 @@ pub fn texture_files(path: &Path) -> Vec<std::path::PathBuf> {
     }
 }
 
-use crust_core::{
+use crust_world::{
     AssetLoader, ColorSpace, EnvironmentMap, IesProfile, LightTexture, PtexTexture,
     ResolvedColorSpace, Texture2D,
 };
-use crust_core::{cause_warning, warning};
+use crust_world::{cause_warning, warning};
 use std::path::Path;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// The tables a resolved colour space's curve is applied through.
 ///
-/// The curves themselves are OCIO's ([`crust_core::color`]); a texture stored
+/// The curves themselves are OCIO's ([`crust_world::color`]); a texture stored
 /// as bytes meets them only through these two tables, built once per open, so
 /// no texel lookup and no mip reduction runs an OCIO processor.
 pub trait TransferCurve: Copy {
@@ -136,15 +136,15 @@ impl TransferCurve for ResolvedColorSpace {
 
 /// A filtered RGBA lookup brought to the working space: the change of
 /// primaries a texture stored on its own primaries applies after filtering
-/// ([`crust_core::color::apply_gamut`]); alpha is untouched. One function for
+/// ([`crust_world::color::apply_gamut`]); alpha is untouched. One function for
 /// the preloaded and the streamed sampler, so the two stay bit-identical.
 #[inline]
-pub(crate) fn to_working(gamut: Option<&crust_core::Mat3A>, rgba: [f32; 4]) -> [f32; 4] {
+pub(crate) fn to_working(gamut: Option<&crust_world::Mat3A>, rgba: [f32; 4]) -> [f32; 4] {
     match gamut {
         None => rgba,
         Some(_) => {
             let [r, g, b, a] = rgba;
-            let c = crust_core::color::apply_gamut(gamut, crust_core::Vec3A::new(r, g, b));
+            let c = crust_world::color::apply_gamut(gamut, crust_world::Vec3A::new(r, g, b));
             [c.x, c.y, c.z, a]
         }
     }
@@ -227,17 +227,17 @@ pub(crate) fn decode_rgb_of_rgba(rgba: &mut [f32], decode: impl FnOnce(&mut [f32
     }
 }
 
-/// The host side of `crust_core::AssetLoader`, reading from the filesystem.
+/// The host side of `crust_world::AssetLoader`, reading from the filesystem.
 ///
 /// The engine asks for pixels, this decodes them: OpenEXR through `exr`,
 /// Radiance `.hdr` and LDR images through `image`, per-face Ptex through
 /// `ptex-rs`. LDR pixels are un-gamma'd to linear, since the renderer works
 /// in linear light and an sRGB-encoded sky would be noticeably wrong.
 pub struct FileAssets {
-    /// The `CRUST_*` switches this loader obeys: [`crust_core::config()`]
+    /// The `CRUST_*` switches this loader obeys: [`crust_world::config()`]
     /// unless constructed [`FileAssets::with_config`]. Every texture-policy
     /// decision below reads it, never the environment.
-    config: crust_core::Config,
+    config: crust_world::Config,
     /// The tile cache every streaming texture shares. Present whether or not
     /// streaming is on, so the counters can be reported either way — an empty
     /// one costs 64 empty maps.
@@ -362,15 +362,15 @@ impl Default for FileAssets {
 }
 
 impl FileAssets {
-    /// A loader under the process's switches ([`crust_core::config()`]).
+    /// A loader under the process's switches ([`crust_world::config()`]).
     pub fn new() -> FileAssets {
-        FileAssets::with_config(crust_core::config().clone())
+        FileAssets::with_config(crust_world::config().clone())
     }
 
     /// A loader under `config` rather than the process environment — how a
     /// test or probe compares both sides of a switch without mutating a
     /// process-global the rest of the program is reading.
-    pub fn with_config(config: crust_core::Config) -> FileAssets {
+    pub fn with_config(config: crust_world::Config) -> FileAssets {
         let streaming = config.tex_stream;
         let budget = tiled::TileCache::budget_of(&config);
         let max_open_files = config.tex_max_open_files;
@@ -782,9 +782,9 @@ impl FileAssets {
     /// Reports for **both** backends, because the first question the report
     /// has to answer is which one ran. Pushed into `RenderStats` by the host
     /// exactly as `texture_cache_stats` is.
-    pub fn ptex_stats(&self) -> crust_core::PtexCacheStats {
+    pub fn ptex_stats(&self) -> crust_world::PtexCacheStats {
         let opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
-        let mut out = crust_core::PtexCacheStats {
+        let mut out = crust_world::PtexCacheStats {
             // Process-wide rather than per texture: one set of slots per
             // thread serves every stream, keyed by texture id.
             micro_retained_bytes: ptex_stream::micro_retained_bytes(),
@@ -832,10 +832,10 @@ impl FileAssets {
     /// that way: `crust-assets` knows about `crust-core`, not the reverse, so
     /// the host pushes its numbers in — exactly as `main.rs` already assigns
     /// `stats.rays` from what the renderer handed back.
-    pub fn texture_cache_stats(&self) -> crust_core::TextureCacheStats {
+    pub fn texture_cache_stats(&self) -> crust_world::TextureCacheStats {
         use std::sync::atomic::Ordering::Relaxed;
         let c = self.cache.counters();
-        crust_core::TextureCacheStats {
+        crust_world::TextureCacheStats {
             files: c.files,
             loaded_tiles: c.loaded_tiles,
             resident_bytes: c.resident_bytes,
@@ -1084,7 +1084,7 @@ impl FileAssets {
     fn decode_ptex(
         &self,
         path: &Path,
-        space: crust_core::ColorSpace,
+        space: crust_world::ColorSpace,
     ) -> Option<std::sync::Arc<dyn PtexTexture>> {
         // A/B switch, in the spirit of CRUST_MESH_BAKE: decline every texture
         // so the same scene renders on its constant `baseColor` fallback. That
@@ -1298,7 +1298,7 @@ impl AssetLoader for FileAssets {
     fn load_ptex(
         &self,
         path: &Path,
-        space: crust_core::ColorSpace,
+        space: crust_world::ColorSpace,
     ) -> Option<std::sync::Arc<dyn PtexTexture>> {
         self.kept_or(
             kept::Key::Ptex(path.to_path_buf(), space),

@@ -438,7 +438,7 @@ program to machine code.
 the size the gate predicted). `crates/crust-jit`, behind crust-core's `jit`
 feature — on by default in `crust-render`, `--no-default-features` without it —
 and `CRUST_SHADER_JIT=0` at run time. It is `deny(unsafe_code)` rather than
-`forbid`, as `crust-core` is for its test-only allocator, and is the only crate
+`forbid`, as `crust-usd` is for its test-only allocator, and is the only crate
 with `unsafe` in production code: five audited blocks (the code-pointer
 transmute, the call into generated code, the raw-pointer accesses in the two
 host callbacks, and freeing the code memory in `Drop`). Every program a

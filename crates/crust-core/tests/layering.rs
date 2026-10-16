@@ -1,16 +1,29 @@
-//! crust-core's modules import only downward (`docs/architecture.md`
-//! § Layering): every `crate::` path outside a test module names a module of
-//! its own layer or one below, whether it spells the module
-//! (`crate::light::LightList`), a crate-root re-export (`crate::LightList`,
-//! including the names `pub use material::*` brings), or reaches the root
-//! through `super::` (`super::super::tracer` from `light/list.rs`). A new
-//! top-level module fails here until it is given a layer.
+//! The engine's modules import only downward (`docs/architecture.md`
+//! § Layering). Between crates Cargo enforces it: a crate names only the
+//! crates it depends on. Inside a crate this test does: every `crate::` path
+//! outside a test module names a module of its own layer or one below,
+//! whether it spells the module (`crate::light::LightList`), a crate-root
+//! re-export (`crate::LightList`, including the names `pub use material::*`
+//! brings and those a lower crate's root glob re-exports), or reaches the
+//! root through `super::` (`super::super::tracer` from `light/list.rs`). A
+//! new top-level module fails here until it is given a layer, and a module
+//! must sit in the crate its layer belongs to.
 //!
 //! Test-only items (`#[cfg(test)]` modules, inline or declared, and helpers)
 //! and comment lines are skipped: a doc link may point upward.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The engine crates, lowest first, with the layers (below) each holds.
+const CRATES: &[(&str, &[&str])] = &[
+    ("crust-base", &["foundation", "rays"]),
+    ("crust-shading", &["materials"]),
+    ("crust-world", &["world", "lights", "contents"]),
+    ("crust-tracer", &["integrator"]),
+    ("crust-usd", &["import"]),
+    ("crust-tools", &["tools"]),
+];
 
 /// Lowest first. A module may import from its own layer and the ones before.
 const LAYERS: &[(&str, &[&str])] = &[
@@ -36,25 +49,17 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("rays", &["aabb", "hittable", "medium", "ray"]),
     ("materials", &["lpe", "material"]),
     ("world", &["rt_world"]),
-    ("lights", &["environment", "light"]),
+    ("lights", &["assets", "environment", "light"]),
     (
-        "integrator",
+        "contents",
         &[
-            "aov",
-            "camera",
-            "filter",
-            "guiding",
-            "sampler",
-            "subsurface",
-            "tracer",
+            "aov", "camera", "compare", "control", "filter", "sampler", "settings", "stamp",
             "volume",
         ],
     ),
+    ("integrator", &["guiding", "subsurface", "tracer"]),
     ("import", &["live", "place", "scene", "world"]),
-    (
-        "tools",
-        &["check", "compare", "diagnostic", "inspect", "stamp"],
-    ),
+    ("tools", &["check", "diagnostic", "inspect"]),
 ];
 
 fn layer_of() -> HashMap<&'static str, usize> {
@@ -392,26 +397,69 @@ fn walk(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+/// Each engine crate's `src`, with the crate's name.
+fn crate_sources() -> Vec<(&'static str, PathBuf)> {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    CRATES
+        .iter()
+        .map(|(name, _)| (*name, crates.join(name).join("src")))
+        .collect()
+}
+
+/// The crate each layer's modules belong in.
+fn crate_of_layer(layer: &str) -> &'static str {
+    CRATES
+        .iter()
+        .find(|(_, layers)| layers.contains(&layer))
+        .map(|(name, _)| *name)
+        .unwrap_or_else(|| panic!("layer {layer} is in no crate of CRATES"))
+}
+
 #[test]
 fn modules_import_only_downward() {
     let modules = layer_of();
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let lib = std::fs::read_to_string(src.join("lib.rs")).expect("lib.rs");
-    let root = root_exports(&lib, &modules, |m| {
-        std::fs::read_to_string(src.join(m).join("mod.rs"))
-            .or_else(|_| std::fs::read_to_string(src.join(format!("{m}.rs"))))
-            .ok()
-    });
+    let crate_order: Vec<usize> = LAYERS
+        .iter()
+        .map(|(layer, _)| {
+            let home = crate_of_layer(layer);
+            CRATES.iter().position(|(c, _)| *c == home).expect("listed")
+        })
+        .collect();
+    assert!(
+        crate_order.is_sorted(),
+        "CRATES must hold LAYERS in order, lowest first"
+    );
+    let sources = crate_sources();
+    // A name re-exported at any crate's root resolves the same in every
+    // crate above it (each root glob re-exports the one below), and module
+    // names are unique across the crates, so one table serves them all.
+    let read_module = |m: &str| {
+        sources.iter().find_map(|(_, src)| {
+            std::fs::read_to_string(src.join(m).join("mod.rs"))
+                .or_else(|_| std::fs::read_to_string(src.join(format!("{m}.rs"))))
+                .ok()
+        })
+    };
+    let mut root = HashMap::new();
+    for (_, src) in &sources {
+        let lib = std::fs::read_to_string(src.join("lib.rs")).expect("lib.rs");
+        root.extend(root_exports(&lib, &modules, read_module));
+    }
     assert!(
         root.get("OpenPBR").is_some_and(|m| m == "material"),
         "the `pub use material::*` glob was not expanded"
     );
 
     let mut files = Vec::new();
-    walk(&src, &mut files);
+    for (name, src) in &sources {
+        let mut found = Vec::new();
+        walk(src, &mut found);
+        files.extend(found.into_iter().map(|f| (*name, src.clone(), f)));
+    }
+    let mut misplaced = Vec::new();
     let mut unclassified = Vec::new();
     let mut upward: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for file in files {
+    for (krate, src, file) in files {
         let rel = file.strip_prefix(&src).expect("under src");
         let top = rel.components().next().expect("a component");
         let top = top.as_os_str().to_str().expect("utf-8 path");
@@ -421,9 +469,13 @@ fn modules_import_only_downward() {
         if module == "lib" || is_test {
             continue;
         }
-        if !modules.contains_key(module) {
+        let Some(&layer) = modules.get(module) else {
             unclassified.push(module.to_owned());
             continue;
+        };
+        let home = crate_of_layer(LAYERS[layer].0);
+        if home != krate {
+            misplaced.push(format!("{module} is in {krate}, its layer in {home}"));
         }
         // `a/b/mod.rs` is the module `a::b`, `a/b/c.rs` the module `a::b::c`.
         let depth = rel.components().count() - usize::from(rel.ends_with("mod.rs"));
@@ -440,6 +492,12 @@ fn modules_import_only_downward() {
     assert!(
         unclassified.is_empty(),
         "give these top-level modules a layer in LAYERS: {unclassified:?}"
+    );
+    misplaced.sort();
+    misplaced.dedup();
+    assert!(
+        misplaced.is_empty(),
+        "modules outside their layer's crate: {misplaced:?}"
     );
     assert!(
         upward.is_empty(),

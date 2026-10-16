@@ -112,7 +112,7 @@ recorded beside the code.
 
 | pattern | where | Rust feature |
 |---------|-------|--------------|
-| Profiling compiled away when off | `render_pixel::<PROFILE>` → `trace_path::<PROFILE>` → `profile::scope_if::<PROFILE>` (`crust-core/src/tracer/`, `profile.rs`) | const generic `bool`, branch once per pass; the runtime-check version cost +2.5% instructions |
+| Profiling compiled away when off | `render_pixel::<PROFILE>` → `trace_path::<PROFILE>` → `profile::scope_if::<PROFILE>` (`crust-tracer/src/tracer/`, `profile.rs`) | const generic `bool`, branch once per pass; the runtime-check version cost +2.5% instructions |
 | Texture payload chosen once per lookup | `StreamingTexture::eval_as::<HALF>` (`crust-assets/src/tiled/stream.rs`) | const generic; the comment records why closure and enum variants were slower |
 | Texel storage chosen once per lookup | `UvTexture::eval_tiles::<T: Texel>` (`crust-assets/src/uv_texture/`) | trait bound + one `match Storage` per lookup, not per texel |
 | Closed primitive set | `PrimNode` enum over the `Prim` trait (`crust-rt/src/prim.rs`) | enum dispatch replaced `Box<dyn Prim>`; `CubicCurve`/`Instance` boxed to keep the enum small |
@@ -139,7 +139,7 @@ whose variants the compiler checks exhaustively. Crust follows this for
 
 ### 1.1 `LightShape` → `enum AreaShape` (high payoff, medium risk)
 
-`AreaLight` holds `Box<dyn LightShape>` (`crust-core/src/light/area.rs`), and
+`AreaLight` holds `Box<dyn LightShape>` (`crust-world/src/light/area.rs`), and
 `AreaLight::sample_li` makes three or four virtual calls through it per NEE
 sample (`sample_solid_angle`, `sample_point`, `normal_at`, `inv_pdf_area` via
 `pdf_toward`). The three implementors — `SphereShape`, `AffineShape`,
@@ -236,7 +236,7 @@ Option<Self>` refusing non-finite and non-positive), which also retires the
 flattens `pdf_toward`'s `Option<f32>` to `0.0` with `unwrap_or`, and the caller
 re-tests `point_pdf <= 0.0`.
 
-Start at the light seam (`light/`, `tracer/path.rs`, `tracer/settings.rs`);
+Start at the light seam (`light/`, `tracer/path.rs`, `settings.rs`);
 BSDF pdfs follow. The newtype compiles to the same code, but check it under
 callgrind anyway since it touches `trace_path`.
 
@@ -311,7 +311,7 @@ is the first step of §4.6.
 |----------|----------|--------|
 | `HitRecord::NO_FACE = u32::MAX`, `face_uv` "meaningless" when set | `hittable.rs` | `Option<FaceHit { id, uv }>` ties the uv to the id |
 | `base_face = u32::MAX` | `scene/subdiv/`, `usd_import/mesh.rs` | same |
-| `indirect_clamp == 0.0` means off | `tracer/settings.rs` | `Option<f32>` validated at construction |
+| `indirect_clamp == 0.0` means off | `settings.rs` | `Option<f32>` validated at construction |
 | `STRIPE = usize::MAX` means unset | `tiled/cache.rs` | `Cell<Option<usize>>` |
 
 Keep the sentinels where layout is the point: `NO_CHILD` in the guiding
@@ -326,7 +326,7 @@ bare `u32`. The clearest hazard is `WideNode.child[l]`, which indexes `leaves`
 or `wide` depending on a flag bit. `GeomId(u32)` / `PrimId(u32)` on the public
 API (`attach`, `RayHit`) and a `WideNode::child(l) -> Child { Node(NodeIdx),
 Leaf(LeafIdx) }` accessor make mix-ups unrepresentable at zero cost. Ray masks
-(`MASK_*` in `crust-core/src/ray.rs`) are the same story: a `RayMask(u32)`
+(`MASK_*` in `crust-base/src/ray.rs`) are the same story: a `RayMask(u32)`
 with `BitAnd`/`BitOr` and associated consts. This is a breaking change to the
 `crust_rt` vocabulary that crust-core adopts, so do it in one pass.
 

@@ -333,8 +333,8 @@ the finest level held at every footprint). See
     whatever other threads insert while one sweeps. That is a few hundred lines
     of `std::sync`, which is why there is no `moka`/`quick_cache` dependency:
     both carry internal `unsafe`, and the whole workspace is
-    `forbid(unsafe_code)` (`crust-core` is `deny`, for one test-only
-    `GlobalAlloc`; `crust-jit` is `deny`, for calling generated code).
+    `forbid(unsafe_code)` (`crust-usd` is `deny`, for one test-only
+    `GlobalAlloc` and the `mmap` opt-in; `crust-jit` is `deny`, for calling generated code).
   - **Three tiers, and the top one does the work.** A per-thread microcache,
     then 64 sharded maps, then a decode. Measured on the alias scene: **98.6% of
     8.7 M lookups never reach a lock**, because a bilinear tap reads one tile

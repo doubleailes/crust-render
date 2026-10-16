@@ -700,7 +700,7 @@ impl TileCache {
 
     /// The tile cache budget `config` asks for (`CRUST_TEX_CACHE_MB`), in
     /// bytes.
-    pub fn budget_of(config: &crust_core::Config) -> u64 {
+    pub fn budget_of(config: &crust_world::Config) -> u64 {
         mib_to_bytes(config.tex_cache_mb.get())
     }
 
@@ -931,7 +931,7 @@ impl TileCache {
     }
 
     fn page_in(&self, id: TileId) -> Option<Arc<Tile>> {
-        let _p = crust_core::profile::scope(crust_core::profile::Section::TextureLoad);
+        let _p = crust_world::profile::scope(crust_world::profile::Section::TextureLoad);
         let slot = {
             let files = lock(&self.files)?;
             files.get(id.file as usize)?.clone()
@@ -1305,7 +1305,7 @@ mod tests {
                 [(x % 251) as u8, (y % 251) as u8, ((x * 3 + y) % 251) as u8]
             })
             .collect();
-        write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+        write_tx(&path, &src, w, h, crust_world::ResolvedColorSpace::RAW).expect("write");
         path
     }
 
@@ -1314,7 +1314,7 @@ mod tests {
         clear_microcache();
         let path = fixture("direct", 300, 200);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
 
         let mut dec = tf.reader().expect("reader");
@@ -1367,12 +1367,12 @@ mod tests {
                 [x * 0.125, y * 0.0625, 12.5]
             })
             .collect();
-        crate::tiled::write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW)
+        crate::tiled::write_tx_exr(&path, &src, w, h, crust_world::ResolvedColorSpace::RAW)
             .expect("write");
 
         let tf = TiledFile::open(&path).expect("open");
         let budget = 1024 * 1024;
-        let cache = TileCache::new(budget, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(budget, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
         let mut dec = tf.reader().expect("reader");
 
@@ -1425,7 +1425,7 @@ mod tests {
         // The floor `TileCache::new` clamps to, so the working set below is
         // ~7 MiB against it — several sweeps' worth.
         let budget = 1024 * 1024;
-        let cache = TileCache::new(budget, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(budget, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
 
         let l0 = tf.level(0);
@@ -1469,7 +1469,7 @@ mod tests {
         let tf = TiledFile::open(&path).expect("open");
         let cache = Arc::new(TileCache::new(
             512 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+            crust_world::DEFAULT_TEX_MAX_OPEN_FILES,
         ));
         let id = cache.intern(tf.clone()).expect("intern");
 
@@ -1528,7 +1528,7 @@ mod tests {
         clear_microcache();
         let path = fixture("micro", 256, 256);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf).expect("intern");
 
         let a = TileId {
@@ -1568,7 +1568,7 @@ mod tests {
     fn interleaved_textures_do_not_evict_each_other() {
         clear_microcache();
         let path = fixture("micro_interleave", 256, 256);
-        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         // Five textures, as an ALab material has.
         let files: Vec<u32> = (0..5)
             .map(|_| {
@@ -1614,7 +1614,7 @@ mod tests {
         clear_microcache();
         let path = fixture("micro_corner", 512, 512);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
         let corner = |level: u8| {
             let across = tf.level(level as usize).across as u32;
@@ -1671,7 +1671,7 @@ mod tests {
         clear_microcache();
         let path = fixture("held_none", 1536, 1536);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
         let l0 = tf.level(0);
         flood(&cache, id, (l0.across * l0.down) as u32, |c| {
@@ -1692,8 +1692,8 @@ mod tests {
         let tf = TiledFile::open(&path).expect("open");
         // Large enough that one thread's share holds a tile on any core
         // count, small enough that the flood below must evict.
-        let cache = TileCache::new(8 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
-        let other = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(8 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
+        let other = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf.clone()).expect("intern");
         let other_id = other.intern(tf.clone()).expect("intern");
         let held_tile = TileId {
@@ -1735,7 +1735,7 @@ mod tests {
     #[test]
     fn a_threads_share_is_half_the_budget_split_across_threads() {
         let budget = 64 * 1024 * 1024;
-        let cache = TileCache::new(budget, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(budget, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let threads = crate::ptex_stream::micro_threads() as u64;
         assert_eq!(cache.micro_share, budget / 2 / threads);
     }
@@ -1748,9 +1748,9 @@ mod tests {
         clear_microcache();
         let path = fixture("held_share", 256, 256);
         let tf = TiledFile::open(&path).expect("open");
-        let small = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+        let small = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES)
             .with_micro_share(0);
-        let large = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let large = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let s = small.intern(tf.clone()).expect("intern");
         let l = large.intern(tf.clone()).expect("intern");
         let at = |file| TileId {
@@ -1787,7 +1787,7 @@ mod tests {
         clear_microcache();
         let path = fixture("raced", 256, 256);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let file = cache.intern(tf.clone()).expect("intern");
         let id = TileId {
             file,
@@ -1838,7 +1838,7 @@ mod tests {
         let path = fixture("share_full", 512, 512);
         let tf = TiledFile::open(&path).expect("open");
         let tile = full_u8_tile_bytes();
-        let cache = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+        let cache = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES)
             .with_micro_share(3 * tile);
         let file = cache.intern(tf).expect("intern");
         for id in level0(file, 8) {
@@ -1858,9 +1858,9 @@ mod tests {
         let path = fixture("share_other", 512, 512);
         let tf = TiledFile::open(&path).expect("open");
         let tile = full_u8_tile_bytes();
-        let large = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+        let large = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES)
             .with_micro_share(16 * tile);
-        let small = TileCache::new(64 * 1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES)
+        let small = TileCache::new(64 * 1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES)
             .with_micro_share(2 * tile);
         let l = large.intern(tf.clone()).expect("intern");
         let s = small.intern(tf).expect("intern");
@@ -1926,7 +1926,7 @@ mod tests {
                 let src: Vec<u8> = (0..w * h)
                     .flat_map(|i| [(i % 251) as u8, k as u8, ((i / w) % 251) as u8])
                     .collect();
-                write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+                write_tx(&path, &src, w, h, crust_world::ResolvedColorSpace::RAW).expect("write");
                 path
             })
             .collect()
@@ -2233,7 +2233,7 @@ mod tests {
         clear_microcache();
         let path = fixture("broken", 128, 128);
         let tf = TiledFile::open(&path).expect("open");
-        let cache = TileCache::new(1024 * 1024, crust_core::DEFAULT_TEX_MAX_OPEN_FILES);
+        let cache = TileCache::new(1024 * 1024, crust_world::DEFAULT_TEX_MAX_OPEN_FILES);
         let id = cache.intern(tf).expect("intern");
 
         // A tile index past the end of the level.

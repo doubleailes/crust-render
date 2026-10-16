@@ -12,7 +12,10 @@ name = "crust_assets"
 path = "src/lib.rs"
 
 [dependencies]
-crust-core = { path = "../crust-core" }
+# Everything a decoder hands the engine (`AssetLoader`, the texture traits,
+# `EnvironmentMap`, colour spaces, `Config`) is in `crust-world` or below it,
+# so the decoders build beside the integrator and the import, not after them.
+crust-world = { path = "../crust-world" }
 exr.workspace = true
 image.workspace = true
 ptex.workspace = true
@@ -25,6 +28,8 @@ rayon.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The tests import stages through the decoders.
+crust-core = { path = "../crust-core" }
 # `std` for `tracing::subscriber::with_default`, which the WARN-once test
 # counts events through.
 tracing = { workspace = true, features = ["std"] }

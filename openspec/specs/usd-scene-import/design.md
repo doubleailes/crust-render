@@ -348,7 +348,7 @@ Schema mapping:
     face-varying channel is a full parallel hierarchy). The returned mesh holds 44 B/face;
     84 with the Ptex table, 68 with a refined chart (48 / 88 / 72 before
     `compact-triangle-storage` unpadded the normals). Pinned by the allocation-counting
-    probe `cargo test --release -p crust-core --lib subdivision_memory_probe -- --ignored
+    probe `cargo test --release -p crust-usd --lib subdivision_memory_probe -- --ignored
     --nocapture --test-threads=1`, whose deterministic requested-byte ceilings sit ~20%
     above those numbers. The refiner is dropped before the result's copies are built;
     the probe counts requested bytes, not the live peak, so that shows in RSS rather
@@ -834,7 +834,7 @@ same point.
   un-namespaced `domeLightCameraVisibility` bool, default true). Missing attrs
   fall back to defaults (128 spp, depth 32, 640×360, power MIS, power light selection,
   triangle filter at radius 1.0, indirect clamp 10) defined as consts at the top of the file
-  (the clamp's in `tracer/settings.rs`, `DEFAULT_INDIRECT_CLAMP`, since it is the engine's own default).
+  (the clamp's in `settings.rs`, `DEFAULT_INDIRECT_CLAMP`, since it is the engine's own default).
   **`crust:indirectClamp`** is the one biased setting: it caps each camera sample's
   *indirect* light (everything past the primary vertex's continuation) at the value in
   its largest channel, scaling the colour whole (`tracer/path.rs`, `clamp_indirect`). Direct
@@ -879,8 +879,8 @@ the 16 spp image is bit-identical on 92% of pixels, the rest consistent with noi
 
 **The import reads USD files through memory mappings** (`CRUST_USD_MMAP`, on), the other
 gain that issue reports (~30% on Moana, and a −19% to −42% heap peak, measured upstream).
-crust-core's `mmap` feature (off in the library, on in the renderer's defaults, like
-`jit`) enables openusd's and compiles the opt-in: `stage_builder()` hands every import
+crust-usd's `mmap` feature (forwarded by crust-core; off in the library, on in the
+renderer's defaults, like `jit`) enables openusd's and compiles the opt-in: `stage_builder()` hands every import
 stage a `DefaultResolver::map_files()` resolver; a layer then holds no copy of its
 file, and a `.usdc` decodes its values from the mapped pages on demand. `map_files` is an
 `unsafe fn`: its caller promises no mapped file is modified while anything read from it

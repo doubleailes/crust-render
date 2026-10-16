@@ -22,7 +22,7 @@
 
 use super::write::space_name;
 use crate::uv_texture::{channels, reduce_half_linear};
-use crust_core::ResolvedColorSpace;
+use crust_world::ResolvedColorSpace;
 use exr::math::RoundingMode;
 use exr::prelude::{
     AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, Image, Layer,

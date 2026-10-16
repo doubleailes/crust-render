@@ -222,7 +222,7 @@ new instrument is built.
 
 ### D9. The switch
 
-`CRUST_WAVEFRONT` is a `Config` field in `crust-core/src/config.rs`, parsed once.
+`CRUST_WAVEFRONT` is a `Config` field in `crust-base/src/config.rs`, parsed once.
 A bad value warns once and falls back to `0`. The change also adds:
 - a row in `docs/architecture.md` § Environment switches;
 - a section on the user page.

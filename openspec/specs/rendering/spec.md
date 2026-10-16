@@ -5,7 +5,7 @@
 Turn a `Scene` (camera, world geometry, lights, render settings) into a pixel
 buffer using physically-based path tracing. This capability covers the sampling
 loop, the integrator (`ray_color`), participating-media transport, and the
-parallel execution strategies. It is the core of `crust-core` (`tracer/`).
+parallel execution strategies. It is the core of `crust-tracer` (`tracer/`), re-exported by `crust-core`.
 
 ## Requirements
 

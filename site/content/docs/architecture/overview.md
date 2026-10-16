@@ -26,18 +26,33 @@ in the repository.
 ## The crates
 
 ```text
-                    crust-render  (the CLI; binary `crust`)
-                     │         │
-                     │         ▼
-                     │    crust-assets ──► ptex-rs
-                     │    (file decoders, texture caches)
-                     ▼         │
-                    crust-core ◄┘
-         (USD import, integrator, materials, lights, volumes, guiding)
-          │       │        │         │        │         │          │
-          ▼       ▼        ▼         ▼        ▼         ▼          ▼
-      crust-rt crust-mtlx crust-jit crust-nn utils  openqmc-rs  openusd,
-      (kernel) (MaterialX) (JIT)   (networks) (math) (sampling)  opensubdiv-rs
+   crust-render  (the CLI; binary `crust`)
+      │                            │
+      ▼                            ▼
+   crust-core                   crust-assets ──► ptex-rs
+   (the engine's public         (file decoders, texture caches)
+    surface)                       │
+      │                            │
+      ▼                            │
+   crust-tools                     │
+   (diagnostic, inspector, check)  │
+      │              │             │
+      ▼              ▼             │
+   crust-tracer   crust-usd ──► openusd, opensubdiv-rs
+   (integrator)   (USD import)     │
+      │              │             │
+      ▼              ▼             ▼
+   crust-world  (world, lights, camera, volumes, render settings)
+      │
+      ▼
+   crust-shading  (materials, light path expressions)
+      │
+      ▼
+   crust-base  (configuration, colour, statistics, warnings, rays)
+      │
+      ▼
+   crust-rt (kernel), crust-mtlx (MaterialX), crust-jit (JIT),
+   crust-nn (networks), utils (math), openqmc-rs (sampling)
 ```
 
 | crate | owns | knows nothing about |
@@ -46,10 +61,20 @@ in the repository.
 | `crust-mtlx` | reading `.mtlx` documents, compiling node graphs into programs, the BSDF closure tree | any Crust type |
 | `crust-jit` | compiling MaterialX programs to machine code (optional, the `jit` feature) | everything but `crust-mtlx` |
 | `crust-nn` | small neural networks — a hash-grid encoding, dense layers, their training — that `neural` light selection learns visibility with | any Crust type |
-| `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, path guiding, statistics, the diagnostic and its report | decoding images, textures or IES files |
-| `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the texture tile caches, `.tx` conversion | the integrator |
+| `crust-base` | configuration, colour management, statistics, coded warnings, rays | materials and everything above |
+| `crust-shading` | materials: OpenPBR, MaterialX, `UsdPreviewSurface`, light path expressions | lights, the integrator |
+| `crust-world` | what a render is made of: the world, lights, the camera, volumes, the render settings, the AOV requests | how a path is traced, USD |
+| `crust-tracer` | the integrator: path tracing, the AOV film, path guiding, subsurface | USD |
+| `crust-usd` | the USD import | the integrator |
+| `crust-tools` | the diagnostic and its report, the light path inspector, `crust check` | — |
+| `crust-core` | the engine's public interface: it re-exports the six crates above | decoding images, textures or IES files |
+| `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the texture tile caches, `.tx` conversion | the integrator, the import |
 | `crust-render` | the command line, logging, the progress bar, writing the EXR and PNG, printing and saving the diagnostic's report | decoding anything |
 | `utils` | stateless math: sampling warps, MIS heuristics, luminance | everything |
+
+The engine is one library cut into six crates along its layers, each depending only on
+those below. The integrator and the USD import depend on the world but not on each other,
+so they — and the file decoders — compile in parallel.
 
 Three libraries come from outside the workspace, all pure Rust:
 
@@ -68,7 +93,7 @@ they could be extracted too.
 
 1. **Command line.** `crust-render` parses its flags and builds the asset loader, which
    reads the `CRUST_*` texture settings.
-2. **USD import** (`crust-core`). A light "index" stage is opened with payloads unloaded,
+2. **USD import** (`crust-usd`). A light "index" stage is opened with payloads unloaded,
    to read the render settings, pick the camera and list the top-level subtrees. Each
    subtree is then composed on its own masked stage, traversed and dropped. Prims become
    meshes, spheres, curves, instances, lights, volumes or the camera. Materials are
