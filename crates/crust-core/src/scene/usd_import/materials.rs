@@ -160,7 +160,7 @@ pub(super) struct CachedMaterial {
 }
 
 /// The binding purpose a final render resolves: USD's `full`, falling back to
-/// the all-purpose binding (`compute_bound_material` does the fallback).
+/// the all-purpose binding (`bound_material` does the fallback).
 /// `preview` is for interactive proxies and is never consulted.
 const RENDER_BINDING_PURPOSE: &str = "full";
 
@@ -171,7 +171,7 @@ const RENDER_BINDING_PURPOSE: &str = "full";
 ///
 /// - **Inheritance.** A binding on an ancestor applies to every prim beneath
 ///   it, and production assets bind on the group: ALab binds each asset's
-///   `GEO` scope, never its meshes. openusd-schemas' `compute_bound_material`
+///   `GEO` scope, never its meshes. openusd-schemas' `bound_material`
 ///   walks the ancestors (binding strength and collection bindings included),
 ///   but only from a prim that *carries* `MaterialBindingAPI`, and
 ///   `MaterialBindingAPI::get` returns `None` for any other — which is every
@@ -188,10 +188,7 @@ pub(super) fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
             return None;
         }
         if let Ok(Some(api)) = MaterialBindingAPI::get(stage, p.clone()) {
-            return api
-                .compute_bound_material(RENDER_BINDING_PURPOSE)
-                .ok()
-                .flatten();
+            return api.bound_material(RENDER_BINDING_PURPOSE).ok().flatten();
         }
         path = p.parent();
     }
@@ -521,10 +518,7 @@ fn preview_displacement_of(
     caches: &mut ImportCaches<'_>,
 ) -> Option<Displacement> {
     let mat = UsdMaterial::get(stage, mat_path.clone()).ok().flatten()?;
-    let resolved = mat
-        .compute_surface_source(SURFACE_RENDER_CONTEXTS)
-        .ok()
-        .flatten()?;
+    let resolved = mat.surface_source(SURFACE_RENDER_CONTEXTS).ok().flatten()?;
     let shader = resolved.sources().iter().find_map(TerminalSource::shader)?;
     if shader_info_id(shader).as_deref() != Some("UsdPreviewSurface") {
         return None;
@@ -532,7 +526,7 @@ fn preview_displacement_of(
     preview_displacement(stage, mat_path, shader, caches)
 }
 
-/// Render contexts `compute_surface_source` is asked for, strongest first.
+/// Render contexts `surface_source` is asked for, strongest first.
 ///
 /// openusd 0.6 took no argument: it tried the universal terminal, then every
 /// authored context in alphabetical order. 0.7 takes the preference list
@@ -600,7 +594,7 @@ fn resolve_material_uncached(
     // render-context outputs — the Moana island authors `outputs:ri:surface`
     // (PxrDisneyBsdf), `outputs:glslfx:surface` (UsdPreviewSurface) and
     // `outputs:ri:displacement` on every prim — resolves through
-    // `compute_surface_source` to the *preview* shader, whose inputs are all
+    // `surface_source` to the *preview* shader, whose inputs are all
     // `.connect`ed to the material's interface rather than authored as values.
     // Decoding that gives a material with every parameter at its default: the
     // island rendered uniformly pale and glossy instead of matte dark rock.
@@ -615,7 +609,7 @@ fn resolve_material_uncached(
     // material: the volume is the medium inside the bound geometry, under the
     // MaterialX surface of the same network when there is one, and a
     // transparent medium boundary when there is none.
-    if let Some(volume) = terminal_shader(mat.compute_volume_source(VOLUME_RENDER_CONTEXTS))
+    if let Some(volume) = terminal_shader(mat.volume_source(VOLUME_RENDER_CONTEXTS))
         .filter(|s| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id)))
     {
         // Each context is checked for MaterialX on its own: an `mtlx`
@@ -623,12 +617,11 @@ fn resolve_material_uncached(
         // one that is.
         let is_mtlx =
             |s: &Shader| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id));
-        let surface = terminal_shader(mat.compute_surface_source(&["mtlx"]))
+        let surface = terminal_shader(mat.surface_source(&["mtlx"]))
             .filter(is_mtlx)
-            .or_else(|| terminal_shader(mat.compute_surface_source(&[""])).filter(is_mtlx));
+            .or_else(|| terminal_shader(mat.surface_source(&[""])).filter(is_mtlx));
         if surface.is_none()
-            && let Some(other) =
-                terminal_shader(mat.compute_surface_source(SURFACE_RENDER_CONTEXTS))
+            && let Some(other) = terminal_shader(mat.surface_source(SURFACE_RENDER_CONTEXTS))
         {
             warning!(
                 MaterialVolumeIgnored,
@@ -649,10 +642,7 @@ fn resolve_material_uncached(
     // The first source whose endpoint is a `Shader`-typed prim is that shader;
     // a source can point at an untyped prim, which is USD's invalid-shader
     // result and not something to decode.
-    let resolved = mat
-        .compute_surface_source(SURFACE_RENDER_CONTEXTS)
-        .ok()
-        .flatten();
+    let resolved = mat.surface_source(SURFACE_RENDER_CONTEXTS).ok().flatten();
     let Some(shader) = resolved
         .as_ref()
         .and_then(|terminal| terminal.sources().iter().find_map(TerminalSource::shader))
@@ -717,8 +707,7 @@ pub(super) fn surface_shader_id(stage: &Stage, mat_path: &sdf::Path) -> Option<S
         return Some("PxrDisneyBsdf".to_owned());
     }
     let mat = UsdMaterial::get(stage, mat_path.clone()).ok().flatten()?;
-    terminal_shader(mat.compute_surface_source(SURFACE_RENDER_CONTEXTS))
-        .and_then(|s| shader_info_id(&s))
+    terminal_shader(mat.surface_source(SURFACE_RENDER_CONTEXTS)).and_then(|s| shader_info_id(&s))
 }
 
 /// The first `Shader`-typed source driving a resolved terminal.
@@ -950,11 +939,11 @@ fn mtlx_reference(stage: &Stage, mat_path: &sdf::Path) -> Option<(std::path::Pat
             // bare assignment — and all three mean "this material is that
             // document".
             let items = list
-                .explicit_items
+                .explicit_items()
                 .iter()
-                .chain(list.prepended_items.iter())
-                .chain(list.appended_items.iter())
-                .chain(list.added_items.iter());
+                .chain(list.prepended_items().iter())
+                .chain(list.appended_items().iter())
+                .chain(list.added_items().iter());
             for r in items {
                 if !r.asset_path.to_ascii_lowercase().ends_with(".mtlx") {
                     continue;

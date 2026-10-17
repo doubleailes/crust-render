@@ -264,7 +264,7 @@ def DomeLight_1 "Sky"
 /// `strongerThanDescendants` decides it: the ancestor's binding (`Stronger`)
 /// wins over the mesh's own (`Overridden`), for the import — and with it the
 /// render — as for C++ USD. (openusd 0.7 read a `.usda`'s `bindMaterialAs` as
-/// a string that `compute_bound_material` did not recognise, and this pinned
+/// a string that `bound_material` did not recognise, and this pinned
 /// the opposite.)
 #[test]
 fn material_records_follow_the_binding_resolution() {

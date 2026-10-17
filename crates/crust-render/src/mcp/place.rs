@@ -44,7 +44,7 @@ fn prims_of(open: &Open, paths: &[String], what: &str) -> Result<Vec<sdf::Path>,
     let mut out: Vec<sdf::Path> = Vec::with_capacity(paths.len());
     for p in paths {
         let path = sdf::Path::new(p).map_err(|e| format!("{p:?} is not a USD path: {e}"))?;
-        if !path.is_prim_path() {
+        if !path.is_prim() {
             return Err(format!("{p} is not a prim path"));
         }
         prim_at(&open.stage, &path)?;
@@ -207,7 +207,7 @@ impl Open {
         prims_of(self, &args.target, "target")?;
         let path = sdf::Path::new(&args.path)
             .ok()
-            .filter(|p| p.is_prim_path() && p.is_abs())
+            .filter(|p| p.is_prim() && p.is_abs())
             .ok_or_else(|| format!("{:?} is not an absolute prim path", args.path))?;
         if prim_at(&self.stage, &path).is_ok() {
             return Err(format!(
@@ -295,7 +295,7 @@ impl Open {
             let (stem, source) = if is_prim {
                 let prim = sdf::Path::new(g)
                     .ok()
-                    .filter(sdf::Path::is_prim_path)
+                    .filter(sdf::Path::is_prim)
                     .ok_or_else(|| format!("prototype {g:?} is not a prim path"))?;
                 prim_at(&self.stage, &prim)
                     .map_err(|_| format!("prototype {g} is not a prim of the stage"))?;

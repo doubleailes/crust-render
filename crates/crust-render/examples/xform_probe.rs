@@ -30,9 +30,9 @@ fn main() {
     let x = Xform::get(&stage, path.clone())
         .expect("Xform::get")
         .expect("prim is an Xform");
-    match x.local_transformation(usd::TimeCode::new(0.0)) {
+    match x.local_transform(usd::TimeCode::new(0.0)) {
         Ok(m) => {
-            println!("openusd local_transformation for {}:", args[1]);
+            println!("openusd local_transform for {}:", args[1]);
             // Row-major as USD stores it; the translation is the last row.
             for r in 0..4 {
                 let row: Vec<String> = (0..4)
@@ -45,6 +45,6 @@ fn main() {
                 m.0[12], m.0[13], m.0[14]
             );
         }
-        Err(e) => println!("local_transformation failed: {e}"),
+        Err(e) => println!("local_transform failed: {e}"),
     }
 }

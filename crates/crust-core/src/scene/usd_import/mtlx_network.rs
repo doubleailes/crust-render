@@ -183,7 +183,7 @@ impl Builder<'_> {
                 };
                 let source = Source::Value(value);
                 let colorspace = owner
-                    .get_metadata::<sdf::Value>("colorSpace")
+                    .metadata::<sdf::Value>("colorSpace")
                     .ok()
                     .flatten()
                     .and_then(|v| v.as_str().map(str::to_owned));

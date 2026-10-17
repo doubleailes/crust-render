@@ -965,7 +965,7 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource>
         // chart, so the authored value decides and `vertex` is the fallback.
         let face_varying = matches!(
             prim.attribute(name)
-                .get_metadata::<sdf::Value>("interpolation")
+                .metadata::<sdf::Value>("interpolation")
                 .ok()
                 .flatten(),
             Some(sdf::Value::Token(t)) if t.as_str() == "faceVarying"

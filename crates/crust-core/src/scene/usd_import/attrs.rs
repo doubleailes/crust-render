@@ -393,7 +393,7 @@ pub(super) fn attr_own_color_space(attr: &Attribute) -> Option<Space> {
 }
 
 fn own_color_space_name(attr: &Attribute) -> Option<String> {
-    attr.get_metadata::<sdf::Value>("colorSpace")
+    attr.metadata::<sdf::Value>("colorSpace")
         .ok()
         .flatten()
         .and_then(decode_text)
