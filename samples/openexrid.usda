@@ -1,0 +1,283 @@
+#usda 1.0
+(
+    doc = """ID mattes as OpenEXRId deep EXRs, the identity AOVs and a primvar AOV,
+through UsdRender. A chair (a `component` asset of two meshes), a ball, a
+PointInstancer of pebbles and a floor, each authoring `primvars:displayColor`.
+
+    cargo run --release -- render -i samples/openexrid.usda
+
+writes four files under renders/:
+
+- openexrid.exr (+ .png): the beauty with alpha, `primId`, `elementId` and
+  the displayColor primvar — flat channels;
+- openexrid_objects.exr: an OpenEXRId matte by prim, with each prim's share
+  of the beauty (`deepRaster`, `primId` + the beauty);
+- openexrid_materials.exr and openexrid_assets.exr: mattes by bound material
+  and by asset, coverage only.
+
+Open a matte in Nuke with the DeepOpenEXRId node (or the OpenEXRId OpenFX
+plug-in) and select objects by name: /World/Chair/*, /World/Pebbles, ..."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 28
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.6, 6.5)
+        float3 xformOp:rotateXYZ = (-10, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.55, 0.62, 0.75)
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 2
+        float inputs:intensity = 2.5
+        float3 xformOp:rotateXYZ = (-50, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Mesh "Floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 3, 2, 4, 5]
+        point3f[] points = [(-6, 0, 4), (6, 0, 4), (6, 0, -1), (-6, 0, -1), (6, 0, -6), (-6, 0, -6)]
+        color3f[] primvars:displayColor = [(0.35, 0.35, 0.3), (0.3, 0.32, 0.35)] (
+            interpolation = "uniform"
+        )
+        rel material:binding = </World/Looks/Stone>
+    }
+
+    def Xform "Chair" (
+        kind = "component"
+    )
+    {
+        double3 xformOp:translate = (-1.3, 0, -0.5)
+        float3 xformOp:rotateXYZ = (0, 25, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Mesh "Seat" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 7, 6, 6, 7, 5, 4, 4, 5, 1, 0, 1, 5, 7, 3, 4, 0, 2, 6]
+            point3f[] points = [(-0.5, 0.45, 0.5), (0.5, 0.45, 0.5), (-0.5, 0.55, 0.5), (0.5, 0.55, 0.5), (-0.5, 0.45, -0.5), (0.5, 0.45, -0.5), (-0.5, 0.55, -0.5), (0.5, 0.55, -0.5)]
+            color3f[] primvars:displayColor = [(0.55, 0.35, 0.2)]
+            rel material:binding = </World/Looks/Wood>
+        }
+
+        def Mesh "Back" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 7, 6, 6, 7, 5, 4, 4, 5, 1, 0, 1, 5, 7, 3, 4, 0, 2, 6]
+            point3f[] points = [(-0.5, 0.55, -0.4), (0.5, 0.55, -0.4), (-0.5, 1.4, -0.4), (0.5, 1.4, -0.4), (-0.5, 0.55, -0.5), (0.5, 0.55, -0.5), (-0.5, 1.4, -0.5), (0.5, 1.4, -0.5)]
+            color3f[] primvars:displayColor = [(0.5, 0.3, 0.18)]
+            rel material:binding = </World/Looks/Wood>
+        }
+
+        def Mesh "Legs" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            point3f[] points = [(-0.45, 0, 0.45), (-0.4, 0, 0.45), (-0.4, 0.45, 0.45), (-0.45, 0.45, 0.45), (0.4, 0, 0.45), (0.45, 0, 0.45), (0.45, 0.45, 0.45), (0.4, 0.45, 0.45), (-0.45, 0, -0.45), (-0.4, 0, -0.45), (-0.4, 0.45, -0.45), (-0.45, 0.45, -0.45), (0.4, 0, -0.45), (0.45, 0, -0.45), (0.45, 0.45, -0.45), (0.4, 0.45, -0.45)]
+            color3f[] primvars:displayColor = [(0.2, 0.15, 0.1)]
+            rel material:binding = </World/Looks/Wood>
+        }
+    }
+
+    def Sphere "Ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.6
+        color3f[] primvars:displayColor = [(0.8, 0.1, 0.1)]
+        rel material:binding = </World/Looks/Red>
+        double3 xformOp:translate = (1.1, 0.6, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def PointInstancer "Pebbles"
+    {
+        rel prototypes = [</World/Pebbles/Protos/Pebble>]
+        int[] protoIndices = [0, 0, 0, 0, 0]
+        point3f[] positions = [(0.2, 0.12, 1.6), (0.7, 0.12, 2.0), (1.3, 0.12, 1.5), (-0.4, 0.12, 2.1), (2.1, 0.12, 0.9)]
+        float3[] scales = [(1, 0.6, 1), (0.8, 0.5, 0.8), (1.2, 0.7, 1.2), (0.7, 0.5, 0.7), (1, 0.6, 1)]
+
+        def Scope "Protos"
+        {
+            def Sphere "Pebble" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                double radius = 0.2
+                color3f[] primvars:displayColor = [(0.45, 0.45, 0.42)]
+                rel material:binding = </World/Looks/Stone>
+            }
+        }
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Stone"
+        {
+            token outputs:surface.connect = </World/Looks/Stone/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.4, 0.4, 0.38)
+                float inputs:roughness = 0.8
+                token outputs:surface
+            }
+        }
+
+        def Material "Wood"
+        {
+            token outputs:surface.connect = </World/Looks/Wood/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.45, 0.28, 0.15)
+                float inputs:roughness = 0.6
+                token outputs:surface
+            }
+        }
+
+        def Material "Red"
+        {
+            token outputs:surface.connect = </World/Looks/Red/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.7, 0.08, 0.06)
+                float inputs:roughness = 0.3
+                token outputs:surface
+            }
+        }
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (160, 90)
+        rel products = [
+            </Render/Products/image>,
+            </Render/Products/objects>,
+            </Render/Products/materials>,
+            </Render/Products/assets>,
+        ]
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 4
+        int crust:minSamplesPerPixel = 8
+        float crust:varianceThreshold = 0.05
+    }
+
+    def Scope "Products"
+    {
+        # Flat channels: the beauty, the closest sample's prim and authored
+        # face (UINT), and the displayColor primvar.
+        def RenderProduct "image"
+        {
+            token productName = "renders/openexrid.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/beauty>,
+                </Render/Products/Vars/primId>,
+                </Render/Products/Vars/elementId>,
+                </Render/Products/Vars/displayColor>,
+            ]
+        }
+
+        # An OpenEXRId matte by prim: each prim's coverage of a pixel and
+        # its share of the beauty.
+        def RenderProduct "objects"
+        {
+            uniform token productType = "deepRaster"
+            token productName = "renders/openexrid_objects.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/primId>,
+                </Render/Products/Vars/beauty>,
+            ]
+        }
+
+        # Mattes by bound material and by asset (the nearest component or
+        # assembly model), coverage only.
+        def RenderProduct "materials"
+        {
+            uniform token productType = "deepRaster"
+            token productName = "renders/openexrid_materials.exr"
+            rel orderedVars = [</Render/Products/Vars/materialId>]
+        }
+
+        def RenderProduct "assets"
+        {
+            uniform token productType = "deepRaster"
+            token productName = "renders/openexrid_assets.exr"
+            rel orderedVars = [</Render/Products/Vars/assetId>]
+        }
+
+        def Scope "Vars"
+        {
+            def RenderVar "beauty"
+            {
+                uniform token dataType = "color4f"
+                uniform string sourceName = "color"
+            }
+
+            def RenderVar "primId"
+            {
+                uniform token dataType = "int"
+                uniform string sourceName = "primId"
+            }
+
+            def RenderVar "elementId"
+            {
+                uniform token dataType = "int"
+                uniform string sourceName = "elementId"
+            }
+
+            def RenderVar "materialId"
+            {
+                uniform token dataType = "int"
+                uniform string sourceName = "materialId"
+            }
+
+            def RenderVar "assetId"
+            {
+                uniform token dataType = "int"
+                uniform string sourceName = "assetId"
+            }
+
+            def RenderVar "displayColor"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "displayColor"
+                uniform token sourceType = "primvar"
+            }
+        }
+    }
+}

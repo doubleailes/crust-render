@@ -38,7 +38,6 @@ mcp = [
     "dep:serde",
     "dep:schemars",
     "dep:serde_json",
-    "dep:base64",
 ]
 
 [dependencies]
@@ -53,7 +52,13 @@ clap = { version = "4.5.48", features = ["derive"] }
 image.workspace = true
 indicatif = "0.18.0"
 tracing.workspace = true
-exr.workspace = true
+# `deep`: OpenEXRId mattes are deep scanline EXRs.
+exr = { workspace = true, features = ["deep"] }
+# An OpenEXRId matte's name table travels in its header as base64 of the
+# zlib-compressed names, as OpenEXRId's own writer encodes it. `mcp` also
+# sends a render's PNG to the client as base64 image content.
+flate2.workspace = true
+base64 = "0.23"
 # Ctrl-C: the first one cancels the render through its `RenderControl` and
 # the partial outputs are written. Its `unsafe` is in installing the signal
 # handler, never on the render path; this crate stays `forbid(unsafe_code)`.
@@ -72,8 +77,6 @@ openusd = { workspace = true, features = ["serde"], optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 schemars = { version = "1.2", optional = true }
 serde_json = { version = "1.0.151", optional = true }
-# `mcp`: a render's PNG goes to the client as base64 image content.
-base64 = { version = "0.23", optional = true }
 
 # The probe examples read a stage directly (`ptex_verify`, `proto_probe`,
 # `rel_probe`, ...) and read `.ptx` headers and faces through the raw reader

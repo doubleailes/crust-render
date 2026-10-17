@@ -268,9 +268,11 @@ Renders that do not inspect run the code they ran:
 
 ## D10. Prims, in two steps
 
-Every record carries `prims`. Until a hit can be resolved to its prim
-(`add-identity-aovs-openexrid`), it is `null`, `prims_note` says why, and
-`expr+prims+light` is refused. Step 2 fills `prims` with each vertex's **instance**
+Every record carries `prims`. Until a hit is resolved to its prim, it is
+`null`, `prims_note` says why, and `expr+prims+light` is refused. The tables
+that resolve it now exist (`crust_core::identity::Identity`, from
+`add-identity-aovs-openexrid`, kept when an identity AOV asks for them); step 2
+is to keep them for an inspection too and read them per vertex. Step 2 fills `prims` with each vertex's **instance**
 prim path (from `(geom_id, prim_id, placement)`, never `/__Prototype_N`, which the
 stage epoch renumbers), enables the grouping, and drops `prims_note`; the format
 stays `/1`: a field that was `null` gains values.

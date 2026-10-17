@@ -35,7 +35,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ),
     ("rays", &["aabb", "hittable", "medium", "ray", "strands"]),
     ("materials", &["lpe", "material"]),
-    ("world", &["rt_world"]),
+    ("world", &["identity", "rt_world"]),
     ("lights", &["environment", "light"]),
     (
         "integrator",
@@ -44,6 +44,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "camera",
             "filter",
             "guiding",
+            "matte",
             "sampler",
             "subsurface",
             "tracer",

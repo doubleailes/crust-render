@@ -90,16 +90,22 @@ const UNKNOWN_INTEROP_ID: &str = "unknown";
 
 /// The channel names `var` writes, one per plane `AovFilm::var_channels`
 /// returns. `bare` makes the layer prefix empty — the product's beauty.
+/// A primvar's vector and colour layouts take as many components as its
+/// type has (`X/Y[/Z/W]`, `U/V[/W]`, `R/G/B[/A]`).
 pub fn channel_names(var: &AovVar, bare: bool) -> Vec<String> {
     let layer = match &var.channel_prefix {
         Some(prefix) => prefix.clone(),
         None if bare => String::new(),
         None => var.name.clone(),
     };
+    let n = var.components;
     let components: &[&str] = match var.channel_kind() {
         ChannelKind::Color if var.with_alpha() => &["R", "G", "B", "A"],
+        ChannelKind::Color if var.primvar.is_some() => &["R", "G", "B", "A"][..n.min(4)],
         ChannelKind::Color => &["R", "G", "B"],
+        ChannelKind::Vector if var.primvar.is_some() => &["X", "Y", "Z", "W"][..n.min(4)],
         ChannelKind::Vector => &["X", "Y", "Z"],
+        ChannelKind::Uv if var.primvar.is_some() => &["U", "V", "W"][..n.min(3)],
         ChannelKind::Uv => &["U", "V"],
         ChannelKind::Motion => &["u", "v"],
         ChannelKind::Scalar => {
@@ -124,9 +130,11 @@ pub fn channel_names(var: &AovVar, bare: bool) -> Vec<String> {
 
 /// `plane` as `precision` samples. A UINT channel holds integers; a negative
 /// one (the `-1` "no ID" clear value) is written as its two's-complement
-/// bit pattern.
-fn samples(plane: Vec<f32>, precision: Precision) -> FlatSamples {
+/// bit pattern. An identity's plane already holds its integers' bits
+/// (`bits`, [`AovVar::holds_bits`]), which are written as they are.
+fn samples(plane: Vec<f32>, precision: Precision, bits: bool) -> FlatSamples {
     match precision {
+        Precision::Uint if bits => FlatSamples::U32(plane.into_iter().map(f32::to_bits).collect()),
         Precision::Half => FlatSamples::F16(plane.into_iter().map(f16::from_f32).collect()),
         Precision::Float => FlatSamples::F32(plane),
         Precision::Uint => FlatSamples::U32(plane.into_iter().map(|v| v as i32 as u32).collect()),
@@ -136,7 +144,25 @@ fn samples(plane: Vec<f32>, precision: Precision) -> FlatSamples {
 /// The layout of a product's file: its channels' names, in var order, with
 /// the var each comes from. A var whose names collide with an earlier one's
 /// is refused (warned) rather than written over it.
+///
+/// A `deepRaster` product writes an OpenEXRId matte instead: its id var's
+/// channels are `Id`, `Z` and `A`, its beauty's `R`, `G`, `B` — names, not
+/// planes (`exrid.rs`).
 pub fn product_channels(product: &AovProduct) -> Vec<(&AovVar, Vec<String>)> {
+    if product.deep {
+        return product
+            .vars
+            .iter()
+            .map(|v| {
+                let names: &[&str] = if v.source == crust_core::AovSource::Color {
+                    &["R", "G", "B"]
+                } else {
+                    &["Id", "Z", "A"]
+                };
+                (v, names.iter().map(|n| (*n).to_owned()).collect())
+            })
+            .collect();
+    }
     let beauty = product.beauty().map(|v| v.prim_path.as_str());
     let mut taken: Vec<String> = Vec::new();
     let mut out = Vec::new();
@@ -307,7 +333,8 @@ pub fn refuse_shared_paths(products: &mut Vec<AovProduct>) {
 /// The colour channels are tagged with the working space's ASWF Color
 /// Interop ID (`colorInteropID`, `docs/color_management.md`) and, off
 /// Rec.709, its chromaticities. An `interrupted` render's product says so
-/// ([`RENDER_STATUS`]).
+/// ([`RENDER_STATUS`]). A `deepRaster` product is an OpenEXRId matte
+/// ([`crate::exrid::write_matte`]).
 pub fn write_product(
     path: &Path,
     product: &AovProduct,
@@ -317,8 +344,17 @@ pub fn write_product(
     sampling: &SamplingStamp,
     interrupted: bool,
 ) -> io::Result<Vec<String>> {
-    let interop = crust_core::color::interop_id(color.working);
-    let interop = interop.as_deref().unwrap_or(UNKNOWN_INTEROP_ID);
+    if product.deep {
+        return crate::exrid::write_matte(
+            path,
+            product,
+            beauty,
+            film,
+            color,
+            sampling,
+            interrupted,
+        );
+    }
     let (width, height) = film.dimensions();
     let (position, display_window) = exr_windows(beauty);
     let mut channels = Vec::new();
@@ -330,7 +366,10 @@ pub fn write_product(
                     format!("channel name {name:?} is not valid in an EXR"),
                 )
             })?;
-            channels.push(AnyChannel::new(name, samples(plane, var.precision)));
+            channels.push(AnyChannel::new(
+                name,
+                samples(plane, var.precision, var.holds_bits()),
+            ));
         }
     }
     if channels.is_empty() {
@@ -346,7 +385,41 @@ pub fn write_product(
     // them by name — an unsorted list is a malformed file.
     let channels = AnyChannels::sort(channels.into_iter().collect());
     let names = channels.list.iter().map(|c| c.name.to_string()).collect();
+    let attributes = product_attributes(product, color, sampling, interrupted, position);
 
+    let layer = Layer::new(
+        (width, height),
+        attributes,
+        Encoding {
+            compression: Compression::ZIP16,
+            blocks: Blocks::ScanLines,
+            line_order: LineOrder::Increasing,
+        },
+        channels,
+    );
+    let mut image = Image::from_layer(layer);
+    image.attributes.display_window = display_window;
+    image.attributes.chromaticities = color.exr_chromaticities();
+    image
+        .write()
+        .to_file(path)
+        .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
+    Ok(names)
+}
+
+/// The header every product's file carries, flat or deep: `software`, the
+/// working space's Color Interop ID, the product's `driver:parameters` text
+/// (those crust does not set itself), the sampling stamp, an interrupted
+/// render's status, and the data window's origin.
+pub fn product_attributes(
+    product: &AovProduct,
+    color: &super::OutputColor,
+    sampling: &SamplingStamp,
+    interrupted: bool,
+    position: Vec2<i32>,
+) -> LayerAttributes {
+    let interop = crust_core::color::interop_id(color.working);
+    let interop = interop.as_deref().unwrap_or(UNKNOWN_INTEROP_ID);
     let mut attributes = LayerAttributes {
         software_name: Text::new_or_none(concat!("crust-render ", env!("CARGO_PKG_VERSION"))),
         layer_position: position,
@@ -389,25 +462,7 @@ pub fn write_product(
     if interrupted {
         mark_interrupted(&mut attributes);
     }
-
-    let layer = Layer::new(
-        (width, height),
-        attributes,
-        Encoding {
-            compression: Compression::ZIP16,
-            blocks: Blocks::ScanLines,
-            line_order: LineOrder::Increasing,
-        },
-        channels,
-    );
-    let mut image = Image::from_layer(layer);
-    image.attributes.display_window = display_window;
-    image.attributes.chromaticities = color.exr_chromaticities();
-    image
-        .write()
-        .to_file(path)
-        .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
-    Ok(names)
+    attributes
 }
 
 /// Writes `crust diagnostic --adaptive-maps`: one EXR at the scene's
@@ -484,6 +539,7 @@ mod tests {
             expression: None,
             raw: false,
             variance: false,
+            primvar: None,
         }
     }
 
@@ -497,6 +553,7 @@ mod tests {
                 ("colorInteropID".into(), "srgb_rec709_display".into()),
                 ("comments".into(), "a note".into()),
             ],
+            deep: false,
         }
     }
 
@@ -549,6 +606,44 @@ mod tests {
                 "diffuse.B"
             ]
         );
+    }
+
+    /// A primvar's channels follow its type's role and component count.
+    #[test]
+    fn primvar_channels_take_their_types_layout() {
+        let primvar = |name: &str, kind: ChannelKind, components: usize| AovVar {
+            components,
+            primvar: Some(crust_core::PrimvarSource {
+                name: name.to_owned(),
+                kind,
+            }),
+            ..var(name, AovSource::Primvar)
+        };
+        let p = product(vec![
+            primvar("dc", ChannelKind::Color, 3),
+            primvar("w", ChannelKind::Vector, 4),
+            primvar("uv3", ChannelKind::Uv, 3),
+            primvar("r", ChannelKind::Scalar, 1),
+            primvar("v2", ChannelKind::Vector, 2),
+        ]);
+        assert_eq!(
+            names(&p),
+            [
+                "dc.R", "dc.G", "dc.B", "w.X", "w.Y", "w.Z", "w.W", "uv3.U", "uv3.V", "uv3.W", "r",
+                "v2.X", "v2.Y"
+            ]
+        );
+    }
+
+    /// A deep product lists OpenEXRId's channels, not planes of its vars.
+    #[test]
+    fn a_deep_product_lists_openexrids_channels() {
+        let mut p = product(vec![
+            var("prim", AovSource::PrimId),
+            var("C", AovSource::Color),
+        ]);
+        p.deep = true;
+        assert_eq!(names(&p), ["Id", "Z", "A", "R", "G", "B"]);
     }
 
     /// Motion vectors take Nuke's lowercase `u` / `v`, so a var named
@@ -864,17 +959,23 @@ mod tests {
     #[test]
     fn samples_take_the_requested_precision() {
         assert!(matches!(
-            samples(vec![0.5], Precision::Half),
+            samples(vec![0.5], Precision::Half, false),
             FlatSamples::F16(v) if v == [f16::from_f32(0.5)]
         ));
         assert!(matches!(
-            samples(vec![0.5], Precision::Float),
+            samples(vec![0.5], Precision::Float, false),
             FlatSamples::F32(v) if v == [0.5]
         ));
         // `-1` ("no ID") is the all-ones bit pattern.
         assert!(matches!(
-            samples(vec![-1.0, 7.0], Precision::Uint),
+            samples(vec![-1.0, 7.0], Precision::Uint, false),
             FlatSamples::U32(v) if v == [0xFFFF_FFFF, 7]
+        ));
+        // An identity's plane is its integers' bits: a hash beyond f32's
+        // integers survives whole.
+        assert!(matches!(
+            samples(vec![f32::from_bits(0x8eb8_c548), f32::from_bits(u32::MAX)], Precision::Uint, true),
+            FlatSamples::U32(v) if v == [0x8eb8_c548, 0xFFFF_FFFF]
         ));
     }
 

@@ -563,6 +563,9 @@ impl Renderer {
         }
         let mut layout = AovLayout::new(request);
         layout.luma = self.lights.luma();
+        if !layout.mattes.is_empty() || layout.identity.any() {
+            layout.names = self.world.identity().cloned();
+        }
         if !layout.lpes.is_empty() || layout.albedo || layout.diffuse_filter {
             // One DFA for every expression of the render, over the lights'
             // tags; shared read-only by every worker.
@@ -1231,10 +1234,12 @@ impl Renderer {
         };
         let route_ctx = layout.and_then(|l| l.route.clone());
         let motion_aov = layout.is_some_and(|l| l.motion);
+        let attrs = layout.map_or((false, 0), |l| (l.reads_hit_attributes(), l.primvars.len()));
         let scratch = || {
             let mut s = PathScratch::new(self.settings.max_depth as usize);
             s.route_ctx = route_ctx.clone();
             s.motion = motion_aov;
+            s.first_attrs = path::FirstAttrs::new(attrs.0, attrs.1);
             s
         };
         // Read before every pixel's advance (one relaxed load; nothing at
@@ -1773,6 +1778,9 @@ impl Renderer {
                     albedo: scratch.route.albedo,
                     diffuse_filter: scratch.route.diffuse_filter,
                     time,
+                    identity: scratch.first_attrs.identity,
+                    primvars: &scratch.first_attrs.primvars,
+                    radiance,
                 };
                 planes.add(&scratch.first, &extras, fx, fy, wx * wy);
             }

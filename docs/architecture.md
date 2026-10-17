@@ -178,7 +178,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/usd_import/implicit.rs` (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1` variants tessellated as OpenUSD's GeomUtil does, pinned point for point by `tests/geomutil_oracle.rs`, their radial count chosen from the screen when a camera is named); `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `strands.rs` (`StrandTable`, `CurveHit`), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
-| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
+| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); `identity.rs` (`Identity`: `geom_id` → prim, material and asset names and `PointInstancer` placements; `AovGeometry`: element maps and primvar sets), kept by `scene/usd_import/aov_keep.rs` only when a var asks; `matte.rs` (the ID mattes' bounded per-pixel name lists, which `crust-render/src/exrid.rs` writes as OpenEXRId deep EXRs); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` (and `var_of_mean`, the one variance estimator), `region.rs` (`PixelRect`) |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`), `lobe.rs` (the lobe vocabulary: `Scatter`, `LobeLabel`, `LobeEvent`, `LobeSplit`, which `lpe` re-exports) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection, `learned.rs` and `neural.rs` the frozen tables the learned selections pick with), `tracer/light_cache.rs` (`learned`'s training pre-pass, and the walk both learned selections share), `tracer/light_visibility.rs` (`neural`'s training over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
@@ -199,9 +199,9 @@ stays a mechanical move. From the bottom:
 | foundation | `config`, `names`, `warnings`, `report`, `profile`, `stats`, `pdf`, `distribution`, `color`, `texture`, `lux`, `error` (with `Structural` and the inspection's `Refusal` and limits), `region`, `buffer` |
 | rays | `ray`, `medium`, `hittable`, `aabb`, `strands` |
 | materials | `material/` (with the lobe vocabulary `lpe` matches, and `SubsurfaceEntry`), `lpe/` |
-| world | `rt_world` (with the material `Signature` an in-place edit is checked against, and `EVERY_CLASS`) |
+| world | `rt_world` (with the material `Signature` an in-place edit is checked against, and `EVERY_CLASS`), `identity` (the tables identity, matte and primvar AOVs read beside the world) |
 | lights | `light/` (with the learned selections' frozen tables), `environment` |
-| integrator | `tracer/` (with the learned selections' training and the inspection's per-unit store), `aov`, `camera`, `filter`, `sampler`, `guiding`, `volume`, `subsurface` |
+| integrator | `tracer/` (with the learned selections' training and the inspection's per-unit store), `aov`, `matte`, `camera`, `filter`, `sampler`, `guiding`, `volume`, `subsurface` |
 | import | `scene/`, `world.rs`, `live`, `place` |
 | tools | `diagnostic/`, `inspect/`, `compare`, `stamp`, `check` |
 
@@ -405,6 +405,20 @@ other. The pairs:
   once per pass in `PassConfig`),
   never the records, so the vector is the same with blur on and off
   (`sample_value` rebases the hit to shutter open by the sample's `time`).
+- **Identity ↔ light linking.** The names `primId` and the ID mattes give a
+  hit are the light-link provenance runs' prims (the instance or instancer
+  prim, never a `/__Prototype_N`), read from the same runs at the end of the
+  import (`AovKeep::build`); a new geometry producer that records its runs
+  gets ids and matte names with no further work, and one that does not gets
+  `-1` and no name. An identity plane holds `u32` bit patterns in its `f32`
+  slots, so it is closest-only (passes keep the closest sample's, never an
+  average), never exposed, and written with
+  `f32::to_bits` (`AovSource::is_identity`); a new arithmetic step over
+  planes skips it. The element maps and primvar sets are side tables beside
+  the geometry, never inputs to it: asking for them changes no vertex, and
+  barycentrics are recovered by a sliver re-intersection
+  (`World::barycentrics`) rather than by widening `WorldHit`. An MCP settings
+  refresh that would change which tables the import keeps is `Structural`.
 
 ## Environment switches
 

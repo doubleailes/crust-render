@@ -28,7 +28,9 @@ use openusd_schemas::render::{
 };
 use tracing::debug;
 
-use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
+use crate::aov::{
+    Accumulation, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, Precision, PrimvarSource,
+};
 use crate::region::PixelRect;
 
 use super::attrs::{custom_bool, custom_token, decode_bool, decode_number, prim_value, value_at};
@@ -198,15 +200,20 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         let prim = prim_at(stage, product_path.clone());
         let product_type =
             custom_token(&prim, "productType").unwrap_or_else(|| "raster".to_owned());
-        if product_type != "raster" {
-            warning!(
-                ProductUnsupportedType,
-                at = product_path,
-                "{product_path}: productType {product_type:?} is not supported (only \
-                 \"raster\"); no file is written for it"
-            );
-            continue;
-        }
+        // A deep product is an ID matte: one OpenEXRId file.
+        let deep = match product_type.as_str() {
+            "raster" => false,
+            "deepRaster" => true,
+            _ => {
+                warning!(
+                    ProductUnsupportedType,
+                    at = product_path,
+                    "{product_path}: productType {product_type:?} is not supported (only \
+                     \"raster\" and \"deepRaster\"); no file is written for it"
+                );
+                continue;
+            }
+        };
         // The camera's existence is not checked here: this is the index
         // stage, with payloads unloaded, and a shot camera under a payload
         // (the production case) is not composed on it. A camera that really
@@ -305,6 +312,12 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             }
             product_vars.extend(var);
         }
+        if deep {
+            match matte_vars(&product_path, product_vars) {
+                Some(vars) => product_vars = vars,
+                None => continue,
+            }
+        }
         let attributes = driver_attributes(&prim);
         debug!(
             "{product_path}: {:?} with {} var(s): {}",
@@ -321,6 +334,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             name,
             vars: product_vars,
             attributes,
+            deep,
         });
     }
     if let Some(first) = render_base {
@@ -330,6 +344,50 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         out.data_window = first.data_window;
     }
     out
+}
+
+/// The vars a `deepRaster` product keeps: the first that names an id (a
+/// prim, material or asset id: what the matte's ids stand for) and the
+/// first beauty (each id's share of it), each refused with a warning past
+/// that, and every other var refused — an OpenEXRId file holds ids, their
+/// coverage and their colour, nothing else. `None`, warned, when no var
+/// names an id: the product then writes nothing.
+fn matte_vars(product: &sdf::Path, vars: Vec<AovVar>) -> Option<Vec<AovVar>> {
+    let mut kept: Vec<AovVar> = Vec::new();
+    for var in vars {
+        let named = var.source.name_key().is_some();
+        let beauty = var.source == AovSource::Color;
+        let taken = kept.iter().any(|k| {
+            (named && k.source.name_key().is_some()) || (beauty && k.source == AovSource::Color)
+        });
+        if (named || beauty) && !taken {
+            kept.push(var);
+            continue;
+        }
+        let why = if named || beauty {
+            "a deepRaster product writes one matte, and an earlier var already sets it"
+        } else {
+            "a deepRaster product is an OpenEXRId matte: only primId, materialId or assetId \
+             (what its ids name) and the beauty (their colour) go in it"
+        };
+        warning!(
+            AovNotInMatte,
+            at = var.prim_path,
+            "{}: {} cannot be written by {product}: {why}; no channel written",
+            var.prim_path,
+            var.source.name()
+        );
+    }
+    if !kept.iter().any(|v| v.source.name_key().is_some()) {
+        warning!(
+            ProductNoWritableVars,
+            at = product,
+            "{product}: a deepRaster product needs a var naming what its ids stand for \
+             (sourceName primId, materialId or assetId); nothing is written for it"
+        );
+        return None;
+    }
+    Some(kept)
 }
 
 /// `UsdRender`'s fallback `dataWindowNDC`: the whole frame.
@@ -530,13 +588,35 @@ pub(super) fn parse_data_type(name: &str) -> Option<(usize, Precision)> {
 }
 
 /// Whether `source` can be written as `components` channels of `precision`.
+/// An identity is one integer channel; a primvar any one to four channels,
+/// the primvar's own type being checked against them where it is read.
 fn type_fits(source: AovSource, components: usize, precision: Precision) -> bool {
     let components_fit = match source {
         AovSource::Color | AovSource::Lpe => components == 3 || components == 4,
+        AovSource::Primvar => (1..=4).contains(&components),
         s => components == s.components(),
     };
-    let precision_fits = precision != Precision::Uint || source == AovSource::SampleCount;
+    let precision_fits = match source {
+        s if s.is_identity() => precision == Precision::Uint,
+        AovSource::SampleCount | AovSource::Primvar => true,
+        _ => precision != Precision::Uint,
+    };
     components_fit && precision_fits
+}
+
+/// How a primvar var's channels are laid out, by its type's role: a colour
+/// as colour, a texture coordinate as `U/V`, any other vector as `X/Y/Z/W`,
+/// one component as a scalar.
+fn primvar_kind(type_name: &str, components: usize) -> ChannelKind {
+    if type_name.starts_with("color") {
+        ChannelKind::Color
+    } else if type_name.starts_with("texCoord") {
+        ChannelKind::Uv
+    } else if components == 1 {
+        ChannelKind::Scalar
+    } else {
+        ChannelKind::Vector
+    }
 }
 
 /// The accumulation a var's authored attributes ask for, first match wins:
@@ -611,6 +691,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     let source_type = custom_token(&prim, "sourceType").unwrap_or_else(|| "raw".to_owned());
     let source_name = custom_token(&prim, "sourceName").unwrap_or_default();
     let mut expression = None;
+    let mut primvar_name: Option<String> = None;
     let mut raw = false;
     let raw_authored = custom_bool(&prim, "crust:aov:raw") == Some(true);
     let variance = custom_bool(&prim, "crust:aov:variance") == Some(true);
@@ -630,6 +711,16 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             } else {
                 &source_name
             };
+            if AovSource::is_cryptomatte(lookup) {
+                warning!(
+                    AovUnsupportedSource,
+                    at = path,
+                    "{path}: {lookup:?} is a Cryptomatte layer, which crust does not write — \
+                     its ID mattes are OpenEXRId files (a RenderProduct with productType \
+                     \"deepRaster\"); no channel written"
+                );
+                return None;
+            }
             if raw_authored {
                 warning!(
                     AovRawIgnored,
@@ -708,12 +799,20 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             AovSource::Lpe
         }
         "primvar" => {
-            warning!(
-                AovUnsupportedSource,
-                at = path,
-                "{path}: primvar source {source_name:?} is not supported yet; no channel written"
-            );
-            return None;
+            let primvar = source_name
+                .strip_prefix("primvars:")
+                .unwrap_or(&source_name);
+            if primvar.is_empty() {
+                warning!(
+                    AovUnknownSource,
+                    at = path,
+                    "{path}: sourceType \"primvar\" names no primvar (sourceName is empty); no \
+                     channel written"
+                );
+                return None;
+            }
+            primvar_name = Some(primvar.to_owned());
+            AovSource::Primvar
         }
         "intrinsic" => {
             warning!(
@@ -735,9 +834,19 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     };
 
     // An expression's variance is one scalar: unauthored, it is a float.
+    // An identity is Hydra's `int` unauthored.
     let type_name = custom_token(&prim, "driver:parameters:aov:format")
         .or_else(|| custom_token(&prim, "dataType"))
-        .unwrap_or_else(|| if variance { "float" } else { "color3f" }.to_owned());
+        .unwrap_or_else(|| {
+            if variance {
+                "float"
+            } else if source.is_identity() {
+                "int"
+            } else {
+                "color3f"
+            }
+            .to_owned()
+        });
     let Some((components, precision)) = parse_data_type(&type_name) else {
         warning!(
             AovTypeMismatch,
@@ -766,7 +875,13 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         return None;
     }
 
-    let default = source.default_accumulation();
+    // An integer primvar is closest by default, like every id: the average
+    // of two integers is no integer the primvar holds.
+    let default = if source == AovSource::Primvar && precision == Precision::Uint {
+        Accumulation::Closest
+    } else {
+        source.default_accumulation()
+    };
     let authored = authored_accumulation(&prim);
     if variance && authored == Some(Accumulation::Closest) {
         // One sample's value per pixel has no sample variance.
@@ -780,11 +895,15 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     }
     let accumulation = match authored {
         Some(mode) if !source.accepts_accumulation() && mode != default => {
+            let why = if source.is_identity() {
+                "the average of two ids is no id"
+            } else {
+                "it is a per-pixel quantity"
+            };
             warning!(
                 AovAccumulationIgnored,
                 at = path,
-                "{path}: {} is a per-pixel quantity and cannot be accumulated as {mode:?}; \
-                 using {default:?}",
+                "{path}: {} cannot be accumulated as {mode:?} ({why}); using {default:?}",
                 source.name()
             );
             default
@@ -807,6 +926,10 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         expression,
         raw,
         variance,
+        primvar: primvar_name.map(|name| PrimvarSource {
+            name,
+            kind: primvar_kind(&type_name, components),
+        }),
     })
 }
 

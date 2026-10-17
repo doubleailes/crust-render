@@ -31,6 +31,9 @@ mod error;
 mod filter;
 mod guiding;
 mod hittable;
+/// What the identity AOVs and ID mattes name, and what the primvar AOVs
+/// read: the tables the import keeps beside the world when asked.
+pub mod identity;
 /// The light path inspector: the individual light paths of a few pixels
 /// (`crust light-paths`).
 pub mod inspect;
@@ -39,6 +42,7 @@ pub mod live;
 pub mod lpe;
 mod lux;
 mod material;
+mod matte;
 mod medium;
 pub mod names;
 mod pdf;
@@ -85,7 +89,8 @@ pub use crust_rt as rt;
 
 pub use aabb::AABB;
 pub use aov::{
-    Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, Precision,
+    Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, IdentityNeeds,
+    MatteKey, MatteView, NameKey, Precision, PrimvarRead, PrimvarSource,
 };
 pub use buffer::Buffer;
 pub use camera::Camera;
@@ -93,6 +98,7 @@ pub use config::{
     Config, DEFAULT_TEX_MAX_OPEN_FILES, DiskSampling, PtexMipSpace, TriPackets, TubeSampling,
     config,
 };
+pub use matte::{MatteSample, SPILL_NAME};
 
 /// What every kernel scene commits with — the `CRUST_TRI_PACKETS` switch,
 /// read once.

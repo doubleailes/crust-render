@@ -53,6 +53,22 @@ pub(super) struct MaterialCache {
 }
 
 impl MaterialCache {
+    /// Each material the cache resolved, by its `Arc`'s address → its prim
+    /// path, prototype-scoped ones included under their `/__Prototype_N`
+    /// path (which the identity tables name after the prim placing it,
+    /// `super::aov_keep`). By `Arc` identity, as [`MaterialCache::origins`].
+    pub(super) fn paths_by_address(&self) -> HashMap<usize, String> {
+        self.by_path
+            .iter()
+            .map(|((_, path), cached)| {
+                (
+                    Arc::as_ptr(&cached.material) as *const () as usize,
+                    path.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Each material prim the cache resolved → the `world` slots holding it
     /// and whether a mesh was displaced by it ([`crate::live::Provenance`]).
     /// By `Arc` identity: a slot holds exactly the `Arc` the cache handed out.

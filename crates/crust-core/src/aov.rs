@@ -20,6 +20,9 @@ use glam::Vec3A;
 
 use crate::buffer::Buffer;
 use crate::camera::CameraFrame;
+pub use crate::identity::NameKey;
+use crate::identity::{HitIdentity, NO_ID, NO_NAME, NameTable};
+use crate::matte::{FilmMatte, MatteSample, SPILL, SPILL_NAME, UnitMatte};
 use crate::region::PixelRect;
 
 /// What a RenderVar computes: one row of the canonical table.
@@ -61,6 +64,22 @@ pub enum AovSource {
     /// pixels: `u` right, `v` up (Nuke's conventions, Arnold's raw
     /// `motionvector`). Zero on static geometry, in volumes and on escapes.
     MotionVector,
+    /// A stable integer per prim: the MurmurHash3 of the path of the prim
+    /// the hit geometry came from — the instance or instancer prim for
+    /// instanced geometry, as light linking judges receivers.
+    PrimId,
+    /// The MurmurHash3 of the hit geometry's bound material's path.
+    MaterialId,
+    /// The MurmurHash3 of the path of the hit prim's asset: its nearest
+    /// ancestor (or itself) of `kind` `component` or `assembly`.
+    AssetId,
+    /// The hit instance's index in its `PointInstancer`'s arrays.
+    InstanceId,
+    /// The authored (pre-triangulation) face index of the hit mesh.
+    ElementId,
+    /// A primvar's value at the first hit (`sourceType = "primvar"`; the
+    /// primvar is the var's [`AovVar::primvar`]).
+    Primvar,
 }
 
 /// `(name, source)` for every canonical name and alias a `raw` var may ask
@@ -115,6 +134,17 @@ const RAW_NAMES: &[(&str, AovSource)] = &[
     // `Vector`, `motionFore`) each encode the vector their own way, and an
     // alias would be a plausible but wrong channel.
     ("motionvector", AovSource::MotionVector),
+    ("primId", AovSource::PrimId),
+    ("id", AovSource::PrimId),
+    ("ID", AovSource::PrimId),
+    ("Object Index", AovSource::PrimId),
+    // Crust's own: Hydra names no material or asset id.
+    ("materialId", AovSource::MaterialId),
+    ("assetId", AovSource::AssetId),
+    ("instanceId", AovSource::InstanceId),
+    ("id2", AovSource::InstanceId),
+    ("elementId", AovSource::ElementId),
+    ("faceindex", AovSource::ElementId),
 ];
 
 /// The raw light sources: a name, and the light path expression whose
@@ -141,16 +171,12 @@ pub const RAW_FILTER_FLOOR: f32 = 1e-4;
 
 /// Names a later phase of the AOV work will define, refused today with a
 /// reason that says so rather than "unknown".
-const LATER_NAMES: &[&str] = &[
-    "Ng",
-    "primId",
-    "id",
-    "ID",
-    "Object Index",
-    "instanceId",
-    "id2",
-    "elementId",
-    "faceindex",
+const LATER_NAMES: &[&str] = &["Ng"];
+
+/// Cryptomatte's layer names. Crust writes ID mattes as OpenEXRId instead
+/// (a `deepRaster` product), so these are refused with a reason that says
+/// so, never written.
+const CRYPTOMATTE_NAMES: &[&str] = &[
     "crypto_object",
     "crypto_material",
     "crypto_asset",
@@ -186,6 +212,37 @@ impl AovSource {
         LATER_NAMES.contains(&name)
     }
 
+    /// Whether `name` is one of Cryptomatte's layers, which crust does not
+    /// write: its ID mattes are OpenEXRId.
+    pub fn is_cryptomatte(name: &str) -> bool {
+        CRYPTOMATTE_NAMES.contains(&name)
+    }
+
+    /// Whether the source is an identity: an integer naming what the first
+    /// hit lies on, closest-sample and written as UINT. Its film slot holds
+    /// the integer's bit pattern, which nothing ever does arithmetic on.
+    pub fn is_identity(self) -> bool {
+        matches!(
+            self,
+            AovSource::PrimId
+                | AovSource::MaterialId
+                | AovSource::AssetId
+                | AovSource::InstanceId
+                | AovSource::ElementId
+        )
+    }
+
+    /// What the source's id names, for the three that hash a name — and
+    /// that name an ID matte's ids.
+    pub fn name_key(self) -> Option<NameKey> {
+        match self {
+            AovSource::PrimId => Some(NameKey::Prim),
+            AovSource::MaterialId => Some(NameKey::Material),
+            AovSource::AssetId => Some(NameKey::Asset),
+            _ => None,
+        }
+    }
+
     /// The canonical (Hydra) name.
     pub fn name(self) -> &'static str {
         match self {
@@ -204,11 +261,19 @@ impl AovSource {
             AovSource::Albedo => "albedo",
             AovSource::DiffuseFilter => "diffuse_albedo",
             AovSource::MotionVector => "motionvector",
+            AovSource::PrimId => "primId",
+            AovSource::MaterialId => "materialId",
+            AovSource::AssetId => "assetId",
+            AovSource::InstanceId => "instanceId",
+            AovSource::ElementId => "elementId",
+            AovSource::Primvar => "primvar",
         }
     }
 
     /// How many components the source has. The beauty's alpha is a
-    /// separate source, so `color` is 3 even when written as `color4f`.
+    /// separate source, so `color` is 3 even when written as `color4f`. A
+    /// primvar has as many as its var's type ([`AovVar::components`]); 1
+    /// stands for it here.
     pub fn components(self) -> usize {
         match self {
             AovSource::Color
@@ -224,7 +289,13 @@ impl AovSource {
             | AovSource::Depth
             | AovSource::Distance
             | AovSource::SampleCount
-            | AovSource::Variance => 1,
+            | AovSource::Variance
+            | AovSource::PrimId
+            | AovSource::MaterialId
+            | AovSource::AssetId
+            | AovSource::InstanceId
+            | AovSource::ElementId
+            | AovSource::Primvar => 1,
         }
     }
 
@@ -247,7 +318,13 @@ impl AovSource {
             | AovSource::SampleCount
             | AovSource::Albedo
             | AovSource::DiffuseFilter
-            | AovSource::MotionVector => 0,
+            | AovSource::MotionVector
+            | AovSource::PrimId
+            | AovSource::MaterialId
+            | AovSource::AssetId
+            | AovSource::InstanceId
+            | AovSource::ElementId
+            | AovSource::Primvar => 0,
         }
     }
 
@@ -265,7 +342,15 @@ impl AovSource {
             | AovSource::Depth
             | AovSource::Distance
             | AovSource::SampleCount
-            | AovSource::Variance => ChannelKind::Scalar,
+            | AovSource::Variance
+            | AovSource::PrimId
+            | AovSource::MaterialId
+            | AovSource::AssetId
+            | AovSource::InstanceId
+            | AovSource::ElementId => ChannelKind::Scalar,
+            // A primvar's layout is its var's type's ([`PrimvarSource`]):
+            // scalar until a type says otherwise.
+            AovSource::Primvar => ChannelKind::Scalar,
         }
     }
 
@@ -274,6 +359,8 @@ impl AovSource {
     /// motion vector blended at an edge would have VectorBlur smear the
     /// foreground into the background (Arnold users pair `motionvector`
     /// with `closest_filter` for the same reason).
+    ///
+    /// An identity is closest too: a blend of two ids is no id at all.
     pub fn default_accumulation(self) -> Accumulation {
         match self {
             AovSource::Depth
@@ -281,26 +368,31 @@ impl AovSource {
             | AovSource::P
             | AovSource::Peye
             | AovSource::MotionVector => Accumulation::Closest,
+            s if s.is_identity() => Accumulation::Closest,
             _ => Accumulation::Filtered,
         }
     }
 
     /// Whether an authored accumulation mode applies to this source at all.
     /// The beauty, `sampleCount` and `variance` are per-pixel quantities the
-    /// film already has; they have no per-sample value to accumulate.
+    /// film already has; they have no per-sample value to accumulate. An
+    /// identity is always closest: its slot holds an integer's bits, which a
+    /// filter would average into a number that names nothing.
     pub fn accepts_accumulation(self) -> bool {
         !matches!(
             self,
             AovSource::Color | AovSource::SampleCount | AovSource::Variance
-        )
+        ) && !self.is_identity()
     }
 
     /// What a pixel holds where no sample saw the quantity (the primary ray
     /// escaped): `+inf` for the two distances, so a `zmin` composite treats
-    /// the background as infinitely far, and 0 for everything else.
+    /// the background as infinitely far, `-1` ("no id", written as
+    /// `0xFFFFFFFF`) for an identity, and 0 for everything else.
     pub fn default_clear(self) -> f32 {
         match self {
             AovSource::Depth | AovSource::Distance => f32::INFINITY,
+            s if s.is_identity() => -1.0,
             _ => 0.0,
         }
     }
@@ -366,6 +458,31 @@ pub struct AovVar {
     /// `variance` source's estimator over the expression's (raw, if `raw`)
     /// share of each sample. `components` is 1.
     pub variance: bool,
+    /// The primvar of an [`AovSource::Primvar`] var; `None` for every other
+    /// source.
+    pub primvar: Option<PrimvarSource>,
+}
+
+/// One way the render reads a primvar: its name, how many components a var
+/// writes of it, and whether as a colour (taken into the working space).
+/// Two vars reading one primvar the same way share its values.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PrimvarRead {
+    pub name: String,
+    pub components: usize,
+    pub color: bool,
+}
+
+/// The primvar a `sourceType = "primvar"` var reads, and how its channels
+/// are laid out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimvarSource {
+    /// The primvar's name, without the `primvars:` namespace.
+    pub name: String,
+    /// The channels' suffixes, from the var's type's role: a colour is
+    /// `R/G/B[/A]` and taken into the working space, a texture coordinate
+    /// `U/V[/W]`, any other vector `X/Y/Z[/W]`, a scalar one channel.
+    pub kind: ChannelKind,
 }
 
 impl AovVar {
@@ -376,13 +493,32 @@ impl AovVar {
     }
 
     /// How the var's channels are laid out: its source's, except that an
-    /// expression's variance is one scalar.
+    /// expression's variance is one scalar and a primvar's is its type's.
     pub fn channel_kind(&self) -> ChannelKind {
         if self.is_lpe_variance() {
             ChannelKind::Scalar
+        } else if let Some(p) = &self.primvar {
+            p.kind
         } else {
             self.source.channel_kind()
         }
+    }
+
+    /// Whether the var's planes hold an integer's bit pattern rather than a
+    /// number ([`AovSource::is_identity`]): a writer takes them with
+    /// `f32::to_bits`.
+    pub fn holds_bits(&self) -> bool {
+        self.source.is_identity()
+    }
+
+    /// How the var reads its primvar, for a primvar var.
+    pub fn primvar_read(&self) -> Option<PrimvarRead> {
+        let p = self.primvar.as_ref()?;
+        Some(PrimvarRead {
+            name: p.name.clone(),
+            components: self.components,
+            color: p.kind == ChannelKind::Color,
+        })
     }
 
     fn is_lpe_variance(&self) -> bool {
@@ -390,11 +526,25 @@ impl AovVar {
     }
 
     /// The film slot holding this var's per-sample accumulation, if any.
-    /// `lpes` is the render's expression list ([`AovLayout::lpes`]).
-    fn slot_key(&self, lpes: &[String]) -> Option<SlotKey> {
+    /// `lpes` and `primvars` are the render's expression and primvar lists
+    /// ([`AovLayout::lpes`], [`AovLayout::primvars`]).
+    fn slot_key(&self, lpes: &[String], primvars: &[PrimvarRead]) -> Option<SlotKey> {
         let lpe = match &self.expression {
             Some(e) if self.source == AovSource::Lpe => lpes.iter().position(|x| x == e)? as u16,
             _ => NO_LPE,
+        };
+        let (primvar, width) = match self.primvar_read() {
+            Some(read) if self.source == AovSource::Primvar => (
+                primvars.iter().position(|x| *x == read)? as u16,
+                self.components.clamp(1, 4) as u8,
+            ),
+            _ => (NO_PRIMVAR, self.source.components() as u8),
+        };
+        // An identity slot holds its integer's bits, its clear value too.
+        let clear_bits = if self.source.is_identity() {
+            self.clear as i64 as u32
+        } else {
+            self.clear.to_bits()
         };
         // A variance is a statistic over every sample: its slot is filtered
         // whatever the var carries. The importer refuses `Closest` on one;
@@ -407,16 +557,21 @@ impl AovVar {
         self.source.needs_slot().then(|| SlotKey {
             source: self.source,
             accumulation,
-            clear_bits: self.clear.to_bits(),
+            clear_bits,
             lpe,
             raw: self.raw,
             variance: self.is_lpe_variance(),
+            primvar,
+            width,
         })
     }
 }
 
 /// A slot that holds no light path expression.
 const NO_LPE: u16 = u16::MAX;
+
+/// A slot that holds no primvar.
+const NO_PRIMVAR: u16 = u16::MAX;
 
 /// One accepted `raster` RenderProduct.
 #[derive(Debug, Clone, PartialEq)]
@@ -430,6 +585,10 @@ pub struct AovProduct {
     /// Authored `driver:parameters:*` text values to copy into the header,
     /// as `(name without the prefix, value)`.
     pub attributes: Vec<(String, String)>,
+    /// A `deepRaster` product: one OpenEXRId matte, whose ids stand for
+    /// what its one identity var names ([`AovProduct::matte`]); a beauty var
+    /// adds each id's share of the beauty.
+    pub deep: bool,
 }
 
 impl AovProduct {
@@ -438,6 +597,29 @@ impl AovProduct {
     pub fn beauty(&self) -> Option<&AovVar> {
         self.vars.iter().find(|v| v.source == AovSource::Color)
     }
+
+    /// The ID matte a `deepRaster` product writes: what its ids name, and
+    /// whether it carries colour. `None` for a raster product, and for a
+    /// deep one with no var that names an id (the importer refuses those).
+    pub fn matte(&self) -> Option<MatteKey> {
+        if !self.deep {
+            return None;
+        }
+        let names = self.vars.iter().find_map(|v| v.source.name_key())?;
+        Some(MatteKey {
+            names,
+            color: self.beauty().is_some(),
+        })
+    }
+}
+
+/// What one ID matte accumulates: the name each sample's id stands for,
+/// and whether its samples carry their share of the beauty (`R/G/B`)
+/// besides their coverage (`A`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatteKey {
+    pub names: NameKey,
+    pub color: bool,
 }
 
 /// Every product a render writes. Empty when the stage authors none, which
@@ -449,14 +631,73 @@ pub struct AovRequest {
 
 impl AovRequest {
     /// Whether any var needs more than the beauty buffer — that is, whether
-    /// the render must take the AOV path at all.
+    /// the render must take the AOV path at all. An ID matte always does.
     pub fn needs_film(&self) -> bool {
         self.vars()
             .any(|v| v.source != AovSource::Color || v.with_alpha())
+            || self.mattes().next().is_some()
     }
 
+    /// The vars of the raster products: the ones written as planes.
     fn vars(&self) -> impl Iterator<Item = &AovVar> {
-        self.products.iter().flat_map(|p| &p.vars)
+        self.products
+            .iter()
+            .filter(|p| !p.deep)
+            .flat_map(|p| &p.vars)
+    }
+
+    /// The ID mattes the `deepRaster` products ask for.
+    fn mattes(&self) -> impl Iterator<Item = MatteKey> + '_ {
+        self.products.iter().filter_map(AovProduct::matte)
+    }
+
+    /// What the render needs to know about the first hit's identity: which
+    /// names the flat ids and the mattes read, and whether a var reads the
+    /// instance or the element. The importer keeps the tables these need,
+    /// and only these.
+    pub fn identity(&self) -> IdentityNeeds {
+        let mut needs = IdentityNeeds::default();
+        for key in self.mattes() {
+            needs.names[key.names.index()] = true;
+        }
+        for v in self.vars() {
+            if let Some(key) = v.source.name_key() {
+                needs.names[key.index()] = true;
+            }
+            needs.instance |= v.source == AovSource::InstanceId;
+            needs.element |= v.source == AovSource::ElementId;
+        }
+        needs
+    }
+
+    /// The primvars the render's vars read, each way once, in first-use
+    /// order: what the importer keeps per geometry ([`AovLayout::primvars`]).
+    pub fn primvars(&self) -> Vec<PrimvarRead> {
+        let mut out: Vec<PrimvarRead> = Vec::new();
+        for read in self.vars().filter_map(AovVar::primvar_read) {
+            if !out.contains(&read) {
+                out.push(read);
+            }
+        }
+        out
+    }
+}
+
+/// What the identity AOVs of a render read ([`AovRequest::identity`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityNeeds {
+    /// Per [`NameKey`], whether an id or a matte names it.
+    pub names: [bool; 3],
+    /// Whether a var reads `instanceId`.
+    pub instance: bool,
+    /// Whether a var reads `elementId`.
+    pub element: bool,
+}
+
+impl IdentityNeeds {
+    /// Whether anything is read at all.
+    pub fn any(&self) -> bool {
+        self.names.contains(&true) || self.instance || self.element
     }
 }
 
@@ -478,6 +719,11 @@ pub(crate) struct SlotKey {
     /// film holds the variance of the mean. It shares the expression's DFA
     /// bit with the value slot, as raw does.
     variance: bool,
+    /// For an [`AovSource::Primvar`] slot, the primvar's index in
+    /// [`AovLayout::primvars`].
+    primvar: u16,
+    /// Components per sample: the source's, or a primvar var's type's.
+    width: u8,
 }
 
 impl SlotKey {
@@ -497,12 +743,12 @@ impl SlotKey {
     }
 
     /// Components per pixel in the film: one for a variance slot, else the
-    /// source's.
+    /// source's (a primvar's, its var's).
     fn components(&self) -> usize {
         if self.variance {
             1
         } else {
-            self.source.components()
+            self.width as usize
         }
     }
 
@@ -543,6 +789,18 @@ pub(crate) struct AovLayout {
     /// The light path inspector's configuration: every camera sample's
     /// records are kept per work unit ([`crate::inspect`]).
     pub(crate) inspect: Option<std::sync::Arc<crate::tracer::inspection::Config>>,
+    /// What the identity vars and mattes read of the first hit.
+    pub(crate) identity: IdentityNeeds,
+    /// The primvars the vars read, in first-use order: a primvar slot's
+    /// index, and the order a geometry's [`PrimvarSet`] holds them in.
+    ///
+    /// [`PrimvarSet`]: crate::identity::PrimvarSet
+    pub(crate) primvars: Vec<PrimvarRead>,
+    /// The ID mattes the `deepRaster` products write.
+    pub(crate) mattes: Vec<MatteKey>,
+    /// The world's identity tables, which name a matte's ids; set by the
+    /// renderer when a matte or an identity var needs them.
+    pub(crate) names: Option<std::sync::Arc<crate::identity::Identity>>,
 }
 
 impl AovLayout {
@@ -557,14 +815,16 @@ impl AovLayout {
                 layout.lpes.push(e.clone());
             }
         }
+        layout.primvars = request.primvars();
         let lpes = layout.lpes.clone();
+        let primvars = layout.primvars.clone();
         let mut add = |key: SlotKey| {
             if !layout.slots.contains(&key) {
                 layout.slots.push(key);
             }
         };
         for var in request.vars() {
-            if let Some(key) = var.slot_key(&lpes) {
+            if let Some(key) = var.slot_key(&lpes, &primvars) {
                 add(key);
             }
             if var.with_alpha() {
@@ -578,7 +838,19 @@ impl AovLayout {
         layout.sample_count = request.vars().any(|v| v.source == AovSource::SampleCount);
         layout.variance = request.vars().any(|v| v.source == AovSource::Variance);
         layout.motion = request.vars().any(|v| v.source == AovSource::MotionVector);
+        layout.identity = request.identity();
+        for key in request.mattes() {
+            if !layout.mattes.contains(&key) {
+                layout.mattes.push(key);
+            }
+        }
         layout
+    }
+
+    /// Whether the integrator has to look the first hit up in the world's
+    /// identity or primvar tables at all.
+    pub(crate) fn reads_hit_attributes(&self) -> bool {
+        self.identity.any() || !self.primvars.is_empty()
     }
 }
 
@@ -590,6 +862,8 @@ const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
     lpe: NO_LPE,
     raw: false,
     variance: false,
+    primvar: NO_PRIMVAR,
+    width: 1,
 };
 
 /// What one camera sample carries for the AOVs besides its first hit: the
@@ -604,6 +878,15 @@ pub(crate) struct SampleExtras<'a> {
     /// The sample's shutter time in `[0, 1)`: 0 unless the scene moves and
     /// motion blur is on. The motion vector rebases the hit by it.
     pub(crate) time: f32,
+    /// What the first hit names ([`HitIdentity::NONE`] off a surface, or
+    /// when no var reads it).
+    pub(crate) identity: HitIdentity,
+    /// Each of [`AovLayout::primvars`] at the first hit, `None` where the
+    /// hit surface does not author it.
+    pub(crate) primvars: &'a [Option<[f32; 4]>],
+    /// The sample's radiance, unweighted — what a coloured matte splits
+    /// among the ids.
+    pub(crate) radiance: Vec3A,
 }
 
 /// What the camera ray met at the path's first vertex, recorded by the
@@ -670,17 +953,18 @@ fn motion_vector(cam: &CameraFrame, p: Vec3A, v: Vec3A, time: f32) -> (f32, f32)
 
 /// One sample's value for `key`'s source, written into `out` (as many
 /// components as the source has). Where the sample saw nothing the source
-/// describes, the slot's clear value.
+/// describes, the slot's clear value. An identity's value is its integer's
+/// bit pattern.
 fn sample_value(
     key: &SlotKey,
     hit: &FirstHit,
     extras: &SampleExtras,
     cam: &CameraFrame,
-    out: &mut [f32; 3],
+    out: &mut [f32; 4],
 ) {
     let clear = key.clear();
-    *out = [clear; 3];
-    let put3 = |out: &mut [f32; 3], v: Vec3A| *out = [v.x, v.y, v.z];
+    *out = [clear; 4];
+    let put3 = |out: &mut [f32; 4], v: Vec3A| out[..3].copy_from_slice(&[v.x, v.y, v.z]);
     match (key.source, hit) {
         (AovSource::Lpe, _) if key.raw => {
             // Raw light: this sample's light over this sample's diffuse
@@ -688,7 +972,7 @@ fn sample_value(
             let v = extras.lpe[key.lpe as usize];
             let f = extras.diffuse_filter;
             let raw = |v: f32, f: f32| if f >= RAW_FILTER_FLOOR { v / f } else { 0.0 };
-            *out = [raw(v.x, f.x), raw(v.y, f.y), raw(v.z, f.z)];
+            out[..3].copy_from_slice(&[raw(v.x, f.x), raw(v.y, f.y), raw(v.z, f.z)]);
         }
         (AovSource::Lpe, _) => put3(out, extras.lpe[key.lpe as usize]),
         (AovSource::Albedo, _) => put3(out, extras.albedo),
@@ -720,6 +1004,27 @@ fn sample_value(
         ) => {
             out[0] = *u;
             out[1] = *v;
+        }
+        (
+            AovSource::PrimId | AovSource::MaterialId | AovSource::AssetId,
+            FirstHit::Surface { .. },
+        ) => {
+            let k = key.source.name_key().expect("a named identity").index();
+            if extras.identity.names[k] != NO_NAME {
+                out[0] = f32::from_bits(extras.identity.hashes[k]);
+            }
+        }
+        (AovSource::InstanceId, FirstHit::Surface { .. }) if extras.identity.instance != NO_ID => {
+            out[0] = f32::from_bits(extras.identity.instance);
+        }
+        (AovSource::ElementId, FirstHit::Surface { .. }) if extras.identity.element != NO_ID => {
+            out[0] = f32::from_bits(extras.identity.element);
+        }
+        (AovSource::Primvar, FirstHit::Surface { .. }) => {
+            if let Some(Some(v)) = extras.primvars.get(key.primvar as usize) {
+                let n = key.width as usize;
+                out[..n].copy_from_slice(&v[..n]);
+            }
         }
         _ => {}
     }
@@ -816,6 +1121,8 @@ pub(crate) struct UnitAov {
     pub(crate) pixel: usize,
     planes: Vec<SlotPlanes>,
     luma: utils::Luma,
+    /// The ID mattes' per-pixel entries.
+    mattes: Vec<UnitMatte>,
 }
 
 impl UnitAov {
@@ -846,6 +1153,11 @@ impl UnitAov {
                 })
                 .collect(),
             luma: layout.luma,
+            mattes: layout
+                .mattes
+                .iter()
+                .map(|&k| UnitMatte::new(k, pixels))
+                .collect(),
         }
     }
 
@@ -862,7 +1174,7 @@ impl UnitAov {
     ) {
         let (p, cam) = (self.pixel, &self.cam);
         let in_box = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
-        let mut v = [0.0f32; 3];
+        let mut v = [0.0f32; 4];
         for (slot, planes) in self.slots.iter().zip(&mut self.planes) {
             let comps = slot.components();
             match slot.accumulation {
@@ -872,7 +1184,7 @@ impl UnitAov {
                     // `C.*[LO]` the colour is the beauty's bit for bit, so
                     // the moments are too.
                     sample_value(slot, hit, extras, cam, &mut v);
-                    let x = self.luma.of(Vec3A::from_array(v) * weight) as f64;
+                    let x = self.luma.of(Vec3A::new(v[0], v[1], v[2]) * weight) as f64;
                     let var = planes.var.as_mut().expect("a unit's variance slot");
                     var.sum[p] += x;
                     var.sq[p] += x * x;
@@ -911,6 +1223,16 @@ impl UnitAov {
                 }
             }
         }
+        // A matte counts the surfaces the camera saw first; an escape or a
+        // volume scatter covers no name, so its weight is the background's.
+        if let FirstHit::Surface { p: at, .. } = hit {
+            for matte in &mut self.mattes {
+                let name = extras.identity.names[matte.key().names.index()];
+                if name != NO_NAME {
+                    matte.add(p, name, cam.depth(*at), weight, extras.radiance);
+                }
+            }
+        }
     }
 }
 
@@ -937,6 +1259,13 @@ pub struct AovFilm {
     /// The render's light path expressions ([`AovLayout::lpes`]), to find
     /// an LPE var's slot.
     lpes: Vec<String>,
+    /// The render's primvars ([`AovLayout::primvars`]), to find a primvar
+    /// var's slot.
+    primvars: Vec<PrimvarRead>,
+    /// The ID mattes, one per [`MatteKey`] the products ask for.
+    mattes: Vec<FilmMatte>,
+    /// The world's identity tables, which name the mattes' ids.
+    names: Option<std::sync::Arc<crate::identity::Identity>>,
 }
 
 impl AovFilm {
@@ -956,6 +1285,13 @@ impl AovFilm {
             sample_count: layout.sample_count.then(|| vec![0.0; pixels]),
             variance: layout.variance.then(|| vec![0.0; pixels]),
             lpes: layout.lpes.clone(),
+            primvars: layout.primvars.clone(),
+            mattes: layout
+                .mattes
+                .iter()
+                .map(|&k| FilmMatte::new(k, pixels))
+                .collect(),
+            names: layout.names.clone(),
         }
     }
 
@@ -986,6 +1322,9 @@ impl AovFilm {
         variance: f64,
     ) {
         let q = self.rect.index(x, y);
+        for (matte, src) in self.mattes.iter_mut().zip(&unit.mattes) {
+            matte.store(src, p, q, weight_sum, taken);
+        }
         if taken == 0 {
             for slot in &mut self.slots {
                 let comps = slot.key.components();
@@ -1063,6 +1402,14 @@ impl AovFilm {
             sample_count: first.sample_count.as_ref().map(|n| vec![0.0; n.len()]),
             variance: first.variance.as_ref().map(|v| vec![0.0; v.len()]),
             lpes: first.lpes.clone(),
+            primvars: first.primvars.clone(),
+            mattes: (0..first.mattes.len())
+                .map(|m| {
+                    let passes: Vec<&FilmMatte> = films.iter().map(|f| &f.mattes[m]).collect();
+                    FilmMatte::blend(&passes, weights, total)
+                })
+                .collect(),
+            names: first.names.clone(),
         };
         for slot in &mut out.slots {
             if slot.key.accumulation == Accumulation::Filtered {
@@ -1211,7 +1558,9 @@ impl AovFilm {
                 vec![top_down(&|q| v[q])]
             }
             _ => {
-                let key = var.slot_key(&self.lpes).expect("a slotted source");
+                let key = var
+                    .slot_key(&self.lpes, &self.primvars)
+                    .expect("a slotted source");
                 let slot = self.slot(&key);
                 let comps = key.components();
                 (0..comps)
@@ -1241,7 +1590,9 @@ impl AovFilm {
             AovSource::SampleCount => vec![self.sample_count.as_ref().expect("laid out")[q]],
             AovSource::Variance => vec![self.variance.as_ref().expect("laid out")[q]],
             _ => {
-                let key = var.slot_key(&self.lpes).expect("a slotted source");
+                let key = var
+                    .slot_key(&self.lpes, &self.primvars)
+                    .expect("a slotted source");
                 let slot = self.slot(&key);
                 let comps = key.components();
                 (0..comps)
@@ -1270,11 +1621,68 @@ impl AovFilm {
             let factor = scale.powi(AovSource::Variance.exposure_power());
             variance.iter_mut().for_each(|v| *v *= factor);
         }
+        for matte in &mut self.mattes {
+            matte.apply_exposure(scale);
+        }
+    }
+
+    /// The ID matte `product` writes, if it is a `deepRaster` product the
+    /// render was asked for: each pixel's samples and the names they
+    /// stand for.
+    pub fn matte(&self, product: &AovProduct) -> Option<MatteView<'_>> {
+        let key = product.matte()?;
+        let matte = self.mattes.iter().find(|m| m.key() == key)?;
+        Some(MatteView {
+            matte,
+            names: self.names.as_deref().map(|n| n.names(key.names)),
+            width: self.rect.width(),
+            height: self.rect.height(),
+            rect: self.rect,
+        })
     }
 
     /// The film of a render that asks for no AOV: no planes at all.
     pub fn empty(width: usize, height: usize) -> Self {
         AovFilm::new(&AovLayout::default(), PixelRect::full(width, height))
+    }
+}
+
+/// One ID matte of a film, as its writer reads it: per pixel of the render's
+/// region, its samples front to back, and the name each sample's id stands
+/// for.
+pub struct MatteView<'a> {
+    matte: &'a FilmMatte,
+    names: Option<&'a NameTable>,
+    width: usize,
+    height: usize,
+    rect: PixelRect,
+}
+
+impl MatteView<'_> {
+    /// What the matte's ids name and whether it carries colour.
+    pub fn key(&self) -> MatteKey {
+        self.matte.key()
+    }
+
+    /// The size of the region the matte covers.
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// The samples of pixel `(x, y)` of the region, `y` top-down (an EXR's
+    /// row order), front to back.
+    pub fn pixel(&self, x: usize, y: usize) -> &[MatteSample] {
+        let q = self.rect.index(self.rect.x0 + x, self.rect.y1 - 1 - y);
+        self.matte.pixel(q)
+    }
+
+    /// The name a sample's id stands for: a prim, material or asset path,
+    /// or [`SPILL_NAME`] for the names a crowded pixel had no room for.
+    pub fn name(&self, id: u32) -> &str {
+        if id == SPILL {
+            return SPILL_NAME;
+        }
+        self.names.and_then(|n| n.name(id)).unwrap_or_default()
     }
 }
 
@@ -1287,6 +1695,9 @@ mod tests {
         albedo: Vec3A::ZERO,
         diffuse_filter: Vec3A::ZERO,
         time: 0.0,
+        identity: HitIdentity::NONE,
+        primvars: &[],
+        radiance: Vec3A::ZERO,
     };
 
     /// A camera at the origin looking down −Z with a 90° square frame one
@@ -1318,6 +1729,7 @@ mod tests {
             expression: None,
             raw: false,
             variance: false,
+            primvar: None,
         }
     }
 
@@ -1341,6 +1753,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![var(AovSource::Depth, Accumulation::Closest)],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         let layout = AovLayout::new(&request);
@@ -1370,6 +1783,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![v.clone()],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         let layout = AovLayout::new(&request);
@@ -1397,6 +1811,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![v.clone()],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         let layout = AovLayout::new(&request);
@@ -1425,6 +1840,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![v.clone()],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         let layout = AovLayout::new(&request);
@@ -1468,6 +1884,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![v.clone()],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         let layout = AovLayout::new(&request);
@@ -1493,6 +1910,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![beauty.clone()],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         assert!(!request.needs_film());
@@ -1534,6 +1952,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![var(AovSource::MotionVector, Accumulation::Closest)],
                 attributes: Vec::new(),
+                deep: false,
             }],
         });
         assert!(layout.motion);
@@ -1651,6 +2070,7 @@ mod tests {
                 name: "a.exr".into(),
                 vars: vec![v.clone()],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         let layout = AovLayout::new(&request);
@@ -1686,9 +2106,9 @@ mod tests {
     fn volumes_and_escapes_take_the_motion_vectors_clear_value() {
         let mut v = var(AovSource::MotionVector, Accumulation::Closest);
         v.clear = 7.0;
-        let key = v.slot_key(&[]).expect("slotted");
+        let key = v.slot_key(&[], &[]).expect("slotted");
         let cam = frame();
-        let mut out = [0.0f32; 3];
+        let mut out = [0.0f32; 4];
         sample_value(
             &key,
             &FirstHit::Volume {

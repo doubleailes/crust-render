@@ -26,6 +26,7 @@ fn var(name: &str, source: AovSource) -> AovVar {
         expression: None,
         raw: false,
         variance: false,
+        primvar: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn request(vars: Vec<AovVar>) -> AovRequest {
             name: "p.exr".into(),
             vars,
             attributes: Vec::new(),
+            deep: false,
         }],
     }
 }

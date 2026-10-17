@@ -577,6 +577,7 @@ fn the_transport_rows_sum_to_the_beauty() {
                 expression: Some((*e).into()),
                 raw: false,
                 variance: false,
+                primvar: None,
             };
             film.var_channels(&m.buffer, &v)
         })

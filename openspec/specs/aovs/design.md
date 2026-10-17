@@ -10,10 +10,10 @@
 >
 > **Status.** Phases 1 (products, first-hit AOVs) and 2 (light path
 > expressions, albedo, light groups) are implemented. Phase 3 — identity
-> AOVs and ID mattes through OpenEXRId (D14, on hold until crust can write
-> deep EXRs), and primvar sources — continues in the change
-> `add-identity-aovs-openexrid`. Open question 3 (`diffuse_albedo`) is taken
-> up by the change `add-raw-lighting-aovs`.
+> AOVs, primvar sources and ID mattes through OpenEXRId (D14) — was
+> finished by the change `add-identity-aovs-openexrid`; "Identity, primvars
+> and OpenEXRId" below is what it built. Open question 3 (`diffuse_albedo`)
+> is taken up by the change `add-raw-lighting-aovs`.
 
 ## Context
 
@@ -179,7 +179,8 @@ AOVs. Crust should combine:
 
 **Non-Goals:**
 
-- Deep output (`deepRaster`).
+- Deep output (`deepRaster`). (ID mattes became the one deep product, in
+  `add-identity-aovs-openexrid`.)
 - Multiple cameras or resolutions in one render.
 - `dataWindowNDC` crop and overscan, `pixelAspectRatio`,
   `aspectRatioConformPolicy`.
@@ -343,9 +344,12 @@ are aliases, matched case-sensitively, as Arnold and RenderMan do.
 | `albedo` | `diffuse_albedo`*, `DiffuseAlbedoSD` | color3f | filtered | Phase 2. Albedo at the first non-delta hit (D12). |
 | `motionvector` | — | float2 / half2 | closest | `add-motion-vector-aov`. The first hit's forward 2D screen-space displacement over the shutter, in pixels, `u` right and `v` up (Arnold's raw `motionvector`, Nuke's `forward.u/.v`). Channels `u`, `v` lowercase. Clear `0`. See "Motion vector AOV" below. |
 | `primId` | `id`, `ID`, `Object Index` | int | closest | Phase 3. Stable per-prim integer: hash of the prim path (D14). Clear `-1` (written as u32 `0xFFFFFFFF`). |
+| `materialId` | — | int | closest | Phase 3, added as built. The hash of the bound material's path. |
+| `assetId` | — | int | closest | Phase 3, added as built. The hash of the nearest `component` / `assembly` ancestor's path, else the prim's. |
 | `instanceId` | `id2` | int | closest | Phase 3. Instance index within its instancer, else `-1`. |
 | `elementId` | `faceindex` | int | closest | Phase 3. *Authored* face index (pre-triangulation), else `-1`. |
-| ID mattes | — | (deep) | coverage-weighted | Phase 3, on hold: OpenEXRId deep EXRs, not Cryptomatte (D14). The Cryptomatte names (`crypto_object` …) stay refused. |
+| ID mattes | — | (deep) | coverage-weighted | Phase 3: a `deepRaster` product naming `primId`, `materialId` or `assetId` is an OpenEXRId deep EXR, not Cryptomatte (D14). The Cryptomatte names (`crypto_object` …) stay refused. |
+| primvar | — | the var's | filtered (closest for `int`) | Phase 3: `sourceType = "primvar"`, any 1–4 component type (D14). Clear `0`. |
 
 \* `diffuse_albedo` is Arnold's diffuse-only albedo, so it is an alias only
 for an OpenPBR surface whose albedo is entirely diffuse. Phase 2 decides
@@ -682,7 +686,10 @@ question.
 The user writes `C.*<L.'key'>`. Automatic per-tag splitting (Karma's
 `C_key`) is not done; the user asks for each group with its own var.
 
-### D14. Identity and ID mattes (Phase 3) — ID mattes on hold
+### D14. Identity and ID mattes (Phase 3)
+
+*Built by `add-identity-aovs-openexrid`; where the build departs from this
+plan, "Identity, primvars and OpenEXRId" below says so.*
 
 **A prim-path table.** Import keeps a compact `geom_id → interned prim path`
 table for every geometry prim, not only for emitters.
@@ -709,18 +716,18 @@ Cryptomatte v1.2 for ID mattes. OpenEXRId stores mattes as a *deep* EXR:
 each pixel holds its own list of samples, each with an object id and its
 coverage, and the names the ids stand for travel in the file.
 
-- **On hold.** The `exr` crate (1.74) reads and writes flat images only; its
-  README lists deep data as not yet supported. Nothing else here is blocked.
-- **Unblocking it** means one of: deep scanline writing landing in `exr`
-  (upstream contribution), or a deep scanline writer in-tree in safe Rust
-  (the OpenEXR deep format is documented). A C++/FFI writer would be
-  `unsafe`, which is a project decision.
+- **It waited on a deep writer.** The `exr` crate (1.74) reads and writes
+  flat images only. The options were deep scanline writing in `exr`
+  (upstream contribution), a deep scanline writer in-tree in safe Rust, or
+  a C++/FFI writer (`unsafe`, a project decision). It was unblocked by a
+  fork of `exr` with deep scanline reading and writing, in safe Rust
+  ("Identity, primvars and OpenEXRId").
 - **What carries over** from this record: the prim-path table and the
   stable per-path `primId` above, which name the ids; coverage weighted by
   the beauty's pixel filter, as for every filtered AOV; cutout pass-through
   contributing to the surfaces behind it. The exact channel and metadata
-  layout is OpenEXRId's, to be taken from its specification when the work
-  resumes — not designed here.
+  layout is OpenEXRId's, taken from its sources (it has no written
+  specification): "OpenEXRId as built".
 - **Superseded:** the Cryptomatte plan (MurmurHash3 names, ranked
   `<name>NN.rgba` layers, header manifests) is dropped, not deferred.
 
@@ -756,7 +763,7 @@ like `st`, and evaluated at the first hit.
   - `int` → UINT, with `-1` written as its two's-complement bit pattern.
 
   Data AOVs default to FLOAT. (ID mattes are deep, OpenEXRId's own layout:
-  D14.)
+  "OpenEXRId as built".)
 - **Header:**
   - `software` = `crust-render <version>`;
   - `colorInteropID` = `lin_rec709_scene`, crust's rendering space
@@ -818,7 +825,8 @@ the prim path and the reason:
 - unknown source;
 - unsupported `sourceType`;
 - type mismatch;
-- `deepRaster`;
+- `deepRaster` with no var naming what its ids stand for, and any var a
+  matte cannot hold;
 - a product whose camera or resolution differs;
 - an LPE parse error, quoting the expression and the column.
 
@@ -873,7 +881,8 @@ sample.
   `add-render-region`: every product of a cropped render is written with the
   frame as display window and the region as data window; overscan is not.)
 - One render per (camera, resolution) group.
-- `deepRaster` products. Crust's FIS film would need per-sample depth lists.
+- `deepRaster` products other than ID mattes. Crust's FIS film would need
+  per-sample depth lists for every AOV; the mattes keep only per-name sums.
 - Volume alpha and `C<V.>` volume AOVs with a `ZBack`.
 - Moving the no-products EXR to the new writer (scanline, tagged), as a
   goldened switch.
@@ -1235,6 +1244,148 @@ skipped, so a camera without an exposure renders the bits it always did. Pinned 
 `exposure_scales_radiance_only` (×2 radiance, ×4 variances, every other channel
 identical) and `the_last_snapshot_is_exposed`.
 
+## Identity, primvars and OpenEXRId (`add-identity-aovs-openexrid`)
+
+Phase 3 as built: the identity sources, `sourceType = "primvar"`, and ID
+mattes written as OpenEXRId deep EXRs. The change's `design.md` has the plan
+it started from; what the build settled, and the traps it met, are here.
+
+### Identity and primvars
+
+- **Five identity sources, not three.** `primId`, `instanceId` and
+  `elementId` as D5 planned, plus `materialId` (the bound material's path)
+  and `assetId` (the nearest `kind = component | assembly` ancestor, else
+  the prim itself): the same three name tables the mattes need (by object,
+  material, asset), so a flat id exists for each matte. `materialId` and
+  `assetId` have no alias; no other renderer's name for them means the same.
+  The flat ids are the MurmurHash3_x86_32 (seed 0) of the name's UTF-8, the
+  hash `primId` already had (`identity::murmur3_32`, pinned to smhasher's
+  vectors).
+- **The names come from light linking's provenance runs**, not a second
+  traversal. At the end of the import (`AovKeep::build`,
+  `usd_import/aov_keep.rs`) each run's prim is the object name, the material
+  its geometry was bound to (by address, `paths_by_address`) is the material
+  name — `crust:unbound` where no material prim is bound, and a prototype's
+  `/__Prototype_N/…` material is renamed under the run's prim, since the
+  numbering is per stage — and the asset is walked up from the prim when the
+  geometry is emitted (`AovKeep::saw`). A `PointInstancer`'s placements are
+  ranges of `geom_id`s recorded as they are emitted; `instanceId` is the
+  placement's index. The tables are `(first, end, name)` runs per key,
+  looked up by binary search: a few bytes per prim, kept only when a var
+  reads that key (`IdentityNeeds`).
+- **Identity planes hold bits.** The AOV planes are `f32`; an identity
+  slot stores the id's `u32` bit pattern (`f32::from_bits`) and the writer
+  takes `f32::to_bits`, so `0xFFFFFFFF` (the `-1` clear) and every hash
+  survive exactly. That is safe only because nothing does arithmetic on
+  them: identity sources are closest-only (`accepts_accumulation` refuses
+  `filtered`), take exposure power 0, and a guided blend keeps the closest
+  pass's sample. *Trap:* a new step that scales or averages every plane
+  must skip `holds_bits` slots, or ids turn into NaN payloads.
+- **`elementId` needs a map from the kernel's triangles back to the
+  authored faces** (`ElementMap`, per distinct mesh, beside the side tables).
+  Unrefined meshes: the fan triangulation's face per triangle, and which
+  slice of the fan it is. Refined meshes: the cage face each refined
+  triangle came from (`cage_face`, carried through uniform and adaptive
+  refinement), and where in it through the same `FaceMap` Ptex reads —
+  quads only, so a refined triangle or n-gon is read at its centre. Loop
+  refinement tracks no faces: `-1`. Implicit shapes author no faces: `-1`.
+- **Primvars are read as authored, per prim, not baked into the vertices**
+  (D14 had planned "like `st`"). A var's `PrimvarRead` (name, component
+  count, whether it is a colour) goes into the keep set before the meshes
+  load; each gprim's matching primvars are read once — values, indices,
+  interpolation, `elementSize` — into a `PrimvarSet` shared by every
+  instance of that mesh, and evaluated at the first hit through the
+  element map. Constant primvars are inherited from ancestors, as
+  `UsdGeomPrimvarsAPI::FindPrimvarWithInheritance` does; a colour primvar is
+  converted to the working space like every colour input. A type that
+  cannot fill the var's components is refused once per primvar name
+  (`aov.primvar_type_mismatch`); an unreadable one is `aov.primvar_unreadable`.
+  An `int` primvar is closest by default: the mean of two integers is no
+  value the primvar holds.
+- **Barycentrics come from re-intersecting a sliver, not from the hit.**
+  The kernel's hit is `(geom_id, prim_id, t)`; widening `WorldHit` with
+  `(u, v)` would change the hot path's record for every render.
+  `World::barycentrics` re-traces the camera ray over `[t − ε, t + ε]`
+  (`ε = max(1e-4·t, 1e-6)`) and accepts the hit only if it is the same
+  geometry, triangle and placement. It runs only in the AOV instantiation,
+  only at a camera ray's first hit, and only where a var needs to know where
+  in its face the hit lies (a vertex, varying or face-varying primvar).
+  A mirrored bake swaps `(u, v)` as the shading tables already do.
+- **Asking for them changes no geometry.** `want_face_uvs` turns on for an
+  element map (the Ptex face table is how a refined triangle finds its cage
+  face), which used to be a material's decision; the face table is a side
+  table, so the vertices are those of the render without it. Pinned by
+  `identity_aovs_change_no_bit_of_the_beauty`,
+  `element_maps_change_no_geometry_and_name_cage_faces` (a subdivided mesh)
+  and `tiles_and_scanlines_write_the_same_ids_primvars_and_matte`
+  (`crates/crust-core/tests/identity.rs`).
+- **The zero-AOV render stays the code it was.** The first-hit reads are one
+  `#[inline(never)]` call (`FirstAttrs::read`) behind `AOV &&
+  first_attrs.on`; the `AOV = false` instantiation does not contain it.
+- **MCP.** A settings refresh that would change the tables the import keeps
+  (`(identity(), primvars())` against `StageFacts::aov_tables`) is
+  `Structural`: the session re-imports instead of reusing a world without
+  them.
+
+### OpenEXRId as built
+
+- **The deep writer is a fork of `exr`**
+  (`github.com/doubleailes/exrs`, branch `claude/awesome-fermat-41ixgg`,
+  patched over 1.74 in the workspace `Cargo.toml` and allowed in
+  `deny.toml`), which reads and writes deep scanline images in safe Rust.
+  When upstream `exr` gains deep data the patch line goes; nothing else
+  names the fork.
+- **The layout is taken from OpenEXRId's sources**, which have no written
+  specification (`openexrid/Builder.cpp`, `openexrid/Mask.cpp`, the Nuke
+  plug-in's `nuke/DeepOpenEXRId.cpp`), version 3: one part, deep scanline, ZIPS; per pixel
+  one sample per name, sorted by depth; channels `Id` (UINT, the index in
+  the file's name table), `Z` (FLOAT), `A` and, for a coloured matte, `R`,
+  `G`, `B` (HALF); the values in the deep "over" form `Builder::finish`
+  writes (cumulated front to back, each divided by `1 −` the alpha in front
+  of it), which the readers undo; header `EXRIdVersion = 3` and
+  `EXRIdNames`, the names zlib-compressed and base64-encoded. Crust's table
+  holds only the names some sample uses, sorted, so the same scene writes
+  the same file.
+- **Trap: OpenEXRId disagrees with itself on the name separator.** Its
+  Nuke plug-in splits a version-3 table on `\n`; its library's `Mask::read`
+  (and so its OpenFX plug-in) on `\0`. No separator satisfies both. Crust
+  writes `\n`, the Nuke plug-in's, the reader compositors use; `Mask::read`
+  then sees one name.
+- **Trap: `Mask::read` crashes under OpenEXR 3.** Written for OpenEXR 2, it
+  turns the sample counts it read into offsets inside the frame buffer's
+  sample-count slice, which OpenEXR 3's `readPixels` writes again line by
+  line; it then reads past its arrays — on OpenEXRId's own sample file as
+  on crust's. `scripts/openexrid_oracle.py` patches that one point before
+  compiling it and checks crust's three sample mattes with OpenEXR 3.5.2:
+  coverage sums to the beauty's alpha, a coloured matte's samples to the
+  beauty, every id has a name.
+- **The vocabulary: a `deepRaster` product is a matte.** It holds one var
+  naming what its ids stand for (`primId`, `materialId` or `assetId`) and,
+  optionally, the beauty, whose share each name then carries as `R/G/B`.
+  Any other var is refused (`aov.not_in_matte`); a product with no naming
+  var writes nothing (`product.no_writable_vars`). Deep output of other AOVs
+  stays refused. The Cryptomatte names stay refused, with a message pointing
+  at the mattes.
+- **Accumulation** (`matte.rs`). A unit keeps, per pixel, a short list of
+  `(name, Σw·(r, g, b, 1), Σ|w|·z, Σ|w|)` searched linearly — never a
+  full-frame map. A sample's weight is the beauty's own filter weight, so
+  coverage is filtered as every filtered AOV is and the names' coverage
+  plus the background's sums to one; the depth is the camera depth averaged
+  by `|w|` (a signed filter's lobes would cancel a plain weighted mean). A
+  pixel holds at most 64 names; past that, a new name's samples go to one
+  spill entry, `crust:spill`, so coverage still sums. The film normalises by
+  the beauty's `weight_sum` (with its `/ taken` fallback), sorts front to
+  back, blends a guided render's passes by the beauty's own shares, and
+  scales colour, not coverage, by the camera exposure. An escape or a
+  volume scatter names nothing: its weight is the background's.
+- **Pinned by** `crates/crust-render/tests/openexrid.rs` (the sample's three
+  mattes read back with the fork: coverage against alpha, colour against the
+  beauty, flat `primId` and the primvar against the matte where one prim
+  covers a pixel), the over form's round trip through `Mask::read`'s
+  arithmetic (`exrid.rs`), and `crates/crust-core/tests/identity.rs`
+  (`a_prim_has_the_same_id_in_every_frame`,
+  `a_matte_covers_every_pixel_and_splits_the_beauty`).
+
 ## Known gaps
 
 - Every Non-Goal above, which is warned when authored, not silent.
@@ -1253,6 +1404,25 @@ identical) and `the_last_snapshot_is_exposed`.
 - The albedo of a volume scatter before any surface is 1.
 - Light-only (`--strategy light`) renders near-mirror lobes black at
   practical sample counts — true of the beauty as of every expression.
+- Identity and primvars (`add-identity-aovs-openexrid`):
+  - a primvar on a refined mesh is interpolated over its cage face
+    (bilinearly on a quad, at the centre of a triangle or n-gon), not
+    through the subdivision stencils, so a `vertex` primvar on a smooth
+    surface is the cage's, not the limit surface's; Loop-refined meshes
+    have no element map, so they report `elementId = -1` and only their
+    constant primvars reach the AOV;
+  - gprims other than meshes (implicit shapes, curves, points) read
+    constant primvars only, and report `elementId = -1`;
+  - `instanceId` is the placement index of the outermost `PointInstancer`;
+    a nested instancer's index is not reported, and a native (scene-graph)
+    instance reports `-1`;
+  - an `int` primvar is accumulated in a float plane and written as UINT
+    (a negative value as its two's complement), so one above 2²⁴ in
+    magnitude loses precision;
+  - a pixel seeing more than 64 names puts the rest in `crust:spill`;
+  - OpenEXRId's own `Mask::read` (and its OpenFX plug-in) reads a crust
+    matte's name table as one name, the separator conflict above; its
+    Nuke plug-in reads it as written.
 
 ## Sources
 
@@ -1279,6 +1449,12 @@ sources.
 - ASWF Color Interop, `Recommendations/04_OpenEXRFiles/OpenEXRFiles.md`
   (v1.0.0, 2026-07-14).
 - Cryptomatte v1.2: `github.com/Psyop/Cryptomatte/specification`.
+- OpenEXRId: `github.com/MercenariesEngineering/openexrid` at
+  `1ec6dff08714876f1a6f15added25d26f49270ac` — `openexrid/Builder.cpp`,
+  `openexrid/Mask.cpp`, `nuke/DeepOpenEXRId.cpp`, `openfx/openfx.cpp` and its
+  issue tracker, read 2026-10-17. Deep scanline writing: the `exr` fork at
+  `github.com/doubleailes/exrs`, branch `claude/awesome-fermat-41ixgg`
+  (commit `a7a2a626`).
 - OIDN: `github.com/RenderKit/oidn/blob/master/doc/api.md`.
 - Karma, RenderMan, Arnold, Omniverse user docs were blocked by the network
   proxy. Claims attributed to them come from search summaries and the

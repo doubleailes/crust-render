@@ -298,8 +298,9 @@ fn unsupported_products_and_vars_are_refused() {
     {
         token productName = "flat.exr"
         rel orderedVars = [</Render/intrinsic>, </Render/unknown>, </Render/lpe>,
-                           </Render/primvar>, </Render/int_color>, </Render/float_normal>,
-                           </Render/later>, </Render/depth>, </Render/notavar>]
+                           </Render/crypto>, </Render/int_color>, </Render/float_normal>,
+                           </Render/later>, </Render/float_id>, </Render/depth>,
+                           </Render/notavar>]
     }
     def Scope "notaproduct"
     {
@@ -319,10 +320,9 @@ fn unsupported_products_and_vars_are_refused() {
         uniform string sourceName = "C<RD>?L"
         uniform token sourceType = "lpe"
     }
-    def RenderVar "primvar"
+    def RenderVar "crypto"
     {
-        uniform string sourceName = "displayColor"
-        uniform token sourceType = "primvar"
+        uniform string sourceName = "crypto_object"
     }
     def RenderVar "int_color"
     {
@@ -336,7 +336,12 @@ fn unsupported_products_and_vars_are_refused() {
     }
     def RenderVar "later"
     {
-        uniform token dataType = "int"
+        uniform token dataType = "normal3f"
+        uniform string sourceName = "Ng"
+    }
+    def RenderVar "float_id"
+    {
+        uniform token dataType = "float"
         uniform string sourceName = "primId"
     }
     def RenderVar "depth"
@@ -1562,4 +1567,242 @@ fn a_window_is_no_longer_listed_as_not_honoured() {
         !warnings.iter().any(|w| w.contains("not honoured")),
         "{warnings:?}"
     );
+}
+
+/// The identity sources and their aliases: one integer channel, closest, `-1`
+/// where nothing was hit, `int` when no type is authored; an authored filter
+/// cannot average an id.
+#[test]
+fn identity_vars_are_closest_integers() {
+    let scene = load(
+        "identity_vars",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/prim>, </Render/id>, </Render/inst>, </Render/face>,
+                           </Render/mat>, </Render/asset>]
+    }
+    def RenderVar "prim"
+    {
+        uniform string sourceName = "primId"
+        bool driver:parameters:aov:multiSampled = 1
+    }
+    def RenderVar "id"
+    {
+        uniform token dataType = "int"
+        uniform string sourceName = "id"
+    }
+    def RenderVar "inst"
+    {
+        uniform token dataType = "uint"
+        uniform string sourceName = "instanceId"
+    }
+    def RenderVar "face"
+    {
+        uniform token dataType = "int"
+        uniform string sourceName = "faceindex"
+    }
+    def RenderVar "mat"
+    {
+        uniform string sourceName = "materialId"
+    }
+    def RenderVar "asset"
+    {
+        uniform string sourceName = "assetId"
+    }
+"#,
+    );
+    assert_eq!(
+        sources(&scene.aovs, 0),
+        [
+            ("prim".into(), AovSource::PrimId),
+            ("id".into(), AovSource::PrimId),
+            ("inst".into(), AovSource::InstanceId),
+            ("face".into(), AovSource::ElementId),
+            ("mat".into(), AovSource::MaterialId),
+            ("asset".into(), AovSource::AssetId),
+        ]
+    );
+    for v in &scene.aovs.products[0].vars {
+        assert_eq!(v.precision, Precision::Uint, "{}", v.name);
+        assert_eq!(v.accumulation, Accumulation::Closest, "{}", v.name);
+        assert_eq!(v.clear, -1.0, "{}", v.name);
+        assert_eq!(v.components, 1, "{}", v.name);
+    }
+    let needs = scene.aovs.identity();
+    assert_eq!(needs.names, [true, true, true]);
+    assert!(needs.instance && needs.element);
+    let ignored: Vec<_> = scene
+        .warnings
+        .iter()
+        .filter(|w| w.code.as_str() == "aov.accumulation_ignored")
+        .flat_map(|w| w.prims.iter().map(String::as_str))
+        .collect();
+    assert_eq!(ignored, ["/Render/prim"]);
+}
+
+/// `sourceType = "primvar"`: the name with or without its namespace, the
+/// channels laid out by the type's role, integers closest.
+#[test]
+fn primvar_vars_take_their_layout_from_the_type() {
+    let scene = load(
+        "primvar_vars",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/dc>, </Render/rough>, </Render/st2>, </Render/tag>,
+                           </Render/v4>, </Render/empty>]
+    }
+    def RenderVar "dc"
+    {
+        uniform string sourceName = "displayColor"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "rough"
+    {
+        uniform token dataType = "half"
+        uniform string sourceName = "primvars:roughness"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "st2"
+    {
+        uniform token dataType = "texCoord2f"
+        uniform string sourceName = "st2"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "tag"
+    {
+        uniform token dataType = "int"
+        uniform string sourceName = "tag"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "v4"
+    {
+        uniform token dataType = "float4"
+        uniform string sourceName = "weights"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "empty"
+    {
+        uniform token sourceType = "primvar"
+    }
+"#,
+    );
+    let vars = &scene.aovs.products[0].vars;
+    let names: Vec<_> = vars.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["dc", "rough", "st2", "tag", "v4"]);
+    let primvar = |i: usize| vars[i].primvar.clone().expect("a primvar var");
+    assert_eq!(primvar(0).name, "displayColor");
+    assert_eq!(primvar(0).kind, crust_core::ChannelKind::Color);
+    assert_eq!(vars[0].components, 3);
+    assert_eq!(primvar(1).name, "roughness");
+    assert_eq!(primvar(1).kind, crust_core::ChannelKind::Scalar);
+    assert_eq!(vars[1].precision, Precision::Half);
+    assert_eq!(primvar(2).kind, crust_core::ChannelKind::Uv);
+    assert_eq!(vars[3].accumulation, Accumulation::Closest);
+    assert_eq!(vars[3].precision, Precision::Uint);
+    assert_eq!(vars[4].accumulation, Accumulation::Filtered);
+    assert_eq!(primvar(4).kind, crust_core::ChannelKind::Vector);
+    assert_eq!(vars[4].components, 4);
+    let reads = scene.aovs.primvars();
+    assert_eq!(reads.len(), 5);
+    assert!(reads[0].color && !reads[1].color);
+}
+
+/// A `deepRaster` product is an ID matte: its id var names what the ids
+/// stand for, a beauty var gives them colour, and anything else is refused;
+/// one with no id var writes nothing.
+#[test]
+fn deep_raster_products_are_id_mattes() {
+    let scene = load(
+        "deep_mattes",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/objects>, </Render/materials>, </Render/nothing>]
+    }
+    def RenderProduct "objects"
+    {
+        uniform token productType = "deepRaster"
+        token productName = "objects.exr"
+        rel orderedVars = [</Render/depth>, </Render/prim>, </Render/beauty>, </Render/mat>]
+    }
+    def RenderProduct "materials"
+    {
+        uniform token productType = "deepRaster"
+        token productName = "materials.exr"
+        rel orderedVars = [</Render/mat>]
+    }
+    def RenderProduct "nothing"
+    {
+        uniform token productType = "deepRaster"
+        token productName = "nothing.exr"
+        rel orderedVars = [</Render/depth>]
+    }
+    def RenderVar "depth"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "depth"
+    }
+    def RenderVar "prim"
+    {
+        uniform string sourceName = "primId"
+    }
+    def RenderVar "mat"
+    {
+        uniform string sourceName = "materialId"
+    }
+    def RenderVar "beauty"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }
+"#,
+    );
+    let names: Vec<_> = scene
+        .aovs
+        .products
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["objects.exr", "materials.exr"]);
+    let objects = &scene.aovs.products[0];
+    assert!(objects.deep);
+    assert_eq!(
+        objects.matte(),
+        Some(crust_core::MatteKey {
+            names: crust_core::NameKey::Prim,
+            color: true
+        })
+    );
+    assert_eq!(
+        sources(&scene.aovs, 0),
+        [
+            ("prim".into(), AovSource::PrimId),
+            ("beauty".into(), AovSource::Color)
+        ]
+    );
+    assert_eq!(
+        scene.aovs.products[1].matte(),
+        Some(crust_core::MatteKey {
+            names: crust_core::NameKey::Material,
+            color: false
+        })
+    );
+    // A matte needs a film, but its vars are no planes: a deep product's
+    // beauty adds no alpha slot, its ids no flat id.
+    assert!(scene.aovs.needs_film());
+    let codes: Vec<&str> = scene.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert!(codes.contains(&"aov.not_in_matte"), "{codes:?}");
+    assert!(codes.contains(&"product.no_writable_vars"), "{codes:?}");
 }

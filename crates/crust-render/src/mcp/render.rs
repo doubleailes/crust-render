@@ -355,6 +355,8 @@ pub fn planes(
     let size = film.dimensions();
     aovs.products
         .iter()
+        // A matte is samples per pixel, not planes: `probe` reads it.
+        .filter(|product| !product.deep)
         .map(|product| {
             let mut channels = BTreeMap::new();
             for (var, names) in crate::products::product_channels(product) {
@@ -368,6 +370,10 @@ pub fn planes(
                             .map(|v| f16::from_f32(v).to_f32())
                             .collect(),
                         Precision::Float => plane,
+                        // An identity's plane holds its integers' bits.
+                        Precision::Uint if var.holds_bits() => {
+                            plane.into_iter().map(|v| v.to_bits() as f32).collect()
+                        }
                         Precision::Uint => {
                             plane.into_iter().map(|v| v as i32 as u32 as f32).collect()
                         }
@@ -498,12 +504,35 @@ pub fn probe(job: &Job, scene: &Imported, x: usize, y: usize) -> Result<Value, S
         && let Some(film) = &f.film
     {
         for product in &job.aovs.products {
+            if let Some(matte) = film.matte(product) {
+                // A matte's pixel: each name it holds, front to back.
+                let samples: Vec<Value> = matte
+                    .pixel(lx, ly)
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "name": matte.name(s.name),
+                            "coverage": s.value[3],
+                            "color": &s.value[..3],
+                            "depth": s.z,
+                        })
+                    })
+                    .collect();
+                aovs.insert(product.prim_path.clone(), json!({ "matte": samples }));
+                continue;
+            }
             let mut values = serde_json::Map::new();
             for (var, names) in crate::products::product_channels(product) {
                 // One pixel, not the planes: a probe reads one value each.
                 let pixel = film.var_pixel(&f.buffer, var, lx, ly);
                 for (name, value) in names.into_iter().zip(pixel) {
-                    values.insert(name, json!(value));
+                    // An identity is an integer: its value's bits.
+                    let value = if var.holds_bits() {
+                        json!(value.to_bits())
+                    } else {
+                        json!(value)
+                    };
+                    values.insert(name, value);
                 }
             }
             aovs.insert(product.prim_path.clone(), Value::Object(values));

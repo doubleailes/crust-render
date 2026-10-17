@@ -35,6 +35,9 @@ pub(super) const ADAPTIVE_ISOLATION: usize = 1;
 /// an `n`-gon, which Ptex does not address here (as for uniform refinement).
 pub(crate) struct TessellatedFaces {
     pub base_face: Vec<Option<u32>>,
+    /// The cage face every triangle lies in, quad or not: what `elementId`
+    /// and the primvar AOVs read.
+    pub cage_face: Vec<u32>,
     pub corner_uvs: Vec<[[f32; 2]; 3]>,
 }
 
@@ -204,6 +207,7 @@ pub(crate) fn tessellate_adaptive(
         uvs,
         indices: out_indices,
         base_face,
+        cage_face,
         corner_uvs,
         fv_values,
         fv_indices,
@@ -219,6 +223,7 @@ pub(crate) fn tessellate_adaptive(
         normals,
         faces: req.want_face_uvs.then_some(TessellatedFaces {
             base_face,
+            cage_face,
             corner_uvs,
         }),
         uvs: vertex_chart.is_some().then_some(uvs),
@@ -374,6 +379,7 @@ struct Emitted {
     uvs: Vec<[f32; 2]>,
     indices: Vec<i32>,
     base_face: Vec<Option<u32>>,
+    cage_face: Vec<u32>,
     corner_uvs: Vec<[[f32; 2]; 3]>,
     fv_values: Vec<[f32; 2]>,
     fv_indices: Vec<i32>,
@@ -398,6 +404,7 @@ impl Default for Emitted {
             uvs: Vec::new(),
             indices: Vec::new(),
             base_face: Vec::new(),
+            cage_face: Vec::new(),
             corner_uvs: Vec::new(),
             fv_values: Vec::new(),
             fv_indices: Vec::new(),
@@ -714,6 +721,7 @@ fn tessellate_selected(
                     }
                 }
                 out.base_face.push((n == 4).then_some(f as u32));
+                out.cage_face.push(f as u32);
                 out.corner_uvs.push(tri.map(|c| t.points[c as usize]));
             }
         }
@@ -838,6 +846,7 @@ fn tessellate_unselected(
                 }
             }
             out.base_face.push((n == 4).then_some(f as u32));
+            out.cage_face.push(f as u32);
             out.corner_uvs.push(tri.map(|c| c.1));
         };
         if ring.len() == n {

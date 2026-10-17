@@ -134,6 +134,7 @@ each file is `DEBUG`.
 
 - The no-products EXR is still the `exr` crate's default encoding (tiled,
   untagged); see above.
-- No deep output, no display drivers, no progressive writes.
+- No deep output but OpenEXRId ID mattes (`aovs/design.md`, "OpenEXRId as
+  built"), no display drivers, no progressive writes.
 - The PNG is always the first product's beauty, clamped and sRGB-encoded; no
-  view transform is applied.
+  view transform is applied. A first product that is an ID matte gets none.

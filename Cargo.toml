@@ -139,3 +139,9 @@ codegen-units = 1
 [patch.crates-io]
 openusd = { git = "https://github.com/mxpv/openusd", branch = "main" }
 openusd-schemas = { git = "https://github.com/mxpv/openusd", branch = "main" }
+# Deep EXR writing (OpenEXRId mattes, `crust-render/src/exrid.rs`) is not in a
+# released `exr` yet: this fork adds it behind the `deep` feature, on top of
+# the same 1.74.2 the requirement above names, so the whole graph — `image`'s
+# decoder included — keeps one `exr`. Dropping this line reverts to crates.io
+# once the work lands upstream. Cargo.lock pins the commit.
+exr = { git = "https://github.com/doubleailes/exrs", branch = "claude/awesome-fermat-41ixgg" }

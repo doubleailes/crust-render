@@ -616,8 +616,9 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
 - **The baseline is profiled** (for `profile_top`, and because the clamp
   counter lives in that instantiation), so its time carries the profiler's
   overhead; trials are not profiled, and trial estimates from it err long.
-- **Per-object noise attribution** waits for object IDs
-  (`add-identity-aovs-openexrid`).
+- **No per-object noise attribution.** The object ids it needed exist
+  (`crust_core::identity::Identity`, `add-identity-aovs-openexrid`); the
+  diagnostic does not keep or read them yet.
 - `ε` and R are fixed; the noise floor says when R pairs at this spp cannot
   decide (`insufficient_samples`), but the diagnostic does not pick its spp from
   the scene's noise ahead of time: a larger `--budget` buys more.
@@ -663,8 +664,9 @@ the stage, `--baseline` or the region cannot be used. Its log goes to stderr, as
 - **No per-object attribution** of the missing energy, and none per light or
   per path in the report itself: `crust light-paths` names the paths and lights
   behind a few pixels (`light-path-inspection`), but the diagnostic does not run it
-  when `firefly_energy` fires, and which object carries the energy waits for
-  `add-identity-aovs-openexrid`.
+  when `firefly_energy` fires, and which object carries the energy is not
+  measured (the identity tables of `add-identity-aovs-openexrid` could name
+  it).
 - **Report details** (found on ALab, not yet fixed): `scene.camera` is `null`
   when the RenderSettings camera is used — it should be the resolved path;
   `suggested_command` restates defaults and omits tier 2's projected `-s`; a rig
