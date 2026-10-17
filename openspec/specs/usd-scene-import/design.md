@@ -798,6 +798,28 @@ same point.
 - **MaterialX view-dependent nodes** have no meaningful value at a vertex (they see a
   head-on viewer, `view = −normal`).
 
+## Curve mass fields: the attributes, the terminal and the bake pass
+
+`BasisCurves` and `NurbsCurves` read `crust:mass:radius` (a positive value
+opts the prim in), `crust:mass:threshold`, `crust:mass:group` and
+`crust:mass:maxResolution` (`usd_import/mass.rs`); any other prim authoring a
+`crust:mass:*` attribute is reported once with `mass.not_curves`, from the
+branch that reads it. The span loops in `shapes.rs` build, beside the
+material's strand table, a bake table for the material's mass colour graph
+(the `outputs:crust:mass:color` terminal, compiled once per material in the
+material cache through the inline-network translator), and the batches are
+turned into the straight pieces the bake splats. A prim joins a field of its
+group under its placement, or one of its own, in `ImportCaches::mass`; the
+world builder is told which geometry reads which field through which
+placement (`expect_mass`). After the last chunk and `flush_meshes`, before
+the top-level commit, every field bakes in parallel — the strands were read
+at the frame's time code during the single-threaded traversal, and the bake
+reads no attribute — and the baked fields are attached to the geometries'
+strand tables, which is where the `mass.unplaceable` warnings are raised, on
+the importing thread. The bake is its own import phase (`Bake mass fields`)
+and its counters are `SceneCounters::mass_fields`. The rest — the field, its
+lookups, grouping, placements, edits — is the `curve-mass-field` record.
+
 ## Volumes, frame, camera and render settings
 
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked

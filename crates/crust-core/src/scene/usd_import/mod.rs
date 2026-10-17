@@ -18,6 +18,7 @@
 //! | [`mesh`]       | `UsdGeomMesh`: interning, deferred bake-vs-instance, side tables |
 //! | [`adaptive`]   | the camera's projection; adaptive subdivision: a mesh's level from its size on screen |
 //! | [`shapes`]     | `UsdGeomSphere`, `UsdGeomBasisCurves`                        |
+//! | [`mass`]       | `crust:mass:*`: curves baked into a mass field, after the read |
 //! | [`implicit`]   | `Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` (+ `_1`) → GeomUtil meshes |
 //! | [`instancing`] | `PointInstancer` and native `instanceable` prototypes        |
 //! | [`lights`]     | every UsdLux light type, shaping and IES                     |
@@ -77,6 +78,7 @@ mod light_links;
 mod lights;
 mod listing;
 mod live;
+mod mass;
 mod materials;
 mod mesh;
 mod mtlx_network;
@@ -104,6 +106,7 @@ use lights::{
 };
 pub(crate) use listing::{list_prims, list_records};
 pub(crate) use live::{prim_frames, rebuild};
+use materials::resolve_mass_color;
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{
     MeshArena, MeshPlace, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes, place_mesh_source,
@@ -381,6 +384,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if custom_token(&prim, "crust:volume:type").is_some() {
             emit_volume(&prim, this_world, &mut ctx.volumes, ctx.caches.working);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+            mass::warn_not_curves(&prim);
             let mat = resolve_bound(stage, &prim, &mut ctx.caches);
             emit_mesh(
                 &mut ctx.world,
@@ -392,19 +396,45 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 &mut ctx.pending_meshes,
             );
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
+            mass::warn_not_curves(&prim);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_sphere(&mut ctx.world, &prim, &sphere, this_world, mat);
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let request = StrandRequest::of(&*mat, ctx.caches.working);
-            let imported = curve_segments(&prim, &curves, request.as_ref());
-            emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
+            let color = resolve_mass_color(stage, &prim, &mut ctx.caches);
+            let fingerprint = color.as_ref().map(|c| c.fingerprint);
+            let mass = mass::request(&prim, &*mat, color, ctx.caches.working);
+            let reads = mass.as_ref().is_some_and(|m| m.reads);
+            let request = StrandRequest::of(&*mat, ctx.caches.working, reads);
+            let imported = curve_segments(&prim, &curves, request.as_ref(), mass.as_ref());
+            emit_curves(
+                &mut ctx.world,
+                &prim,
+                imported,
+                this_world,
+                mat,
+                &mut ctx.caches,
+                fingerprint,
+            );
         } else if let Ok(Some(curves)) = UsdNurbsCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let request = StrandRequest::of(&*mat, ctx.caches.working);
-            let imported = nurbs_curve_segments(&prim, &curves, request.as_ref());
-            emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
+            let color = resolve_mass_color(stage, &prim, &mut ctx.caches);
+            let fingerprint = color.as_ref().map(|c| c.fingerprint);
+            let mass = mass::request(&prim, &*mat, color, ctx.caches.working);
+            let reads = mass.as_ref().is_some_and(|m| m.reads);
+            let request = StrandRequest::of(&*mat, ctx.caches.working, reads);
+            let imported = nurbs_curve_segments(&prim, &curves, request.as_ref(), mass.as_ref());
+            emit_curves(
+                &mut ctx.world,
+                &prim,
+                imported,
+                this_world,
+                mat,
+                &mut ctx.caches,
+                fingerprint,
+            );
         } else if let Some(shape) = Shape::read(&prim) {
+            mass::warn_not_curves(&prim);
             let bound = undisplaced(&prim, resolve_bound(stage, &prim, &mut ctx.caches));
             let src =
                 ctx.caches
@@ -421,8 +451,12 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             );
         } else if visit_camera(stage, &prim, ctx) {
             // Recorded (and built, if it is the one) inside the call.
-        } else if !emit_light(stage, ctx, &prim, this_world) {
-            ctx.caches.unread.saw(&prim);
+            mass::warn_not_curves(&prim);
+        } else {
+            mass::warn_not_curves(&prim);
+            if !emit_light(stage, ctx, &prim, this_world) {
+                ctx.caches.unread.saw(&prim);
+            }
         }
         ctx.links.saw(
             prim.path(),
@@ -1120,6 +1154,24 @@ pub(crate) fn load_scene(
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
 
+    // The mass fields: every opted-in groom, baked in parallel now that the
+    // single-threaded read is over, then attached to the geometries that
+    // read them (which warns, here on the importing thread, about the
+    // placements that cannot).
+    let mass_counters = if ctx.caches.mass.is_empty() {
+        crate::stats::MassCounters::default()
+    } else {
+        let (fields, bake_elapsed) = ctx.caches.mass.bake_all(time);
+        ctx.world.attach_mass_fields(&fields);
+        stats.record_at("Bake mass fields", 1, bake_elapsed, MemorySample::now());
+        crate::stats::MassCounters {
+            fields: fields.len(),
+            bricks: fields.iter().map(|f| f.bricks()).sum(),
+            bytes: fields.iter().map(|f| f.bytes()).sum(),
+            time: bake_elapsed,
+        }
+    };
+
     let commit_start = Instant::now();
     let committed = ctx.world.commit();
     let commit_elapsed = commit_start.elapsed();
@@ -1148,6 +1200,7 @@ pub(crate) fn load_scene(
         unique: committed.unique_primitive_breakdown().into(),
         footprint: committed.memory_footprint(),
         strand_tables_bytes: committed.strand_table_bytes(),
+        mass_fields: mass_counters,
         lights: ctx.lights.count(),
         volumes: ctx.volumes.len(),
     };
@@ -1504,6 +1557,9 @@ struct ImportCaches<'a> {
     /// purpose ([`assets::explained`]): only references to these count a
     /// `*.unreadable` warning.
     failed_assets: std::collections::HashSet<std::path::PathBuf>,
+    /// The opted-in curves, grouped into the mass fields they bake into
+    /// after the read ([`mass::MassCollector`]).
+    mass: mass::MassCollector,
     /// How implicit shapes are tessellated, and what was.
     implicit: ImplicitPolicy,
     /// Geometry prims neither walk reads, for `geom.unsupported_type`.
@@ -1602,6 +1658,7 @@ impl<'a> ImportCaches<'a> {
             ies: HashMap::new(),
             light_textures: HashMap::new(),
             failed_assets: std::collections::HashSet::new(),
+            mass: mass::MassCollector::default(),
             implicit: ImplicitPolicy::default(),
             unread: UnreadGprims::default(),
             working,

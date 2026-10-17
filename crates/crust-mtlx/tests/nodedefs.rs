@@ -19,7 +19,12 @@ fn inputs(file: &str, nodedef: &str) -> Vec<(String, String, Option<String>)> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/nodedefs")
         .join(file);
-    let text = std::fs::read_to_string(&path).expect("vendored nodedef");
+    inputs_at(&path, file, nodedef)
+}
+
+/// [`inputs`] of a nodedef in the document at `path`.
+fn inputs_at(path: &Path, file: &str, nodedef: &str) -> Vec<(String, String, Option<String>)> {
+    let text = std::fs::read_to_string(path).expect("nodedef document");
     let doc = roxmltree::Document::parse(&text).expect("well-formed");
     let find = |name: &str| {
         doc.descendants()
@@ -28,7 +33,7 @@ fn inputs(file: &str, nodedef: &str) -> Vec<(String, String, Option<String>)> {
     };
     let nd = find(nodedef);
     let mut out: Vec<(String, String, Option<String>)> = match nd.attribute("inherit") {
-        Some(parent) => inputs(file, parent),
+        Some(parent) => inputs_at(path, file, parent),
         None => Vec::new(),
     };
     for i in nd.children().filter(|c| c.has_tag_name("input")) {
@@ -44,7 +49,14 @@ fn inputs(file: &str, nodedef: &str) -> Vec<(String, String, Option<String>)> {
 }
 
 fn check(table: &[InputDef], file: &str, nodedef: &str) {
-    let expected = inputs(file, nodedef);
+    check_against(table, inputs(file, nodedef), nodedef);
+}
+
+fn check_against(
+    table: &[InputDef],
+    expected: Vec<(String, String, Option<String>)>,
+    nodedef: &str,
+) {
     let names: Vec<&str> = table.iter().map(|d| d.name).collect();
     let want: Vec<&str> = expected.iter().map(|(n, _, _)| n.as_str()).collect();
     assert_eq!(names, want, "{nodedef}: the inputs, in order");
@@ -109,4 +121,39 @@ fn standard_surface_1_0_1_overrides_its_parent() {
         .unwrap();
     assert_eq!(base.default.unwrap().x(), 1.0);
     assert_eq!(color.default.unwrap().v[..3], [0.8, 0.8, 0.8]);
+}
+
+/// The crust library's own nodedefs (`libraries/crust/crust_defs.mtlx`) and
+/// the tables the compiler reads the mass nodes by are one definition: the
+/// shipped document is what a validating tool sees, the tables are what a
+/// document gets.
+#[test]
+fn crust_library_tables_match_the_shipped_document() {
+    use crust_mtlx::{
+        CRUST_LIBRARY, CRUST_LIBRARY_PATH, CRUST_MASS_COLOR, CRUST_MASS_DENSITY, CRUST_MASS_DEPTH,
+        CRUST_MASS_DIFFUSE_BSDF, CRUST_MASS_NORMAL,
+    };
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(CRUST_LIBRARY_PATH);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the library file"),
+        CRUST_LIBRARY,
+        "the constant is the file"
+    );
+    for (table, nodedef) in [
+        (CRUST_MASS_COLOR, "ND_crust_mass_color"),
+        (CRUST_MASS_NORMAL, "ND_crust_mass_normal"),
+        (CRUST_MASS_DEPTH, "ND_crust_mass_depth"),
+        (CRUST_MASS_DENSITY, "ND_crust_mass_density"),
+        (CRUST_MASS_DIFFUSE_BSDF, "ND_crust_mass_diffuse_bsdf"),
+    ] {
+        check_against(
+            table,
+            inputs_at(&path, CRUST_LIBRARY_PATH, nodedef),
+            nodedef,
+        );
+    }
+    // The document parses as a MaterialX document, with its nodedefs
+    // skipped as every nodedef is.
+    let doc = crust_mtlx::Doc::parse(CRUST_LIBRARY).expect("the library parses");
+    assert_eq!(doc.by_category("crust_mass_color").count(), 0);
 }

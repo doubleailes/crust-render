@@ -608,7 +608,9 @@ From the `crust-core` crate description:
   inspired by Guerilla Render's "Profiling And Statistics"): the importer fills
   in its own phases and the counters onto `Scene::stats`, the host appends
   render/output phases, and the report prints the statistics (scene, allocated
-  materials and lights by kind, kernel memory), ray statistics (primary / bounce
+  materials and lights by kind, kernel memory, the curves' strand tables and
+  mass fields — fields, bricks, bytes and the parallel bake's time, which is
+  also its own import phase, `Bake mass fields`), ray statistics (primary / bounce
   / shadow rays, shadow rays per shading point, average and adaptive samples per
   pixel, how paths ended — the four endings sum to the primary rays), textures
   (Guerilla's total / loaded / still-in-cache memory and loaded / unloaded

@@ -103,6 +103,7 @@ impl<'a> Compiler<'a> {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            mass: None,
         };
         Some(apply(op, &slots, &ctx))
     }
@@ -380,6 +381,12 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::HsvToRgb { a })
             }
             "geompropvalue" => self.compile_geompropvalue(node, arity),
+            "crust_mass_color" | "crust_mass_normal" | "crust_mass_depth"
+            | "crust_mass_density" => {
+                let prop = crate::mass::MassProp::of_category(&node.category)
+                    .expect("the arms above name every mass lookup");
+                self.compile_mass(node, prop)
+            }
             "ifgreater" => self.compile_conditional(node, CmpOp::Greater),
             "ifgreatereq" => self.compile_conditional(node, CmpOp::GreaterEq),
             "ifequal" => self.compile_conditional(node, CmpOp::Equal),

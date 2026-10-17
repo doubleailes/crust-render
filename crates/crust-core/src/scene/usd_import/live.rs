@@ -73,9 +73,9 @@ pub(crate) fn rebuild(
         warnings,
     };
     for path in &change.materials {
-        update
-            .materials
-            .push(rebuilding.material(path, &change.shaders)?);
+        let (slots, material, mass_color) = rebuilding.material(path, &change.shaders)?;
+        update.mass_colors.push((slots.clone(), mass_color));
+        update.materials.push((slots, material));
     }
     for path in &change.lights {
         update.lights.push(rebuilding.light(path)?);
@@ -194,7 +194,7 @@ impl Rebuilding<'_> {
         &self,
         path: &str,
         shaders: &[String],
-    ) -> Result<(Vec<u32>, Arc<dyn Material>), Structural> {
+    ) -> Result<(Vec<u32>, Arc<dyn Material>, Option<u64>), Structural> {
         let origin = self
             .prov
             .material(path)
@@ -221,12 +221,16 @@ impl Rebuilding<'_> {
             if displaces {
                 return Err(Structural(format!("{path} now defines a displacement")));
             }
-            Ok(material)
+            // The mass colour graph, as the import compiles it: its
+            // fingerprint is what the world checks a curves slot against.
+            let mass_color =
+                super::mass::color_terminal(&stage, &mat_path, &mut caches).map(|c| c.fingerprint);
+            Ok((material, mass_color))
         })();
         let raised = scope.finish();
-        let material = built?;
+        let (material, mass_color) = built?;
         same_warnings(&raised, self.warnings, path)?;
-        Ok((origin.slots.clone(), material))
+        Ok((origin.slots.clone(), material, mass_color))
     }
 
     /// The light at `path`, emitted as the traversal emitted it, its

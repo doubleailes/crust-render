@@ -486,3 +486,94 @@ def Xform "World"
         "a mesh reads no table"
     );
 }
+
+/// A groom's field is baked with its material's mass colour graph, so an
+/// in-place material edit that changes the graph is refused (the host
+/// re-imports), while one that leaves it alone is applied in place; a mesh
+/// bound to the same material is never the reason.
+#[test]
+fn a_curve_material_edit_that_changes_its_mass_colour_graph_is_refused() {
+    let dir = std::env::temp_dir().join("crust_live_mass_colour");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stage = dir.join("stage.usda");
+    let write = |base: &str, tint: &str| {
+        std::fs::write(
+            &stage,
+            format!(
+                r#"#usda 1.0
+(
+    defaultPrim = "World"
+)
+def Xform "World"
+{{
+    def Camera "cam"
+    {{
+    }}
+    def Material "Hair"
+    {{
+        token outputs:surface.connect = </World/Hair/Shader.outputs:surface>
+        color3f outputs:crust:mass:color.connect = </World/Hair/Tint.outputs:out>
+        def Shader "Shader"
+        {{
+            uniform token info:id = "crust:openpbr"
+            color3f inputs:baseColor = {base}
+            token outputs:surface
+        }}
+        def Shader "Tint"
+        {{
+            uniform token info:id = "ND_constant_color3"
+            color3f inputs:value = {tint}
+            color3f outputs:out
+        }}
+    }}
+    def BasisCurves "Groom" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token type = "linear"
+        int[] curveVertexCounts = [2, 2, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 0.1, 0), (1, 0.1, 0), (0, 0.2, 0), (1, 0.2, 0)]
+        float[] widths = [0.1] (interpolation = "constant")
+        rel material:binding = </World/Hair>
+        float crust:mass:radius = 0.3
+    }}
+    def Mesh "Card" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 2, 0), (1, 2, 0), (0, 3, 0)]
+        rel material:binding = </World/Hair>
+    }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+    };
+    write("(0.5, 0.5, 0.5)", "(1, 0, 0)");
+    let scene = Scene::from_usd(&stage).expect("imports");
+    assert_eq!(scene.world.mass_fields().len(), 1);
+    assert!(scene.world.mass_fields()[0].has_color());
+    let prov = consistent(&scene);
+    let change = crust_core::live::Change {
+        materials: vec!["/World/Hair".into()],
+        ..Default::default()
+    };
+    let rebuild = || prov.rebuild(&stage, &crust_core::NoAssets, &scene.warnings, &change);
+    // Nothing changed: the rebuild stands.
+    rebuild()
+        .expect("rebuilt")
+        .check(&scene.world, &scene.lights)
+        .expect("the same graph is kept");
+    // The surface's colour changed, the graph did not: applied in place.
+    write("(0.1, 0.2, 0.3)", "(1, 0, 0)");
+    rebuild()
+        .expect("rebuilt")
+        .check(&scene.world, &scene.lights)
+        .expect("a surface edit keeps the field");
+    // The graph changed: the field would be stale, so the swap is refused.
+    write("(0.1, 0.2, 0.3)", "(0, 0, 1)");
+    let refused = rebuild()
+        .expect("rebuilt")
+        .check(&scene.world, &scene.lights)
+        .expect_err("another graph needs the field baked again");
+    assert!(refused.0.contains("mass colour graph"), "{refused}");
+}

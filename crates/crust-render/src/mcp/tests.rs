@@ -464,6 +464,153 @@ fn edits_in_place_render_as_a_full_import() {
     }
 }
 
+/// A stage with a groom baked into a mass field: its material's inline
+/// MaterialX surface reads the field, and authors the mass colour graph as
+/// its terminal. Small, so a render is quick.
+fn mass_stage(dir: &Path) -> PathBuf {
+    let strands: Vec<String> = (0..9)
+        .map(|k| {
+            let x = -0.4 + 0.1 * k as f32;
+            format!("({x}, 0, 0), ({x}, 1.2, 0.2)")
+        })
+        .collect();
+    let stage = format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        uniform int2 resolution = (32, 24)
+        int crust:maxDepth = 3
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0.6, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+
+    def DomeLight "Sky"
+    {{
+        float inputs:intensity = 0.5
+    }}
+
+    def BasisCurves "Groom" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token type = "linear"
+        int[] curveVertexCounts = [2, 2, 2, 2, 2, 2, 2, 2, 2]
+        point3f[] points = [{}]
+        float[] widths = [0.08] (interpolation = "constant")
+        rel material:binding = </World/Looks/Mass>
+        float crust:mass:radius = 0.3
+        token crust:mass:group = "hair"
+    }}
+
+    def Scope "Looks"
+    {{
+        def Material "Mass"
+        {{
+            token outputs:mtlx:surface.connect = </World/Looks/Mass/Surface.outputs:out>
+            color3f outputs:crust:mass:color.connect = </World/Looks/Mass/Tint.outputs:out>
+
+            def Shader "Tint"
+            {{
+                uniform token info:id = "ND_constant_color3"
+                color3f inputs:value = (0.8, 0.3, 0.1)
+                color3f outputs:out
+            }}
+
+            def Shader "Read"
+            {{
+                uniform token info:id = "ND_crust_mass_color_color3"
+                color3f inputs:default = (0.5, 0.5, 0.5)
+                color3f outputs:out
+            }}
+
+            def Shader "Surface"
+            {{
+                uniform token info:id = "ND_standard_surface_surfaceshader_100"
+                color3f inputs:base_color.connect = </World/Looks/Mass/Read.outputs:out>
+                float inputs:specular_roughness = 0.5
+                token outputs:out
+            }}
+        }}
+    }}
+}}
+"#,
+        strands.join(", ")
+    );
+    let path = dir.join("stage.usda");
+    std::fs::write(&path, stage).expect("write the stage");
+    path
+}
+
+/// An edit of a `crust:mass:*` attribute, of a prim's group, or of the
+/// material's mass colour graph bakes the affected field again — through a
+/// full import, since the field is import-baked state — and the edited
+/// scene renders exactly as a fresh import of the same layer (the in place
+/// ↔ full re-import pair); a surface edit that leaves the graph alone stays
+/// in place.
+#[test]
+fn mass_edits_render_as_a_full_import() {
+    let dir = work_dir("mass_edits");
+    let input = mass_stage(&dir);
+    let layer = dir.join("mass.usda");
+    let mut state = State::default();
+    state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .expect("opened");
+    assert_eq!(
+        state.session().unwrap().scene.report.warnings.len(),
+        0,
+        "{:?}",
+        state.session().unwrap().scene.report.warnings
+    );
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "radius",
+            "full",
+            r#"over "World" { over "Groom" { float crust:mass:radius = 0.5 } }"#,
+        ),
+        (
+            "group",
+            "full",
+            r#"over "World" { over "Groom" { token crust:mass:group = "mane" } }"#,
+        ),
+        (
+            "colour graph",
+            "full",
+            r#"over "World" { over "Looks" { over "Mass" { over "Tint" {
+                color3f inputs:value = (0.1, 0.4, 0.9) } } } }"#,
+        ),
+        (
+            "surface roughness",
+            "materials",
+            r#"over "World" { over "Looks" { over "Mass" { over "Surface" {
+                float inputs:specular_roughness = 0.2 } } } }"#,
+        ),
+    ];
+    for (what, class, usda) in cases {
+        assert_eq!(author(&mut state, usda), *class, "{what}");
+        same_as_full_import(&mut state, &dir, what);
+    }
+    for (what, class, _) in cases.iter().rev() {
+        assert_eq!(undo(&mut state), *class, "undo {what}");
+        same_as_full_import(&mut state, &dir, &format!("undo {what}"));
+    }
+}
+
 /// What is not confined is applied as `full`.
 #[test]
 fn unconfined_edits_are_full() {

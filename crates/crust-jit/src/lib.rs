@@ -548,7 +548,9 @@ impl Gen<'_> {
             Op::RgbToHsv { a } | Op::HsvToRgb { a } => w(a).map(|n| if n == 4 { 4 } else { 3 }),
             Op::Select { in1, in2, .. } => max(&[in1, in2]),
             Op::CellNoise2 { .. } => Some(1),
-            Op::Curve { arity, .. } | Op::Primvar { arity, .. } => Some(*arity),
+            Op::Curve { arity, .. } | Op::Primvar { arity, .. } | Op::Mass { arity, .. } => {
+                Some(*arity)
+            }
         }
     }
 

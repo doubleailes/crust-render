@@ -31,7 +31,7 @@ use crate::hittable::HitRecord;
 use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure, volume_medium};
 use crate::material::{BsdfDraw, Material, Resolution, ScatterSample};
 use crate::ray::Ray;
-use crust_mtlx::{Closures, CurveCtx, Host, Program, ShadeCtx, Val};
+use crust_mtlx::{Closures, CurveCtx, Host, MassReads, Program, ShadeCtx, Val};
 use glam::Vec3A;
 
 pub use crust_mtlx::MtlxError;
@@ -55,6 +55,9 @@ pub struct MtlxMaterial {
     /// faster way to run `program`.
     #[cfg(feature = "jit")]
     jit: Option<crust_jit::JitProgram>,
+    /// Which mass properties `program` reads ([`Program::mass_reads`]),
+    /// decided once: the hit looks up those alone.
+    mass_reads: MassReads,
     /// The closure tree, its EDF terms and interior volume.
     closures: Closures,
     /// The program for the surface's opacity alone, when it has one.
@@ -81,6 +84,7 @@ struct Presence {
     program: Program,
     #[cfg(feature = "jit")]
     jit: Option<crust_jit::JitProgram>,
+    mass_reads: MassReads,
     /// Where the opacity lands in `program`'s slots.
     slot: u32,
 }
@@ -113,6 +117,7 @@ impl MtlxDisplacement {
             position: ctx.position,
             uv_width: ctx.uv_width,
             curve: None,
+            mass: None,
         };
         let _ = use_jit;
         SLOTS.with(|cell| {
@@ -199,7 +204,7 @@ impl MtlxMaterial {
         let jit = self.jit.as_ref();
         #[cfg(not(feature = "jit"))]
         let jit = None;
-        run(&self.program, jit, r_in, rec, f)
+        run(&self.program, jit, self.mass_reads, r_in, rec, f)
     }
 
     /// The emitted radiance: the EDF terms summed, each `weight · color` per
@@ -274,6 +279,7 @@ type Jit = std::convert::Infallible;
 fn run<R>(
     program: &Program,
     jit: Option<&Jit>,
+    mass_reads: MassReads,
     r_in: &Ray,
     rec: &HitRecord,
     f: impl FnOnce(&[Val]) -> R,
@@ -284,10 +290,19 @@ fn run<R>(
         random: c.random(),
         primvars,
     };
+    // The mass field at the hit, for what the program reads of it: read
+    // off the curve's table, through its placement.
+    let mass = |c: &crate::CurveHit| {
+        if mass_reads.any() {
+            c.mass(rec.p, mass_reads)
+        } else {
+            None
+        }
+    };
     match rec.curve() {
-        None => run_at(program, jit, r_in, rec, None, f),
+        None => run_at(program, jit, r_in, rec, None, None, f),
         Some(c) if program.primvars.is_empty() || !c.has_primvars() => {
-            run_at(program, jit, r_in, rec, Some(strand(c, &[])), f)
+            run_at(program, jit, r_in, rec, Some(strand(c, &[])), mass(c), f)
         }
         // The hit's primvars, looked up into a buffer reused per thread —
         // taken rather than borrowed, so a program run from inside `f`
@@ -295,20 +310,29 @@ fn run<R>(
         Some(c) => {
             let mut primvars = PRIMVARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
             c.primvars_into(&mut primvars);
-            let out = run_at(program, jit, r_in, rec, Some(strand(c, &primvars)), f);
+            let out = run_at(
+                program,
+                jit,
+                r_in,
+                rec,
+                Some(strand(c, &primvars)),
+                mass(c),
+                f,
+            );
             PRIMVARS.with(|cell| *cell.borrow_mut() = primvars);
             out
         }
     }
 }
 
-/// [`run`] with the curve record already looked up.
+/// [`run`] with the curve record and the mass field already looked up.
 fn run_at<R>(
     program: &Program,
     jit: Option<&Jit>,
     r_in: &Ray,
     rec: &HitRecord,
     curve: Option<CurveCtx<'_>>,
+    mass: Option<crust_mtlx::MassCtx>,
     f: impl FnOnce(&[Val]) -> R,
 ) -> R {
     let ctx = ShadeCtx {
@@ -319,6 +343,7 @@ fn run_at<R>(
         position: rec.p,
         uv_width: rec.uv_width,
         curve,
+        mass,
     };
     SLOTS.with(|cell| {
         let mut slots = cell.borrow_mut();
@@ -399,7 +424,9 @@ impl Material for MtlxMaterial {
         let jit = p.jit.as_ref();
         #[cfg(not(feature = "jit"))]
         let jit = None;
-        let o = run(&p.program, jit, r_in, rec, |s| s[p.slot as usize].x());
+        let o = run(&p.program, jit, p.mass_reads, r_in, rec, |s| {
+            s[p.slot as usize].x()
+        });
         if o.is_finite() {
             o.clamp(0.0, 1.0)
         } else {
@@ -468,6 +495,7 @@ impl Material for MtlxMaterial {
             chart: self.program.reads_chart(),
             strand: self.program.reads_curve(),
             primvars: &self.program.primvars,
+            mass: self.mass_reads.any(),
         }
     }
 
@@ -604,6 +632,7 @@ pub fn from_compiled(mut c: crust_mtlx::Compiled, luma: utils::Luma) -> Result<L
         Presence {
             #[cfg(feature = "jit")]
             jit: jit_of(&program),
+            mass_reads: program.mass_reads(),
             program,
             slot,
         }
@@ -620,6 +649,7 @@ pub fn from_compiled(mut c: crust_mtlx::Compiled, luma: utils::Luma) -> Result<L
     let material = MtlxMaterial {
         #[cfg(feature = "jit")]
         jit,
+        mass_reads: c.program.mass_reads(),
         program: c.program,
         closures: c.closures,
         presence,

@@ -60,7 +60,11 @@ one.
 
 ### The mass normal is the gradient of the signed distance
 
-`N_mass(P) = normalize(∇d(P))`, by central differences of trilinear `d`.
+`N_mass(P) = normalize(∇d(P))`, by central differences of trilinear `d`, one
+voxel apart, after one separable binomial pass `(1 2 1)/4` along each axis
+over the distance (what the spike settled on, below: without it, fast
+sweeping's first-order staircase on a tilted plane shows as faint bands a
+voxel apart, which diffuse shading would turn into Mach bands).
 
 - **Alternative: the density gradient, `−∇ρ / |∇ρ|`.** Cheaper, but deep inside
   a clump `∇ρ → 0` and the normal is noise — the opposite of a mass. Rejected.
@@ -329,12 +333,15 @@ strands (the documentation's guidance, since the radius is authored per
 groom), threshold 0.5, voxel half the radius, and one smoothing pass of the
 distance. The whole bake of the sample takes 0.1 s.
 
-### Amendments the spike proposes (pending review)
+### What the spike changed
 
-- **The mass normal's decision** gains the smoothing pass: the normal is the
+Folded into the decisions above and into the tasks, on the strength of the
+measurements:
+
+- **The mass normal's decision** gained the smoothing pass: the normal is the
   normalised gradient of the signed distance after one binomial pass along
   each axis, interpolated from the voxels' central differences.
-- **Task 1.2's criterion** becomes the mass signal's gradient energy at the
+- **Task 1.2's criterion** became the mass signal's gradient energy at the
   crossing as a fraction of the per-strand signal's (under 1% for the normal,
   a few percent for the colour), in place of the crossing/away ratio.
 - **A known gap**: a one-layer sheet of strands has every hit near the

@@ -23,6 +23,7 @@ mod compile;
 #[cfg(test)]
 mod tests;
 
+use crate::mass::{MassCtx, MassProp, MassReads};
 use crate::texture::TextureRef;
 use crate::value::Val;
 use glam::Vec3A;
@@ -72,6 +73,10 @@ pub struct ShadeCtx<'a> {
     /// The strand, on a curve hit; `None` anywhere else, where a curve
     /// property or primvar reads its `geompropvalue`'s `default`.
     pub curve: Option<CurveCtx<'a>>,
+    /// The curve mass field at the hit, on a curve that bakes one, filled for
+    /// what the program reads ([`Program::mass_reads`]); `None` anywhere
+    /// else, where every `crust_mass_*` lookup reads its `default`.
+    pub mass: Option<MassCtx>,
 }
 
 /// A property of the strand a curve hit lies on, read by `geompropvalue`.
@@ -170,6 +175,14 @@ pub enum Op {
     /// none.
     Primvar {
         channel: u32,
+        arity: u8,
+        fallback: Val,
+    },
+    /// A `crust_mass_*` lookup: the property off [`ShadeCtx::mass`] at
+    /// `arity` lanes, or `fallback` (the node's `default`) where the context
+    /// has none.
+    Mass {
+        prop: MassProp,
         arity: u8,
         fallback: Val,
     },
@@ -316,6 +329,7 @@ impl Op {
             | Op::TexCoord { .. }
             | Op::Curve { .. }
             | Op::Primvar { .. }
+            | Op::Mass { .. }
             | Op::Normal
             | Op::ViewDirection
             | Op::Position => {}
@@ -409,6 +423,7 @@ impl Op {
             Op::TexCoord { .. }
             | Op::Curve { .. }
             | Op::Primvar { .. }
+            | Op::Mass { .. }
             | Op::Normal
             | Op::ViewDirection
             | Op::Position
@@ -470,6 +485,39 @@ impl Program {
         self.ops
             .iter()
             .any(|op| matches!(op, Op::Curve { .. } | Op::Primvar { .. }))
+    }
+
+    /// Which mass properties an evaluation reads off [`ShadeCtx::mass`]:
+    /// what a host looks up at a hit before running the program.
+    pub fn mass_reads(&self) -> MassReads {
+        MassReads(self.ops.iter().fold(0, |bits, op| match op {
+            Op::Mass { prop, .. } => bits | prop.bit(),
+            _ => bits,
+        }))
+    }
+
+    /// Whether an evaluation reads anything that needs a view or a hit
+    /// (`viewdirection`, `normal`, a texture footprint, the chart's
+    /// footprint shifts): the ops a bake, which has neither, cannot
+    /// evaluate. Each is named by its node, for one warning.
+    pub fn needs_view_or_hit(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        for op in &self.ops {
+            let name = match op {
+                Op::ViewDirection => "viewdirection",
+                Op::Normal => "normal",
+                Op::NormalMap { .. } => "normalmap",
+                Op::HeightToNormal { .. } => "heighttonormal",
+                Op::Texture { shift, .. } | Op::TexCoord { shift } if *shift != [0.0; 2] => {
+                    "heighttonormal"
+                }
+                _ => continue,
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
     }
 
     /// Whether every operand refers to a slot strictly before its user's —
@@ -551,6 +599,7 @@ impl Program {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            mass: None,
         };
         let mut scratch: Vec<Val> = vec![Val::ZERO; n];
         for (i, op) in self.ops.iter().enumerate() {

@@ -645,6 +645,9 @@ writes those it completed, or the first one as far as it got.
 
 When the render finishes, print render statistics and a per-phase profile: the time and
 memory of parsing, building, rendering and writing the output, plus scene statistics.
+A groom baked into a [curve mass field](@/docs/usd/mass-fields.md) adds a `Bake mass
+fields` phase and a `curve mass fields` row: how many fields, their bricks and bytes, and
+the bake's time.
 For streamed textures it reports the tile cache's memory and hit rates, and how many `.tx`
 files were open at the peak against
 [`CRUST_TEX_MAX_OPEN_FILES`](@/docs/reference/environment-variables.md#crust-tex-max-open-files),

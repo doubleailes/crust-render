@@ -18,11 +18,14 @@ use crate::material::Material;
 use crate::rt_world::WorldBuilder;
 use crate::strands::StrandTable;
 
+use super::ImportCaches;
 use super::attrs::{
     attr_f32, custom_token, decode_f32_array, decode_f64_array, decode_i32_array,
     decode_vec3f_array, prim_motion_translate, prim_ray_mask, value_at,
 };
+use super::mass::{CurvesMass, MassRequest, Placement};
 use super::strands::{CurveCounts, StrandBuilder, StrandRequest, VertexRecipe};
+use crate::rt_world::MassPlacement;
 
 // -----------------------------------------------------------------------
 // Sphere
@@ -196,6 +199,7 @@ pub(super) fn curve_segments(
     prim: &Prim,
     curves: &UsdBasisCurves,
     request: Option<&StrandRequest>,
+    mass: Option<&MassRequest>,
 ) -> Option<Curves> {
     let points = value_at(&curves.points_attr()).and_then(decode_vec3f_array);
     let counts = value_at(&curves.curve_vertex_counts_attr()).and_then(decode_i32_array);
@@ -251,27 +255,31 @@ pub(super) fn curve_segments(
     };
 
     let linear = ty == "linear";
-    let mut strands = request.map(|r| {
-        // `varying` has one value per span end: a linear curve's points, a
-        // cubic curve's span count plus one.
-        let varying = counts
-            .iter()
-            .map(|&c| {
-                let c = c.max(0) as usize;
-                match (linear, c >= 4) {
-                    (true, _) => c,
-                    (false, true) => (c - 4) / vstep + 2,
-                    (false, false) => 0,
-                }
-            })
-            .sum();
-        let shape = CurveCounts {
-            points: n_points,
-            curves: n_curves,
-            varying,
-        };
-        StrandBuilder::new(prim, r, shape)
-    });
+    // `varying` has one value per span end: a linear curve's points, a
+    // cubic curve's span count plus one.
+    let varying = counts
+        .iter()
+        .map(|&c| {
+            let c = c.max(0) as usize;
+            match (linear, c >= 4) {
+                (true, _) => c,
+                (false, true) => (c - 4) / vstep + 2,
+                (false, false) => 0,
+            }
+        })
+        .sum();
+    let shape = CurveCounts {
+        points: n_points,
+        curves: n_curves,
+        varying,
+    };
+    let mut strands = request.map(|r| StrandBuilder::new(prim, r, shape));
+    // The bake's own table, for the mass colour graph's properties and
+    // primvars at the strand samples.
+    let bake_request = mass.and_then(MassRequest::bake_request);
+    let mut bake = bake_request
+        .as_ref()
+        .map(|r| StrandBuilder::new(prim, r, shape));
     let weights = basis_weights(basis);
     let mut segments: Vec<CurveSegment> = Vec::new();
     let mut cubic_segments: Vec<CubicCurveSegment> = Vec::new();
@@ -300,7 +308,7 @@ pub(super) fn curve_segments(
                     r0: radius(k),
                     r1: radius(k + 1),
                 });
-                if let Some(b) = &mut strands {
+                for b in strands.iter_mut().chain(bake.iter_mut()) {
                     let (i, v) = (offset + k, |k: usize| k as f32 / last as f32);
                     b.span(
                         curve_idx,
@@ -339,7 +347,7 @@ pub(super) fn curve_segments(
                     r0,
                     r1,
                 });
-                if let Some(b) = &mut strands {
+                for b in strands.iter_mut().chain(bake.iter_mut()) {
                     let i = offset + base;
                     let recipe = VertexRecipe {
                         idx: [i, i + 1, i + 2, i + 3],
@@ -369,9 +377,12 @@ pub(super) fn curve_segments(
         segments.len(),
         cubic_segments.len()
     );
+    let batches = (segments, cubic_segments);
+    let mass = mass.map(|m| CurvesMass::new(&batches, m, bake.and_then(|b| b.finish(prim))));
     Some(Curves {
-        batches: (segments, cubic_segments),
+        batches,
         strands: strands.and_then(|b| b.finish(prim)),
+        mass,
     })
 }
 
@@ -379,12 +390,14 @@ pub(super) fn curve_segments(
 /// and cubic (Bézier-form) spans.
 pub(super) type CurveBatches = (Vec<CurveSegment>, Vec<CubicCurveSegment>);
 
-/// A curves prim as imported: its batches, and its strand table when its
-/// material asked for one. The table indexes the one batch that is not
-/// empty (see [`nurbs_curve_segments`] for a prim of both kinds).
+/// A curves prim as imported: its batches, its strand table when its
+/// material asked for one, and what it bakes into a mass field when it opts
+/// in. The table indexes the one batch that is not empty (see
+/// [`nurbs_curve_segments`] for a prim of both kinds).
 pub(super) struct Curves {
     pub(super) batches: CurveBatches,
     pub(super) strands: Option<StrandTable>,
+    pub(super) mass: Option<CurvesMass>,
 }
 
 /// One kernel scene holding a curves prim's batches, in its local space.
@@ -404,15 +417,25 @@ pub(super) fn curves_scene(batches: CurveBatches) -> crust_rt::Scene {
 
 /// Places a curves prim's batches ([`curve_segments`] or
 /// [`nurbs_curve_segments`]) at the top level, under an `Instance` carrying
-/// its world transform.
+/// its world transform. A prim that opts into a mass field joins the field
+/// of its group under this world transform, or one of its own, in world
+/// space; `color_fingerprint` is its material's mass colour graph, which an
+/// in-place material edit is checked against.
 pub(super) fn emit_curves(
     world: &mut WorldBuilder,
     prim: &Prim,
     curves: Option<Curves>,
     world_xf: GMat4,
     material: Arc<dyn Material>,
+    caches: &mut ImportCaches<'_>,
+    color_fingerprint: Option<u64>,
 ) {
-    let Some(Curves { batches, strands }) = curves else {
+    let Some(Curves {
+        batches,
+        strands,
+        mass,
+    }) = curves
+    else {
         return;
     };
     if world_xf.determinant().abs() < 1e-12 {
@@ -436,6 +459,15 @@ pub(super) fn emit_curves(
     match strands {
         Some(table) => world.set_strands(id, Arc::new(table)),
         None => world.mark_curves(id),
+    }
+    world.set_mass_color(id, color_fingerprint);
+    if let Some(mass) = mass {
+        let field = caches.mass.add(
+            Placement::world(&world_xf),
+            prim.path().as_str(),
+            mass.transformed(&world_xf),
+        );
+        world.expect_mass(id, field, MassPlacement::World, prim.path().to_string());
     }
 }
 
@@ -591,6 +623,7 @@ pub(super) fn nurbs_curve_segments(
     prim: &Prim,
     curves: &UsdNurbsCurves,
     request: Option<&StrandRequest>,
+    mass: Option<&MassRequest>,
 ) -> Option<Curves> {
     let points = value_at(&curves.points_attr()).and_then(decode_vec3f_array);
     let counts = value_at(&curves.curve_vertex_counts_attr()).and_then(decode_i32_array);
@@ -671,22 +704,28 @@ pub(super) fn nurbs_curve_segments(
         })
     };
 
-    let elevate =
-        request.is_some() && orders.contains(&2) && orders.iter().any(|&o| o == 3 || o == 4);
-    let mut strands = request.map(|r| {
-        // `varying` has one value per segment end: `count - order + 2`.
-        let varying = counts
-            .iter()
-            .zip(&orders)
-            .map(|(&c, &o)| (i64::from(c) - i64::from(o) + 2).max(0) as usize)
-            .sum();
-        let shape = CurveCounts {
-            points: n_points,
-            curves: n_curves,
-            varying,
-        };
-        StrandBuilder::new(prim, r, shape)
-    });
+    // A table (the material's, or the mass bake's) indexes one batch, so a
+    // prim mixing linear spans with cubic ones carries the linear ones as
+    // straight cubics when either is built.
+    let elevate = (request.is_some() || mass.is_some())
+        && orders.contains(&2)
+        && orders.iter().any(|&o| o == 3 || o == 4);
+    // `varying` has one value per segment end: `count - order + 2`.
+    let varying = counts
+        .iter()
+        .zip(&orders)
+        .map(|(&c, &o)| (i64::from(c) - i64::from(o) + 2).max(0) as usize)
+        .sum();
+    let shape = CurveCounts {
+        points: n_points,
+        curves: n_curves,
+        varying,
+    };
+    let mut strands = request.map(|r| StrandBuilder::new(prim, r, shape));
+    let bake_request = mass.and_then(MassRequest::bake_request);
+    let mut bake = bake_request
+        .as_ref()
+        .map(|r| StrandBuilder::new(prim, r, shape));
     let mut varying_offset = 0usize;
     let mut segments: Vec<CurveSegment> = Vec::new();
     let mut cubic_segments: Vec<CubicCurveSegment> = Vec::new();
@@ -768,7 +807,7 @@ pub(super) fn nurbs_curve_segments(
             };
             let radius = |v: &NurbsVertex| 0.5 * (v[3] as f32).max(1e-6);
             let (first_v, last_v) = (&bez[0], &bez[p]);
-            if let Some(b) = &mut strands {
+            for b in strands.iter_mut().chain(bake.iter_mut()) {
                 let recipe = nurbs_span_recipe(u, span, p, (s, e), first, elevate);
                 let v = |t: f64| ((t - lo) / (hi - lo)) as f32;
                 let j = varying_first + (span - p);
@@ -846,9 +885,12 @@ pub(super) fn nurbs_curve_segments(
         segments.len(),
         cubic_segments.len()
     );
+    let batches = (segments, cubic_segments);
+    let mass = mass.map(|m| CurvesMass::new(&batches, m, bake.and_then(|b| b.finish(prim))));
     Some(Curves {
-        batches: (segments, cubic_segments),
+        batches,
         strands: strands.and_then(|b| b.finish(prim)),
+        mass,
     })
 }
 

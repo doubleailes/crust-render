@@ -53,6 +53,7 @@ shader inputs are stricter; see [Materials](@/docs/usd/materials.md#input-types)
 |------------|---------------|------|
 | `crust:samplesPerPixel`, `crust:maxDepth`, `crust:pixelFilter`, … | the `RenderSettings` prim | [Render settings](@/docs/usd/render-settings.md) |
 | `crust:rayMask`, `crust:motion:translate` | geometry: `Mesh`, `Sphere`, `BasisCurves`, the implicit shapes (`Cube`, `Cylinder`, …) | [Geometry](@/docs/usd/geometry.md) |
+| `crust:mass:*` | `BasisCurves`, `NurbsCurves` | [Curve mass fields](@/docs/usd/mass-fields.md) |
 | `crust:light:cameraVisible` | UsdLux lights | [Lights](@/docs/usd/lights.md) |
 | `info:id = "crust:openpbr"` and its `inputs:*` | a `Shader` prim | [Materials and textures](@/docs/usd/materials.md) |
 | `crust:volume:*` | any prim, typically a `Cube` | [Volumes](@/docs/usd/volumes.md) |
@@ -127,6 +128,10 @@ the `crust:` attribute wins:
 | [`crust:enableExposureCompensation`](@/docs/usd/render-settings.md#crust-enableexposurecompensation) | `bool` | RenderSettings | true |
 | [`crust:rayMask`](@/docs/usd/geometry.md#crust-raymask) | `int` | geometry, lights | 7 (geometry) |
 | [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) | `float3` | Mesh, Sphere, implicit shapes | none |
+| [`crust:mass:radius`](@/docs/usd/mass-fields.md#crust-mass-radius) | `float` | BasisCurves, NurbsCurves | none (no field) |
+| [`crust:mass:threshold`](@/docs/usd/mass-fields.md#crust-mass-threshold) | `float` | BasisCurves, NurbsCurves | 0.5 |
+| [`crust:mass:group`](@/docs/usd/mass-fields.md#crust-mass-group) | `token` | BasisCurves, NurbsCurves | none |
+| [`crust:mass:maxResolution`](@/docs/usd/mass-fields.md#crust-mass-maxresolution) | `int` | BasisCurves, NurbsCurves | 512 |
 | [`crust:light:cameraVisible`](@/docs/usd/lights.md#crust-light-cameravisible) | `bool` | lights | false (true for domes) |
 | [`info:id = "crust:openpbr"`](@/docs/usd/materials.md#the-crust-openpbr-shader) | `token` | Shader | — |
 | [`crust:volume:type`](@/docs/usd/volumes.md#crust-volume-type) and the other `crust:volume:*` | various | any | — |

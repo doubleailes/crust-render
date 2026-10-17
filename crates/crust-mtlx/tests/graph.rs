@@ -28,6 +28,7 @@ fn ctx() -> ShadeCtx<'static> {
         position: Vec3A::new(1.0, 2.0, 3.0),
         uv_width: 0.0,
         curve: None,
+        mass: None,
     }
 }
 
@@ -102,7 +103,9 @@ fn leaf_params(l: &Bsdf, slots: &[Val]) -> (&'static str, Vec3A, f32) {
         Bsdf::Sheen {
             color, roughness, ..
         } => (v(*color).rgb(), v(*roughness).x()),
-        Bsdf::Subsurface { color, .. } | Bsdf::Translucent { color } => (v(*color).rgb(), 0.0),
+        Bsdf::Subsurface { color, .. }
+        | Bsdf::Translucent { color }
+        | Bsdf::MassDiffuse { color } => (v(*color).rgb(), 0.0),
         Bsdf::Hair {
             tint_r,
             roughness_r,

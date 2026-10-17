@@ -157,6 +157,9 @@ pub(super) struct CachedMaterial {
     /// `None` until a mesh asked; then the answer, which may be no
     /// displacement.
     displacement: Option<Option<Arc<Displacement>>>,
+    /// `None` until a curves prim asked; then the material's mass colour
+    /// graph ([`super::mass::color_terminal`]), which may be none.
+    mass_color: Option<Option<Arc<crate::mass::MassColor>>>,
 }
 
 /// The binding purpose a final render resolves: USD's `full`, falling back to
@@ -278,9 +281,30 @@ fn cached_material(
             reads,
             mtlx,
             displacement: None,
+            mass_color: None,
         },
     );
     Some((key, mat_path))
+}
+
+/// The mass colour graph of the material bound to `prim` — its
+/// `outputs:crust:mass:color` terminal, compiled once per material
+/// ([`super::mass::color_terminal`]); `None` for a material without one, or
+/// an unbound prim.
+pub(super) fn resolve_mass_color(
+    stage: &Stage,
+    prim: &Prim,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Arc<crate::mass::MassColor>> {
+    let (key, mat_path) = cached_material(stage, prim, caches)?;
+    if let Some(color) = &caches.materials.by_path[&key].mass_color {
+        return color.clone();
+    }
+    let color = super::mass::color_terminal(stage, &mat_path, caches);
+    if let Some(entry) = caches.materials.by_path.get_mut(&key) {
+        entry.mass_color = Some(color.clone());
+    }
+    color
 }
 
 /// The prims outside the material at `mat_path` that its network reads: the
@@ -998,42 +1022,7 @@ fn compile_mtlx(
         utils::Luma,
     ) -> Result<crate::materialx::Loaded, crate::materialx::MtlxError>,
 ) -> Option<Arc<dyn Material>> {
-    // `RefCell` because the loader closure is called from inside the compiler
-    // while `caches` would otherwise be mutably borrowed by the outer call.
-    let (working, luma) = (caches.working, caches.luma);
-    let cell = std::cell::RefCell::new(&mut *caches);
-    let loader = |asset: &str, space: Option<&str>| -> Option<crate::TextureRef> {
-        let mut c = cell.borrow_mut();
-        load_uv_texture(
-            &dir.join(asset),
-            crate::ColorSpace::from_mtlx(space, working),
-            mat_path,
-            &mut c,
-        )
-        .map(crate::TextureRef)
-    };
-    // A literal colour with an effective `colorspace` is converted into the
-    // working space once, at compile time; one with none is already in it.
-    let convert = |space: &str, rgb: [f32; 3]| -> [f32; 3] {
-        crate::ColorSpace::from_mtlx(Some(space), working)
-            .resolved()
-            .map_or(rgb, |s| s.decode_rgb(Vec3A::from_array(rgb)).to_array())
-    };
-    let host = crust_mtlx::Host {
-        load_texture: &loader,
-        convert_color: &convert,
-    };
-    // Billed as (total) minus (what the texture loads already billed): the
-    // loader closure runs *inside* this call and adds its own decode time to
-    // the same accumulator, so timing the whole thing on top of that would
-    // count every texture twice — which showed up as a "Load assets" phase
-    // reported at 178% of the parse phase that contains it.
-    let started = Instant::now();
-    let before = cell.borrow().asset_time;
-    let loaded = compile(&host, luma);
-    let nested = cell.borrow().asset_time - before;
-    // `cell` is not used past this point, which ends its borrow of `caches`.
-    caches.asset_time += started.elapsed().saturating_sub(nested);
+    let loaded = with_mtlx_host(mat_path, dir, caches, compile);
 
     match loaded {
         Ok(l) => {
@@ -1076,6 +1065,56 @@ fn compile_mtlx(
             None
         }
     }
+}
+
+/// Runs `compile` with a MaterialX host whose texture loader resolves
+/// `image` files against `dir` and whose colour conversion targets the
+/// working space, with the working space's luminance weights, billing the
+/// textures it decodes to the asset phase. What [`compile_mtlx`] compiles a
+/// material through, and [`super::mass::color_terminal`] a colour graph.
+pub(super) fn with_mtlx_host<R>(
+    mat_path: &sdf::Path,
+    dir: &std::path::Path,
+    caches: &mut ImportCaches<'_>,
+    compile: impl FnOnce(&crust_mtlx::Host<'_>, utils::Luma) -> R,
+) -> R {
+    // `RefCell` because the loader closure is called from inside the compiler
+    // while `caches` would otherwise be mutably borrowed by the outer call.
+    let (working, luma) = (caches.working, caches.luma);
+    let cell = std::cell::RefCell::new(&mut *caches);
+    let loader = |asset: &str, space: Option<&str>| -> Option<crate::TextureRef> {
+        let mut c = cell.borrow_mut();
+        load_uv_texture(
+            &dir.join(asset),
+            crate::ColorSpace::from_mtlx(space, working),
+            mat_path,
+            &mut c,
+        )
+        .map(crate::TextureRef)
+    };
+    // A literal colour with an effective `colorspace` is converted into the
+    // working space once, at compile time; one with none is already in it.
+    let convert = |space: &str, rgb: [f32; 3]| -> [f32; 3] {
+        crate::ColorSpace::from_mtlx(Some(space), working)
+            .resolved()
+            .map_or(rgb, |s| s.decode_rgb(Vec3A::from_array(rgb)).to_array())
+    };
+    let host = crust_mtlx::Host {
+        load_texture: &loader,
+        convert_color: &convert,
+    };
+    // Billed as (total) minus (what the texture loads already billed): the
+    // loader closure runs *inside* this call and adds its own decode time to
+    // the same accumulator, so timing the whole thing on top of that would
+    // count every texture twice — which showed up as a "Load assets" phase
+    // reported at 178% of the parse phase that contains it.
+    let started = Instant::now();
+    let before = cell.borrow().asset_time;
+    let out = compile(&host, luma);
+    let nested = cell.borrow().asset_time - before;
+    // `cell` is not used past this point, which ends its borrow of `caches`.
+    caches.asset_time += started.elapsed().saturating_sub(nested);
+    out
 }
 
 /// The per-face colour texture a material binds, if any.

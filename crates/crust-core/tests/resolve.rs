@@ -271,6 +271,8 @@ fn materials() -> Vec<(String, Arc<dyn Material>)> {
         ("hair.mtlx", "mtlx_hair_mix"),
         ("hair.mtlx", "mtlx_hair_clear"),
         ("hair.mtlx", "mtlx_hair_translucent_mix"),
+        ("hair.mtlx", "mtlx_hair_tilted_mix"),
+        ("hair.mtlx", "mtlx_mass_back"),
         ("materialx_thin_walled.mtlx", "mtlx_openpbr_window"),
         ("materialx_thin_walled.mtlx", "mtlx_standard_film"),
     ] {
