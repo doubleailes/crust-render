@@ -15,6 +15,15 @@ ignore = [
     # `paste` is unmaintained, not vulnerable; it is a build-time proc macro
     # reached through `exr` -> `pulp`, and nothing here can replace it.
     { id = "RUSTSEC-2024-0436", reason = "build-time proc macro via exr -> pulp; unmaintained, no known vulnerability" },
+    # `zip` 2.x reached only through `ocio`, whose every release requires
+    # `zip ^2`. All three advisories are in `ZipArchive::extract` and
+    # `ZipStreamReader::extract` (symlinks and permission bits written to
+    # disk); ocio never extracts, it reads OCIOZ entries through
+    # `ZipArchive::new` / `by_index` into memory and writes archives with
+    # `ZipWriter`. Remove when ocio moves to zip 9 (2026-10-17).
+    { id = "RUSTSEC-2026-0367", reason = "zip 2.4.2 via ocio; only ZipArchive::extract is affected and ocio never extracts" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 2.4.2 via ocio; only ZipArchive::extract is affected and ocio never extracts" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 2.4.2 via ocio; only the extract functions are affected and ocio never extracts" },
 ]
 
 [licenses]
