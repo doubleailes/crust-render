@@ -1,7 +1,7 @@
 //! `collection:lightLink` and `collection:shadowLink`: which receivers a
 //! light illuminates, and which occluders shadow it.
 //!
-//! Membership is openusd's own (`CollectionAPI::compute_membership_query`), so
+//! Membership is openusd's own (`CollectionAPI::membership_query`), so
 //! every `UsdCollectionAPI` rule — nearest opinion wins, `includeRoot`,
 //! expansion rules, nested collections with cycles broken — is the
 //! reference's. What crust adds is *when* it is asked. A light can be
@@ -82,7 +82,7 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
         return None;
     }
     let collection = CollectionAPI::from_prim_unchecked(prim.clone(), name);
-    let query = match collection.compute_membership_query() {
+    let query = match collection.membership_query() {
         Ok(q) => q,
         Err(e) => {
             warning!(
@@ -328,9 +328,7 @@ impl LightLinks {
         let mut kept: Vec<&Pending> = Vec::new();
         for p in &self.pending {
             match &p.light {
-                Some(q) if !paths.iter().any(|path| q.is_path_included(path)) => {
-                    nothing.push(p.index)
-                }
+                Some(q) if !paths.iter().any(|path| q.is_included(path)) => nothing.push(p.index),
                 _ => kept.push(p),
             }
         }
@@ -502,7 +500,7 @@ fn classify<'q>(
         .map(|path| {
             let mut key = Key(vec![0u64; words]);
             for (bit, q) in queries.iter().enumerate() {
-                if q.is_path_included(path) {
+                if q.is_included(path) {
                     key.0[bit / 64] |= 1 << (bit % 64);
                 }
             }

@@ -158,40 +158,29 @@ impl Snippet {
 /// (`apiSchemas`, `variantSetNames`): item by item, so applying one schema
 /// keeps the others the layer applies. An explicit list on either side
 /// replaces, as it does in composition.
-fn merge_list_op<T: Default + Clone + PartialEq>(
+fn merge_list_op<T: Clone + PartialEq + std::hash::Hash>(
     old: sdf::ListOp<T>,
     new: &sdf::ListOp<T>,
 ) -> sdf::ListOp<T> {
-    if new.explicit || old.explicit {
+    use sdf::ListOpType::{Added, Appended, Deleted, Ordered, Prepended};
+    if new.is_explicit() || old.is_explicit() {
         return new.clone();
     }
-    let union = |into: &mut Vec<T>, from: &[T]| {
-        for item in from {
-            if !into.contains(item) {
-                into.push(item.clone());
-            }
-        }
-    };
     let mut out = old;
     // An item the snippet adds is no longer deleted, and the reverse.
-    for item in new
-        .prepended_items
-        .iter()
-        .chain(&new.appended_items)
-        .chain(&new.added_items)
-    {
-        out.deleted_items.retain(|d| d != item);
+    let added: Vec<&T> = [Prepended, Appended, Added]
+        .into_iter()
+        .flat_map(|ty| new.items(ty))
+        .collect();
+    out.edit_items(Deleted, |held| held.retain(|d| !added.contains(&d)));
+    for ty in [Prepended, Appended, Added] {
+        out.edit_items(ty, |held| held.retain(|d| !new.deleted_items().contains(d)));
     }
-    for item in &new.deleted_items {
-        out.prepended_items.retain(|d| d != item);
-        out.appended_items.retain(|d| d != item);
-        out.added_items.retain(|d| d != item);
+    for ty in [Prepended, Appended, Added, Deleted, Ordered] {
+        for item in new.items(ty) {
+            out.push(ty, item.clone());
+        }
     }
-    union(&mut out.prepended_items, &new.prepended_items);
-    union(&mut out.appended_items, &new.appended_items);
-    union(&mut out.added_items, &new.added_items);
-    union(&mut out.deleted_items, &new.deleted_items);
-    union(&mut out.ordered_items, &new.ordered_items);
     out
 }
 
@@ -407,7 +396,7 @@ pub fn overs_tree(entries: &[(sdf::Path, String)]) -> Result<String, String> {
     let mut root = Node::default();
     for (prim, body) in entries {
         let text = prim.to_string();
-        if text.contains('{') || !prim.is_abs() || prim.is_property_path() {
+        if text.contains('{') || !prim.is_abs() || prim.is_property() {
             return Err(format!("{prim} is not a prim path on the stage"));
         }
         let mut node = &mut root;

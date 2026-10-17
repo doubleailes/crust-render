@@ -729,7 +729,7 @@ impl ValidOptions {
             Some(c) => Some(
                 sdf::path(c)
                     .ok()
-                    .filter(|p| p.is_abs() && p.is_prim_path() && !p.is_abs_root())
+                    .filter(|p| p.is_abs() && p.is_prim() && !p.is_abs_root())
                     .ok_or_else(|| crate::Error::InvalidCameraPath(c.clone()))?,
             ),
             None => None,

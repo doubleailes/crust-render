@@ -575,7 +575,7 @@ impl Open {
     /// an instance proxy, whose opinions USD reads from its prototype only.
     pub(super) fn editable_prim(&self, path: &str) -> Result<sdf::Path, String> {
         let path = sdf::Path::new(path).map_err(|e| format!("{path:?} is not a USD path: {e}"))?;
-        if path.is_property_path() {
+        if path.is_property() {
             return Err(format!(
                 "{path} is a property path; a prim path is expected"
             ));
@@ -601,7 +601,7 @@ impl Open {
         self.refresh()?;
         let attr_path =
             sdf::Path::new(path).map_err(|e| format!("{path:?} is not a USD path: {e}"))?;
-        if !attr_path.is_property_path() {
+        if !attr_path.is_property() {
             return Err(format!("{path} is not an attribute path (`/prim.name`)"));
         }
         self.editable_prim(&attr_path.prim_path().to_string())?;

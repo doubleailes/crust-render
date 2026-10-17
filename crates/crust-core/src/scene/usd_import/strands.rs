@@ -365,7 +365,7 @@ fn read(
         }
     }
     let interp = match attr
-        .get_metadata::<sdf::Value>("interpolation")
+        .metadata::<sdf::Value>("interpolation")
         .ok()
         .flatten()
         .and_then(decode_text)

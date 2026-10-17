@@ -165,7 +165,7 @@ pub(super) fn variant_sets(stage: &Stage, prim: &Prim) -> BTreeMap<String, Varia
     }
     let selections: BTreeMap<String, String> = prim
         .variant_sets()
-        .get_all_variant_selections()
+        .selections()
         .unwrap_or_default()
         .into_iter()
         .collect();
@@ -275,7 +275,7 @@ fn attribute_json(stage: &Stage, path: &sdf::Path) -> Result<Value, String> {
 /// `query`: a prim (`/a/b`) or an attribute (`/a/b.inputs:x`).
 pub fn query(stage: &Stage, path: &str) -> Result<Value, String> {
     let path = sdf::Path::new(path).map_err(|e| format!("{path:?} is not a USD path: {e}"))?;
-    if path.is_property_path() {
+    if path.is_property() {
         attribute_json(stage, &path)
     } else {
         Ok(prim_json(stage, &prim_at(stage, &path)?))

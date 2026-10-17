@@ -3,7 +3,7 @@
 
 use crate::warning;
 use glam::Mat4 as GMat4;
-use openusd::gf::Matrix4d;
+use openusd::gf::Mat4d;
 use openusd::tf::Token;
 use openusd::usd::Prim;
 use openusd_schemas::geom::{XformQuery, Xformable, XformableSchema};
@@ -15,7 +15,7 @@ use super::time::eval_time;
 /// column-vector convention, so USD's row-major layout is exactly the
 /// column-major layout of the transposed matrix — which is what we want
 /// for M * v evaluation.
-fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
+fn usd_mat_to_glam(m: Mat4d) -> GMat4 {
     GMat4::from_cols_array(&m.0.map(|v| v as f32))
 }
 
@@ -122,10 +122,10 @@ pub(super) fn compose_with_parent(prim: &Prim, parent: GMat4) -> GMat4 {
     };
     warn_unknown_ops(&xf);
     let query = XformQuery::new(&xf);
-    let composed = query.as_ref().map_err(|e| e.to_string()).and_then(|q| {
-        q.local_transformation(eval_time())
-            .map_err(|e| e.to_string())
-    });
+    let composed = query
+        .as_ref()
+        .map_err(|e| e.to_string())
+        .and_then(|q| q.local_transform(eval_time()).map_err(|e| e.to_string()));
     let local = match composed {
         Ok(m) => usd_mat_to_glam(m),
         Err(e) => {
