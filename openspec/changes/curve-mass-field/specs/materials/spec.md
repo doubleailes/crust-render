@@ -7,8 +7,9 @@
 The MaterialX nodes `crust_mass_color` (`color3`), `crust_mass_normal`
 (`vector3`, world space, unit length), `crust_mass_depth` (`float`, world
 units) and `crust_mass_density` (`float`, coverage) SHALL read the mass field
-of the geometry hit at the hit's position. On geometry without a field, or a
-field without a colour for `crust_mass_color`, each SHALL return its `default`
+of the geometry hit at the hit's position. On geometry without a field, a
+field without a colour for `crust_mass_color`, or a point where the field
+defines no normal for `crust_mass_normal`, each SHALL return its `default`
 input, with no warning.
 
 #### Scenario: A lookup off the field
