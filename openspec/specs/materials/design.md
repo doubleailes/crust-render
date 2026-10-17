@@ -908,6 +908,79 @@
     miniature, in white, and they still need probing by hand after any change
     to the tree.
 
+## The curve mass field's nodes
+
+Four lookups and one leaf, defined in the crust node library shipped with
+the reader (`crates/crust-mtlx/libraries/crust/crust_defs.mtlx`, tables in
+`crust_mtlx::mass`, kept in step by `tests/nodedefs.rs`). The field itself —
+how it is baked, grouped, placed and rebuilt — is the `curve-mass-field`
+record; this is their place among the materials.
+
+### The lookups: `crust_mass_color`, `crust_mass_normal`, `crust_mass_depth`, `crust_mass_density`
+
+Each compiles to one `Op::Mass` reading the shading context's `mass` entry
+(`ShadeCtx::mass`, a `MassCtx` the host fills), with the node's `default`
+folded in as the fallback exactly as `geompropvalue`'s is: the op returns it
+where the context has no field, no colour (`crust_mass_color`), or no normal
+(`crust_mass_normal`), and a connected `default` is reported unsupported. The
+host decides once per material which properties its program reads
+(`Program::mass_reads`, kept on `MtlxMaterial` and on the opacity's slice) and
+looks up those alone at the hit, off the curve's strand table
+(`CurveHit::mass`). The JIT hands the op to the interpreter, as it does every
+op that reads the context; `tests/jit.rs` pins all four, with and without a
+field. The lookups are impure: the optimiser keeps them.
+
+### `crust_mass_diffuse_bsdf`
+
+A Lambertian around the leaf's `normal`: `prepare_mass_diffuse` builds the
+Oren–Nayar lobe at zero roughness, which `mx::oren_nayar` evaluates to
+exactly 1, so the leaf shares the diffuse lobe's evaluation and cosine
+sampling and adds no lobe of its own. What is its own:
+
+- **Its normal is kept whichever way it faces.** `prepare` drops any other
+  leaf's normal that faces away from the hit's (`n · rec.normal ≤ 1e-3`) and
+  substitutes the hit's. On a curve that is the tube's normal, and a mass
+  normal routinely faces away from it — a strand on the far side of a clump,
+  seen through a gap — so the rule would restore exactly the discontinuity
+  the field removes. The mass leaf's frame is built from its normal
+  unfiltered; only a non-finite or zero-length one falls back to the hit's.
+  Pinned by `the_mass_leaf_keeps_an_opposed_normal`: lit from the opposed
+  normal's side the leaf responds, and an `oren_nayar_diffuse_bsdf` given the
+  same normal shades on the hit's.
+- **Its light passes out of the strand it starts in**, as a fibre's: the walk
+  sets the vertex-wide flag and the leaf's bit in `hair_leaves` for it, so
+  its continuation and shadow rays carry `ignore_curve_exits`, and a mixed
+  vertex splits its share as a fibre's. A strand whose only leaf is a mass
+  diffuse facing a light behind the strand is lit as the mass's surface
+  would be (`a_mass_lit_strand_lit_from_behind_its_own_tube`).
+- **It is a stylisation leaf.** Its normal is not the surface's, so it is
+  not reciprocal against the geometry; under a uniform white environment it
+  returns `color` exactly, for every view and every normal
+  (`the_mass_leaf_returns_its_colour_in_a_white_furnace`, and the strand
+  furnace in `tests/hair.rs`).
+- **Alternative: let `oren_nayar_diffuse_bsdf` on a curve take its normal
+  this way.** Rejected: it would change what existing documents render.
+
+### The mixed-vertex split, widened
+
+`mixes_hair` engaged only beside a transmitting leaf, on the reasoning that a
+reflecting leaf's light never enters the tube. That holds for a reflecting
+leaf on the hit's own normal, not for one with a normal of its own — a normal
+map, or the field's normal blended into an ordinary diffuse — whose
+hemisphere reaches into the tube. The walk now records whether any non-fibre
+leaf's prepared frame normal differs from the hit's (`tilted`), and the split
+engages beside a leaf that transmits *or* is tilted. The common mixes keep
+the single shadow ray: a mass leaf or a fibre beside a diffuse on the hit's
+normal is not tilted (an unconnected normal is the hit's bitwise; an authored
+normal equal to it normalises to the same bits). The same widening fixes the
+pre-existing case of `chiang_hair_bsdf` beside a normal-mapped reflecting
+leaf. Pinned by `only_a_transmitting_neighbour_mixes_a_fibre_vertex` (now a
+tilted diffuse too) and `a_tilted_reflecting_leaf_beside_a_fibre_meets_its_tube`:
+the tilted diffuse alone has a response toward a light below the tube's
+horizon, its shadow ray meets the far wall, and mixed with the fibre the
+strand shows only the fibre's share. The cost where it does not engage is
+measured in the `curve-mass-field` record.
+
 ## MaterialX volume terminals and inline networks
 
 NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no

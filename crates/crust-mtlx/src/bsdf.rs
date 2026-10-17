@@ -150,6 +150,13 @@ pub enum Bsdf {
     Translucent {
         color: Slot,
     },
+    /// `crust_mass_diffuse_bsdf`: a Lambertian around the leaf's `normal`
+    /// input — the curve mass field's normal, in the use it is built for —
+    /// kept whichever way it faces, whose light passes out of the strand it
+    /// starts in as a fibre's does (`crust_mtlx::mass`).
+    MassDiffuse {
+        color: Slot,
+    },
     /// `chiang_hair_bsdf`: a fibre, scattering over the whole sphere. Each
     /// roughness is a `vector2` of (longitudinal variance, azimuthal scale),
     /// what `chiang_hair_roughness` outputs.
@@ -181,6 +188,7 @@ impl Bsdf {
             Bsdf::Sheen { .. } => "sheen_bsdf",
             Bsdf::Subsurface { .. } => "subsurface_bsdf",
             Bsdf::Translucent { .. } => "translucent_bsdf",
+            Bsdf::MassDiffuse { .. } => "crust_mass_diffuse_bsdf",
             Bsdf::Hair { .. } => "chiang_hair_bsdf",
         }
     }
@@ -266,7 +274,7 @@ impl Bsdf {
                 f(radius);
                 f(anisotropy);
             }
-            Bsdf::Translucent { color } => f(color),
+            Bsdf::Translucent { color } | Bsdf::MassDiffuse { color } => f(color),
             Bsdf::Hair {
                 tint_r,
                 tint_tt,
@@ -809,7 +817,7 @@ fn bsdf_tree(
 /// Builds a leaf, or `None` for a BSDF node there is no leaf for (reported)
 /// or one that can never contribute (a literal `weight = 0`).
 fn leaf(c: &mut Compiler<'_>, node: &Node) -> Option<Leaf> {
-    const KNOWN: [&str; 10] = [
+    const KNOWN: [&str; 11] = [
         "oren_nayar_diffuse_bsdf",
         "diffuse_bsdf",
         "burley_diffuse_bsdf",
@@ -820,6 +828,7 @@ fn leaf(c: &mut Compiler<'_>, node: &Node) -> Option<Leaf> {
         "subsurface_bsdf",
         "translucent_bsdf",
         "chiang_hair_bsdf",
+        "crust_mass_diffuse_bsdf",
     ];
     if !KNOWN.contains(&node.category.as_str()) {
         c.unsupported.insert(node.category.clone());
@@ -914,6 +923,13 @@ fn leaf(c: &mut Compiler<'_>, node: &Node) -> Option<Leaf> {
                 absorption: input("absorption_coefficient"),
             }
         }
+        "crust_mass_diffuse_bsdf" => Bsdf::MassDiffuse {
+            color: c.input_or(
+                node,
+                "color",
+                crate::hair::default_of(crate::mass::CRUST_MASS_DIFFUSE_BSDF, "color"),
+            ),
+        },
         _ => Bsdf::Translucent {
             color: c.input_or(node, "color", Val::ONE),
         },
@@ -1322,6 +1338,7 @@ mod tests {
                 position: Vec3A::ZERO,
                 uv_width: 0.0,
                 curve: None,
+                mass: None,
             },
             &mut slots,
         );
@@ -1563,6 +1580,7 @@ mod tests {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            mass: None,
         }
     }
 

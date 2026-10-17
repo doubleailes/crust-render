@@ -85,6 +85,11 @@ fn radiance_by(
 /// One horizontal strand at the origin, bound to `material`, with a small
 /// light straight behind it as the camera sees it, and nothing else.
 fn backlit_strand(name: &str, material: &str) -> Scene {
+    lit_strand(name, material, "(0, 0, -3)")
+}
+
+/// [`backlit_strand`] with the light at `light`.
+fn lit_strand(name: &str, material: &str, light: &str) -> Scene {
     load(
         name,
         &[material],
@@ -102,7 +107,7 @@ fn backlit_strand(name: &str, material: &str) -> Scene {
     {{
         float inputs:intensity = 50
         float inputs:radius = 0.2
-        double3 xformOp:translate = (0, 0, -3)
+        double3 xformOp:translate = {light}
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }}"#
         ),
@@ -241,10 +246,20 @@ fn every_hair_fixture_is_bounded_in_a_white_furnace() {
             "mtlx_hair_melanin",
             "mtlx_hair_mix",
             "mtlx_hair_translucent_mix",
+            "mtlx_hair_tilted_mix",
         ] {
             let mean = strand_furnace(fixture(name).material, h);
             assert!(
                 mean.max_element() <= 1.02 && mean.min_element() > 0.0,
+                "{name} at h {h}: {mean}"
+            );
+        }
+        // A white mass leaf returns `color` — all of it — whichever way its
+        // normal faces, its light passing out of the strand as a fibre's.
+        for name in ["mtlx_mass_back", "mtlx_mass_front"] {
+            let mean = strand_furnace(fixture(name).material, h);
+            assert!(
+                (mean - Vec3A::ONE).abs().max_element() < 0.03,
                 "{name} at h {h}: {mean}"
             );
         }
@@ -313,4 +328,72 @@ fn only_the_fibres_light_passes_out_of_a_mixed_strand() {
         (half - full * 0.5).abs().max_element() < 0.04,
         "BSDF sampling: mixed {half:?} vs clear fibre {full:?}"
     );
+}
+
+/// A reflecting leaf about a normal of its own, tilted into the tube,
+/// beside a fibre: the same rule as the translucent's. The light is below
+/// the tube's horizon but within the tilted diffuse's hemisphere, so the
+/// diffuse has light to send into the tube — alone, its shadow ray meets the
+/// far wall and it stays dark; mixed with the fibre it must stay so, the
+/// mix showing only the fibre's share, rather than its light passing out of
+/// the strand with the fibre's.
+#[test]
+fn a_tilted_reflecting_leaf_beside_a_fibre_meets_its_tube() {
+    let ray = Ray::new(Vec3A::new(0.0, 0.0, 5.0), -Vec3A::Z);
+    // 60° above the strand's far side: below the tube's horizon at the hit,
+    // 30° inside the tilted diffuse's hemisphere.
+    let light = "(0, 2.6, -1.5)";
+    let mut hair = lit_strand("tilted_hair_ref", "mtlx_hair_clear", light);
+    let mut alone = lit_strand("tilted_alone", "mtlx_tilted_alone", light);
+    let mut mixed = lit_strand("tilted_hair", "mtlx_hair_tilted_mix", light);
+    // The diffuse has a response toward the light: what would show were its
+    // light to pass out of the strand.
+    let hit = alone.world.intersect(&ray, 1e-4, 1e4).expect("the strand");
+    let toward = (Vec3A::new(0.0, 2.6, -1.5) - hit.rec.p).normalize();
+    assert!(
+        hit.rec.normal.dot(toward) < 0.0,
+        "the light is below the tube's horizon"
+    );
+    let (f, _) = hit
+        .mat
+        .eval(&ray, &hit.rec, toward)
+        .expect("a diffuse evaluates");
+    assert!(
+        f.max_element() > 0.1,
+        "the tilted diffuse faces the light: {f:?}"
+    );
+    for (strategy, n) in [
+        (SamplingStrategy::LightOnly, 4096),
+        (SamplingStrategy::BsdfOnly, 16384),
+    ] {
+        let fibre = radiance_by(&mut hair, &ray, 1, n, strategy);
+        let dark = radiance_by(&mut alone, &ray, 1, n, strategy);
+        let mix = radiance_by(&mut mixed, &ray, 1, n, strategy);
+        assert!(dark.max_element() < 1e-6, "{strategy:?}: alone {dark:?}");
+        assert!(
+            (mix - fibre * 0.5).abs().max_element() < 2e-3 + 0.05 * fibre.max_element(),
+            "{strategy:?}: mixed {mix:?} vs the fibre's half of {fibre:?}"
+        );
+    }
+}
+
+/// A strand whose only leaf is a mass diffuse facing away from the camera,
+/// toward the light behind the strand: lit as the mass's surface would be,
+/// not shadowed by its own tube — under light sampling and BSDF sampling
+/// alike. The same leaf facing the camera has the light below its horizon.
+#[test]
+fn a_mass_lit_strand_lit_from_behind_its_own_tube() {
+    let ray = Ray::new(Vec3A::new(0.0, 0.0, 5.0), -Vec3A::Z);
+    let mut back = backlit_strand("mass_back", "mtlx_mass_back");
+    let mut front = backlit_strand("mass_front", "mtlx_mass_front");
+    for strategy in [
+        SamplingStrategy::LightOnly,
+        SamplingStrategy::BsdfOnly,
+        SamplingStrategy::PowerMis,
+    ] {
+        let lit = radiance_by(&mut back, &ray, 1, 1024, strategy);
+        let dark = radiance_by(&mut front, &ray, 1, 1024, strategy);
+        assert!(lit.min_element() > 0.05, "{strategy:?}: mass {lit:?}");
+        assert!(dark.max_element() < 1e-6, "{strategy:?}: front {dark:?}");
+    }
 }

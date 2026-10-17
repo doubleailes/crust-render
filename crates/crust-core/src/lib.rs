@@ -38,6 +38,7 @@ mod light;
 pub mod live;
 pub mod lpe;
 mod lux;
+pub mod mass;
 mod material;
 mod medium;
 pub mod names;
@@ -117,6 +118,7 @@ pub use lux::{
     IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_in, blackbody_rgb,
     distant_illuminance, distant_size_factor,
 };
+pub use mass::{MassColor, MassField, MassLookup, MassPiece, MassSettings, MassSource};
 pub use material::*;
 pub use medium::Medium;
 pub use pdf::{InvPdfArea, PdfSolidAngle};

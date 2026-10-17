@@ -46,6 +46,7 @@
 mod bsdf;
 mod eval;
 mod hair;
+mod mass;
 mod parse;
 mod surface;
 mod texture;
@@ -65,6 +66,12 @@ pub use eval::{
 pub use hair::{
     CHIANG_HAIR_ABSORPTION_FROM_COLOR, CHIANG_HAIR_BSDF, CHIANG_HAIR_ROUGHNESS,
     DEON_HAIR_ABSORPTION_FROM_MELANIN,
+};
+/// The curve mass field's nodes (`crust_mass_*`): their nodedef tables, the
+/// library document they ship in, and what a host fills per hit for them.
+pub use mass::{
+    CRUST_LIBRARY, CRUST_LIBRARY_PATH, CRUST_MASS_COLOR, CRUST_MASS_DENSITY, CRUST_MASS_DEPTH,
+    CRUST_MASS_DIFFUSE_BSDF, CRUST_MASS_NORMAL, MassCtx, MassProp, MassReads,
 };
 pub use parse::{Doc, Input, MtlxError, Node, Source};
 pub use surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};

@@ -44,6 +44,7 @@ fn tree(doc: &str, root: &str) -> (Closures, Vec<Val>) {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            mass: None,
         },
         &mut slots,
     );
@@ -1081,6 +1082,138 @@ fn only_a_transmitting_neighbour_mixes_a_fibre_vertex() {
     assert!(with(r#"<translucent_bsdf name="n" type="BSDF" />"#));
     assert!(!with(r#"<dielectric_bsdf name="n" type="BSDF" />"#));
     assert!(!with(r#"<oren_nayar_diffuse_bsdf name="n" type="BSDF" />"#));
+    // A reflecting leaf about a normal of its own reaches into the tube,
+    // so it mixes; one whose normal is the hit's does not.
+    assert!(with(
+        r#"<oren_nayar_diffuse_bsdf name="n" type="BSDF">
+             <input name="normal" type="vector3" value="0.3, 0, 0.954" />
+           </oren_nayar_diffuse_bsdf>"#
+    ));
+    assert!(!with(
+        r#"<oren_nayar_diffuse_bsdf name="n" type="BSDF">
+             <input name="normal" type="vector3" value="0, 0, 1" />
+           </oren_nayar_diffuse_bsdf>"#
+    ));
+    // Nor does a mass leaf beside a fibre: both pass, neither meets a wall.
+    assert!(!with(
+        r#"<crust_mass_diffuse_bsdf name="n" type="BSDF">
+             <input name="normal" type="vector3" value="0.3, 0, -0.954" />
+           </crust_mass_diffuse_bsdf>"#
+    ));
+}
+
+/// The mass diffuse leaf, for a normal: the hit's, a tilted one, an opposed
+/// one, or none.
+fn mass_leaf(normal: &str) -> String {
+    doc(&format!(
+        r#"<crust_mass_diffuse_bsdf name="x" type="BSDF">
+             <input name="color" type="color3" value="0.8, 0.5, 0.2" />
+             {normal}
+           </crust_mass_diffuse_bsdf>"#
+    ))
+}
+
+fn normal_input(xyz: &str) -> String {
+    format!(r#"<input name="normal" type="vector3" value="{xyz}" />"#)
+}
+
+/// Under a uniform white environment the leaf returns `color` exactly,
+/// whichever way its normal faces: its hemisphere is its own.
+#[test]
+fn the_mass_leaf_returns_its_colour_in_a_white_furnace() {
+    let color = Vec3A::new(0.8, 0.5, 0.2);
+    for normal in ["", &normal_input("0.6, 0, 0.8"), &normal_input("0, 0, -1")] {
+        let c = resolved(&mass_leaf(normal), "x", 0.4, true);
+        assert_eq!(c.leaves().len(), 1);
+        assert_eq!(c.leaves()[0].category, "crust_mass_diffuse_bsdf");
+        for theta in [0.1, 0.6, 1.2] {
+            let a = albedo(&c, theta, true, 2048);
+            assert!(
+                (a - color).abs().max_element() < 1e-3,
+                "normal {normal:?} at {theta}: {a}"
+            );
+        }
+    }
+}
+
+/// The leaf is cosine-sampled about its own normal, with the pdf its
+/// evaluation reports: the share of samples within a cone of the normal
+/// is the cosine distribution's, and each sample's value and pdf are
+/// eval's.
+#[test]
+fn the_mass_leaf_samples_with_the_density_it_reports() {
+    let n = Vec3A::new(0.6, 0.0, 0.8);
+    let c = resolved(&mass_leaf(&normal_input("0.6, 0, 0.8")), "x", 0.4, true);
+    let (r, rec) = (arriving(0.4), hit(true));
+    let mut s = S(0);
+    let (mut total, mut within) = (0usize, 0usize);
+    for _ in 0..4096 {
+        let Some(x) = c.scatter(&r, &rec, s.next()) else {
+            continue;
+        };
+        let wi = x.ray.direction().normalize();
+        let cos = wi.dot(n);
+        assert!(cos > 0.0, "a sample in the leaf's own hemisphere: {wi}");
+        total += 1;
+        if cos > 0.5 {
+            within += 1;
+        }
+        let (v, p) = c.eval(&r, &rec, wi).expect("evaluable");
+        assert!(
+            (v - x.value).abs().max_element() < 1e-4,
+            "{v} vs {}",
+            x.value
+        );
+        assert!((p - x.pdf).abs() < 1e-4 * (1.0 + p), "{p} vs {}", x.pdf);
+        assert!(
+            (p - cos * FRAC_1_PI).abs() < 1e-4,
+            "cosine density: {p} for cos {cos}"
+        );
+        // Its light passes out of the strand, as a fibre's.
+        assert!(x.ray.rt().ignore_curve_exits);
+    }
+    assert_eq!(total, 4096);
+    // P(cos θ > ½) = 1 − ¼ under the cosine distribution.
+    let share = within as f32 / total as f32;
+    assert!((share - 0.75).abs() < 0.02, "{share}");
+    assert!(c.passes_out_of_curves() && !c.mixes_hair());
+    assert_eq!(c.hair_leaves(), 0b1);
+}
+
+/// An opposed normal is kept on the mass leaf, where every other leaf would
+/// take the hit's: lit from that normal's side, the leaf responds, and
+/// differs from the same leaf on the hit's normal. A zero normal falls
+/// back to the hit's.
+#[test]
+fn the_mass_leaf_keeps_an_opposed_normal() {
+    let opposed = resolved(&mass_leaf(&normal_input("0, 0, -1")), "x", 0.4, true);
+    let own = resolved(&mass_leaf(""), "x", 0.4, true);
+    let zero = resolved(&mass_leaf(&normal_input("0, 0, 0")), "x", 0.4, true);
+    assert_eq!(opposed.leaves()[0].frame.n, -Vec3A::Z);
+    assert_eq!(own.leaves()[0].frame.n, Vec3A::Z);
+    assert_eq!(zero.leaves()[0].frame.n, Vec3A::Z);
+    let (r, rec) = (arriving(0.4), hit(true));
+    let below = Vec3A::new(0.2, 0.1, -0.9).normalize();
+    let above = Vec3A::new(0.2, 0.1, 0.9).normalize();
+    let value =
+        |c: &ResolvedClosure, wi: Vec3A| c.eval(&r, &rec, wi).map_or(Vec3A::ZERO, |(v, _)| v);
+    assert!(
+        value(&opposed, below).max_element() > 0.1,
+        "lit from its normal's side"
+    );
+    assert_eq!(value(&opposed, above), Vec3A::ZERO);
+    assert!(value(&own, above).max_element() > 0.1);
+    assert_eq!(value(&own, below), Vec3A::ZERO);
+    // Every other leaf ignores an opposed normal.
+    let diffuse = resolved(
+        &doc(r#"<oren_nayar_diffuse_bsdf name="x" type="BSDF">
+                  <input name="normal" type="vector3" value="0, 0, -1" />
+                </oren_nayar_diffuse_bsdf>"#),
+        "x",
+        0.4,
+        true,
+    );
+    assert_eq!(diffuse.leaves()[0].frame.n, Vec3A::Z);
 }
 
 /// Thin-walled sheets as MaterialX authors them: `open_pbr_surface` and

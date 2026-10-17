@@ -6,6 +6,7 @@
 
 use crate::error::Structural;
 use crate::hittable::{FaceHit, HitPart, HitRecord};
+use crate::mass::{MassField, MassLookup};
 use crate::material::Material;
 use crate::ray::Ray;
 use crate::strands::{CurveHit, StrandTable};
@@ -551,6 +552,10 @@ struct SideTables {
     /// into its slot must then agree on is also what the import decoded for
     /// it ([`Signature`]).
     curves: bool,
+    /// On curves, the mass colour graph of the material the import read
+    /// (its fingerprint): a field was baked with it, so a material swapped
+    /// in must carry the same graph ([`World::check_materials`]).
+    mass_color: Option<u64>,
     /// None of `map`, `uv` and `strands` is set: a hit is only its surface.
     /// One flag for the three, kept by their setters, so the overwhelming
     /// majority of hits ([`World::intersect`]) test one byte, not three
@@ -583,6 +588,7 @@ impl Default for SideTables {
             uv: None,
             strands: None,
             curves: false,
+            mass_color: None,
             plain: true,
             swapped: false,
             vertices: VertexSource::Unresolved,
@@ -624,6 +630,27 @@ pub struct WorldBuilder {
     /// answer for it: an id inside a range gets no record, whichever
     /// geometry it belongs to.
     forwarded: Vec<(u32, u32)>,
+    /// Geometries that read a mass field once it is baked: `(geom_id, the
+    /// field's index, how it is placed, the prim)` — see
+    /// [`WorldBuilder::expect_mass`].
+    pending_mass: Vec<(u32, usize, MassPlacement, String)>,
+    /// The baked fields, for the stats ([`World::mass_fields`]).
+    mass_fields: Vec<Arc<MassField>>,
+}
+
+/// How a geometry that bakes a mass field is placed, which decides whether
+/// it can read the field ([`WorldBuilder::expect_mass`]).
+#[derive(Clone, Debug)]
+pub enum MassPlacement {
+    /// A top-level geometry: the field is in world space.
+    World,
+    /// A direct, static, unlabelled instance: the field is in the
+    /// prototype's space, read through this placement when it is a rotation
+    /// and uniform scale ([`MassLookup::placed`]).
+    Instance(Affine3A),
+    /// A placement the hit cannot name (through an instancer's group, by a
+    /// `PointInstancer`): the lookups return their defaults, with the reason.
+    Unplaceable(&'static str),
 }
 
 impl WorldBuilder {
@@ -811,6 +838,69 @@ impl WorldBuilder {
         self.faces[id as usize].curves = true;
     }
 
+    /// Records the mass colour graph (its fingerprint) of the material a
+    /// curves geometry was imported with — what a material swapped into the
+    /// slot must carry too, the field having been baked with it.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_mass_color(&mut self, id: u32, fingerprint: Option<u64>) {
+        self.faces[id as usize].mass_color = fingerprint;
+    }
+
+    /// Says that the geometry at `id`, the prim `prim`'s curves, reads the
+    /// mass field `field` of the ones [`WorldBuilder::attach_mass_fields`]
+    /// will be handed, through `placement`.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn expect_mass(&mut self, id: u32, field: usize, placement: MassPlacement, prim: String) {
+        assert!(
+            (id as usize) < self.faces.len(),
+            "geometry {id} was never attached"
+        );
+        self.pending_mass.push((id, field, placement, prim));
+    }
+
+    /// Gives every geometry that expects a field ([`WorldBuilder::expect_mass`])
+    /// its lookup, on its strand table — a placement reading a prototype's
+    /// field through its own transform gets its own copy of the table — and
+    /// raises one `mass.unplaceable` per prim placed where the field cannot
+    /// be read. A geometry without a table (its material reads no lookup)
+    /// is left as it is: the field is baked and reported either way.
+    pub fn attach_mass_fields(&mut self, fields: &[Arc<MassField>]) {
+        let mut unplaceable: Vec<String> = Vec::new();
+        for (id, field, placement, prim) in std::mem::take(&mut self.pending_mass) {
+            let Some(field) = fields.get(field) else {
+                continue;
+            };
+            let (lookup, why) = match placement {
+                MassPlacement::World => (Some(MassLookup::world(Arc::clone(field))), ""),
+                MassPlacement::Instance(l2w) => match MassLookup::placed(Arc::clone(field), l2w) {
+                    Some(l) => (Some(l), ""),
+                    None => (None, "instanced with a non-uniform scale"),
+                },
+                MassPlacement::Unplaceable(why) => (None, why),
+            };
+            let Some(lookup) = lookup else {
+                if !unplaceable.contains(&prim) {
+                    warning!(
+                        MassUnplaceable,
+                        at = &prim,
+                        "{prim}: its mass field cannot be read where it is {why} — the \
+                         crust_mass_* lookups return their defaults there",
+                    );
+                    unplaceable.push(prim);
+                }
+                continue;
+            };
+            if let Some(table) = &mut self.faces[id as usize].strands {
+                Arc::make_mut(table).set_mass(Some(lookup));
+            }
+        }
+        self.mass_fields = fields.to_vec();
+    }
+
     /// Records the uniform scale of this geometry's placement, which converts
     /// a world-space texture footprint into the local frame both side tables'
     /// densities are expressed in.
@@ -931,6 +1021,7 @@ impl WorldBuilder {
                 Vec::new()
             },
             motion: self.motion,
+            mass_fields: self.mass_fields,
         }
     }
 
@@ -1009,9 +1100,21 @@ pub struct World {
     /// The moving geometries' translations, sorted by `geom_id`; empty for a
     /// static scene (see [`World::motion`]).
     motion: Vec<(u32, Vec3A)>,
+    /// The curve mass fields baked for the scene ([`crate::mass`]), in the
+    /// order the import grouped them.
+    mass_fields: Vec<Arc<MassField>>,
 }
 
 impl World {
+    /// The curve mass fields the import baked, for the stats and the tests.
+    pub fn mass_fields(&self) -> &[Arc<MassField>] {
+        &self.mass_fields
+    }
+
+    /// The mass field the geometry at `geom_id` reads, when it reads one.
+    pub fn mass_lookup(&self, geom_id: u32) -> Option<&MassLookup> {
+        self.faces.get(geom_id as usize)?.strands.as_deref()?.mass()
+    }
     /// The world-space translation the geometry at `geom_id` moves through
     /// over the shutter — the `crust:motion:translate` the kernel blurs it
     /// by — or zero when it does not move, or moves in a way the record
@@ -1395,6 +1498,30 @@ impl World {
         Ok(())
     }
 
+    /// Refuses a material swap whose mass colour graph is not the one the
+    /// slot's curves were baked with: the field holds that graph's colour,
+    /// so another graph needs the field baked again, by a re-import. Each
+    /// entry is the slots a rebuilt material goes into and the fingerprint
+    /// of its graph ([`crate::MassColor::fingerprint`]), `None` for none.
+    /// Mesh slots are not checked: no field was baked from them.
+    pub fn check_mass_colors(&self, swaps: &[(&[u32], Option<u64>)]) -> Result<(), Structural> {
+        for (slots, fingerprint) in swaps {
+            for &slot in *slots {
+                let Some(tables) = self.faces.get(slot as usize) else {
+                    return Err(Structural(format!("the world has no slot {slot}")));
+                };
+                if tables.curves && tables.mass_color != *fingerprint {
+                    return Err(Structural(format!(
+                        "the material in slot {slot} would change the mass colour graph its \
+                         curves were baked with ({:?} to {:?})",
+                        tables.mass_color, fingerprint
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Swaps each of `swaps`' materials into its slots, after
     /// [`World::check_materials`] passed: the kernel scene, the side tables and
     /// every flag stay as committed, which the check is what makes right.
@@ -1424,17 +1551,18 @@ pub(crate) struct Signature {
     uv: bool,
     uv_primvar: Option<String>,
     face_texture: Option<usize>,
-    /// On a curves slot: the chart, the strand and the primvars by name its
-    /// strand table was decoded for. `None` elsewhere, so a mesh material's
-    /// edit is never refused over what only a curve would read.
-    curve: Option<(bool, bool, Vec<String>)>,
+    /// On a curves slot: the chart, the strand, the primvars by name and
+    /// whether the mass field is read — what its strand table was decoded
+    /// for. `None` elsewhere, so a mesh material's edit is never refused
+    /// over what only a curve would read.
+    curve: Option<(bool, bool, Vec<String>, bool)>,
 }
 
 impl Signature {
     pub(crate) fn of(m: &dyn Material, curves: bool) -> Signature {
         let curve = curves.then(|| {
             let n = m.curve_needs();
-            (n.chart, n.strand, n.primvars.to_vec())
+            (n.chart, n.strand, n.primvars.to_vec(), n.mass)
         });
         Signature {
             curve,

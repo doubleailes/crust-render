@@ -11,7 +11,10 @@
 //! ([`crate::Material::curve_needs`]) — the chart only where the prim authors
 //! one — so a groom shaded by a material that reads none of them pays nothing.
 
-use crust_mtlx::Val;
+use crust_mtlx::{MassCtx, MassReads, Val};
+use glam::Vec3A;
+
+use crate::mass::MassLookup;
 
 /// One kernel primitive of a curves prim: the curve it belongs to, and the
 /// interval of that curve's parameter it covers, normalised so the curve's
@@ -130,6 +133,12 @@ pub struct StrandTable {
     /// ([`crust_mtlx::Program::primvars`]); `None` where the prim authors no
     /// readable primvar of that name.
     primvars: Vec<Option<StrandValues>>,
+    /// The curve mass field the geometry reads, through its placement, when
+    /// the prim bakes one and the material reads it ([`crate::mass`]). On
+    /// the table rather than the hit record, which stays its 96 bytes: a
+    /// placement that reads a prototype's field through its own transform
+    /// gets its own table ([`crate::WorldBuilder::attach_mass_fields`]).
+    mass: Option<MassLookup>,
 }
 
 /// The seed `curve:random` hashes under, so its values are not those of any
@@ -145,7 +154,18 @@ impl StrandTable {
             seed: [h as i32, (h >> 32) as i32],
             chart: None,
             primvars: Vec::new(),
+            mass: None,
         }
+    }
+
+    /// Gives the table a mass field to read, or takes it away with `None`.
+    pub fn set_mass(&mut self, mass: Option<MassLookup>) {
+        self.mass = mass;
+    }
+
+    /// The mass field the table reads, when it has one.
+    pub fn mass(&self) -> Option<&MassLookup> {
+        self.mass.as_ref()
     }
 
     pub fn with_chart(mut self, chart: Option<StrandValues>) -> StrandTable {
@@ -287,6 +307,13 @@ impl<'w> CurveHit<'w> {
     /// Whether the table carries any primvar values at all.
     pub fn has_primvars(&self) -> bool {
         !self.table.primvars.is_empty()
+    }
+
+    /// The mass field at the world-space point `p` (the hit's position),
+    /// for the properties `reads` names; `None` when the geometry reads no
+    /// field, where every `crust_mass_*` lookup gives its default.
+    pub fn mass(&self, p: Vec3A, reads: MassReads) -> Option<MassCtx> {
+        self.table.mass.as_ref().map(|m| m.read(p, reads))
     }
 }
 

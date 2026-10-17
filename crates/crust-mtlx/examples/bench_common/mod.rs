@@ -36,6 +36,7 @@ pub fn points() -> Vec<ShadeCtx<'static>> {
                 position: Vec3A::new(t, 1.0 - t, t * t),
                 uv_width: t * 0.01,
                 curve: None,
+                mass: None,
             }
         })
         .collect()

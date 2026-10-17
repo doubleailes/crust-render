@@ -152,6 +152,23 @@ pub struct SceneCounters {
     /// `kernel_memory`, and zero unless a curve's material reads a curve
     /// property, primvar or chart.
     pub strand_tables_bytes: usize,
+    /// The curve mass fields baked ([`crate::mass`]): none for a scene
+    /// without an opted-in groom.
+    pub mass_fields: MassCounters,
+}
+
+/// What the curve mass fields cost: how many, their bricks and bytes, and
+/// the time the parallel bake took.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct MassCounters {
+    pub fields: usize,
+    /// Bricks of 8³ voxels held, over every field.
+    pub bricks: usize,
+    /// Bytes held by the fields, host-side (not in `kernel_memory`).
+    pub bytes: usize,
+    /// The bake's wall-clock time, every field in parallel.
+    #[serde(rename = "time_s", serialize_with = "seconds")]
+    pub time: Duration,
 }
 
 /// Work the integrator did, in rays and path vertices.
@@ -1305,6 +1322,19 @@ impl RenderStats {
                 human_bytes(s.strand_tables_bytes as u64)
             )?;
         }
+        let m = &s.mass_fields;
+        if m.fields > 0 {
+            writeln!(
+                f,
+                "  {:<28} {} field{}, {} bricks, {}, baked in {:.2?}",
+                "curve mass fields",
+                m.fields,
+                if m.fields == 1 { "" } else { "s" },
+                thousands(m.bricks),
+                human_bytes(m.bytes as u64),
+                m.time
+            )?;
+        }
         if let Some(peak) = self.peak_memory_bytes {
             writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
         }
@@ -2396,6 +2426,11 @@ mod tests {
             "scene.kernel_memory.vertex_normals_bytes",
             "scene.kernel_memory.vertices_bytes",
             "scene.lights",
+            "scene.mass_fields",
+            "scene.mass_fields.bricks",
+            "scene.mass_fields.bytes",
+            "scene.mass_fields.fields",
+            "scene.mass_fields.time_s",
             "scene.strand_tables_bytes",
             "scene.top_level",
             "scene.top_level.cubic_curve_spans",

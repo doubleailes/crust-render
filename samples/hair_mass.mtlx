@@ -1,0 +1,139 @@
+<?xml version="1.0"?>
+<!--
+  Hair shaded through its curve mass field (see hair_mass.usda, and
+  site/content/docs/usd/mass-fields.md).
+
+  mass_hair — the stylised look. Its diffuse is a `crust_mass_diffuse_bsdf`
+  whose colour and normal come from the field the groom bakes:
+
+    1. a per-strand colour: a warm brown ramped to a lighter tip by
+       `curve:v`, with a small hue shift per strand from `curve:random` — what
+       the strands read without a field;
+    2. `crust_mass_color`, the field's colour (the root-to-tip ramp the USD
+       material authors as its `outputs:crust:mass:color` terminal), blended
+       over the per-strand colour by `fade`;
+    3. `crust_mass_normal`, blended over the tube's normal (the `normal` node)
+       by the same `fade`, as the diffuse's normal;
+    4. `fade` is `crust_mass_density` through a `smoothstep`: inside the mass
+       the strands take the field's colour and normal, and the flyaways, where
+       the coverage thins out, keep their own — a flyaway far from the mass
+       would otherwise read a distant surface's normal.
+
+  A `chiang_hair_bsdf` mixed on top keeps the specular the strand's own.
+  Every node is a standard MaterialX one or one of the crust library's
+  (crates/crust-mtlx/libraries/crust/crust_defs.mtlx): the engine exposes the
+  field, and the look is this graph's.
+
+  strand_hair — the same look shaded per strand: the diffuse on the tube's
+  normal with the per-strand colour alone, the before picture.
+-->
+<materialx version="1.39">
+
+  <!-- 1. The per-strand colour. -->
+  <geompropvalue name="along" type="float">
+    <input name="geomprop" type="string" value="curve:v" />
+  </geompropvalue>
+  <geompropvalue name="strand_random" type="float">
+    <input name="geomprop" type="string" value="curve:random" />
+  </geompropvalue>
+  <mix name="strand_ramp" type="color3">
+    <input name="bg" type="color3" value="0.2, 0.09, 0.035" />
+    <input name="fg" type="color3" value="0.55, 0.3, 0.12" />
+    <input name="mix" type="float" nodename="along" />
+  </mix>
+  <remap name="hue_shift" type="float">
+    <input name="in" type="float" nodename="strand_random" />
+    <input name="outlow" type="float" value="-0.03" />
+    <input name="outhigh" type="float" value="0.03" />
+  </remap>
+  <combine3 name="hsv_delta" type="color3">
+    <input name="in1" type="float" nodename="hue_shift" />
+  </combine3>
+  <rgbtohsv name="strand_hsv" type="color3">
+    <input name="in" type="color3" nodename="strand_ramp" />
+  </rgbtohsv>
+  <add name="shifted_hsv" type="color3">
+    <input name="in1" type="color3" nodename="strand_hsv" />
+    <input name="in2" type="color3" nodename="hsv_delta" />
+  </add>
+  <hsvtorgb name="strand_color" type="color3">
+    <input name="in" type="color3" nodename="shifted_hsv" />
+  </hsvtorgb>
+
+  <!-- 4. How much of the mass a strand takes: none where the coverage is
+       below a tenth of a strand's, all of it above four tenths. -->
+  <crust_mass_density name="mass_density" type="float" />
+  <smoothstep name="fade" type="float">
+    <input name="in" type="float" nodename="mass_density" />
+    <input name="low" type="float" value="0.1" />
+    <input name="high" type="float" value="0.4" />
+  </smoothstep>
+
+  <!-- 2. The mass colour over the per-strand colour. -->
+  <crust_mass_color name="mass_color" type="color3">
+    <input name="default" type="color3" value="0.2, 0.09, 0.035" />
+  </crust_mass_color>
+  <mix name="diffuse_color" type="color3">
+    <input name="bg" type="color3" nodename="strand_color" />
+    <input name="fg" type="color3" nodename="mass_color" />
+    <input name="mix" type="float" nodename="fade" />
+  </mix>
+
+  <!-- 3. The mass normal over the tube's. -->
+  <normal name="tube_normal" type="vector3" />
+  <crust_mass_normal name="mass_normal" type="vector3">
+    <input name="default" type="vector3" value="0, 1, 0" />
+  </crust_mass_normal>
+  <mix name="diffuse_normal" type="vector3">
+    <input name="bg" type="vector3" nodename="tube_normal" />
+    <input name="fg" type="vector3" nodename="mass_normal" />
+    <input name="mix" type="float" nodename="fade" />
+  </mix>
+
+  <!-- The leaves: the mass diffuse, and a fibre for the specular. -->
+  <crust_mass_diffuse_bsdf name="mass_diffuse" type="BSDF">
+    <input name="color" type="color3" nodename="diffuse_color" />
+    <input name="normal" type="vector3" nodename="diffuse_normal" />
+  </crust_mass_diffuse_bsdf>
+  <chiang_hair_roughness name="rough" type="multioutput">
+    <input name="longitudinal" type="float" value="0.25" />
+    <input name="azimuthal" type="float" value="0.4" />
+  </chiang_hair_roughness>
+  <chiang_hair_bsdf name="specular" type="BSDF">
+    <input name="tint_R" type="color3" value="0.35, 0.35, 0.35" />
+    <input name="tint_TT" type="color3" value="0.2, 0.2, 0.2" />
+    <input name="tint_TRT" type="color3" value="0.3, 0.2, 0.1" />
+    <input name="roughness_R" type="vector2" nodename="rough" output="roughness_R" />
+    <input name="roughness_TT" type="vector2" nodename="rough" output="roughness_TT" />
+    <input name="roughness_TRT" type="vector2" nodename="rough" output="roughness_TRT" />
+    <input name="absorption_coefficient" type="vector3" value="0.4, 0.8, 1.6" />
+  </chiang_hair_bsdf>
+  <mix name="mass_bsdf" type="BSDF">
+    <input name="fg" type="BSDF" nodename="specular" />
+    <input name="bg" type="BSDF" nodename="mass_diffuse" />
+    <input name="mix" type="float" value="0.3" />
+  </mix>
+  <surface name="mass_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="mass_bsdf" />
+  </surface>
+  <surfacematerial name="mass_hair" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="mass_surface" />
+  </surfacematerial>
+
+  <!-- The same look per strand. -->
+  <oren_nayar_diffuse_bsdf name="strand_diffuse" type="BSDF">
+    <input name="color" type="color3" nodename="strand_color" />
+  </oren_nayar_diffuse_bsdf>
+  <mix name="strand_bsdf" type="BSDF">
+    <input name="fg" type="BSDF" nodename="specular" />
+    <input name="bg" type="BSDF" nodename="strand_diffuse" />
+    <input name="mix" type="float" value="0.3" />
+  </mix>
+  <surface name="strand_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="strand_bsdf" />
+  </surface>
+  <surfacematerial name="strand_hair" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="strand_surface" />
+  </surfacematerial>
+
+</materialx>

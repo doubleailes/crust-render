@@ -26,6 +26,19 @@
                           translucent: a fibre beside a transmitting leaf,
                           whose light must not pass out of the strand as the
                           fibre's does.
+    mtlx_hair_tilted_mix
+                        — the clear fibre mixed half and half with a white
+                          diffuse about a normal of its own, tilted 64° from
+                          the tube's: a reflecting leaf whose hemisphere
+                          reaches into the tube, so its light must meet the
+                          far wall as the translucent's does.
+    mtlx_tilted_alone   — that tilted diffuse on its own.
+    mtlx_mass_back      — a white `crust_mass_diffuse_bsdf` whose normal
+                          points away from the camera of the backlit tests
+                          (−z), toward the light behind the strand: the mass
+                          leaf lit from behind its own tube.
+    mtlx_mass_front     — the same leaf facing the camera (+z): the light
+                          behind is below its horizon.
 
   Texture-free on purpose, so tests and `examples/mtlx_shade` can pin exact
   numbers.
@@ -152,6 +165,53 @@
   </surface>
   <surfacematerial name="mtlx_hair_translucent_mix" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="translucent_mix_surface" />
+  </surfacematerial>
+
+  <!-- Half fibre, half a diffuse tilted into the tube: a reflecting leaf
+       whose light can enter the tube. -->
+  <oren_nayar_diffuse_bsdf name="tilted_diffuse" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+    <input name="normal" type="vector3" value="0, 0.9, 0.436" />
+  </oren_nayar_diffuse_bsdf>
+  <surface name="tilted_alone_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="tilted_diffuse" />
+  </surface>
+  <surfacematerial name="mtlx_tilted_alone" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="tilted_alone_surface" />
+  </surfacematerial>
+  <mix name="tilted_mix_bsdf" type="BSDF">
+    <input name="fg" type="BSDF" nodename="clear_bsdf" />
+    <input name="bg" type="BSDF" nodename="tilted_diffuse" />
+    <input name="mix" type="float" value="0.5" />
+  </mix>
+  <surface name="tilted_mix_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="tilted_mix_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_tilted_mix" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="tilted_mix_surface" />
+  </surfacematerial>
+
+  <!-- The mass diffuse leaf about a normal facing away from the camera (−z),
+       and about one facing it (+z). -->
+  <crust_mass_diffuse_bsdf name="mass_back_bsdf" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+    <input name="normal" type="vector3" value="0, 0, -1" />
+  </crust_mass_diffuse_bsdf>
+  <surface name="mass_back_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="mass_back_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_mass_back" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="mass_back_surface" />
+  </surfacematerial>
+  <crust_mass_diffuse_bsdf name="mass_front_bsdf" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+    <input name="normal" type="vector3" value="0, 0, 1" />
+  </crust_mass_diffuse_bsdf>
+  <surface name="mass_front_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="mass_front_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_mass_front" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="mass_front_surface" />
   </surfacematerial>
 
 </materialx>

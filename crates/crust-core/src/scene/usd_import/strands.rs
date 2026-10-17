@@ -27,17 +27,27 @@ pub(super) struct StrandRequest<'a> {
     /// The chart the material names other than `st` ([`crate::Material::uv_primvar`]).
     pub(super) chart: Option<&'a str>,
     pub(super) working: Space,
+    /// Whether the table is to carry the prim's mass field lookup: the
+    /// material reads the field and the prim bakes one ([`super::mass`]).
+    /// A table is then built even when nothing else is read.
+    pub(super) mass: bool,
 }
 
 impl<'a> StrandRequest<'a> {
     /// The request for `material`, or `None` when it reads nothing a strand
-    /// table carries — the case that must cost nothing.
-    pub(super) fn of(material: &'a dyn crate::Material, working: Space) -> Option<Self> {
+    /// table carries and no mass field is to be read (`mass`) — the case
+    /// that must cost nothing.
+    pub(super) fn of(
+        material: &'a dyn crate::Material,
+        working: Space,
+        mass: bool,
+    ) -> Option<Self> {
         let needs = material.curve_needs();
-        needs.any().then(|| StrandRequest {
+        (needs.any() || mass).then(|| StrandRequest {
             needs,
             chart: material.uv_primvar(),
             working,
+            mass,
         })
     }
 }
@@ -190,6 +200,8 @@ pub(super) struct StrandBuilder {
     /// Whether the material reads the strand itself (a curve property or a
     /// primvar), or only the chart.
     strand: bool,
+    /// Whether the table carries a mass field lookup ([`StrandRequest::mass`]).
+    mass: bool,
     spans: Vec<StrandSpan>,
     chart: Option<Channel>,
     primvars: Vec<Option<Channel>>,
@@ -246,6 +258,7 @@ impl StrandBuilder {
         StrandBuilder {
             path: prim.path().to_string(),
             strand: request.needs.strand,
+            mass: request.mass,
             spans: Vec::new(),
             chart,
             primvars,
@@ -300,7 +313,7 @@ impl StrandBuilder {
         };
         let chart = done(self.chart);
         let primvars: Vec<_> = self.primvars.into_iter().map(done).collect();
-        (self.strand || chart.is_some()).then(|| {
+        (self.strand || chart.is_some() || self.mass).then(|| {
             StrandTable::new(self.spans, &self.path)
                 .with_chart(chart)
                 .with_primvars(primvars)

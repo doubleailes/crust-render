@@ -42,12 +42,15 @@ use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
 };
 use super::implicit::{Shape, undisplaced};
+use super::mass::{self, Placement};
+use super::materials::resolve_mass_color;
 use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
 use super::shapes::{Curves, curve_segments, curves_scene, nurbs_curve_segments, sphere_radius};
 use super::strands::StrandRequest;
 use super::xform::compose_with_parent;
 use super::{ImportCaches, WalkScope, prim_at, prune_reason};
+use crate::rt_world::MassPlacement;
 use crate::strands::StrandTable;
 
 /// How deep prototypes may nest before the importer gives up. USD forbids
@@ -103,6 +106,12 @@ pub(super) struct PartSlot {
     strands: Option<Arc<StrandTable>>,
     /// Whether the slot is curves, table or not ([`WorldBuilder::mark_curves`]).
     curves: bool,
+    /// The mass field the slot's curves bake into (an index the collector
+    /// handed out) and the prim, for the placement's lookup — or its
+    /// `mass.unplaceable` warning.
+    mass: Option<(usize, String)>,
+    /// The slot's material's mass colour graph ([`WorldBuilder::set_mass_color`]).
+    mass_color: Option<u64>,
     /// Uniform scale from the slot's own geometry frame, which its tables'
     /// densities are in, to the part's frame. 1 for a leaf part; inside a
     /// group, the member's placement. Nested *instancer* placements are not
@@ -149,6 +158,8 @@ impl ProtoPart {
                 uvs,
                 strands: None,
                 curves: false,
+                mass: None,
+                mass_color: None,
                 scale: 1.0,
             }]),
         }
@@ -307,12 +318,21 @@ pub(super) fn collect_proto_parts(
             },
         } {
             let material = resolve_material(stage, &prim, caches);
-            let request = StrandRequest::of(&*material, caches.working);
+            let color = resolve_mass_color(stage, &prim, caches);
+            let fingerprint = color.as_ref().map(|c| c.fingerprint);
+            let mass = mass::request(&prim, &*material, color, caches.working);
+            let reads = mass.as_ref().is_some_and(|m| m.reads);
+            let request = StrandRequest::of(&*material, caches.working, reads);
             let imported = match &read {
-                Curve::Basis(c) => curve_segments(&prim, c, request.as_ref()),
-                Curve::Nurbs(c) => nurbs_curve_segments(&prim, c, request.as_ref()),
+                Curve::Basis(c) => curve_segments(&prim, c, request.as_ref(), mass.as_ref()),
+                Curve::Nurbs(c) => nurbs_curve_segments(&prim, c, request.as_ref(), mass.as_ref()),
             };
-            if let Some(Curves { batches, strands }) = imported {
+            if let Some(Curves {
+                batches,
+                strands,
+                mass,
+            }) = imported
+            {
                 let mut part = ProtoPart::leaf(
                     Arc::new(curves_scene(batches)),
                     this_local,
@@ -324,6 +344,17 @@ pub(super) fn collect_proto_parts(
                 let slot = &mut Arc::make_mut(&mut part.slots)[0];
                 slot.curves = true;
                 slot.strands = strands.map(Arc::new);
+                slot.mass_color = fingerprint;
+                // The field is baked in the curves' own space: every
+                // placement of the prototype reads it through its transform.
+                if let Some(m) = mass {
+                    let field = caches.mass.add(
+                        Placement::prototype(caches.epoch, root.path(), &this_local),
+                        prim.path().as_str(),
+                        m,
+                    );
+                    slot.mass = Some((field, prim.path().to_string()));
+                }
                 parts.push(part);
             }
         } else if let Some(shape) = Shape::read(&prim) {
@@ -706,7 +737,7 @@ pub(super) fn emit_native_instance(
     };
     let parts = placed_parts(stage, proto_path, caches, place);
     let first = world.count();
-    attach_proto_parts(world, &parts, world_xf, "native instance");
+    attach_proto_parts(world, &parts, world_xf, "native instance", true);
     debug!(
         "Instance {} uses prototype {proto_path} ({} instance(s), geom ids {first}..{})",
         prim.path(),
@@ -720,12 +751,16 @@ pub(super) fn emit_native_instance(
 /// one `geom_id` per slot, so the ids consumed can exceed the count.
 /// Non-invertible placements are skipped: the kernel's instance transform
 /// must be invertible, and a zero scale is a common "hide this instance"
-/// idiom rather than an error.
+/// idiom rather than an error. `native` says the placement is a direct
+/// `instanceable` instance's: a curves part with a mass field reads it
+/// through the placement then, and only then — see the design record on
+/// instanced grooms.
 fn attach_proto_parts(
     world: &mut WorldBuilder,
     parts: &[ProtoPart],
     placement: GMat4,
     what: &str,
+    native: bool,
 ) -> usize {
     let mut attached = 0;
     for part in parts {
@@ -777,6 +812,17 @@ fn attach_proto_parts(
                 Some(table) => world.set_strands(id, table.clone()),
                 None if slot.curves => world.mark_curves(id),
                 None => {}
+            }
+            world.set_mass_color(id, slot.mass_color);
+            if let Some((field, prim)) = &slot.mass {
+                let mass_placement = match (native, label) {
+                    (true, InstanceHitId::Own) => MassPlacement::Instance(xf),
+                    (true, _) => MassPlacement::Unplaceable(
+                        "placed through its prototype's group, whose hits share one id",
+                    ),
+                    (false, _) => MassPlacement::Unplaceable("placed by a PointInstancer"),
+                };
+                world.expect_mass(id, *field, mass_placement, prim.clone());
             }
             world.set_placement_scale(id, scale * slot.scale);
         }
@@ -1124,7 +1170,13 @@ pub(super) fn emit_point_instancer(
         let Some(parts) = proto_parts.get(version) else {
             continue;
         };
-        attached += attach_proto_parts(world, parts, world_xf * xf, "PointInstancer instance");
+        attached += attach_proto_parts(
+            world,
+            parts,
+            world_xf * xf,
+            "PointInstancer instance",
+            false,
+        );
     }
 
     debug!(

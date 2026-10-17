@@ -415,6 +415,11 @@ pub struct CurveNeeds<'a> {
     /// The primvars read by name, in the order the material's program
     /// numbers them ([`crust_mtlx::Program::primvars`]).
     pub primvars: &'a [String],
+    /// The curve mass field, through any `crust_mass_*` lookup: a curve
+    /// that bakes one then carries its lookup on its table
+    /// ([`crate::mass`]). Not in [`CurveNeeds::any`]: a material reading the
+    /// field asks nothing of a curve that bakes none.
+    pub mass: bool,
 }
 
 impl CurveNeeds<'_> {
@@ -424,6 +429,7 @@ impl CurveNeeds<'_> {
         chart: false,
         strand: false,
         primvars: &[],
+        mass: false,
     };
 
     /// Whether the curve needs a strand table at all.

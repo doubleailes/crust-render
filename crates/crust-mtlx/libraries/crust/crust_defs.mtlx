@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<!--
+  The crust node library: nodedefs for the nodes Crust Render adds to
+  MaterialX, beside the standard library's own (stdlib, pbrlib). A document
+  need not include this file — the reader knows these categories — but a
+  tool that validates documents against their nodedefs can read it.
+
+  The four lookups read the curve mass field of the geometry hit
+  (openspec/specs/curve-mass-field/design.md). On a mesh, a curve without a
+  field, a field without a colour (`crust_mass_color`) or a point where the
+  field defines no normal (`crust_mass_normal`), each returns its `default`.
+  `crust_mass_diffuse_bsdf` is a Lambertian leaf around the normal it is
+  given, kept whichever way that normal faces, whose light passes out of the
+  strand it starts in as a hair fibre's does.
+
+  crates/crust-mtlx/src/mass.rs holds the same tables; tests/nodedefs.rs
+  keeps the two in step.
+-->
+<materialx version="1.39">
+
+  <nodedef name="ND_crust_mass_color" node="crust_mass_color" nodegroup="geometric">
+    <input name="default" type="color3" value="0, 0, 0" />
+    <output name="out" type="color3" />
+  </nodedef>
+
+  <nodedef name="ND_crust_mass_normal" node="crust_mass_normal" nodegroup="geometric">
+    <input name="default" type="vector3" value="0, 0, 0" />
+    <output name="out" type="vector3" />
+  </nodedef>
+
+  <nodedef name="ND_crust_mass_depth" node="crust_mass_depth" nodegroup="geometric">
+    <input name="default" type="float" value="0" />
+    <output name="out" type="float" />
+  </nodedef>
+
+  <nodedef name="ND_crust_mass_density" node="crust_mass_density" nodegroup="geometric">
+    <input name="default" type="float" value="0" />
+    <output name="out" type="float" />
+  </nodedef>
+
+  <nodedef name="ND_crust_mass_diffuse_bsdf" node="crust_mass_diffuse_bsdf" nodegroup="pbr" bsdf="R">
+    <input name="weight" type="float" value="1.0" />
+    <input name="color" type="color3" value="0.18, 0.18, 0.18" />
+    <input name="normal" type="vector3" defaultgeomprop="Nworld" />
+    <output name="out" type="BSDF" />
+  </nodedef>
+
+</materialx>

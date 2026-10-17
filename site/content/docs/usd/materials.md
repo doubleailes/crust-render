@@ -364,10 +364,12 @@ The three helper nodes turn artist parameters into those inputs:
 `samples/hair.usda` renders one tuft per way of reaching the node. Light reaching a strand
 through the strand itself is already part of the model, so a strand never shadows its
 own transmitted light. It still shadows everything else, other strands included. If the
-hair node is mixed with a BSDF that transmits, such as a refracting `dielectric_bsdf` or
-a `translucent_bsdf`, only the hair's share of the light passes through the strand. The
-other BSDF's light meets the far side of the tube, as it would without the hair. Path
-guiding is off where such a mix is hit.
+hair node is mixed with a BSDF whose light can enter the tube — one that transmits, such
+as a refracting `dielectric_bsdf` or a `translucent_bsdf`, or one that reflects about a
+normal of its own, such as a normal-mapped diffuse — only the hair's share of the light
+passes through the strand. The other BSDF's light meets the far side of the tube, as it
+would without the hair. Path guiding is off where such a mix is hit. A diffuse on the
+strand's own normal never sends light into the tube, so mixing one in costs nothing more.
 
 Author grooms in centimetres (`metersPerUnit = 0.01`, the USD default). Crust Render
 starts every ray 0.001 units away from the surface it leaves; in a groom authored in
@@ -376,6 +378,16 @@ shadowing each other. See [limitations](@/docs/architecture/limitations.md#mater
 
 The node also works on a mesh, such as a hair card. There, `curve_direction` defaults to
 the mesh's UV tangent, so the card needs UVs whose `u` runs along the hair.
+
+### The mass diffuse lobe and the mass lookups
+
+Stylised hair shades its diffuse around the *mass* of the groom rather than each strand's
+tube, and takes its colour from the mass too: a groom that authors `crust:mass:radius` is
+baked into a field, which `crust_mass_color`, `crust_mass_normal`, `crust_mass_depth` and
+`crust_mass_density` read at every hit, and `crust_mass_diffuse_bsdf` shades around the
+normal it is given — kept whichever way it faces, its light passing out of the strand as a
+fibre's does. See [curve mass fields](@/docs/usd/mass-fields.md); `samples/hair_mass.usda`
+layers a fibre over such a lobe.
 
 ### Variation nodes
 

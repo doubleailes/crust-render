@@ -288,6 +288,16 @@ warning_codes! {
         "A curve primvar a material reads has a type, interpolation or length crust cannot read; the material reads its geompropvalue's default there.";
     CurvesReservedPrimvar => "curves.reserved_primvar", Skipped, Each,
         "A curve primvar is authored under primvars:curve:, the namespace of the curve properties; the material reads the property, not the primvar.";
+    MassInvalidSetting => "mass.invalid_setting", Refused, Each,
+        "A crust:mass:* attribute has a value outside its domain; a bad radius bakes no field, a bad threshold or cap takes its default.";
+    MassNotCurves => "mass.not_curves", Skipped, Each,
+        "A crust:mass:* attribute on a prim that is not BasisCurves or NurbsCurves; nothing is baked for it.";
+    MassColorUnsupported => "mass.color_unsupported", Skipped, Each,
+        "A material's crust:mass:color terminal is not a MaterialX node, or a node in its graph needs a view or a hit; the colour, or that node, reads its default.";
+    MassUnplaceable => "mass.unplaceable", Skipped, Each,
+        "A curves prim with a mass field is placed through an instancer, a motion-blurred or a non-uniformly scaled instance, where the field cannot be read; its mass lookups return their defaults.";
+    MassGroupConflict => "mass.group_conflict", Approximated, Each,
+        "A prim in a crust:mass:group authors other mass settings than the group's first prim; the first prim's are used.";
     VolumeUnknownType => "volume.unknown_type", Skipped, Each,
         "crust:volume:type is not homogeneous, smoke or grid.";
     VolumeInvalidGrid => "volume.invalid_grid", Skipped, Each,

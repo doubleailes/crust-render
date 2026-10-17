@@ -316,11 +316,16 @@ pub struct ResolvedClosure {
     medium: Option<Medium>,
     /// Whether any leaf transmits.
     transmits: bool,
-    /// Whether any leaf is a fibre: its rays pass out of curve tubes
-    /// ([`crust_rt::Ray::ignore_curve_exits`]).
+    /// Whether any leaf is a fibre, or the mass leaf that passes like one:
+    /// its rays pass out of curve tubes ([`crust_rt::Ray::ignore_curve_exits`]).
     hair: bool,
-    /// Bit `i` set when leaf `i` is a fibre.
+    /// Bit `i` set when leaf `i` is a fibre (or the mass leaf).
     hair_leaves: u8,
+    /// Whether any non-fibre leaf shades about a normal of its own, other
+    /// than the hit's: its hemisphere can reach into the tube, so beside a
+    /// fibre it needs the mixed-vertex split as a transmitting leaf does
+    /// ([`ResolvedClosure::mixes_hair`]).
+    tilted: bool,
 }
 
 thread_local! {
@@ -499,6 +504,7 @@ impl ResolvedClosure {
             transmits: false,
             hair: false,
             hair_leaves: 0,
+            tilted: false,
         }
     }
 
@@ -521,6 +527,7 @@ impl ResolvedClosure {
         self.transmits = false;
         self.hair = false;
         self.hair_leaves = 0;
+        self.tilted = false;
         let walk = Walk {
             slots,
             rec,
@@ -649,13 +656,19 @@ impl ResolvedClosure {
         self.hair
     }
 
-    /// Whether a fibre shares this vertex with a leaf that transmits (a
-    /// refracting or translucent one). Light going into the tube then needs
-    /// two answers to "is the way clear": the fibre's passes out of its own
-    /// strand, the other leaf's meets the tube's far wall, as it would on
-    /// its own.
+    /// Whether a fibre (or the mass leaf) shares this vertex with a leaf
+    /// whose light can go into the tube: one that transmits (a refracting or
+    /// translucent one), or one that reflects about a normal of its own,
+    /// other than the hit's (a normal map, a field normal blended into an
+    /// ordinary diffuse), whose hemisphere reaches into the tube. Light going
+    /// into the tube then needs two answers to "is the way clear": the
+    /// fibre's passes out of its own strand, the other leaf's meets the
+    /// tube's far wall, as it would on its own. A reflecting leaf on the
+    /// hit's own normal never sends light into the tube, so the common
+    /// mixes — a fibre or mass leaf beside such a diffuse — keep the single
+    /// shadow ray.
     pub fn mixes_hair(&self) -> bool {
-        self.hair && self.transmits
+        self.hair && (self.transmits || self.tilted)
     }
 
     /// Bit `i` set when leaf `i` (in [`ResolvedClosure::eval_lobes`]'s order)
@@ -707,9 +720,13 @@ impl ResolvedClosure {
                     if matches!(p.lobe, Lobe::Translucent { .. }) {
                         self.transmits = true;
                     }
-                    if matches!(p.lobe, Lobe::Hair(_)) {
+                    if matches!(p.lobe, Lobe::Hair(_))
+                        || matches!(leaf.bsdf, Bsdf::MassDiffuse { .. })
+                    {
                         self.hair = true;
                         self.hair_leaves |= 1 << self.len;
+                    } else if p.frame.n != w.rec.normal {
+                        self.tilted = true;
                     }
                     self.leaves[self.len] = p;
                     self.len += 1;
@@ -1149,12 +1166,18 @@ fn alphas(v: Val) -> (f32, f32) {
 /// leaf, whose throughput is 0.
 fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
     let s = |i: u32| w.slots[i as usize];
+    // The mass leaf keeps its normal whichever way it faces: on a curve the
+    // hit's normal is the tube's, and the field's normal routinely faces
+    // away from it (a strand on the far side of a clump, seen through a
+    // gap), which is exactly the discontinuity the field removes. Only one
+    // that is not finite or has no length falls back to the hit's.
+    let keeps_facing = matches!(leaf.bsdf, Bsdf::MassDiffuse { .. });
     let n = leaf
         .normal
         .map(|i| s(i).rgb())
         .filter(|n| n.is_finite() && n.length_squared() > 1e-12)
         .map(|n| n.normalize())
-        .filter(|n| n.dot(w.rec.normal) > 1e-3)
+        .filter(|n| keeps_facing || n.dot(w.rec.normal) > 1e-3)
         .unwrap_or(w.rec.normal);
     let tangent = leaf
         .tangent
@@ -1181,6 +1204,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
         } => prepare_subsurface(&cx, color, radius, anisotropy),
         Bsdf::Hair { .. } => prepare_hair(&cx, &leaf.bsdf),
         Bsdf::Translucent { color } => prepare_translucent(&cx, color),
+        Bsdf::MassDiffuse { color } => prepare_mass_diffuse(&cx, color),
         Bsdf::Sheen {
             color,
             roughness,
@@ -1269,6 +1293,23 @@ fn prepare_diffuse(
             roughness: r,
         },
         cx.w.luma.of(albedo).max(0.02),
+        None,
+    )
+}
+
+/// [`prepare`] for a `crust_mass_diffuse_bsdf` leaf: a Lambertian — the
+/// Oren–Nayar lobe at zero roughness, which is exactly `color / π` — around
+/// the frame `prepare` built from the leaf's own normal, unfiltered.
+#[inline(always)]
+fn prepare_mass_diffuse(cx: &LeafInputs<'_>, color: &u32) -> Built {
+    let color = cx.rgb(*color);
+    (
+        Lobe::Diffuse {
+            model: DiffuseModel::OrenNayar,
+            color,
+            roughness: 0.0,
+        },
+        cx.w.luma.of(color).max(0.02),
         None,
     )
 }

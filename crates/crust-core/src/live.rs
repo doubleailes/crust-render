@@ -12,8 +12,8 @@
 //!
 //! - a material whose swap would move a flag the world or the geometry was
 //!   built on (cutout, straight transmission, medium boundary, emission, the
-//!   UV or per-face tables, a displacement), or whose network reaches outside
-//!   its own prim;
+//!   UV or per-face tables, a displacement, the mass colour graph a groom's
+//!   field was baked with), or whose network reaches outside its own prim;
 //! - a light whose rebuild would add or drop a light, change how many
 //!   geometries it owns, or move it to or from infinity, and a light the
 //!   scene's light links took out of the list (it is no longer one);
@@ -290,6 +290,10 @@ pub struct Update {
     pub(crate) settings: Option<SettingsUpdate>,
     /// Each rebuilt material and the slots it goes into.
     pub(crate) materials: Vec<(Vec<u32>, Arc<dyn Material>)>,
+    /// Each rebuilt material's mass colour graph (its fingerprint, `None`
+    /// for none) and the slots it goes into: on curves, what the field was
+    /// baked with must stay ([`World::check_mass_colors`]).
+    pub(crate) mass_colors: Vec<(Vec<u32>, Option<u64>)>,
     pub(crate) lights: Vec<LightUpdate>,
 }
 
@@ -303,6 +307,12 @@ impl Update {
     /// re-import (see [`World::check_materials`], [`LightList::check_replace`]).
     pub fn check(&self, world: &World, lights: &LightList) -> Result<(), Structural> {
         world.check_materials(&self.swaps())?;
+        let colors: Vec<(&[u32], Option<u64>)> = self
+            .mass_colors
+            .iter()
+            .map(|(slots, fp)| (slots.as_slice(), *fp))
+            .collect();
+        world.check_mass_colors(&colors)?;
         for l in &self.lights {
             lights.check_replace(l.index, &l.light)?;
         }

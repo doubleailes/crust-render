@@ -33,7 +33,10 @@ const LAYERS: &[(&str, &[&str])] = &[
             "warnings",
         ],
     ),
-    ("rays", &["aabb", "hittable", "medium", "ray", "strands"]),
+    (
+        "rays",
+        &["aabb", "hittable", "mass", "medium", "ray", "strands"],
+    ),
     ("materials", &["lpe", "material"]),
     ("world", &["rt_world"]),
     ("lights", &["environment", "light"]),

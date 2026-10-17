@@ -27,6 +27,7 @@ opened with — `usd_import::stage_builder()`). Do not add loaders for any other
 | `crust-rt`: SBVH → BVH4, watertight `Tri4` packets, instancing, SIMD | `intersection-kernel` | `docs/simd.md`, `docs/embree_comparison.md` |
 | `Material` / `resolve` / `ShadingPoint`, OpenPBR, MaterialX (`crust-mtlx`, `crust-jit`), `UsdPreviewSurface` | `materials` | `docs/openpbr_reference_alignment.md`, `docs/shading_performance.md`, `docs/material_fidelity.md` |
 | lights, light selection (`power` / `uniform` / `learned`), UsdLux units, shaping, IES | `lighting` | `docs/light_sampling.md` |
+| curve mass fields: `crust:mass:*`, the bake (splat, signed distance, colour), the `crust_mass_*` lookups and `crust_mass_diffuse_bsdf`, placements, the rebuild on edit | `curve-mass-field` | `site/content/docs/usd/mass-fields.md` |
 | UV / UDIM textures, `.tx` streaming, Ptex (preload and streaming), ray-cone filtering | `textures` | `docs/ptex_streaming.md`, `docs/color_management.md` |
 | AOVs: `RenderProduct` / `RenderVar` resolution, the source vocabulary and its aliases, accumulation modes, light path expressions and their routing, albedo, light groups, the per-product EXR writer | `aovs` | `site/content/docs/usd/aovs.md` |
 | USD import: streaming import, schema mapping, subdivision, displacement, instancing, time, camera, settings, Moana, ALab | `usd-scene-import` | `docs/alab_profile.md`, `docs/moana_profile.md`, `docs/issues/` |

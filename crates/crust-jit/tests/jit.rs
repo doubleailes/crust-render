@@ -49,6 +49,7 @@ fn shading_points() -> Vec<ShadeCtx<'static>> {
                 position: Vec3A::new(t, 1.0 - t, t * t),
                 uv_width: if i % 3 == 0 { 0.0 } else { t * 0.01 },
                 curve: None,
+                mass: None,
             }
         })
         .collect()
@@ -453,6 +454,7 @@ fn the_jit_matches_the_interpreter_on_curves() {
             [
                 ShadeCtx {
                     curve: Some(curve),
+                    mass: None,
                     ..ctx
                 },
                 ctx,
@@ -464,6 +466,84 @@ fn the_jit_matches_the_interpreter_on_curves() {
     assert!(remap[root as usize].is_some());
     assert_eq!(optimised.primvars, c.program.primvars);
     same_at(&optimised, "curve graph (optimised)", &points);
+}
+
+/// The four mass lookups at hits with a field (a colour and a normal, or
+/// neither), and off any field.
+#[test]
+fn the_jit_matches_the_interpreter_on_mass_lookups() {
+    use crust_mtlx::MassCtx;
+    let doc = Doc::parse(
+        r#"<materialx>
+             <crust_mass_color name="c" type="color3">
+               <input name="default" type="color3" value="0.2, 0.3, 0.4" />
+             </crust_mass_color>
+             <crust_mass_normal name="n" type="vector3">
+               <input name="default" type="vector3" value="0, 0, 1" />
+             </crust_mass_normal>
+             <crust_mass_depth name="d" type="float" />
+             <crust_mass_density name="rho" type="float">
+               <input name="default" type="float" value="-1" />
+             </crust_mass_density>
+             <multiply name="shaded" type="color3">
+               <input name="in1" type="color3" nodename="c" />
+               <input name="in2" type="float" nodename="rho" />
+             </multiply>
+             <dotproduct name="facing" type="float">
+               <input name="in1" type="vector3" nodename="n" />
+               <input name="in2" type="vector3" value="0.3, 0.4, 0.5" />
+             </dotproduct>
+             <combine3 name="out" type="color3">
+               <input name="in1" type="float" nodename="facing" />
+               <input name="in2" type="float" nodename="d" />
+               <input name="in3" type="float" nodename="rho" />
+             </combine3>
+             <add name="sum" type="color3">
+               <input name="in1" type="color3" nodename="out" />
+               <input name="in2" type="color3" nodename="shaded" />
+             </add>
+           </materialx>"#,
+    )
+    .unwrap();
+    let mut c = Compiler::new(&doc, &Host::new(&procedural));
+    let root = c.compile_named("", "sum", None);
+    assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
+    assert_eq!(c.program.mass_reads().0, 15);
+    let points: Vec<ShadeCtx<'static>> = shading_points()
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, ctx)| {
+            let t = i as f32 / 96.0;
+            let full = MassCtx {
+                color: Some(Vec3A::new(t, 1.0 - t, 0.5)),
+                normal: Some(Vec3A::new((t * 3.0).sin(), (t * 2.0).cos(), 0.7).normalize()),
+                depth: t * 0.1,
+                density: 2.0 * t,
+            };
+            let bare = MassCtx {
+                color: None,
+                normal: None,
+                depth: 0.0,
+                density: t,
+            };
+            [
+                ShadeCtx {
+                    mass: Some(full),
+                    ..ctx
+                },
+                ShadeCtx {
+                    mass: Some(bare),
+                    ..ctx
+                },
+                ctx,
+            ]
+        })
+        .collect();
+    same_at(&c.program, "mass graph (compiled)", &points);
+    let (optimised, remap) = c.program.optimize(&[root]);
+    assert!(remap[root as usize].is_some());
+    assert_eq!(optimised.mass_reads().0, 15);
+    same_at(&optimised, "mass graph (optimised)", &points);
 }
 
 #[test]

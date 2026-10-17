@@ -4,6 +4,7 @@
 use glam::Vec3A;
 
 use super::{BinOp, CmpOp, CurveProp, Op, ShadeCtx, UnOp};
+use crate::mass::MassProp;
 use crate::value::Val;
 
 /// One instruction's value, given the slots computed before it.
@@ -87,6 +88,25 @@ pub(super) fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             // keeps its leading lanes, as MaterialX's `convert` nodes do.
             Some(v) if v.arity == 1 => v.broadcast_to(*arity),
             Some(v) => convert(v, *arity),
+            None => *fallback,
+        },
+        Op::Mass {
+            prop,
+            arity,
+            fallback,
+        } => match ctx.mass {
+            Some(m) => match prop {
+                MassProp::Color => match m.color {
+                    Some(c) => Val::from(c).broadcast_to(*arity),
+                    None => *fallback,
+                },
+                MassProp::Normal => match m.normal {
+                    Some(n) => Val::from(n).broadcast_to(*arity),
+                    None => *fallback,
+                },
+                MassProp::Depth => Val::float(m.depth).broadcast_to(*arity),
+                MassProp::Density => Val::float(m.density).broadcast_to(*arity),
+            },
             None => *fallback,
         },
         Op::Normal => ctx.normal.into(),

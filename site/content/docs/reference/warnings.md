@@ -170,6 +170,16 @@ plain text and are not counted.
 | `volume.invalid_grid` | skipped | A grid volume's gridDims and gridData are missing or do not match. | Author `crust:volume:gridDims` and a `crust:volume:gridData` of that many values. |
 | `volume.in_prototype` | skipped | A volume inside an instance prototype; volumes cannot be instanced. | Move the volume out of the prototype. |
 
+## Curve mass fields
+
+| code | kind | meaning | what to do |
+|------|------|---------|------------|
+| `mass.invalid_setting` | refused | A crust:mass:* attribute has a value outside its domain; a bad radius bakes no field, a bad threshold or cap takes its default. | Author a positive, finite `crust:mass:radius`, a positive `crust:mass:threshold` and a `crust:mass:maxResolution` of at least 1. |
+| `mass.not_curves` | skipped | A crust:mass:* attribute on a prim that is not BasisCurves or NurbsCurves; nothing is baked for it. | Move the attributes to the `BasisCurves` or `NurbsCurves` prim, or remove them. |
+| `mass.color_unsupported` | skipped | A material's crust:mass:color terminal is not a MaterialX node, or a node in its graph needs a view or a hit; the colour, or that node, reads its default. | Connect `outputs:crust:mass:color` to a MaterialX `color3` node, and build its graph from nodes that need no view (`viewdirection`), surface (`normal`, `tangent`) or texture footprint. |
+| `mass.unplaceable` | skipped | A curves prim with a mass field is placed through an instancer, a motion-blurred or a non-uniformly scaled instance, where the field cannot be read; its mass lookups return their defaults. | Place the groom at the top level, or as a direct `instanceable` instance with a static transform of rotation, translation and uniform scale. |
+| `mass.group_conflict` | approximated | A prim in a crust:mass:group authors other mass settings than the group's first prim; the first prim's are used. | Author the same `crust:mass:radius`, `crust:mass:threshold` and `crust:mass:maxResolution` on every prim of the group, or only on its first. |
+
 ## Instancing
 
 | code | kind | meaning | what to do |
