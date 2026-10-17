@@ -60,15 +60,31 @@ point read the same mass colour, normal, depth and density there.
 
 The mass normal at a point SHALL be the normalised gradient of the signed
 distance there: outside the mass it points away from the mass's surface, and
-inside it points toward the nearest point of that surface. Depth into the mass
-SHALL be the negated signed distance where it is negative, and 0 elsewhere.
+inside it points toward the nearest point of that surface. Where that gradient
+is zero or not finite (on a symmetry axis, or with no surface within the
+field's distance band), the normal lookup SHALL return its default. Depth SHALL
+be the negated signed distance where negative, and 0 elsewhere.
 
 #### Scenario: A clump's normal is its surface's
 
 - **WHEN** a round clump of parallel strands bakes a field and the mass normal
-  is read at a strand on its silhouette and at one on its axis
+  is read at a strand on its silhouette and at one halfway to its axis
 - **THEN** the silhouette strand reads a normal pointing radially outward, and
-  the axis strand reads a unit normal with depth greater than 0
+  the inner strand a unit normal pointing away from the axis, with depth
+  greater than 0
+
+#### Scenario: The exact axis has no normal
+
+- **WHEN** the mass normal of that clump is read exactly on its centre line,
+  where the distance's gradient vanishes by symmetry
+- **THEN** the lookup returns its default
+
+#### Scenario: A strand that never reaches the threshold
+
+- **WHEN** a lone opted-in strand narrower than half the field's radius bakes
+  with the default threshold, so its coverage stays below it everywhere
+- **THEN** the field has no surface: the normal lookup returns its default,
+  depth is 0, and density still reads the strand's coverage
 
 ### Requirement: The mass colour is a coverage-weighted mean
 
@@ -109,7 +125,10 @@ SHALL be refused with one warning naming it, and read its default.
 
 Curve prims authoring the same `crust:mass:group` token under the same
 placement SHALL bake one field together; a prim without a group SHALL bake its
-own. Prims under different placements SHALL never share a field.
+own, and prims under different placements SHALL never share one. A group's
+field SHALL take its radius, threshold and cap from the group's first prim in
+path order; prims authoring other values SHALL be named by one
+`mass.group_conflict` warning.
 
 #### Scenario: A groom split over prims bakes one mass
 
@@ -123,6 +142,13 @@ own. Prims under different placements SHALL never share a field.
 - **WHEN** two characters' grooms author the same group token under different
   transforms
 - **THEN** each bakes its own field
+
+#### Scenario: Grouped prims disagree
+
+- **WHEN** `/Groom/A` and `/Groom/B` share a group, `A` authoring
+  `crust:mass:radius = 0.1` and `B` 0.2
+- **THEN** one field bakes with radius 0.1, and one `mass.group_conflict`
+  warning names the group and `/Groom/B`
 
 ### Requirement: Field resolution is bounded
 
@@ -150,10 +176,11 @@ add no Monte Carlo noise to the render.
 
 ### Requirement: Lookups resolve their placement or fall back
 
-A field SHALL be read at top-level curves and at curves directly instanced with
-a static, unlabelled transform, through that placement. A hit through any
-other placement (a `PointInstancer`'s, or a motion-blurred instance) SHALL read
-every lookup's default, and the import SHALL raise one
+A field SHALL be read at top-level curves, and at curves directly instanced
+with a static, unlabelled transform of rotation and uniform scale, through that
+placement, its mass scaling with the instance as its strands do. A hit through
+any other placement (a `PointInstancer`'s, a motion-blurred or a non-uniformly
+scaled instance) SHALL read every lookup's default, with one
 `mass.unplaceable` warning per prim placed so.
 
 #### Scenario: A directly instanced groom reads its field
@@ -161,6 +188,19 @@ every lookup's default, and the import SHALL raise one
 - **WHEN** a groom prototype with a field is instanced twice with different
   rotations
 - **THEN** each instance reads the mass normal rotated with it
+
+#### Scenario: A scaled instance scales its mass
+
+- **WHEN** a groom prototype with a field is instanced at scale 1 and at
+  uniform scale 2
+- **THEN** at corresponding points the second instance reads the same mass
+  normal and twice the depth
+
+#### Scenario: A non-uniformly scaled instance falls back
+
+- **WHEN** the same prototype is instanced with scale (1, 2, 1)
+- **THEN** that instance's curves shade with every mass lookup's default, and
+  one `mass.unplaceable` warning names the prim
 
 #### Scenario: An instancer-placed groom falls back
 

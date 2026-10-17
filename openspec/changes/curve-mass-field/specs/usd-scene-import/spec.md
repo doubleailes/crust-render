@@ -5,17 +5,29 @@
 ### Requirement: Curves read the crust:mass attributes
 
 `BasisCurves` and `NurbsCurves` prims SHALL read `float crust:mass:radius`
-(world units; a positive value opts the prim in), `float
-crust:mass:threshold` (default 0.5), `token crust:mass:group` and `int
-crust:mass:maxResolution` (default 512). A value outside its domain SHALL be
-refused with one `mass.invalid_setting` warning: a bad radius bakes no field,
-a bad threshold or cap takes its default.
+(in the curves' own units, as their `widths` are; a positive value opts the
+prim in), `float crust:mass:threshold` (default 0.5), `token crust:mass:group`
+and `int crust:mass:maxResolution` (default 512). A value outside its domain
+SHALL be refused with one `mass.invalid_setting` warning: a bad radius bakes no
+field, a bad threshold or cap takes its default.
 
 #### Scenario: A negative radius is refused
 
 - **WHEN** a curves prim authors `crust:mass:radius = -0.1`
 - **THEN** no field is baked for it, and one `mass.invalid_setting` warning
   names the prim and the attribute
+
+#### Scenario: The radius scales with the curves
+
+- **WHEN** a top-level groom authoring `crust:mass:radius = 0.05` sits under
+  an `Xform` with uniform scale 2
+- **THEN** its field is baked with a world radius of 0.1
+
+#### Scenario: A non-uniform scale takes its cube root
+
+- **WHEN** the same groom sits under scale (1, 8, 1)
+- **THEN** its field is baked in world space with the radius scaled by the
+  cube root of the scale's determinant, 0.1, the same in every direction
 
 #### Scenario: A zero cap takes the default
 

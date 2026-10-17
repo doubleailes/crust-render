@@ -72,6 +72,11 @@ one.
   which is what makes two strands crossing deep in a clump agree.
 - **Depth into the mass** is `max(−d, 0)`, exposed as its own lookup: a
   design signal for value variation through the volume, independent of light.
+- **Where the gradient vanishes, the lookup gives its default.** Exactly on a
+  symmetry axis (a round clump's centre line) the two sides cancel, and a field
+  whose coverage never reaches the threshold has no surface, so its distance is
+  the band's clamp everywhere and its gradient zero. A normal is never made up
+  there; the material's `default` stands in, as it does off a field.
 
 ### The colour bake evaluates an explicitly connected graph
 
@@ -93,6 +98,17 @@ number and primvars in `ShadeCtx`.
 - A field covers one curve prim, or every curve prim sharing a
   `crust:mass:group` token under the same placement, so a groom split over
   several prims bakes one mass and two characters' hair never merge.
+- **A group's settings are its first prim's**, in path order: one field has
+  one radius, threshold and cap. A prim that authors others is named by one
+  `mass.group_conflict` warning rather than silently overruled.
+  **Alternative: the largest radius, the smallest threshold.** Rejected: no
+  ordering of thresholds is "safer", and a rule per setting is harder to
+  predict than one prim deciding.
+- **The radius is in the curves' own units**, as `widths` are, so a scaled
+  groom scales its mass with its strands. A top-level field is baked in world
+  space, its radius scaled by the cube root of the prim's transform's
+  determinant (exact for a uniform scale; under a non-uniform one, the
+  isotropic stand-in the texture footprint already uses).
 - The voxel size is `radius / 2`, its count capped by
   `crust:mass:maxResolution` (per axis); when the cap binds, the voxel grows
   and the import says so once at DEBUG.
@@ -107,20 +123,23 @@ carries `(geom_id, prim_id)` and nothing about the placement
 
 - **Top-level curves**, and curves baked into the top-level scene: the field is
   baked in world space and looked up with the hit's `P` as is.
-- **A direct, unlabelled, static instance** — the one case where the id *is*
-  the placement, which `VertexSource::Placed` already records for tangent
-  frames: one field per prototype, in prototype space, scoped by the stage
-  epoch like every prototype-keyed cache. The lookup takes `P` through the
-  recorded placement's inverse, and returns the normal through the inverse
-  transpose of its linear part, renormalised.
+- **A direct, unlabelled, static instance of rotation and uniform scale** —
+  the one case where the id *is* the placement, which `VertexSource::Placed`
+  already records for tangent frames: one field per prototype, in prototype
+  space, scoped by the stage epoch like every prototype-keyed cache. The
+  lookup takes `P` through the recorded placement's inverse, returns the
+  normal through the inverse transpose of its linear part, renormalised, and
+  the depth times its scale. A non-uniform scale would stretch the mass with
+  its strands, but depth would then depend on direction, so such an instance
+  falls back as below.
 - **Every other placement** — a prototype placed through an instancer's group,
-  whose forwarded slot id two differently transformed placements share, and a
+  whose forwarded slot id two differently transformed placements share, a
   motion-blurred instance, intersected through a transform interpolated at the
-  ray's time — cannot recover its transform. Its lookups return their
-  `default` inputs, so the material falls back to per-strand shading, and the
-  import raises one warning per prim (a new `WarningCode`, listed in
-  `site/content/docs/reference/warnings.md`) naming it. No lookup ever
-  guesses a transform.
+  ray's time, and a non-uniformly scaled instance — cannot be read correctly.
+  Its lookups return their `default` inputs, so the material falls back to
+  per-strand shading, and the import raises one warning per prim
+  (`mass.unplaceable`, listed in `site/content/docs/reference/warnings.md`)
+  naming it. No lookup ever guesses a transform.
 - **Alternative: bake one world-space field per placement.** Correct for
   every placement, but memory scales with the placement count, and a forwarded
   hit still cannot say which placement's field to read. Rejected.

@@ -71,6 +71,12 @@ fn main() {
         field.h,
         started.elapsed().as_secs_f32()
     );
+    if !field.surface {
+        println!(
+            "coverage never reaches the threshold {threshold}: the field has no surface, and no \
+             hit reads a mass normal"
+        );
+    }
 
     let scene = Scene::from_usd(Path::new(stage_path)).expect("the stage loads");
     let view = View::cast(&scene, &strands, &field);
@@ -95,6 +101,20 @@ fn read_strands(path: &str) -> Vec<Strand> {
             continue;
         }
         let value = |name: &str| prim.attribute(name).get::<sdf::Value>().ok().flatten();
+        // The field is baked from straight segments between authored points,
+        // which is the curve the renderer traces only for `linear`; USD's
+        // default type is `cubic`.
+        let ty = match value("type") {
+            Some(sdf::Value::Token(t)) => t.as_str().to_owned(),
+            _ => "cubic".to_owned(),
+        };
+        if ty != "linear" {
+            eprintln!(
+                "{}: type is {ty}; the spike bakes linear curves only",
+                prim.path()
+            );
+            std::process::exit(2);
+        }
         let Some(sdf::Value::Vec3fVec(points)) = value("points") else {
             continue;
         };
@@ -155,6 +175,8 @@ struct Field {
     dist: Vec<f32>,
     /// Per-voxel central-difference gradients of the (smoothed) distance.
     grad: Vec<Vec3A>,
+    /// Whether coverage reaches the threshold anywhere.
+    surface: bool,
 }
 
 impl Field {
@@ -183,6 +205,7 @@ impl Field {
             weight: vec![0.0; cells],
             dist: vec![0.0; cells],
             grad: Vec::new(),
+            surface: false,
         };
         // Samples a quarter voxel apart, each standing for `ds` of strand:
         // a lone line as wide as the radius sums to coverage 1 on its axis.
@@ -394,8 +417,14 @@ impl Field {
                 }
             }
         }
+        self.surface = fixed.iter().any(|f| *f);
+        // Clamped beyond a band of three radii (six voxels), as the design
+        // has it — which also keeps a field with no surface finite, its
+        // gradient zero rather than not a number.
+        let band = 6.0 * self.h;
         for (d, (u, p)) in self.dist.iter_mut().zip(u.iter().zip(&phi)) {
-            *d = if *p > 0.0 { -u } else { *u };
+            let u = u.min(band);
+            *d = if *p > 0.0 { -u } else { u };
         }
     }
 
@@ -453,6 +482,9 @@ struct View {
     width: usize,
     height: usize,
     pixels: Vec<Option<Pixel>>,
+    /// Hits the field gave no normal or colour (no surface within its band,
+    /// or a vanishing gradient): left out of every measure, and counted.
+    unread: usize,
 }
 
 /// Pixels per world unit, and the region seen: both sheets and the clump.
@@ -464,27 +496,33 @@ impl View {
         let width = ((REGION[1] - REGION[0]) * PIXELS_PER_UNIT) as usize;
         let height = ((REGION[3] - REGION[2]) * PIXELS_PER_UNIT) as usize;
         let mut pixels = Vec::with_capacity(width * height);
+        let mut unread = 0;
         for j in 0..height {
             for i in 0..width {
                 let x = REGION[0] + (i as f32 + 0.5) / PIXELS_PER_UNIT;
                 let y = REGION[3] - (j as f32 + 0.5) / PIXELS_PER_UNIT;
                 let ray = Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z);
-                pixels.push(scene.world.intersect(&ray, 1e-4, 1e4).and_then(|hit| {
+                let pixel = scene.world.intersect(&ray, 1e-4, 1e4).and_then(|hit| {
                     let p = hit.rec.p;
+                    let field = field.normal(p).zip(field.colour(p));
+                    unread += usize::from(field.is_none());
+                    let (mass_normal, mass_colour) = field?;
                     Some(Pixel {
                         p,
                         tube_normal: hit.rec.normal,
-                        mass_normal: field.normal(p)?,
+                        mass_normal,
                         strand_colour: nearest_colour(strands, p),
-                        mass_colour: field.colour(p)?,
+                        mass_colour,
                     })
-                }));
+                });
+                pixels.push(pixel);
             }
         }
         View {
             width,
             height,
             pixels,
+            unread,
         }
     }
 
@@ -556,6 +594,13 @@ impl View {
             ("strand colour", &|p| p.strand_colour),
             ("mass colour", &|p| p.mass_colour),
         ];
+        if self.unread > 0 {
+            println!(
+                "  {} hits read no mass normal or colour (no surface within the band, or a \
+                 vanishing gradient) and are left out",
+                self.unread
+            );
+        }
         let mut energies = Vec::new();
         for (name, f) in rows {
             let (c, a) = (
