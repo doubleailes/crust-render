@@ -128,7 +128,7 @@ fn same_warnings(raised: &[Warning], scene: &[Warning], root: &str) -> Result<()
 fn prim_path(path: &str) -> Result<sdf::Path, Structural> {
     sdf::Path::new(path)
         .ok()
-        .filter(|p| p.is_prim_path())
+        .filter(|p| p.is_prim())
         .ok_or_else(|| Structural(format!("{path} is not a prim path")))
 }
 
@@ -442,7 +442,7 @@ pub(crate) fn prim_frames(
             let world = compose_with_parent(&prim, parent);
             let place = prim
                 .attribute(place_op)
-                .get::<openusd::gf::Matrix4d>()
+                .get::<openusd::gf::Mat4d>()
                 .ok()
                 .flatten()
                 .map(|m| glam::DMat4::from_cols_array(&m.0));

@@ -760,7 +760,7 @@ fn variants_activity_and_bindings_are_opinions_too() {
         .prim("/World/asset")
         .unwrap()
         .variant_sets()
-        .get_all_variant_selections()
+        .selections()
         .unwrap();
     assert!(
         selections.contains(&("lod".into(), "high".into())),

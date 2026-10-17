@@ -306,7 +306,7 @@ fn openpbr_showcase_materials_all_decode() {
             // render-context list (the empty string is the universal context)
             // and yields every source driving it rather than one shader.
             let terminal = mat
-                .compute_surface_source(&[""])
+                .surface_source(&[""])
                 .unwrap()
                 .unwrap_or_else(|| panic!("Material {} has no surface shader", p));
             let shader = terminal
