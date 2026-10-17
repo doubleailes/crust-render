@@ -1346,6 +1346,12 @@ impl World {
         self.scene.memory_footprint()
     }
 
+    /// The node format of every distinct kernel tree — see
+    /// [`crust_rt::Scene::node_format_census`].
+    pub fn node_format_census(&self) -> crust_rt::NodeFormatCensus {
+        self.scene.node_format_census()
+    }
+
     /// Distinct materials in the table, counted once however many
     /// geometries share one, grouped by [`Material::kind`] — Guerilla's
     /// "allocated materials". Heaviest kind first.

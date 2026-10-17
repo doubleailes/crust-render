@@ -76,6 +76,54 @@ impl From<TriPackets> for crust_rt::PacketLayout {
     }
 }
 
+/// `CRUST_BVH_NODES`: which node format a kernel tree's BVH uses — see
+/// `crust_rt::NodeFormatChoice`. Every format answers every query alike (up
+/// to exact distance ties); `wide4` is the 4-wide `f32` node the kernel used
+/// before the quantised node existed (the honest A/B side), `quant8` is the
+/// 8-wide node with byte-quantised child bounds (smaller, and measured
+/// faster on trees too large for the cache, slower on small ones), and
+/// `auto` lets the kernel choose per tree by size.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BvhNodes {
+    Wide4,
+    Quant8,
+    #[default]
+    Auto,
+}
+
+impl FromStr for BvhNodes {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "wide4" => Ok(BvhNodes::Wide4),
+            "quant8" => Ok(BvhNodes::Quant8),
+            "auto" => Ok(BvhNodes::Auto),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for BvhNodes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BvhNodes::Wide4 => "wide4",
+            BvhNodes::Quant8 => "quant8",
+            BvhNodes::Auto => "auto",
+        })
+    }
+}
+
+impl From<BvhNodes> for crust_rt::NodeFormatChoice {
+    fn from(n: BvhNodes) -> Self {
+        match n {
+            BvhNodes::Wide4 => crust_rt::NodeFormatChoice::Wide,
+            BvhNodes::Quant8 => crust_rt::NodeFormatChoice::Quantised,
+            BvhNodes::Auto => crust_rt::NodeFormatChoice::Auto,
+        }
+    }
+}
+
 /// Which mip chain a streamed Ptex texture is allowed to read
 /// (`CRUST_PTEX_STREAM_MIPSPACE`).
 ///
@@ -253,6 +301,9 @@ pub struct Config {
     /// `CRUST_TRI_PACKETS`: the kernel's triangle packet layout
     /// (`gathered` | `indexed` | `auto`; bit-identical either way).
     pub tri_packets: TriPackets,
+    /// `CRUST_BVH_NODES`: the kernel's BVH node format
+    /// (`wide4` | `quant8` | `auto`; the same hits either way).
+    pub bvh_nodes: BvhNodes,
     /// `CRUST_MTLX_OPT`: fold, hoist and prune MaterialX programs (`false`:
     /// run them as compiled; bit-identical).
     pub mtlx_opt: bool,
@@ -345,6 +396,7 @@ impl Default for Config {
             adaptive_per_face: true,
             adaptive_frustum: true,
             tri_packets: TriPackets::Auto,
+            bvh_nodes: BvhNodes::Auto,
             mtlx_opt: true,
             shader_jit: true,
             ray_cones: true,
@@ -395,6 +447,12 @@ impl Config {
                 "CRUST_TRI_PACKETS",
                 d.tri_packets,
                 "`gathered`, `indexed` or `auto`",
+            ),
+            bvh_nodes: env_parse(
+                &lookup,
+                "CRUST_BVH_NODES",
+                d.bvh_nodes,
+                "`wide4`, `quant8` or `auto`",
             ),
             mtlx_opt: flag("CRUST_MTLX_OPT", d.mtlx_opt),
             shader_jit: flag("CRUST_SHADER_JIT", d.shader_jit),
@@ -655,6 +713,28 @@ mod tests {
         }
         let bad = Config::from_lookup(|n| (n == "CRUST_TRI_PACKETS").then(|| "fast".to_string()));
         assert_eq!(bad.tri_packets, TriPackets::Auto);
+    }
+
+    #[test]
+    fn bvh_nodes_parses_its_three_names() {
+        assert_eq!(with(&[]).bvh_nodes, BvhNodes::Auto);
+        for (spelling, want) in [
+            ("wide4", BvhNodes::Wide4),
+            ("quant8", BvhNodes::Quant8),
+            ("auto", BvhNodes::Auto),
+        ] {
+            let c = with(&[("CRUST_BVH_NODES", spelling)]);
+            assert_eq!(c.bvh_nodes, want);
+            assert_eq!(spelling.parse::<BvhNodes>(), Ok(want));
+            assert_eq!(want.to_string(), spelling);
+        }
+        // A bad value means `auto` (and warns once, like every switch).
+        let bad = with(&[("CRUST_BVH_NODES", "wide")]);
+        assert_eq!(bad.bvh_nodes, BvhNodes::Auto);
+    }
+
+    #[test]
+    fn mip_space_bad_name_falls_back() {
         let bad = with(&[("CRUST_PTEX_STREAM_MIPSPACE", "srgb")]);
         assert_eq!(bad.ptex_mip_space, PtexMipSpace::Capped);
         for m in [

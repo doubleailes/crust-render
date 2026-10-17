@@ -47,17 +47,54 @@ pub enum PacketLayout {
     Auto,
 }
 
+/// Which node format a tree's BVH uses.
+///
+/// Two formats exist: the `f32` node (4 children, or 8 under the nightly
+/// `bvh8` feature), and an 8-wide node whose child bounds are quantised to
+/// bytes on a per-node grid, rounded outward. The quantised node is smaller
+/// (76 bytes against 128) and measured faster on trees too large for the
+/// cache, and slower on trees that fit in it, so the format is chosen per
+/// tree. Both answer every query identically, up to exact distance ties.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeFormatChoice {
+    /// The kernel chooses by the tree's size: the quantised node for a tree
+    /// of at least 100 000 primitives, the `f32` node below that.
+    Auto,
+    /// The `f32` node on every tree.
+    Wide,
+    /// The quantised 8-wide node on every tree.
+    Quantised,
+}
+
+impl Default for NodeFormatChoice {
+    /// `Auto`. With the `test-node-env` feature, `CRUST_RT_NODES` (`wide` |
+    /// `quant`) overrides it, so the kernel's whole test suite can run under
+    /// each format.
+    fn default() -> Self {
+        #[cfg(feature = "test-node-env")]
+        match std::env::var("CRUST_RT_NODES").as_deref() {
+            Ok("wide") => return NodeFormatChoice::Wide,
+            Ok("quant") => return NodeFormatChoice::Quantised,
+            _ => {}
+        }
+        NodeFormatChoice::Auto
+    }
+}
+
 /// What [`SceneBuilder::commit_with`] lets a caller choose about the build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitOptions {
     /// The triangle packet layout.
     pub layout: PacketLayout,
+    /// The BVH node format.
+    pub nodes: NodeFormatChoice,
 }
 
 impl Default for CommitOptions {
     fn default() -> Self {
         CommitOptions {
             layout: PacketLayout::Auto,
+            nodes: NodeFormatChoice::default(),
         }
     }
 }
@@ -80,8 +117,10 @@ pub struct MemoryFootprint {
     pub instances: usize,
     /// Cubic curve spans, 96 bytes each inline.
     pub cubic_spans: usize,
-    /// 4-wide BVH nodes.
+    /// BVH nodes of the `f32` format (4-wide, or 8-wide under `bvh8`).
     pub bvh_nodes: usize,
+    /// BVH nodes of the quantised 8-wide format (76 bytes each).
+    pub bvh_nodes_quantised: usize,
     pub leaves: usize,
     /// Triangle SIMD packets of the gathered layout (the vertices, SoA).
     pub packets: usize,
@@ -110,6 +149,7 @@ impl MemoryFootprint {
             + self.instances
             + self.cubic_spans
             + self.bvh_nodes
+            + self.bvh_nodes_quantised
             + self.leaves
             + self.packets
             + self.packets_indexed
@@ -119,6 +159,18 @@ impl MemoryFootprint {
             + self.vertex_normals
             + self.geometry_tables
     }
+}
+
+/// The node format of every distinct tree in a committed [`Scene`] — the
+/// top level and each distinct instanced scene once — as each tree's
+/// primitive reference count (the count `auto` chooses by), largest first.
+/// See [`Scene::node_format_census`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeFormatCensus {
+    /// Trees with the `f32` node.
+    pub wide: Vec<usize>,
+    /// Trees with the quantised 8-wide node.
+    pub quantised: Vec<usize>,
 }
 
 /// Top-level primitives of a committed [`Scene`], split by kind. See
@@ -425,7 +477,7 @@ impl SceneBuilder {
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
         };
         Scene {
-            bvh: Bvh::new(sink.input, layout),
+            bvh: Bvh::with_nodes(sink.input, layout, options.nodes),
             n_geoms,
             has_motion: sink.has_motion,
             max_hit_id: sink.max_hit_id,
@@ -912,6 +964,26 @@ impl Scene {
         let mut acc = MemoryFootprint::default();
         self.accumulate_footprint_into(&mut visited, &mut acc);
         acc
+    }
+
+    /// Which node format each distinct tree was committed with — see
+    /// [`NodeFormatCensus`]. A report, not a query: it walks every
+    /// distinct instanced scene.
+    pub fn node_format_census(&self) -> NodeFormatCensus {
+        let mut visited = std::collections::HashSet::new();
+        let mut acc = NodeFormatCensus::default();
+        self.accumulate_census_into(&mut visited, &mut acc);
+        acc.wide.sort_unstable_by(|a, b| b.cmp(a));
+        acc.quantised.sort_unstable_by(|a, b| b.cmp(a));
+        acc
+    }
+
+    pub(crate) fn accumulate_census_into(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut NodeFormatCensus,
+    ) {
+        self.bvh.accumulate_census(visited, acc);
     }
 
     pub(crate) fn accumulate_footprint_into(

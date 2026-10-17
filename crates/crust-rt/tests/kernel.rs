@@ -1572,6 +1572,7 @@ fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
             + small.instances
             + small.cubic_spans
             + small.bvh_nodes
+            + small.bvh_nodes_quantised
             + small.leaves
             + small.packets
             + small.indices
@@ -1770,7 +1771,10 @@ fn packet_layouts_are_bit_identical() {
             gt.clone(),
         ));
         b.attach(sphere(Vec3A::new(0.0, 0.0, 2.5), 0.4));
-        b.commit_with(crust_rt::CommitOptions { layout })
+        b.commit_with(crust_rt::CommitOptions {
+            layout,
+            ..Default::default()
+        })
     };
     let gathered = build(PacketLayout::Gathered);
     let indexed = build(PacketLayout::Indexed);
@@ -2268,5 +2272,260 @@ fn a_passing_ray_from_elsewhere_meets_a_strand_at_its_joints() {
     assert!(
         bend.intersect(&wedge, 1e-3, 100.0)
             .is_some_and(|h| h.front_face)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Node formats: the f32 node and the quantised 8-wide node answer alike
+// ---------------------------------------------------------------------------
+
+/// Commits `geoms` once per node format.
+fn both_formats(attach: impl Fn(&mut SceneBuilder)) -> (Scene, Scene) {
+    use crust_rt::{CommitOptions, NodeFormatChoice};
+    let build = |nodes| {
+        let mut b = SceneBuilder::new();
+        attach(&mut b);
+        b.commit_with(CommitOptions {
+            nodes,
+            ..Default::default()
+        })
+    };
+    (
+        build(NodeFormatChoice::Wide),
+        build(NodeFormatChoice::Quantised),
+    )
+}
+
+/// The two scenes answer every ray the same: equal closest-hit distance,
+/// the same primitive (random floats never tie), and the same occlusion
+/// verdict.
+fn assert_formats_agree(wide: &Scene, quant: &Scene, rays: &[Ray]) {
+    let mut hits = 0;
+    for (i, r) in rays.iter().enumerate() {
+        let (a, b) = (
+            wide.intersect(r, 1e-4, f32::INFINITY),
+            quant.intersect(r, 1e-4, f32::INFINITY),
+        );
+        match (a, b) {
+            (None, None) => {}
+            (Some(a), Some(b)) => {
+                hits += 1;
+                assert!(a.t.is_finite() && b.t.is_finite(), "ray {i}: NaN or inf t");
+                assert_eq!(a.t.to_bits(), b.t.to_bits(), "ray {i}: distance");
+                assert_eq!(
+                    (a.geom_id, a.prim_id),
+                    (b.geom_id, b.prim_id),
+                    "ray {i}: primitive"
+                );
+            }
+            (a, b) => panic!(
+                "ray {i}: wide {:?}, quantised {:?}",
+                a.map(|h| h.t),
+                b.map(|h| h.t)
+            ),
+        }
+        // A finite segment, half the closest hit's distance and twice it.
+        for t_max in [0.5, 2.0, f32::INFINITY] {
+            let t_max = a.map_or(t_max, |h| h.t * t_max);
+            assert_eq!(
+                wide.occluded(r, 1e-4, t_max),
+                quant.occluded(r, 1e-4, t_max),
+                "ray {i}: occlusion to {t_max}"
+            );
+        }
+    }
+    assert!(hits > rays.len() / 10, "the rays barely hit anything");
+}
+
+#[test]
+fn node_formats_agree_on_a_triangle_soup() {
+    let mut rng = Rng::new(0x51_0F);
+    // 6 000 triangles, enough for several levels of 8-wide nodes.
+    let mut verts = Vec::new();
+    let mut idx = Vec::new();
+    for i in 0..6000u32 {
+        let c = vec3(&mut rng, -4.0, 4.0);
+        for _ in 0..3 {
+            verts.push(c + vec3(&mut rng, -0.4, 0.4));
+        }
+        idx.push([3 * i, 3 * i + 1, 3 * i + 2]);
+    }
+    let (wide, quant) = both_formats(|b| {
+        b.attach(mesh(verts.clone(), idx.clone()));
+        b.attach(sphere(Vec3A::new(0.5, 0.5, 0.5), 0.7));
+    });
+    let mut rays = Vec::new();
+    for _ in 0..20_000 {
+        rays.push(Ray::new(vec3(&mut rng, -6.0, 6.0), dir(&mut rng)));
+    }
+    // Axis-aligned directions, where one reciprocal is the clamped huge one.
+    for axis in 0..3 {
+        for sign in [-1.0, 1.0] {
+            for _ in 0..500 {
+                let mut d = Vec3A::ZERO;
+                d[axis] = sign;
+                rays.push(Ray::new(vec3(&mut rng, -5.0, 5.0), d));
+            }
+        }
+    }
+    assert_formats_agree(&wide, &quant, &rays);
+    let (fw, fq) = (wide.memory_footprint(), quant.memory_footprint());
+    assert!(fw.bvh_nodes > 0 && fw.bvh_nodes_quantised == 0);
+    assert!(fq.bvh_nodes == 0 && fq.bvh_nodes_quantised > 0);
+    assert!(
+        fq.bvh_nodes_quantised < fw.bvh_nodes,
+        "quantised nodes should be smaller"
+    );
+    // The total moves by exactly the node bytes' difference.
+    assert_eq!(
+        fw.total() - fw.bvh_nodes,
+        fq.total() - fq.bvh_nodes_quantised,
+        "only the nodes differ between the two commits"
+    );
+}
+
+/// Nodes whose children all lie in a plane, and a sliver of zero extent:
+/// the grid exponent must stay valid, and rays travelling in the plane must
+/// neither be lost nor turn into NaN.
+#[test]
+fn node_formats_agree_on_degenerate_extents() {
+    let (v, t) = grid(24);
+    let (wide, quant) = both_formats(|b| {
+        b.attach(mesh(v.clone(), t.clone()));
+        // A triangle with zero area, collinear along x.
+        b.attach(mesh(
+            vec![
+                Vec3A::new(0.2, 0.2, 0.5),
+                Vec3A::new(0.4, 0.2, 0.5),
+                Vec3A::new(0.8, 0.2, 0.5),
+            ],
+            vec![[0, 1, 2]],
+        ));
+    });
+    let mut rng = Rng::new(0xD36E);
+    let mut rays = Vec::new();
+    for _ in 0..2000 {
+        // Straight down onto the plane.
+        let o = Vec3A::new(range(&mut rng, -0.2, 1.2), range(&mut rng, -0.2, 1.2), 1.0);
+        rays.push(Ray::new(o, Vec3A::new(0.0, 0.0, -1.0)));
+        // In the plane z = 0, and exactly along each in-plane axis.
+        let o = Vec3A::new(range(&mut rng, -0.5, 1.5), range(&mut rng, -0.5, 1.5), 0.0);
+        rays.push(Ray::new(o, Vec3A::new(1.0, 0.0, 0.0)));
+        rays.push(Ray::new(o, Vec3A::new(0.0, -1.0, 0.0)));
+        let a = range(&mut rng, 0.0, std::f32::consts::TAU);
+        rays.push(Ray::new(o, Vec3A::new(a.cos(), a.sin(), 0.0)));
+    }
+    let mut verdicts = 0;
+    for (i, r) in rays.iter().enumerate() {
+        let (a, b) = (
+            wide.intersect(r, 1e-4, f32::INFINITY),
+            quant.intersect(r, 1e-4, f32::INFINITY),
+        );
+        assert_eq!(
+            a.map(|h| h.t.to_bits()),
+            b.map(|h| h.t.to_bits()),
+            "ray {i}"
+        );
+        assert!(a.is_none_or(|h| h.t.is_finite()), "ray {i}: t not finite");
+        assert_eq!(
+            wide.occluded(r, 1e-4, f32::INFINITY),
+            quant.occluded(r, 1e-4, f32::INFINITY),
+            "ray {i}: occlusion"
+        );
+        verdicts += usize::from(a.is_some());
+    }
+    assert!(verdicts > 500, "the down-rays should hit the grid");
+}
+
+/// Under `Auto` a small tree keeps the `f32` node and a large one gets the
+/// quantised node, per tree: a small prototype placed 110 000 times gives a
+/// quantised top level over `f32` prototype trees, and rays crossing both
+/// answer as they do with every tree forced to the `f32` node.
+#[test]
+fn auto_chooses_the_node_format_per_tree() {
+    use crust_rt::{CommitOptions, NodeFormatChoice};
+    let commit = |b: SceneBuilder, nodes| {
+        b.commit_with(CommitOptions {
+            nodes,
+            ..Default::default()
+        })
+    };
+    let field = |nodes| {
+        let mut inner = SceneBuilder::new();
+        inner.attach(sphere(Vec3A::ZERO, 0.3));
+        inner.attach(unit_quad());
+        let inner = Arc::new(commit(inner, nodes));
+        let mut b = SceneBuilder::new();
+        let mut rng = Rng::new(0xF1E1D);
+        for _ in 0..110_000 {
+            b.attach(Geometry::Instance {
+                scene: Arc::clone(&inner),
+                transform: Affine3A::from_translation(vec3(&mut rng, -60.0, 60.0).into()),
+                transform_end: None,
+            });
+        }
+        (commit(b, nodes), inner)
+    };
+    let (auto, auto_inner) = field(NodeFormatChoice::Auto);
+    let (wide, _) = field(NodeFormatChoice::Wide);
+
+    // The prototype is small: f32 nodes, no quantised bytes.
+    let fi = auto_inner.memory_footprint();
+    assert!(fi.bvh_nodes > 0 && fi.bvh_nodes_quantised == 0, "{fi:?}");
+    // The top level is large: quantised; the footprint counts the shared
+    // prototype once, so both rows are non-zero.
+    let fa = auto.memory_footprint();
+    assert!(fa.bvh_nodes_quantised > 0 && fa.bvh_nodes > 0, "{fa:?}");
+    let fw = wide.memory_footprint();
+    assert_eq!(fw.bvh_nodes_quantised, 0);
+
+    let mut rng = Rng::new(0xA070);
+    let rays: Vec<Ray> = (0..4000)
+        .map(|_| Ray::new(vec3(&mut rng, -70.0, 70.0), dir(&mut rng)))
+        .collect();
+    assert_formats_agree(&wide, &auto, &rays);
+}
+
+/// Under `Auto` a scene below the threshold commits exactly the `f32` tree.
+/// `Auto` is named, not defaulted, so a forced `CRUST_RT_NODES` run tests it too.
+#[test]
+fn auto_keeps_small_trees_on_the_f32_node() {
+    use crust_rt::{CommitOptions, NodeFormatChoice};
+    let mut b = SceneBuilder::new();
+    let (v, t) = grid(32);
+    b.attach(mesh(v, t));
+    let fp = b
+        .commit_with(CommitOptions {
+            nodes: NodeFormatChoice::Auto,
+            ..Default::default()
+        })
+        .memory_footprint();
+    assert!(fp.bvh_nodes > 0 && fp.bvh_nodes_quantised == 0, "{fp:?}");
+}
+
+/// The census reports each tree under the format it was committed with, by
+/// the reference count the choice was made from.
+#[test]
+fn node_format_census_counts_each_tree_under_its_format() {
+    use crust_rt::{CommitOptions, NodeFormatChoice};
+    let census = |nodes| {
+        let mut b = SceneBuilder::new();
+        let (v, t) = grid(32);
+        let n = t.len();
+        b.attach(mesh(v, t));
+        let c = b
+            .commit_with(CommitOptions {
+                nodes,
+                ..Default::default()
+            })
+            .node_format_census();
+        (n, c)
+    };
+    let (n, wide) = census(NodeFormatChoice::Wide);
+    assert_eq!((wide.wide.as_slice(), wide.quantised.len()), (&[n][..], 0));
+    let (n, quant) = census(NodeFormatChoice::Quantised);
+    assert_eq!(
+        (quant.wide.len(), quant.quantised.as_slice()),
+        (0, &[n][..])
     );
 }

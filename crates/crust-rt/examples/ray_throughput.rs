@@ -10,11 +10,22 @@
 //! cargo run --release -p crust-rt --example ray_throughput
 //! cargo run --release -p crust-rt --example ray_throughput -- --large [MTRIS]
 //! cargo run --release -p crust-rt --example ray_throughput -- --layout indexed [--large [MTRIS]]
+//! cargo run --release -p crust-rt --example ray_throughput -- --nodes quant [--large [MTRIS]]
 //! ```
 //!
 //! `--layout gathered|indexed|auto` commits every scene with that triangle
 //! packet layout (default `auto`), which is how the two are A/B'd per tree
 //! size.
+//!
+//! `--compare` does the same for the default in-cache scenes, and
+//! `--field [N]` for the instance field (`auto` and all-quantised against
+//! all-f32).
+//! `--sweep M1,M2,...` times the f32 and the quantised node on the same soup of
+//! each size, alternating repeat by repeat in one process (see `sweep`).
+//!
+//! `--nodes wide|quant|auto` commits every scene with that BVH node format
+//! (default `auto`), which is how the 4-wide `f32` node and the quantised
+//! 8-wide node are A/B'd in one binary.
 //!
 //! The default scenes are small enough that their whole BVH stays in cache,
 //! so they measure the node test's arithmetic. `--large` adds two scenes
@@ -29,7 +40,7 @@
 #[path = "../fixtures/mod.rs"]
 mod fixtures;
 
-use crust_rt::{CommitOptions, Geometry, PacketLayout, Scene, SceneBuilder};
+use crust_rt::{CommitOptions, Geometry, NodeFormatChoice, PacketLayout, Scene, SceneBuilder};
 use fixtures::{
     T_MIN, in_cube, instance_scene, ray_batch, sphere_grid_scene, triangle_scene, uv_sphere,
 };
@@ -123,6 +134,7 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
         crust_rt::traversal_stats::reset();
         let mut best = f64::INFINITY;
         let mut hits = 0usize;
+        let mut all = Vec::new();
         for _ in 0..repeats {
             let start = Instant::now();
             let mut h = 0usize;
@@ -139,6 +151,10 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
             let secs = start.elapsed().as_secs_f64();
             hits = h;
             best = best.min(secs);
+            all.push(secs * 1e3);
+        }
+        if std::env::var_os("CRUST_PRINT_REPEATS").is_some() {
+            println!("{name} {kind} repeats_ms {all:.1?}");
         }
         println!(
             "{name:<12} {kind:<10} {:>8.3} ms   {:>6.2} Mray/s   ({hits}/{n_rays} hit)",
@@ -168,25 +184,223 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
 /// The packet layout every scene below commits with (`--layout`).
 static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
 
+/// The node format every scene below commits with (`--nodes`).
+static NODES: std::sync::OnceLock<NodeFormatChoice> = std::sync::OnceLock::new();
+
+thread_local! {
+    /// Set while `--sweep` builds one scene of a pair, overriding `--nodes`.
+    static FORCED: std::cell::Cell<Option<NodeFormatChoice>> = const { std::cell::Cell::new(None) };
+}
+
 fn commit(b: SceneBuilder) -> Scene {
     b.commit_with(CommitOptions {
         layout: *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
+        nodes: FORCED
+            .get()
+            .or_else(|| NODES.get().copied())
+            .unwrap_or(NodeFormatChoice::Auto),
     })
+}
+
+/// One timed pass of every ray through `scene`: seconds and the hit count.
+fn pass(scene: &Scene, rays: &[crust_rt::Ray], closest: bool) -> (f64, usize) {
+    let start = Instant::now();
+    let mut hits = 0usize;
+    for r in rays {
+        let hit = if closest {
+            scene.intersect(r, T_MIN, f32::INFINITY).is_some()
+        } else {
+            scene.occluded(r, T_MIN, f32::INFINITY)
+        };
+        hits += usize::from(hit);
+    }
+    (start.elapsed().as_secs_f64(), hits)
+}
+
+fn median(v: &[f64]) -> f64 {
+    let mut v = v.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// Times `wide` and `quant` alternately, repeat by repeat, on the same rays,
+/// and prints one row per query (see `sweep`).
+fn compare_pair(label: &str, wide: &Scene, quant: &Scene, rays: &[crust_rt::Ray], repeats: usize) {
+    let mib = |s: &Scene| s.memory_footprint().total() as f64 / (1 << 20) as f64;
+    for (kind, closest) in [("intersect", true), ("occluded", false)] {
+        let (mut tw, mut tq) = (Vec::new(), Vec::new());
+        let (mut hw, mut hq) = (0, 0);
+        for r in 0..repeats {
+            let order = if r % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for quantised in order {
+                let (secs, hits) = pass(if quantised { quant } else { wide }, rays, closest);
+                if quantised {
+                    tq.push(secs * 1e3);
+                    hq = hits;
+                } else {
+                    tw.push(secs * 1e3);
+                    hw = hits;
+                }
+            }
+        }
+        let min = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
+        println!(
+            "{label:>8} {kind:<10} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>7.1}% {:>9.0} {:>9.0}{}",
+            min(&tw),
+            median(&tw),
+            min(&tq),
+            median(&tq),
+            100.0 * (median(&tq) / median(&tw) - 1.0),
+            mib(wide),
+            mib(quant),
+            if hw == hq { "" } else { "  HIT COUNTS DIFFER" },
+        );
+    }
+}
+
+/// `--sweep M1,M2,...`: for each soup size (millions of triangles), commits
+/// the same soup once per node format *in this one process*, then times the
+/// two alternately, repeat by repeat, so time drift lands on both. Prints the
+/// min and median of each, the quantised/f32 ratio of the medians, the hit
+/// counts (which must match) and the kernel bytes. `CRUST_SWEEP_REPEATS`
+/// sets the repeats (default 6).
+fn sweep(sizes: &[f64]) {
+    let repeats: usize = std::env::var("CRUST_SWEEP_REPEATS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    println!(
+        "{:>8} {:<10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>9} {:>9}",
+        "Mtris",
+        "query",
+        "wide min",
+        "wide med",
+        "quant min",
+        "quant med",
+        "q/w med",
+        "wide MiB",
+        "quant MiB"
+    );
+    for &m in sizes {
+        let n = (m * 1e6) as usize;
+        let build = |choice| {
+            FORCED.set(Some(choice));
+            let s = soup_scene(n);
+            FORCED.set(None);
+            s
+        };
+        let (wide, quant) = (
+            build(NodeFormatChoice::Wide),
+            build(NodeFormatChoice::Quantised),
+        );
+        let rays = ray_batch(LARGE_RAYS, LARGE_HALF);
+        compare_pair(&format!("{m}"), &wide, &quant, &rays, repeats);
+    }
 }
 
 fn main() {
     // `--layout` is read before any scene is built, so the default scenes
     // commit with it too.
     let mut args = std::env::args().skip(1).peekable();
-    if args.peek().map(String::as_str) == Some("--layout") {
+    while let Some(flag) = args.peek().cloned() {
+        match flag.as_str() {
+            "--layout" => {
+                args.next();
+                let layout = match args.next().as_deref() {
+                    Some("gathered") => PacketLayout::Gathered,
+                    Some("indexed") => PacketLayout::Indexed,
+                    Some("auto") => PacketLayout::Auto,
+                    other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
+                };
+                LAYOUT.set(layout).expect("set once");
+            }
+            "--nodes" => {
+                args.next();
+                let nodes = match args.next().as_deref() {
+                    Some("wide") => NodeFormatChoice::Wide,
+                    Some("quant") => NodeFormatChoice::Quantised,
+                    Some("auto") => NodeFormatChoice::Auto,
+                    other => panic!("--nodes wants wide|quant|auto, got {other:?}"),
+                };
+                NODES.set(nodes).expect("set once");
+            }
+            _ => break,
+        }
+    }
+
+    if args.peek().map(String::as_str) == Some("--compare") {
+        // The default in-cache scenes, both formats alternated in one process.
         args.next();
-        let layout = match args.next().as_deref() {
-            Some("gathered") => PacketLayout::Gathered,
-            Some("indexed") => PacketLayout::Indexed,
-            Some("auto") => PacketLayout::Auto,
-            other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
+        let repeats: usize = std::env::var("CRUST_SWEEP_REPEATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        let pair = |f: fn(fn(SceneBuilder) -> Scene) -> Scene| {
+            let build = |choice| {
+                FORCED.set(Some(choice));
+                let s = f(commit);
+                FORCED.set(None);
+                s
+            };
+            (
+                build(NodeFormatChoice::Wide),
+                build(NodeFormatChoice::Quantised),
+            )
         };
-        LAYOUT.set(layout).expect("set once");
+        for (name, f, extent) in [
+            (
+                "tri_sph",
+                triangle_scene as fn(fn(SceneBuilder) -> Scene) -> Scene,
+                6.0,
+            ),
+            ("sph_grid", sphere_grid_scene, 14.0),
+            ("instances", instance_scene, 7.0),
+        ] {
+            let (w, q) = pair(f);
+            compare_pair(name, &w, &q, &ray_batch(RAYS, extent), repeats);
+        }
+        return;
+    }
+    if args.peek().map(String::as_str) == Some("--field") {
+        // The instance field three ways: every tree f32, `auto` (the top level
+        // quantised, the small prototypes f32), and every tree quantised.
+        args.next();
+        let count: usize = args
+            .next()
+            .and_then(|a| a.parse().ok())
+            .unwrap_or(2_000_000);
+        let repeats: usize = std::env::var("CRUST_SWEEP_REPEATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6);
+        let build = |choice| {
+            FORCED.set(Some(choice));
+            let s = instance_field_scene(count);
+            FORCED.set(None);
+            s
+        };
+        let wide = build(NodeFormatChoice::Wide);
+        let auto = build(NodeFormatChoice::Auto);
+        let quant = build(NodeFormatChoice::Quantised);
+        let rays = ray_batch(LARGE_RAYS, LARGE_HALF);
+        compare_pair("auto", &wide, &auto, &rays, repeats);
+        compare_pair("quant", &wide, &quant, &rays, repeats);
+        return;
+    }
+    if args.peek().map(String::as_str) == Some("--sweep") {
+        args.next();
+        let sizes: Vec<f64> = args
+            .next()
+            .expect("--sweep wants M1,M2,... (millions of triangles)")
+            .split(',')
+            .map(|x| x.parse().expect("a size in millions of triangles"))
+            .collect();
+        sweep(&sizes);
+        return;
     }
 
     let tri = triangle_scene(commit);
@@ -207,8 +421,17 @@ fn main() {
             mem.total() as f64 / (1 << 20) as f64,
             t.elapsed().as_secs_f64()
         );
-        probe_with("soup", &soup, LARGE_HALF, LARGE_RAYS, LARGE_REPEATS);
+        // `CRUST_LARGE_REPEATS` / `CRUST_SOUP_ONLY` / `CRUST_PRINT_REPEATS`:
+        // knobs for a longer A/B of the soup alone (every repeat is printed).
+        let repeats = std::env::var("CRUST_LARGE_REPEATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(LARGE_REPEATS);
+        probe_with("soup", &soup, LARGE_HALF, LARGE_RAYS, repeats);
         drop(soup);
+        if std::env::var_os("CRUST_SOUP_ONLY").is_some() {
+            return;
+        }
 
         // A quarter as many instances as the soup has triangles: 2 M at the
         // default, a top level the size of a production stage's.

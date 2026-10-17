@@ -90,15 +90,16 @@ pub use aov::{
 pub use buffer::Buffer;
 pub use camera::Camera;
 pub use config::{
-    Config, DEFAULT_TEX_MAX_OPEN_FILES, DiskSampling, PtexMipSpace, TriPackets, TubeSampling,
-    config,
+    BvhNodes, Config, DEFAULT_TEX_MAX_OPEN_FILES, DiskSampling, PtexMipSpace, TriPackets,
+    TubeSampling, config,
 };
 
-/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` switch,
-/// read once.
+/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` and
+/// `CRUST_BVH_NODES` switches, read once.
 pub(crate) fn commit_options() -> crust_rt::CommitOptions {
     crust_rt::CommitOptions {
         layout: config().tri_packets.into(),
+        nodes: config().bvh_nodes.into(),
     }
 }
 pub use environment::EnvironmentMap;

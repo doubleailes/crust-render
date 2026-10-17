@@ -67,10 +67,43 @@ mod collapse;
 mod lanes4;
 #[cfg(feature = "bvh8")]
 mod lanes8;
+mod lanesq;
+mod node;
+
+use lanesq::{BuildNode8, QNode, quantise_tree};
+use node::NodeFormat;
+
+/// The `f32` node format: 4 lanes on glam's `Vec4`, or under the nightly
+/// `bvh8` feature 8 lanes on `std::simd::f32x8`.
 #[cfg(not(feature = "bvh8"))]
-use lanes4::{LANES, Lanes, RaySlab, splat};
+type FNode = lanes4::Node4;
+#[cfg(not(feature = "bvh8"))]
+const F_WIDTH: usize = 4;
 #[cfg(feature = "bvh8")]
-use lanes8::{LANES, Lanes, RaySlab, splat};
+type FNode = lanes8::Node8;
+#[cfg(feature = "bvh8")]
+const F_WIDTH: usize = 8;
+
+/// Width of the quantised node.
+const Q_WIDTH: usize = 8;
+
+use crate::scene::NodeFormatChoice as NodeChoice;
+
+/// Trees with at least this many primitive references get the quantised
+/// node under [`NodeChoice::Auto`]. Measured with `ray_throughput --compare`
+/// and `--sweep` (both formats alternated in one process, 4-core Xeon @
+/// 2.8 GHz, 2026-10): below about 50 k references the f32 node is faster
+/// (quantised 1–6 % slower on a 43 k-triangle mesh set, 5–27 % on small
+/// sphere grids and instance prototypes), and from a 50 k-triangle soup up
+/// to 8 M the quantised node is 7–43 % faster on both queries. 100 k leaves
+/// a margin above the crossover.
+const AUTO_QUANT_MIN_REFS: Option<usize> = Some(100_000);
+
+/// A tree's nodes, in whichever format it was committed with.
+enum Nodes {
+    Wide(Box<[FNode]>),
+    Quant(Box<[QNode]>),
+}
 
 /// Leaves are forced at this depth so the traversal stack can never
 /// overflow; SAH partitions are otherwise free to be arbitrarily uneven.
@@ -135,47 +168,10 @@ impl Node {
     }
 }
 
-/// Marks an unused lane of a [`WideNode`].
-const EMPTY_LANE: u32 = u32::MAX;
-
-/// Lane-validity bits of [`WideNode::flags`] (bit `k` = lane `k` holds a
-/// real child) and leaf bits (bit `LANES + k` = that child is a leaf).
-const VALID_MASK: u32 = (1 << LANES) - 1;
-const LEAF_SHIFT: u32 = LANES as u32;
-
-/// A [`LANES`]-wide BVH node in SoA layout: lane `k` of each vector holds
-/// child `k`'s slab bounds, so one round of vector min/max tests every child
-/// box against the ray at once (Embree's BVH4 / BVH8 idea).
-///
-/// At the default width exactly 128 bytes (two cache lines): six `Vec4`s,
-/// one child index per lane, and the flag nibbles; 256 bytes under `bvh8`.
-/// The leaf payload — how many primitives, and where their SIMD packets
-/// live — sits in the separate [`Leaf`] table
-/// rather than in the node, which is what keeps the node this small.
-struct WideNode {
-    bmin_x: Lanes,
-    bmin_y: Lanes,
-    bmin_z: Lanes,
-    bmax_x: Lanes,
-    bmax_y: Lanes,
-    bmax_z: Lanes,
-    /// Leaf lane: index into the BVH's `leaves`. Internal lane: index into
-    /// `wide`. Unused lane: [`EMPTY_LANE`].
-    child: [u32; LANES],
-    /// Bits `0..LANES`: lane `k` holds a real child. Bits `LANES..2·LANES`:
-    /// that child is a leaf.
-    ///
-    /// The validity bits exist because unused lanes carry +INF/+INF
-    /// bounds, which *usually* fail the slab test but not always: for
-    /// `t_max == INF` and an all-positive ray direction the test reduces to
-    /// `INF <= INF`. Traversal ANDs the nibble into the SIMD hit mask — one
-    /// integer `and` in place of four per-lane branches.
-    flags: u32,
-}
-
 /// A leaf's payload: the 4-wide triangle packets to run, plus the leftover
 /// primitives (spheres, curves, instances, and the triangles that did not
 /// fill a packet's worth) that still go one at a time.
+#[derive(Clone, Copy)]
 struct Leaf {
     /// Range in the BVH's `packets`.
     pkt_first: u32,
@@ -183,41 +179,6 @@ struct Leaf {
     /// Range in the BVH's `indices`.
     idx_first: u32,
     idx_count: u32,
-}
-
-impl WideNode {
-    fn empty() -> Self {
-        let inf = splat(f32::INFINITY);
-        WideNode {
-            bmin_x: inf,
-            bmin_y: inf,
-            bmin_z: inf,
-            bmax_x: inf,
-            bmax_y: inf,
-            bmax_z: inf,
-            child: [EMPTY_LANE; LANES],
-            flags: 0,
-        }
-    }
-
-    fn set_lane_bounds(&mut self, lane: usize, b: &AABB) {
-        self.bmin_x[lane] = b.minimum.x;
-        self.bmin_y[lane] = b.minimum.y;
-        self.bmin_z[lane] = b.minimum.z;
-        self.bmax_x[lane] = b.maximum.x;
-        self.bmax_y[lane] = b.maximum.y;
-        self.bmax_z[lane] = b.maximum.z;
-        self.flags |= 1 << lane;
-    }
-
-    #[inline]
-    fn is_leaf(&self, lane: usize) -> bool {
-        self.flags & (1 << (LEAF_SHIFT + lane as u32)) != 0
-    }
-
-    fn mark_leaf(&mut self, lane: usize) {
-        self.flags |= 1 << (LEAF_SHIFT + lane as u32);
-    }
 }
 
 /// Which packet table a tree uses — the resolved form of
@@ -381,7 +342,7 @@ impl Primitives {
 /// a box can neither grow nor hold capacity slack the memory footprint would
 /// have to count.
 pub(crate) struct Bvh {
-    wide: Box<[WideNode]>,
+    nodes: Nodes,
     /// Leaf payloads, indexed by a leaf lane's `child`.
     leaves: Box<[Leaf]>,
     /// 4-wide triangle packets, grouped per leaf; one of the two tables
@@ -412,6 +373,9 @@ pub(crate) struct Bvh {
     n_degenerate: usize,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
+    /// Primitive references the build started from (the count the node
+    /// format was chosen by); reported, never read by a query.
+    n_refs: usize,
 }
 
 /// One build reference: conservative bounds of (a fragment of) primitive
@@ -475,7 +439,12 @@ impl Candidate {
 }
 
 impl Bvh {
+    #[cfg(test)]
     pub(crate) fn new(input: Primitives, layout: Layout) -> Self {
+        Self::with_nodes(input, layout, NodeChoice::default())
+    }
+
+    pub(crate) fn with_nodes(input: Primitives, layout: Layout, choice: NodeChoice) -> Self {
         // One reference per primitive, in input order (the order decides
         // ties, so it is part of the build's determinism); degenerate
         // records get none.
@@ -483,19 +452,54 @@ impl Bvh {
             .filter_map(|i| input.bbox(i).map(|bbox| PrimRef::new(bbox, i)))
             .collect();
 
-        let (wide, collected, root_bbox) = if refs.is_empty() {
-            (Vec::new(), LeafData::default(), None)
+        let n_refs = refs.len();
+        let quantised = match choice {
+            NodeChoice::Wide => false,
+            NodeChoice::Quantised => true,
+            NodeChoice::Auto => AUTO_QUANT_MIN_REFS.is_some_and(|min| refs.len() >= min),
+        };
+
+        let (nodes, leaves, collected, root_bbox) = if refs.is_empty() {
+            let empty = if quantised {
+                Nodes::Quant(Box::default())
+            } else {
+                Nodes::Wide(Box::default())
+            };
+            (empty, Vec::new(), LeafData::default(), None)
         } else {
             let root_bbox = union_all(&refs);
             let subtree = build_subtree(&input, refs, 0, surface_area(&root_bbox));
-            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &input, layout);
-            (wide, collected, Some(root_bbox))
+            if quantised {
+                let (wide, mut collected) = collapse::<BuildNode8, Q_WIDTH>(
+                    &subtree.nodes,
+                    &subtree.indices,
+                    &input,
+                    layout,
+                );
+                let (nodes, leaves) = quantise_tree(wide, std::mem::take(&mut collected.leaves));
+                (
+                    Nodes::Quant(nodes.into_boxed_slice()),
+                    leaves,
+                    collected,
+                    Some(root_bbox),
+                )
+            } else {
+                let (wide, mut collected) =
+                    collapse::<FNode, F_WIDTH>(&subtree.nodes, &subtree.indices, &input, layout);
+                let leaves = std::mem::take(&mut collected.leaves);
+                (
+                    Nodes::Wide(wide.into_boxed_slice()),
+                    leaves,
+                    collected,
+                    Some(root_bbox),
+                )
+            }
         };
 
         let n_degenerate = input.tris.iter().filter(|r| r.is_degenerate()).count();
         Bvh {
-            wide: wide.into_boxed_slice(),
-            leaves: collected.leaves.into_boxed_slice(),
+            nodes,
+            leaves: leaves.into_boxed_slice(),
             packets: collected.packets.into_boxed_slice(),
             packets_i: collected.packets_i.into_boxed_slice(),
             layout,
@@ -509,6 +513,7 @@ impl Bvh {
             instances: input.instances.into_boxed_slice(),
             cubics: input.cubics.into_boxed_slice(),
             root_bbox,
+            n_refs,
         }
         // `input.order` and `input.instance_bounds` drop here: build-only.
     }
@@ -770,7 +775,10 @@ impl Bvh {
     ) {
         use std::mem::size_of_val;
         acc.prim_nodes += size_of_val(&*self.prims);
-        acc.bvh_nodes += size_of_val(&*self.wide);
+        match &self.nodes {
+            Nodes::Wide(n) => acc.bvh_nodes += std::mem::size_of_val(&**n),
+            Nodes::Quant(n) => acc.bvh_nodes_quantised += std::mem::size_of_val(&**n),
+        }
         acc.leaves += size_of_val(&*self.leaves);
         acc.packets += size_of_val(&*self.packets);
         acc.packets_indexed += size_of_val(&*self.packets_i);
@@ -817,6 +825,24 @@ impl Bvh {
         for i in &self.instances {
             if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
                 i.scene.accumulate_unique_into(visited, acc);
+            }
+        }
+    }
+
+    /// Adds this tree's reference count to `acc` under its node format,
+    /// descending into each distinct instanced scene once.
+    pub(crate) fn accumulate_census(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut crate::scene::NodeFormatCensus,
+    ) {
+        match &self.nodes {
+            Nodes::Wide(_) => acc.wide.push(self.n_refs),
+            Nodes::Quant(_) => acc.quantised.push(self.n_refs),
+        }
+        for i in &self.instances {
+            if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                i.scene.accumulate_census_into(visited, acc);
             }
         }
     }
@@ -883,7 +909,23 @@ impl Bvh {
 
     /// Closest hit in `(t_min, t_max)`.
     pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
-        if self.wide.is_empty() {
+        match &self.nodes {
+            Nodes::Wide(nodes) => self.hit_in::<FNode, F_WIDTH>(nodes, ray, t_min, t_max),
+            Nodes::Quant(nodes) => self.hit_in::<QNode, Q_WIDTH>(nodes, ray, t_min, t_max),
+        }
+    }
+
+    /// [`Bvh::hit`] over one node format: monomorphised per format, so the
+    /// choice costs one `match` per tree descent and nothing per node.
+    #[inline]
+    fn hit_in<N: NodeFormat<W>, const W: usize>(
+        &self,
+        nodes: &[N],
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+    ) -> Option<PrimHit> {
+        if nodes.is_empty() {
             return None;
         }
         tstat!(QUERIES, 1);
@@ -893,23 +935,23 @@ impl Bvh {
         // Splat the ray into SoA lanes once for the whole traversal
         // instead of once per visited node, and likewise derive the Woop
         // shear once instead of once per triangle.
-        let rs = RaySlab::new(ray, t_min);
+        let rs = N::prepare(ray, t_min);
         let shear = self.shear(ray);
 
         let mut stack = TraversalStack::new(0);
 
         while let Some(node_idx) = stack.pop() {
             tstat!(NODES_VISITED, 1);
-            let node = &self.wide[node_idx as usize];
-            let (mut mask, tn) = rs.slab(node, closest);
+            let node = &nodes[node_idx as usize];
+            let (mut mask, tn) = N::slab(&rs, node, closest);
             if mask == 0 {
                 continue;
             }
 
-            // Hit lanes, insertion-sorted near-to-far (≤ LANES entries).
+            // Hit lanes, insertion-sorted near-to-far (≤ W entries).
             // The distances are read from one spilled copy of the vector
             // rather than re-extracting a lane at a time.
-            let mut order = [(0f32, 0usize); LANES];
+            let mut order = [(0f32, 0usize); W];
             let mut n_hit = 0;
             while mask != 0 {
                 let l = mask.trailing_zeros() as usize;
@@ -930,7 +972,7 @@ impl Bvh {
             for &(_, l) in &order[..n_hit] {
                 if node.is_leaf(l)
                     && let Some(hit) =
-                        self.intersect_leaf(node.child[l], ray, shear.as_ref(), t_min, closest)
+                        self.intersect_leaf(node.child_at(l), ray, shear.as_ref(), t_min, closest)
                 {
                     closest = hit.t();
                     best = Some(hit);
@@ -939,7 +981,7 @@ impl Bvh {
             for i in (0..n_hit).rev() {
                 let l = order[i].1;
                 if !node.is_leaf(l) {
-                    stack.push(node.child[l]);
+                    stack.push(node.child_at(l));
                 }
             }
         }
@@ -1059,26 +1101,41 @@ impl Bvh {
     /// Early-exit occlusion traversal: no ordering, returns on the first
     /// confirmed hit anywhere in `(t_min, t_max)`.
     pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        if self.wide.is_empty() {
+        match &self.nodes {
+            Nodes::Wide(nodes) => self.hit_any_in::<FNode, F_WIDTH>(nodes, ray, t_min, t_max),
+            Nodes::Quant(nodes) => self.hit_any_in::<QNode, Q_WIDTH>(nodes, ray, t_min, t_max),
+        }
+    }
+
+    /// [`Bvh::hit_any`] over one node format; see [`Bvh::hit_in`].
+    #[inline]
+    fn hit_any_in<N: NodeFormat<W>, const W: usize>(
+        &self,
+        nodes: &[N],
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        if nodes.is_empty() {
             return false;
         }
-        let rs = RaySlab::new(ray, t_min);
+        let rs = N::prepare(ray, t_min);
         let shear = self.shear(ray);
 
         let mut stack = TraversalStack::new(0);
 
         while let Some(node_idx) = stack.pop() {
-            let node = &self.wide[node_idx as usize];
-            let (mut mask, _) = rs.slab(node, t_max);
+            let node = &nodes[node_idx as usize];
+            let (mut mask, _) = N::slab(&rs, node, t_max);
             while mask != 0 {
                 let l = mask.trailing_zeros() as usize;
                 mask &= mask - 1;
                 if node.is_leaf(l) {
-                    if self.occlude_leaf(node.child[l], ray, shear.as_ref(), t_min, t_max) {
+                    if self.occlude_leaf(node.child_at(l), ray, shear.as_ref(), t_min, t_max) {
                         return true;
                     }
                 } else {
-                    stack.push(node.child[l]);
+                    stack.push(node.child_at(l));
                 }
             }
         }

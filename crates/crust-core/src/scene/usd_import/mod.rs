@@ -1142,6 +1142,25 @@ pub(crate) fn load_scene(
         commit_mem,
     );
 
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let census = committed.node_format_census();
+        let head = |v: &[usize]| {
+            v.iter()
+                .take(5)
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        debug!(
+            "BVH node formats: {} f32 trees (largest refs: {}), {} quantised (largest refs: {}; smallest: {})",
+            census.wide.len(),
+            head(&census.wide),
+            census.quantised.len(),
+            head(&census.quantised),
+            census.quantised.last().map_or("-".into(), usize::to_string),
+        );
+    }
+
     stats.scene = SceneCounters {
         geometries: committed.count(),
         top_level: committed.primitive_breakdown().into(),
