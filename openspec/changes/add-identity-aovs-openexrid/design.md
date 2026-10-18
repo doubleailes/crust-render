@@ -115,9 +115,12 @@ all.
   through a per-mesh element map (authored face, and where in it), the map
   `elementId` reads. A refined mesh finds its cage face through the Ptex
   face table. Constant primvars are inherited from ancestors.
-- A hit's barycentrics are recovered by re-intersecting a sliver of the
-  camera ray, only in the AOV instantiation and only where a primvar needs
-  them, so the kernel's hit record is unchanged.
+- A hit's barycentrics are solved from its triangle's world-space vertices,
+  only where a primvar needs them, so neither the kernel's hit record nor
+  its traversal changes; the integrator records only the first hit's ids,
+  in spare bytes of `FirstHit`, and the AOV unit reads the tables from them.
+  Both were measured against the zero-AOV instruction count (the `aovs`
+  design record, "Identity and primvars").
 
 ### D9. As built: the matte film
 

@@ -1075,29 +1075,27 @@ impl World {
         self.aov.get(geom_id as usize)
     }
 
-    /// The barycentrics of a hit already found — on `geom_id`'s triangle
-    /// `prim_id` in `placement`, at `t` along `ray` — which [`WorldHit`]
-    /// does not carry: the kernel is asked again over a sliver of the ray
-    /// around `t`, and its answer kept only if it is the same triangle of
-    /// the same placement. `None` otherwise (a coplanar or an edge-sharing
-    /// triangle won the sliver), and the caller reads the face as a whole.
+    /// The barycentrics `(u, v)` of the point `p` on `geom_id`'s triangle
+    /// `prim_id`, in the kernel's convention (`u` weighs the second vertex,
+    /// `v` the third), which [`WorldHit`] does not carry: solved in the
+    /// triangle's plane from its world-space vertices — the ones a hit's
+    /// tangent frame is derived from. `None` where those cannot be
+    /// recovered (see [`VertexSource`]) or the triangle is degenerate, and
+    /// the caller reads the face as a whole.
     ///
     /// For the primvar AOVs, at a camera ray's first hit only: the beauty
-    /// never needs it, so `WorldHit` stays the size it is.
-    pub fn barycentrics(
-        &self,
-        ray: &Ray,
-        t: f32,
-        geom_id: u32,
-        prim_id: u32,
-        placement: u32,
-    ) -> Option<(f32, f32)> {
-        let eps = (t.abs() * 1e-4).max(1e-6);
-        let h = self
-            .scene
-            .intersect(ray.rt(), (t - eps).max(0.0), t + eps)?;
-        (h.geom_id == geom_id && h.prim_id == prim_id && h.placement == placement)
-            .then_some((h.u, h.v))
+    /// never needs it, so `WorldHit` stays the size it is. Not asked of the
+    /// kernel again either: a second caller of the traversal moved the
+    /// beauty-only render's instruction count (the `aovs` design record).
+    pub fn barycentrics(&self, p: Vec3A, geom_id: u32, prim_id: u32) -> Option<(f32, f32)> {
+        let tables = self.faces.get(geom_id as usize)?;
+        let [a, b, c] = self.world_vertices(geom_id, prim_id, tables)?;
+        let (e1, e2, d) = (b - a, c - a, p - a);
+        let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+        let (d1, d2) = (d.dot(e1), d.dot(e2));
+        let den = d11 * d22 - d12 * d12;
+        let (u, v) = ((d22 * d1 - d12 * d2) / den, (d11 * d2 - d12 * d1) / den);
+        (u.is_finite() && v.is_finite()).then_some((u, v))
     }
 
     /// The world-space translation the geometry at `geom_id` moves through

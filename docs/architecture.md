@@ -416,9 +416,14 @@ other. The pairs:
   `f32::to_bits` (`AovSource::is_identity`); a new arithmetic step over
   planes skips it. The element maps and primvar sets are side tables beside
   the geometry, never inputs to it: asking for them changes no vertex, and
-  barycentrics are recovered by a sliver re-intersection
-  (`World::barycentrics`) rather than by widening `WorldHit`. An MCP settings
-  refresh that would change which tables the import keeps is `Structural`.
+  barycentrics are solved from the triangle's vertices
+  (`World::barycentrics`) rather than by widening `WorldHit` or tracing
+  again. The integrator records only the first hit's `geom_id` and
+  `prim_id` (in `FirstHit`'s spare bytes); the tables are read by the unit
+  (`UnitAov`). Both rules keep the zero-AOV instruction count: a second
+  caller of the kernel's traversal, or a field on `PathScratch`, each moved
+  it (`aovs/design.md`, "Identity and primvars"). An MCP settings refresh
+  that would change which tables the import keeps is `Structural`.
 
 ## Environment switches
 

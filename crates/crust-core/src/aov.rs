@@ -16,7 +16,7 @@
 //! samples the beauty takes — they draw no random number and change no
 //! weight — so the beauty is bit-identical with or without them.
 
-use glam::Vec3A;
+use glam::{Vec3, Vec3A};
 
 use crate::buffer::Buffer;
 use crate::camera::CameraFrame;
@@ -24,6 +24,7 @@ pub use crate::identity::NameKey;
 use crate::identity::{HitIdentity, NO_ID, NO_NAME, NameTable};
 use crate::matte::{FilmMatte, MatteSample, SPILL, SPILL_NAME, UnitMatte};
 use crate::region::PixelRect;
+use crate::rt_world::World;
 
 /// What a RenderVar computes: one row of the canonical table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -869,7 +870,7 @@ const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
 /// What one camera sample carries for the AOVs besides its first hit: the
 /// light each expression selected, the albedo, and the shutter time it was
 /// traced at. Empty and unused unless the render asks for them.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(crate) struct SampleExtras<'a> {
     pub(crate) lpe: &'a [Vec3A],
     pub(crate) albedo: Vec3A,
@@ -878,12 +879,9 @@ pub(crate) struct SampleExtras<'a> {
     /// The sample's shutter time in `[0, 1)`: 0 unless the scene moves and
     /// motion blur is on. The motion vector rebases the hit by it.
     pub(crate) time: f32,
-    /// What the first hit names ([`HitIdentity::NONE`] off a surface, or
-    /// when no var reads it).
-    pub(crate) identity: HitIdentity,
-    /// Each of [`AovLayout::primvars`] at the first hit, `None` where the
-    /// hit surface does not author it.
-    pub(crate) primvars: &'a [Option<[f32; 4]>],
+    /// The world the sample was traced in, which the identity and primvar
+    /// AOVs look the first hit up in ([`FirstAttrs`]); `None` reads nothing.
+    pub(crate) world: Option<&'a World>,
     /// The sample's radiance, unweighted — what a coloured matte splits
     /// among the ids.
     pub(crate) radiance: Vec3A,
@@ -898,15 +896,25 @@ pub(crate) enum FirstHit {
     /// A volume scatter: a position, but no surface.
     Volume { p: Vec3A },
     /// A camera-visible surface, after cutout pass-through.
+    ///
+    /// `n` and `motion` are `Vec3`, not `Vec3A`, so the hit's ids fit in
+    /// the bytes their fourth lanes took: `FirstHit` keeps its size, and
+    /// [`PathScratch`](crate::tracer) the layout the beauty-only render's
+    /// instruction count was measured with ("Identity and primvars" in the
+    /// `aovs` design record).
     Surface {
         p: Vec3A,
         /// The shading normal (after bump and normal map), facing the ray.
-        n: Vec3A,
+        n: Vec3,
         uv: Option<(f32, f32)>,
         /// The world-space translation the hit geometry moves through over
-        /// the shutter ([`World::motion`](crate::World::motion)); zero when
-        /// it does not move, or when no var asks for the motion vector.
-        motion: Vec3A,
+        /// the shutter ([`World::motion`]); zero when it does not move, or
+        /// when no var asks for the motion vector.
+        motion: Vec3,
+        /// The hit's geometry and primitive: what the identity and primvar
+        /// AOVs look up ([`FirstAttrs`]).
+        geom_id: u32,
+        prim_id: u32,
     },
 }
 
@@ -959,6 +967,7 @@ fn sample_value(
     key: &SlotKey,
     hit: &FirstHit,
     extras: &SampleExtras,
+    attrs: &FirstAttrs,
     cam: &CameraFrame,
     out: &mut [f32; 4],
 ) {
@@ -989,10 +998,10 @@ fn sample_value(
         (AovSource::Peye, FirstHit::Surface { p, .. } | FirstHit::Volume { p }) => {
             put3(out, cam.eye(*p - cam.origin))
         }
-        (AovSource::Normal, FirstHit::Surface { n, .. }) => put3(out, *n),
-        (AovSource::Neye, FirstHit::Surface { n, .. }) => put3(out, cam.eye(*n)),
+        (AovSource::Normal, FirstHit::Surface { n, .. }) => put3(out, (*n).into()),
+        (AovSource::Neye, FirstHit::Surface { n, .. }) => put3(out, cam.eye((*n).into())),
         (AovSource::MotionVector, FirstHit::Surface { p, motion, .. }) => {
-            let (u, v) = motion_vector(cam, *p, *motion, extras.time);
+            let (u, v) = motion_vector(cam, *p, (*motion).into(), extras.time);
             out[0] = u;
             out[1] = v;
         }
@@ -1010,23 +1019,84 @@ fn sample_value(
             FirstHit::Surface { .. },
         ) => {
             let k = key.source.name_key().expect("a named identity").index();
-            if extras.identity.names[k] != NO_NAME {
-                out[0] = f32::from_bits(extras.identity.hashes[k]);
+            if attrs.identity.names[k] != NO_NAME {
+                out[0] = f32::from_bits(attrs.identity.hashes[k]);
             }
         }
-        (AovSource::InstanceId, FirstHit::Surface { .. }) if extras.identity.instance != NO_ID => {
-            out[0] = f32::from_bits(extras.identity.instance);
+        (AovSource::InstanceId, FirstHit::Surface { .. }) if attrs.identity.instance != NO_ID => {
+            out[0] = f32::from_bits(attrs.identity.instance);
         }
-        (AovSource::ElementId, FirstHit::Surface { .. }) if extras.identity.element != NO_ID => {
-            out[0] = f32::from_bits(extras.identity.element);
+        (AovSource::ElementId, FirstHit::Surface { .. }) if attrs.identity.element != NO_ID => {
+            out[0] = f32::from_bits(attrs.identity.element);
         }
         (AovSource::Primvar, FirstHit::Surface { .. }) => {
-            if let Some(Some(v)) = extras.primvars.get(key.primvar as usize) {
+            if let Some(Some(v)) = attrs.primvars.get(key.primvar as usize) {
                 let n = key.width as usize;
                 out[..n].copy_from_slice(&v[..n]);
             }
         }
         _ => {}
+    }
+}
+
+/// What the identity and primvar AOVs read of a sample's first hit: the
+/// names the world's [`Identity`](crate::identity::Identity) gives it, its
+/// authored face, and the render's primvars there. Read by the unit, once
+/// per sample, from the ids [`FirstHit::Surface`] carries — never by the
+/// integrator, so the beauty-only render's path scratch is unchanged.
+#[derive(Debug, Clone, Default)]
+struct FirstAttrs {
+    /// Whether any var reads them.
+    on: bool,
+    identity: HitIdentity,
+    /// Each of [`AovLayout::primvars`] at the hit, `None` where the hit
+    /// surface does not author it.
+    primvars: Vec<Option<[f32; 4]>>,
+}
+
+impl FirstAttrs {
+    fn new(on: bool, primvars: usize) -> Self {
+        FirstAttrs {
+            on,
+            identity: HitIdentity::NONE,
+            primvars: vec![None; primvars],
+        }
+    }
+
+    /// Looks `hit` up in `world`. The barycentrics are solved only when a
+    /// primvar spreads over the face's corners
+    /// ([`World::barycentrics`]).
+    fn read(&mut self, world: &World, hit: &FirstHit) {
+        self.identity = HitIdentity::NONE;
+        self.primvars.fill(None);
+        let FirstHit::Surface {
+            p,
+            geom_id,
+            prim_id,
+            ..
+        } = *hit
+        else {
+            return;
+        };
+        if let Some(names) = world.identity() {
+            self.identity = names.lookup(geom_id);
+        }
+        let Some(geom) = world.aov_geometry(geom_id) else {
+            return;
+        };
+        self.identity.element = geom.element(prim_id);
+        let Some(set) = geom.primvars.as_deref() else {
+            return;
+        };
+        let bary = if geom.needs_barycentrics() {
+            world.barycentrics(p, geom_id, prim_id)
+        } else {
+            None
+        };
+        let at = geom.locate(prim_id, bary);
+        for (i, value) in self.primvars.iter_mut().enumerate() {
+            *value = set.eval(i, at);
+        }
     }
 }
 
@@ -1123,6 +1193,9 @@ pub(crate) struct UnitAov {
     luma: utils::Luma,
     /// The ID mattes' per-pixel entries.
     mattes: Vec<UnitMatte>,
+    /// What the identity, primvar and matte vars read of the current
+    /// sample's first hit.
+    attrs: FirstAttrs,
 }
 
 impl UnitAov {
@@ -1158,6 +1231,7 @@ impl UnitAov {
                 .iter()
                 .map(|&k| UnitMatte::new(k, pixels))
                 .collect(),
+            attrs: FirstAttrs::new(layout.reads_hit_attributes(), layout.primvars.len()),
         }
     }
 
@@ -1172,7 +1246,12 @@ impl UnitAov {
         fy: f32,
         weight: f32,
     ) {
-        let (p, cam) = (self.pixel, &self.cam);
+        if self.attrs.on
+            && let Some(world) = extras.world
+        {
+            self.attrs.read(world, hit);
+        }
+        let (p, cam, attrs) = (self.pixel, &self.cam, &self.attrs);
         let in_box = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
         let mut v = [0.0f32; 4];
         for (slot, planes) in self.slots.iter().zip(&mut self.planes) {
@@ -1183,14 +1262,14 @@ impl UnitAov {
                     // luminance of the weighted colour, as f64. For
                     // `C.*[LO]` the colour is the beauty's bit for bit, so
                     // the moments are too.
-                    sample_value(slot, hit, extras, cam, &mut v);
+                    sample_value(slot, hit, extras, attrs, cam, &mut v);
                     let x = self.luma.of(Vec3A::new(v[0], v[1], v[2]) * weight) as f64;
                     let var = planes.var.as_mut().expect("a unit's variance slot");
                     var.sum[p] += x;
                     var.sq[p] += x * x;
                 }
                 Accumulation::Filtered => {
-                    sample_value(slot, hit, extras, cam, &mut v);
+                    sample_value(slot, hit, extras, attrs, cam, &mut v);
                     if slot.hits_only() {
                         // A sample that saw the quantity has a finite value;
                         // a miss has the (non-finite) clear value.
@@ -1215,7 +1294,7 @@ impl UnitAov {
                         dx * dx + dy * dy
                     };
                     if planes.closer(p, in_box, key) {
-                        sample_value(slot, hit, extras, cam, &mut v);
+                        sample_value(slot, hit, extras, attrs, cam, &mut v);
                         planes.values[p * comps..(p + 1) * comps].copy_from_slice(&v[..comps]);
                         planes.key[p] = key;
                         planes.in_box[p] = in_box;
@@ -1227,7 +1306,7 @@ impl UnitAov {
         // volume scatter covers no name, so its weight is the background's.
         if let FirstHit::Surface { p: at, .. } = hit {
             for matte in &mut self.mattes {
-                let name = extras.identity.names[matte.key().names.index()];
+                let name = attrs.identity.names[matte.key().names.index()];
                 if name != NO_NAME {
                     matte.add(p, name, cam.depth(*at), weight, extras.radiance);
                 }
@@ -1695,8 +1774,7 @@ mod tests {
         albedo: Vec3A::ZERO,
         diffuse_filter: Vec3A::ZERO,
         time: 0.0,
-        identity: HitIdentity::NONE,
-        primvars: &[],
+        world: None,
         radiance: Vec3A::ZERO,
     };
 
@@ -1818,9 +1896,11 @@ mod tests {
         let cam = frame();
         let surface = FirstHit::Surface {
             p: Vec3A::new(0.0, 0.0, -1.0),
-            n: Vec3A::Z,
+            n: Vec3::Z,
             uv: None,
-            motion: Vec3A::ZERO,
+            motion: Vec3::ZERO,
+            geom_id: 0,
+            prim_id: 0,
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
         unit.add(&surface, &NONE, 0.5, 0.5, 3.0);
@@ -2077,9 +2157,11 @@ mod tests {
         let mut unit = UnitAov::new(&layout, frame(), 1);
         let hit = FirstHit::Surface {
             p: Vec3A::new(0.0, 0.0, -1.0),
-            n: Vec3A::Z,
+            n: Vec3::Z,
             uv: None,
-            motion: Vec3A::ZERO,
+            motion: Vec3::ZERO,
+            geom_id: 0,
+            prim_id: 0,
         };
         let samples = [Vec3A::new(1.0, 0.0, 0.0), Vec3A::new(3.0, 0.0, 0.0)];
         for lpe in &samples {
@@ -2115,30 +2197,42 @@ mod tests {
                 p: Vec3A::new(0.0, 0.0, -1.0),
             },
             &NONE,
+            &FirstAttrs::default(),
             &cam,
             &mut out,
         );
         assert_eq!(out[..2], [7.0, 7.0]);
-        sample_value(&key, &FirstHit::Escaped, &NONE, &cam, &mut out);
+        sample_value(
+            &key,
+            &FirstHit::Escaped,
+            &NONE,
+            &FirstAttrs::default(),
+            &cam,
+            &mut out,
+        );
         assert_eq!(out[..2], [7.0, 7.0]);
         let moving = FirstHit::Surface {
             p: Vec3A::new(0.0, 0.0, -2.0),
-            n: Vec3A::Z,
+            n: Vec3::Z,
             uv: None,
-            motion: Vec3A::new(1.0, 0.0, 0.0),
+            motion: Vec3::new(1.0, 0.0, 0.0),
+            geom_id: 0,
+            prim_id: 0,
         };
-        sample_value(&key, &moving, &NONE, &cam, &mut out);
+        sample_value(&key, &moving, &NONE, &FirstAttrs::default(), &cam, &mut out);
         assert!(
             (out[0] - 25.0).abs() < 1e-3 && out[1].abs() < 1e-3,
             "{out:?}"
         );
         let still = FirstHit::Surface {
             p: Vec3A::new(0.0, 0.0, -2.0),
-            n: Vec3A::Z,
+            n: Vec3::Z,
             uv: None,
-            motion: Vec3A::ZERO,
+            motion: Vec3::ZERO,
+            geom_id: 0,
+            prim_id: 0,
         };
-        sample_value(&key, &still, &NONE, &cam, &mut out);
+        sample_value(&key, &still, &NONE, &FirstAttrs::default(), &cam, &mut out);
         assert_eq!(out[..2], [0.0, 0.0]);
     }
 }

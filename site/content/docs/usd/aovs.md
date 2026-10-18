@@ -692,6 +692,13 @@ subdivision scheme, and on the refinement of a triangle or of a larger polygon a
 refined keeps no faces at all: only its `constant` primvars are read, and its
 `elementId` is `-1`.
 
+On a mesh placed by a `PointInstancer`, a mesh of a native instance whose prototype holds
+more than one mesh, or an instance with motion blur, a `vertex`, `varying` or
+`faceVarying` primvar also takes the face's average: Crust Render cannot place the hit
+within the face there without tracing the camera ray again, which would slow every
+render, AOVs or not. `constant` and `uniform` primvars and `elementId` are exact
+everywhere.
+
 ## ID mattes (OpenEXRId)
 
 A `RenderProduct` with `productType = "deepRaster"` writes an ID matte: an

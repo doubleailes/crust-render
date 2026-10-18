@@ -1302,15 +1302,21 @@ it started from; what the build settled, and the traps it met, are here.
   (`aov.primvar_type_mismatch`); an unreadable one is `aov.primvar_unreadable`.
   An `int` primvar is closest by default: the mean of two integers is no
   value the primvar holds.
-- **Barycentrics come from re-intersecting a sliver, not from the hit.**
-  The kernel's hit is `(geom_id, prim_id, t)`; widening `WorldHit` with
-  `(u, v)` would change the hot path's record for every render.
-  `World::barycentrics` re-traces the camera ray over `[t − ε, t + ε]`
-  (`ε = max(1e-4·t, 1e-6)`) and accepts the hit only if it is the same
-  geometry, triangle and placement. It runs only in the AOV instantiation,
-  only at a camera ray's first hit, and only where a var needs to know where
-  in its face the hit lies (a vertex, varying or face-varying primvar).
-  A mirrored bake swaps `(u, v)` as the shading tables already do.
+- **Barycentrics are solved from the triangle's vertices, not taken from
+  the hit.** `WorldHit` carries no `(u, v)`, and widening it would change
+  the hot path's record for every render. `World::barycentrics` solves the
+  hit point in the plane of the triangle's world-space vertices
+  (`world_vertices`, where a hit's tangent frame comes from), in the
+  kernel's own convention and vertex order, so a mirrored bake's swap is
+  undone as for the shading tables. It runs only for a camera sample's first
+  hit, and only where a var needs to know where in its face the hit lies (a
+  vertex, varying or face-varying primvar). Where the vertices cannot be
+  recovered — every `PointInstancer` placement and every native instance of
+  a several-mesh prototype (their hits carry a forwarded slot id, not the
+  placement), and a motion-blurred instance (`VertexSource::Unresolved`) —
+  the face is read at its centre (Known gaps). Pinned to the kernel's own
+  `(u, v)` by `barycentrics_are_the_kernels_through_every_resolvable_placement`
+  (`crates/crust-core/tests/world_material.rs`).
 - **Asking for them changes no geometry.** `want_face_uvs` turns on for an
   element map (the Ptex face table is how a refined triangle finds its cage
   face), which used to be a material's decision; the face table is a side
@@ -1319,9 +1325,28 @@ it started from; what the build settled, and the traps it met, are here.
   `element_maps_change_no_geometry_and_name_cage_faces` (a subdivided mesh)
   and `tiles_and_scanlines_write_the_same_ids_primvars_and_matte`
   (`crates/crust-core/tests/identity.rs`).
-- **The zero-AOV render stays the code it was.** The first-hit reads are one
-  `#[inline(never)]` call (`FirstAttrs::read`) behind `AOV &&
-  first_attrs.on`; the `AOV = false` instantiation does not contain it.
+- **Trap: the zero-AOV render moved twice, with no new work in it.**
+  Callgrind on cornellbox at `-s 2` (one thread) counted +8.5M instructions
+  (+0.20%) for the first build, images bit-identical. Two causes, found by
+  building variants: (1) `World::barycentrics` first re-traced the camera
+  ray over a sliver `[t − ε, t + ε]` — a new caller of the kernel's
+  traversal, which changed `Bvh::hit`'s codegen (+5.1M for the same
+  1,044,079 calls, register spills, its source untouched); (2) the
+  first-hit reads lived on a new `PathScratch` field, which made rustc
+  reorder the whole struct (`-Zprint-type-sizes`: `thin` and `route` moved
+  to the front) and `advance_pixel::<false…>` lose +2.5M to block
+  placement and register allocation. So the integrator records only the
+  hit's `geom_id` and `prim_id`, in `FirstHit::Surface` — whose `n` and
+  `motion` became `Vec3`, so the ids take the bytes their fourth lanes did
+  and `FirstHit` stays 64 bytes and `PathScratch` byte-for-byte the base's
+  — and the unit reads the tables from them (`FirstAttrs`, on `UnitAov`,
+  once per sample in `UnitAov::add`). `UnitAov` growing is harmless: it
+  sits behind an `Option` the beauty-only loop never opens. Measured after:
+  4,263.51M against the base's 4,264.19M (−0.016%), the image bit-identical;
+  `Bvh::hit` and `advance_pixel::<false…>` are the base's instruction for
+  instruction, `World::intersect` −1.39M (its `world_vertices` gained a
+  second caller and LLVM laid it out tighter), the `exr` fork's flat writer
+  +0.46M, and per-unit setup and the import's triangulation +0.08M.
 - **MCP.** A settings refresh that would change the tables the import keeps
   (`(identity(), primvars())` against `StageFacts::aov_tables`) is
   `Structural`: the session re-imports instead of reusing a world without
@@ -1413,6 +1438,12 @@ it started from; what the build settled, and the traps it met, are here.
     constant primvars reach the AOV;
   - gprims other than meshes (implicit shapes, curves, points) read
     constant primvars only, and report `elementId = -1`;
+  - a `vertex`, `varying` or `faceVarying` primvar on a mesh a
+    `PointInstancer` places, on a mesh of a native instance whose prototype
+    holds several meshes, or on a motion-blurred instance, is read at its
+    face's centre: the triangle's world-space vertices cannot be recovered
+    there (`VertexSource::Unresolved`), and asking the kernel again costs
+    the beauty-only render (above);
   - `instanceId` is the placement index of the outermost `PointInstancer`;
     a nested instancer's index is not reported, and a native (scene-graph)
     instance reports `-1`;
