@@ -79,7 +79,7 @@ half = "2.7"
 # config resolves MaterialX / USD colour-space names through its aliases and
 # converts them into the working space (`crust_core::color`). From crates.io
 # (doubleailes/ocio-rs#2); the committed `Cargo.lock` pins the exact version.
-ocio = "0.1.0"
+ocio = "0.2.0"
 # The USD reader and its typed schema views, versioned in lockstep. Declared
 # once so crust-core (the import) and crust-render (the MCP session's override
 # layer, the probe examples) can never name different versions of the stage
