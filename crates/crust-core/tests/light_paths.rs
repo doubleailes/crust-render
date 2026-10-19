@@ -39,7 +39,7 @@ fn fixed(spp: u32) -> impl FnOnce(RenderSettings) -> RenderSettings {
 
 /// The 10×10 pixels at the frame's centre.
 fn centre(r: &Renderer) -> PixelRect {
-    let (w, h) = r.settings.get_dimensions();
+    let (w, h) = r.settings().get_dimensions();
     PixelRect::new(w / 2 - 5, h / 2 - 5, w / 2 + 5, h / 2 + 5)
 }
 
@@ -148,7 +148,7 @@ fn records_rebuild_every_sample_and_pixel() {
 #[test]
 fn clamped_records_sum_to_the_clamped_beauty() {
     let mut r = caustic(256);
-    r.settings = r.settings.with_indirect_clamp(10.0);
+    r.retune(r.settings().with_indirect_clamp(10.0));
     let report = inspect(&mut r, CAUSTIC, GroupBy::ExprLight, 64);
     let c = &report.consistency;
     assert!(
@@ -327,7 +327,7 @@ fn the_region_is_the_frame_bit_for_bit() {
             s.with_resolution(160, 90).with_samples_per_pixel(16)
         });
         let frame = r.render();
-        let (_, h) = r.settings.get_dimensions();
+        let (_, h) = r.settings().get_dimensions();
         let region = centre(&r);
         let report = inspect(&mut r, region, GroupBy::ExprLight, 4);
         assert!(report.reproduces_frame, "{name}");
@@ -338,7 +338,7 @@ fn the_region_is_the_frame_bit_for_bit() {
             assert_eq!(p.beauty.map(f32::to_bits), want, "{name} at {x},{y}");
         }
         // The renderer is left as it was: the frame renders again.
-        assert!(r.settings.is_full_frame());
+        assert!(r.settings().is_full_frame());
     }
     let mut guided = load("cornellbox_guided.usda", |s| {
         s.with_resolution(160, 90).with_samples_per_pixel(4)
@@ -385,7 +385,7 @@ fn every_expression_routes_its_path() {
         crust_core::lpe::Lpe::compile(&[rec.expression.as_str()])
             .unwrap_or_else(|e| panic!("{}: {e}", rec.expression));
     }
-    r.settings = r.settings.with_region(region).expect("inside");
+    r.retune(r.settings().with_region(region).expect("inside"));
     for rec in report.records.iter().take(8) {
         let var = lpe_var(&rec.expression);
         let request = AovRequest {

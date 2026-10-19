@@ -148,7 +148,8 @@ without the other (full list: `docs/architecture.md` § Invariants):
   sides (`PdfSolidAngle::new` → `None`), never replaced by a finite stand-in.
 - Light path expression AOVs reuse the beauty's own recurrence, so their pairs are the
   beauty's: `eval_all` ↔ `eval_split`, `scatter_resolved` ↔ `scatter_split` (one
-  `scatter_with`), `escaped_emission` ↔ `escaped_split`. `C.*[LO]` is pinned bitwise to the
+  `scatter_with`); infinite-light emission and routing share `escaped_split`.
+  `C.*[LO]` is pinned bitwise to the
   beauty, and the zero-AOV render to its instruction count (`docs/architecture.md`).
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; streamed `capped` Ptex ↔

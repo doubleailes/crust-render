@@ -120,7 +120,7 @@ impl Imported {
         let t = ((height - 1 - y) as f32 + 0.5) / height as f32;
         let ray = camera.get_ray(s, t, [0.5, 0.5], 0.0);
         self.renderer
-            .world
+            .world()
             .intersect(&ray, crust_core::TRACE_T_MIN, f32::INFINITY)
             .map(|h| h.geom_id)
     }
@@ -154,17 +154,21 @@ impl Imported {
             .as_ref()
             .ok_or_else(|| Structural("the scene has no provenance".into()))?;
         let update = provenance.rebuild(layer, &*self._assets, &self.rest.warnings, change)?;
-        update.check(&self.renderer.world, &self.renderer.lights)?;
+        update.check(self.renderer.world(), self.renderer.lights())?;
         let args = check_args(layer).map_err(Structural)?;
         // Past the checks nothing refuses: take the renderer apart into the
         // scene it was built from.
         let renderer = Arc::get_mut(&mut self.renderer)
             .ok_or_else(|| Structural("the scene is still held by a render".into()))?;
-        let world = std::mem::replace(&mut renderer.world, WorldBuilder::new().commit());
-        let lights = std::mem::replace(&mut renderer.lights, LightList::new());
-        let volumes = std::mem::take(&mut renderer.volumes).into_regions();
-        let mut scene =
-            Scene::new(renderer.camera, world, lights, self.rest.settings).with_volumes(volumes);
+        let empty = Renderer::new(
+            *renderer.camera(),
+            WorldBuilder::new().commit(),
+            LightList::new(),
+            renderer.settings(),
+        );
+        let (camera, world, lights, _, volumes) = std::mem::replace(renderer, empty).into_parts();
+        let mut scene = Scene::new(camera, world, lights, self.rest.settings)
+            .with_volumes(volumes.into_regions());
         // The report's phases are the import's, then this update's; the
         // next update starts from the import's again.
         let import_stats = std::mem::take(&mut self.rest.stats);

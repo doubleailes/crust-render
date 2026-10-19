@@ -132,12 +132,12 @@ fn reproduces(settings: &RenderSettings) -> Result<(), String> {
 /// to it, as `--region` is.
 pub fn run(renderer: &mut Renderer, region: PixelRect, options: &Options) -> Result<Report, Error> {
     check_request(region, options.group_by, options.top)?;
-    let original = renderer.settings;
+    let original = renderer.settings();
     let (w, h) = original.get_dimensions();
     let settings = original.with_region(region)?;
     // Interned tags: lights sharing one share an `expr` group, as they share
     // its `<L.'tag'>`. A tag a label cannot hold is no tag.
-    let lights = &renderer.lights;
+    let lights = renderer.lights();
     let mut tag_ids: HashMap<&str, u32> = HashMap::new();
     let tags: Arc<[u32]> = (0..lights.count())
         .map(|i| match lights.lpe_tag(i).filter(|t| !t.contains('\'')) {
@@ -186,7 +186,7 @@ pub fn run(renderer: &mut Renderer, region: PixelRect, options: &Options) -> Res
 /// none (or one the importer gave no name).
 fn light_name(renderer: &Renderer, light: u32) -> Option<String> {
     is_light(light)
-        .then(|| renderer.lights.name(light as usize))
+        .then(|| renderer.lights().name(light as usize))
         .flatten()
         .map(str::to_owned)
 }
@@ -197,7 +197,7 @@ fn light_tag(renderer: &Renderer, light: u32) -> Option<&str> {
         return None;
     }
     renderer
-        .lights
+        .lights()
         .lpe_tag(light as usize)
         .filter(|t| !t.contains('\''))
 }

@@ -398,7 +398,7 @@ fn scene_new_and_with_volumes_assemble_a_renderer() {
     );
     let renderer = Renderer::new(scene.camera, scene.world, scene.lights, scene.settings)
         .with_volumes(scene.volumes);
-    assert!(renderer.volumes.is_empty());
+    assert!(renderer.volumes().is_empty());
     let buf = renderer.render();
     assert!(buf.get_pixel(2, 2).x > 0.0);
 }

@@ -135,7 +135,7 @@ impl Open {
             ));
         }
         let dropped = place::drop_prims(
-            &self.scene.renderer.world,
+            self.scene.renderer.world(),
             self.provenance()?,
             prims,
             target,
@@ -253,7 +253,7 @@ impl Open {
             prototypes: prototypes.len() as u32,
             up,
         };
-        let scattered = place::scatter(&self.scene.renderer.world, self.provenance()?, &request)?;
+        let scattered = place::scatter(self.scene.renderer.world(), self.provenance()?, &request)?;
         let name = path.name().unwrap_or_default().to_owned();
         let body = instancer_body(
             &name,
