@@ -9,6 +9,7 @@ under `repro/` and the driver output taken from an actual run.
 | --- | --- | --- |
 | [openusd: prototype does not materialize through a non-root reference](openusd-prototype-through-nested-reference.md) | [mxpv/openusd](https://github.com/mxpv/openusd) | fixed in [0.6.0](https://github.com/mxpv/openusd/releases/tag/v0.6.0) |
 | [openusd: relationship targets lost through a variant inside a prototype](openusd-relationship-targets-lost-through-variant-in-prototype.md) | [mxpv/openusd](https://github.com/mxpv/openusd) | fixed in [0.6.0](https://github.com/mxpv/openusd/releases/tag/v0.6.0) |
+| [crust-render: streaming import drops material bindings across top-level subtrees](streaming-import-cross-chunk-material-binding.md) | crust-render (this repo) | open |
 
 Both were found while adding Ptex support and rendering Disney's Moana Island
 Scene, and both are fixed in openusd 0.6.0, which the workspace now tracks from
