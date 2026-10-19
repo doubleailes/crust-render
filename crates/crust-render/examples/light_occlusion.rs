@@ -208,7 +208,7 @@ fn main() {
         None => scene.settings,
     };
     let r = Renderer::new(scene.camera, scene.world, scene.lights, settings);
-    let (world, lights) = (&r.world, &r.lights);
+    let (world, lights) = (r.world(), r.lights());
     let list = lights.lights();
     let mut stats = vec![PerLight::default(); list.len()];
     let mut receivers = 0u64;
@@ -220,7 +220,7 @@ fn main() {
     for j in 0..gh {
         for i in 0..gw {
             let (u, v) = ((i as f32 + 0.5) / gw as f32, (j as f32 + 0.5) / gh as f32);
-            let ray = r.camera.get_ray(u, v, [0.5, 0.5], 0.0);
+            let ray = r.camera().get_ray(u, v, [0.5, 0.5], 0.0);
             let Some(hit) = world.intersect(&ray, TRACE_T_MIN, f32::INFINITY) else {
                 continue;
             };

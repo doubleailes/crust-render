@@ -2159,7 +2159,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     // only exist in a feature-on build.
     #[cfg(feature = "traversal-stats")]
     if cli.stats || cli.profile {
-        let out = crust_core::traversal_report(&renderer.world, ray_stats.camera_rays);
+        let out = crust_core::traversal_report(renderer.world(), ray_stats.camera_rays);
         info!(target: STATS_TARGET, "{out}");
     }
 

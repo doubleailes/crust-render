@@ -759,77 +759,26 @@ pub(super) fn escaped_emission(
     strategy: SamplingStrategy,
 ) -> Vec3A {
     let mut radiance = Vec3A::ZERO;
-    if lights.escapes_to_backdrop(mask) {
-        // No NEE ever competes for a backdrop — nothing can select it — so
-        // its emission is taken whole, as for any camera ray.
-        for backdrop in lights.backdrops() {
-            if let Some((emitted, _)) = backdrop.escaped(Vec3A::ZERO, direction) {
-                radiance += emitted * strategy.unopposed_weight();
-            }
-        }
-        return radiance;
-    }
-    if lights.count() == 0 {
-        return radiance;
-    }
-    // As on the bounce-hit path, a delta or non-evaluable previous vertex
-    // means NEE could not have found this light, so there is no competing
-    // strategy and the emission is taken whole.
-    let competing = match prev {
-        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.from, p.pdf, p.nee_count)),
-        Some(PrevVertex::Phase {
-            pos,
-            pdf,
-            nee_count,
-            ..
-        }) => Some((Receiver::at(*pos), *pdf, *nee_count)),
-        // Primary rays, and rays leaving a carried-medium scatter, run no
-        // NEE — full weight, exactly as `prev = None` means elsewhere.
-        None => None,
-    };
-    // The receiver whose light links apply: the surface or volume region
-    // the ray left. The camera has none, and sees every light.
-    let class = match prev {
-        Some(PrevVertex::Surface(p)) => p.class,
-        Some(PrevVertex::Phase { class, .. }) => *class,
-        None => EVERY_CLASS,
-    };
-    let from = competing.map_or(Receiver::at(Vec3A::ZERO), |(r, _, _)| r);
-    // The pmf at the vertex the escaping ray left: the one its NEE picked with.
-    // Only lights at infinity can answer `escaped`; the rest are skipped.
-    for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
-        if !lights.illuminates(index, class) {
-            continue;
-        }
-        // The link twin's, or NEE's alone, at a continuous vertex (see
-        // `bounce_emission_weight`).
-        if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
-            continue;
-        }
-        let Some((emitted, pdf)) = light.escaped(from.p, direction) else {
-            continue;
-        };
-        let weight = match (competing, pdf) {
-            (Some((_, bounce_pdf, count)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
-                let light_pdf = lights.density(pdf, pmf, count).max(1e-6);
-                strategy.bounce_weight(bounce_pdf, light_pdf)
-            }
-            // No NEE ran for this vertex, the strategy does not sample lights
-            // at all, the selection never picks this one, or the light never
-            // samples this direction: nothing competes.
-            _ => strategy.unopposed_weight(),
-        };
-        radiance += emitted * weight;
-    }
+    escaped_split(
+        prev,
+        lights,
+        direction,
+        mask,
+        strategy,
+        |_, contribution| {
+            radiance += contribution;
+        },
+    );
     radiance
 }
 
-/// [`escaped_emission`], one light at a time: `f(light, contribution)` for
-/// each light at infinity it adds (`None` for a backdrop), in its order, so
-/// the contributions sum to its result bit for bit (the AOV instantiation
-/// asserts it in debug builds). The light-path-expression routing's view of
-/// an escape: each light's share ends an `L` event with that light's tag.
-/// A pair with `escaped_emission`: change one, change both.
+/// Each infinite light's MIS-weighted contribution, in accumulation order:
+/// the single traversal used by both the beauty and light-path routing.
+/// `None` names a backdrop, which no light sampler can select.
+///
+/// Forced inline so the beauty's addition remains in the integrator, with
+/// no callback dispatch or routing work in a beauty-only render.
+#[inline(always)]
 fn escaped_split(
     prev: &Option<PrevVertex>,
     lights: &LightList,
@@ -839,6 +788,7 @@ fn escaped_split(
     mut f: impl FnMut(Option<usize>, Vec3A),
 ) {
     if lights.escapes_to_backdrop(mask) {
+        // Camera backdrops are never selected by NEE.
         for backdrop in lights.backdrops() {
             if let Some((emitted, _)) = backdrop.escaped(Vec3A::ZERO, direction) {
                 f(None, emitted * strategy.unopposed_weight());
@@ -849,6 +799,8 @@ fn escaped_split(
     if lights.count() == 0 {
         return;
     }
+    // Primary rays, carried-medium scatters and delta bounces have no
+    // competing continuous light sample, and keep emission whole.
     let competing = match prev {
         Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.from, p.pdf, p.nee_count)),
         Some(PrevVertex::Phase {
@@ -859,6 +811,7 @@ fn escaped_split(
         }) => Some((Receiver::at(*pos), *pdf, *nee_count)),
         None => None,
     };
+    // A bounce inherits the light links of the receiver it left.
     let class = match prev {
         Some(PrevVertex::Surface(p)) => p.class,
         Some(PrevVertex::Phase { class, .. }) => *class,
@@ -869,6 +822,8 @@ fn escaped_split(
         if !lights.illuminates(index, class) {
             continue;
         }
+        // A restricted light's continuous bounce share belongs to its
+        // link twin, or to NEE alone, so it cannot also be collected here.
         if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
             continue;
         }
@@ -880,6 +835,7 @@ fn escaped_split(
                 let light_pdf = lights.density(pdf, pmf, count).max(1e-6);
                 strategy.bounce_weight(bounce_pdf, light_pdf)
             }
+            // No NEE, zero selection probability or an unsampled direction.
             _ => strategy.unopposed_weight(),
         };
         f(Some(index), emitted * weight);
@@ -3150,7 +3106,7 @@ pub(super) fn trace_path<
             // With light path expressions, each light's share is routed by
             // its own `L`, and the background is their sum — the additions
             // `escaped_emission` makes, in its order, so bit for bit its
-            // answer (asserted in debug builds) without evaluating every
+            // answer through the same traversal, without evaluating every
             // light at infinity twice.
             let background = if let Some(ctx) = routing {
                 route.escape_lights_begin();
@@ -3165,15 +3121,7 @@ pub(super) fn trace_path<
                         route.escape_light(sym, light.map_or(NO_LIGHT, |i| i as u32), e);
                     },
                 );
-                let total = route.escaped_total();
-                debug_assert!(
-                    total.to_array().map(f32::to_bits)
-                        == escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy)
-                            .to_array()
-                            .map(f32::to_bits),
-                    "escaped_split must sum to escaped_emission"
-                );
-                total
+                route.escaped_total()
             } else {
                 escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy)
             };

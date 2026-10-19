@@ -385,7 +385,7 @@ impl Open {
             )),
             camera: self.scene.report.scene.camera.clone(),
         };
-        let own = renderer.settings;
+        let own = renderer.settings();
         renderer.retune(job.settings);
         let report = inspect::run(renderer, rect, &options);
         renderer.retune(own);

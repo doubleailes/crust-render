@@ -367,7 +367,7 @@ fn shoot(renderer: &mut Renderer, settings: RenderSettings) -> (Shot, Measured) 
         },
     );
     let rect = settings.region().flip_y(settings.get_dimensions().1);
-    let lum = luminance(&m, rect, renderer.lights.luma());
+    let lum = luminance(&m, rect, renderer.lights().luma());
     let (selection_s, training_s) = setup_parts(settings, selection, m.setup_s);
     let shot = Shot {
         image: CropImage {

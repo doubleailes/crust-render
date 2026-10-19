@@ -753,6 +753,7 @@ fn retune_renders_what_new_renders() {
         (at16, true),
         (cropped, true),
         (at16.with_resolution(32, 24), false),
+        (at16.with_frame(1), false),
         (at16.with_light_selection(LightSelection::Power), false),
     ];
     for (k, (s, kept)) in cases.into_iter().enumerate() {

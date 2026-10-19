@@ -123,15 +123,15 @@ fn same(a: &Buffer, b: &Buffer, w: usize, h: usize) -> bool {
 #[test]
 fn the_sealed_light_is_predicted_hidden() {
     let r = scene_at(LightSelection::Neural, 1, 256, 144);
-    assert_eq!(r.lights.selection(), LightSelection::Neural);
+    assert_eq!(r.lights().selection(), LightSelection::Neural);
     let power = scene(LightSelection::Power, 1);
-    let cache = r.lights.visibility_cache().expect("trained");
+    let cache = r.lights().visibility_cache().expect("trained");
     let p = Vec3A::new(-1.0, 0.0, 1.0);
     let v = cache.visibility(p).expect("the floor is inside the bounds");
     assert!(v[1] < 0.1, "the sealed light: V̂ {}", v[1]);
     // Not yet saturated after the few steps a small frame trains for.
     assert!(v[0] > 0.75, "the visible light: V̂ {}", v[0]);
-    let (sealed, by_power) = (r.lights.pmf_at(p, 1), power.lights.pmf_at(p, 1));
+    let (sealed, by_power) = (r.lights().pmf_at(p, 1), power.lights().pmf_at(p, 1));
     assert!(
         by_power > 0.4,
         "power favours the sealed light ({by_power})"
@@ -150,7 +150,7 @@ fn the_sealed_light_is_predicted_hidden() {
 #[test]
 fn both_mis_sides_read_the_same_bits() {
     let r = scene(LightSelection::Neural, 1);
-    let lights = &r.lights;
+    let lights = r.lights();
     let cache = lights.visibility_cache().expect("trained");
     let elsewhere = Vec3A::new(1.7, 0.0, -2.3);
     let bits = |v: f32| v.to_bits();
@@ -201,12 +201,12 @@ fn both_mis_sides_read_the_same_bits() {
     for index in 0..3 {
         assert_eq!(
             bits(lights.pmf_at(far, index)),
-            bits(power.lights.pmf(index))
+            bits(power.lights().pmf(index))
         );
     }
     assert_eq!(
         bits(lights.infinite_at(far).next().unwrap().1),
-        bits(power.lights.pmf(2))
+        bits(power.lights().pmf(2))
     );
 }
 
@@ -286,7 +286,7 @@ fn row_of_lights(count: usize, selection: LightSelection) -> (Buffer, LightSelec
             lights,
             settings(selection, 24, 24, 16),
         );
-        (r.render(), r.lights.selection())
+        (r.render(), r.lights().selection())
     });
     let warnings = warnings.lock().unwrap().clone();
     (image, picked, warnings)
@@ -375,5 +375,5 @@ def Scope "Render"
     let scene = Scene::from_usd(&path).expect("stage");
     assert_eq!(scene.settings.light_selection(), LightSelection::Neural);
     let r = Renderer::new(scene.camera, scene.world, scene.lights, scene.settings);
-    assert_eq!(r.lights.selection(), LightSelection::Neural);
+    assert_eq!(r.lights().selection(), LightSelection::Neural);
 }

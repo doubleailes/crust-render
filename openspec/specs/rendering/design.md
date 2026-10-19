@@ -389,6 +389,19 @@ consumed as ordinary dependencies:
    and `renders/foo.png`. Tone mapping and PNG encoding live in `main.rs`; the engine
    crate only produces the `Buffer`.
 
+## Renderer state and light-selection lifetime
+
+`Renderer` keeps its camera, world, lights, settings and volumes private. Its
+accessors return a settings copy or shared references; settings updates go
+through `reconfigure` (always rebuild selection) or `retune` (reuse only when
+the selection strategy, resolution and frame are unchanged). A host editing
+scene parts consumes `into_parts` and constructs a new renderer, preserving
+geometry and assets while rebuilding selection for the edited scene.
+
+Infinite-light emission has one traversal, `escaped_split`, shared by the
+beauty sum and light-path routing. It owns the camera visibility, links,
+selection density and MIS weight, in the same accumulation order for both.
+
 ## Adaptive sampling
 
 The final pass stops a pixel once the relative standard error of its mean

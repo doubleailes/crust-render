@@ -83,7 +83,8 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
  │       │     assets decode through AssetLoader (timed as "Load assets")
  │       ├─ mesh::flush_meshes               bake-once vs instance, now that counts are final
  │       └─ WorldBuilder::commit             top-level SBVH (crust-rt)
- ├─ Renderer::new(scene)                     light selection table, optional learned cache or visibility network
+ ├─ Renderer::new(camera, world, lights, settings)
+ │                                          light selection table, optional learned cache or visibility network
  ├─ Renderer::render_with_control(tiled, progress, aovs, &control)
  │  (the CLI's call; render_with_stats / render_with_aovs are the same render without a control)
  │   ├─ first sweep in stages 1, 2, 4, … spp, then adaptive rounds; each unit publishes
@@ -236,6 +237,11 @@ other. The pairs:
   material property the import bakes into geometry or a world flag belongs in
   `Signature`. Pinned per class, undo included, by
   `edits_in_place_render_as_a_full_import` (`crust-render/src/mcp/tests.rs`).
+- **Renderer state is read-only to callers.** `settings()`, `camera()`, `world()`,
+  `lights()` and `volumes()` expose values or shared references, never mutable
+  scene state. Settings changes use `reconfigure` or `retune`; camera, world
+  and light edits consume `into_parts` and construct a new renderer, so a
+  cached light selection cannot outlive the scene it was built for.
 - **`Renderer::new` ↔ `Renderer::reconfigure`.** `new` is `reconfigure` on a
   fresh renderer, and `reconfigure` rebuilds everything that depends on the
   settings (the light selection, the `learned` or `neural` pre-pass); every other setting
@@ -362,15 +368,15 @@ other. The pairs:
   gather (`tracer/route.rs`) re-evaluates the beauty's backward recurrence
   per expression and reuses its totals wherever the lobes agree for that
   expression, so `C.*[LO]` is the beauty bit for bit
-  (`the_full_path_expression_is_the_beauty_bitwise`). Three pairs keep that
+  (`the_full_path_expression_is_the_beauty_bitwise`). These relationships keep that
   true: `eval_all` ↔ `eval_split` (OpenPBR's per-lobe summands, pinned to
   rounding by `the_lobe_split_sums_to_eval_within_rounding`) and the closure's
   `eval_pdf` ↔ `eval_lobes` (pinned bitwise); `scatter_resolved` ↔
   `scatter_split`, one generic `scatter_with` so the split is taken at the
   *local* direction drawn (a world round trip moves a zero-roughness lobe's
-  value by 0.2%); `escaped_emission` ↔ `escaped_split` (asserted bitwise in
-  debug builds). The indirect clamp's factor is the beauty's, applied to
-  every expression's continuation.
+  value by 0.2%); `escaped_emission` sums `escaped_split`'s single traversal.
+  The indirect clamp's factor is the beauty's, applied to every expression's
+  continuation.
 - **The light path inspector's records ↔ the beauty.** `Route::fold`
   (`tracer/route.rs`) walks the same recurrence forward and hands out one
   record per term that ends on emission — `segment_emit`, `emit_here`, each

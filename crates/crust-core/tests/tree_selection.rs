@@ -132,7 +132,7 @@ fn moments(r: &Renderer, list: &LightList, s: SamplingStrategy, n: i32) -> (f64,
     for i in 0..n {
         let v = ray_color(
             &ray,
-            &r.world,
+            r.world(),
             list,
             &volumes,
             3,
@@ -150,7 +150,7 @@ fn moments(r: &Renderer, list: &LightList, s: SamplingStrategy, n: i32) -> (f64,
 #[test]
 fn the_tree_is_installed() {
     let (r, _) = scene(LightSelection::Tree, 1);
-    assert_eq!(r.lights.selection(), LightSelection::Tree);
+    assert_eq!(r.lights().selection(), LightSelection::Tree);
 }
 
 /// Light-only, BSDF-only and MIS estimates of a floor point agree under the
@@ -168,7 +168,7 @@ fn the_strategies_agree_on_a_lit_floor() {
         SamplingStrategy::LightOnly,
         SamplingStrategy::BsdfOnly,
     ] {
-        let (mean, var) = moments(&r, &r.lights, s, n);
+        let (mean, var) = moments(&r, r.lights(), s, n);
         let (_, var_power) = moments(&r, &by_power, s, n);
         eprintln!(
             "{s:?}: tree {mean:.5} against power-MIS {reference:.5}; variance ratio tree / power {:.3}",
@@ -223,13 +223,13 @@ fn a_light_below_an_opaque_floor_keeps_only_its_defensive_share() {
     let below = 3;
     let share = crust_core::TREE_DEFENSIVE_SHARE * by_power.pmf(below);
     assert!(
-        (r.lights.pmf_at(floor, below) - share).abs() < 1e-7,
+        (r.lights().pmf_at(floor, below) - share).abs() < 1e-7,
         "{} against {share}",
-        r.lights.pmf_at(floor, below)
+        r.lights().pmf_at(floor, below)
     );
     // A transmissive floor sees it.
     let glass = crust_core::Receiver::surface(floor.p, Vec3A::Y, false);
-    assert!(r.lights.pmf_at(glass, below) > 1.5 * share);
+    assert!(r.lights().pmf_at(glass, below) > 1.5 * share);
     // The near light above it gets more than power gives it.
-    assert!(r.lights.pmf_at(floor, 0) > by_power.pmf(0));
+    assert!(r.lights().pmf_at(floor, 0) > by_power.pmf(0));
 }
