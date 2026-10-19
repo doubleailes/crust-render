@@ -202,12 +202,12 @@ fn main() {
     let (gw, gh) = grid;
     let mut receivers = Vec::new();
     {
-        let (world, lights) = (&r.world, &r.lights);
+        let (world, lights) = (r.world(), r.lights());
         let n = lights.count().max(1);
         for j in 0..gh {
             for i in 0..gw {
                 let (u, v) = ((i as f32 + 0.5) / gw as f32, (j as f32 + 0.5) / gh as f32);
-                let ray = r.camera.get_ray(u, v, [0.5, 0.5], 0.0);
+                let ray = r.camera().get_ray(u, v, [0.5, 0.5], 0.0);
                 let Some(hit) = world.intersect(&ray, TRACE_T_MIN, f32::INFINITY) else {
                     continue;
                 };
@@ -237,7 +237,7 @@ fn main() {
         "{}: {} lights, {calls} receivers ({gw}x{gh} grid), {rays} shadow rays, \
          {repeat} runs, one thread, ns per call (min / mean)\n",
         path.display(),
-        r.lights.count(),
+        r.lights().count(),
     );
     if calls == 0 {
         eprintln!("no receivers: the camera sees nothing");
@@ -253,29 +253,33 @@ fn main() {
             1
         }
     };
-    let power = time(timed("power"), calls, || phase_power(&r.lights, &receivers));
-    let shadow = time(timed("shadow"), rays, || phase_shadow(&r.world, &receivers));
+    let power = time(timed("power"), calls, || {
+        phase_power(r.lights(), &receivers)
+    });
+    let shadow = time(timed("shadow"), rays, || {
+        phase_shadow(r.world(), &receivers)
+    });
 
     let setup = r.reconfigure(base.with_light_selection(LightSelection::Learned));
-    let learned_on = r.lights.selection() == LightSelection::Learned;
+    let learned_on = r.lights().selection() == LightSelection::Learned;
     let learned = time(timed("learned"), calls, || {
-        phase_learned(&r.lights, &receivers)
+        phase_learned(r.lights(), &receivers)
     });
     let learned_setup = setup;
 
     let setup = r.reconfigure(base.with_light_selection(LightSelection::Neural));
-    let neural_on = r.lights.selection() == LightSelection::Neural;
+    let neural_on = r.lights().selection() == LightSelection::Neural;
     if !neural_on {
         eprintln!("neural selection fell back to power (see the log): nothing to time");
         std::process::exit(1);
     }
     let neural = time(timed("neural"), calls, || {
-        phase_neural(&r.lights, &receivers)
+        phase_neural(r.lights(), &receivers)
     });
     let both = time(timed("both"), calls, || {
-        phase_pick_then_shadow(&r.world, &r.lights, &receivers)
+        phase_pick_then_shadow(r.world(), r.lights(), &receivers)
     });
-    let cache = r.lights.visibility_cache().expect("neural is installed");
+    let cache = r.lights().visibility_cache().expect("neural is installed");
 
     let row = |name: &str, (min, mean): (f64, f64)| {
         println!("  {name:<22} {min:>9.1} {mean:>9.1}");

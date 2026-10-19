@@ -236,7 +236,7 @@ impl Renders {
             settings,
             aovs,
             working_space,
-            camera: scene.camera,
+            camera: *scene.camera(),
             geometry,
             layer,
             started: Instant::now(),

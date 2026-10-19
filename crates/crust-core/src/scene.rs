@@ -9,8 +9,9 @@ use crate::warning;
 
 /// The renderer's runtime scene, produced from a USD stage
 /// (`Scene::from_usd`) or assembled by hand (`Scene::new`, e.g. from the
-/// procedural `world::simple_scene`). `Renderer::new` consumes this
-/// directly. `world` is a committed [`World`] — kernel scene plus the
+/// procedural `world::simple_scene`). Its camera, world, lights and settings
+/// construct a [`crate::Renderer`]; attach its volumes with `with_volumes`.
+/// `world` is a committed [`World`] — kernel scene plus the
 /// per-geometry material table.
 pub struct Scene {
     pub camera: Camera,

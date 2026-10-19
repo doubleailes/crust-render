@@ -1694,7 +1694,7 @@ fn session_vertices(state: &mut State, prim: &str) -> Vec<DVec3> {
     for ids in prov.geometry_of(prim) {
         open.scene
             .renderer
-            .world
+            .world()
             .visit(ids, RayMask::CAMERA, |_, piece| {
                 if let Piece::Triangle(vs) = piece {
                     out.extend(vs.map(|v| v.as_dvec3()));
@@ -1788,7 +1788,7 @@ fn a_drop_lands_only_on_its_target_and_on_uneven_ground() {
     let open = state.session().unwrap();
     let prov = open.scene.provenance().unwrap();
     let terrain = prov.geometry_of("/World/terrain");
-    let world = &open.scene.renderer.world;
+    let world = open.scene.renderer.world();
     let gaps: Vec<f64> = rock
         .iter()
         .filter_map(|v| {

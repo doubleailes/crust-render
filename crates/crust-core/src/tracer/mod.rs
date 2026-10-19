@@ -289,20 +289,71 @@ impl PartialPass {
     }
 }
 
+/// A scene configured for rendering. Its parts are read-only through the
+/// accessors: settings changes must rebuild or preserve light selection
+/// through [`Self::reconfigure`] or [`Self::retune`]. To edit the camera,
+/// geometry or lights, consume it with [`Self::into_parts`] and rebuild.
+///
+/// Direct assignment cannot bypass light-selection invalidation:
+/// ```compile_fail
+/// fn change_frame(renderer: &mut crust_core::Renderer) {
+///     renderer.settings = renderer.settings().with_frame(1);
+/// }
+/// ```
 pub struct Renderer {
-    pub camera: Camera,
+    camera: Camera,
     /// The committed world: the `crust-rt` kernel scene plus the material
     /// table hits resolve through (by `geom_id`).
-    pub world: World,
-    pub lights: LightList,
-    pub settings: RenderSettings,
+    world: World,
+    lights: LightList,
+    settings: RenderSettings,
     /// Participating-media regions, sampled outside the BVH (see
     /// `volume.rs`). Empty for scenes without volumes — every volume code
     /// path short-circuits then.
-    pub volumes: Volumes,
+    volumes: Volumes,
 }
 
 impl Renderer {
+    /// The settings currently used by this renderer. Change them through
+    /// [`Self::reconfigure`] or [`Self::retune`] so cached light selection
+    /// stays consistent with the render.
+    pub fn settings(&self) -> RenderSettings {
+        self.settings
+    }
+
+    /// The camera used to render and to train visibility-aware light selection.
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    /// The committed geometry and its material table, read-only while rendering.
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    /// The lights and the selection built for this scene and these settings.
+    pub fn lights(&self) -> &LightList {
+        &self.lights
+    }
+
+    /// The participating-media regions attached to this renderer.
+    pub fn volumes(&self) -> &Volumes {
+        &self.volumes
+    }
+
+    /// Consumes the renderer to recover its camera, world, lights, settings
+    /// and volumes without copying geometry or assets. After editing the
+    /// parts, build a new renderer so its light selection is rebuilt too.
+    pub fn into_parts(self) -> (Camera, World, LightList, RenderSettings, Volumes) {
+        (
+            self.camera,
+            self.world,
+            self.lights,
+            self.settings,
+            self.volumes,
+        )
+    }
+
     /// Records the material and light breakdowns of what will render into
     /// `stats` (its `materials` and `light_kinds`).
     pub fn inventory_into(&self, stats: &mut RenderStats) {
