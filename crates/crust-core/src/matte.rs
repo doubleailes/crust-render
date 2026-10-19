@@ -204,7 +204,8 @@ impl FilmMatte {
     /// shares (`weights[k] / total`, as [`crate::AovFilm`] blends its
     /// planes): each name's share is the same linear combination of passes
     /// as the beauty, and its depth the mean of the passes' weighted by the
-    /// share of coverage each gave it.
+    /// share of coverage each gave it. Passes that saw different names keep
+    /// [`MAX_NAMES_PER_PIXEL`]: names past it join the spill, as in a unit.
     pub(crate) fn blend(films: &[&FilmMatte], weights: &[f64], total: f64) -> FilmMatte {
         let first = films.first().expect("at least one pass");
         let mut out = FilmMatte::new(first.key, first.spans.len());
@@ -218,20 +219,32 @@ impl FilmMatte {
                 }
                 for s in film.pixel(q) {
                     let zw = share * f64::from(s.value[3].abs());
-                    let at = match merged.iter().position(|(m, _, _)| m.name == s.name) {
+                    let fresh = |name| {
+                        (
+                            MatteSample {
+                                name,
+                                value: [0.0; 4],
+                                z: 0.0,
+                            },
+                            0.0,
+                            0.0,
+                        )
+                    };
+                    let find = |name| merged.iter().position(|(m, _, _)| m.name == name);
+                    let at = match find(s.name) {
                         Some(i) => i,
-                        None => {
-                            merged.push((
-                                MatteSample {
-                                    name: s.name,
-                                    value: [0.0; 4],
-                                    z: 0.0,
-                                },
-                                0.0,
-                                0.0,
-                            ));
+                        None if merged.len() + 1 < MAX_NAMES_PER_PIXEL => {
+                            merged.push(fresh(s.name));
                             merged.len() - 1
                         }
+                        // Full: the last slot is the spill's.
+                        None => match find(SPILL) {
+                            Some(i) => i,
+                            None => {
+                                merged.push(fresh(SPILL));
+                                merged.len() - 1
+                            }
+                        },
                     };
                     let (m, z, w) = &mut merged[at];
                     for (d, v) in m.value.iter_mut().zip(s.value) {
@@ -286,6 +299,30 @@ mod tests {
         names: NameKey::Prim,
         color: true,
     };
+
+    /// Two passes that each saw 63 names of their own hold 126 between
+    /// them: the blend keeps the cap, the rest going to the spill, and the
+    /// coverage still sums to the passes' blend.
+    #[test]
+    fn blended_passes_keep_the_name_cap() {
+        let pass = |first: u32| {
+            let mut unit = UnitMatte::new(KEY, 1);
+            for name in first..first + 63 {
+                unit.add(0, name, 1.0 + name as f32, 1.0, Vec3A::ONE);
+            }
+            let mut film = FilmMatte::new(KEY, 1);
+            film.store(&unit, 0, 0, 63.0, 63);
+            film
+        };
+        let (a, b) = (pass(0), pass(1000));
+        assert_eq!(a.pixel(0).len(), 63);
+        let blended = FilmMatte::blend(&[&a, &b], &[1.0, 1.0], 2.0);
+        let samples = blended.pixel(0);
+        assert_eq!(samples.len(), MAX_NAMES_PER_PIXEL);
+        assert_eq!(samples.iter().filter(|s| s.name == SPILL).count(), 1);
+        let coverage: f32 = samples.iter().map(|s| s.value[3]).sum();
+        assert!((coverage - 1.0).abs() < 1e-5, "{coverage}");
+    }
 
     #[test]
     fn coverage_is_the_filter_weight_share_and_samples_sort_by_depth() {

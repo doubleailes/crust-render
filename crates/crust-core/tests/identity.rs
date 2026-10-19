@@ -744,3 +744,227 @@ fn element_maps_change_no_geometry_and_name_cage_faces() {
         ]
     );
 }
+
+/// A constant primvar authored on a native instance prim reaches the
+/// prototype's geometry under it, per placement — `FindPrimvarWithInheritance`
+/// on the instance proxy — through a nested instance too, and a primvar the
+/// prototype's own geometry authors still wins over the instance's.
+#[test]
+fn instances_hand_their_constant_primvars_to_their_prototype() {
+    let products = r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/prim>, </Render/colour>]
+    }
+    def RenderVar "prim"
+    {
+        uniform string sourceName = "primId"
+    }
+    def RenderVar "colour"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "displayColor"
+        uniform token sourceType = "primvar"
+    }
+}
+"#;
+    let scene = load_text(
+        "instance_primvars",
+        &format!(
+            r#"#usda 1.0
+class Xform "Proto"
+{{
+    def Mesh "Box"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }}
+    def Mesh "Painted"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 1), (1, 0, 1), (0, 1, 1)]
+        color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]
+    }}
+}}
+
+class Xform "Outer"
+{{
+    def Xform "Inner" (
+        instanceable = true
+        references = </Proto>
+    )
+    {{
+    }}
+}}
+
+def Xform "World"
+{{
+    def Xform "A" (
+        instanceable = true
+        references = </Proto>
+    )
+    {{
+        color3f[] primvars:displayColor = [(1, 0, 0)]
+    }}
+    def Xform "B" (
+        instanceable = true
+        references = </Proto>
+    )
+    {{
+        color3f[] primvars:displayColor = [(0, 1, 0)]
+        double3 xformOp:translate = (3, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Xform "C" (
+        instanceable = true
+        references = </Outer>
+    )
+    {{
+        color3f[] primvars:displayColor = [(0, 0, 1)]
+        double3 xformOp:translate = (6, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+}}
+{products}"#
+        ),
+    );
+    let world = &scene.world;
+    let names = world.identity().expect("primId keeps the names");
+    let mut seen: Vec<(String, [f32; 3])> = Vec::new();
+    for geom_id in 0..64 {
+        let Some(geom) = world.aov_geometry(geom_id) else {
+            continue;
+        };
+        let Some(set) = geom.primvars.as_deref() else {
+            continue;
+        };
+        let hit = names.lookup(geom_id);
+        let index = hit.names[crust_core::NameKey::Prim.index()];
+        let Some(name) = names.names(crust_core::NameKey::Prim).name(index) else {
+            continue;
+        };
+        let v = set.eval(0, None).expect("a value");
+        seen.push((name.to_owned(), [v[0], v[1], v[2]]));
+    }
+    seen.sort_by(|a, b| a.0.cmp(&b.0).then(a.1[0].total_cmp(&b.1[0])));
+    assert_eq!(
+        seen,
+        [
+            ("/World/A".to_owned(), [0.5, 0.5, 0.5]),
+            ("/World/A".to_owned(), [1.0, 0.0, 0.0]),
+            ("/World/B".to_owned(), [0.0, 1.0, 0.0]),
+            ("/World/B".to_owned(), [0.5, 0.5, 0.5]),
+            ("/World/C".to_owned(), [0.0, 0.0, 1.0]),
+            ("/World/C".to_owned(), [0.5, 0.5, 0.5]),
+        ]
+    );
+}
+
+/// A material inside a nested native prototype is named by its own
+/// instance-proxy path, nested instance included: two prototypes that each
+/// bind a material at the same prototype-relative path keep two names, and
+/// two `materialId`s.
+#[test]
+fn nested_prototype_materials_keep_their_own_names() {
+    let material = |name: &str| {
+        format!(
+            r#"def Scope "Looks"
+    {{
+        def Material "M"
+        {{
+            token outputs:surface.connect = </{name}/Looks/M/S.outputs:surface>
+            def Shader "S"
+            {{
+                uniform token info:id = "UsdPreviewSurface"
+                token outputs:surface
+            }}
+        }}
+    }}"#
+        )
+    };
+    let tri = |name: &str, z: f32, looks: &str| {
+        format!(
+            r#"def Mesh "{name}" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, {z}), (1, 0, {z}), (0, 1, {z})]
+        rel material:binding = <{looks}/Looks/M>
+    }}"#
+        )
+    };
+    let stage = format!(
+        r#"#usda 1.0
+class Xform "ChairProto"
+{{
+    {chair_looks}
+    {seat}
+}}
+
+class Xform "HouseProto"
+{{
+    {house_looks}
+    {wall}
+    def Xform "Chair" (
+        instanceable = true
+        references = </ChairProto>
+    )
+    {{
+    }}
+}}
+
+def Xform "World"
+{{
+    def Xform "house" (
+        instanceable = true
+        references = </HouseProto>
+    )
+    {{
+    }}
+}}
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/p>]
+    }}
+    def RenderProduct "p"
+    {{
+        token productName = "p.exr"
+        rel orderedVars = [</Render/mat>]
+    }}
+    def RenderVar "mat"
+    {{
+        uniform string sourceName = "materialId"
+    }}
+}}
+"#,
+        chair_looks = material("ChairProto"),
+        seat = tri("Seat", 1.0, "/ChairProto"),
+        house_looks = material("HouseProto"),
+        wall = tri("Wall", 0.0, "/HouseProto"),
+    );
+    let scene = load_text("nested_materials", &stage);
+    let names = scene.world.identity().expect("materialId keeps the names");
+    let table = names.names(crust_core::NameKey::Material);
+    let mut seen: Vec<&str> = (0..table.len() as u32)
+        .filter_map(|i| table.name(i))
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(seen, ["/World/house/Chair/Looks/M", "/World/house/Looks/M"]);
+}

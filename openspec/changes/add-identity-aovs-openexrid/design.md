@@ -67,7 +67,8 @@ baked per vertex: D8.)
 
 ### D5. As built: the deep writer is a fork of `exr`
 
-`github.com/doubleailes/exrs`, branch `claude/awesome-fermat-41ixgg`, patched
+`github.com/doubleailes/exrs` at commit `a7a2a626` (its branch
+`claude/awesome-fermat-41ixgg`, pinned by `rev`), patched
 over `exr` 1.74 in the workspace `Cargo.toml` and allowed as a git source in
 `deny.toml`. It reads and writes deep scanline images in safe Rust, so the
 in-tree writer was not needed. When upstream `exr` reads and writes deep

@@ -434,6 +434,10 @@ pub struct PrimvarSet {
     pub vars: Vec<Option<PrimvarData>>,
     /// The mesh's faces, when one of `vars` is read per face or per corner.
     pub topology: Option<Arc<CageTopology>>,
+    /// The indices of `vars` the prim's own ancestors left open: nothing up
+    /// to a native prototype's root says anything, so the prim that places
+    /// the prototype decides. Empty off a prototype.
+    pub open: Vec<usize>,
 }
 
 impl PrimvarSet {
@@ -593,6 +597,7 @@ mod tests {
                 indices: None,
             })],
             topology: Some(Arc::new(topo)),
+            open: Vec::new(),
         };
         // Triangle 4 is the pentagon's (0, 3, 4) slice: points 3, 5, 6.
         let at = map.locate(4, 0.25, 0.5, false);
@@ -628,6 +633,7 @@ mod tests {
                 None,
             ],
             topology: Some(topo),
+            open: Vec::new(),
         };
         let map = ElementMap::Cage {
             faces: vec![0, 1],
@@ -650,6 +656,7 @@ mod tests {
                 indices: Some(vec![3]),
             })],
             topology: None,
+            open: Vec::new(),
         };
         assert_eq!(set.eval(0, None), None);
     }

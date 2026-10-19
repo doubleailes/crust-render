@@ -65,31 +65,30 @@ pub fn encode_names(names: &[&str]) -> io::Result<String> {
 }
 
 /// One pixel's samples in OpenEXRId's deep "over" form, from front-to-back
-/// plain shares `(r, g, b, a)`: cumulated, then each divided by `1 −` the
-/// cumulated alpha in front of it (left as is where that is not positive) —
-/// `openexrid::Builder::finish`, which a reader undoes by multiplying each
-/// sample by the transparency in front of it.
+/// plain shares `(r, g, b, a)`: each divided by the transparency the samples
+/// in front of it leave — `openexrid::Builder::finish`, which a reader undoes
+/// by multiplying each sample by that transparency.
+///
+/// The form holds coverage in `[0, 1]` that sums to at most one; a filter
+/// with negative lobes can give a name a share outside it. So each coverage
+/// is first clipped to `[0, 1 − c]`, `c` the clipped coverage in front of
+/// it, and a sample with no transparency left in front of it keeps no colour
+/// either: a reader decodes exactly what was encoded, never through a
+/// stand-in denominator it would not use.
 pub fn over_form(plain: &[[f32; 4]]) -> Vec<[f32; 4]> {
-    let mut acc = [0.0f32; 4];
-    let cumulated: Vec<[f32; 4]> = plain
+    let mut covered = 0.0f32;
+    plain
         .iter()
         .map(|v| {
-            for (a, x) in acc.iter_mut().zip(v) {
-                *a += x;
+            let left = 1.0 - covered;
+            if left <= 0.0 {
+                return [0.0; 4];
             }
-            acc
+            let a = v[3].clamp(0.0, left);
+            covered += a;
+            [v[0] / left, v[1] / left, v[2] / left, a / left]
         })
-        .collect();
-    let mut out = cumulated.clone();
-    for s in (1..cumulated.len()).rev() {
-        let prev = cumulated[s - 1];
-        let oma = 1.0 - prev[3];
-        let oma = if oma > 0.0 { oma } else { 1.0 };
-        for c in 0..4 {
-            out[s][c] = (cumulated[s][c] - prev[c]) / oma;
-        }
-    }
-    out
+        .collect()
 }
 
 /// Writes `product`'s matte to `path`, creating its parent directories, and
@@ -229,6 +228,34 @@ mod tests {
         for (got, want) in plain_form(&over).iter().zip(&plain) {
             for c in 0..4 {
                 assert!((got[c] - want[c]).abs() < 1e-6, "{got:?} vs {want:?}");
+            }
+        }
+    }
+
+    /// Signed filter weights can give one name more than the whole pixel
+    /// and the next a negative share: coverage is clipped to what the over
+    /// form holds, and the reader decodes exactly the clipped shares — a
+    /// sample behind full coverage decodes to nothing, never to a value the
+    /// film did not hold.
+    #[test]
+    fn coverage_outside_the_unit_interval_round_trips_clipped() {
+        let plain = [
+            [0.5, 0.0, 0.0, 1.2],
+            [0.0, 0.4, 0.0, 0.3],
+            [0.1, 0.1, 0.1, -0.5],
+        ];
+        let decoded = plain_form(&over_form(&plain));
+        let want = [[0.5, 0.0, 0.0, 1.0], [0.0; 4], [0.0; 4]];
+        for (got, want) in decoded.iter().zip(want) {
+            for c in 0..4 {
+                assert!((got[c] - want[c]).abs() < 1e-6, "{decoded:?}");
+            }
+        }
+        let decoded = plain_form(&over_form(&[[0.2, 0.0, 0.0, -0.25], [0.3, 0.3, 0.3, 0.75]]));
+        let want = [[0.2, 0.0, 0.0, 0.0], [0.3, 0.3, 0.3, 0.75]];
+        for (got, want) in decoded.iter().zip(want) {
+            for c in 0..4 {
+                assert!((got[c] - want[c]).abs() < 1e-6, "{decoded:?}");
             }
         }
     }

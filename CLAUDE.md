@@ -107,7 +107,7 @@ selection; no dependencies at all, the caller brings threads and random numbers)
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
 `crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
 writes their files — the images, the reports — while the engine writes nothing: `main.rs`,
-`products.rs`, `logging.rs`) and `utils` (stateless math:
+`products.rs`, `exrid.rs` (the OpenEXRId matte writer), `logging.rs`, and `mcp/` for `crust mcp`) and `utils` (stateless math:
 warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
 `opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
 re-exports the public surface.

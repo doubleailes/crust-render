@@ -22,6 +22,7 @@ use crate::rt_world::WorldBuilder;
 
 use super::attrs::{custom_i32_array, decode_text, in_working, value_at};
 use super::mesh::mesh_arrays;
+use super::time::eval_time;
 
 /// What a hit on geometry with no material prim bound names in a material
 /// matte (the default material, a light's own emitter). Not a path: a prim
@@ -45,6 +46,46 @@ pub(super) struct AovKeep {
     /// `(geom_ids, index)` per top-level `PointInstancer` placement, when
     /// `instanceId` is read.
     instances: Vec<(Range<u32>, u32)>,
+    /// Per `geom_id` placed through a nested native instance, where
+    /// ([`MaterialScope`]), when material names are kept.
+    scopes: HashMap<u32, MaterialScope>,
+}
+
+/// Where a nested native instance placed a prototype inside another, for
+/// naming a material in the inner prototype by its instance-proxy path: the
+/// nesting prims' paths, each with its own prototype's `/__Prototype_N`
+/// stripped (`/Inner`, then `/Inner/Chair` a level deeper), relative to the
+/// prim that places the outermost prototype — or absolute, when the
+/// outermost nesting prim is in no prototype (inside a `PointInstancer`'s
+/// prototype, whose prims have their own paths).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum MaterialScope {
+    Relative(Arc<str>),
+    Absolute(Arc<str>),
+}
+
+impl MaterialScope {
+    /// The scope the nested instance prim `prim` opens.
+    pub(super) fn of(prim: &Prim) -> MaterialScope {
+        let path = prim.path().to_string();
+        match path.strip_prefix("/__Prototype_") {
+            Some(rest) => MaterialScope::Relative(rest.find('/').map_or("", |i| &rest[i..]).into()),
+            None => MaterialScope::Absolute(path.into()),
+        }
+    }
+
+    /// This scope with `inner` (relative to this one's prototype, as every
+    /// scope inside a native prototype is) under it.
+    pub(super) fn within(&self, inner: Option<&MaterialScope>) -> MaterialScope {
+        let suffix = match inner {
+            Some(MaterialScope::Relative(s) | MaterialScope::Absolute(s)) => &**s,
+            None => "",
+        };
+        match self {
+            MaterialScope::Relative(s) => MaterialScope::Relative(format!("{s}{suffix}").into()),
+            MaterialScope::Absolute(s) => MaterialScope::Absolute(format!("{s}{suffix}").into()),
+        }
+    }
 }
 
 impl AovKeep {
@@ -123,64 +164,118 @@ impl AovKeep {
         let mut cage: Option<Option<Cage>> = None;
         let mut vars = Vec::with_capacity(self.primvars.len());
         let mut topology = false;
+        let mut open = Vec::with_capacity(self.primvars.len());
         for read in &self.primvars {
-            let data = read_primvar(prim, read, working).and_then(|data| {
-                let Some(mesh) = mesh else {
+            let found = match lookup(prim, &read.name) {
+                Lookup::Found(attr, value) => Some((attr, value)),
+                Lookup::Hidden => None,
+                Lookup::Open => {
+                    open.push(vars.len());
+                    None
+                }
+            };
+            let data = found
+                .and_then(|(attr, value)| read_primvar(prim, read, attr, value, working))
+                .and_then(|data| {
+                    let Some(mesh) = mesh else {
+                        if data.interpolation == Interpolation::Constant {
+                            return Some(data);
+                        }
+                        warning!(
+                            AovPrimvarUnreadable,
+                            at = prim.path(),
+                            "{}: primvars:{} is {:?}, which crust reads on meshes only — its AOV \
+                         holds the clear value there",
+                            prim.path(),
+                            read.name,
+                            data.interpolation
+                        );
+                        return None;
+                    };
                     if data.interpolation == Interpolation::Constant {
                         return Some(data);
                     }
-                    warning!(
-                        AovPrimvarUnreadable,
-                        at = prim.path(),
-                        "{}: primvars:{} is {:?}, which crust reads on meshes only — its AOV \
-                         holds the clear value there",
-                        prim.path(),
-                        read.name,
-                        data.interpolation
-                    );
-                    return None;
-                };
-                if data.interpolation == Interpolation::Constant {
-                    return Some(data);
-                }
-                let cage = cage.get_or_insert_with(|| Cage::read(mesh)).as_ref()?;
-                let needed = match data.interpolation {
-                    Interpolation::Constant => 1,
-                    Interpolation::Uniform => cage.topology.starts.len() - 1,
-                    Interpolation::Vertex | Interpolation::Varying => cage.points,
-                    Interpolation::FaceVarying => cage.topology.points.len(),
-                };
-                let have = data.indices.as_ref().map_or(data.values.len(), Vec::len);
-                if have < needed {
-                    warning!(
-                        AovPrimvarUnreadable,
-                        at = prim.path(),
-                        "{}: primvars:{} has {have} values where its {:?} interpolation needs \
+                    let cage = cage.get_or_insert_with(|| Cage::read(mesh)).as_ref()?;
+                    let needed = match data.interpolation {
+                        Interpolation::Constant => 1,
+                        Interpolation::Uniform => cage.topology.starts.len() - 1,
+                        Interpolation::Vertex | Interpolation::Varying => cage.points,
+                        Interpolation::FaceVarying => cage.topology.points.len(),
+                    };
+                    let have = data.indices.as_ref().map_or(data.values.len(), Vec::len);
+                    if have < needed {
+                        warning!(
+                            AovPrimvarUnreadable,
+                            at = prim.path(),
+                            "{}: primvars:{} has {have} values where its {:?} interpolation needs \
                          {needed} — its AOV holds the clear value there",
-                        prim.path(),
-                        read.name,
-                        data.interpolation
-                    );
-                    return None;
-                }
-                topology |= data.interpolation != Interpolation::Uniform;
-                Some(data)
-            });
+                            prim.path(),
+                            read.name,
+                            data.interpolation
+                        );
+                        return None;
+                    }
+                    topology |= data.interpolation != Interpolation::Uniform;
+                    Some(data)
+                });
             vars.push(data);
         }
-        if vars.iter().all(Option::is_none) {
+        if vars.iter().all(Option::is_none) && open.is_empty() {
             return None;
         }
         let topology = topology
             .then(|| cage.flatten().map(|c| Arc::new(c.topology)))
             .flatten();
-        Some(Arc::new(PrimvarSet { vars, topology }))
+        Some(Arc::new(PrimvarSet {
+            vars,
+            topology,
+            open,
+        }))
+    }
+
+    /// `set` as `placer` places it: each primvar its prototype left open
+    /// ([`PrimvarSet::open`]) looked up on `placer` and its ancestors, which
+    /// hand down `constant` primvars only, as `FindPrimvarWithInheritance`
+    /// does on the instance proxy. `None` when `set` has nothing open, and
+    /// every placement shares it.
+    pub(super) fn placed_primvars(
+        &self,
+        set: &PrimvarSet,
+        placer: &Prim,
+        working: crate::color::Space,
+    ) -> Option<Arc<PrimvarSet>> {
+        if set.open.is_empty() {
+            return None;
+        }
+        let mut placed = set.clone();
+        placed.open.clear();
+        for &i in &set.open {
+            let read = &self.primvars[i];
+            match lookup_inherited(placer, &format!("primvars:{}", read.name)) {
+                Lookup::Found(attr, value) => {
+                    placed.vars[i] = read_primvar(placer, read, attr, value, working);
+                }
+                Lookup::Hidden => {}
+                Lookup::Open => placed.open.push(i),
+            }
+        }
+        Some(Arc::new(placed))
     }
 
     /// The identity tables, from the import's emitting prims (`runs`, the
     /// light links' run table: one per prim, in id order), the world's
     /// material slots, and what the traversal recorded. `None` when no
     /// identity var or matte asked.
+    /// Records that `geom_id` was placed through `scope` (nothing when
+    /// `None`, or when no material names are kept).
+    pub(super) fn scope(&mut self, geom_id: u32, scope: Option<&MaterialScope>) {
+        if let Some(scope) = scope
+            && self.names[NameKey::Material.index()]
+        {
+            self.scopes.insert(geom_id, scope.clone());
+        }
+    }
+
     pub(super) fn build(
         self,
         runs: &[(Range<u32>, String)],
@@ -200,7 +295,7 @@ impl AovKeep {
                     let material = world.material(id);
                     let address = Arc::as_ptr(material) as *const () as usize;
                     let name = match material_paths.get(&address) {
-                        Some(m) => placed_path(m, path),
+                        Some(m) => placed_path(m, path, self.scopes.get(&id)),
                         None => UNBOUND_MATERIAL.to_owned(),
                     };
                     b.name(NameKey::Material, id..id + 1, &name);
@@ -218,17 +313,21 @@ impl AovKeep {
 }
 
 /// A material path as the prim placing it names it: a material inside a
-/// native prototype (`/__Prototype_N/…`, numbered per stage) is named after
-/// the prim that placed the geometry (`<prim>/…`, its instance-proxy path
-/// when the prim is the instance), so the name is the same in every frame
-/// and every streamed chunk.
-fn placed_path(material: &str, prim: &str) -> String {
-    match material.strip_prefix("/__Prototype_") {
-        Some(rest) => match rest.find('/') {
-            Some(i) => format!("{prim}{}", &rest[i..]),
-            None => prim.to_owned(),
-        },
-        None => material.to_owned(),
+/// native prototype (`/__Prototype_N/…`, numbered per stage) is named by its
+/// instance-proxy path — the prim that placed the geometry (`<prim>/…`, the
+/// instance when it is one), then the nested instances it was placed
+/// through (`scope`) — so the name is the same in every frame and every
+/// streamed chunk, and two nested prototypes' materials at the same
+/// prototype-relative path keep two names.
+fn placed_path(material: &str, prim: &str, scope: Option<&MaterialScope>) -> String {
+    let Some(rest) = material.strip_prefix("/__Prototype_") else {
+        return material.to_owned();
+    };
+    let rest = rest.find('/').map_or("", |i| &rest[i..]);
+    match scope {
+        None => format!("{prim}{rest}"),
+        Some(MaterialScope::Relative(s)) => format!("{prim}{s}{rest}"),
+        Some(MaterialScope::Absolute(s)) => format!("{s}{rest}"),
     }
 }
 
@@ -270,26 +369,80 @@ impl Cage {
 /// primvar inheritance finds it: its own where it authors a value, else the
 /// nearest ancestor's that does — when that one is `constant`, since only a
 /// constant primvar is inherited, and one of any other interpolation hides
-/// those above it.
+/// those above it. A blocked value (`= None`) is authored too: it hides the
+/// ancestors' and gives the prim none.
+#[cfg(test)]
 fn applying(prim: &Prim, name: &str) -> Option<(Attribute, sdf::Value)> {
+    match lookup(prim, name) {
+        Lookup::Found(attr, value) => Some((attr, value)),
+        Lookup::Hidden | Lookup::Open => None,
+    }
+}
+
+/// Where the walk for a primvar ended ([`lookup`]).
+enum Lookup {
+    /// The attribute that applies, and its value.
+    Found(Attribute, sdf::Value),
+    /// The prim has none: a block, or an ancestor's primvar of another
+    /// interpolation, hides everything above, or nothing up to the stage's
+    /// root authors one.
+    Hidden,
+    /// Nothing up to a native prototype's root (`/__Prototype_N`) authors
+    /// one: the walk goes on from the prim that places the prototype
+    /// ([`AovKeep::placed_primvars`]).
+    Open,
+}
+
+/// [`applying`]'s walk, telling an open end from a hidden one.
+fn lookup(prim: &Prim, name: &str) -> Lookup {
     let attr_name = format!("primvars:{name}");
     let own = prim.attribute(&attr_name);
     if let Some(value) = value_at(&own) {
-        return Some((own, value));
+        return Lookup::Found(own, value);
     }
-    let mut at = prim.parent();
+    if blocked(&own) {
+        return Lookup::Hidden;
+    }
+    match prim.parent() {
+        Some(parent) => lookup_inherited(&parent, &attr_name),
+        None => Lookup::Hidden,
+    }
+}
+
+/// The walk over `from` and its ancestors, which hand down `constant`
+/// primvars only.
+fn lookup_inherited(from: &Prim, attr_name: &str) -> Lookup {
+    let mut at = Some(from.clone());
+    let mut top = None;
     while let Some(p) = at {
         if p.path().is_abs_root() {
-            return None;
+            break;
         }
-        let attr = p.attribute(&attr_name);
+        let attr = p.attribute(attr_name);
         if let Some(value) = value_at(&attr) {
-            return (interpolation(&attr) == Some(Interpolation::Constant))
-                .then_some((attr, value));
+            return if interpolation(&attr) == Some(Interpolation::Constant) {
+                Lookup::Found(attr, value)
+            } else {
+                Lookup::Hidden
+            };
+        }
+        if blocked(&attr) {
+            return Lookup::Hidden;
         }
         at = p.parent();
+        top = Some(p);
     }
-    None
+    if top.is_some_and(|p| p.is_prototype().unwrap_or(false)) {
+        Lookup::Open
+    } else {
+        Lookup::Hidden
+    }
+}
+
+/// Whether `attr`'s value is blocked at the evaluation time.
+fn blocked(attr: &Attribute) -> bool {
+    attr.resolve_info_at(eval_time())
+        .is_ok_and(|info| info.value_is_blocked())
 }
 
 /// A primvar's authored interpolation, `constant` (UsdGeom's fallback) when
@@ -317,9 +470,10 @@ fn interpolation(attr: &Attribute) -> Option<Interpolation> {
 fn read_primvar(
     prim: &Prim,
     read: &PrimvarRead,
+    attr: Attribute,
+    value: sdf::Value,
     working: crate::color::Space,
 ) -> Option<PrimvarData> {
-    let (attr, value) = applying(prim, &read.name)?;
     let Some((mut values, components)) = decode(value) else {
         warning!(
             AovPrimvarTypeMismatch,
@@ -497,16 +651,74 @@ fn decode(value: sdf::Value) -> Option<(Vec<[f32; 4]>, usize)> {
 mod tests {
     use super::*;
 
+    /// A constant primvar inherits past a child that does not author it, but
+    /// not past one that blocks it: the block is the child's own opinion.
+    #[test]
+    fn a_blocked_primvar_hides_the_ancestors_constant() {
+        let dir = std::env::temp_dir().join(format!("crust_aov_keep_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("blocked.usda");
+        std::fs::write(
+            &path,
+            r#"#usda 1.0
+def Xform "W"
+{
+    color3f[] primvars:displayColor = [(0.2, 0.4, 0.6)]
+    def Xform "Plain" {}
+    def Xform "Blocked"
+    {
+        color3f[] primvars:displayColor = None
+        def Xform "Below" {}
+    }
+}
+"#,
+        )
+        .expect("write stage");
+        let stage = super::super::stage_builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        let at = |p: &str| super::super::prim_at(&stage, sdf::path(p).unwrap());
+        let (_, value) = applying(&at("/W/Plain"), "displayColor").expect("inherited");
+        assert!(matches!(value, sdf::Value::Vec3fVec(_)), "{value:?}");
+        assert!(applying(&at("/W/Blocked"), "displayColor").is_none());
+        assert!(applying(&at("/W/Blocked/Below"), "displayColor").is_none());
+    }
+
     #[test]
     fn a_prototype_scoped_material_is_named_after_the_placing_prim() {
         assert_eq!(
-            placed_path("/__Prototype_3/Looks/Bark", "/World/tree_12"),
+            placed_path("/__Prototype_3/Looks/Bark", "/World/tree_12", None),
             "/World/tree_12/Looks/Bark"
         );
-        assert_eq!(placed_path("/__Prototype_3", "/World/t"), "/World/t");
+        assert_eq!(placed_path("/__Prototype_3", "/World/t", None), "/World/t");
         assert_eq!(
-            placed_path("/World/Looks/Red", "/World/t"),
+            placed_path("/World/Looks/Red", "/World/t", None),
             "/World/Looks/Red"
+        );
+        // Two nested prototypes' materials at the same prototype-relative
+        // path keep two names: the nested instance's path is in each.
+        let chair = MaterialScope::Relative("/Chair".into());
+        assert_eq!(
+            placed_path("/__Prototype_2/Looks/M", "/World/house", Some(&chair)),
+            "/World/house/Chair/Looks/M"
+        );
+        assert_eq!(
+            placed_path("/__Prototype_1/Looks/M", "/World/house", None),
+            "/World/house/Looks/M"
+        );
+        let deeper = chair.within(Some(&MaterialScope::Relative("/Leg".into())));
+        assert_eq!(
+            placed_path("/__Prototype_7/Looks/M", "/World/house", Some(&deeper)),
+            "/World/house/Chair/Leg/Looks/M"
+        );
+        let under_instancer = MaterialScope::Absolute("/World/Pebbles/Protos/Rock/Inner".into());
+        assert_eq!(
+            placed_path(
+                "/__Prototype_4/Looks/M",
+                "/World/Pebbles",
+                Some(&under_instancer)
+            ),
+            "/World/Pebbles/Protos/Rock/Inner/Looks/M"
         );
     }
 

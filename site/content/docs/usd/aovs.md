@@ -639,7 +639,8 @@ instancer prim, never a prototype's own path (`/__Prototype_N`, which a stage nu
 it composes it): every placement of a native instance has its own `primId`; the
 instances of one `PointInstancer` share the instancer's, and `instanceId` tells them
 apart. A material inside a native instance's prototype is named after the instance, as
-its instance-proxy path: `/World/Tree_12/Looks/Bark`. Geometry with no material prim
+its instance-proxy path: `/World/Tree_12/Looks/Bark`, and through a nested instance
+`/World/House_3/Chair/Looks/Wood`. Geometry with no material prim
 bound (the default material, a light's own surface) is named `crust:unbound`.
 
 ```usda
@@ -667,7 +668,9 @@ is closest by default, since averaged integers name nothing. A colour type (`col
 `color4f`) reads the primvar as a colour, taken into the
 [working colour space](@/docs/usd/render-settings.md#renderingcolorspace) as every
 authored colour is. A constant primvar authored on an ancestor (an `Xform` above the
-mesh) applies, as UsdGeom's primvar inheritance says. Where the hit surface does not
+mesh) applies, as UsdGeom's primvar inheritance says — on a native instance too, where
+each instance prim's own value reaches the prototype's meshes under it — and one blocked
+on the mesh (`= None`) is not inherited. Where the hit surface does not
 author the primvar, the channel holds the var's clear value.
 
 ```usda
@@ -736,7 +739,9 @@ The file is OpenEXRId's version 3, as its own writer lays it out:
   camera depth in the pixel), `A` (HALF, its coverage) and, with a beauty var, `R`, `G`,
   `B` (HALF, its share of the beauty, in the working colour space);
 - each pixel's samples front to back, in the deep "over" form, which a deep compositor
-  undoes;
+  undoes. That form holds coverage between 0 and 1, summing to at most 1: with a pixel
+  filter that has negative lobes (Mitchell), a name's share can fall outside
+  that range near an edge, and is clipped to what the form can hold;
 - `EXRIdVersion = 3`, and `EXRIdNames`: the names the file uses, sorted, one per line,
   zlib-compressed and base64-encoded.
 

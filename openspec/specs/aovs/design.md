@@ -1266,8 +1266,12 @@ it started from; what the build settled, and the traps it met, are here.
   `usd_import/aov_keep.rs`) each run's prim is the object name, the material
   its geometry was bound to (by address, `paths_by_address`) is the material
   name — `crust:unbound` where no material prim is bound, and a prototype's
-  `/__Prototype_N/…` material is renamed under the run's prim, since the
-  numbering is per stage — and the asset is walked up from the prim when the
+  `/__Prototype_N/…` material is renamed to its instance-proxy path, since
+  the numbering is per stage: the run's prim, then the nested native
+  instances it was placed through (`MaterialScope`, carried on each part
+  slot and recorded per `geom_id` as it is attached), so two nested
+  prototypes binding a material at the same prototype-relative path keep
+  two names (`nested_prototype_materials_keep_their_own_names`) — and the asset is walked up from the prim when the
   geometry is emitted (`AovKeep::saw`). A `PointInstancer`'s placements are
   ranges of `geom_id`s recorded as they are emitted; `instanceId` is the
   placement's index. The tables are `(first, end, name)` runs per key,
@@ -1284,7 +1288,10 @@ it started from; what the build settled, and the traps it met, are here.
 - **`elementId` needs a map from the kernel's triangles back to the
   authored faces** (`ElementMap`, per distinct mesh, beside the side tables).
   Unrefined meshes: the fan triangulation's face per triangle, and which
-  slice of the fan it is. Refined meshes: the cage face each refined
+  slice of the fan it is. The mesh cache keys on whether the faces are
+  authored (`MeshKey::authored`), so an implicit shape's tessellation never
+  shares a slot, and its element map, with an authored mesh of the same
+  arrays. Refined meshes: the cage face each refined
   triangle came from (`cage_face`, carried through uniform and adaptive
   refinement), and where in it through the same `FaceMap` Ptex reads —
   quads only, so a refined triangle or n-gon is read at its centre. Loop
@@ -1296,7 +1303,13 @@ it started from; what the build settled, and the traps it met, are here.
   interpolation, `elementSize` — into a `PrimvarSet` shared by every
   instance of that mesh, and evaluated at the first hit through the
   element map. Constant primvars are inherited from ancestors, as
-  `UsdGeomPrimvarsAPI::FindPrimvarWithInheritance` does; a colour primvar is
+  `UsdGeomPrimvarsAPI::FindPrimvarWithInheritance` does on an instance
+  proxy: a prototype prim's walk that reaches its `/__Prototype_N` root
+  without an answer is left open (`PrimvarSet::open`) and continued from the
+  prim that places the prototype — per placement, through nested instances
+  too (`instances_hand_their_constant_primvars_to_their_prototype`) — and a
+  value block (`= None`) stops it, as an opinion of its own
+  (`a_blocked_primvar_hides_the_ancestors_constant`); a colour primvar is
   converted to the working space like every colour input. A type that
   cannot fill the var's components is refused once per primvar name
   (`aov.primvar_type_mismatch`); an unreadable one is `aov.primvar_unreadable`.
@@ -1355,11 +1368,13 @@ it started from; what the build settled, and the traps it met, are here.
 ### OpenEXRId as built
 
 - **The deep writer is a fork of `exr`**
-  (`github.com/doubleailes/exrs`, branch `claude/awesome-fermat-41ixgg`,
-  patched over 1.74 in the workspace `Cargo.toml` and allowed in
-  `deny.toml`), which reads and writes deep scanline images in safe Rust.
-  When upstream `exr` gains deep data the patch line goes; nothing else
-  names the fork.
+  (`github.com/doubleailes/exrs`, commit `a7a2a626`, developed on its
+  branch `claude/awesome-fermat-41ixgg`), patched over 1.74 in the
+  workspace `Cargo.toml` and allowed in `deny.toml`, which reads and writes
+  deep scanline images in safe Rust. The patch names the commit (`rev`),
+  not the branch: a moved or deleted branch must not change or break a
+  fresh build. When upstream `exr` gains deep data the patch line goes;
+  nothing else names the fork.
 - **The layout is taken from OpenEXRId's sources**, which have no written
   specification (`openexrid/Builder.cpp`, `openexrid/Mask.cpp`, the Nuke
   plug-in's `nuke/DeepOpenEXRId.cpp`), version 3: one part, deep scanline, ZIPS; per pixel
@@ -1402,7 +1417,16 @@ it started from; what the build settled, and the traps it met, are here.
   the beauty's `weight_sum` (with its `/ taken` fallback), sorts front to
   back, blends a guided render's passes by the beauty's own shares, and
   scales colour, not coverage, by the camera exposure. An escape or a
-  volume scatter names nothing: its weight is the background's.
+  volume scatter names nothing: its weight is the background's. Passes
+  blended past the cap spill as a unit does.
+- **Trap: the over form holds no coverage outside `[0, 1]`.** A signed
+  filter can give a name a share above one, or below zero; the first writer
+  divided by a stand-in `1` once the coverage in front reached one, which a
+  reader then multiplied by `1 − prev ≤ 0` — a value the film never held.
+  `over_form` now clips each coverage to `[0, 1 − c]` (`c` the clipped
+  coverage in front) and gives a sample with nothing left in front of it no
+  colour, so a reader decodes exactly what was encoded
+  (`coverage_outside_the_unit_interval_round_trips_clipped`).
 - **Pinned by** `crates/crust-render/tests/openexrid.rs` (the sample's three
   mattes read back with the fork: coverage against alpha, colour against the
   beauty, flat `primId` and the primvar against the matte where one prim
@@ -1484,8 +1508,8 @@ sources.
   `1ec6dff08714876f1a6f15added25d26f49270ac` — `openexrid/Builder.cpp`,
   `openexrid/Mask.cpp`, `nuke/DeepOpenEXRId.cpp`, `openfx/openfx.cpp` and its
   issue tracker, read 2026-10-17. Deep scanline writing: the `exr` fork at
-  `github.com/doubleailes/exrs`, branch `claude/awesome-fermat-41ixgg`
-  (commit `a7a2a626`).
+  `github.com/doubleailes/exrs`, commit `a7a2a626` (branch
+  `claude/awesome-fermat-41ixgg`).
 - OIDN: `github.com/RenderKit/oidn/blob/master/doc/api.md`.
 - Karma, RenderMan, Arnold, Omniverse user docs were blocked by the network
   proxy. Claims attributed to them come from search summaries and the

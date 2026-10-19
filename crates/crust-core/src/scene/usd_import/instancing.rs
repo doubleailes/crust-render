@@ -39,6 +39,7 @@ use crate::identity::{ElementMap, PrimvarSet};
 use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
+use super::aov_keep::MaterialScope;
 use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
 };
@@ -107,9 +108,15 @@ pub(super) struct PartSlot {
     /// Where each triangle lies in the authored mesh, when the render's
     /// identity or primvar AOVs read it ([`WorldBuilder::set_aov_elements`]).
     elements: Option<Arc<ElementMap>>,
-    /// The prototype prim's primvars the render's AOVs read — the same for
-    /// every placement, which are of one prim.
+    /// The prototype prim's primvars the render's AOVs read. Those the
+    /// prototype leaves open ([`PrimvarSet::open`]) are resolved per
+    /// placement, through the prim that places it ([`place_primvars`]).
     primvars: Option<Arc<PrimvarSet>>,
+    /// Where a nested native instance placed this slot's prototype inside
+    /// the part's: what turns a material in that inner prototype into its
+    /// instance-proxy path ([`MaterialScope`]). `None` for the part's own
+    /// prototype's geometry.
+    scope: Option<MaterialScope>,
     /// Uniform scale from the slot's own geometry frame, which its tables'
     /// densities are in, to the part's frame. 1 for a leaf part; inside a
     /// group, the member's placement. Nested *instancer* placements are not
@@ -158,6 +165,7 @@ impl ProtoPart {
                 curves: false,
                 elements: None,
                 primvars: None,
+                scope: None,
                 scale: 1.0,
             }]),
         }
@@ -223,9 +231,24 @@ pub(super) fn collect_proto_parts(
             match prim.prototype() {
                 Ok(Some(inner)) => {
                     let inner_parts = prototype_parts(stage, &inner, caches, depth + 1);
-                    parts.extend(inner_parts.iter().map(|part| ProtoPart {
-                        local: this_local * part.local,
-                        ..part.clone()
+                    // The inner prototype's open primvars, as this prim
+                    // (still inside the outer prototype) hands them down.
+                    let placed = place_primvars(&inner_parts, &prim, caches);
+                    let inner_parts = placed.as_deref().unwrap_or(&inner_parts);
+                    let scope = MaterialScope::of(&prim);
+                    parts.extend(inner_parts.iter().map(|part| {
+                        ProtoPart {
+                            local: this_local * part.local,
+                            slots: part
+                                .slots
+                                .iter()
+                                .map(|slot| PartSlot {
+                                    scope: Some(scope.within(slot.scope.as_ref())),
+                                    ..slot.clone()
+                                })
+                                .collect(),
+                            ..part.clone()
+                        }
                     }));
                     continue;
                 }
@@ -719,8 +742,15 @@ pub(super) fn emit_native_instance(
         ProtoPlace::Shared
     };
     let parts = placed_parts(stage, proto_path, caches, place);
+    let placed = place_primvars(&parts, prim, caches);
     let first = world.count();
-    attach_proto_parts(world, &parts, world_xf, "native instance");
+    attach_proto_parts(
+        world,
+        placed.as_deref().unwrap_or(&parts),
+        world_xf,
+        "native instance",
+        |id, slot| caches.aov.scope(id, slot.scope.as_ref()),
+    );
     debug!(
         "Instance {} uses prototype {proto_path} ({} instance(s), geom ids {first}..{})",
         prim.path(),
@@ -729,9 +759,59 @@ pub(super) fn emit_native_instance(
     );
 }
 
+/// `parts` as `placer` places them: each slot's primvars that its prototype
+/// left open, looked up on `placer` and its ancestors
+/// ([`AovKeep::placed_primvars`](super::aov_keep::AovKeep::placed_primvars)).
+/// `None` when no slot has one open, so every placement shares the parts.
+fn place_primvars(
+    parts: &[ProtoPart],
+    placer: &Prim,
+    caches: &ImportCaches<'_>,
+) -> Option<Vec<ProtoPart>> {
+    let open = |slot: &PartSlot| {
+        slot.primvars
+            .as_ref()
+            .is_some_and(|set| !set.open.is_empty())
+    };
+    if !parts.iter().any(|part| part.slots.iter().any(open)) {
+        return None;
+    }
+    Some(
+        parts
+            .iter()
+            .map(|part| {
+                if !part.slots.iter().any(open) {
+                    return part.clone();
+                }
+                let slots: Vec<PartSlot> = part
+                    .slots
+                    .iter()
+                    .map(|slot| {
+                        let primvars = slot.primvars.as_ref().map(|set| {
+                            caches
+                                .aov
+                                .placed_primvars(set, placer, caches.working)
+                                .unwrap_or_else(|| set.clone())
+                        });
+                        PartSlot {
+                            primvars,
+                            ..slot.clone()
+                        }
+                    })
+                    .collect();
+                ProtoPart {
+                    slots: slots.into(),
+                    ..part.clone()
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Attaches every part of a prototype at `placement`, one instance each,
 /// and returns how many kernel instances that was. A group's instance takes
-/// one `geom_id` per slot, so the ids consumed can exceed the count.
+/// one `geom_id` per slot, so the ids consumed can exceed the count. `each`
+/// is handed every slot attached, with its `geom_id`.
 /// Non-invertible placements are skipped: the kernel's instance transform
 /// must be invertible, and a zero scale is a common "hide this instance"
 /// idiom rather than an error.
@@ -740,6 +820,7 @@ fn attach_proto_parts(
     parts: &[ProtoPart],
     placement: GMat4,
     what: &str,
+    mut each: impl FnMut(u32, &PartSlot),
 ) -> usize {
     let mut attached = 0;
     for part in parts {
@@ -799,6 +880,7 @@ fn attach_proto_parts(
                 world.set_aov_primvars(id, set.clone());
             }
             world.set_placement_scale(id, scale * slot.scale);
+            each(id, slot);
         }
         attached += 1;
     }
@@ -1156,7 +1238,13 @@ pub(super) fn emit_point_instancer(
             continue;
         };
         let before = world.count();
-        attached += attach_proto_parts(world, parts, world_xf * xf, "PointInstancer instance");
+        attached += attach_proto_parts(
+            world,
+            parts,
+            world_xf * xf,
+            "PointInstancer instance",
+            |id, slot| caches.aov.scope(id, slot.scope.as_ref()),
+        );
         caches.aov.instance(before..world.count(), index);
     }
 

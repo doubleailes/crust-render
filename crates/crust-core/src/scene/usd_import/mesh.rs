@@ -65,6 +65,11 @@ pub(super) struct MeshKey {
     /// every array yet shade smooth and faceted — without this, whichever
     /// interned first would shade both.
     pub(super) smooth: bool,
+    /// Whether the faces are authored: an authored mesh and an implicit
+    /// shape's tessellation can agree on every array, but only the first has
+    /// faces an `elementId` names, and the slot's element map is built from
+    /// whichever interned it first.
+    pub(super) authored: bool,
     pub(super) material: usize,
 }
 
@@ -100,6 +105,7 @@ impl MeshKey {
             n_indices: src.indices.len(),
             n_uvs: src.uvs.as_ref().map(|uv| uv.values.len()),
             smooth: src.normals.is_some(),
+            authored: src.authored,
             material: Arc::as_ptr(material) as *const u8 as usize,
         }
     }
@@ -2444,6 +2450,37 @@ mod subdiv_policy_tests {
             }
         }
         assert!(seams > 0, "the cube's chart has seams to test");
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use crate::material::OpenPBR;
+
+    /// An authored mesh and an implicit shape's tessellation with the same
+    /// arrays and material do not share a slot: the slot's element map
+    /// would name the faces of whichever interned first.
+    #[test]
+    fn authored_and_implicit_meshes_do_not_share_a_slot() {
+        let source = |authored| MeshSource {
+            points: vec![
+                Vec3f::from([0.0, 0.0, 0.0]),
+                Vec3f::from([1.0, 0.0, 0.0]),
+                Vec3f::from([0.0, 1.0, 0.0]),
+            ],
+            counts: vec![3],
+            indices: vec![0, 1, 2],
+            normals: None,
+            subdiv_faces: None,
+            base_face_count: 1,
+            uvs: None,
+            refined: false,
+            authored,
+        };
+        let material: Arc<dyn Material> = Arc::new(OpenPBR::default());
+        assert!(MeshKey::new(&source(true), &material) != MeshKey::new(&source(false), &material));
+        assert!(MeshKey::new(&source(true), &material) == MeshKey::new(&source(true), &material));
     }
 }
 
