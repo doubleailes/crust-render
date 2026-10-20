@@ -44,7 +44,7 @@ less, or unauthored, SHALL be a pinhole. The field of view SHALL not depend on
 ### Requirement: An unusable metersPerUnit is refused
 
 A stage `metersPerUnit` that is not finite or not positive SHALL be refused with
-one `stage.invalid_meters_per_unit` warning naming the value, and SHALL read as
+one `camera.invalid_meters_per_unit` warning naming the value, and SHALL read as
 0.01. The check SHALL apply only when the render camera has a lens, so a
 pinhole render raises no warning.
 
@@ -52,14 +52,14 @@ pinhole render raises no warning.
 
 - **WHEN** a stage authors `metersPerUnit = 0` and the render camera authors
   `focalLength = 50` and `fStop = 2`
-- **THEN** one `stage.invalid_meters_per_unit` warning is raised and the lens
+- **THEN** one `camera.invalid_meters_per_unit` warning is raised and the lens
   diameter is 2.5 scene units
 
 #### Scenario: A pinhole does not check
 
 - **WHEN** a stage authors `metersPerUnit = 0` and the render camera authors
   no `fStop`
-- **THEN** no `stage.invalid_meters_per_unit` warning is raised
+- **THEN** no `camera.invalid_meters_per_unit` warning is raised
 
 ### Requirement: Render settings can disable depth of field
 
