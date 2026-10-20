@@ -990,19 +990,153 @@ fn the_motion_blur_flags_are_no_longer_warned_about() {
         ),
     );
     assert!(!scene.settings.motion_blur());
-    let unhonoured: Vec<&String> = warnings
-        .iter()
-        .filter(|w| w.contains("not honoured"))
-        .collect();
-    assert_eq!(unhonoured.len(), 1, "{warnings:?}");
+    assert!(!scene.settings.depth_of_field());
     assert!(
-        unhonoured[0].contains("disableDepthOfField = true"),
+        warnings.iter().all(|w| !w.contains("not honoured")),
         "{warnings:?}"
     );
     assert!(
-        warnings
-            .iter()
-            .all(|w| !w.contains("disableMotionBlur") && !w.contains("instantaneousShutter")),
+        warnings.iter().all(|w| !w.contains("disableMotionBlur")
+            && !w.contains("instantaneousShutter")
+            && !w.contains("disableDepthOfField")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn depth_of_field_is_on_unless_disabled_and_the_product_wins() {
+    let scene = load(
+        "dof_default",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform int2 resolution = (64, 36)
+    }
+"#,
+    );
+    assert!(scene.settings.depth_of_field());
+
+    // Settings only, no products: the settings prim decides.
+    let scene = load(
+        "dof_settings_only",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform bool disableDepthOfField = 1
+    }
+"#,
+    );
+    assert!(!scene.settings.depth_of_field());
+
+    // The settings disable it, the first product re-enables it.
+    let scene = load(
+        "dof_product_on",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        uniform bool disableDepthOfField = 1
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        )
+        .replace(
+            "token productName",
+            "uniform bool disableDepthOfField = 0\n        token productName",
+        ),
+    );
+    assert!(scene.settings.depth_of_field());
+
+    // The product disables it, the settings say nothing.
+    let scene = load(
+        "dof_product_off",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        )
+        .replace(
+            "token productName",
+            "uniform bool disableDepthOfField = 1\n        token productName",
+        ),
+    );
+    assert!(!scene.settings.depth_of_field());
+}
+
+#[test]
+fn products_that_disagree_on_depth_of_field_render_with_the_first() {
+    let products = |first: &str, second: &str| {
+        format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/a>, </Render/b>]
+    }}
+    def RenderProduct "a"
+    {{
+        {first}
+        token productName = "a.exr"
+        rel orderedVars = [</Render/beauty>]
+    }}
+    def RenderProduct "b"
+    {{
+        {second}
+        token productName = "b.exr"
+        rel orderedVars = [</Render/beauty>]
+    }}
+    def RenderVar "beauty"
+    {{
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }}
+"#
+        )
+    };
+    let (scene, warnings) = load_warnings(
+        "dof_products_differ",
+        &products(
+            "uniform bool disableDepthOfField = 1",
+            "uniform bool disableDepthOfField = 0",
+        ),
+    );
+    let names: Vec<&str> = scene
+        .aovs
+        .products
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["a.exr", "b.exr"]);
+    assert!(!scene.settings.depth_of_field());
+    let dof: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("depth of field"))
+        .collect();
+    assert_eq!(dof.len(), 1, "{warnings:?}");
+    assert!(dof[0].contains("/Render/b") && dof[0].contains("asks for depth of field on"));
+    assert!(
+        warnings.iter().all(|w| !w.contains("no file is written")),
+        "{warnings:?}"
+    );
+    let codes: Vec<_> = scene
+        .warnings
+        .iter()
+        .filter(|w| w.code == crust_core::WarningCode::ProductDepthOfFieldMismatch)
+        .collect();
+    assert_eq!(codes.len(), 1, "{codes:?}");
+
+    // The same setting, once inherited: nothing to say.
+    let (_, warnings) = load_warnings(
+        "dof_products_agree",
+        &products("uniform bool disableDepthOfField = 1", "").replace(
+            "rel products",
+            "uniform bool disableDepthOfField = 1\n        rel products",
+        ),
+    );
+    assert!(
+        warnings.iter().all(|w| !w.contains("depth of field")),
         "{warnings:?}"
     );
 }

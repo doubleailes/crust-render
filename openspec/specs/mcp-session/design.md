@@ -11,11 +11,22 @@
 
 - **The override layer is a real `.usda` on disk, and the import reads that file**
   (mcp-session D1). `open_session` writes `<output>.usda` with `subLayers = [@<input>@]`
-  and nothing else; every edit is merged into it and saved. What the session renders,
+  and the input's units (below), and nothing else; every edit is merged into it and saved. What the session renders,
   and what it leaves behind, is what `crust render <output>` renders: the session
   imports through the CLI's own argument defaults (`Cli::try_parse_from`) and the
   CLI's own `import_checked` / `check_scene`, so a render flag that changes the import
   belongs in those, never in one caller.
+- **The layer carries the input's units** (`physical-depth-of-field`). A stage reads
+  its metadata from its root layer only, and a session's root layer is the override
+  layer. So `open_session` copies the input root layer's `metersPerUnit` and `upAxis`
+  into the layer it creates (`StageMetrics`, `mcp/layer.rs`), and a resumed layer that
+  lacks one the input authors gets it added, keeping any value it authors itself.
+  Without the copy a session over a metre-scale input would read the 0.01 fallback and
+  render its lens 100x wider than `crust render` of the input, and so would
+  `render_final`, which renders the layer file. A fallback to the input's root layer
+  inside the session (as placement's up-axis read does) cannot fix that, so the file has
+  to say it. Only authored values are copied: an input that authors neither gets the
+  layer it always got. The copy wins over a later change to the input (Known gaps).
 - **One thread owns the authoring stage** (D2). openusd's `Stage` is `Rc` / `RefCell`;
   the protocol's async handlers reach it through a channel, one command at a time.
 - **Every edit is a USDA snippet merged into the layer** (D3, `mcp/edit.rs`): per
@@ -547,9 +558,10 @@ would otherwise run its own surface queries against geometry that is not what re
   pair cannot.
 - `xformOpOrder` is authored whole, which shadows later source changes to it (Known gaps).
 
-**Up axis.** Stage metadata is the root layer's, and the override layer authors no
-`upAxis`. So placement reads the override layer's `upAxis`, then the input's root layer's,
-alone with `sdf::Layer::open`, then falls back to Y.
+**Up axis.** Stage metadata is the root layer's. The override layer copies the input's
+`upAxis` (see "The layer carries the input's units" below), and placement reads the
+override layer's `upAxis`, then the input's root layer's, alone with `sdf::Layer::open`,
+then falls back to Y. The second read covers a layer the user edited the metadata out of.
 
 ### Scattering
 
@@ -638,9 +650,7 @@ The tests live in two places:
 - **CDF resolution.** The CDF is stored in f32, as fine as the sampler's numbers: a
   triangle under ~1e-7 of the target's area can be over- or under-drawn.
 - **Instances stand upright.** They are not aligned to the surface normal.
-- **The override layer carries no `upAxis`.** Found while writing the up-axis read: a
-  session's composed stage is Y-up whatever the input says. Placement reads the input's
-  root layer to compensate. Where the render reads the stage's up axis (a `DomeLight_1`
-  with `poleAxis = "scene"`), a session over a Z-up input renders the dome as Y-up, unlike
-  `crust render` of the input. `open_session` should copy the input's `upAxis` (and
-  `metersPerUnit`) into the layer it creates.
+- **The layer's copy of the input's units wins.** `open_session` copies the input root
+  layer's `metersPerUnit` and `upAxis` into the override layer (below), once. If the
+  input's change afterwards, the session keeps rendering the copied values until the line
+  is edited in the layer. Stage units are fixed early in a pipeline, so this is rare.

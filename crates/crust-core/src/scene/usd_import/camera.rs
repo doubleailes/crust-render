@@ -2,11 +2,12 @@
 
 use glam::{Mat4 as GMat4, Vec3, Vec3A};
 use openusd::usd::{Prim, Stage};
-use openusd_schemas::geom::{Camera as UsdCamera, CameraSchema};
+use openusd_schemas::geom::{Camera as UsdCamera, CameraSchema, StageMetadata, tokens};
 use tracing::debug;
 
 use crate::camera::Camera;
 use crate::tracer::RenderSettings;
+use crate::warning;
 
 use super::attrs::attr_f32;
 use super::prim_at;
@@ -99,10 +100,29 @@ fn lens(cam: &UsdCamera, frame: &CameraFrame) -> CameraLens {
 /// A camera as the import builds it: the rays it generates, and its linear
 /// exposure scale as authored. The scale is checked only once this camera is
 /// the one rendered through and its exposure applies, so a fallback candidate
-/// or a disabled exposure raises no warning.
+/// or a disabled exposure raises no warning; so is the stage unit its lens
+/// refused ([`RenderCamera::warn_lens_units`]).
 pub(super) struct RenderCamera {
     pub(super) camera: Camera,
     pub(super) exposure_scale: f32,
+    /// The stage's `metersPerUnit` when the lens read it and refused it (not
+    /// finite or not positive); the lens was built with the fallback.
+    pub(super) refused_meters_per_unit: Option<f64>,
+}
+
+impl RenderCamera {
+    /// Raises `camera.invalid_meters_per_unit` for the camera rendered
+    /// through, when its lens refused the stage's unit.
+    pub(super) fn warn_lens_units(&self, camera_path: Option<&str>) {
+        if let Some(m) = self.refused_meters_per_unit {
+            let camera = camera_path.unwrap_or("the render camera");
+            warning!(
+                CameraInvalidMetersPerUnit,
+                "{camera}: the stage's metersPerUnit = {m} is not a length; the lens reads it \
+                 as {FALLBACK_METERS_PER_UNIT} (a centimetre)"
+            );
+        }
+    }
 }
 
 /// The camera at `prim` and its exposure scale, `None` when `prim` is not a
@@ -113,9 +133,11 @@ pub(super) fn build_camera(
     settings: &RenderSettings,
 ) -> Option<RenderCamera> {
     let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
+    let (camera, refused_meters_per_unit) = lens_camera(&cam, stage, prim, settings);
     Some(RenderCamera {
-        camera: lens_camera(&cam, stage, prim, settings),
+        camera,
         exposure_scale: exposure_scale(&cam),
+        refused_meters_per_unit,
     })
 }
 
@@ -136,8 +158,55 @@ fn exposure_scale(cam: &UsdCamera) -> f32 {
     (time * iso * 2.0_f32.powf(exponent) * responsivity) / (100.0 * f_stop * f_stop)
 }
 
-/// The ray-generating camera at `prim`, from its transform and lens.
-fn lens_camera(cam: &UsdCamera, stage: &Stage, prim: &Prim, settings: &RenderSettings) -> Camera {
+/// USD's `metersPerUnit` fallback: a centimetre.
+const FALLBACK_METERS_PER_UNIT: f64 = 0.01;
+
+/// The stage's authored `metersPerUnit` (C++ `UsdGeomGetStageMetersPerUnit`,
+/// which reads only the root and session layers), `None` when no layer
+/// authors it. Unchecked: [`lens_diameter`] refuses a value that is not a
+/// length.
+fn authored_meters_per_unit(stage: &Stage) -> Option<f64> {
+    if !stage
+        .has_authored_stage_metadata(tokens::METERS_PER_UNIT)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    stage.meters_per_unit().ok().flatten()
+}
+
+/// The lens diameter in scene units: `focalLength / fStop` millimetres,
+/// converted through the stage's `metersPerUnit` (unauthored reads as
+/// [`FALLBACK_METERS_PER_UNIT`]), and the unit when it was refused. `0` is a
+/// pinhole: an `fStop` of 0 or less, or `disableDepthOfField`. Only a lens
+/// reads the unit, so a pinhole render refuses none it does not use; a unit
+/// that is not finite or not positive is refused and reads as the fallback.
+fn lens_diameter(
+    stage: &Stage,
+    focal_length: f32,
+    f_stop: f32,
+    depth_of_field: bool,
+) -> (f32, Option<f64>) {
+    if !depth_of_field || f_stop <= 0.0 {
+        return (0.0, None);
+    }
+    let (meters_per_unit, refused) = match authored_meters_per_unit(stage) {
+        Some(m) if m.is_finite() && m > 0.0 => (m, None),
+        Some(m) => (FALLBACK_METERS_PER_UNIT, Some(m)),
+        None => (FALLBACK_METERS_PER_UNIT, None),
+    };
+    let diameter = f64::from(focal_length) / f64::from(f_stop) * 0.001 / meters_per_unit;
+    (diameter as f32, refused)
+}
+
+/// The ray-generating camera at `prim`, from its transform and lens, and the
+/// stage unit its lens refused.
+fn lens_camera(
+    cam: &UsdCamera,
+    stage: &Stage,
+    prim: &Prim,
+    settings: &RenderSettings,
+) -> (Camera, Option<f64>) {
     let frame = CameraFrame::read(cam, stage, prim, settings);
     let CameraLens {
         f_stop,
@@ -146,22 +215,20 @@ fn lens_camera(cam: &UsdCamera, stage: &Stage, prim: &Prim, settings: &RenderSet
     } = lens(cam, &frame);
 
     let vfov_deg = 2.0 * frame.tan_half_vfov().atan().to_degrees();
-    let aperture = if f_stop > 0.0 {
-        frame.focal_length / f_stop
-    } else {
-        0.0
-    };
+    let (aperture, refused_meters_per_unit) =
+        lens_diameter(stage, frame.focal_length, f_stop, settings.depth_of_field());
     let aspect = frame.aspect();
     let lookfrom = Vec3A::from(frame.eye);
     let lookat = Vec3A::from(frame.eye + frame.forward * focus_distance);
     let vup = Vec3A::from(frame.up);
 
     debug!(
-        "USD camera: lookfrom={:?} lookat={:?} vup={:?} vfov={} aspect={} aperture={} focus={}",
+        "USD camera: lookfrom={:?} lookat={:?} vup={:?} vfov={} aspect={} lens diameter={} \
+         (scene units) focus={}",
         lookfrom, lookat, vup, vfov_deg, aspect, aperture, focus_distance
     );
 
-    Camera::new(
+    let camera = Camera::new(
         lookfrom,
         lookat,
         vup,
@@ -169,7 +236,8 @@ fn lens_camera(cam: &UsdCamera, stage: &Stage, prim: &Prim, settings: &RenderSet
         aspect,
         aperture,
         focus_distance,
-    )
+    );
+    (camera, refused_meters_per_unit)
 }
 
 /// What adaptive subdivision needs of the render camera, read before the
@@ -228,4 +296,32 @@ pub(super) fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
     ancestors
         .iter()
         .fold(GMat4::IDENTITY, |acc, p| compose_with_parent(p, acc))
+}
+
+#[cfg(test)]
+mod tests {
+    use openusd::usd::Stage;
+
+    use super::authored_meters_per_unit;
+
+    /// A stage on a `.usda` holding `metadata` and nothing else.
+    fn stage(name: &str, metadata: &str) -> Stage {
+        let dir = std::env::temp_dir().join("crust_camera_units");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("{name}.usda"));
+        std::fs::write(&path, format!("#usda 1.0\n(\n{metadata}\n)\n")).expect("write stage");
+        super::super::stage_builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens")
+    }
+
+    /// The authored unit, and `None` (not the schema's fallback) when no
+    /// layer authors one.
+    #[test]
+    fn meters_per_unit_reads_what_the_stage_authors() {
+        let metre = stage("metre", "    metersPerUnit = 1");
+        assert_eq!(authored_meters_per_unit(&metre), Some(1.0));
+        let unauthored = stage("unauthored", "    upAxis = \"Y\"");
+        assert_eq!(authored_meters_per_unit(&unauthored), None);
+    }
 }

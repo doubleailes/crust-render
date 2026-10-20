@@ -374,6 +374,7 @@ fn refresh_settings(
         let prim: Prim = prim_at(&stage, cam_path.clone());
         let rc = build_camera(&stage, &prim, &read.settings)
             .ok_or_else(|| Structural(format!("{camera} is no longer a camera")))?;
+        rc.warn_lens_units(Some(camera));
         let settings = apply_exposure(
             read.settings,
             read.exposure_compensation,

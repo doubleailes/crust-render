@@ -866,6 +866,32 @@ same point.
   `camera.invalid_exposure` and stores 1. The scale reaches the
   image only after the film is resolved; the `aovs` design record says which outputs
   take it.
+- **Camera depth of field** (`physical-depth-of-field`): `lens_camera` gives the lens a
+  diameter of `focalLength / fStop × 0.001 / metersPerUnit` scene units — the focal
+  length read in millimetres, the stage's `metersPerUnit` (root and session layer only,
+  `UsdGeomGetStageMetersPerUnit`; unauthored is USD's fallback 0.01). It used to be
+  `focalLength / fStop` taken as scene units, a lens 10x too wide on centimetre stages and
+  1000x on metre stages; `samples/cornellbox_guided.usda` carried `fStop = 1000` against
+  it. The alternative was OpenUSD's own convention, tenths of a scene unit
+  (`GfCamera::FOCAL_LENGTH_UNIT`, what Hydra and usdview use), which matches usdview on
+  every stage but gives a 50 mm lens a 1.79 m opening on a metre stage; the two agree at
+  0.01, so stages that author no units still match Hydra. `CameraLens` stays the lens as
+  authored (what `crust ls camera --json` reports); only `lens_camera` derives the
+  diameter. Only a lens reads the unit: one that is not finite or not positive is
+  refused as `camera.invalid_meters_per_unit` and reads as 0.01, raised like the
+  exposure check, for the camera rendered through only (`RenderCamera::warn_lens_units`),
+  so a fallback candidate the traversal built and dropped says nothing. `metersPerUnit`
+  is read for the lens only: light units, displacement bounds and edge lengths still
+  ignore it.
+- **`disableDepthOfField`** is resolved in `import_render_products` like
+  `disableMotionBlur` — the first product's authored value, else the settings prim's —
+  and sets `RenderSettings::depth_of_field = false`, which `lens_camera` reads to build a
+  pinhole. It is applied at import rather than as a branch before `get_ray`: the scene's
+  camera is then the one rendered, and the rays are exactly `fStop = 0`'s (the focus
+  distance only scales the viewport, which cancels in the ray direction). A later product
+  that differs is written with the first's setting under
+  `product.depth_of_field_mismatch`, as motion blur is. An MCP edit of it goes through
+  `live.rs`'s settings refresh, which rebuilds the camera from the settings it re-reads.
 - **`disableMotionBlur` / `instantaneousShutter`** (`RenderSettingsBase`, the second the
   deprecated name of the first) are resolved in `import_render_products` like the render's
   camera and resolution — the first product's authored value, else the settings prim's,
@@ -877,7 +903,7 @@ same point.
   ray has `time = 0`, `transforms_at` returns the start transforms, and the beauty is sharp
   at the authored positions while the motion records stay for the `motionvector` AOV. The
   two left `warn_unhonoured` when they became honoured; it still warns about
-  `disableDepthOfField` and `pixelAspectRatio`. `dataWindowNDC` left it too
+  `pixelAspectRatio` (`disableDepthOfField` left it with `physical-depth-of-field`). `dataWindowNDC` left it too
   (`add-render-region`): it is resolved like `resolution` (first product, else the
   settings prim) and `region_from_ndc` turns it into the render's region — the pixels
   whose centres lie inside the window, NDC `y` bottom-up, overscan clipped and an empty

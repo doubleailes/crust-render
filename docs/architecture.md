@@ -393,10 +393,12 @@ other. The pairs:
   the beauty bit for bit (`the_region_is_the_frame_bit_for_bit`); the
   light-list index each `L` entry carries beside its symbol is recorded
   only when the path is inspected (`Route::begin`).
-- **Products ↔ settings.** The render's camera, resolution and motion-blur
-  switch (`disableMotionBlur` / `instantaneousShutter`) are the first
-  `RenderProduct`'s (`import_render_products`), applied before the camera is
-  imported; a product that differs is refused rather than resampled.
+- **Products ↔ settings.** The render's camera, resolution, motion-blur
+  switch (`disableMotionBlur` / `instantaneousShutter`) and depth-of-field
+  switch (`disableDepthOfField`) are the first `RenderProduct`'s
+  (`import_render_products`), applied before the camera is imported; a
+  product with another camera or resolution is refused rather than
+  resampled, and one with another switch is written with the first's.
 - **Motion blur ↔ the motion-vector AOV.** The `motionvector` AOV reads the
   same `transform_end` the kernel interpolates: `WorldBuilder` derives a
   per-`geom_id` translation from every `Geometry::Instance` it is given
