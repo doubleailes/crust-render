@@ -25,7 +25,11 @@ re-reads the settings and products from the edited layer, then calls the same
 
 - One formula for the lens diameter, in one function, used by the render.
 - `disableDepthOfField` follows the same path as `disableMotionBlur`, so an MCP
-  edit and a full re-import agree without new code in `live.rs`.
+  edit and a full re-import agree without new code in `live.rs`. The
+  `metersPerUnit` refusal is `camera.invalid_meters_per_unit`, so an in-place settings update that drops
+  the lens also drops the warning (`SETTINGS_FAMILIES` already lists
+  `camera.`).
+- An MCP session renders a lens as `crust render` of its input does.
 
 **Non-Goals:**
 
@@ -58,7 +62,22 @@ consumer of the diameter.
 exposes `meters_per_unit()` beside it. If it doesn't, the value is read from the
 root layer's metadata, which is where USD stores it (`UsdGeomGetStageMetersPerUnit`
 reads only the root layer). The masked stages `live.rs` opens keep their root
-layer's metadata, so both paths read the same value.
+layer's metadata, so in-place updates and re-imports read the same value.
+
+**An MCP session's override layer carries the input's stage metadata.** A
+session's root layer is the override layer, which `new_layer_text` writes with
+only `subLayers`. Read as stage metadata, its `metersPerUnit` would fall back
+to 0.01 whatever the input authors, and so would the layer that `render_final`
+renders through `crust render -i`. `open_session` copies the input root layer's
+`metersPerUnit` and `upAxis` into the layer it creates, and adds whichever one
+is missing to a layer it resumes. Only values the input authors are copied, so
+an input that authors neither still gets an override layer with neither. The
+alternative, falling back to the input's root layer in the session (as
+`place.rs` does for `upAxis`), cannot fix `render_final`. That is a separate
+`crust render` of the override layer, so the file itself has to say it.
+Copying `upAxis` too retires the gap that `mcp-session/design.md` records,
+where a session over a Z-up input renders a `poleAxis = "scene"` dome Y-up. It
+is the same line of code, so the two are fixed together.
 
 **The refusal check runs only when there is a lens.** An invalid
 `metersPerUnit` affects nothing in a pinhole render, and warning about it there
@@ -83,8 +102,8 @@ kind of disagreement.
 ## Risks / Trade-offs
 
 - [Stages tuned for the old blur render much sharper] → It is the intended fix,
-  and the proposal marks it BREAKING. The one sample that was tuned
-  (`cornellbox_guided.usda`) drops its workaround. The release notes and the
+  and the proposal marks it BREAKING. The two samples that author a lens are
+  retuned (see below). The release notes and the
   render-settings page state the factor: 10x on centimetre stages, 1000x on
   metre stages.
 - [A metre stage exported in the USD convention (focal length in tenths of a
@@ -94,10 +113,18 @@ kind of disagreement.
 - [No longer bit-identical to Hydra on non-centimetre stages] → The camera page
   documents it. Centimetre stages and stages that don't author `metersPerUnit`
   still match.
-- [Goldens recorded from a stage with a lens change] → The only sample with a
-  non-zero `fStop` is `cornellbox_guided.usda` (`fStop = 1000`, almost a pinhole
-  already), and removing it changes that image by noise only. `check_images.sh`
-  runs before and after to confirm that no other image moves.
+- [Goldens recorded from a stage with a lens change] → Two samples author a
+  non-zero `fStop`. `cornellbox_guided.usda` (`fStop = 1000`, almost a pinhole
+  already) drops it, which changes that image by noise only.
+  `openpbr_showcase.usda` (`fStop = 1000`, `focalLength = 50`, no
+  `metersPerUnit`) has a deliberate 0.05-unit lens, and `fStop = 100` keeps it:
+  `50 / 100 × 0.001 / 0.01 = 0.05`, equal up to the rounding of the new
+  expression. `check_images.sh` runs before and after to confirm that no other
+  image moves.
+- [The input's `metersPerUnit` or `upAxis` changes after a session copied
+  it] → The override layer's copy wins, so the session renders the old value
+  until the line is edited in the layer. That is rare (stage units are fixed
+  early in a pipeline), and `mcp-session/design.md` records it.
 
 ## Migration Plan
 
