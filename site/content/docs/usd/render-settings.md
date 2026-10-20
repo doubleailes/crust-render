@@ -71,6 +71,7 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
 | `bool disableMotionBlur` | `false` | render moving geometry sharp, at its shutter-open position. The first render product's own value overrides it. See [below](#disablemotionblur). |
 | `bool instantaneousShutter` | `false` | the same switch under its older `UsdRender` name. Either one set to `true` turns the blur off. |
+| `bool disableDepthOfField` | `false` | render through a pinhole, sharp at every depth, whatever the camera's `fStop`. The first render product's own value overrides it. See [below](#disabledepthoffield). |
 | `token renderingColorSpace` | `lin_rec709` | the working colour space. See [below](#renderingcolorspace). |
 
 ### disableMotionBlur
@@ -99,6 +100,28 @@ def RenderSettings "settings"
 ```
 
 `samples/motionvector.usda` renders moving geometry this way.
+
+### disableDepthOfField
+
+`uniform bool disableDepthOfField = 1`
+
+Turns off the camera's [depth of field](#camera-depth-of-field) for the whole render.
+Every camera ray starts at the camera's position, as with a camera that authors no
+`fStop`: the image is sharp at every depth. The field of view and the framing do not
+change, and neither does anything else the camera authors.
+
+It is resolved like `disableMotionBlur`: from the first `RenderProduct` when it
+authors it, else from this prim. A later product that asks for the other setting is
+still written, with the first product's, and a
+[`product.depth_of_field_mismatch`](@/docs/reference/warnings.md) warning says so: one
+render has one camera.
+
+```usda
+def RenderSettings "settings"
+{
+    uniform bool disableDepthOfField = 1
+}
+```
 
 ### dataWindowNDC
 
@@ -433,6 +456,59 @@ def RenderSettings "settings"
 
 `samples/subdivision_adaptive.usda` places one cube five times at growing distances,
 refined to levels 3, 3, 2, 1 and 0.
+
+## Camera depth of field
+
+A render camera that authors an `fStop` greater than 0 has a lens, and renders sharp
+only at its `focusDistance`. The lens is a disk whose diameter, in scene units, is
+
+```text
+diameter = focalLength / fStop × 0.001 / metersPerUnit
+```
+
+`focalLength` is read in millimetres, as a camera's lens is specified, and the stage's
+`metersPerUnit` converts it into scene units. A 50 mm lens at f/2 is 25 mm across: 2.5
+units on a centimetre stage (`metersPerUnit = 0.01`), 0.025 units on a metre stage
+(`metersPerUnit = 1`). `focusDistance` is in scene units. Unauthored, `focalLength` is
+50, `focusDistance` 10 and `metersPerUnit` 0.01, USD's fallback. An `fStop` of 0, or
+none, is a pinhole: no blur at all.
+
+The field of view depends only on `focalLength` and the apertures, so neither `fStop`,
+`focusDistance` nor `metersPerUnit` reframes the image.
+
+A `metersPerUnit` that is not a positive number (0, say) is refused with a
+[`camera.invalid_meters_per_unit`](@/docs/reference/warnings.md) warning and read as
+0.01. Only a camera with a lens checks it, so a pinhole render says nothing about it.
+[`disableDepthOfField`](#disabledepthoffield) on the render settings turns the lens off
+without editing the camera.
+
+```usda
+#usda 1.0
+(
+    metersPerUnit = 1
+)
+
+def Camera "cam"
+{
+    float focalLength = 50
+    float fStop = 2.8
+    float focusDistance = 4
+}
+```
+
+**Stages written for older versions.** Crust Render used to take `focalLength / fStop`
+as a diameter in scene units directly, which made the blur 10 times too strong on a
+centimetre stage (and on one that authors no `metersPerUnit`) and 1000 times too strong
+on a metre stage. Such a stage now renders much sharper. To keep an old look, divide its
+`fStop` by the same factor: 10 on a centimetre stage, 1000 on a metre stage.
+
+**Hydra.** OpenUSD's own camera (`GfCamera`, which usdview and hdEmbree use) reads lens
+lengths in tenths of a scene unit whatever `metersPerUnit` says. That agrees with
+millimetres only at `metersPerUnit = 0.01`. On a centimetre stage, or one that authors no
+units, Crust Render's depth of field matches Hydra's. On any other stage it does not. A
+metre stage exported in Hydra's convention, with `focalLength = 0.5` for a 50 mm lens,
+gets a lens 100 times smaller than intended. Its framing is unaffected, because the
+apertures are in the same units as the focal length.
 
 ## Camera exposure
 

@@ -199,6 +199,10 @@ pub struct RenderSettings {
     // Off, every ray is traced at shutter open and moving geometry renders
     // sharp at its authored position; its motion stays in the scene.
     pub(super) motion_blur: bool,
+    // Whether the render camera keeps its lens (see `with_depth_of_field`;
+    // `disableDepthOfField` on the render settings). The import reads it
+    // when it builds the camera: off, the camera is a pinhole.
+    pub(super) depth_of_field: bool,
     // The render camera's linear exposure scale (see `with_exposure_scale`;
     // the camera's `exposure` attributes). Finite and positive; 1 leaves the
     // film untouched.
@@ -232,6 +236,7 @@ impl Default for RenderSettings {
             light_samples: DEFAULT_LIGHT_SAMPLES,
             light_samples_indirect: DEFAULT_LIGHT_SAMPLES,
             motion_blur: true,
+            depth_of_field: true,
             exposure_scale: DEFAULT_EXPOSURE_SCALE,
         }
     }
@@ -495,6 +500,23 @@ impl RenderSettings {
     /// [`RenderSettings::with_motion_blur`].
     pub fn motion_blur(&self) -> bool {
         self.motion_blur
+    }
+
+    /// Whether the render camera's lens (`fStop`) blurs out of focus. On by
+    /// default. Off (`disableDepthOfField` on the render settings), the USD
+    /// import builds the camera as a pinhole at its position: the field of
+    /// view and the focus plane are unchanged, and every camera ray starts
+    /// at the camera. Set before the import builds the camera; changing it
+    /// on an imported scene does not rebuild its camera.
+    pub fn with_depth_of_field(mut self, on: bool) -> Self {
+        self.depth_of_field = on;
+        self
+    }
+
+    /// Whether the render camera keeps its lens — see
+    /// [`RenderSettings::with_depth_of_field`].
+    pub fn depth_of_field(&self) -> bool {
+        self.depth_of_field
     }
 
     pub fn min_samples_per_pixel(&self) -> u32 {

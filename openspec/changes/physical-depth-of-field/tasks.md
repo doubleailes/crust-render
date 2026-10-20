@@ -2,31 +2,31 @@
 
 ## 1. Physical lens diameter
 
-- [ ] 1.1 Find how openusd exposes the stage's `metersPerUnit`: a
+- [x] 1.1 Find how openusd exposes the stage's `metersPerUnit`: a
       `Stage::meters_per_unit()` beside `up_axis()`, else the root layer's
       metadata. Write a private reader in `usd_import/camera.rs` that returns
       `Option<f64>`, and check with a unit test that it returns `Some(1.0)` on an
       inline stage authoring `metersPerUnit = 1` and `None` on a stage authoring
       nothing.
-- [ ] 1.2 Add the `camera.invalid_meters_per_unit` code to `warnings.rs`
+- [x] 1.2 Add the `camera.invalid_meters_per_unit` code to `warnings.rs`
       (Refused, Each) and a row under "Camera" in
       `site/content/docs/reference/warnings.md`. Verify that the warnings-table
       test in `warnings.rs` passes.
-- [ ] 1.3 In `lens_camera`, compute the aperture as
+- [x] 1.3 In `lens_camera`, compute the aperture as
       `focal / fStop × 0.001 / metersPerUnit`, reading 0.01 when `metersPerUnit`
       is unauthored. Read 0.01 and raise `camera.invalid_meters_per_unit` when it
       is not finite or not positive, and do the check only when `fStop > 0`.
       Update the `debug!` line to print the diameter in scene units. Verify with
       `cargo test -p crust-core --test usd_inline` (the existing
       `f_stop_gives_the_camera_a_lens` still passes).
-- [ ] 1.4 Add `usd_inline.rs` tests for the spec's "Camera depth of field" and
+- [x] 1.4 Add `usd_inline.rs` tests for the spec's "Camera depth of field" and
       "An unusable metersPerUnit is refused" scenarios. Cover a cm stage
       (diameter 2.5: the origin offset from lens samples `[0, 0.5]` and
       `[1, 0.5]` is 2.5 apart), an m stage (0.025), unauthored (2.5), the
       pinhole case, an identical centre direction across units, a zero
       `metersPerUnit` with a lens (one warning, 2.5) and without one (no warning).
       Verify that they pass.
-- [ ] 1.5 Remove `fStop = 1000` from `samples/cornellbox_guided.usda`. In
+- [x] 1.5 Remove `fStop = 1000` from `samples/cornellbox_guided.usda`. In
       `samples/openpbr_showcase.usda`, change `fStop = 1000` to `fStop = 100`
       and update its comment to give the new reading
       (`50 / 100 × 0.001 / 0.01 = 0.05` units). Record goldens with
@@ -36,7 +36,7 @@
       `-s 64` (no bias, just the old near-pinhole lens gone), and
       `openpbr_showcase`'s `crust diff` relmse is at the float-rounding level,
       not a loss of blur.
-- [ ] 1.6 Document the lens in a "Camera depth of field" section of
+- [x] 1.6 Document the lens in a "Camera depth of field" section of
       `site/content/docs/usd/render-settings.md`, beside "Camera exposure". Give
       the formula, the millimetre reading, the `metersPerUnit` fallback, the
       factor older stages change by (10x cm, 1000x m) and where it departs from
@@ -45,26 +45,26 @@
 
 ## 2. disableDepthOfField
 
-- [ ] 2.1 Add `depth_of_field: bool` (default `true`) and `with_depth_of_field`
+- [x] 2.1 Add `depth_of_field: bool` (default `true`) and `with_depth_of_field`
       to `RenderSettings` in `tracer/settings.rs`, beside `motion_blur`. Verify
       that `cargo build -p crust-core` succeeds.
-- [ ] 2.2 In `products.rs`, resolve `disableDepthOfField` in `Base` (product over
+- [x] 2.2 In `products.rs`, resolve `disableDepthOfField` in `Base` (product over
       settings, through `custom_bool` or a schema accessor if one exists), carry
       `depth_of_field` on `RenderProducts`, and remove it from
       `warn_unhonoured`. In `mod.rs`, set it on the settings next to
       `with_motion_blur`. Verify with a test in `products.rs`'s tests that the
       product's value beats the settings'.
-- [ ] 2.3 Add `product.depth_of_field_mismatch` (Approximated, Each) to
+- [x] 2.3 Add `product.depth_of_field_mismatch` (Approximated, Each) to
       `warnings.rs` and `warnings.md`, and raise it for a later product whose
       effective value differs, as `product.motion_blur_mismatch` is raised.
       Verify with the warnings-table test and a products test.
-- [ ] 2.4 Make `lens_camera` build a pinhole (aperture 0) when
+- [x] 2.4 Make `lens_camera` build a pinhole (aperture 0) when
       `settings.depth_of_field` is false, before the `metersPerUnit` check.
       Verify with `usd_inline.rs` tests for the spec's "Render settings can
       disable depth of field" scenarios: a sharp render with no
       `product.unhonoured_attribute` naming it, product over settings, the
       default, products that disagree.
-- [ ] 2.5 Pin the live-edit pair: an MCP-style edit that authors
+- [x] 2.5 Pin the live-edit pair: an MCP-style edit that authors
       `disableDepthOfField = true` on the settings prim applies in place and
       gives the same camera rays as a full re-import of the same layer. Verify
       with a test beside the existing live-update tests in
@@ -72,7 +72,7 @@
       Also cover a stage with `metersPerUnit = 0` and `fStop = 2`, where an edit
       sets `disableDepthOfField = true`. The in-place update's warnings must
       equal the re-import's, with no stale `camera.invalid_meters_per_unit`.
-- [ ] 2.6 Document `disableDepthOfField` under "Standard attributes" in
+- [x] 2.6 Document `disableDepthOfField` under "Standard attributes" in
       `site/content/docs/usd/render-settings.md` (after `disableMotionBlur`).
       Remove it from the not-honoured list in `site/content/docs/usd/aovs.md`.
       Update the honoured-attributes notes in `openspec/specs/aovs/design.md`
@@ -80,23 +80,23 @@
 
 ## 3. MCP sessions carry the input's stage metadata
 
-- [ ] 3.1 Make `open_session` (`crust-render/src/mcp/session.rs`) read
+- [x] 3.1 Make `open_session` (`crust-render/src/mcp/session.rs`) read
       `metersPerUnit` and `upAxis` from the input's root layer (as `place.rs`
       `up_axis` reads it). Have `new_layer_text` (`mcp/layer.rs`) write
       whichever ones the input authors into the new layer's metadata. Verify
       with a `layer.rs` unit test: an input authoring both gives a layer with
       both and `subLayers`, an input authoring neither gives the layer as before.
-- [ ] 3.2 On resume, add whichever of the input's authored `metersPerUnit` /
+- [x] 3.2 On resume, add whichever of the input's authored `metersPerUnit` /
       `upAxis` the override layer does not author, keeping every opinion and
       any value the layer already authors. Verify with an
       `mcp/tests.rs` test that resumes a layer written by the old
       `new_layer_text` and finds the metadata added and the edits intact.
-- [ ] 3.3 Add an `mcp/tests.rs` test on the `metersPerUnit = 1` look-dev stage
+- [x] 3.3 Add an `mcp/tests.rs` test on the `metersPerUnit = 1` look-dev stage
       with a camera at `fStop = 2`. The session's camera rays and `render_final`'s
       output must match `crust render` of the input at `-s 16`, checked with
       `crust diff`. Add a second test: a Z-up input's session reads `upAxis = Z`
       from its own stage.
-- [ ] 3.4 Retire the "override layer carries no `upAxis`" gap in
+- [x] 3.4 Retire the "override layer carries no `upAxis`" gap in
       `openspec/specs/mcp-session/design.md`, recording the "the copy wins"
       trade-off instead. If `site/content/docs/help/claude-desktop.md`
       describes the layer's content, update it there too. Verify with
@@ -107,7 +107,7 @@
 - [ ] 4.1 Run CI's checks locally: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast`. Verify that all three pass.
-- [ ] 4.2 Render `samples/cornellbox.usda` with `fStop = 2` added through a
+- [x] 4.2 Render `samples/cornellbox.usda` with `fStop = 2` added through a
       layer: once as authored, once with `disableDepthOfField = true`. Check with
       `crust diff` that the second matches the unmodified sample bit for bit at
       `-s 16`, and that the first differs only off the focus plane.

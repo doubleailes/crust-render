@@ -28,6 +28,13 @@ composition arc is a sublayer on `input`:
 )
 ```
 
+When the input authors a `metersPerUnit` or an `upAxis`, the layer copies them, since
+a stage reads its units and up axis from its root layer: without the copy the session
+would render a camera's [depth of field](@/docs/usd/render-settings.md#camera-depth-of-field),
+or a dome's `poleAxis = "scene"`, unlike `crust render` of the input. Resuming a layer that
+lacks them adds them. A layer keeps the value it copied even if the input's changes later:
+edit it in the layer to follow.
+
 Every edit the agent makes is an opinion in that layer, as an `over` where the prim
 is defined elsewhere, and the layer is saved after every edit. What is rendered is
 always the saved file, imported exactly as `crust render <output>` imports it. So:

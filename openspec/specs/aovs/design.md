@@ -185,7 +185,9 @@ AOVs. Crust should combine:
   `aspectRatioConformPolicy`.
 - `disableMotionBlur` / `disableDepthOfField`. (`disableMotionBlur` and its
   synonym `instantaneousShutter` were honoured later, by
-  `add-motion-vector-aov`; see "Motion vector AOV" below.)
+  `add-motion-vector-aov`; see "Motion vector AOV" below. `disableDepthOfField`
+  was honoured by `physical-depth-of-field`, resolved the same way; the
+  `usd-scene-import` design record has it.)
 - `includedPurposes` / `materialBindingPurposes`.
 
 These are UsdRender settings worth a separate change ("camera and settings
@@ -867,9 +869,10 @@ sample.
 ## Follow-ups
 
 - Camera and settings conformance: `pixelAspectRatio`,
-  `aspectRatioConformPolicy`, `disableDepthOfField`, `includedPurposes`,
+  `aspectRatioConformPolicy`, `includedPurposes`,
   `materialBindingPurposes`. (`disableMotionBlur` / `instantaneousShutter`
-  are done: "Motion vector AOV" below. `dataWindowNDC` is done by
+  are done: "Motion vector AOV" below. `disableDepthOfField` is done by
+  `physical-depth-of-field`: the `usd-scene-import` design record. `dataWindowNDC` is done by
   `add-render-region`: every product of a cropped render is written with the
   frame as display window and the region as data window; overscan is not.)
 - One render per (camera, resolution) group.

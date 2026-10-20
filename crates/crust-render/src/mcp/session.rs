@@ -13,7 +13,7 @@ use super::delta::{Applied, classify, layer_diff};
 use super::edit::{
     Snippet, active_snippet, attribute_snippet, binding_snippet, reanchor, variant_snippet,
 };
-use super::layer::{absolute, new_layer_text, same_file};
+use super::layer::{StageMetrics, absolute, new_layer_text, same_file};
 use super::query::{prim_at, variant_sets};
 use super::render::{Job, Renders};
 use super::scene::{Imported, import};
@@ -142,6 +142,31 @@ fn names(paths: &[PathBuf]) -> String {
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Authors `metrics` as the stage metadata of `stage`'s root layer, the
+/// override layer at `output`, and saves it.
+fn author_metrics(stage: &Stage, metrics: &StageMetrics, output: &Path) -> Result<(), String> {
+    let failed = |e: &dyn std::fmt::Display| format!("cannot author {}: {e}", output.display());
+    if let Some(m) = metrics.meters_per_unit {
+        stage
+            .set_stage_metadata("metersPerUnit", sdf::Value::Double(m))
+            .map_err(|e| failed(&e))?;
+    }
+    if let Some(axis) = &metrics.up_axis {
+        stage
+            .set_stage_metadata("upAxis", sdf::Value::Token(axis.as_str().into()))
+            .map_err(|e| failed(&e))?;
+    }
+    let root = stage.root_layer().identifier().to_owned();
+    let mut layer = stage
+        .layer_mut(&root)
+        .ok_or_else(|| format!("cannot save {}: the stage has no root layer", root))?;
+    layer
+        .save()
+        .map_err(|e| format!("cannot save {}: {e}", output.display()))?;
+    debug!("{}: added the input's {metrics:?}", output.display());
+    Ok(())
 }
 
 /// The sublayers `stage`'s root layer authors, as written.
@@ -750,10 +775,18 @@ impl State {
                     input.display()
                 ));
             }
+            // A layer written before sessions copied the input's metrics:
+            // add what it lacks, keeping what it authors.
+            let missing =
+                StageMetrics::of_layer(&input).missing_from(&StageMetrics::of_layer(&output));
+            if !missing.is_empty() {
+                author_metrics(&stage, &missing, &output)?;
+            }
             stage
         } else {
             std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            std::fs::write(&output, new_layer_text(&input, &dir))
+            let metrics = StageMetrics::of_layer(&input);
+            std::fs::write(&output, new_layer_text(&input, &dir, &metrics))
                 .map_err(|e| format!("{}: {e}", output.display()))?;
             match open_stage(&output) {
                 Ok(stage) => stage,

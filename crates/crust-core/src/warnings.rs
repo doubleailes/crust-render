@@ -172,6 +172,8 @@ warning_codes! {
         "The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled.";
     CameraUnreadable => "camera.unreadable", Skipped, Each,
         "A camera prim could not be built into a camera.";
+    CameraInvalidMetersPerUnit => "camera.invalid_meters_per_unit", Refused, Each,
+        "The stage's metersPerUnit is not finite or not positive; the lens reads it as 0.01, a centimetre.";
 
     // Products, AOVs and light path expressions
     ProductNotARenderProduct => "product.not_a_render_product", Skipped, Each,
@@ -182,6 +184,8 @@ warning_codes! {
         "A product renders through another camera or resolution than the first; no file is written for it.";
     ProductMotionBlurMismatch => "product.motion_blur_mismatch", Approximated, Each,
         "A product asks for other motion blur than the first; its file is written with the first's.";
+    ProductDepthOfFieldMismatch => "product.depth_of_field_mismatch", Approximated, Each,
+        "A product asks for other depth of field than the first; its file is written with the first's.";
     ProductRegionMismatch => "product.region_mismatch", Approximated, Each,
         "A product asks for another dataWindowNDC than the first; its file is written over the first's.";
     ProductUnhonouredAttribute => "product.unhonoured_attribute", Approximated, Each,
