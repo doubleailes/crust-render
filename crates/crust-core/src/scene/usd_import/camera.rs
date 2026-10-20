@@ -106,7 +106,8 @@ pub(super) struct RenderCamera {
     pub(super) camera: Camera,
     pub(super) exposure_scale: f32,
     /// The stage's `metersPerUnit` when the lens read it and refused it (not
-    /// finite or not positive); the lens was built with the fallback.
+    /// finite, not positive, or overflowing the diameter); the lens was built
+    /// with the fallback.
     pub(super) refused_meters_per_unit: Option<f64>,
 }
 
@@ -118,8 +119,8 @@ impl RenderCamera {
             let camera = camera_path.unwrap_or("the render camera");
             warning!(
                 CameraInvalidMetersPerUnit,
-                "{camera}: the stage's metersPerUnit = {m} is not a length; the lens reads it \
-                 as {FALLBACK_METERS_PER_UNIT} (a centimetre)"
+                "{camera}: the stage's metersPerUnit = {m} is not a length the lens can use; it \
+                 reads it as {FALLBACK_METERS_PER_UNIT} (a centimetre)"
             );
         }
     }
@@ -180,7 +181,8 @@ fn authored_meters_per_unit(stage: &Stage) -> Option<f64> {
 /// [`FALLBACK_METERS_PER_UNIT`]), and the unit when it was refused. `0` is a
 /// pinhole: an `fStop` of 0 or less, or `disableDepthOfField`. Only a lens
 /// reads the unit, so a pinhole render refuses none it does not use; a unit
-/// that is not finite or not positive is refused and reads as the fallback.
+/// that is not finite, not positive, or so small that the diameter overflows
+/// `f32` is refused and reads as the fallback.
 fn lens_diameter(
     stage: &Stage,
     focal_length: f32,
@@ -190,13 +192,16 @@ fn lens_diameter(
     if !depth_of_field || f_stop <= 0.0 {
         return (0.0, None);
     }
-    let (meters_per_unit, refused) = match authored_meters_per_unit(stage) {
-        Some(m) if m.is_finite() && m > 0.0 => (m, None),
-        Some(m) => (FALLBACK_METERS_PER_UNIT, Some(m)),
-        None => (FALLBACK_METERS_PER_UNIT, None),
+    let diameter = |meters_per_unit: f64| {
+        (f64::from(focal_length) / f64::from(f_stop) * 0.001 / meters_per_unit) as f32
     };
-    let diameter = f64::from(focal_length) / f64::from(f_stop) * 0.001 / meters_per_unit;
-    (diameter as f32, refused)
+    match authored_meters_per_unit(stage) {
+        // A unit so small that the diameter overflows `f32` is no length
+        // either: the lens would offset every ray to infinity.
+        Some(m) if m.is_finite() && m > 0.0 && diameter(m).is_finite() => (diameter(m), None),
+        Some(m) => (diameter(FALLBACK_METERS_PER_UNIT), Some(m)),
+        None => (diameter(FALLBACK_METERS_PER_UNIT), None),
+    }
 }
 
 /// The ray-generating camera at `prim`, from its transform and lens, and the

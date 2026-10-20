@@ -841,6 +841,23 @@ fn an_unusable_meters_per_unit_is_refused_only_for_a_lens() {
         lens_diameter(&lens)
     );
 
+    // Finite and positive, but the diameter (2.5e40 units) overflows `f32`: the
+    // lens would offset every ray to infinity.
+    let tiny = load_lens(
+        "unit_tiny_lens",
+        "metersPerUnit = 1e-42",
+        "float fStop = 2",
+        "",
+    );
+    assert_eq!(invalid_unit_warnings(&tiny), 1, "{:?}", tiny.warnings);
+    assert!(
+        (lens_diameter(&tiny) - 2.5).abs() < 1e-5,
+        "{}",
+        lens_diameter(&tiny)
+    );
+    let ray = tiny.camera.get_ray(0.5, 0.5, [0.9, 0.1], 0.0);
+    assert!(ray.origin().is_finite() && ray.direction().is_finite());
+
     let pinhole = load_lens("unit_zero_pinhole", "metersPerUnit = 0", "", "");
     assert_eq!(invalid_unit_warnings(&pinhole), 0, "{:?}", pinhole.warnings);
 
@@ -880,6 +897,35 @@ def Scope "Render"
         "{}",
         lens_diameter(&named)
     );
+}
+
+/// A stage with no camera renders through the procedural fallback, whose
+/// lens `disableDepthOfField` closes as it does a USD camera's.
+#[test]
+fn disable_depth_of_field_closes_the_fallback_cameras_lens() {
+    let stage = |name: &str, render: &str| {
+        load_raw(
+            name,
+            &format!(
+                "#usda 1.0\n\ndef Xform \"World\"\n{{\n}}\n\ndef Scope \"Render\"\n{{\n{render}\n}}\n"
+            ),
+        )
+    };
+    let blurred = stage("dof_fallback_lens", "");
+    assert!(lens_diameter(&blurred) > 0.0, "the fallback has a lens");
+    let sharp = stage(
+        "dof_fallback_pinhole",
+        r#"    def RenderSettings "settings"
+    {
+        uniform bool disableDepthOfField = 1
+    }"#,
+    );
+    assert_eq!(lens_diameter(&sharp), 0.0);
+    for (s, t) in [(0.5, 0.5), (0.0, 1.0)] {
+        let a = sharp.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        let b = blurred.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        assert!(a.direction().abs_diff_eq(b.direction(), 1e-5));
+    }
 }
 
 const DOF_PRODUCT: &str = r#"

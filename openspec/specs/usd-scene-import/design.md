@@ -877,7 +877,8 @@ same point.
   every stage but gives a 50 mm lens a 1.79 m opening on a metre stage; the two agree at
   0.01, so stages that author no units still match Hydra. `CameraLens` stays the lens as
   authored (what `crust ls camera --json` reports); only `lens_camera` derives the
-  diameter. Only a lens reads the unit: one that is not finite or not positive is
+  diameter. Only a lens reads the unit: one that is not finite, not positive, or so
+  small that the diameter overflows `f32` (a lens offsetting every ray to infinity) is
   refused as `camera.invalid_meters_per_unit` and reads as 0.01, raised like the
   exposure check, for the camera rendered through only (`RenderCamera::warn_lens_units`),
   so a fallback candidate the traversal built and dropped says nothing. `metersPerUnit`
@@ -886,7 +887,10 @@ same point.
 - **`disableDepthOfField`** is resolved in `import_render_products` like
   `disableMotionBlur` — the first product's authored value, else the settings prim's —
   and sets `RenderSettings::depth_of_field = false`, which `lens_camera` reads to build a
-  pinhole. It is applied at import rather than as a branch before `get_ray`: the scene's
+  pinhole; a stage with no camera has the procedural fallback's lens closed the same way
+  (`Camera::pinhole` in `resolve_camera`), so the attribute is honoured on every path
+  that no longer warns it is not. It is applied at import rather than as a branch before
+  `get_ray`: the scene's
   camera is then the one rendered, and the rays are exactly `fStop = 0`'s (the focus
   distance only scales the viewport, which cancels in the ray direction). A later product
   that differs is written with the first's setting under

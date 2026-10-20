@@ -20,7 +20,10 @@
   its metadata from its root layer only, and a session's root layer is the override
   layer. So `open_session` copies the input root layer's `metersPerUnit` and `upAxis`
   into the layer it creates (`StageMetrics`, `mcp/layer.rs`), and a resumed layer that
-  lacks one the input authors gets it added, keeping any value it authors itself.
+  lacks one the input authors gets it added, keeping any value it authors itself. A
+  resume that is then refused (the addition cannot be saved, or the import fails) puts
+  the layer's earlier bytes back (`restoring`), so a refused `open_session` leaves the
+  file as it found it, like every other refused call.
   Without the copy a session over a metre-scale input would read the 0.01 fallback and
   render its lens 100x wider than `crust render` of the input, and so would
   `render_final`, which renders the layer file. A fallback to the input's root layer

@@ -169,6 +169,23 @@ fn author_metrics(stage: &Stage, metrics: &StageMetrics, output: &Path) -> Resul
     Ok(())
 }
 
+/// `result`, after putting `original` back as the bytes at `path` when it
+/// failed: a refused resume leaves the layer as it found it. A restore that
+/// fails too is added to the error.
+fn restoring<T>(
+    path: &Path,
+    original: Option<&[u8]>,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    match (result, original) {
+        (Err(e), Some(bytes)) => Err(match replace_file(path, bytes) {
+            Ok(()) => e,
+            Err(io) => format!("{e}; and {} could not be restored: {io}", path.display()),
+        }),
+        (result, _) => result,
+    }
+}
+
 /// The sublayers `stage`'s root layer authors, as written.
 fn authored_sublayers(stage: &Stage) -> Vec<String> {
     let root = stage.root_layer();
@@ -763,6 +780,9 @@ impl State {
             .ok_or("the output has no directory")?
             .to_owned();
         let resumed = output.exists();
+        // The resumed layer's bytes before this call added metrics to it, put
+        // back if the session it opens is refused.
+        let mut before_metrics = None;
         let stage = if resumed {
             let stage = open_stage(&output)?;
             let sublayers = authored_sublayers(&stage);
@@ -780,7 +800,11 @@ impl State {
             let missing =
                 StageMetrics::of_layer(&input).missing_from(&StageMetrics::of_layer(&output));
             if !missing.is_empty() {
-                author_metrics(&stage, &missing, &output)?;
+                let original =
+                    std::fs::read(&output).map_err(|e| format!("{}: {e}", output.display()))?;
+                let authored = author_metrics(&stage, &missing, &output);
+                before_metrics = Some(original);
+                restoring(&output, before_metrics.as_deref(), authored)?;
             }
             stage
         } else {
@@ -799,7 +823,8 @@ impl State {
         let assets = crust_core::config()
             .scene_deltas
             .then(|| Arc::new(FileAssets::new().keep_decoded()));
-        let scene = match import_kept(&output, loader(assets.as_ref()).0) {
+        let imported = import_kept(&output, loader(assets.as_ref()).0);
+        let scene = match restoring(&output, before_metrics.as_deref(), imported) {
             Ok(scene) => scene,
             Err(e) => {
                 // A new layer the import refuses is no session: leave nothing.
@@ -921,6 +946,35 @@ impl Session {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// A failed step of a resume puts back the bytes the layer had before
+    /// the resume added metrics to it; a step that succeeds keeps them, as
+    /// does a new layer, which has no earlier bytes.
+    #[test]
+    fn a_failed_resume_restores_the_layer() {
+        let dir = std::env::temp_dir().join("crust_mcp_restoring");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let layer = dir.join("edits.usda");
+        let original = b"#usda 1.0\n# as found\n";
+        let with_metrics = b"#usda 1.0\n(\n    metersPerUnit = 1\n)\n";
+
+        std::fs::write(&layer, with_metrics).unwrap();
+        let e = restoring(
+            &layer,
+            Some(original),
+            Err::<(), _>("import refused".into()),
+        );
+        assert_eq!(e, Err("import refused".to_owned()));
+        assert_eq!(std::fs::read(&layer).unwrap(), original);
+
+        std::fs::write(&layer, with_metrics).unwrap();
+        assert_eq!(restoring(&layer, Some(original), Ok(7)), Ok(7));
+        assert_eq!(std::fs::read(&layer).unwrap(), with_metrics);
+
+        let none = restoring::<()>(&layer, None, Err("refused".into()));
+        assert!(none.is_err());
+        assert_eq!(std::fs::read(&layer).unwrap(), with_metrics);
+    }
 
     /// `replace_file` gives the path a new file rather than rewriting the one
     /// there, so an import that still maps the old layer keeps the bytes it
