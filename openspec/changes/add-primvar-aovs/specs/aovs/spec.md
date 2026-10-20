@@ -48,12 +48,12 @@ SHALL hold the var's clear value.
 
 ### Requirement: Primvar types must fit the var
 
-A primvar var's channel count SHALL come from its `dataType` (see "Canonical
-raw sources and aliases" for the type rules). A primvar whose component count
-differs from the var's, or whose type has no numeric value per point
-(`string`, `token`, matrices), SHALL be refused on that prim with one warning
-per var and prim, and that prim SHALL read the clear value. An integer
-primvar SHALL be accepted for an `int` or `float` var.
+A primvar var's channel count SHALL come from its `dataType`: 1, 2 or 3
+components; a four-component `dataType` SHALL refuse the var (not yet
+supported). A primvar whose component count differs from the var's, or with
+no numeric value per point (`string`, `token`, matrices), SHALL be refused on
+that prim with one warning per var and prim; that prim reads the clear value.
+An `int` primvar SHALL fit an `int` or `float` var.
 
 #### Scenario: Mismatched component count
 
@@ -61,6 +61,12 @@ primvar SHALL be accepted for an `int` or `float` var.
   `point3f[] primvars:rest`
 - **THEN** one warning names the var, the prim and both types, and the mesh
   reads the clear value
+
+#### Scenario: Four components refused
+
+- **WHEN** a primvar var authors `dataType = "color4f"`
+- **THEN** a warning names the var and says four-component primvar vars are
+  not supported yet, and the product has no channel for it
 
 #### Scenario: Integer IDs
 
@@ -124,8 +130,13 @@ SHALL match the same render without this capability.
 
 - **WHEN** a scene with `primvars:rest` on every mesh is rendered with a
   product requesting only `depth` and `normal`
-- **THEN** the scene's reported geometry memory is the same as with no
-  `primvars:rest` authored
+- **THEN** `--stats` reports 0 bytes of primvar tables, and the beauty is
+  bit-identical to the same render with no `primvars:rest` authored
+
+#### Scenario: Primvar tables are reported
+
+- **WHEN** the same scene is rendered with a `rest` primvar var and `--stats`
+- **THEN** the stats report the primvar tables' bytes
 
 ## MODIFIED Requirements
 
