@@ -509,23 +509,32 @@ fn the_jit_matches_the_interpreter_on_mass_lookups() {
     let root = c.compile_named("", "sum", None);
     assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
     assert_eq!(c.program.mass_reads().0, 15);
-    let points: Vec<ShadeCtx<'static>> = shading_points()
-        .into_iter()
-        .enumerate()
-        .flat_map(|(i, ctx)| {
+    let base = shading_points();
+    // Two fields per shading point: one with every property, one with no
+    // colour and no normal.
+    let fields: Vec<[MassCtx; 2]> = (0..base.len())
+        .map(|i| {
             let t = i as f32 / 96.0;
-            let full = MassCtx {
-                color: Some(Vec3A::new(t, 1.0 - t, 0.5)),
-                normal: Some(Vec3A::new((t * 3.0).sin(), (t * 2.0).cos(), 0.7).normalize()),
-                depth: t * 0.1,
-                density: 2.0 * t,
-            };
-            let bare = MassCtx {
-                color: None,
-                normal: None,
-                depth: 0.0,
-                density: t,
-            };
+            [
+                MassCtx {
+                    color: Some(Vec3A::new(t, 1.0 - t, 0.5)),
+                    normal: Some(Vec3A::new((t * 3.0).sin(), (t * 2.0).cos(), 0.7).normalize()),
+                    depth: t * 0.1,
+                    density: 2.0 * t,
+                },
+                MassCtx {
+                    color: None,
+                    normal: None,
+                    depth: 0.0,
+                    density: t,
+                },
+            ]
+        })
+        .collect();
+    let points: Vec<ShadeCtx<'_>> = base
+        .into_iter()
+        .zip(&fields)
+        .flat_map(|(ctx, [full, bare])| {
             [
                 ShadeCtx {
                     mass: Some(full),

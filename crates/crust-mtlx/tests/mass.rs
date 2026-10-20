@@ -13,7 +13,7 @@ fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
     None
 }
 
-fn ctx(mass: Option<MassCtx>) -> ShadeCtx<'static> {
+fn ctx(mass: Option<&MassCtx>) -> ShadeCtx<'_> {
     ShadeCtx {
         uv: (0.25, 0.75),
         normal: Vec3A::Z,
@@ -69,7 +69,7 @@ fn every_lookup_reads_its_default_off_a_field() {
         depth: 0.25,
         density: 1.5,
     };
-    c.program.eval(&ctx(Some(bare)), &mut slots);
+    c.program.eval(&ctx(Some(&bare)), &mut slots);
     assert_eq!(slots[color as usize].rgb(), Vec3A::new(0.1, 0.2, 0.3));
     assert_eq!(slots[normal as usize].rgb(), Vec3A::Z);
     assert_eq!(slots[depth as usize].x(), 0.25);
@@ -86,7 +86,7 @@ fn every_lookup_reads_the_field_the_host_filled() {
         density: 0.9,
     };
     let mut slots = Vec::new();
-    c.program.eval(&ctx(Some(full)), &mut slots);
+    c.program.eval(&ctx(Some(&full)), &mut slots);
     assert_eq!(slots[color as usize].rgb(), Vec3A::new(0.6, 0.4, 0.2));
     assert_eq!(slots[color as usize].arity, 3);
     assert_eq!(slots[normal as usize].rgb(), Vec3A::new(0.6, 0.0, 0.8));

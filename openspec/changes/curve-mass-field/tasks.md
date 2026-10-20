@@ -42,18 +42,18 @@ tables of `curve-attributes-to-materials`. No task starts until that change
 
 - [x] 5.1 Add `crust_mass_diffuse_bsdf` (`weight`, `color`, `normal`): Lambertian around its normal, cosine-sampled with the matching pdf, its normal kept whichever way it faces and replaced by the hit's only when non-finite or zero; verify a white-furnace test returning `color`, a sampling-histogram test, the opposed-normal shading test and its `tests/resolve.rs` entry
 - [x] 5.2 Make the leaf's light pass out of its strand as a fibre's does, and widen the mixed-vertex split to any non-fibre leaf that transmits or whose prepared normal differs from the hit's; verify the tilted-diffuse variant of `only_the_fibres_light_passes_out_of_a_mixed_strand`, the mass-lit-from-behind test, and that the existing hair tests are unchanged
-- [ ] 5.3 Verify the widened split costs nothing where it does not engage: cornellbox and `samples/hair.usda` instruction counts (callgrind, `-s 2`) within 0.1% of the branch point, and their images bit-identical
+- [x] 5.3 Verify the widened split costs nothing where it does not engage: cornellbox and `samples/hair.usda` instruction counts (callgrind, `-s 2`) within 0.1% of the branch point, and their images bit-identical
 - [x] 5.4 Document the leaf, the normal exception and the widened split in the materials design record and the site's materials page; verify `zola build`
 
 ## 6. Live edits
 
-- [ ] 6.1 Add every `crust:mass:*` attribute, group membership and the colour terminal's graph to `Signature`, so an MCP edit of any of them rebuilds the affected fields; verify tests in `tests/live.rs` that a radius edit, a group change and a colour-graph edit each render equal to a full re-import
+- [x] 6.1 Add every `crust:mass:*` attribute, group membership and the colour terminal's graph to `Signature`, so an MCP edit of any of them rebuilds the affected fields; verify tests in `tests/live.rs` that a radius edit, a group change and a colour-graph edit each render equal to a full re-import
 
 ## 7. Sample and integration
 
-- [ ] 7.1 Add `samples/hair_mass.usda` / `.mtlx`: a groom whose material blends a per-strand colour and the mass colour, normal and diffuse, faded by density for flyaways, documented in the file; verify it renders and `crust check` reports no warning
-- [ ] 7.2 Measure bake time and field memory on the largest groom available, and record them in the curve-mass-field design record; verify the numbers are there
-- [ ] 7.3 Verify every existing sample renders bit-identically to the branch point (`scripts/check_images.sh check`), and run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, `cargo deny --locked check`, and the pinned nightly clippy
+- [x] 7.1 Add `samples/hair_mass.usda` / `.mtlx`: a groom whose material blends a per-strand colour and the mass colour, normal and diffuse, faded by density for flyaways, documented in the file; verify it renders and `crust check` reports no warning
+- [x] 7.2 Measure bake time and field memory on the largest groom available, and record them in the curve-mass-field design record; verify the numbers are there
+- [x] 7.3 Verify every existing sample renders bit-identically to the branch point (`scripts/check_images.sh check`), and run the CI set: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, `cargo deny --locked check`, and the pinned nightly clippy
 
 ## Workflow follow-up
 

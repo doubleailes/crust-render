@@ -919,7 +919,9 @@ record; this is their place among the materials.
 ### The lookups: `crust_mass_color`, `crust_mass_normal`, `crust_mass_depth`, `crust_mass_density`
 
 Each compiles to one `Op::Mass` reading the shading context's `mass` entry
-(`ShadeCtx::mass`, a `MassCtx` the host fills), with the node's `default`
+(`ShadeCtx::mass`, a `MassCtx` the host fills and the context borrows, as it
+does the strand's primvars, so a material reading none copies one pointer
+more per shading call), with the node's `default`
 folded in as the fallback exactly as `geompropvalue`'s is: the op returns it
 where the context has no field, no colour (`crust_mass_color`), or no normal
 (`crust_mass_normal`), and a connected `default` is reported unsupported. The

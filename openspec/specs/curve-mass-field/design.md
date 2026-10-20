@@ -309,20 +309,34 @@ groom), threshold 0.5, voxel half the radius, one smoothing pass.
 
 Measured on this machine (4 cores, `cargo build --release`), `--stats`:
 
-| groom | strands | pieces | field | bricks | bytes | bake |
-|---|---|---|---|---|---|---|
-| `samples/hair_mass.usda` (the mass clump) | see below | | | | | |
+| groom | strands | cubic spans | bricks | field memory | bake |
+|---|---|---|---|---|---|
+| `samples/hair_mass.usda`, the mass clump (radius 0.45 cm, three spacings) | 421 | 2 526 | 195 | 2.29 MiB (with a colour) | 0.15 s |
 
-The widened mixed-vertex split engages nowhere in a scene without a tilted
-or transmitting leaf beside a fibre, and the lookup is read nowhere without
-a field: cornellbox's and `samples/hair.usda`'s instruction counts
-(callgrind, `-s 2`, one thread) and images against the branch point are in
-the table below.
+The bake is 2.3% of that render's import and render time at 16 spp; the
+`Bake mass fields` phase and the `curve mass fields` row report it.
 
-| scene | before (instructions) | after | change |
-|---|---|---|---|
-| cornellbox | | | |
-| hair | | | |
+**Rendering costs nothing where no field is read.** Instruction counts
+(callgrind, one thread) against the branch point, images compared bit for
+bit:
+
+| scene | before | after | change | image |
+|---|---|---|---|---|
+| cornellbox, `-s 2` | 4 264 068 279 | 4 265 430 204 | +1.36 M (+0.03%) | identical |
+| `samples/hair.usda`, `-s 2` | 693 213 085 | 694 867 041 | +1.65 M (+0.24%) | identical |
+| `samples/hair.usda`, `-s 8` | 2 451 634 027 | 2 453 162 260 | +1.53 M (+0.06%) | identical |
+
+The difference does not grow with the samples — four times the shading at
+8 spp, the same 1.5 M — so it is the import's: reading the `crust:mass:*`
+attributes and the colour terminal of every curve prim and material. Per
+hit, the lookup is not read and the widened mixed-vertex split does not
+engage (no fibre beside a tilted or transmitting leaf), and the shading
+context carries the field by reference, a pointer, so a material that reads
+none copies nothing more. Every other checked-in sample renders
+bit-identical at 16 spp (`scripts/check_images.sh` against goldens from the
+branch point); `cornellbox_guided` matches when both are rendered on an
+idle machine — its guided render differs between two runs of the same
+binary under load, which predates this change.
 
 ## Known gaps
 

@@ -490,7 +490,9 @@ def Xform "World"
 /// A groom's field is baked with its material's mass colour graph, so an
 /// in-place material edit that changes the graph is refused (the host
 /// re-imports), while one that leaves it alone is applied in place; a mesh
-/// bound to the same material is never the reason.
+/// bound to the same material is never the reason. Three subtrees, so the
+/// stage imports whole: streamed, the material would be a sibling chunk's
+/// (a known gap of the streamed import).
 #[test]
 fn a_curve_material_edit_that_changes_its_mass_colour_graph_is_refused() {
     let dir = std::env::temp_dir().join("crust_live_mass_colour");
@@ -506,9 +508,6 @@ fn a_curve_material_edit_that_changes_its_mass_colour_graph_is_refused() {
 )
 def Xform "World"
 {{
-    def Camera "cam"
-    {{
-    }}
     def Material "Hair"
     {{
         token outputs:surface.connect = </World/Hair/Shader.outputs:surface>
@@ -551,7 +550,11 @@ def Xform "World"
     write("(0.5, 0.5, 0.5)", "(1, 0, 0)");
     let scene = Scene::from_usd(&stage).expect("imports");
     assert_eq!(scene.world.mass_fields().len(), 1);
-    assert!(scene.world.mass_fields()[0].has_color());
+    assert!(
+        scene.world.mass_fields()[0].has_color(),
+        "{:#?}",
+        scene.warnings
+    );
     let prov = consistent(&scene);
     let change = crust_core::live::Change {
         materials: vec!["/World/Hair".into()],

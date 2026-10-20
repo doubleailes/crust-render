@@ -302,7 +302,16 @@ fn run<R>(
     match rec.curve() {
         None => run_at(program, jit, r_in, rec, None, None, f),
         Some(c) if program.primvars.is_empty() || !c.has_primvars() => {
-            run_at(program, jit, r_in, rec, Some(strand(c, &[])), mass(c), f)
+            let mass = mass(c);
+            run_at(
+                program,
+                jit,
+                r_in,
+                rec,
+                Some(strand(c, &[])),
+                mass.as_ref(),
+                f,
+            )
         }
         // The hit's primvars, looked up into a buffer reused per thread —
         // taken rather than borrowed, so a program run from inside `f`
@@ -310,13 +319,14 @@ fn run<R>(
         Some(c) => {
             let mut primvars = PRIMVARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
             c.primvars_into(&mut primvars);
+            let mass = mass(c);
             let out = run_at(
                 program,
                 jit,
                 r_in,
                 rec,
                 Some(strand(c, &primvars)),
-                mass(c),
+                mass.as_ref(),
                 f,
             );
             PRIMVARS.with(|cell| *cell.borrow_mut() = primvars);
@@ -332,7 +342,7 @@ fn run_at<R>(
     r_in: &Ray,
     rec: &HitRecord,
     curve: Option<CurveCtx<'_>>,
-    mass: Option<crust_mtlx::MassCtx>,
+    mass: Option<&crust_mtlx::MassCtx>,
     f: impl FnOnce(&[Val]) -> R,
 ) -> R {
     let ctx = ShadeCtx {

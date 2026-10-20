@@ -75,8 +75,10 @@ pub struct ShadeCtx<'a> {
     pub curve: Option<CurveCtx<'a>>,
     /// The curve mass field at the hit, on a curve that bakes one, filled for
     /// what the program reads ([`Program::mass_reads`]); `None` anywhere
-    /// else, where every `crust_mass_*` lookup reads its `default`.
-    pub mass: Option<MassCtx>,
+    /// else, where every `crust_mass_*` lookup reads its `default`. Borrowed,
+    /// as the strand's primvars are: the context is built at every shading
+    /// call, and an inline field would more than double what that copies.
+    pub mass: Option<&'a MassCtx>,
 }
 
 /// A property of the strand a curve hit lies on, read by `geompropvalue`.
