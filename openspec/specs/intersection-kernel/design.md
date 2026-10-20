@@ -303,7 +303,11 @@ model).
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*
   linearly (no deformation blur, no quaternion motion — a large shutter rotation bows
-  slightly, but the union-of-endpoints bbox stays conservative). Cubic curve spans are
+  slightly, but the union-of-endpoints bbox stays conservative). Every local point
+  therefore moves along a straight chord at constant speed, `M(t)·L = S·L + t·(E − S)·L`,
+  and since time-sampled transforms drive this pair that chord is also what the
+  `motionvector` AOV reports (`rt_world.rs`'s affine `Motion` repeats `lerp_affine`
+  to rebase a hit); slerped transforms would have to change both together. Cubic curve spans are
   kept as cubic primitives (converted to Bézier control points) and adaptively
   subdivided per ray query into rounded cones (`crust_rt::curve::cubic_curve_intersect`),
   so they are not stored as polylines; widths lerp across a span in parameter; the

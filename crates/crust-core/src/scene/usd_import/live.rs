@@ -28,7 +28,7 @@ use super::mesh::SubdivPolicy;
 use super::time::EvalTimeScope;
 use super::xform::compose_with_parent;
 use super::{
-    ImportCaches, ImportCtx, ValidOptions, apply_exposure, emit_light, open_stage,
+    ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, open_stage,
     open_stage_masked, prim_at, read_index, stage_builder,
 };
 
@@ -359,6 +359,15 @@ fn refresh_settings(
             return Err(Structural(
                 "implicit shapes would be sized for the newly named camera".into(),
             ));
+        }
+        // Geometry was placed at the shutter's ends, so another shutter
+        // re-imports, as a transform edit does.
+        if read
+            .shutter
+            .key(asks_about_time(&read.shutter, &read.products))
+            != facts.shutter
+        {
+            return Err(Structural("the camera shutter changed".into()));
         }
         if read.domes_seen_by_camera != facts.domes_seen_by_camera {
             return Err(Structural("the dome's camera visibility changed".into()));

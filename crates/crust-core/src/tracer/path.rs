@@ -1690,6 +1690,7 @@ fn first_wall(
     world: &World,
     motion_on: bool,
     primvars_on: Option<&Ray>,
+    time: f32,
 ) -> Option<FirstHit> {
     let (t_wall, rec, prim) = thin.first.filter(|_| walls)?;
     (t_wall < t).then(|| FirstHit::Surface {
@@ -1697,7 +1698,7 @@ fn first_wall(
         n: rec.normal,
         uv: rec.uv,
         motion: if motion_on {
-            world.motion(prim.geom_id)
+            world.motion(prim.geom_id, rec.p, time)
         } else {
             Vec3A::ZERO
         },
@@ -2841,7 +2842,7 @@ pub(super) fn trace_path<
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 if AOV && records.is_empty() {
-                    *first = first_wall(thin, walls, t, world, motion_on, primvars_on)
+                    *first = first_wall(thin, walls, t, world, motion_on, primvars_on, ray.time())
                         .unwrap_or(FirstHit::Volume { p });
                 }
                 let wi = ray.direction().normalize();
@@ -2978,8 +2979,16 @@ pub(super) fn trace_path<
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
             if AOV && records.is_empty() {
-                *first = first_wall(thin, walls, t_med, world, motion_on, primvars_on)
-                    .unwrap_or(FirstHit::Volume { p: pos });
+                *first = first_wall(
+                    thin,
+                    walls,
+                    t_med,
+                    world,
+                    motion_on,
+                    primvars_on,
+                    ray.time(),
+                )
+                .unwrap_or(FirstHit::Volume { p: pos });
             }
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
             let dir = sample_henyey_greenstein(
@@ -3116,8 +3125,15 @@ pub(super) fn trace_path<
             stats.ended_escaped += 1;
             if AOV
                 && records.is_empty()
-                && let Some(wall) =
-                    first_wall(thin, walls, f32::INFINITY, world, motion_on, primvars_on)
+                && let Some(wall) = first_wall(
+                    thin,
+                    walls,
+                    f32::INFINITY,
+                    world,
+                    motion_on,
+                    primvars_on,
+                    ray.time(),
+                )
             {
                 *first = wall;
             }
@@ -3220,19 +3236,26 @@ pub(super) fn trace_path<
             route.diffuse_filter = sp.diffuse_filter(cos_o);
         }
         if AOV && records.is_empty() {
-            *first = first_wall(thin, walls, rec.t, world, motion_on, primvars_on).unwrap_or(
-                FirstHit::Surface {
-                    p: rec.p,
-                    n: sp.normal(),
-                    uv: rec.uv,
-                    motion: if motion_on {
-                        world.motion(hit.geom_id)
-                    } else {
-                        Vec3A::ZERO
-                    },
-                    prim: with_barycentrics(HitPrim::of(&hit), world, primvars_on, hit.rec.t),
+            *first = first_wall(
+                thin,
+                walls,
+                rec.t,
+                world,
+                motion_on,
+                primvars_on,
+                ray.time(),
+            )
+            .unwrap_or(FirstHit::Surface {
+                p: rec.p,
+                n: sp.normal(),
+                uv: rec.uv,
+                motion: if motion_on {
+                    world.motion(hit.geom_id, rec.p, ray.time())
+                } else {
+                    Vec3A::ZERO
                 },
-            );
+                prim: with_barycentrics(HitPrim::of(&hit), world, primvars_on, hit.rec.t),
+            });
         }
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;

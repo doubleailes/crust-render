@@ -39,14 +39,15 @@ use crate::material::Material;
 use crate::rt_world::{FaceMap, PrimvarTable, UvMap, WorldBuilder};
 
 use super::attrs::{
-    custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
+    custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_motion_translate,
+    prim_ray_mask, value_at,
 };
 use super::implicit::{Shape, undisplaced};
 use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
 use super::shapes::{Curves, curve_segments, curves_scene, nurbs_curve_segments, sphere_radius};
 use super::strands::StrandRequest;
-use super::xform::compose_with_parent;
+use super::xform::{Span, compose_with_parent};
 use super::{ImportCaches, WalkScope, prim_at, prune_reason};
 use crate::strands::StrandTable;
 
@@ -207,6 +208,9 @@ pub(super) fn collect_proto_parts(
             continue;
         }
         let this_local = part_local(&prim, root, parent_local);
+        if prim.path() != root.path() {
+            caches.motion.in_prototype(&prim);
+        }
 
         // A native instance nested in this prototype: splice its prototype's
         // parts in, placed by this prim, rather than walking its proxy
@@ -691,7 +695,7 @@ pub(super) fn emit_native_instance(
     world: &mut WorldBuilder,
     prim: &Prim,
     proto_path: &sdf::Path,
-    world_xf: GMat4,
+    span: Span,
     caches: &mut ImportCaches<'_>,
 ) {
     // A kept primvar on the instance, or above it, does not reach the
@@ -700,6 +704,7 @@ pub(super) fn emit_native_instance(
         .meshes
         .primvars
         .report_placement(prim, "the instance prim");
+    let world_xf = span.open;
     // Adaptive subdivision refines a prototype by its size on screen only when
     // this is its one placement in its top-level subtree.
     let place = if caches.meshes.subdiv.adaptive.is_some()
@@ -711,7 +716,15 @@ pub(super) fn emit_native_instance(
     };
     let parts = placed_parts(stage, proto_path, caches, place);
     let first = world.count();
-    attach_proto_parts(world, &parts, world_xf, "native instance");
+    let motion = prim_motion_translate(prim);
+    attach_proto_parts(
+        world,
+        &parts,
+        world_xf,
+        span.close.as_ref(),
+        motion,
+        "native instance",
+    );
     debug!(
         "Instance {} uses prototype {proto_path} ({} instance(s), geom ids {first}..{})",
         prim.path(),
@@ -726,15 +739,30 @@ pub(super) fn emit_native_instance(
 /// Non-invertible placements are skipped: the kernel's instance transform
 /// must be invertible, and a zero scale is a common "hide this instance"
 /// idiom rather than an error.
+///
+/// `placement` is where the shutter opens; `close`, when the placement's
+/// transform moves, where it closes. Each part ends the shutter at the span's
+/// end with `part.local` folded in ([`Span::end`]), moved by `motion`, the
+/// placing prim's `crust:motion:translate`.
 fn attach_proto_parts(
     world: &mut WorldBuilder,
     parts: &[ProtoPart],
     placement: GMat4,
+    close: Option<&GMat4>,
+    motion: Option<Vec3>,
     what: &str,
 ) -> usize {
     let mut attached = 0;
     for part in parts {
         let xf = placement * part.local;
+        let end = match (close, motion) {
+            (None, None) => None,
+            _ => Span {
+                open: xf,
+                close: close.map(|c| *c * part.local),
+            }
+            .end(motion),
+        };
         if xf.determinant().abs() < 1e-12 {
             debug!("{what}: non-invertible instance transform — skipped");
             continue;
@@ -751,7 +779,7 @@ fn attach_proto_parts(
             Geometry::Instance {
                 scene: part.scene.clone(),
                 transform: xf,
-                transform_end: None,
+                transform_end: end.map(Box::new),
             },
             part.slots[0].material.clone(),
             part.mask,
@@ -1049,9 +1077,10 @@ pub(super) fn emit_point_instancer(
     world: &mut WorldBuilder,
     prim: &Prim,
     instancer: &PointInstancer,
-    world_xf: GMat4,
+    span: Span,
     caches: &mut ImportCaches<'_>,
 ) {
+    let world_xf = span.open;
     let Some(layout) = read_instancer(prim, instancer, true) else {
         return;
     };
@@ -1138,7 +1167,15 @@ pub(super) fn emit_point_instancer(
         let Some(parts) = proto_parts.get(version) else {
             continue;
         };
-        attached += attach_proto_parts(world, parts, world_xf * xf, "PointInstancer instance");
+        let close = span.close.map(|c| c * xf);
+        attached += attach_proto_parts(
+            world,
+            parts,
+            world_xf * xf,
+            close.as_ref(),
+            None,
+            "PointInstancer instance",
+        );
     }
 
     debug!(

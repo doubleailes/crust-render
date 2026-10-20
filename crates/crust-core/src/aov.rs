@@ -533,6 +533,11 @@ impl AovRequest {
             .any(|v| v.source != AovSource::Color || v.with_alpha())
     }
 
+    /// Whether any product writes a var of `source`.
+    pub fn asks_for(&self, source: AovSource) -> bool {
+        self.vars().any(|v| v.source == source)
+    }
+
     fn vars(&self) -> impl Iterator<Item = &AovVar> {
         self.products.iter().flat_map(|p| &p.vars)
     }

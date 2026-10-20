@@ -400,15 +400,19 @@ other. The pairs:
   product with another camera or resolution is refused rather than
   resampled, and one with another switch is written with the first's.
 - **Motion blur ↔ the motion-vector AOV.** The `motionvector` AOV reads the
-  same `transform_end` the kernel interpolates: `WorldBuilder` derives a
-  per-`geom_id` translation from every `Geometry::Instance` it is given
-  (`MotionRecord::of`, read back by `World::motion`), so the importer never
-  states a prim's motion twice and the vector cannot fall out of step with the
-  blur. A producer of a new kind of motion (a rotating end transform, nested
-  motion, an id a forwarding `InstanceHitId::As` / `Offset` instance reports
-  its inner hits under) gets a vector of zero and one summarised `WARN` at
-  commit, not a silently wrong one; extend `MotionRecord` rather than adding
-  a second table.
+  same transform pair the kernel interpolates: `WorldBuilder` derives a
+  per-`geom_id`-range `Motion` (a translation, or the affine start / end pair
+  whose per-hit chord repeats the kernel's `lerp_affine`) from every
+  `Geometry::Instance` it is given (`MotionRecord::of`, read back by
+  `World::motion(geom_id, p, time)`), so the importer never states a prim's
+  motion twice and the vector cannot fall out of step with the blur. Both
+  read one shutter, the camera's, resolved before the traversal. A producer
+  of motion the record cannot attribute to one placement (nested motion, an
+  id a forwarding `InstanceHitId::As` / `Offset` instance reports its inner
+  hits under) gets a vector of zero and one summarised `WARN` at commit, not
+  a silently wrong one; extend `MotionRecord` rather than adding a second
+  table. A change to the kernel's interpolation (slerped transforms) must
+  change `rt_world.rs`'s copy of it in the same commit.
   `disableMotionBlur` gates only the shutter draw (`Renderer::shutter`, decided
   once per pass in `PassConfig`),
   never the records, so the vector is the same with blur on and off

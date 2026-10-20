@@ -620,10 +620,15 @@ and blurs a sharp beauty along it. Its definition is Arnold's raw `motionvector`
 - **2D, in pixels of the rendered image**, measured through a pinhole at the lens centre
   (depth of field is ignored: the vector describes the in-focus image);
 - **`u` right, `v` up**, Nuke's conventions, in channels named `u` and `v`;
-- **per shutter**: the authored
-  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) is the
-  displacement over the shutter, and that is what the vector measures. The camera's
-  `shutter:open` / `shutter:close` are not read;
+- **per shutter**: the vector covers the
+  [camera's shutter](@/docs/usd/render-settings.md#camera-shutter), from
+  `frame + shutter:open` to `frame + shutter:close`. A shutter of one frame
+  (`shutter:close = 1`) gives a vector per frame, one of half a frame half that;
+- **from every motion crust renders**: a time-sampled transform (its own `xformOp`s or an
+  ancestor's) on a mesh, sphere, implicit shape, native instance or `PointInstancer`
+  placement, including rotation and scale, plus an authored
+  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), which is a
+  displacement over the shutter whatever its length;
 - **closest** by default (see [Accumulation](#accumulation)), with a clear value of `0`:
   a pixel at an object's edge holds the object's vector or the background's, never a
   blend that VectorBlur would smear across the edge;
@@ -634,15 +639,35 @@ shutter time is measured from where that point was at shutter open. The intended
 is a sharp beauty, with
 [`disableMotionBlur`](@/docs/usd/render-settings.md#disablemotionblur) on the render
 settings, and the blur added in Nuke. Blurring a beauty crust has already blurred doubles
-the blur.
+the blur. The sharp beauty is the scene at shutter open, so blurring it forward along the
+vector covers exactly the shutter.
+
+For an animated stage, that is three things: a shutter on the camera, blur off on the
+settings, and the var.
 
 ```usda
+def Camera "cam"
+{
+    double shutter:open = 0
+    double shutter:close = 0.5
+}
+
+def RenderSettings "settings"
+{
+    uniform bool disableMotionBlur = 1
+}
+
 def RenderVar "forward"
 {
     uniform token dataType = "float2"
     uniform string sourceName = "motionvector"
 }
 ```
+
+Render with a frame (`-f 5`): without one, time samples are not read at all. Without a
+shutter, the vector of a time-sampled transform is `(0, 0)`, and a
+[`camera.shutter_instantaneous`](@/docs/reference/warnings.md) warning says so when the
+stage has one.
 
 A var named `forward` writes `forward.u` and `forward.v`, which Nuke reads as its built-in
 `forward` layer, so VectorBlur2's `uv channels` knob finds it without any renaming. Any
@@ -653,13 +678,20 @@ could not hold leftward or downward motion), are refused with a warning.
 
 In VectorBlur2, select the layer in `uv channels`, choose the forward motion-vector type
 (crust writes no backward vector), and set the blur scale to the fraction of the shutter
-you want blurred: `1` blurs over the whole authored translation. VectorBlur clamps very
+you want blurred: `1` blurs over the whole shutter. VectorBlur clamps very
 long vectors with its own maximum; an object passing close to the camera produces such
 vectors, finite but large.
 
-Across one object the vector is not constant even though every point of the object moves
-by the same amount: a point closer to the camera covers more pixels for the same world
-displacement. This is perspective, not interpolation. A straight path in the scene still
+A rotating or scaling object's points move by different amounts: each point's vector is
+the straight chord from where it is at shutter open to where it is at shutter close, the
+path the blurred beauty follows too. Under a large rotation within one shutter the chord
+cuts the corner of the arc. Motion the vector cannot attribute to one placement (inside a
+prototype, or through a nested `PointInstancer`) is blurred but reads `(0, 0)`, with an
+[`xform.motion_vector_unsupported`](@/docs/reference/warnings.md) warning.
+
+Across one translating object the vector is not constant either, even though every point
+of the object moves by the same amount: a point closer to the camera covers more pixels
+for the same world displacement. This is perspective, not interpolation. A straight path in the scene still
 projects to a straight segment on screen, the one VectorBlur blurs along; only the speed
 along it varies.
 

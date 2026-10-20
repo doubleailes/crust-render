@@ -79,9 +79,11 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 `uniform bool disableMotionBlur = 1`
 
 Turns off motion blur for the whole render. Every camera ray is traced at shutter open, so
-geometry that authors
-[`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) renders sharp
-at its authored position, in the beauty and in every AOV. The motion itself stays in the
+moving geometry renders sharp where it is when the [shutter](#camera-shutter) opens, in
+the beauty and in every AOV: at its authored position for
+[`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), and at its
+transform at `frame + shutter:open` for a time-sampled transform. With a shutter that
+opens before the frame (`-0.25 .. 0.25`), that is a quarter frame before the frame. The motion itself stays in the
 scene: the [`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, so
 the blur can be added in compositing from a sharp beauty.
 
@@ -511,6 +513,49 @@ units, Crust Render's depth of field matches Hydra's. On any other stage it does
 metre stage exported in Hydra's convention, with `focalLength = 0.5` for a 50 mm lens,
 gets a lens 100 times smaller than intended. Its framing is unaffected, because the
 apertures are in the same units as the focal length.
+
+## Camera shutter
+
+The render camera's `shutter:open` and `shutter:close` say over which interval motion is
+measured. They are offsets in time codes from the frame given by `-f`, and each defaults
+to `0`, as USD defines it. With frame `f`, motion runs from `f + shutter:open` (shutter
+open) to `f + shutter:close` (shutter close):
+
+```usda
+def Camera "cam"
+{
+    double shutter:open = 0
+    double shutter:close = 0.5   # half a frame after the frame
+}
+```
+
+Over that interval, every mesh, sphere, implicit shape, native instance and
+`PointInstancer` placement whose transform is time-sampled (its own `xformOp`s or an
+ancestor's) moves from its transform at shutter open to its transform at shutter close.
+The beauty is blurred along that path, unless [`disableMotionBlur`](#disablemotionblur)
+is set, and the [`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV measures the same
+path. Only the transform is read at the two ends: every other attribute, points
+included, is read at the frame.
+
+The shutter is **instantaneous**, and nothing time-sampled moves, when:
+
+- neither attribute is authored, or `shutter:close` is not after `shutter:open`. This
+  is the default, so a stage that authors no shutter renders exactly as before;
+- no frame is given. Time samples are then not evaluated, and a
+  [`time.motion_needs_frame`](@/docs/reference/warnings.md) warning says so if the
+  stage has any.
+
+The shutter is read before the stage is walked, from the camera the render goes
+through: the one named by `--camera` or `RenderSettings.camera`, even inside a payload,
+else the first camera on the stage. If the render ends up going through another camera
+whose shutter differs (for example, the first camera sits in an unloaded payload), a
+[`camera.shutter_mismatch`](@/docs/reference/warnings.md) warning names both. Naming the
+camera avoids it.
+
+Only the shutter's two ends are read. A path that curves or turns back inside the
+interval is rendered as the straight chord between them, and a rotation is interpolated
+the same way, so a large turn within one shutter shrinks the object in the middle of the
+blur. See [limitations](@/docs/architecture/limitations.md#geometry).
 
 ## Camera exposure
 

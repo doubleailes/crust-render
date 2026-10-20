@@ -572,24 +572,80 @@ enum VertexSource {
 /// cannot disagree, and every importer special case (a non-invertible mesh
 /// drops its motion, a prototype gets no end transform) is covered without
 /// a word here.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 enum MotionRecord {
     /// Nothing moves: a static geometry, or an instance without an end
     /// transform over a static scene.
     None,
-    /// Every point of the geometry moves by this world-space translation
-    /// over the shutter, at constant speed: an instance whose end transform
-    /// has the start's linear part. The one motion the importer produces.
-    Translation(Vec3A),
-    /// Motion the record cannot express — an end transform with a different
-    /// linear part (a rotation, a scale), or an instance whose inner scene
-    /// itself moves. The kernel blurs it; the AOV reports zero and the
-    /// import warns once with the count.
+    /// The geometry moves, and every hit on the ids it covers can be
+    /// attributed to it.
+    Moves(Motion),
+    /// Motion the record cannot attribute to one placement — an instance
+    /// whose inner scene itself moves, or one whose hits carry ids a
+    /// forwarding label names. The kernel blurs it; the AOV reports zero and
+    /// the import warns once with the count.
     Unresolved,
 }
 
+/// How a moving geometry's points travel over the shutter.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum Motion {
+    /// Every point moves by this world-space translation, at constant speed:
+    /// an instance whose end transform has the start's linear part. Exact,
+    /// and 16 bytes.
+    Translation(Vec3A),
+    /// The start and end transforms of an instance whose linear part changes
+    /// (a rotation, a scale): a point's path is where the kernel's
+    /// element-wise interpolation carries it, a straight chord.
+    Affine(Box<[Affine3A; 2]>),
+}
+
+impl Motion {
+    /// The world-space displacement over the whole shutter of the point hit
+    /// at `p` at shutter time `time`: constant along its path, since the
+    /// kernel's interpolation moves every point in a straight line.
+    ///
+    /// For the affine record, `M(t) = lerp(S, E, t)` is the kernel's own
+    /// interpolation, `L = M(t)⁻¹ · p` the point in the instance's frame, and
+    /// the answer `E·L − S·L`. A singular `M(t)` (a scale passing through
+    /// zero) has no inverse, and answers zero.
+    pub(crate) fn velocity(&self, p: Vec3A, time: f32) -> Vec3A {
+        match self {
+            Motion::Translation(v) => *v,
+            Motion::Affine(ends) => {
+                let [start, end] = **ends;
+                let m = lerp_affine(&start, &end, time);
+                if m.matrix3.determinant() == 0.0 {
+                    return Vec3A::ZERO;
+                }
+                let local = m.inverse().transform_point3a(p);
+                let v = end.transform_point3a(local) - start.transform_point3a(local);
+                if v.is_finite() { v } else { Vec3A::ZERO }
+            }
+        }
+    }
+}
+
+/// `crust_rt`'s instance interpolation, element by element — the same
+/// arithmetic, so a hit point is rebased through exactly the transform it
+/// was intersected through.
+fn lerp_affine(a: &Affine3A, b: &Affine3A, t: f32) -> Affine3A {
+    Affine3A {
+        matrix3: glam::Mat3A::from_cols(
+            a.matrix3.x_axis.lerp(b.matrix3.x_axis, t),
+            a.matrix3.y_axis.lerp(b.matrix3.y_axis, t),
+            a.matrix3.z_axis.lerp(b.matrix3.z_axis, t),
+        ),
+        translation: a.translation.lerp(b.translation, t),
+    }
+}
+
 impl MotionRecord {
-    fn of(geometry: &Geometry, label: InstanceHitId) -> MotionRecord {
+    /// The record of `geometry` attached at `id` with hits labelled `label`.
+    /// An `Offset` label based at the geometry's own id covers the ids its
+    /// slots take, which only its own hits carry; any other forwarding label
+    /// names ids it does not own.
+    fn of(geometry: &Geometry, label: InstanceHitId, id: u32) -> MotionRecord {
         let Geometry::Instance {
             scene,
             transform,
@@ -603,14 +659,13 @@ impl MotionRecord {
         }
         match transform_end {
             None => MotionRecord::None,
-            // A forwarded label names a slot, not the placement traversed:
-            // two differently placed prototypes share one id, so no single
-            // translation is the answer.
-            Some(_) if label != InstanceHitId::Own => MotionRecord::Unresolved,
-            Some(end) if end.matrix3 == transform.matrix3 => {
-                MotionRecord::Translation(end.translation - transform.translation)
+            Some(_) if label != InstanceHitId::Own && label != InstanceHitId::Offset(id) => {
+                MotionRecord::Unresolved
             }
-            Some(_) => MotionRecord::Unresolved,
+            Some(end) if end.matrix3 == transform.matrix3 => {
+                MotionRecord::Moves(Motion::Translation(end.translation - transform.translation))
+            }
+            Some(end) => MotionRecord::Moves(Motion::Affine(Box::new([*transform, **end]))),
         }
     }
 }
@@ -687,11 +742,13 @@ pub struct WorldBuilder {
     /// Per `geom_id`, whether it is a transparent emitter; empty when none
     /// is (see [`World::is_transparent_emitter`]).
     transparent_emitters: Vec<bool>,
-    /// The geometries that move over the shutter and by how much, sorted by
-    /// `geom_id` (see [`World::motion`]). Sparse: most geometries never
-    /// move, and a field on every `SideTables` would cost each static
-    /// `geom_id` 16 bytes for a value read at most once per camera sample.
-    motion: Vec<(u32, Vec3A)>,
+    /// The geometries that move over the shutter and how, as sorted,
+    /// non-overlapping inclusive `geom_id` ranges (see [`World::motion`]): a
+    /// single id for a geometry hit under its own id, the ids its slots take
+    /// for a multi-part instance. Sparse: most geometries never move, and a
+    /// field on every `SideTables` would cost each static `geom_id` for a
+    /// value read at most once per camera sample.
+    motion: Vec<(u32, u32, Motion)>,
     /// The geometries carrying a [`PrimvarTable`], sorted by `geom_id`, each
     /// with whether its placement mirrored the winding. Sparse, for the same
     /// reason as `motion`, and empty unless a render var asks for a primvar.
@@ -744,18 +801,27 @@ impl WorldBuilder {
         label: InstanceHitId,
     ) -> u32 {
         let vertices = Self::vertex_source(&geometry, label);
-        let motion = MotionRecord::of(&geometry, label);
+        let id = self.materials.len() as u32;
+        let motion = MotionRecord::of(&geometry, label, id);
         // The ids this instance's hits will carry, when they are not its
-        // own: a translation recorded under one of them would be read by
-        // hits that lie in this placement instead.
-        let forwards = match (label, &geometry) {
-            (InstanceHitId::As(id), _) => Some((id, id)),
+        // own. An `Offset` range based at its own id is its own slots, and
+        // its motion covers them; any other is forwarded, and a motion
+        // recorded under one of its ids would be read by hits that lie in
+        // this placement instead.
+        let (forwards, hi) = match (label, &geometry) {
+            (InstanceHitId::As(k), _) => (Some((k, k)), id),
             (InstanceHitId::Offset(base), Geometry::Instance { scene, .. }) => {
-                Some((base, base.saturating_add(scene.max_hit_id())))
+                let range = (base, base.saturating_add(scene.max_hit_id()));
+                if base == id {
+                    (None, range.1)
+                } else {
+                    (Some(range), id)
+                }
             }
-            _ => None,
+            _ => (None, id),
         };
-        let id = self.rt.attach_labelled(geometry, mask, label);
+        let attached = self.rt.attach_labelled(geometry, mask, label);
+        debug_assert_eq!(attached, id);
         self.materials.push(material);
         self.faces.push(SideTables {
             vertices,
@@ -764,54 +830,69 @@ impl WorldBuilder {
         if let Some(range) = forwards {
             self.forward_ids(range);
         }
-        self.record_motion(id, motion);
+        self.record_motion(id, hi, motion);
         debug_assert_eq!(id as usize + 1, self.materials.len());
         id
     }
 
     /// Marks `range` (inclusive) as ids forwarding instances report: a
-    /// translation already recorded inside it becomes unresolved, and none
+    /// motion already recorded over any of them becomes unresolved, and none
     /// is recorded there later.
     fn forward_ids(&mut self, range: (u32, u32)) {
         self.forwarded.push(range);
         let (lo, hi) = range;
-        let shared: Vec<u32> = self
+        let shared: Vec<(u32, u32)> = self
             .motion
             .iter()
-            .map(|(id, _)| *id)
-            .filter(|id| (lo..=hi).contains(id))
+            .filter(|(a, b, _)| *a <= hi && lo <= *b)
+            .map(|(a, b, _)| (*a, *b))
             .collect();
-        for id in shared {
-            self.record_motion(id, MotionRecord::Unresolved);
+        for (a, b) in shared {
+            self.record_motion(a, b, MotionRecord::Unresolved);
         }
     }
 
-    /// Replaces `id`'s entry in the motion table with `motion`: the current
-    /// state of the slot, so a geometry given again drops what it replaced.
-    fn record_motion(&mut self, id: u32, motion: MotionRecord) {
+    /// Replaces the motion of the geometry at `id`, whose hits carry the ids
+    /// `id ..= hi`, with `motion`: the current state of the slot, so a
+    /// geometry given again drops what it replaced. A static slot inside a
+    /// recorded range (a multi-part instance's further slots) leaves the
+    /// range alone.
+    fn record_motion(&mut self, id: u32, hi: u32, motion: MotionRecord) {
+        // The common case, a static geometry in a static scene, has nothing
+        // to replace.
+        if motion == MotionRecord::None && self.motion.is_empty() && self.unresolved.is_empty() {
+            return;
+        }
         let motion = match motion {
-            MotionRecord::Translation(_)
+            MotionRecord::Moves(_)
                 if self
                     .forwarded
                     .iter()
-                    .any(|(lo, hi)| (*lo..=*hi).contains(&id)) =>
+                    .any(|(lo, fhi)| *lo <= hi && id <= *fhi) =>
             {
                 MotionRecord::Unresolved
             }
             m => m,
         };
-        let at = self.motion.binary_search_by_key(&id, |(i, _)| *i);
-        match (motion, at) {
-            (MotionRecord::Translation(v), Ok(i)) => self.motion[i].1 = v,
-            (MotionRecord::Translation(v), Err(i)) => self.motion.insert(i, (id, v)),
+        let at = self.motion.binary_search_by_key(&id, |(lo, ..)| *lo);
+        match (&motion, at) {
+            (MotionRecord::Moves(m), Ok(i)) => self.motion[i] = (id, hi, m.clone()),
+            (MotionRecord::Moves(m), Err(i)) => {
+                debug_assert!(
+                    self.motion.get(i).is_none_or(|(lo, ..)| *lo > hi)
+                        && (i == 0 || self.motion[i - 1].1 < id),
+                    "motion ranges overlap at {id}..={hi}"
+                );
+                self.motion.insert(i, (id, hi, m.clone()));
+            }
             (MotionRecord::None | MotionRecord::Unresolved, Ok(i)) => {
                 self.motion.remove(i);
             }
             (MotionRecord::None | MotionRecord::Unresolved, Err(_)) => {}
         }
-        match (motion, self.unresolved.binary_search(&id)) {
+        match (&motion, self.unresolved.binary_search(&id)) {
             (MotionRecord::Unresolved, Err(i)) => self.unresolved.insert(i, id),
-            (MotionRecord::None | MotionRecord::Translation(_), Ok(i)) => {
+            (MotionRecord::None | MotionRecord::Moves(_), Ok(i)) => {
                 self.unresolved.remove(i);
             }
             _ => {}
@@ -968,9 +1049,9 @@ impl WorldBuilder {
     /// If `id` was never reserved.
     pub fn set_geometry(&mut self, id: u32, geometry: Geometry) {
         self.faces[id as usize].vertices = Self::vertex_source(&geometry, InstanceHitId::Own);
-        let motion = MotionRecord::of(&geometry, InstanceHitId::Own);
+        let motion = MotionRecord::of(&geometry, InstanceHitId::Own, id);
         self.rt.set_geometry(id, geometry);
-        self.record_motion(id, motion);
+        self.record_motion(id, id, motion);
     }
 
     /// The ray mask the geometry at `id` was attached with.
@@ -1010,9 +1091,9 @@ impl WorldBuilder {
             let one = unresolved == 1;
             warning!(
                 XformMotionVectorUnsupported,
-                "{unresolved} geometr{} move{} other than by a translation (a rotating or \
-                 scaling end transform, nested motion, or an id shared with a forwarding \
-                 instance); motion blurred, but the motionvector AOV reports zero for {}",
+                "{unresolved} geometr{} move{} in a way the vector cannot attribute to one \
+                 placement (nested motion, or an id shared with a forwarding instance); motion \
+                 blurred, but the motionvector AOV reports zero for {}",
                 if one { "y" } else { "ies" },
                 if one { "s" } else { "" },
                 if one { "it" } else { "them" },
@@ -1110,9 +1191,9 @@ pub struct World {
     light_classes: Vec<u16>,
     /// Sparse, indexed by `geom_id`; empty when no geometry is one.
     transparent_emitters: Vec<bool>,
-    /// The moving geometries' translations, sorted by `geom_id`; empty for a
-    /// static scene (see [`World::motion`]).
-    motion: Vec<(u32, Vec3A)>,
+    /// The moving geometries' motions over inclusive `geom_id` ranges, sorted;
+    /// empty for a static scene (see [`World::motion`]).
+    motion: Vec<(u32, u32, Motion)>,
     /// See [`WorldBuilder`]'s field of the same name.
     primvars: Vec<(u32, Arc<PrimvarTable>, bool)>,
 }
@@ -1196,16 +1277,18 @@ impl World {
         bytes
     }
 
-    /// The world-space translation the geometry at `geom_id` moves through
-    /// over the shutter — the `crust:motion:translate` the kernel blurs it
-    /// by — or zero when it does not move, or moves in a way the record
-    /// cannot express (see [`WorldBuilder::unresolved_motion`]). Derived at
-    /// attach time from the same end transform the kernel interpolates, so
-    /// the `motionvector` AOV and the beauty's blur never disagree.
-    pub fn motion(&self, geom_id: u32) -> Vec3A {
-        match self.motion.binary_search_by_key(&geom_id, |(i, _)| *i) {
-            Ok(i) => self.motion[i].1,
-            Err(_) => Vec3A::ZERO,
+    /// The world-space displacement over the whole shutter of the point hit
+    /// at `p` on `geom_id` by a ray at shutter time `time` — the motion the
+    /// kernel blurs it by — or zero when the geometry does not move, or moves
+    /// in a way the record cannot attribute (see
+    /// [`WorldBuilder::unresolved_motion`]). Derived at attach time from the
+    /// same transform pair the kernel interpolates, so the `motionvector` AOV
+    /// and the beauty's blur never disagree.
+    pub fn motion(&self, geom_id: u32, p: Vec3A, time: f32) -> Vec3A {
+        let i = self.motion.partition_point(|(lo, ..)| *lo <= geom_id);
+        match i.checked_sub(1).map(|i| &self.motion[i]) {
+            Some((_, hi, m)) if geom_id <= *hi => m.velocity(p, time),
+            _ => Vec3A::ZERO,
         }
     }
 
