@@ -104,7 +104,7 @@
 
 ## 4. Integration
 
-- [ ] 4.1 Run CI's checks locally: `cargo fmt --all -- --check`,
+- [x] 4.1 Run CI's checks locally: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast`. Verify that all three pass.
 - [x] 4.2 Render `samples/cornellbox.usda` with `fStop = 2` added through a
