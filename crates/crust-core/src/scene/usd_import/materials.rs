@@ -181,22 +181,59 @@ const RENDER_BINDING_PURPOSE: &str = "full";
 /// - **Purpose.** ALab authors `material:binding:full` and
 ///   `material:binding:preview` and almost never the all-purpose relationship,
 ///   so asking for `""` alone found nothing on 7 256 prims.
-///
-/// A binding whose target is not a `Material` prim binds nothing, as in C++
-/// `ComputeBoundMaterial`: the prim takes the default material.
+/// - **Targets outside the stage.** openusd-schemas' `bound_material`
+///   answers with the `Material` prim, and so `None` wherever the winning
+///   target is not one *on this stage* — which a streamed import's masked
+///   stage makes of every material outside the chunk (the Cornell box binds
+///   `/scene/Looks/…` from five sibling chunks). That answer would drop the
+///   binding: no material provenance for `crust mcp`, no
+///   `material.fallback_default` warning. So when it answers nothing, the
+///   binding is read as the target of the nearest direct binding instead
+///   ([`direct_binding_target`]), which the resolution then reports as
+///   unresolvable, as it always did.
 pub(super) fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
-    let mut path = Some(prim.path().clone());
+    let api = nearest_binding_api(stage, prim.path().clone())?;
+    match api.bound_material(RENDER_BINDING_PURPOSE) {
+        Ok(Some(material)) => Some(material.path().clone()),
+        _ => direct_binding_target(stage, api.path().clone()),
+    }
+}
+
+/// The `MaterialBindingAPI` of `path` or its nearest ancestor carrying it.
+fn nearest_binding_api(stage: &Stage, path: sdf::Path) -> Option<MaterialBindingAPI> {
+    let mut path = Some(path);
     while let Some(p) = path {
         if p.is_abs_root() {
             return None;
         }
         if let Ok(Some(api)) = MaterialBindingAPI::get(stage, p.clone()) {
-            let material = api.bound_material(RENDER_BINDING_PURPOSE).ok().flatten()?;
-            return Some(material.path().clone());
+            return Some(api);
         }
         path = p.parent();
     }
     None
+}
+
+/// The target of the nearest direct binding on `path` or an ancestor, for
+/// [`RENDER_BINDING_PURPOSE`] across the whole chain before the all-purpose
+/// binding, as `bound_material` orders them. What a binding whose target is
+/// absent from the stage, or not a `Material`, names; it reads neither
+/// binding strength nor collection bindings, which only choose between
+/// materials that resolve.
+fn direct_binding_target(stage: &Stage, path: sdf::Path) -> Option<sdf::Path> {
+    [RENDER_BINDING_PURPOSE, ""]
+        .into_iter()
+        .find_map(|purpose| {
+            let mut at = Some(path.clone());
+            while let Some(p) = at {
+                let api = nearest_binding_api(stage, p)?;
+                if let Ok(Some(target)) = api.direct_binding(purpose) {
+                    return Some(target);
+                }
+                at = api.path().parent();
+            }
+            None
+        })
 }
 
 /// The material bound to `prim`, for a prim that cannot be displaced
