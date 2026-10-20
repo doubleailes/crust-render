@@ -35,6 +35,7 @@ use super::attrs::{
 use super::materials::BoundMaterial;
 use super::products::{KeptPrimvar, PrimvarKeep};
 use super::time::eval_time;
+use super::xform::Span;
 
 /// Identity of an imported mesh's shared geometry: a content hash of the
 /// authored points/counts/indices **and texture chart**, plus the (memoized,
@@ -343,7 +344,9 @@ pub(super) struct MeshPlacement {
     /// Index into [`MeshArena::slots`].
     pub(super) slot: u32,
     pub(super) l2w: Affine3A,
-    pub(super) motion: Option<Vec3>,
+    /// The transform it ends the shutter at ([`Span::end`]); `None` when it
+    /// does not move.
+    pub(super) l2w_end: Option<Affine3A>,
 }
 
 impl MeshArena {
@@ -592,17 +595,17 @@ fn commit_mesh(geom: MeshGeom) -> RtScene {
     b.commit_with(crate::commit_options())
 }
 
-/// Reads a direct `UsdGeomMesh` prim placed at `world_xf` and places it
-/// ([`place_mesh_source`]).
+/// Reads a direct `UsdGeomMesh` prim placed over `span` and places it
+/// ([`place_mesh_source`]), which says whether its motion was dropped.
 pub(super) fn emit_mesh(
     world: &mut WorldBuilder,
     prim: &Prim,
     mesh: &UsdMesh,
-    world_xf: GMat4,
+    span: Span,
     bound: BoundMaterial,
     meshes: &mut MeshArena,
     pending: &mut Vec<MeshPlacement>,
-) {
+) -> bool {
     let BoundMaterial {
         material,
         displacement,
@@ -614,43 +617,47 @@ pub(super) fn emit_mesh(
         mesh,
         needs,
         &mut meshes.subdiv,
-        MeshPlace::World(&world_xf),
+        MeshPlace::World(&span.open),
     ) else {
         debug!(
             "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
             prim.path()
         );
-        return;
+        return false;
     };
     place_mesh_source(
         world,
         prim,
         src,
-        world_xf,
+        span,
         BoundMaterial {
             material,
             displacement,
         },
         meshes,
         pending,
-    );
+    )
 }
 
 /// Places a direct prim's mesh, read already: everything after the read that
 /// a `Mesh` prim and an implicit shape ([`super::implicit`]) share. `bound`
 /// carries the displacement the prim applies (see [`prim_displacement`]).
 ///
-/// A non-invertible placement is baked now; any other is interned and
-/// recorded, its representation decided by [`flush_meshes`].
+/// It starts the shutter at `span.open` and ends it at [`Span::end`]. A
+/// non-invertible placement is baked now, at `span.open`; any other is
+/// interned and recorded, its representation decided by [`flush_meshes`].
+/// `true` when the placement's transform moves over the shutter but it was
+/// baked, so that motion is dropped (`xform.motion_ignored`).
 pub(super) fn place_mesh_source(
     world: &mut WorldBuilder,
     prim: &Prim,
     src: MeshSource,
-    world_xf: GMat4,
+    span: Span,
     bound: BoundMaterial,
     meshes: &mut MeshArena,
     pending: &mut Vec<MeshPlacement>,
-) {
+) -> bool {
+    let world_xf = span.open;
     let BoundMaterial {
         material,
         displacement,
@@ -745,7 +752,7 @@ pub(super) fn place_mesh_source(
             }
             None => debug!("Mesh at {} produced no triangles", prim.path()),
         }
-        return;
+        return span.moves();
     }
 
     // Record the placement rather than attaching it. Whether this mesh is
@@ -754,7 +761,7 @@ pub(super) fn place_mesh_source(
     // until the whole stage has been walked — so claim the `geom_id` now (it
     // must keep its traversal order) and decide in `flush_meshes`.
     let Some(slot) = meshes.intern(prim, src, &material, displacement.as_deref()) else {
-        return;
+        return false;
     };
     meshes.slots[slot as usize].n_place += 1;
 
@@ -763,8 +770,9 @@ pub(super) fn place_mesh_source(
         geom_id,
         slot,
         l2w: Affine3A::from_mat4(world_xf),
-        motion,
+        l2w_end: span.end(motion),
     });
+    false
 }
 
 /// Turns the deferred [`MeshPlacement`]s into real geometry, now that every
@@ -811,7 +819,7 @@ pub(super) fn flush_meshes(
         // already made it resident as a kernel scene, and it does not move —
         // a baked mesh has no transform left to interpolate over the shutter.
         let bake =
-            bake_enabled && slot.n_place == 1 && slot.committed.is_none() && p.motion.is_none();
+            bake_enabled && slot.n_place == 1 && slot.committed.is_none() && p.l2w_end.is_none();
 
         let faces = slot.faces.clone();
         let uvs = slot.uvs.clone();
@@ -863,9 +871,7 @@ pub(super) fn flush_meshes(
                 Geometry::Instance {
                     scene,
                     transform: l2w,
-                    transform_end: p
-                        .motion
-                        .map(|v| Box::new(Affine3A::from_translation(v) * l2w)),
+                    transform_end: p.l2w_end.map(Box::new),
                 },
             );
             // An instance keeps the prototype's own winding: the transform is

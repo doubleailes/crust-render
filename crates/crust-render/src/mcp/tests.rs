@@ -1403,6 +1403,66 @@ fn resuming_adds_the_inputs_metrics_the_layer_lacks() {
     assert!(text.contains("input.usda"), "{text}");
 }
 
+/// The shutter motion is measured over was read before the traversal and
+/// placed geometry at its ends, so editing it re-imports, and renders as a
+/// full import of the same layer would; the camera's exposure still applies
+/// in place.
+#[test]
+fn a_shutter_edit_reimports_and_an_exposure_stays_in_place() {
+    let stage = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 10
+)
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+    }
+
+    def Sphere "Mover"
+    {
+        double radius = 0.5
+        double3 xformOp:translate.timeSamples = {
+            1: (-1, 0, 0),
+            10: (1, 0, 0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"#;
+    let (mut state, dir) = session_on("shutter_edit", stage);
+    let exposure = r#"over "World" { over "Cam" { float exposure = 1 } }"#;
+    assert_eq!(author(&mut state, exposure), "settings");
+    same_as_full_import(&mut state, &dir, "shutter exposure");
+    let shutter = r#"over "World" { over "Cam" { double shutter:close = 0.5 } }"#;
+    assert_eq!(author(&mut state, shutter), "full");
+    same_as_full_import(&mut state, &dir, "shutter close");
+    assert_eq!(undo(&mut state), "full", "undo the shutter");
+    same_as_full_import(&mut state, &dir, "undo shutter close");
+}
+
 /// A light-linked scene keeps its resolved links through an in-place light
 /// edit: each linked light (shadow-linked, light-link excludes, include-only)
 /// dims and recolours in place as a full import of the same layer renders it.

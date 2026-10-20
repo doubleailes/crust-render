@@ -29,10 +29,20 @@ render.
 
 ## Geometry
 
-- **Motion blur is transform-only.** It is set with
-  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), and the
-  transform is interpolated linearly. There is no deformation blur, no rotation blur, and
-  animated transforms aren't blurred.
+- **Motion blur is transform-only.** It comes from time-sampled transforms over the
+  [camera's shutter](@/docs/usd/render-settings.md#camera-shutter) and from
+  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate). What is not
+  blurred:
+  - deformation: animated `points` and `velocities` are read at the frame;
+  - curves, lights and volumes, and transforms animated inside a prototype or on a
+    `PointInstancer`'s per-instance arrays;
+  - the camera's own motion.
+
+  Only the shutter's two ends are read, and the transform is interpolated linearly
+  between them, element by element. A path that curves or goes out and back within the
+  shutter becomes its chord, and a large rotation shrinks the object mid-blur. With
+  `shutter:open` other than 0, transforms are read at `frame + shutter:open` while every
+  other attribute is read at the frame.
 - **No OpenVDB or `UsdVolVolume`.** Volumes are the three
   [`crust:volume:type`](@/docs/usd/volumes.md#crust-volume-type) kinds: homogeneous,
   procedural smoke, or a voxel grid authored in USD, or a homogeneous medium inside a mesh

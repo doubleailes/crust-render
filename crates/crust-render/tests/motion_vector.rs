@@ -296,3 +296,279 @@ fn motion_blur_does_not_change_the_vectors() {
     }
     assert!(compared > 20, "{compared} sphere pixels compared");
 }
+
+// ---------------------------------------------------------------------------
+// Time-sampled transforms over the camera's shutter
+// ---------------------------------------------------------------------------
+
+/// A pinhole camera at `eye` looking down −Z with square pixels, as
+/// [`screen`] for any eye and focal length.
+struct Pinhole {
+    eye: [f64; 3],
+    focal: f64,
+}
+
+impl Pinhole {
+    fn screen(&self, p: [f64; 3]) -> (f64, f64) {
+        let px_per_unit = W as f64 * self.focal / H_APERTURE;
+        let depth = self.eye[2] - p[2];
+        (
+            W as f64 / 2.0 + px_per_unit * (p[0] - self.eye[0]) / depth,
+            H as f64 / 2.0 + px_per_unit * (p[1] - self.eye[1]) / depth,
+        )
+    }
+
+    fn pixel(&self, p: [f64; 3]) -> (usize, usize) {
+        let (sx, sy) = self.screen(p);
+        (sx.floor() as usize, (H as f64 - sy).floor() as usize)
+    }
+
+    /// The vector of a hit whose shutter-open point `p0` ends at `p1`.
+    fn vector(&self, p0: [f64; 3], p1: [f64; 3]) -> (f64, f64) {
+        let (x0, y0) = self.screen(p0);
+        let (x1, y1) = self.screen(p1);
+        (x1 - x0, y1 - y0)
+    }
+}
+
+/// `samples/animation.usda`'s camera: at (0, 1.5, 7), 24 mm.
+const ANIMATION_CAM: Pinhole = Pinhole {
+    eye: [0.0, 1.5, 7.0],
+    focal: 24.0,
+};
+
+/// An override layer over `base` (an absolute path): the camera at `camera`
+/// authors `shutter:open = 0` and `shutter:close = close`, and the render
+/// writes the beauty, `P` and a `forward` motion vector var at `W × H`,
+/// blurred or not.
+fn shutter_layer(base: &Path, camera: &str, close: f64, blur: bool) -> String {
+    let (world, cam) = camera.rsplit_once('/').expect("a camera path");
+    let world = world.trim_start_matches('/');
+    format!(
+        r#"#usda 1.0
+(
+    subLayers = [@{base}@]
+)
+
+over "{world}"
+{{
+    over "{cam}"
+    {{
+        double shutter:open = 0
+        double shutter:close = {close}
+    }}
+}}
+
+over "Render"
+{{
+    over "settings"
+    {{
+        rel camera = <{camera}>
+        int2 resolution = ({W}, {H})
+        uniform bool disableMotionBlur = {sharp}
+        rel products = [</Render/comp>]
+        int crust:samplesPerPixel = 16
+        int crust:minSamplesPerPixel = 16
+    }}
+    def RenderProduct "comp"
+    {{
+        token productName = "mv.exr"
+        rel orderedVars = [</Render/comp/C>, </Render/comp/P>, </Render/comp/forward>]
+        def RenderVar "C"
+        {{
+            uniform token dataType = "color4f"
+            uniform string sourceName = "color"
+        }}
+        def RenderVar "P"
+        {{
+            uniform token dataType = "point3f"
+            uniform string sourceName = "P"
+        }}
+        def RenderVar "forward"
+        {{
+            uniform token dataType = "float2"
+            uniform string sourceName = "motionvector"
+        }}
+    }}
+}}
+"#,
+        base = base.display(),
+        sharp = if blur { 0 } else { 1 },
+    )
+}
+
+/// Renders `layer` at `-f 5` from a directory of its own.
+fn render_at_frame_5(test: &str, layer: &str) -> Exr {
+    let dir = work_dir(test);
+    let stage = dir.join("stage.usda");
+    std::fs::write(&stage, layer).expect("write stage");
+    let out = dir.join("mv.exr");
+    let status = Command::new(env!("CARGO_BIN_EXE_crust"))
+        .args(["render", "-i"])
+        .arg(&stage)
+        .arg("-o")
+        .arg(&out)
+        .args([
+            "-f",
+            "5",
+            "-s",
+            "16",
+            "--indirect-clamp",
+            "0",
+            "-l",
+            "error",
+        ])
+        .status()
+        .expect("run crust");
+    assert!(status.success(), "crust render failed: {status}");
+    Exr::load(&out)
+}
+
+fn animation() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/animation.usda")
+        .canonicalize()
+        .expect("samples/animation.usda")
+}
+
+/// `Mover` crosses x = −2 → 2 over frames 1 → 10: 4/9 of a unit a frame.
+const MOVER_STEP: f64 = 4.0 / 9.0;
+/// Its centre at frame 5.
+const MOVER_AT_5: [f64; 3] = [-2.0 + 4.0 * MOVER_STEP, 0.6, 0.0];
+
+/// `samples/animation.usda` at `-f 5`, its camera's shutter one frame long:
+/// `Mover`'s centre pixel carries the projection of its hit moved 4/9 units
+/// along X, the sky reads zero, the blurred render's vectors agree with the
+/// sharp one's, and a shutter half as long halves them.
+#[test]
+fn a_time_sampled_translate_writes_its_vector() {
+    let sharp = render_at_frame_5(
+        "animation_sharp",
+        &shutter_layer(&animation(), "/World/Cam", 1.0, false),
+    );
+    let cam = &ANIMATION_CAM;
+    let (x, y) = cam.pixel(MOVER_AT_5);
+    let p = sharp.p(x, y);
+    assert!(
+        p[2] > 0.3,
+        "the centre pixel hits the sphere's front: {p:?}"
+    );
+    let got = sharp.forward(x, y);
+    let want = cam.vector(p, [p[0] + MOVER_STEP, p[1], p[2]]);
+    assert!(got.0 > 0.0 && close(got, want, 0.01), "{got:?} vs {want:?}");
+    assert!(got.1.abs() < 0.01, "{got:?}");
+
+    // The sky, above everything.
+    for x in [3, 40, W / 2, 90, W - 4] {
+        assert_eq!(sharp.forward(x, 2), (0.0, 0.0), "column {x}");
+    }
+
+    // Blurred: each chosen sample's own hit predicts its vector, and the
+    // sharp render's agrees to a fraction of a pixel.
+    let blurred = render_at_frame_5(
+        "animation_blurred",
+        &shutter_layer(&animation(), "/World/Cam", 1.0, true),
+    );
+    let mut compared = 0;
+    for y in y - 4..y + 4 {
+        for x in x - 4..x + 4 {
+            let (a, b) = (sharp.p(x, y), blurred.p(x, y));
+            if a[2] > 0.3 && b[2] > 0.3 {
+                let (s, m) = (sharp.forward(x, y), blurred.forward(x, y));
+                let want = cam.vector(b, [b[0] + MOVER_STEP, b[1], b[2]]);
+                assert!(close(m, want, 0.01), "({x}, {y}): {m:?} vs {want:?}");
+                assert!((s.0 - m.0).abs() < 0.5, "({x}, {y}): {s:?} vs {m:?}");
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 20, "{compared} sphere pixels compared");
+
+    // Half the shutter, half the vector: the motion is parallel to the image
+    // plane, so the projection is linear in it.
+    let half = render_at_frame_5(
+        "animation_half",
+        &shutter_layer(&animation(), "/World/Cam", 0.5, false),
+    );
+    let (x, y) = cam.pixel(MOVER_AT_5);
+    assert_eq!(half.p(x, y), sharp.p(x, y), "the same shutter-open hit");
+    let (h, s) = (half.forward(x, y), sharp.forward(x, y));
+    assert!(
+        (2.0 * h.0 - s.0).abs() < 1e-3 && h.1.abs() < 0.01,
+        "{h:?} vs {s:?}"
+    );
+}
+
+/// A cube spinning about the camera's view axis by a time-sampled
+/// `rotateZ`, 10° a frame: each pixel's vector is the projection of its
+/// hit's chord `R·P0 − P0` — the straight path the kernel's interpolation
+/// takes — and it vanishes at the axis.
+#[test]
+fn a_time_sampled_rotation_writes_each_points_chord() {
+    let dir = work_dir("spin_base");
+    let base = dir.join("spin.usda");
+    std::fs::write(
+        &base,
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 10
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 0, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "Spin"
+    {
+        double size = 3
+        float xformOp:rotateZ.timeSamples = {
+            1: 0,
+            10: 90,
+        }
+        uniform token[] xformOpOrder = ["xformOp:rotateZ"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+    }
+}
+"#,
+    )
+    .expect("write stage");
+    let exr = render_at_frame_5("spin", &shutter_layer(&base, "/World/Cam", 1.0, false));
+    let cam = Pinhole {
+        eye: [0.0, 0.0, 8.0],
+        focal: 24.0,
+    };
+    let (sin, cos) = 10f64.to_radians().sin_cos();
+    let mut compared = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let p = exr.p(x, y);
+            // The front face, at z = 1.5.
+            if (p[2] - 1.5).abs() > 1e-3 {
+                continue;
+            }
+            let end = [p[0] * cos - p[1] * sin, p[0] * sin + p[1] * cos, p[2]];
+            let want = cam.vector(p, end);
+            let got = exr.forward(x, y);
+            assert!(close(got, want, 0.01), "({x}, {y}): {got:?} vs {want:?}");
+            compared += 1;
+        }
+    }
+    assert!(compared > 500, "{compared} face pixels compared");
+    // At the axis the chord is nearly nothing.
+    let got = exr.forward(W / 2, H / 2);
+    assert!(got.0.hypot(got.1) < 0.2, "{got:?}");
+}

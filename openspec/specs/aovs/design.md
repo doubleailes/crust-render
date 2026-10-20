@@ -1107,9 +1107,11 @@ has the full reasoning (D1–D7); the points to keep here:
   open to shutter close, in pixels of the rendered image, `u` right and `v`
   up (Nuke's conventions, Arnold's raw `motionvector`), measured through the
   pinhole at the lens centre (depth of field ignored on purpose: the vector
-  describes the in-focus image). Per-shutter units: the authored
-  `crust:motion:translate` *is* the displacement over the shutter;
-  `shutter:open/close` are still not read. Closest by default, clear `0`,
+  describes the in-focus image). Per-shutter units: the camera's
+  `shutter:open` / `shutter:close` around the frame (read by the import
+  since `time-sampled-transform-motion`; see `usd-scene-import`), and the
+  authored `crust:motion:translate` *is* the displacement over that shutter
+  whatever its length. Closest by default, clear `0`,
   two floating-point components only (`float2`, `half2`, `texCoord2f`;
   `int2`/`uint2` refused through the UINT-is-`sampleCount`-only rule,
   `vector2f` because `vector` is 3-component in USD). Channels are
@@ -1120,28 +1122,45 @@ has the full reasoning (D1–D7); the points to keep here:
   have their own conventions). The D5 trap again: an alias would be a
   plausible but wrong channel. Each can be added later as its own row.
 - **The motion is derived in `WorldBuilder`, not stated by the importer**
-  (`rt_world.rs`, `MotionRecord::of` → `World::motion`). Every
-  `Geometry::Instance` attached or set with `InstanceHitId::Own` and an end
-  transform whose linear part equals the start's records `end.translation −
-  start.translation`, in a sparse table sorted by `geom_id` (16 bytes per
-  *moving* geometry; a field on every `SideTables` would charge every static
-  id). The record is read off the very transform the kernel interpolates, so
+  (`rt_world.rs`, `MotionRecord::of` → `World::motion(geom_id, p, time)`).
+  The record is read off the very transform pair the kernel interpolates, so
   the vector and the blur cannot disagree, and the importer's cases fall out
   for free: a non-invertible mesh drops its motion (baked, no end transform,
-  no record), a prototype has `transform_end: None`. An end transform with a
-  different linear part, a forwarded label, or an instance over a scene that
-  itself moves is `Unresolved`: vector 0, counted, one summarised `WARN` at
-  commit. So is any id a forwarding instance reports its inner hits under
-  (`InstanceHitId::As(k)`: `k`; `Offset(base)`: `base ..= base +
-  inner.max_hit_id()`): a hit carrying it may lie in the forwarding
+  no record), a prototype has `transform_end: None`. A moving
+  `Geometry::Instance` records one of two `Motion`s:
+  - `Translation(end.translation − start.translation)` when the end's linear
+    part equals the start's: exact, 16 bytes, no inverse;
+  - `Affine([start, end])` otherwise (a rotation, a scale: what time-sampled
+    transforms produce). The per-hit velocity is `v = E·L − S·L` with `L =
+    lerp_affine(S, E, t)⁻¹·p` — the kernel's own element-wise interpolation,
+    re-implemented beside the record with the same glam calls — which is
+    constant along the point's path because that path is a straight chord.
+    So the rebase `P0 = p − t·v` below stays exact, and `aov::motion_vector`
+    did not change. A singular `M(t)` (a scale through zero) answers 0. One
+    3×4 inverse per camera sample that hits such geometry, in the AOV
+    instantiation only.
+
+  The table is sorted, non-overlapping inclusive `geom_id` ranges (binary
+  search on the low end): a geometry hit under its own id is a range of one;
+  a multi-part instance labelled `Offset(base)` *at its own id* — the native
+  instance of a grouped prototype, whose further slots are `reserve_slot`s
+  taken right after it — covers `base ..= base + inner.max_hit_id()`, since
+  only its own hits carry those ids. A static slot recorded inside a range
+  (those reserved slots) leaves it alone. An `As(k)` label, an `Offset` based
+  anywhere else, or an instance over a scene that itself moves is
+  `Unresolved`: vector 0, counted, one summarised `WARN` at commit
+  (`xform.motion_vector_unsupported`, "moves in a way the vector cannot
+  attribute to one placement"). So is any range a forwarding label reports
+  its inner hits under: a hit carrying it may lie in the forwarding
   placement rather than on the geometry that owns the id, so the owner's
   record goes too, whichever was attached first. The unresolved ids are a
   set, the slots' current state, so a reserved slot given a geometry twice
-  is one id and a replaced one is none. Nothing produces any of those today;
-  the guards are for the next producer.
-  Rejected: storing both endpoint transforms and evaluating `(E − L)·M(t)⁻¹·P`
-  for rotation too — 96 bytes per moving geometry and an inverse per sample
-  for motion nothing produces.
+  is one id and a replaced one is none. The importer produces none of the
+  unresolved cases today; the guards are for the next producer.
+  Rejected: the kernel returning the instance-local hit point (a change to
+  `crust-rt`'s hit record that every hit pays for, to serve one AOV), and
+  storing `S⁻¹` and ignoring `t` (wrong for blurred renders, whose hits are
+  made at `t > 0`).
 - **Plumbing.** `FirstHit::Surface` carries `motion`, filled at vertex 0 and
   in `first_wall` (whose `ThinWalls::first` now keeps the wall's `geom_id`),
   looked up only when the layout has a `motionvector` slot
@@ -1200,9 +1219,22 @@ has the full reasoning (D1–D7); the points to keep here:
   instantiation pinned by callgrind on cornellbox, tiles ↔ scanlines and
   the beauty with and without the var bit-identical
   (`crates/crust-core/tests/motion_vector.rs`).
-- **Known gaps.** No 3D velocity, no backward or centred vector, no
-  per-frame units, no camera, rotation or deformation motion, no Arnold
-  normalised encoding; an instancer prototype authoring
+- **Time-sampled transforms** (`time-sampled-transform-motion`). The
+  end-to-end tests render `samples/animation.usda` through an override layer
+  (camera `shutter:close = 1`, `-f 5`, a `forward` var): `Mover`'s centre
+  pixel is the projection of its `P` moved 4/9 units along X within 0.01 px,
+  the sky `(0, 0)`, the blurred render's vectors its own hits' predictions,
+  and `shutter:close = 0.5` halves the vector at constant depth. A cube
+  spinning about the view axis by a time-sampled `rotateZ` checks every face
+  pixel against the projection of the chord `R·P0 − P0` computed from `P`
+  (the affine record end to end), near zero at the axis. Over an
+  instantaneous shutter a `motionvector` var on a stage with a time-varying
+  drawn transform raises `camera.shutter_instantaneous` once.
+- **Known gaps.** No 3D velocity, no backward or centred vector, no camera
+  or deformation motion, no Arnold normalised encoding. A rotation's vector
+  is its chord, as the kernel's blur is (the `intersection-kernel` gap), so a
+  large turn within one shutter reads short; motion inside a prototype or a
+  nested instancer reads 0 (`Unresolved`). An instancer prototype authoring
   `crust:motion:translate` neither blurs nor gets a vector (consistent with
   the beauty; `usd-scene-import` known gaps). Open: whether 3-component
   `dataType`s (`color3f`, `vector3f`) should be accepted with a zero third

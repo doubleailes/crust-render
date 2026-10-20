@@ -839,9 +839,75 @@ same point.
   by the CLI's `parse_frame`): `NaN` compares false against the range, so it would
   otherwise pass the check silently.
   Not time-aware: `UsdPreviewSurface` inputs (read by openusd-schemas'
-  `read_preview_surface`, default only), and `crust:motion:translate` motion blur, which
-  is still an authored offset rather than derived from the samples across the shutter.
-  Sample: `samples/animation.usda`.
+  `read_preview_surface`, default only). `crust:motion:translate` stays an authored
+  offset over the shutter; time-sampled transforms are evaluated across the shutter
+  as well (below). Sample: `samples/animation.usda`.
+- **Camera shutter and time-sampled motion** (`time-sampled-transform-motion`, #336).
+  - *The shutter is read before the traversal* (`read_camera_ahead`, beside the
+    screen projection adaptive subdivision reads, one read for both): the named
+    camera off the index stage, else off a stage masked to it (a camera in a
+    payload); with none named, the first camera of `first_camera`'s walk of the
+    index stage, which mirrors the traversal (a stack, so last child first; the
+    same pruning; invisible subtrees walked; instances and `PointInstancer`s not
+    entered; chunk by chunk when the import streams), payloads unloaded.
+    `shutter:open` / `shutter:close` (fallbacks 0 / 0) give `Shutter { offsets,
+    camera, interval }`, the interval `f + open .. f + close` in time codes, `None`
+    (instantaneous) when `close <= open` or there is no frame. It has to be known
+    before the walk: geometry is emitted while walking, streamed chunks drop their
+    stage before it ends, and shapes are attached at once. After `resolve_camera`,
+    a render camera other than the pre-read one with different offsets raises
+    `camera.shutter_mismatch`, naming both (`RenderCamera::shutter` carries each
+    built camera's offsets).
+  - *The traversal carries a shutter pair through moving subtrees.* Stack entries
+    grew a `Timing` (`Static` | `Varies` | `Moves(Box<Pair { open, close }>)`,
+    boxed because every entry carries one and few move). A prim moves when its own
+    ops might vary (`XformQuery::transform_might_be_time_varying`) or its parent
+    moves and it does not `!resetXformStack!`; it is then composed at both ends by
+    `compose_at` — `compose_with_parent` under a nested `EvalTimeScope`, quiet
+    (the read at the frame already warned) — so the composition rule stays one
+    function. `pair.open` reuses `W_f` when `shutter:open == 0`. `W_f` is still
+    what lights, cameras, the zero-scale tests and `count_placements` read. The
+    question is asked only when the offsets open an interval or a `motionvector`
+    var is requested (`TransformMotion::query`); otherwise `timing` returns
+    `Static` without touching the prim.
+  - *One placement rule* (`Span { open, close }`, `Span::end`): start at `X(open)`,
+    end at `T(v)·X(close)` with `v` the authored `crust:motion:translate`;
+    `v` alone keeps its old `T(v)·X(open)` bit for bit, and a close equal to the
+    open is no motion. Meshes and implicit shapes carry `l2w_end` on
+    `MeshPlacement` (a moving one is never baked; a non-invertible one bakes at
+    open and is counted). Spheres keep their world-space centre at open inside an
+    identity instance ending at `T(v)·X(close)·X(open)⁻¹`. Native instances fold
+    `part.local` in on both sides and now read `v` on the instance prim.
+    `PointInstancer` placements get `W(open)·P_i → W(close)·P_i` from the
+    instancer prim's pair; per-instance arrays are read at the frame.
+  - *Warnings* (`report_unmoved`, once per cause with a count):
+    `time.motion_needs_frame` (offsets open, no frame, a drawn prim varies),
+    `camera.shutter_instantaneous` (a `motionvector` var, offsets that open
+    nothing, a drawn prim varies), `xform.motion_ignored` (curves, lights,
+    volumes, prims inside a prototype whose own ops vary, baked non-invertible
+    meshes). `camera.` and `time.` are settings families, so a scene carrying
+    one refuses MCP's in-place settings refresh.
+  - *MCP*: `StageFacts::shutter` is a `ShutterKey` (the camera, the offsets and
+    interval as bits, and whether prims were asked about time); a settings refresh
+    whose key differs is `Structural("the camera shutter changed")`. The offsets
+    and the query flag are in it because they decide warnings even when the
+    interval does not move: the session renders without a frame, where a
+    `shutter:close` edit leaves the interval `None` but adds
+    `time.motion_needs_frame` to a full import.
+  - *Measured.* Every sample scene is bit-identical at 16 spp with
+    `--indirect-clamp 0` (none authors a shutter), and so is
+    `samples/animation.usda` at `-f 5`. The `AOV = false` instantiation is
+    unchanged under callgrind (`advance_pixel::<…, false, false, false, false>`,
+    3 806 012 499 instructions on cornellbox at 2 spp before and after). The
+    import itself is not free: on cornellbox `load_scene` counts +0.35% (the
+    camera pre-read), and on `samples/PointInstancedMedCity.usd` (`-s 1 -f 1`,
+    40 000 instancer placements, one thread) +0.6% with no shutter and +0.9% with
+    `shutter:close = 0.5` on its camera — about 56 instructions a placement of
+    `attach_proto_parts` plumbing (the optional close and `v`) and larger frames.
+    In time it is below the noise floor: `bench_ab.sh -n 20 -p "Parse USD stage"`
+    gives min / mean +2.4% / −1.0% (0.085 s) static and +5.6% / −1.9% (0.090 s)
+    with the shutter, and 0.004 s either way without a frame. No production stage
+    was available to measure.
 - **Camera choice** (`UsdImportOptions::camera`, the CLI's `--camera`): the named prim,
   else the stage's **`RenderSettings.camera`** relationship (read off the index stage, so
   the traversal knows it before meeting any camera), else the first `UsdGeomCamera` the
@@ -1230,8 +1296,11 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
   native instance inside a prototype into its parts. Volumes inside prototypes are skipped — they
   live outside the surface BVH by design and cannot ride an instance transform.
   `PointInstancer`
-  `velocities` / `accelerations` / `angularVelocities` are ignored, so vectorized instances
-  do not motion-blur (`crust:motion:translate` still works on ordinary prims). The
+  `velocities` / `accelerations` / `angularVelocities` are ignored, and per-instance
+  `positions` / `orientations` time samples are read at the frame only, so vectorized
+  instances do not motion-blur on their own; an instancer whose own transform (or an
+  ancestor's) is time-sampled moves every placement with it, and
+  `crust:motion:translate` works on ordinary prims and native instances. The
   per-instance arrays themselves (`protoIndices`, `positions`, `orientations`,
   `scales`, `ids`, `invisibleIds`) are evaluated at the requested frame like every
   other attribute, so an animated instancer does move between frames. Top-level `UsdGeomSphere` prims
@@ -1406,6 +1475,25 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
     = false )`) removes both.
   - The rig's **13 `CylinderLight`s** (oscilloscope and ham-radio button lights) now
     import as analytic cylinder lights; this used to be a gap.
+
+## Known gaps: time-sampled motion
+
+- **Two keys per shutter.** Only the shutter's ends are read, and the kernel lerps
+  between them: a path that curves inside the shutter becomes its chord, one that
+  goes out and back reads 0, and a large rotation bows (the `intersection-kernel`
+  gap). Several segments would need N transforms per instance in the kernel.
+- **Mixed-time evaluation.** With `shutter:open ≠ 0`, transforms are read at
+  `f + open` while every other attribute, points included, is read at `f`, so a mesh
+  whose points are baked per frame under an animated transform sits slightly
+  inconsistently. The deforming-points change reads points at the same two times.
+- **Not moved:** deformation (`points` time samples, `velocities`), per-instance
+  `PointInstancer` motion, curves, lights, volumes, transforms animated inside a
+  prototype, and the camera itself. Each but the camera is counted under
+  `xform.motion_ignored` when its transform moves.
+- **The pre-read camera can differ from the render's** when no camera is named and
+  the first camera sits in an unloaded payload, or the stage has several unnamed
+  cameras with different shutters: warned (`camera.shutter_mismatch`), and naming
+  the camera fixes it.
 
 ## Known gaps: following a stage live
 

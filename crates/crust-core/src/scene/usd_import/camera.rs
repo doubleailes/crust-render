@@ -1,6 +1,7 @@
 //! `UsdGeomCamera` → [`Camera`].
 
 use glam::{Mat4 as GMat4, Vec3, Vec3A};
+use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::geom::{Camera as UsdCamera, CameraSchema, StageMetadata, tokens};
 use tracing::debug;
@@ -9,7 +10,7 @@ use crate::camera::Camera;
 use crate::tracer::RenderSettings;
 use crate::warning;
 
-use super::attrs::attr_f32;
+use super::attrs::{attr_f32, attr_f64};
 use super::prim_at;
 use super::xform::compose_with_parent;
 
@@ -109,6 +110,9 @@ pub(super) struct RenderCamera {
     /// finite, not positive, or overflowing the diameter); the lens was built
     /// with the fallback.
     pub(super) refused_meters_per_unit: Option<f64>,
+    /// Its shutter, for the check that the one motion was measured over is
+    /// this camera's ([`Shutter`]).
+    pub(super) shutter: ShutterOffsets,
 }
 
 impl RenderCamera {
@@ -139,7 +143,91 @@ pub(super) fn build_camera(
         camera,
         exposure_scale: exposure_scale(&cam),
         refused_meters_per_unit,
+        shutter: offsets(&cam),
     })
+}
+
+/// A camera's `shutter:open` / `shutter:close` as authored: offsets in time
+/// codes from the frame, each at USD's fallback 0 when unauthored.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct ShutterOffsets {
+    pub(super) open: f64,
+    pub(super) close: f64,
+}
+
+impl ShutterOffsets {
+    /// Whether the offsets describe an interval at all: `close > open`. A
+    /// non-finite offset describes none.
+    pub(super) fn opens(&self) -> bool {
+        self.close > self.open
+    }
+}
+
+fn offsets(cam: &UsdCamera) -> ShutterOffsets {
+    ShutterOffsets {
+        open: attr_f64(&cam.shutter_open_attr()).unwrap_or(0.0),
+        close: attr_f64(&cam.shutter_close_attr()).unwrap_or(0.0),
+    }
+}
+
+/// The shutter of the camera at `prim`, `None` when `prim` is not a camera
+/// on `stage`.
+pub(super) fn shutter_offsets(stage: &Stage, prim: &Prim) -> Option<ShutterOffsets> {
+    let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
+    Some(offsets(&cam))
+}
+
+/// The interval motion is measured over, read before the traversal from the
+/// camera the render is expected to go through: the frame `f` plus the
+/// camera's offsets, `f + open .. f + close`. One interval for the beauty's
+/// blur and the `motionvector` AOV, so the two cannot disagree.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Shutter {
+    /// The offsets as authored on `camera`.
+    pub(super) offsets: ShutterOffsets,
+    /// The camera they were read from; `None` when the stage has none the
+    /// read could find, which reads as the fallback 0 / 0.
+    pub(super) camera: Option<sdf::Path>,
+    /// Shutter open and shutter close in time codes; `None` when the shutter
+    /// is instantaneous: the offsets open no interval, or there is no frame
+    /// to measure from.
+    pub(super) interval: Option<(f64, f64)>,
+}
+
+impl Shutter {
+    pub(super) fn new(
+        camera: Option<sdf::Path>,
+        offsets: ShutterOffsets,
+        frame: Option<f64>,
+    ) -> Self {
+        let interval = frame
+            .filter(|_| offsets.opens())
+            .map(|f| (f + offsets.open, f + offsets.close))
+            .filter(|(open, close)| close > open);
+        Shutter {
+            offsets,
+            camera,
+            interval,
+        }
+    }
+
+    /// What the MCP session compares to decide whether a settings edit
+    /// changed the shutter ([`crate::live::ShutterKey`]); `query` is whether
+    /// the import asks prims about time ([`super::xform::TransformMotion`]).
+    pub(super) fn key(&self, query: bool) -> crate::live::ShutterKey {
+        crate::live::ShutterKey {
+            camera: self.camera.as_ref().map(ToString::to_string),
+            offsets: [self.offsets.open.to_bits(), self.offsets.close.to_bits()],
+            interval: self.interval.map(|(o, c)| [o.to_bits(), c.to_bits()]),
+            query,
+        }
+    }
+
+    /// Offsets that open an interval with no frame to place it at: time
+    /// samples are not evaluated over it (`time.motion_needs_frame`).
+    pub(super) fn needs_frame(&self) -> bool {
+        self.offsets.opens() && self.interval.is_none()
+    }
 }
 
 /// The linear exposure scale of `cam` at the import's time (C++
@@ -305,9 +393,10 @@ pub(super) fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
 
 #[cfg(test)]
 mod tests {
-    use openusd::usd::Stage;
-
-    use super::authored_meters_per_unit;
+    use super::*;
+    use crate::scene::usd_import::settings::CameraChoice;
+    use crate::scene::usd_import::{read_camera_ahead, stage_builder};
+    use openusd::usd::InitialLoadSet;
 
     /// A stage on a `.usda` holding `metadata` and nothing else.
     fn stage(name: &str, metadata: &str) -> Stage {
@@ -328,5 +417,114 @@ mod tests {
         assert_eq!(authored_meters_per_unit(&metre), Some(1.0));
         let unauthored = stage("unauthored", "    upAxis = \"Y\"");
         assert_eq!(authored_meters_per_unit(&unauthored), None);
+    }
+
+    fn write(name: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("crust_shutter_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("{name}.usda"));
+        std::fs::write(&path, text).expect("write stage");
+        path
+    }
+
+    /// The shutter read ahead of the traversal off `stage`'s index (payloads
+    /// unloaded), through the camera at `named` when one is.
+    fn shutter(name: &str, stage: &str, named: Option<&str>, frame: Option<f64>) -> Shutter {
+        let path = write(name, stage);
+        let path_str = path.to_str().unwrap();
+        let index = stage_builder()
+            .load(InitialLoadSet::LoadNone)
+            .open(path_str)
+            .expect("stage opens");
+        let named = named.map(|p| CameraChoice::Requested(sdf::path(p).unwrap()));
+        read_camera_ahead(
+            &index,
+            &path,
+            path_str,
+            named.as_ref(),
+            &RenderSettings::default(),
+            frame,
+        )
+        .expect("reads")
+        .1
+    }
+
+    fn one_camera(shutter: &str) -> String {
+        format!(
+            "#usda 1.0\ndef Xform \"World\"\n{{\n    def Camera \"Cam\"\n    {{\n{shutter}\n    }}\n}}\n"
+        )
+    }
+
+    #[test]
+    fn an_authored_shutter_is_measured_from_the_frame() {
+        let s = shutter(
+            "open_close",
+            &one_camera("        double shutter:open = 0\n        double shutter:close = 0.5"),
+            None,
+            Some(5.0),
+        );
+        assert_eq!(s.interval, Some((5.0, 5.5)));
+        assert_eq!(s.camera, Some(sdf::path("/World/Cam").unwrap()));
+    }
+
+    #[test]
+    fn a_shutter_may_open_before_the_frame() {
+        let s = shutter(
+            "centred",
+            &one_camera("        double shutter:open = -0.25\n        double shutter:close = 0.25"),
+            None,
+            Some(5.0),
+        );
+        assert_eq!(s.interval, Some((4.75, 5.25)));
+    }
+
+    #[test]
+    fn an_unauthored_shutter_is_instantaneous() {
+        let s = shutter("unauthored", &one_camera(""), None, Some(5.0));
+        assert_eq!(s.offsets, ShutterOffsets::default());
+        assert_eq!(s.interval, None);
+        assert!(!s.needs_frame());
+    }
+
+    #[test]
+    fn without_a_frame_the_shutter_is_instantaneous() {
+        let s = shutter(
+            "no_frame",
+            &one_camera("        double shutter:close = 0.5"),
+            None,
+            None,
+        );
+        assert_eq!(s.interval, None);
+        assert!(s.needs_frame());
+    }
+
+    #[test]
+    fn a_named_camera_wins_over_an_earlier_one() {
+        let stage = "#usda 1.0\ndef Xform \"World\"\n{\n    def Camera \"A\"\n    {\n        \
+                     double shutter:close = 1\n    }\n    def Camera \"B\"\n    {\n        \
+                     double shutter:close = 0.5\n    }\n}\n";
+        let s = shutter("named", stage, Some("/World/A"), Some(2.0));
+        assert_eq!(s.interval, Some((2.0, 3.0)));
+        // Unnamed, the walk meets B first, as the traversal does (last child
+        // first).
+        let s = shutter("unnamed", stage, None, Some(2.0));
+        assert_eq!(s.camera, Some(sdf::path("/World/B").unwrap()));
+        assert_eq!(s.interval, Some((2.0, 2.5)));
+    }
+
+    #[test]
+    fn a_named_camera_in_an_unloaded_payload_is_read_through_a_masked_stage() {
+        write(
+            "payload_camera_shot",
+            "#usda 1.0\ndef Xform \"Shot\"\n{\n    def Camera \"Cam\"\n    {\n        \
+             double shutter:open = -0.5\n        double shutter:close = 0.5\n    }\n}\n",
+        );
+        let stage = "#usda 1.0\ndef Xform \"World\"\n{\n    def Xform \"Shot\" (\n        \
+                     prepend payload = @payload_camera_shot.usda@</Shot>\n    )\n    {\n    }\n}\n";
+        let s = shutter("payload_camera", stage, Some("/World/Shot/Cam"), Some(10.0));
+        assert_eq!(s.interval, Some((9.5, 10.5)));
+        // Unnamed, the index walk cannot see it.
+        let s = shutter("payload_camera_unnamed", stage, None, Some(10.0));
+        assert_eq!((s.camera, s.interval), (None, None));
     }
 }

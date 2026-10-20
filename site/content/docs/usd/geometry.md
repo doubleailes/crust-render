@@ -130,9 +130,11 @@ Use only bits 0–2. Crust Render uses the higher bits for UsdLux shadow linking
 
 A world-space translation that the prim moves through while the shutter is open, for
 transform motion blur. The prim starts at its authored position when the shutter opens and
-has moved by this vector when it closes.
+has moved by this vector when it closes. It is one displacement over the shutter, whatever
+the shutter's length, including the default instantaneous one.
 
-Read on `Mesh`, `Sphere` and the [implicit shapes](#implicit-shapes).
+Read on `Mesh`, `Sphere`, the [implicit shapes](#implicit-shapes) and native instances
+(an `instanceable` prim).
 
 ```usda
 # A sphere that moves one unit to the right during the shutter.
@@ -145,9 +147,18 @@ def Sphere "Mover"
 }
 ```
 
-This is the only kind of motion blur. There is no deformation (per-vertex) blur, and
-animated `xformOp`s are read at the render frame only: they don't blur. A mesh with a non-invertible transform (for example, a scale of zero on
-one axis) can't move. Its `crust:motion:translate` is ignored with a warning.
+Time-sampled `xformOp`s are the other source of motion: with a
+[camera shutter](@/docs/usd/render-settings.md#camera-shutter) authored, a prim whose
+transform is animated moves from its shutter-open transform to its shutter-close one. On
+a prim that has both, the translation is added on top: the prim ends the shutter at its
+shutter-close transform, moved by `crust:motion:translate`. A mesh whose transform moves
+by `(0, 1, 0)` over the shutter and authors `(1, 0, 0)` has every point move by
+`(1, 1, 0)`.
+
+There is no deformation (per-vertex) blur: animated `points` are read at the frame. A
+mesh with a non-invertible transform (for example, a scale of zero on one axis) can't
+move. Its `crust:motion:translate` is ignored with a warning, and so is its animated
+transform ([`xform.motion_ignored`](@/docs/reference/warnings.md)).
 
 The blur can be turned off for the whole render with
 [`disableMotionBlur`](@/docs/usd/render-settings.md#disablemotionblur) on the

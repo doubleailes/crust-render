@@ -45,7 +45,9 @@ shader inputs are stricter; see [Materials](@/docs/usd/materials.md#input-types)
 
 **Time samples work.** Like any USD attribute, a `crust:*` attribute can be animated with
 `timeSamples`. It is read at the frame given by
-[`--frame`](@/docs/reference/command-line.md#frame).
+[`--frame`](@/docs/reference/command-line.md#frame). Time-sampled transforms also move geometry over the
+camera's shutter when one is authored: see
+[camera shutter](@/docs/usd/render-settings.md#camera-shutter).
 
 ## Where each attribute goes
 

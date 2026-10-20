@@ -154,6 +154,8 @@ warning_codes! {
         "A light-sample count is above the most crust takes; the maximum is used.";
     TimeOutsideRange => "time.outside_range", Approximated, Each,
         "The frame lies outside the stage's time range; animated attributes hold their nearest sample.";
+    TimeMotionNeedsFrame => "time.motion_needs_frame", Skipped, Each,
+        "The camera's shutter opens but no frame was given; time-sampled transforms are not evaluated over it.";
     ColorWorkingSpaceRefused => "color.working_space_refused", Refused, Each,
         "renderingColorSpace names no usable working space; the render is in lin_rec709.";
     ColorUnknownSpace => "color.unknown_space", Refused, Each,
@@ -174,6 +176,10 @@ warning_codes! {
         "A camera prim could not be built into a camera.";
     CameraInvalidMetersPerUnit => "camera.invalid_meters_per_unit", Refused, Each,
         "The stage's metersPerUnit is not finite or not positive; the lens reads it as 0.01, a centimetre.";
+    CameraShutterInstantaneous => "camera.shutter_instantaneous", Approximated, Each,
+        "A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero.";
+    CameraShutterMismatch => "camera.shutter_mismatch", Approximated, Each,
+        "The render goes through another camera than the one whose shutter motion was measured over.";
 
     // Products, AOVs and light path expressions
     ProductNotARenderProduct => "product.not_a_render_product", Skipped, Each,
@@ -241,7 +247,9 @@ warning_codes! {
     XformUnknownType => "xform.unknown_type", Skipped, Once,
         "A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored.";
     XformMotionVectorUnsupported => "xform.motion_vector_unsupported", Approximated, Each,
-        "Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero.";
+        "Geometry moves in a way the vector cannot attribute to one placement; it is motion blurred but the motionvector AOV reads zero.";
+    XformMotionIgnored => "xform.motion_ignored", Skipped, Each,
+        "A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders at shutter open.";
 
     // Meshes, subdivision, displacement
     MeshNonInvertibleTransform => "mesh.non_invertible_transform", Approximated, Each,

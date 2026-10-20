@@ -112,6 +112,23 @@ pub(crate) struct StageFacts {
     /// `(name, components)`: a product that asks for others needs geometry
     /// read again.
     pub(crate) primvars: Vec<(String, u8)>,
+    /// The shutter motion was measured over: geometry was placed at its
+    /// ends, so another shutter is another scene.
+    pub(crate) shutter: ShutterKey,
+}
+
+/// The shutter an import measured motion over, as bits: the camera it was
+/// read from, its offsets as authored, the interval in time codes (`None`
+/// when instantaneous), and whether prims were asked whether their transform
+/// varies. The last two decide warnings as well as geometry
+/// (`time.motion_needs_frame`, `camera.shutter_instantaneous`), so a change to
+/// any part re-imports.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ShutterKey {
+    pub(crate) camera: Option<String>,
+    pub(crate) offsets: [u64; 2],
+    pub(crate) interval: Option<[u64; 2]>,
+    pub(crate) query: bool,
 }
 
 /// A value the import's tessellation read from the render camera, as the

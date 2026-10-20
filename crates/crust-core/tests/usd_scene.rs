@@ -3968,7 +3968,10 @@ fn a_moving_cube_instances_and_a_scaled_one_scales() {
         r#"    def Cube "Mover" { float3 crust:motion:translate = (1, 0, 0) }"#,
     );
     assert_eq!(moving.world.primitive_breakdown().instances, 1);
-    assert_eq!(moving.world.motion(0), Vec3A::new(1.0, 0.0, 0.0));
+    assert_eq!(
+        moving.world.motion(0, Vec3A::ZERO, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0)
+    );
 
     let scaled = implicit_stage(
         "implicit_scaled",
