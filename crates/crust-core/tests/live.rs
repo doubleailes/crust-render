@@ -486,3 +486,103 @@ def Xform "World"
         "a mesh reads no table"
     );
 }
+
+/// A stage with a mesh authoring `primvars:rest`, whose settings target
+/// `products` (one of `</Render/plain>` and `</Render/withRest>`).
+fn primvar_stage(products: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("crust_live_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("live_primvars.usda");
+    std::fs::write(
+        &path,
+        format!(
+            r#"#usda 1.0
+def Xform "W"
+{{
+    def Camera "Cam"
+    {{
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Mesh "M"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        point3f[] primvars:rest = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)] (
+            interpolation = "vertex"
+        )
+    }}
+}}
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </W/Cam>
+        uniform int2 resolution = (32, 32)
+        rel products = [{products}]
+    }}
+    def RenderProduct "plain"
+    {{
+        token productName = "plain.exr"
+        rel orderedVars = [</Render/depth>]
+    }}
+    def RenderProduct "withRest"
+    {{
+        token productName = "rest.exr"
+        rel orderedVars = [</Render/depth>, </Render/Pref>]
+    }}
+    def RenderVar "depth"
+    {{
+        uniform token dataType = "float"
+        uniform string sourceName = "depth"
+    }}
+    def RenderVar "Pref"
+    {{
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+    }}
+}}
+"#
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+/// The geometry keeps the primvars the products asked for when it was read:
+/// retargeting `products` to one with a primvar var re-imports, rather than
+/// render a channel the geometry never kept; the same products update in
+/// place. A fresh import of the retargeted layer keeps the primvar.
+#[test]
+fn a_settings_change_asking_for_new_primvars_reimports() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = primvar_stage("</Render/plain>");
+    let scene = Scene::from_usd(&path).expect("load");
+    assert!(!scene.world.has_primvars());
+    let prov = scene.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+    primvar_stage("</Render/withRest>");
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => assert!(why.contains("primvars"), "{why}"),
+        Ok(_) => panic!("a product asking for a primvar the geometry never kept updated in place"),
+    }
+    let fresh = Scene::from_usd(&path).expect("load");
+    assert!(fresh.world.has_primvars());
+    // And with the primvar kept, the same products update in place.
+    let prov = fresh.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &fresh.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+}

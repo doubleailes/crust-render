@@ -19,6 +19,7 @@ use crate::strands::{StrandSpan, StrandTable, StrandValues};
 use crate::warning;
 
 use super::attrs::{custom_i32_array, decode_text, in_working, prim_value};
+use super::products::{KeptPrimvar, PrimvarKeep};
 
 /// What a curves prim's material asks of it, and what reading it takes.
 #[derive(Clone, Copy)]
@@ -27,17 +28,25 @@ pub(super) struct StrandRequest<'a> {
     /// The chart the material names other than `st` ([`crate::Material::uv_primvar`]).
     pub(super) chart: Option<&'a str>,
     pub(super) working: Space,
+    /// The primvars render vars keep, read whatever the material reads.
+    pub(super) kept: &'a PrimvarKeep,
 }
 
 impl<'a> StrandRequest<'a> {
-    /// The request for `material`, or `None` when it reads nothing a strand
-    /// table carries — the case that must cost nothing.
-    pub(super) fn of(material: &'a dyn crate::Material, working: Space) -> Option<Self> {
+    /// The request for `material` and the render's kept primvars, or `None`
+    /// when neither reads anything a strand table carries — the case that
+    /// must cost nothing.
+    pub(super) fn of(
+        material: &'a dyn crate::Material,
+        working: Space,
+        kept: &'a PrimvarKeep,
+    ) -> Option<Self> {
         let needs = material.curve_needs();
-        needs.any().then(|| StrandRequest {
+        (needs.any() || !kept.is_empty()).then(|| StrandRequest {
             needs,
             chart: material.uv_primvar(),
             working,
+            kept,
         })
     }
 }
@@ -193,6 +202,8 @@ pub(super) struct StrandBuilder {
     spans: Vec<StrandSpan>,
     chart: Option<Channel>,
     primvars: Vec<Option<Channel>>,
+    /// The kept primvars, by keep-set index, for the AOVs.
+    kept: Vec<Option<Channel>>,
 }
 
 /// A curves prim's shape, which every primvar's length is checked against.
@@ -243,12 +254,19 @@ impl StrandBuilder {
             .iter()
             .map(|name| read(prim, name, request.working, counts, false))
             .collect();
+        let kept = request
+            .kept
+            .entries
+            .iter()
+            .map(|k| read_kept(prim, k, counts))
+            .collect();
         StrandBuilder {
             path: prim.path().to_string(),
             strand: request.needs.strand,
             spans: Vec::new(),
             chart,
             primvars,
+            kept,
         }
     }
 
@@ -272,6 +290,7 @@ impl StrandBuilder {
             .chart
             .iter_mut()
             .chain(self.primvars.iter_mut().flatten())
+            .chain(self.kept.iter_mut().flatten())
         {
             c.span(vertex, varying);
         }
@@ -300,12 +319,66 @@ impl StrandBuilder {
         };
         let chart = done(self.chart);
         let primvars: Vec<_> = self.primvars.into_iter().map(done).collect();
-        (self.strand || chart.is_some()).then(|| {
+        let kept: Vec<_> = self
+            .kept
+            .into_iter()
+            .map(|c| {
+                let c = c?;
+                if c.overrun {
+                    warning!(
+                        AovPrimvarMismatch,
+                        at = prim.path(),
+                        "{}: primvars:{} has too few values for its {:?} interpolation; \
+                         that prim reads the primvar vars' clear value",
+                        prim.path(),
+                        c.name,
+                        c.interp,
+                    );
+                    return None;
+                }
+                Some(c.out)
+            })
+            .collect();
+        // A table only the AOVs read is built only when the prim authors a
+        // kept primvar: without one it would carry nothing a hit could read.
+        let any_kept = kept.iter().any(Option::is_some);
+        (self.strand || chart.is_some() || any_kept).then(|| {
             StrandTable::new(self.spans, &self.path)
                 .with_chart(chart)
                 .with_primvars(primvars)
+                .with_kept(kept)
         })
     }
+}
+
+/// A kept primvar on `prim`, decoded as authored and checked against the
+/// prim's counts and the var's component count; `None`, with one warning per
+/// var and prim, for one the var cannot read, and silently for one that is
+/// not authored.
+fn read_kept(prim: &Prim, kept: &KeptPrimvar, counts: CurveCounts) -> Option<Channel> {
+    let channel = match decode_channel(prim, &kept.name, None, counts) {
+        Ok(c) => c?,
+        Err(why) => return refuse_kept(prim, kept, &why),
+    };
+    match channel.values.first().map(|v| v.arity) {
+        Some(n) if n == kept.components => Some(channel),
+        Some(n) => refuse_kept(prim, kept, &format!("has {n} component(s)")),
+        None => None,
+    }
+}
+
+fn refuse_kept(prim: &Prim, kept: &KeptPrimvar, why: &str) -> Option<Channel> {
+    warning!(
+        AovPrimvarMismatch,
+        at = prim.path(),
+        "{} primvar {:?} as {} component(s), but on {} it {why}; that prim reads the \
+         clear value",
+        kept.asking(),
+        kept.name,
+        kept.components,
+        prim.path(),
+    );
+    None
 }
 
 /// `primvars:<name>` on `prim`, decoded and checked against the prim's
@@ -319,19 +392,37 @@ fn read(
     counts: CurveCounts,
     chart: bool,
 ) -> Option<Channel> {
+    match decode_channel(prim, name, Some(working), counts) {
+        Ok(Some(c)) if chart && c.values.first().is_some_and(|v| v.arity != 2) => None,
+        Ok(c) => c,
+        Err(why) => {
+            if !chart {
+                warning!(
+                    CurvesUnsupportedPrimvar,
+                    at = prim.path(),
+                    "{}: primvars:{name} {why} — the material reads its default there",
+                    prim.path(),
+                );
+            }
+            None
+        }
+    }
+}
+
+/// `primvars:<name>` on `prim`, decoded — colours into `working` when one is
+/// given, as authored otherwise — and checked against the prim's counts.
+/// `Ok(None)` for one that is not authored; `Err` with the reason for one
+/// that cannot be read.
+fn decode_channel(
+    prim: &Prim,
+    name: &str,
+    working: Option<Space>,
+    counts: CurveCounts,
+) -> Result<Option<Channel>, String> {
     let attr_name = format!("primvars:{name}");
     let attr = prim.attribute(&attr_name);
-    let value = prim_value(prim, &attr_name)?;
-    let refuse = |why: String| {
-        if !chart {
-            warning!(
-                CurvesUnsupportedPrimvar,
-                at = prim.path(),
-                "{}: primvars:{name} {why} — the material reads its default there",
-                prim.path(),
-            );
-        }
-        None
+    let Some(value) = prim_value(prim, &attr_name) else {
+        return Ok(None);
     };
     let type_name = attr
         .type_name()
@@ -341,14 +432,13 @@ fn read(
         .unwrap_or_default();
     let color = type_name.starts_with("color3");
     let Some(mut values) = decode(value) else {
-        return refuse(format!(
+        return Err(format!(
             "is a {type_name}, which curves do not read (float, float2, float3, color3f, int)"
         ));
     };
-    if chart && values.first().is_some_and(|v| v.arity != 2) {
-        return None;
-    }
-    if color {
+    if let Some(working) = working
+        && color
+    {
         for v in &mut values {
             let rgb = in_working(&attr, Vec3A::new(v.v[0], v.v[1], v.v[2]), working);
             *v = rgb.into();
@@ -361,7 +451,7 @@ fn read(
             .collect();
         match expanded {
             Some(v) => values = v,
-            None => return refuse("has indices out of its range".into()),
+            None => return Err("has indices out of its range".into()),
         }
     }
     let interp = match attr
@@ -375,7 +465,7 @@ fn read(
         Some("uniform") => Interp::Uniform,
         Some("varying") => Interp::Varying,
         Some("vertex") => Interp::Vertex,
-        Some(other) => return refuse(format!("is {other}, which curves do not read")),
+        Some(other) => return Err(format!("is {other}, which curves do not read")),
     };
     let needed = match interp {
         Interp::Constant => 1,
@@ -384,7 +474,7 @@ fn read(
         Interp::Vertex => counts.points,
     };
     if values.len() < needed || (interp != Interp::Constant && values.len() != needed) {
-        return refuse(format!(
+        return Err(format!(
             "has {} values where its {interp:?} interpolation needs {needed}",
             values.len()
         ));
@@ -394,19 +484,19 @@ fn read(
         Interp::Uniform => StrandValues::PerCurve(values.clone()),
         Interp::Varying | Interp::Vertex => StrandValues::Linear(Vec::new()),
     };
-    Some(Channel {
+    Ok(Some(Channel {
         name: name.to_string(),
         interp,
         values,
         out,
         overrun: false,
-    })
+    }))
 }
 
 /// A primvar's values, one [`Val`] each: `float`, `int`, `float2`, `float3`
 /// (and every other three-component role, colours among them), in any
 /// precision, as an array or a lone `constant` value.
-fn decode(value: sdf::Value) -> Option<Vec<Val>> {
+pub(super) fn decode(value: sdf::Value) -> Option<Vec<Val>> {
     use sdf::Value as V;
     let v2 = |x: f32, y: f32| Val::vec2(x, y);
     let v3 = |x: f32, y: f32, z: f32| Val::vec3(x, y, z);

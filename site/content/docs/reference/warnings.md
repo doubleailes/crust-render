@@ -109,7 +109,7 @@ plain text and are not counted.
 | `product.invalid_data_window` | refused | dataWindowNDC is not finite or selects no pixel; the full frame is rendered. | Author a finite window that covers at least one pixel. |
 | `product.data_window_clipped` | approximated | dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped. | Keep `dataWindowNDC` inside 0..1. |
 | `aov.not_a_render_var` | skipped | orderedVars targets a prim that is not a RenderVar. | Point `orderedVars` at `RenderVar` prims. |
-| `aov.unsupported_source` | skipped | A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written. | Remove the var; the [AOV page](@/docs/usd/aovs.md) lists the sources crust writes. |
+| `aov.unsupported_source` | skipped | A RenderVar's source is one crust does not produce yet (planned, intrinsic); no channel is written. | Remove the var; the [AOV page](@/docs/usd/aovs.md) lists the sources crust writes. |
 | `aov.unknown_source` | skipped | A RenderVar names an unknown source or sourceType; no channel is written. | Use a source name from the [AOV page](@/docs/usd/aovs.md). |
 | `aov.type_mismatch` | skipped | A RenderVar's data type is not numeric or cannot hold its source; no channel is written. | Author a numeric `dataType` with enough components for the source. |
 | `aov.unknown_accumulation` | refused | A RenderVar's accumulation token is not supported; the source's default is used. | Use `zmin` or leave the accumulation unauthored. |
@@ -117,6 +117,10 @@ plain text and are not counted.
 | `aov.invalid_variance` | skipped | crust:aov:variance is authored where it cannot apply; no channel is written. | Use `crust:aov:variance` only on an `lpe` var with a float type and filtered accumulation. |
 | `aov.raw_ignored` | approximated | crust:aov:raw is authored on a source that is not a light path expression; it is ignored. | Remove `crust:aov:raw`, or use it on an `lpe` var. |
 | `aov.invalid_raw` | skipped | crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written. | Start the expression with a diffuse reflection (`C<RD>…`). |
+| `aov.primvar_no_name` | skipped | A primvar RenderVar authors no sourceName; no channel is written. | Author `sourceName` with the primvar's name (`rest` or `primvars:rest`). |
+| `aov.primvar_four_components` | skipped | A primvar RenderVar's data type has four components, which are not supported yet; no channel is written. | Ask for one, two or three components (`color3f`, not `color4f`). |
+| `aov.primvar_mismatch` | skipped | A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value. | Author the var's `dataType` with the primvar's component count. |
+| `aov.primvar_not_inherited` | skipped | A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value. | Author the primvar on each mesh or curves prim itself. |
 | `lpe.invalid` | skipped | A light path expression does not parse or compile; no channel is written. | Fix the expression; the message gives the parser's error. |
 
 ## Transforms

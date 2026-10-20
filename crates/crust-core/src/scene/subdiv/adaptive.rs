@@ -9,13 +9,16 @@ use openusd::gf::Vec3f;
 
 use std::collections::HashMap;
 
-use opensubdiv_rs::far::{AdaptiveOptions, PatchMap, PatchTableFactory, PatchTableOptions};
+use opensubdiv_rs::far::{
+    AdaptiveOptions, PatchMap, PatchTable, PatchTableFactory, PatchTableOptions,
+};
 
 use super::super::tessellate::{PointKey, edge_rate, tessellate_quad};
-use super::UvChannel;
 use super::normals::smooth_cage_normals;
 use super::topology::{expand_crease_runs, validate_cage, validate_corners};
-use super::{SubdivError, SubdivRequest, SubdivScheme};
+use super::{
+    Lanes, PrimvarChannel, RefinedChannel, RefinedUvs, SubdivError, SubdivRequest, SubdivScheme,
+};
 
 /// Feature-adaptive isolation depth of per-face tessellation's patch table.
 ///
@@ -61,6 +64,13 @@ pub(crate) struct TessellatedMesh {
     /// keeps its own values: `values`, and per triangle corner (parallel to
     /// `indices`) an index into them.
     pub face_varying_uvs: Option<(Vec<[f32; 2]>, Vec<i32>)>,
+    /// The request's `extra` channels, in order, in the chart's two shapes: a
+    /// `vertex` one per vertex (no indices), a `faceVarying` one per triangle
+    /// corner.
+    pub extra: Vec<RefinedChannel>,
+    /// Per triangle, its cage face — `Some` iff the request set
+    /// `want_base_face`.
+    pub cage_face: Option<Vec<u32>>,
     /// The smallest and largest edge rate used, for the debug line.
     pub rate_range: (u32, u32),
     /// Cage edges and spokes by rate, binned by `ceil(log2(rate))`: 1, 2,
@@ -99,9 +109,9 @@ pub(crate) fn quality_bin(q: f32) -> usize {
     }
 }
 
-/// A point on an unrefined face's boundary: its vertex, its Ptex coordinate and its
-/// face-varying chart value.
-type RingPoint = (u32, [f32; 2], [f32; 2]);
+/// A point on an unrefined face's boundary: its vertex and its Ptex coordinate.
+/// Its face-varying values sit beside it, one per channel.
+type RingPoint = (u32, [f32; 2]);
 
 /// Who owns a vertex of the tessellation, so the faces that meet there share it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -158,12 +168,40 @@ pub(crate) fn tessellate_adaptive(
         corner_vertices: &corners.0,
         corner_weights: &corners.1,
     };
-    let chart = req.uvs.filter(|c| c.face_varying);
-    let vertex_chart = req.uvs.filter(|c| !c.face_varying);
+    // Every channel, the chart first and widened to four lanes, split by kind:
+    // a `faceVarying` one is evaluated per Ptex face, a `vertex` one per
+    // vertex.
+    let widened = req.uvs.as_ref().map(|c| c.widened());
+    let mut channels = Channels::default();
+    if let (Some(c), Some(values)) = (req.uvs, widened.as_deref()) {
+        let c = PrimvarChannel {
+            values,
+            indices: c.indices,
+            face_varying: c.face_varying,
+            linear: c.linear,
+        };
+        if c.face_varying {
+            channels.chart = Some(c);
+        } else {
+            channels.vertex.push(c);
+        }
+    }
+    for c in req.extra {
+        if c.face_varying {
+            channels.extra_fvar.push(*c);
+        } else {
+            channels.vertex.push(*c);
+        }
+    }
 
     let cage = Cage::new(points, counts_us, indices_u32);
     let rating = EdgeRating::new(&cage, max_level, segment_size);
-    let mut out = Emitted::default();
+    let mut out = Emitted {
+        vertex_values: vec![Vec::new(); channels.vertex.len()],
+        fv_values: vec![Vec::new(); channels.n_fvar()],
+        want_cage_face: req.want_base_face,
+        ..Emitted::default()
+    };
     for &r in &rating.edge_rates {
         out.bin(r);
     }
@@ -177,17 +215,13 @@ pub(crate) fn tessellate_adaptive(
         .map(|&n| if n == 4 { 1 } else { n })
         .sum();
 
-    let charts = Charts {
-        chart,
-        vertex_chart,
-    };
     if !selected_faces.is_empty() {
         tessellate_selected(
             &cage,
             &rating,
             req,
             sharpness,
-            charts,
+            &channels,
             &selected_faces,
             max_level,
             segment_size,
@@ -195,24 +229,66 @@ pub(crate) fn tessellate_adaptive(
         )?;
     }
     if selected_faces.len() < n_faces {
-        tessellate_unselected(&cage, &rating, counts, indices, charts, &mut out)?;
+        tessellate_unselected(&cage, &rating, counts, indices, &channels, &mut out)?;
     }
 
     let Emitted {
         points: out_points,
         normals,
-        uvs,
+        vertex_values,
         indices: out_indices,
         base_face,
         corner_uvs,
         fv_values,
         fv_indices,
+        cage_face,
         min_rate,
         max_rate,
         quality,
         rate_bins,
         ..
     } = out;
+    // Back into the request's order: the chart, then each extra channel.
+    let mut vertex_values = vertex_values.into_iter();
+    let mut fv_values = fv_values.into_iter();
+    let chart = req.uvs.map(|c| {
+        let values = if c.face_varying {
+            fv_values.next()
+        } else {
+            vertex_values.next()
+        };
+        RefinedChannel {
+            values: values.expect("the chart is its kind's first channel"),
+            indices: c.face_varying.then(|| fv_indices.clone()),
+            face_varying: c.face_varying,
+        }
+        .narrowed()
+    });
+    let extra: Vec<RefinedChannel> = req
+        .extra
+        .iter()
+        .map(|c| {
+            let values = if c.face_varying {
+                fv_values.next()
+            } else {
+                vertex_values.next()
+            };
+            RefinedChannel {
+                values: values.expect("one emitted array per channel"),
+                indices: c.face_varying.then(|| fv_indices.clone()),
+                face_varying: c.face_varying,
+            }
+        })
+        .collect();
+    let (uvs, face_varying_uvs) = match chart {
+        Some(RefinedUvs {
+            values,
+            indices: Some(indices),
+            ..
+        }) => (None, Some((values, indices))),
+        Some(RefinedUvs { values, .. }) => (Some(values), None),
+        None => (None, None),
+    };
     Ok(TessellatedMesh {
         points: out_points,
         indices: out_indices,
@@ -221,8 +297,10 @@ pub(crate) fn tessellate_adaptive(
             base_face,
             corner_uvs,
         }),
-        uvs: vertex_chart.is_some().then_some(uvs),
-        face_varying_uvs: chart.is_some().then_some((fv_values, fv_indices)),
+        uvs,
+        face_varying_uvs,
+        extra,
+        cage_face: req.want_base_face.then_some(cage_face),
         rate_range: (min_rate.min(max_rate), max_rate),
         rate_bins,
         ptex_faces,
@@ -296,9 +374,9 @@ impl<'a> Cage<'a> {
         self.edge_ids[&(a.min(b), a.max(b))]
     }
 
-    /// The chart value corner `k` of face `f` addresses (0 without a chart).
-    fn chart_value(&self, chart: Option<UvChannel<'_>>, f: usize, k: usize) -> u32 {
-        chart.map_or(0, |c| c.value_index(self.starts[f] + k) as u32)
+    /// The value face-varying `channel` addresses at corner `k` of face `f`.
+    fn chart_value(&self, channel: &PrimvarChannel<'_>, f: usize, k: usize) -> u32 {
+        channel.value_index(self.starts[f] + k) as u32
     }
 }
 
@@ -357,12 +435,29 @@ fn side(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
 }
 
-/// The request's texture chart, by kind: a `faceVarying` one is evaluated per
-/// Ptex face, a `vertex` one per vertex.
-#[derive(Clone, Copy)]
-struct Charts<'a> {
-    chart: Option<UvChannel<'a>>,
-    vertex_chart: Option<UvChannel<'a>>,
+/// The request's channels, by kind: a `faceVarying` one is evaluated per Ptex
+/// face, a `vertex` one per vertex.
+#[derive(Default)]
+struct Channels<'a> {
+    /// A face-varying chart: the main refiner's one FVar channel, so it
+    /// alone decides how the selected faces isolate, as without extras.
+    chart: Option<PrimvarChannel<'a>>,
+    /// Face-varying extras, refined by a refiner of their own so they never
+    /// change the isolation the surface gets.
+    extra_fvar: Vec<PrimvarChannel<'a>>,
+    /// Every `vertex` channel, the chart first if it is one.
+    vertex: Vec<PrimvarChannel<'a>>,
+}
+
+impl<'a> Channels<'a> {
+    fn n_fvar(&self) -> usize {
+        usize::from(self.chart.is_some()) + self.extra_fvar.len()
+    }
+
+    /// The face-varying channels in emitted order: the chart, then extras.
+    fn fvar(&self) -> impl Iterator<Item = &PrimvarChannel<'a>> {
+        self.chart.iter().chain(&self.extra_fvar)
+    }
 }
 
 /// The tessellation as it is emitted, both phases into the same arrays.
@@ -371,18 +466,24 @@ struct Emitted {
     vertex_of: HashMap<VertexKey, u32>,
     points: Vec<Vec3f>,
     normals: Vec<[f32; 3]>,
-    uvs: Vec<[f32; 2]>,
+    /// Per `vertex` channel, its value at every vertex.
+    vertex_values: Vec<Vec<Lanes>>,
     indices: Vec<i32>,
     base_face: Vec<Option<u32>>,
     corner_uvs: Vec<[[f32; 2]; 3]>,
-    fv_values: Vec<[f32; 2]>,
+    /// Per face-varying channel, its values; every channel's are addressed
+    /// by the one `fv_indices`.
+    fv_values: Vec<Vec<Lanes>>,
     fv_indices: Vec<i32>,
+    /// Per triangle, its cage face, when `want_cage_face`.
+    cage_face: Vec<u32>,
+    want_cage_face: bool,
     /// The face-varying limit value a refined face gave each boundary point,
-    /// per chart side: a corner keyed by its cage vertex and chart value, an
-    /// edge point by its key and the chart values at the edge's ends. An
-    /// unrefined neighbour on the same side takes it, so the chart is
-    /// continuous where the two meet.
-    fvar_at: HashMap<(VertexKey, u32, u32), [f32; 2]>,
+    /// per channel and chart side: a corner keyed by its cage vertex and
+    /// chart value, an edge point by its key and the chart values at the
+    /// edge's ends. An unrefined neighbour on the same side takes it, so the
+    /// chart is continuous where the two meet.
+    fvar_at: HashMap<(usize, VertexKey, u32, u32), Lanes>,
     min_rate: u32,
     max_rate: u32,
     quality: [[u64; QUALITY_BINS]; 2],
@@ -395,12 +496,14 @@ impl Default for Emitted {
             vertex_of: HashMap::new(),
             points: Vec::new(),
             normals: Vec::new(),
-            uvs: Vec::new(),
+            vertex_values: Vec::new(),
             indices: Vec::new(),
             base_face: Vec::new(),
             corner_uvs: Vec::new(),
             fv_values: Vec::new(),
             fv_indices: Vec::new(),
+            cage_face: Vec::new(),
+            want_cage_face: false,
             fvar_at: HashMap::new(),
             min_rate: u32::MAX,
             max_rate: 0,
@@ -424,6 +527,11 @@ impl Emitted {
         self.min_rate = self.min_rate.min(r);
         self.max_rate = self.max_rate.max(r);
     }
+
+    /// How many face-varying values each channel holds so far.
+    fn fv_len(&self) -> usize {
+        self.fv_values.first().map_or(0, Vec::len)
+    }
 }
 
 /// The creases and corners the refiner is handed, validated up front.
@@ -443,59 +551,109 @@ fn tessellate_selected(
     rating: &EdgeRating,
     req: &SubdivRequest,
     sharpness: Sharpness<'_>,
-    Charts {
-        chart,
-        vertex_chart,
-    }: Charts<'_>,
+    channels: &Channels<'_>,
     selected_faces: &[u32],
     max_level: u32,
     segment_size: &SegmentSize<'_>,
     out: &mut Emitted,
 ) -> Result<(), SubdivError> {
     let points = cage.points;
+    let chart = channels.chart;
     let scheme = match req.scheme {
         SubdivScheme::Bilinear => sdc::SchemeType::Bilinear,
         _ => sdc::SchemeType::Catmark,
     };
-    let options = sdc::Options::default()
-        .with_vtx_boundary_interpolation(req.boundary)
-        .with_fvar_linear_interpolation(
-            chart.map_or(sdc::FVarLinearInterpolation::All, |c| c.linear),
-        );
-    let chart_indices: Vec<u32> = match chart {
-        Some(c) => (0..cage.indices.len())
-            .map(|fv| c.value_index(fv) as u32)
-            .collect(),
-        None => Vec::new(),
-    };
-    let channels: Vec<FVarChannelDescriptor> = chart
-        .map(|c| FVarChannelDescriptor::new(c.values.len(), &chart_indices))
-        .into_iter()
-        .collect();
-    let mut descriptor = TopologyDescriptor::new(points.len(), &cage.counts, &cage.indices)
-        .with_creases(sharpness.crease_pairs, sharpness.crease_weights)
-        .with_corners(sharpness.corner_vertices, sharpness.corner_weights);
-    if !channels.is_empty() {
-        descriptor = descriptor.with_fvar_channels(&channels);
-    }
-    let mut refiner =
-        TopologyRefinerFactory::create(descriptor, scheme, options).map_err(SubdivError::Refine)?;
-    // A face regular in the vertex topology can be irregular in the chart's:
-    // isolate it too rather than capping it a level up.
-    let mut adaptive =
-        AdaptiveOptions::new(ADAPTIVE_ISOLATION).with_consider_fvar_channels(chart.is_some());
-    adaptive.use_single_crease_patch = true;
-    refiner.refine_adaptive_selected(adaptive, selected_faces);
-    // Smooth face-varying patches that follow the chart's own topology and
-    // rule, not OpenSubdiv's legacy linear ones.
-    let table_options = PatchTableOptions::new()
-        .with_fvar_tables(chart.is_some())
-        .with_fvar_legacy_linear_patches(false);
-    let table =
-        PatchTableFactory::create_with_options_selected(&refiner, &table_options, selected_faces)
+    // The selected faces' limit patches, with `fvar` as the refiner's
+    // face-varying channels (patches for them too when there are any).
+    let patches = |fvar: &[PrimvarChannel<'_>]| -> Result<_, SubdivError> {
+        let options = sdc::Options::default()
+            .with_vtx_boundary_interpolation(req.boundary)
+            .with_fvar_linear_interpolation(
+                fvar.first()
+                    .map_or(sdc::FVarLinearInterpolation::All, |c| c.linear),
+            );
+        let fvar_indices: Vec<Vec<u32>> = fvar
+            .iter()
+            .map(|c| {
+                (0..cage.indices.len())
+                    .map(|fv| c.value_index(fv) as u32)
+                    .collect()
+            })
+            .collect();
+        let descriptors: Vec<FVarChannelDescriptor> = fvar
+            .iter()
+            .zip(&fvar_indices)
+            .map(|(c, idx)| FVarChannelDescriptor::new(c.values.len(), idx))
+            .collect();
+        let mut descriptor = TopologyDescriptor::new(points.len(), &cage.counts, &cage.indices)
+            .with_creases(sharpness.crease_pairs, sharpness.crease_weights)
+            .with_corners(sharpness.corner_vertices, sharpness.corner_weights);
+        if !descriptors.is_empty() {
+            descriptor = descriptor.with_fvar_channels(&descriptors);
+        }
+        let mut refiner = TopologyRefinerFactory::create(descriptor, scheme, options)
             .map_err(SubdivError::Refine)?;
+        // A face regular in the vertex topology can be irregular in the
+        // chart's: isolate it too rather than capping it a level up.
+        let mut adaptive =
+            AdaptiveOptions::new(ADAPTIVE_ISOLATION).with_consider_fvar_channels(!fvar.is_empty());
+        adaptive.use_single_crease_patch = true;
+        refiner.refine_adaptive_selected(adaptive, selected_faces);
+        // Smooth face-varying patches that follow the chart's own topology
+        // and rule, not OpenSubdiv's legacy linear ones.
+        let table_options = PatchTableOptions::new()
+            .with_fvar_tables(!fvar.is_empty())
+            .with_fvar_legacy_linear_patches(false);
+        let table = PatchTableFactory::create_with_options_selected(
+            &refiner,
+            &table_options,
+            selected_faces,
+        )
+        .map_err(SubdivError::Refine)?;
+        // Every face-varying channel's values at every level, base first.
+        let values: Vec<Vec<Lanes>> = {
+            let primvar = PrimvarRefiner::new(&refiner);
+            fvar.iter()
+                .enumerate()
+                .map(|(ch, c)| {
+                    let mut values = c.values.to_vec();
+                    for level in primvar.interpolate_face_varying_all(ch, c.values) {
+                        values.extend_from_slice(&level);
+                    }
+                    values
+                })
+                .collect()
+        };
+        Ok((refiner, table, values))
+    };
+    // The surface's own patches see the chart and nothing else, so extra
+    // primvars never change the beauty's geometry; extra face-varying
+    // channels get patches of their own, evaluated at the same Ptex
+    // coordinates (Ptex ids follow the cage alone).
+    let (refiner, table, chart_values) = patches(chart.as_slice())?;
     let map = PatchMap::new(&table);
     let ptex_of = table.ptex_indices();
+    let extra = if channels.extra_fvar.is_empty() {
+        None
+    } else {
+        Some(patches(&channels.extra_fvar)?)
+    };
+    let extra_map = extra.as_ref().map(|(_, table, _)| PatchMap::new(table));
+    // Per face-varying channel in emitted order: its table, map, values and
+    // table channel.
+    let fvar_eval: Vec<(&PatchTable, &PatchMap, &[Lanes], usize)> = chart_values
+        .iter()
+        .map(|v| (&table, &map, v.as_slice(), 0))
+        .chain(extra.as_ref().zip(extra_map.as_ref()).into_iter().flat_map(
+            |((_, t, values), m)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .map(move |(ch, v)| (t, m, v.as_slice(), ch))
+            },
+        ))
+        .collect();
+    let fvars: Vec<&PrimvarChannel> = channels.fvar().collect();
 
     // Control values: every level's vertices, base first.
     let primvar = PrimvarRefiner::new(&refiner);
@@ -508,26 +666,23 @@ fn tessellate_selected(
         control.extend_from_slice(&refined);
         level_vals = refined;
     }
-    let fvar_values: Option<Vec<[f32; 2]>> = chart.map(|c| {
-        let mut values = c.values.to_vec();
-        for level in primvar.interpolate_face_varying_all(0, c.values) {
-            values.extend_from_slice(&level);
-        }
-        values
-    });
-    let uv_control: Option<Vec<[f32; 2]>> = vertex_chart.map(|c| {
-        let mut control: Vec<[f32; 2]> = (0..points.len())
-            .map(|v| c.values[c.value_index(v)])
-            .collect();
-        let mut level_vals = control.clone();
-        for l in 1..=refiner.max_level() {
-            let mut refined = vec![[0.0f32; 2]; refiner.level(l).num_vertices()];
-            primvar.interpolate(l, &level_vals, &mut refined);
-            control.extend_from_slice(&refined);
-            level_vals = refined;
-        }
-        control
-    });
+    let vertex_control: Vec<Vec<Lanes>> = channels
+        .vertex
+        .iter()
+        .map(|c| {
+            let mut control: Vec<Lanes> = (0..points.len())
+                .map(|v| c.values[c.value_index(v)])
+                .collect();
+            let mut level_vals = control.clone();
+            for l in 1..=refiner.max_level() {
+                let mut refined = vec![[0.0f32; 4]; refiner.level(l).num_vertices()];
+                primvar.interpolate(l, &level_vals, &mut refined);
+                control.extend_from_slice(&refined);
+                level_vals = refined;
+            }
+            control
+        })
+        .collect();
     let eval = |ptex: usize, u: f32, v: f32| -> Option<([f32; 3], [f32; 3])> {
         let patch = map.find_patch(ptex, u, v)?;
         let (p, du, dv) = table.evaluate(patch, u, v, &control);
@@ -543,13 +698,12 @@ fn tessellate_selected(
         };
         Some((p, n.to_array()))
     };
-    let eval_fvar = |ptex: usize, u: f32, v: f32| -> Option<[f32; 2]> {
-        let values = fvar_values.as_ref()?;
+    let eval_fvar = |channel: usize, ptex: usize, u: f32, v: f32| -> Option<Lanes> {
+        let (table, map, values, ch) = fvar_eval[channel];
         let patch = map.find_patch(ptex, u, v)?;
-        Some(table.evaluate_face_varying(patch, u, v, values, 0).0)
+        Some(table.evaluate_face_varying(patch, u, v, values, ch).0)
     };
-    let eval_uv = |ptex: usize, u: f32, v: f32| -> Option<[f32; 2]> {
-        let control = uv_control.as_ref()?;
+    let eval_vertex = |control: &[Lanes], ptex: usize, u: f32, v: f32| -> Option<Lanes> {
         let patch = map.find_patch(ptex, u, v)?;
         Some(table.evaluate(patch, u, v, control).0)
     };
@@ -575,9 +729,8 @@ fn tessellate_selected(
             z: p[2],
         });
         out.normals.push(n);
-        if uv_control.is_some() {
-            out.uvs
-                .push(eval_uv(ptex, uv[0], uv[1]).unwrap_or([0.0, 0.0]));
+        for (control, values) in vertex_control.iter().zip(&mut out.vertex_values) {
+            values.push(eval_vertex(control, ptex, uv[0], uv[1]).unwrap_or([0.0; 4]));
         }
         if let Some(key) = key {
             out.vertex_of.insert(key, v);
@@ -661,31 +814,32 @@ fn tessellate_selected(
                 };
                 local.push(emit(key, ptex, *uv, out)?);
             }
-            // The chart once per point of this Ptex face: a seam vertex shared
-            // with a face on the chart's other side takes this side's value.
-            let fv_first = out.fv_values.len() as i32;
-            if fvar_values.is_some() {
-                // The chart values at this Ptex quad's corners and along its
-                // cage-edge sides, for `fvar_at`.
+            // Each face-varying channel once per point of this Ptex face: a
+            // seam vertex shared with a face on the channel's other side takes
+            // this side's value.
+            let fv_first = out.fv_len() as i32;
+            for (ci, channel) in fvars.iter().enumerate() {
+                // The channel's values at this Ptex quad's corners and along
+                // its cage-edge sides, for `fvar_at`.
                 type Side = Option<(u32, u32)>;
                 let (corner_side, edge_side): ([Side; 4], [Side; 4]) = if n == 4 {
-                    let v = |c: usize| cage.chart_value(chart, f, c);
+                    let v = |c: usize| cage.chart_value(channel, f, c);
                     (
                         [0, 1, 2, 3].map(|c| Some((v(c), v(c)))),
                         [0, 1, 2, 3].map(|e| Some(side(v(e), v((e + 1) % 4)))),
                     )
                 } else {
-                    let vk = cage.chart_value(chart, f, k);
-                    let vn = cage.chart_value(chart, f, (k + 1) % n);
-                    let vp = cage.chart_value(chart, f, (k + n - 1) % n);
+                    let vk = cage.chart_value(channel, f, k);
+                    let vn = cage.chart_value(channel, f, (k + 1) % n);
+                    let vp = cage.chart_value(channel, f, (k + n - 1) % n);
                     (
                         [Some((vk, vk)), Some(side(vk, vn)), None, Some(side(vp, vk))],
                         [Some(side(vk, vn)), None, None, Some(side(vp, vk))],
                     )
                 };
                 for (uv, key) in t.points.iter().zip(&t.keys) {
-                    let value = eval_fvar(ptex, uv[0], uv[1]).unwrap_or([0.0, 0.0]);
-                    out.fv_values.push(value);
+                    let value = eval_fvar(ci, ptex, uv[0], uv[1]).unwrap_or([0.0; 4]);
+                    out.fv_values[ci].push(value);
                     let record = match *key {
                         PointKey::Corner(c) => {
                             corner_side[c as usize].map(|sd| (corner_key[c as usize], sd))
@@ -696,7 +850,7 @@ fn tessellate_selected(
                         PointKey::Interior => None,
                     };
                     if let Some((key, (a, b))) = record {
-                        out.fvar_at.entry((key, a, b)).or_insert(value);
+                        out.fvar_at.entry((ci, key, a, b)).or_insert(value);
                     }
                 }
             }
@@ -709,16 +863,24 @@ fn tessellate_selected(
                     [quality_bin(triangle_quality(a, b, c))] += 1;
                 for &c in tri {
                     out.indices.push(local[c as usize] as i32);
-                    if fvar_values.is_some() {
+                    if !fvars.is_empty() {
                         out.fv_indices.push(fv_first + c as i32);
                     }
                 }
                 out.base_face.push((n == 4).then_some(f as u32));
                 out.corner_uvs.push(tri.map(|c| t.points[c as usize]));
+                if out.want_cage_face {
+                    out.cage_face.push(f as u32);
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Lanes `x + (y − x)·s`, lane by lane.
+fn lerp_lanes(x: Lanes, y: Lanes, s: f32) -> Lanes {
+    std::array::from_fn(|l| x[l] + (y[l] - x[l]) * s)
 }
 
 /// The unselected faces: the smooth cage, each polygon fanned as the importer
@@ -729,25 +891,27 @@ fn tessellate_unselected(
     rating: &EdgeRating,
     counts: &[i32],
     indices: &[i32],
-    Charts {
-        chart,
-        vertex_chart,
-    }: Charts<'_>,
+    channels: &Channels<'_>,
     out: &mut Emitted,
 ) -> Result<(), SubdivError> {
     let points = cage.points;
+    let fvars: Vec<&PrimvarChannel> = channels.fvar().collect();
+    let nf = fvars.len();
     let cage_normals = smooth_cage_normals(points, counts, indices)
         .ok_or_else(|| SubdivError::BadTopology("cage normals".into()))?;
     let corner_param = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mut ring: Vec<RingPoint> = Vec::new();
+    // Per ring point, its value in each face-varying channel (`nf` apiece).
+    let mut ring_fv: Vec<Lanes> = Vec::new();
     for f in (0..cage.n_faces()).filter(|&f| !rating.selected[f]) {
         let fv = cage.face_verts(f);
         let n = fv.len();
         // The face's boundary, corner by corner and along each edge's points,
-        // with its Ptex coordinate (quads) and chart value.
-        let mut ring: Vec<RingPoint> = Vec::new();
-        let chart_at = |k: usize| -> [f32; 2] {
-            chart.map_or([0.0, 0.0], |c| c.values[c.value_index(cage.starts[f] + k)])
-        };
+        // with its Ptex coordinate (quads) and channel values.
+        ring.clear();
+        ring_fv.clear();
+        let chart_at =
+            |c: &PrimvarChannel, k: usize| -> Lanes { c.values[c.value_index(cage.starts[f] + k)] };
         for k in 0..n {
             let (a, b) = (fv[k], fv[(k + 1) % n]);
             let v = match out.vertex_of.get(&VertexKey::Cage(a)) {
@@ -756,8 +920,8 @@ fn tessellate_unselected(
                     let v = out.points.len() as u32;
                     out.points.push(points[a as usize]);
                     out.normals.push(cage_normals[a as usize]);
-                    if let Some(c) = vertex_chart {
-                        out.uvs.push(c.values[c.value_index(a as usize)]);
+                    for (c, values) in channels.vertex.iter().zip(&mut out.vertex_values) {
+                        values.push(c.values[c.value_index(a as usize)]);
                     }
                     out.vertex_of.insert(VertexKey::Cage(a), v);
                     v
@@ -768,17 +932,17 @@ fn tessellate_unselected(
             } else {
                 ([0.0, 0.0], [0.0, 0.0])
             };
-            let (ia, ib) = (
-                cage.chart_value(chart, f, k),
-                cage.chart_value(chart, f, (k + 1) % n),
-            );
-            let (ca, cb) = (chart_at(k), chart_at((k + 1) % n));
-            let ca_limit = out
-                .fvar_at
-                .get(&(VertexKey::Cage(a), ia, ia))
-                .copied()
-                .unwrap_or(ca);
-            ring.push((v, pa, ca_limit));
+            for (ci, c) in fvars.iter().enumerate() {
+                let ia = cage.chart_value(c, f, k);
+                let ca = chart_at(c, k);
+                let ca_limit = out
+                    .fvar_at
+                    .get(&(ci, VertexKey::Cage(a), ia, ia))
+                    .copied()
+                    .unwrap_or(ca);
+                ring_fv.push(ca_limit);
+            }
+            ring.push((v, pa));
             // An edge point here was placed by a selected neighbour (a midpoint
             // its `n`-gon forced): use it, or the faces would meet at a
             // T-junction.
@@ -805,50 +969,67 @@ fn tessellate_unselected(
                                 .normalize_or_zero()
                                 .to_array(),
                         );
-                        if let Some(c) = vertex_chart {
+                        for (c, values) in channels.vertex.iter().zip(&mut out.vertex_values) {
                             let (ua, ub) = (
                                 c.values[c.value_index(a as usize)],
                                 c.values[c.value_index(b as usize)],
                             );
-                            out.uvs
-                                .push([ua[0] + (ub[0] - ua[0]) * s, ua[1] + (ub[1] - ua[1]) * s]);
+                            values.push(lerp_lanes(ua, ub, s));
                         }
                         out.vertex_of.insert(key, v);
                         v
                     }
                 };
-                let lerp2 =
-                    |x: [f32; 2], y: [f32; 2]| [x[0] + (y[0] - x[0]) * s, x[1] + (y[1] - x[1]) * s];
-                let (sa, sb) = side(ia, ib);
-                let value = out
-                    .fvar_at
-                    .get(&(key, sa, sb))
-                    .copied()
-                    .unwrap_or_else(|| lerp2(ca, cb));
-                ring.push((v, lerp2(pa, pb), value));
+                for (ci, c) in fvars.iter().enumerate() {
+                    let (ia, ib) = (
+                        cage.chart_value(c, f, k),
+                        cage.chart_value(c, f, (k + 1) % n),
+                    );
+                    let (ca, cb) = (chart_at(c, k), chart_at(c, (k + 1) % n));
+                    let (sa, sb) = side(ia, ib);
+                    let value = out
+                        .fvar_at
+                        .get(&(ci, key, sa, sb))
+                        .copied()
+                        .unwrap_or_else(|| lerp_lanes(ca, cb, s));
+                    ring_fv.push(value);
+                }
+                let (ua, ub) = (pa, pb);
+                ring.push((
+                    v,
+                    [ua[0] + (ub[0] - ua[0]) * s, ua[1] + (ub[1] - ua[1]) * s],
+                ));
             }
         }
         out.see_rate(1);
-        let push_tri = |tri: [&RingPoint; 3], out: &mut Emitted| {
-            for c in tri {
-                out.indices.push(c.0 as i32);
-                if chart.is_some() {
-                    out.fv_indices.push(out.fv_values.len() as i32);
-                    out.fv_values.push(c.2);
+        // Triangle of ring points `tri` (indices into `ring` / `ring_fv`).
+        let push_tri =
+            |tri: [usize; 3], ring: &[RingPoint], ring_fv: &[Lanes], out: &mut Emitted| {
+                for c in tri {
+                    out.indices.push(ring[c].0 as i32);
+                    if nf > 0 {
+                        out.fv_indices.push(out.fv_len() as i32);
+                        for (ci, values) in out.fv_values.iter_mut().enumerate() {
+                            values.push(ring_fv[c * nf + ci]);
+                        }
+                    }
                 }
-            }
-            out.base_face.push((n == 4).then_some(f as u32));
-            out.corner_uvs.push(tri.map(|c| c.1));
-        };
+                out.base_face.push((n == 4).then_some(f as u32));
+                out.corner_uvs.push(tri.map(|c| ring[c].1));
+                if out.want_cage_face {
+                    out.cage_face.push(f as u32);
+                }
+            };
         if ring.len() == n {
             // The cage polygon, fanned from its first corner as the importer
             // triangulates.
             for k in 1..n - 1 {
-                push_tri([&ring[0], &ring[k], &ring[k + 1]], out);
+                push_tri([0, k, k + 1], &ring, &ring_fv, out);
             }
         } else {
             // Edge points on the boundary: fan from the cage centroid.
-            let m = ring.len() as f32;
+            let len = ring.len();
+            let m = len as f32;
             let centre_p = fv.iter().fold(Vec3A::ZERO, |acc, &v| {
                 let p = points[v as usize];
                 acc + Vec3A::new(p.x, p.y, p.z)
@@ -866,32 +1047,29 @@ fn tessellate_unselected(
                 z: centre_p.z,
             });
             out.normals.push(centre_n.to_array());
-            if let Some(ch) = vertex_chart {
-                let mut uv = [0.0f32, 0.0];
+            for (ch, values) in channels.vertex.iter().zip(&mut out.vertex_values) {
+                let mut uv = [0.0f32; 4];
                 for &v in fv {
                     let x = ch.values[ch.value_index(v as usize)];
-                    uv[0] += x[0] / n as f32;
-                    uv[1] += x[1] / n as f32;
+                    for l in 0..4 {
+                        uv[l] += x[l] / n as f32;
+                    }
                 }
-                out.uvs.push(uv);
+                values.push(uv);
             }
-            let avg = |pick: fn(&RingPoint) -> [f32; 2]| {
-                let mut a = [0.0f32, 0.0];
-                for r in &ring {
-                    let x = pick(r);
-                    a[0] += x[0] / m;
-                    a[1] += x[1] / m;
+            for ci in 0..nf {
+                let mut a = [0.0f32; 4];
+                for r in 0..len {
+                    let x = ring_fv[r * nf + ci];
+                    for l in 0..4 {
+                        a[l] += x[l] / m;
+                    }
                 }
-                a
-            };
-            let centre = (
-                c,
-                if n == 4 { [0.5, 0.5] } else { [0.0, 0.0] },
-                avg(|r| r.2),
-            );
-            for k in 0..ring.len() {
-                let next = &ring[(k + 1) % ring.len()];
-                push_tri([&centre, &ring[k], next], out);
+                ring_fv.push(a);
+            }
+            ring.push((c, if n == 4 { [0.5, 0.5] } else { [0.0, 0.0] }));
+            for k in 0..len {
+                push_tri([len, k, (k + 1) % len], &ring, &ring_fv, out);
             }
         }
     }

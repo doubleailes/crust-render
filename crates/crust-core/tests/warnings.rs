@@ -131,7 +131,8 @@ fn product_and_aov_warnings() {
     def RenderProduct "beauty"
     {
         token productName = "beauty.exr"
-        rel orderedVars = [</Render/color>, </Render/bogus>, </Render/badLpe>, </Render/primvar>]
+        rel orderedVars = [</Render/color>, </Render/bogus>, </Render/badLpe>, </Render/intrinsic>,
+                           </Render/nameless>]
     }
     def Scope "notAProduct"
     {
@@ -149,10 +150,14 @@ fn product_and_aov_warnings() {
         uniform token sourceType = "lpe"
         uniform string sourceName = "C<<<"
     }
-    def RenderVar "primvar"
+    def RenderVar "intrinsic"
+    {
+        uniform token sourceType = "intrinsic"
+        uniform string sourceName = "cameraDepth"
+    }
+    def RenderVar "nameless"
     {
         uniform token sourceType = "primvar"
-        uniform string sourceName = "st"
     }
 }
 "#,
@@ -171,7 +176,11 @@ fn product_and_aov_warnings() {
     );
     assert_eq!(
         record(&scene, WarningCode::AovUnsupportedSource).prims,
-        ["/Render/primvar"]
+        ["/Render/intrinsic"]
+    );
+    assert_eq!(
+        record(&scene, WarningCode::AovPrimvarNoName).prims,
+        ["/Render/nameless"]
     );
     for w in &scene.warnings {
         assert_eq!(w.kind, WarningKind::Skipped, "{w:?}");

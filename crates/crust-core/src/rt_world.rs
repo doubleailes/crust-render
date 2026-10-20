@@ -432,6 +432,85 @@ impl UvMap {
     }
 }
 
+/// A mesh's primvars that render vars ask for, per triangle: one channel per
+/// entry of the render's primvar keep set, `None` where the mesh does not
+/// author it (or authors it with a type the var cannot read). Values are four
+/// lanes, the unused ones zero.
+///
+/// Read only by the AOV first hit ([`World::primvars_at`]), never by
+/// [`World::intersect`]: a geometry carrying one keeps the `plain` fast path,
+/// so the beauty pays nothing per hit. Shared by `Arc` across the placements
+/// of one distinct mesh, like [`UvMap`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimvarTable {
+    pub channels: Vec<Option<PrimvarChannel>>,
+}
+
+/// One primvar of a [`PrimvarTable`], in the shape its interpolation needs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrimvarChannel {
+    /// `constant`: one value for the whole mesh.
+    Constant([f32; 4]),
+    /// `uniform`: per triangle, the index of its polygon's value.
+    PerTriangle { values: Vec<[f32; 4]>, of: Vec<u32> },
+    /// `vertex`, `varying` and `faceVarying`: per triangle, the index of each
+    /// corner's value, in the triangle's original vertex order.
+    Corners {
+        values: Vec<[f32; 4]>,
+        corners: Vec<[u32; 3]>,
+    },
+}
+
+impl PrimvarChannel {
+    /// The value at barycentrics `(u, v)` of triangle `prim_id` (in the
+    /// kernel's vertex order, which `swapped` undoes as [`UvMap::resolve`]
+    /// does), or `None` for a triangle or index the channel does not cover.
+    pub fn at(&self, prim_id: u32, u: f32, v: f32, swapped: bool) -> Option<[f32; 4]> {
+        match self {
+            PrimvarChannel::Constant(x) => Some(*x),
+            PrimvarChannel::PerTriangle { values, of } => {
+                values.get(*of.get(prim_id as usize)? as usize).copied()
+            }
+            PrimvarChannel::Corners { values, corners } => {
+                let [a, b, c] = corners
+                    .get(prim_id as usize)?
+                    .map(|i| values.get(i as usize));
+                let (a, b, c) = (a?, b?, c?);
+                let (u, v) = if swapped { (v, u) } else { (u, v) };
+                let w = 1.0 - u - v;
+                Some(std::array::from_fn(|l| w * a[l] + u * b[l] + v * c[l]))
+            }
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        let lanes = std::mem::size_of::<[f32; 4]>();
+        match self {
+            PrimvarChannel::Constant(_) => lanes,
+            PrimvarChannel::PerTriangle { values, of } => values.len() * lanes + of.len() * 4,
+            PrimvarChannel::Corners { values, corners } => {
+                values.len() * lanes + corners.len() * 12
+            }
+        }
+    }
+}
+
+impl PrimvarTable {
+    /// Whether no channel holds anything: such a table is never attached.
+    pub fn is_empty(&self) -> bool {
+        self.channels.iter().all(Option::is_none)
+    }
+
+    /// Heap bytes of the values and indices, for `--stats`.
+    pub fn bytes(&self) -> usize {
+        self.channels
+            .iter()
+            .flatten()
+            .map(PrimvarChannel::bytes)
+            .sum()
+    }
+}
+
 /// The tangent of one triangle: the standard solve of
 /// `[dP1; dP2] = [duv1; duv2] · [T; B]` for `T` — the direction in which `u`
 /// grows across the triangle, from its world-space vertices and corner UVs
@@ -613,6 +692,10 @@ pub struct WorldBuilder {
     /// move, and a field on every `SideTables` would cost each static
     /// `geom_id` 16 bytes for a value read at most once per camera sample.
     motion: Vec<(u32, Vec3A)>,
+    /// The geometries carrying a [`PrimvarTable`], sorted by `geom_id`, each
+    /// with whether its placement mirrored the winding. Sparse, for the same
+    /// reason as `motion`, and empty unless a render var asks for a primvar.
+    primvars: Vec<(u32, Arc<PrimvarTable>, bool)>,
     /// The `geom_id`s whose motion the table cannot express
     /// ([`MotionRecord::Unresolved`]), sorted; warned about once at commit.
     /// A set, not a count: a slot given a geometry twice is one id.
@@ -788,6 +871,26 @@ impl WorldBuilder {
         t.plain = false;
     }
 
+    /// Records the primvar table of a mesh geometry, which the primvar AOVs
+    /// read at the camera's first hit. Unlike the other tables it leaves the
+    /// geometry `plain`: [`World::intersect`] never reads it.
+    ///
+    /// `swapped` when the placement mirrored the triangle winding, as for
+    /// [`WorldBuilder::set_uv_map`].
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_primvars(&mut self, id: u32, table: Arc<PrimvarTable>, swapped: bool) {
+        assert!(
+            (id as usize) < self.count(),
+            "geometry {id} was never attached"
+        );
+        match self.primvars.binary_search_by_key(&id, |(i, ..)| *i) {
+            Ok(i) => self.primvars[i] = (id, table, swapped),
+            Err(i) => self.primvars.insert(i, (id, table, swapped)),
+        }
+    }
+
     /// Records the strand table of a curves geometry, so hits on it report
     /// where on their strand they lie, the chart, and the primvars its
     /// material reads ([`HitRecord::curve`]).
@@ -931,6 +1034,7 @@ impl WorldBuilder {
                 Vec::new()
             },
             motion: self.motion,
+            primvars: self.primvars,
         }
     }
 
@@ -1009,9 +1113,89 @@ pub struct World {
     /// The moving geometries' translations, sorted by `geom_id`; empty for a
     /// static scene (see [`World::motion`]).
     motion: Vec<(u32, Vec3A)>,
+    /// See [`WorldBuilder`]'s field of the same name.
+    primvars: Vec<(u32, Arc<PrimvarTable>, bool)>,
 }
 
 impl World {
+    /// The kept primvars on primitive `prim_id` of geometry `geom_id`, by
+    /// keep-set index, into `out`: at the kernel's barycentrics `bary` on a
+    /// triangle, at `curve_u` along a curve span; `None` for each one the
+    /// geometry does not carry (and every one with neither parameter).
+    pub(crate) fn primvars_at(
+        &self,
+        geom_id: u32,
+        prim_id: u32,
+        bary: Option<(f32, f32)>,
+        curve_u: Option<f32>,
+        out: &mut [Option<[f32; 4]>],
+    ) {
+        out.fill(None);
+        if let Some(u) = curve_u {
+            if let Some(t) = &self.faces[geom_id as usize].strands {
+                t.kept_into(prim_id, u, out);
+            }
+            return;
+        }
+        if let Some((u, v)) = bary
+            && let Ok(i) = self.primvars.binary_search_by_key(&geom_id, |(id, ..)| *id)
+        {
+            let (_, table, swapped) = &self.primvars[i];
+            for (o, c) in out.iter_mut().zip(&table.channels) {
+                *o = c.as_ref().and_then(|c| c.at(prim_id, u, v, *swapped));
+            }
+        }
+    }
+
+    /// The kernel's barycentrics of the triangle `ray` hit at `t`, for the
+    /// primvar AOVs: the ray is traced again from just short of `t`, and the
+    /// answer is kept only when it lands on the same `(geom_id, prim_id)`.
+    /// Exact through every placement — baked, instanced, grouped or moving —
+    /// which recomputing them from the hit point is not (a forwarded or
+    /// moving instance names no vertices).
+    ///
+    /// The ray is restarted rather than bounded: every kernel query asks for
+    /// `(TRACE_T_MIN, ∞)`, LLVM propagates those constants into the
+    /// traversal, and one query with other bounds costs every ray of every
+    /// render (+0.15% of cornellbox's instructions, measured). The restart
+    /// leaves the hit `TRACE_T_MIN` plus a relative step ahead.
+    pub(crate) fn hit_barycentrics(
+        &self,
+        ray: &Ray,
+        geom_id: u32,
+        prim_id: u32,
+        t: f32,
+    ) -> Option<(f32, f32)> {
+        let back = t - crate::ray::TRACE_T_MIN - t.abs().max(1.0) * 1e-4;
+        let r = Ray::new(ray.at(back), ray.direction())
+            .with_time(ray.time())
+            .with_mask(ray.mask())
+            .with_curve_exits_ignored(ray.rt().ignore_curve_exits);
+        let h = self
+            .scene
+            .intersect(r.rt(), crate::ray::TRACE_T_MIN, f32::INFINITY)?;
+        (h.geom_id == geom_id && h.prim_id == prim_id).then_some((h.u, h.v))
+    }
+
+    /// Whether any geometry carries a primvar table.
+    pub fn has_primvars(&self) -> bool {
+        !self.primvars.is_empty()
+    }
+
+    /// Heap bytes of the primvar tables, each distinct table once.
+    pub fn primvar_table_bytes(&self) -> usize {
+        let mut seen: Vec<*const PrimvarTable> = Vec::new();
+        let mut bytes = 0;
+        for (_, t, _) in &self.primvars {
+            let ptr = Arc::as_ptr(t);
+            if !seen.contains(&ptr) {
+                seen.push(ptr);
+                bytes += t.bytes();
+            }
+        }
+        bytes
+    }
+
     /// The world-space translation the geometry at `geom_id` moves through
     /// over the shutter — the `crust:motion:translate` the kernel blurs it
     /// by — or zero when it does not move, or moves in a way the record
@@ -1623,6 +1807,37 @@ mod tests {
 
     /// A `prim_id` past the table cannot panic: it is reachable from the
     /// integrator, where a panic kills a render thread.
+    /// A primvar table is read by the AOV first hit alone: the geometry
+    /// stays on `intersect`'s plain path, and a mirrored placement's table
+    /// undoes the swapped barycentrics.
+    #[test]
+    fn a_primvar_table_leaves_the_geometry_plain() {
+        let mut b = WorldBuilder::new();
+        let id = b.attach(
+            Geometry::TriangleMesh {
+                vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                indices: vec![[0, 1, 2]],
+                normals: None,
+            },
+            Arc::new(crate::material::OpenPBR::diffuse(Vec3A::splat(0.5))),
+        );
+        let corners = PrimvarChannel::Corners {
+            values: vec![[0.0; 4], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            corners: vec![[0, 1, 2]],
+        };
+        assert_eq!(corners.at(0, 0.25, 0.5, false), Some([0.25, 0.5, 0.0, 0.0]));
+        assert_eq!(corners.at(0, 0.25, 0.5, true), Some([0.5, 0.25, 0.0, 0.0]));
+        assert_eq!(corners.at(1, 0.25, 0.5, false), None);
+        let table = Arc::new(PrimvarTable {
+            channels: vec![Some(corners), None],
+        });
+        b.set_primvars(id, table.clone(), false);
+        assert!(b.faces[id as usize].plain);
+        let world = b.commit();
+        assert!(world.has_primvars());
+        assert_eq!(world.primvar_table_bytes(), table.bytes());
+    }
+
     #[test]
     fn out_of_range_prim_id_declines() {
         assert_eq!(quad().resolve(99, 0.0, 0.0, false), None);

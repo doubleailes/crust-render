@@ -2436,3 +2436,89 @@ fn a_curve_material_reading_a_new_primvar_reimports() {
     assert_eq!(undo(&mut state), "full");
     same_as_full_import(&mut state, &dir, "groom primvar undone");
 }
+
+/// A stage with a mesh authoring `primvars:rest`, whose settings render the
+/// product without a primvar var.
+fn primvar_stage() -> String {
+    r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        double3 xformOp:translate = (0, 0, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+    }
+    def Mesh "M"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        point3f[] primvars:rest = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)] (
+            interpolation = "vertex"
+        )
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (32, 24)
+        int crust:maxDepth = 2
+        rel products = [</Render/plain>]
+    }
+    def RenderProduct "plain"
+    {
+        token productName = "plain.exr"
+        rel orderedVars = [</Render/C>]
+    }
+    def RenderProduct "withRest"
+    {
+        token productName = "rest.exr"
+        rel orderedVars = [</Render/C>, </Render/Pref>]
+    }
+    def RenderVar "C"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "color"
+    }
+    def RenderVar "Pref"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+    }
+}
+"#
+    .to_owned()
+}
+
+/// Retargeting `products` to one with a primvar var asks the geometry for a
+/// primvar it was read without, so the edit is `full`, and its render — the
+/// `Pref` channel included — is a full import's of the same layer, bit for
+/// bit; so is its undo.
+#[test]
+fn a_product_asking_for_a_new_primvar_reimports() {
+    let (mut state, dir) = session_on("primvar_products", &primvar_stage());
+    assert_eq!(
+        author(
+            &mut state,
+            r#"over "Render" { over "settings" { rel products = [</Render/withRest>] } }"#,
+        ),
+        "full"
+    );
+    same_as_full_import(&mut state, &dir, "products with Pref");
+    assert_eq!(undo(&mut state), "full");
+    same_as_full_import(&mut state, &dir, "products with Pref undone");
+}

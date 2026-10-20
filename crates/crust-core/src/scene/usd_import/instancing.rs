@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
 use crate::material::Material;
-use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
+use crate::rt_world::{FaceMap, PrimvarTable, UvMap, WorldBuilder};
 
 use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
@@ -97,6 +97,10 @@ pub(super) struct PartSlot {
     /// the geometric normal there); a direct instance of a mesh gets its
     /// tangent at the hit.
     uvs: Option<Arc<UvMap>>,
+    /// The slot's kept primvars, for the AOVs, carried on the same terms as
+    /// `faces`. Read through the kernel's own barycentrics, so a grouped
+    /// part reads them as a leaf does.
+    primvars: Option<Arc<PrimvarTable>>,
     /// A curves slot's strand table, when its material reads the strand, a
     /// primvar or the chart. Carried on the same terms as `faces`: the
     /// `prim_id` a hit reports is the prototype's own span.
@@ -147,6 +151,7 @@ impl ProtoPart {
                 material,
                 faces,
                 uvs,
+                primvars: None,
                 strands: None,
                 curves: false,
                 scale: 1.0,
@@ -260,7 +265,7 @@ pub(super) fn collect_proto_parts(
             if let Some(src) = mesh_source(
                 &prim,
                 &mesh,
-                MeshNeeds::of(&*material, displacement),
+                MeshNeeds::of(&*material, displacement, &caches.meshes.primvars),
                 &mut caches.meshes.subdiv,
                 part_world
                     .as_ref()
@@ -269,15 +274,12 @@ pub(super) fn collect_proto_parts(
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();
+                let primvars = caches.meshes.slots[slot as usize].primvars.clone();
                 pending_meshes.push((parts.len(), slot));
-                parts.push(ProtoPart::leaf(
-                    placeholder_scene(),
-                    this_local,
-                    mask,
-                    material,
-                    faces,
-                    uvs,
-                ));
+                let mut part =
+                    ProtoPart::leaf(placeholder_scene(), this_local, mask, material, faces, uvs);
+                Arc::make_mut(&mut part.slots)[0].primvars = primvars;
+                parts.push(part);
             }
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, caches);
@@ -307,7 +309,7 @@ pub(super) fn collect_proto_parts(
             },
         } {
             let material = resolve_material(stage, &prim, caches);
-            let request = StrandRequest::of(&*material, caches.working);
+            let request = StrandRequest::of(&*material, caches.working, &caches.meshes.primvars);
             let imported = match &read {
                 Curve::Basis(c) => curve_segments(&prim, c, request.as_ref()),
                 Curve::Nurbs(c) => nurbs_curve_segments(&prim, c, request.as_ref()),
@@ -344,15 +346,12 @@ pub(super) fn collect_proto_parts(
             if let Some(slot) = caches.meshes.intern(&prim, src, &material, None) {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();
+                let primvars = caches.meshes.slots[slot as usize].primvars.clone();
                 pending_meshes.push((parts.len(), slot));
-                parts.push(ProtoPart::leaf(
-                    placeholder_scene(),
-                    this_local,
-                    mask,
-                    material,
-                    faces,
-                    uvs,
-                ));
+                let mut part =
+                    ProtoPart::leaf(placeholder_scene(), this_local, mask, material, faces, uvs);
+                Arc::make_mut(&mut part.slots)[0].primvars = primvars;
+                parts.push(part);
             }
         } else if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
             // A PointInstancer inside a prototype: expand it into nested
@@ -695,6 +694,12 @@ pub(super) fn emit_native_instance(
     world_xf: GMat4,
     caches: &mut ImportCaches<'_>,
 ) {
+    // A kept primvar on the instance, or above it, does not reach the
+    // prototype's prims, which read only their own.
+    caches
+        .meshes
+        .primvars
+        .report_placement(prim, "the instance prim");
     // Adaptive subdivision refines a prototype by its size on screen only when
     // this is its one placement in its top-level subtree.
     let place = if caches.meshes.subdiv.adaptive.is_some()
@@ -772,6 +777,9 @@ fn attach_proto_parts(
             }
             if let Some(map) = &slot.uvs {
                 world.set_uv_map(id, map.clone(), false);
+            }
+            if let Some(table) = &slot.primvars {
+                world.set_primvars(id, table.clone(), false);
             }
             match &slot.strands {
                 Some(table) => world.set_strands(id, table.clone()),
@@ -1047,6 +1055,12 @@ pub(super) fn emit_point_instancer(
     let Some(layout) = read_instancer(prim, instancer, true) else {
         return;
     };
+    // Per-instance primvars, and any above the instancer, do not reach the
+    // prototypes' prims.
+    caches
+        .meshes
+        .primvars
+        .report_placement(prim, "the PointInstancer");
     // The version of its prototype each placement draws: the shared one, or —
     // in adaptive mode, for a target this instancer places once — one built
     // for that placement.

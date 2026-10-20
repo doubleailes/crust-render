@@ -130,6 +130,10 @@ pub struct StrandTable {
     /// ([`crust_mtlx::Program::primvars`]); `None` where the prim authors no
     /// readable primvar of that name.
     primvars: Vec<Option<StrandValues>>,
+    /// The primvars render vars keep, by keep-set index, for the AOVs alone
+    /// ([`StrandTable::kept_into`]): decoded as authored, no colour
+    /// conversion. Empty unless a var asks for a primvar.
+    kept: Vec<Option<StrandValues>>,
 }
 
 /// The seed `curve:random` hashes under, so its values are not those of any
@@ -145,6 +149,7 @@ impl StrandTable {
             seed: [h as i32, (h >> 32) as i32],
             chart: None,
             primvars: Vec::new(),
+            kept: Vec::new(),
         }
     }
 
@@ -156,6 +161,26 @@ impl StrandTable {
     pub fn with_primvars(mut self, primvars: Vec<Option<StrandValues>>) -> StrandTable {
         self.primvars = primvars;
         self
+    }
+
+    pub fn with_kept(mut self, kept: Vec<Option<StrandValues>>) -> StrandTable {
+        self.kept = kept;
+        self
+    }
+
+    /// The kept primvars at `u` on primitive `prim_id`, by keep-set index,
+    /// into `out` (which the caller has cleared): what the primvar AOVs read
+    /// on a curve.
+    pub(crate) fn kept_into(&self, prim_id: u32, u: f32, out: &mut [Option<[f32; 4]>]) {
+        let Some(span) = self.span(prim_id) else {
+            return;
+        };
+        for (o, k) in out.iter_mut().zip(&self.kept) {
+            *o = k
+                .as_ref()
+                .and_then(|k| k.at(prim_id as usize, span.curve, u))
+                .map(|v| v.v);
+        }
     }
 
     /// Number of spans, one per kernel primitive.
@@ -202,6 +227,7 @@ impl StrandTable {
             + self
                 .primvars
                 .iter()
+                .chain(&self.kept)
                 .flatten()
                 .map(StrandValues::bytes)
                 .sum::<usize>()
@@ -250,6 +276,11 @@ impl<'w> CurveHit<'w> {
     pub fn v(&self) -> f32 {
         let s = self.span();
         s.v0 + self.u * (s.v1 - s.v0)
+    }
+
+    /// The parameter within the hit span, `0..1`.
+    pub(crate) fn span_u(&self) -> f32 {
+        self.u
     }
 
     /// The curve's index within its prim — `curve:index`.

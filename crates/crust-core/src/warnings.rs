@@ -207,7 +207,7 @@ warning_codes! {
     AovNotARenderVar => "aov.not_a_render_var", Skipped, Each,
         "orderedVars targets a prim that is not a RenderVar.";
     AovUnsupportedSource => "aov.unsupported_source", Skipped, Each,
-        "A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written.";
+        "A RenderVar's source is one crust does not produce yet (planned, intrinsic); no channel is written.";
     AovUnknownSource => "aov.unknown_source", Skipped, Each,
         "A RenderVar names an unknown source or sourceType; no channel is written.";
     AovTypeMismatch => "aov.type_mismatch", Skipped, Each,
@@ -222,6 +222,14 @@ warning_codes! {
         "crust:aov:raw is authored on a source that is not a light path expression; it is ignored.";
     AovInvalidRaw => "aov.invalid_raw", Skipped, Each,
         "crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written.";
+    AovPrimvarNoName => "aov.primvar_no_name", Skipped, Each,
+        "A primvar RenderVar authors no sourceName; no channel is written.";
+    AovPrimvarFourComponents => "aov.primvar_four_components", Skipped, Each,
+        "A primvar RenderVar's data type has four components, which are not supported yet; no channel is written.";
+    AovPrimvarMismatch => "aov.primvar_mismatch", Skipped, Each,
+        "A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value.";
+    AovPrimvarNotInherited => "aov.primvar_not_inherited", Skipped, Each,
+        "A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value.";
     LpeInvalid => "lpe.invalid", Skipped, Each,
         "A light path expression does not parse or compile; no channel is written.";
 

@@ -86,6 +86,7 @@ pub use crust_rt as rt;
 pub use aabb::AABB;
 pub use aov::{
     Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, Precision,
+    PrimvarRole, PrimvarSource,
 };
 pub use buffer::Buffer;
 pub use camera::Camera;
@@ -123,7 +124,10 @@ pub use pdf::{InvPdfArea, PdfSolidAngle};
 pub use ray::{
     MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask, TRACE_T_MIN,
 };
-pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
+pub use rt_world::{
+    FaceMap, FanSlice, PrimvarChannel, PrimvarTable, SubFace, UvMap, World, WorldBuilder, WorldHit,
+    tangent_of,
+};
 pub use sampler::SamplerKind;
 pub use scene::Scene;
 pub use strands::{CurveHit, StrandSpan, StrandTable, StrandValues};

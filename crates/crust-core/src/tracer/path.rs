@@ -8,7 +8,7 @@
 use glam::Vec3A;
 use utils::exp3;
 
-use crate::aov::FirstHit;
+use crate::aov::{FirstHit, HitPrim};
 use crate::guiding::SampleData;
 use crate::hittable::{FaceHit, HitPart, HitRecord};
 use crate::material::{Material, ScatterSample, ShadingPoint};
@@ -468,6 +468,10 @@ pub(crate) struct PathScratch {
     /// Whether a var asks for the motion vector, so the first hit's motion
     /// is looked up at all. Set on the scratch of an AOV pass only.
     pub(super) motion: bool,
+    /// The first hit's kept primvars, by keep-set index, refilled per camera
+    /// sample. Sized on the scratch of an AOV pass that asks for primvars
+    /// only; empty otherwise.
+    pub(super) primvars: Vec<Option<[f32; 4]>>,
     /// The path's routing record and per-sample results ([`Route`]).
     pub(super) route: Route,
     /// Per-lobe shares — NEE's toward the light, the bounce's toward the
@@ -503,9 +507,9 @@ struct ThinWalls {
     /// without its straight transmission, which the passes carry instead.
     reduced: bool,
     /// The first thin wall passed, as the camera's first hit when this is
-    /// the camera's segment: its `t`, the hit there and its `geom_id` (for
-    /// the wall's motion, read in the AOV instantiation only).
-    first: Option<(f32, HitRecord<'static>, u32)>,
+    /// the camera's segment: its `t`, the hit there and its primitive (for
+    /// the wall's motion and primvars, read in the AOV instantiation only).
+    first: Option<(f32, HitRecord<'static>, HitPrim)>,
     /// The hidden light sources the segment crossed, in order. Written by
     /// every [`pass_cutouts`], in a world with any.
     crossed: Vec<Crossing>,
@@ -572,6 +576,7 @@ impl PathScratch {
             first: FirstHit::Escaped,
             route_ctx: None,
             motion: false,
+            primvars: Vec::new(),
             route: Route::default(),
             nee_split: LobeSplit::default(),
             bounce_split: LobeSplit::default(),
@@ -1643,7 +1648,7 @@ fn pass_walls<'w, S: SamplerImpl>(
             thin.passes.push((h.rec.t, p / q));
             if thin.first.is_none() {
                 // Kept for its geometry only, past this world's borrow.
-                thin.first = Some((h.rec.t, h.rec.detached(), h.geom_id));
+                thin.first = Some((h.rec.t, h.rec.detached(), HitPrim::of(h)));
             }
         } else {
             if opacity >= 1.0 {
@@ -1676,25 +1681,39 @@ fn pass_walls<'w, S: SamplerImpl>(
 /// it where it was a vertex before it became a pass-through — only a
 /// cutout is not a hit. The normal is the geometric one, facing the ray:
 /// the wall was never shaded. Its motion is looked up only when a var asks
-/// for the motion vector (`motion_on`).
+/// for the motion vector (`motion_on`), its barycentrics only when one asks
+/// for a primvar (`primvars_on`, the camera ray).
 fn first_wall(
     thin: &ThinWalls,
     walls: bool,
     t: f32,
     world: &World,
     motion_on: bool,
+    primvars_on: Option<&Ray>,
 ) -> Option<FirstHit> {
-    let (t_wall, rec, geom_id) = thin.first.filter(|_| walls)?;
+    let (t_wall, rec, prim) = thin.first.filter(|_| walls)?;
     (t_wall < t).then(|| FirstHit::Surface {
         p: rec.p,
         n: rec.normal,
         uv: rec.uv,
         motion: if motion_on {
-            world.motion(geom_id)
+            world.motion(prim.geom_id)
         } else {
             Vec3A::ZERO
         },
+        prim: with_barycentrics(prim, world, primvars_on, t_wall),
     })
+}
+
+/// `prim` with its triangle's barycentrics looked up, when a var asks for a
+/// primvar (`camera` is then the camera ray) and the hit is not a curve's.
+fn with_barycentrics(mut prim: HitPrim, world: &World, camera: Option<&Ray>, t: f32) -> HitPrim {
+    if let Some(ray) = camera
+        && prim.curve_u.is_none()
+    {
+        prim.bary = world.hit_barycentrics(ray, prim.geom_id, prim.prim_id, t);
+    }
+    prim
 }
 
 /// The arriving segment's volume event when it passed thin walls: the
@@ -2569,6 +2588,9 @@ pub(super) fn trace_path<
     // the motion vector, so other AOV renders do not pay for it. Constant
     // `false` in the beauty-only instantiation.
     let motion_on = AOV && scratch.motion;
+    // Whether the first hit's primvars are read: only when a var asks for
+    // one. The camera ray, whose hit's barycentrics they are read at.
+    let primvars_on = (AOV && !scratch.primvars.is_empty()).then_some(r);
     let first = &mut scratch.first;
     if AOV {
         *first = FirstHit::Escaped;
@@ -2819,7 +2841,7 @@ pub(super) fn trace_path<
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 if AOV && records.is_empty() {
-                    *first = first_wall(thin, walls, t, world, motion_on)
+                    *first = first_wall(thin, walls, t, world, motion_on, primvars_on)
                         .unwrap_or(FirstHit::Volume { p });
                 }
                 let wi = ray.direction().normalize();
@@ -2956,7 +2978,7 @@ pub(super) fn trace_path<
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
             if AOV && records.is_empty() {
-                *first = first_wall(thin, walls, t_med, world, motion_on)
+                *first = first_wall(thin, walls, t_med, world, motion_on, primvars_on)
                     .unwrap_or(FirstHit::Volume { p: pos });
             }
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
@@ -3094,7 +3116,8 @@ pub(super) fn trace_path<
             stats.ended_escaped += 1;
             if AOV
                 && records.is_empty()
-                && let Some(wall) = first_wall(thin, walls, f32::INFINITY, world, motion_on)
+                && let Some(wall) =
+                    first_wall(thin, walls, f32::INFINITY, world, motion_on, primvars_on)
             {
                 *first = wall;
             }
@@ -3197,8 +3220,8 @@ pub(super) fn trace_path<
             route.diffuse_filter = sp.diffuse_filter(cos_o);
         }
         if AOV && records.is_empty() {
-            *first =
-                first_wall(thin, walls, rec.t, world, motion_on).unwrap_or(FirstHit::Surface {
+            *first = first_wall(thin, walls, rec.t, world, motion_on, primvars_on).unwrap_or(
+                FirstHit::Surface {
                     p: rec.p,
                     n: sp.normal(),
                     uv: rec.uv,
@@ -3207,7 +3230,9 @@ pub(super) fn trace_path<
                     } else {
                         Vec3A::ZERO
                     },
-                });
+                    prim: with_barycentrics(HitPrim::of(&hit), world, primvars_on, hit.rec.t),
+                },
+            );
         }
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;

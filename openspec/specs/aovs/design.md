@@ -1238,9 +1238,93 @@ skipped, so a camera without an exposure renders the bits it always did. Pinned 
 `exposure_scales_radiance_only` (×2 radiance, ×4 variances, every other channel
 identical) and `the_last_snapshot_is_exposed`.
 
+## Primvar sources (`add-primvar-aovs`)
+
+`sourceType = "primvar"`: a primvar of the camera ray's first hit, interpolated
+as authored. The change's `design.md` has the full reasoning (D1–D8); the points
+to keep here:
+
+- **A keep set, resolved before any geometry.** `import_render_products` (the
+  index stage, before `traverse_stage`) returns beside the request a
+  `PrimvarKeep`: the deduplicated `(name, components)` the primvar vars ask for,
+  `primvars:` stripped, in first-use order, each entry's index the
+  `PrimvarSource::index` of every var reading it (so `rest` and
+  `primvars:rest` are one slot, bitwise). It rides on `MeshArena` (every mesh
+  path already holds the arena) and reaches `MeshNeeds` and `StrandRequest`.
+  Empty, every path is the one it was: no read, no table, no hash.
+- **The `dataType` carries a role** (`PrimvarRole`): `point`/`vector`/`normal`
+  and integers are closest, colours, floats and `texCoord`s filtered; the role
+  also picks the channel names. The source's `exposure_power` is 0. A
+  four-component type is refused (the film's per-sample value is 3 lanes).
+- **Mesh tables are outside `plain`.** `PrimvarTable` (constant /
+  per-triangle / corners, values as `[f32; 4]`) is built in `MeshArena::intern`
+  on the *undisplaced* connectivity — which is why `Pref` is the rest position
+  of a displaced mesh for free — by `primvar_table`, which walks the same
+  `for_each_fan_triangle` as `triangulate`, so the two index the same
+  triangles. `World::set_primvars` keeps it in a sparse list sorted by
+  `geom_id` and leaves `plain` alone: `intersect` never reads it. `MeshKey`
+  hashes the kept channels, the failure `mesh.rs` documents for charts.
+- **Subdivision carries N lanes.** `SubdivRequest::extra` is refined by the
+  chart's own code: the chart is widened to `[f32; 4]` and refined with the
+  extras, and opensubdiv-rs's `Primvar for [f32; N]` works lane by lane, so the
+  chart's two lanes are bit-identical to the old two-lane refinement
+  (`an_extra_channel_refines_like_the_chart_bitwise`; every sample renders
+  identically). The trap: adaptive tessellation must not add extra
+  face-varying channels to the surface's refiner —
+  `consider_fvar_channels` isolates a face irregular in *any* channel, which
+  moves the surface. They get a refiner and patch table of their own,
+  evaluated at the same `(ptex, u, v)`
+  (`an_extra_face_varying_channel_leaves_the_adaptive_surface`). A `uniform`
+  primvar maps refined faces through the raw base-face map
+  (`want_base_face`).
+- **The first hit's barycentrics are the kernel's, by re-tracing.**
+  `VertexSource` cannot name a forwarded group slot's or a moving instance's
+  vertices, so recomputing them from `p` would read the clear value on every
+  multi-part prototype; `World::hit_barycentrics` traces the camera ray again
+  from just short of the hit and keeps `(u, v)` when it lands on the same
+  `(geom_id, prim_id)` (`every_placement_of_a_prototype_reads_its_table`:
+  translated, mirrored, PointInstancer). **The trap:** the first version asked
+  the kernel for `(t − d, t + d)`; every other query asks `(TRACE_T_MIN, ∞)`,
+  LLVM had propagated those constants into `Bvh::hit`, and the one new call
+  cost cornellbox's *zero-AOV* render +6.27M instructions (+0.15%, in
+  `Bvh::hit` and `World::intersect`). Restarting the ray instead
+  (`path.rs`'s `restarted` documents the same constraint) brought it to
+  +71k, allocator noise.
+- **Curves read their strand table.** `StrandTable::kept` holds the kept
+  channels, decoded as authored (no colour conversion, unlike the material's),
+  and a table is built for a curves prim authoring a kept primvar even when its
+  material reads nothing — which takes its hits off the `plain` path, as any
+  curve whose material reads a curve property already is.
+- **Inheritance is detected, not honoured.** A geometry prim missing a kept
+  primvar walks its ancestors, memoised per `(entry, ancestor)`; native
+  instance prims and PointInstancers are checked where instancing meets them.
+  One `aov.primvar_not_inherited` per var.
+- **Live edits.** `StageFacts::primvars` records the keep set; a settings
+  refresh whose products ask for another refuses, and the session re-imports
+  (`a_product_asking_for_a_new_primvar_reimports`).
+- **Measured.** Zero-AOV cornellbox, 2 spp, callgrind: 4,264.29M against
+  `main`'s 4,264.22M (+0.0017%); `samples/subdivision.usda` +0.025%, the
+  chart's four-lane refinement and its widening copy at import. Interleaved
+  (`bench_ab.sh`, Render phase): `samples/hair.usda` with a constant
+  `displayColor` on its seven prims and a `displayColor` var against the same
+  product without it — AOV-only strand tables, 8.78 KiB — 64 spp, 12 reps:
+  +2.5% min, −2.1% mean, inside the noise; `samples/primvar_aovs.usda` (160×90,
+  256 spp) with its three primvar vars against `C` and `P` alone: +12.2% min,
+  +14.2% mean, the re-trace per camera sample and three more slots together.
+
 ## Known gaps
 
 - Every Non-Goal above, which is warned when authored, not silent.
+- Primvars are not inherited: a `constant` primvar on an ancestor, a
+  PointInstancer's per-instance primvars and primvars on an instance prim are
+  reported once per var, and the prims below read the clear value.
+- Four-component primvar vars are refused (the per-sample value is 3 lanes).
+- Implicit shapes (`Sphere`, `Cube`, …), Gaussian splats and volumes read a
+  primvar var's clear value, silently.
+- A primvar table stores four lanes per value whatever its arity; packing at
+  the arity would save up to 12 bytes a value.
+- A colour primvar is written as authored, not converted into the working
+  space.
 - The `resolution` fallback is 640×360, not the schema's 2048×1080.
 - LPE extensions (RenderMan lobe tokens and prefixes, Arnold `A`, `!`
   inversion) are not parsed.

@@ -108,6 +108,10 @@ pub(crate) struct StageFacts {
     /// Whether an unshared curved implicit shape took the fixed radial count
     /// because no camera was named: naming one then moves geometry.
     pub(crate) unsized_shapes: bool,
+    /// The primvars the geometry kept for the render's primvar vars, as
+    /// `(name, components)`: a product that asks for others needs geometry
+    /// read again.
+    pub(crate) primvars: Vec<(String, u8)>,
 }
 
 /// A value the import's tessellation read from the render camera, as the
