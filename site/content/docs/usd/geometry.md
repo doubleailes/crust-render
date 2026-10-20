@@ -264,7 +264,9 @@ per-curve id as a `uniform` `int` primvar and use it as a `randomfloat`'s `in`, 
 These attributes cost nothing unless a material reads them. A curve whose material reads
 none of them carries no extra data, and renders as it did before they existed. One that
 does carries a table of its spans and of the primvars it reads, decoded for that
-material only; `--stats` reports its size as `curve strand tables`.
+material only; `--stats` reports its size as `curve strand tables`. A
+[primvar AOV](@/docs/usd/aovs.md#primvars) gives a curve that authors its primvar a table
+too, whatever its material reads.
 
 ## Standard geometry attributes
 

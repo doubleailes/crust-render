@@ -42,6 +42,8 @@ fn request(level: u32) -> SubdivRequest<'static> {
         corner_sharpnesses: &[],
         want_face_uvs: false,
         uvs: None,
+        extra: &[],
+        want_base_face: false,
     }
 }
 
@@ -1065,5 +1067,202 @@ fn subdivision_memory_probe() {
             }
             drop(out);
         }
+    }
+}
+
+// --- N-lane channels --------------------------------------------------
+
+/// opensubdiv-rs refines `[f32; 4]` lane by lane: the first two lanes of a
+/// four-lane refinement are bit-identical to a two-lane one, interpolated and
+/// limited.
+#[test]
+fn four_lane_refinement_matches_two_lanes_bitwise() {
+    let (points, counts, indices) = cube();
+    let counts_us: Vec<usize> = counts.iter().map(|&n| n as usize).collect();
+    let indices_u32: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
+    let descriptor = TopologyDescriptor::new(points.len(), &counts_us, &indices_u32);
+    let mut refiner = TopologyRefinerFactory::create(
+        descriptor,
+        sdc::SchemeType::Catmark,
+        sdc::Options::default(),
+    )
+    .unwrap();
+    refiner.refine_uniform(opensubdiv_rs::far::UniformOptions::new(3));
+    let primvar = PrimvarRefiner::new(&refiner);
+    let two: Vec<[f32; 2]> = points
+        .iter()
+        .map(|p| [p.x * 0.3 + 0.1, p.y - p.z])
+        .collect();
+    let four: Vec<[f32; 4]> = two.iter().map(|v| [v[0], v[1], 7.0, -3.0]).collect();
+    let (mut a, mut b) = (two, four);
+    for l in 1..=3 {
+        let n = refiner.level(l).num_vertices();
+        let (mut ra, mut rb) = (vec![[0.0f32; 2]; n], vec![[0.0f32; 4]; n]);
+        primvar.interpolate(l, &a, &mut ra);
+        primvar.interpolate(l, &b, &mut rb);
+        (a, b) = (ra, rb);
+    }
+    let (mut la, mut lb) = (vec![[0.0f32; 2]; a.len()], vec![[0.0f32; 4]; b.len()]);
+    primvar.limit(&a, &mut la);
+    primvar.limit(&b, &mut lb);
+    for (x, y) in la.iter().zip(&lb) {
+        assert_eq!(x[0].to_bits(), y[0].to_bits());
+        assert_eq!(x[1].to_bits(), y[1].to_bits());
+    }
+}
+
+/// A chart, and the same chart as an extra four-lane channel: the extra's
+/// first two lanes come out bit-identical to the chart, uniform and adaptive,
+/// `vertex` and `faceVarying`, and the other lanes ride along.
+#[test]
+fn an_extra_channel_refines_like_the_chart_bitwise() {
+    let (points, counts, indices) = cube();
+    let per_point: Vec<[f32; 2]> = points
+        .iter()
+        .map(|p| [p.x * 0.25 + 0.5, p.y * 0.25 + p.z * 0.125 + 0.5])
+        .collect();
+    // Face-varying: a seam on every edge of face 0, shared elsewhere.
+    let mut fv_values = per_point.clone();
+    fv_values.extend([[0.9f32, 0.1], [0.8, 0.2], [0.7, 0.3], [0.6, 0.4]]);
+    let fv_indices: Vec<i32> = indices
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| if k < 4 { 8 + k as i32 } else { i })
+        .collect();
+    let widen = |v: &[[f32; 2]]| -> Vec<Lanes> {
+        v.iter()
+            .enumerate()
+            .map(|(k, x)| [x[0], x[1], k as f32, 1.0])
+            .collect()
+    };
+    let (w_point, w_fv) = (widen(&per_point), widen(&fv_values));
+    let same = |a: &[[f32; 2]], b: &[Lanes], what: &str| {
+        assert_eq!(a.len(), b.len(), "{what}: value count");
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!(
+                (x[0].to_bits(), x[1].to_bits()),
+                (y[0].to_bits(), y[1].to_bits()),
+                "{what}: {x:?} vs {y:?}"
+            );
+        }
+    };
+    for face_varying in [false, true] {
+        for linear in [
+            sdc::FVarLinearInterpolation::All,
+            sdc::FVarLinearInterpolation::CornersOnly,
+            sdc::FVarLinearInterpolation::None,
+        ] {
+            let (values, widened, idx) = if face_varying {
+                (&fv_values, &w_fv, Some(fv_indices.as_slice()))
+            } else {
+                (&per_point, &w_point, None)
+            };
+            let chart = UvChannel {
+                values,
+                indices: idx,
+                face_varying,
+                linear,
+            };
+            let extra = [PrimvarChannel {
+                values: widened,
+                indices: idx,
+                face_varying,
+                linear,
+            }];
+            let what = format!("face_varying {face_varying}, {linear:?}");
+            let alone = SubdivRequest {
+                want_face_uvs: true,
+                uvs: Some(chart),
+                ..request(2)
+            };
+            let both = SubdivRequest {
+                extra: &extra,
+                want_base_face: true,
+                ..alone
+            };
+
+            let a = subdivide(&points, &counts, &indices, &alone).unwrap();
+            let b = subdivide(&points, &counts, &indices, &both).unwrap();
+            let (ua, ub) = (a.uvs.unwrap(), b.uvs.unwrap());
+            assert_eq!(ua.indices, ub.indices);
+            assert_eq!(ua.values, ub.values, "{what}: the chart moved");
+            assert_eq!(a.points, b.points, "{what}: the surface moved");
+            same(&ua.values, &b.extra[0].values, &format!("uniform, {what}"));
+            assert_eq!(ua.indices, b.extra[0].indices);
+            let base = b.base_face.as_ref().expect("asked for");
+            assert_eq!(base.len(), b.counts.len());
+            assert!(base.iter().all(|&f| f < 6));
+
+            let a = tessellate_adaptive(&points, &counts, &indices, &alone, 3, &mixed).unwrap();
+            let b = tessellate_adaptive(&points, &counts, &indices, &both, 3, &mixed).unwrap();
+            assert_eq!(a.points, b.points, "{what}: the adaptive surface moved");
+            assert_eq!(a.indices, b.indices);
+            let chart_values = if face_varying {
+                let (va, ia) = a.face_varying_uvs.as_ref().unwrap();
+                assert_eq!(Some(ia), b.extra[0].indices.as_ref());
+                assert_eq!(Some(ia), b.face_varying_uvs.as_ref().map(|f| &f.1));
+                va.clone()
+            } else {
+                a.uvs.clone().unwrap()
+            };
+            same(
+                &chart_values,
+                &b.extra[0].values,
+                &format!("adaptive, {what}"),
+            );
+            // The lanes past the chart's are refined too: the constant lane
+            // stays 1 (refinement weights sum to one).
+            assert!(
+                b.extra[0].values.iter().all(|v| (v[3] - 1.0).abs() < 1e-5),
+                "{what}: a constant lane drifted"
+            );
+            let cage_face = b.cage_face.as_ref().expect("asked for");
+            assert_eq!(cage_face.len(), b.indices.len() / 3);
+            if !face_varying {
+                break; // the rule only reaches face-varying channels
+            }
+        }
+    }
+}
+
+/// Extra face-varying channels refine apart from the surface's patches: an
+/// adaptive tessellation is bit-identical with or without one, with no chart
+/// at all.
+#[test]
+fn an_extra_face_varying_channel_leaves_the_adaptive_surface() {
+    let (points, counts, indices) = cube();
+    let values: Vec<Lanes> = (0..24).map(|k| [k as f32, 0.0, 0.0, 0.0]).collect();
+    let fv: Vec<i32> = (0..24).collect();
+    let extra = [PrimvarChannel {
+        values: &values,
+        indices: Some(&fv),
+        face_varying: true,
+        linear: sdc::FVarLinearInterpolation::None,
+    }];
+    let plain = SubdivRequest {
+        want_face_uvs: true,
+        ..request(0)
+    };
+    let with = SubdivRequest {
+        extra: &extra,
+        ..plain
+    };
+    let a = tessellate_adaptive(&points, &counts, &indices, &plain, 3, &mixed).unwrap();
+    let b = tessellate_adaptive(&points, &counts, &indices, &with, 3, &mixed).unwrap();
+    assert_eq!(a.points, b.points);
+    assert_eq!(a.normals, b.normals);
+    assert_eq!(a.indices, b.indices);
+    assert_eq!(b.extra[0].indices.as_ref().unwrap().len(), b.indices.len());
+    // Each cage face's corners are private values: every triangle corner
+    // reads a value of its own face (k / 4).
+    let ptex = b.faces.as_ref().unwrap();
+    let corners = b.extra[0].indices.as_ref().unwrap();
+    for (k, &c) in corners.iter().enumerate() {
+        let face = ptex.base_face[k / 3].unwrap();
+        let v = b.extra[0].values[c as usize][0];
+        assert!(
+            v >= (face * 4) as f32 - 1e-4 && v <= (face * 4 + 3) as f32 + 1e-4,
+            "corner {k} of face {face} reads {v}"
+        );
     }
 }

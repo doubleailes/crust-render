@@ -396,12 +396,12 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             emit_sphere(&mut ctx.world, &prim, &sphere, this_world, mat);
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let request = StrandRequest::of(&*mat, ctx.caches.working);
+            let request = StrandRequest::of(&*mat, ctx.caches.working, &ctx.caches.meshes.primvars);
             let imported = curve_segments(&prim, &curves, request.as_ref());
             emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Ok(Some(curves)) = UsdNurbsCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let request = StrandRequest::of(&*mat, ctx.caches.working);
+            let request = StrandRequest::of(&*mat, ctx.caches.working, &ctx.caches.meshes.primvars);
             let imported = nurbs_curve_segments(&prim, &curves, request.as_ref());
             emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Some(shape) = Shape::read(&prim) {
@@ -1029,6 +1029,9 @@ pub(crate) fn load_scene(
         assets,
         layers: Default::default(),
     };
+    // The primvars the render vars read, resolved on the index stage before
+    // any geometry: every mesh read from here keeps exactly these.
+    ctx.caches.meshes.primvars = products.primvars.clone();
 
     let traverse_start = Instant::now();
     traverse_stage(
@@ -1148,6 +1151,7 @@ pub(crate) fn load_scene(
         unique: committed.unique_primitive_breakdown().into(),
         footprint: committed.memory_footprint(),
         strand_tables_bytes: committed.strand_table_bytes(),
+        primvar_tables_bytes: committed.primvar_table_bytes(),
         lights: ctx.lights.count(),
         volumes: ctx.volumes.len(),
     };
@@ -1181,6 +1185,7 @@ pub(crate) fn load_scene(
                 .then(|| ctx.caches.implicit.projection.map(|p| p.key()))
                 .flatten(),
             unsized_shapes: ctx.caches.implicit.fixed_unshared,
+            primvars: ctx.caches.meshes.primvars.key(),
         },
     });
     Ok(scene)

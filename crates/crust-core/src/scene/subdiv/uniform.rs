@@ -9,7 +9,10 @@ use openusd::gf::Vec3f;
 
 use super::normals::smooth_normals;
 use super::topology::{expand_crease_runs, ptex_fvar_channel, validate_cage, validate_corners};
-use super::{RefinedUvs, SubdivError, SubdivFaces, SubdivRequest, SubdivScheme, SubdividedMesh};
+use super::{
+    Lanes, PrimvarChannel, RefinedChannel, SubdivError, SubdivFaces, SubdivRequest, SubdivScheme,
+    SubdividedMesh,
+};
 
 /// Uniformly refines the cage to `req.level` and snaps the result to the
 /// limit surface. See the module docs for the shape of the answer.
@@ -24,16 +27,27 @@ pub(crate) fn subdivide(
     // sub-faces. Refine the face table on its own, chartless, and the rest
     // without it — twice the refinement, for a material that reads Ptex *and*
     // a `none` chart. (Pinned by `ptex_channel_is_invariant_under_every_fvar_rule`.)
+    let smooths_corners =
+        |c: &sdc::FVarLinearInterpolation| *c == sdc::FVarLinearInterpolation::None;
     if req.want_face_uvs
-        && req
+        && (req
             .uvs
-            .is_some_and(|c| c.face_varying && c.linear == sdc::FVarLinearInterpolation::None)
+            .is_some_and(|c| c.face_varying && smooths_corners(&c.linear))
+            || req
+                .extra
+                .iter()
+                .any(|c| c.face_varying && smooths_corners(&c.linear)))
     {
         let faces = subdivide(
             points,
             counts,
             indices,
-            &SubdivRequest { uvs: None, ..*req },
+            &SubdivRequest {
+                uvs: None,
+                extra: &[],
+                want_base_face: false,
+                ..*req
+            },
         )?
         .faces;
         let mut out = subdivide(
@@ -61,17 +75,32 @@ pub(crate) fn subdivide(
         SubdivScheme::Bilinear => sdc::SchemeType::Bilinear,
         SubdivScheme::Loop => sdc::SchemeType::Loop,
     };
-    // The face-varying rule is one per refiner, not per channel, so the
-    // authored chart's rule wins. The synthetic Ptex channel must refine
-    // bilinearly, and does under every rule but `none` (handled above) —
-    // each of its values is private to one face, so every one of its edges
-    // is a face-varying boundary, and its data is affine. Without a chart,
+    // Every channel to refine: the chart first, widened to four lanes, then
+    // the extra primvars. One code path refines them all.
+    let widened = req.uvs.as_ref().map(|c| c.widened());
+    let mut channels_in: Vec<PrimvarChannel> = Vec::with_capacity(1 + req.extra.len());
+    if let (Some(c), Some(values)) = (req.uvs, widened.as_deref()) {
+        channels_in.push(PrimvarChannel {
+            values,
+            indices: c.indices,
+            face_varying: c.face_varying,
+            linear: c.linear,
+        });
+    }
+    channels_in.extend_from_slice(req.extra);
+
+    // The face-varying rule is one per refiner, not per channel — in USD it
+    // is a property of the mesh, so every channel carries the same one; the
+    // chart's wins. The synthetic Ptex channel must refine bilinearly, and
+    // does under every rule but `none` (handled above) — each of its values
+    // is private to one face, so every one of its edges is a face-varying
+    // boundary, and its data is affine. Without a face-varying channel,
     // `All`.
-    let chart = req.uvs.as_ref().filter(|c| c.face_varying);
+    let first_fvar = channels_in.iter().find(|c| c.face_varying);
     let options = sdc::Options::default()
         .with_vtx_boundary_interpolation(req.boundary)
         .with_fvar_linear_interpolation(
-            chart.map_or(sdc::FVarLinearInterpolation::All, |c| c.linear),
+            first_fvar.map_or(sdc::FVarLinearInterpolation::All, |c| c.linear),
         );
 
     // Loop cannot refine quads at all, and the Ptex channel only makes sense
@@ -82,22 +111,35 @@ pub(crate) fn subdivide(
     } else {
         (Vec::new(), Vec::new())
     };
-    // A face-varying chart's per-face-vertex indices are its channel's
-    // topology; its values seed the refinement.
-    let chart_indices: Vec<u32> = match chart {
-        Some(c) => (0..indices.len())
-            .map(|fv| c.value_index(fv) as u32)
-            .collect(),
-        None => Vec::new(),
-    };
-    let mut channels = Vec::with_capacity(2);
+    // A face-varying channel's per-face-vertex indices are its topology; its
+    // values seed the refinement.
+    let channel_indices: Vec<Vec<u32>> = channels_in
+        .iter()
+        .map(|c| {
+            if c.face_varying {
+                (0..indices.len())
+                    .map(|fv| c.value_index(fv) as u32)
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+    let mut channels = Vec::with_capacity(1 + channels_in.len());
     if want_uvs {
         channels.push(FVarChannelDescriptor::new(fvar_uvs.len(), &fvar_indices));
     }
-    let chart_channel = chart.map(|c| {
-        channels.push(FVarChannelDescriptor::new(c.values.len(), &chart_indices));
-        channels.len() - 1
-    });
+    // Each channel's refiner FVar channel, `None` for a vertex one.
+    let fvar_channel: Vec<Option<usize>> = channels_in
+        .iter()
+        .zip(&channel_indices)
+        .map(|(c, idx)| {
+            c.face_varying.then(|| {
+                channels.push(FVarChannelDescriptor::new(c.values.len(), idx));
+                channels.len() - 1
+            })
+        })
+        .collect();
 
     let mut descriptor = TopologyDescriptor::new(points.len(), &counts_us, &indices_u32)
         .with_creases(&crease_pairs, &crease_weights)
@@ -135,9 +177,9 @@ pub(crate) fn subdivide(
         out_indices.extend(fv.iter().map(|&v| v as i32));
     }
 
-    let faces = want_uvs.then(|| {
-        // Base-cage face per refined face: compose the one-step
-        // child-to-parent maps from the last refinement down to level 0.
+    // Base-cage face per refined face: compose the one-step child-to-parent
+    // maps from the last refinement down to level 0.
+    let base_face: Option<Vec<u32>> = (want_uvs || req.want_base_face).then(|| {
         let mut base_face: Vec<u32> = (0..n_faces as u32).collect();
         for l in (1..=level).rev() {
             let refinement = refiner.refinement(l);
@@ -145,9 +187,15 @@ pub(crate) fn subdivide(
                 *f = refinement.child_face_parent_face(*f as usize);
             }
         }
+        base_face
+    });
+
+    let faces = want_uvs.then(|| {
         let base_face: Vec<Option<u32>> = base_face
-            .into_iter()
-            .map(|f| (counts[f as usize] == 4).then_some(f))
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|&f| (counts[f as usize] == 4).then_some(f))
             .collect();
 
         // Sub-face corner UVs: refine the synthetic channel the same way the
@@ -176,48 +224,61 @@ pub(crate) fn subdivide(
         }
     });
 
-    let uvs = req.uvs.as_ref().map(|c| match chart_channel {
-        Some(ch) => {
-            // Face-varying: refine the values level by level, snap them to
-            // the limit, then read each refined face's entries.
-            let mut values = c.values.to_vec();
-            for l in 1..=level {
-                let mut refined = vec![[0.0f32; 2]; refiner.level(l).num_fvar_values(ch)];
-                primvar.interpolate_face_varying(l, ch, &values, &mut refined);
-                values = refined;
+    let mut refined_channels = channels_in
+        .iter()
+        .zip(&fvar_channel)
+        .map(|(c, ch)| match *ch {
+            Some(ch) => {
+                // Face-varying: refine the values level by level, snap
+                // them to the limit, then read each refined face's
+                // entries.
+                let mut values = c.values.to_vec();
+                for l in 1..=level {
+                    let mut refined = vec![[0.0f32; 4]; refiner.level(l).num_fvar_values(ch)];
+                    primvar.interpolate_face_varying(l, ch, &values, &mut refined);
+                    values = refined;
+                }
+                let mut limit_values = vec![[0.0f32; 4]; values.len()];
+                primvar.limit_face_varying(ch, &values, &mut limit_values);
+                let mut fv_indices = Vec::with_capacity(out_indices.len());
+                for f in 0..n_faces {
+                    fv_indices.extend(last.face_fvar_values(f, ch).iter().map(|&v| v as i32));
+                }
+                RefinedChannel {
+                    values: limit_values,
+                    indices: Some(fv_indices),
+                    face_varying: true,
+                }
             }
-            let mut limit_uvs = vec![[0.0f32; 2]; values.len()];
-            primvar.limit_face_varying(ch, &values, &mut limit_uvs);
-            let mut fv_indices = Vec::with_capacity(out_indices.len());
-            for f in 0..n_faces {
-                fv_indices.extend(last.face_fvar_values(f, ch).iter().map(|&v| v as i32));
+            None => {
+                // Vertex: one value per point, refined and limited
+                // exactly like the positions.
+                let mut values: Vec<Lanes> = (0..points.len())
+                    .map(|p| c.values[c.value_index(p)])
+                    .collect();
+                for l in 1..=level {
+                    let mut refined = vec![[0.0f32; 4]; refiner.level(l).num_vertices()];
+                    primvar.interpolate(l, &values, &mut refined);
+                    values = refined;
+                }
+                let mut limit_values = vec![[0.0f32; 4]; values.len()];
+                primvar.limit(&values, &mut limit_values);
+                RefinedChannel {
+                    values: limit_values,
+                    indices: None,
+                    face_varying: false,
+                }
             }
-            RefinedUvs {
-                values: limit_uvs,
-                indices: Some(fv_indices),
-                face_varying: true,
-            }
-        }
-        None => {
-            // Vertex: one value per point, refined and limited exactly like
-            // the positions.
-            let mut values: Vec<[f32; 2]> = (0..points.len())
-                .map(|p| c.values[c.value_index(p)])
-                .collect();
-            for l in 1..=level {
-                let mut refined = vec![[0.0f32; 2]; refiner.level(l).num_vertices()];
-                primvar.interpolate(l, &values, &mut refined);
-                values = refined;
-            }
-            let mut limit_uvs = vec![[0.0f32; 2]; values.len()];
-            primvar.limit(&values, &mut limit_uvs);
-            RefinedUvs {
-                values: limit_uvs,
-                indices: None,
-                face_varying: false,
-            }
-        }
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+    let uvs = req.uvs.is_some().then(|| {
+        refined_channels
+            .next()
+            .expect("the chart is channel 0")
+            .narrowed()
     });
+    let extra: Vec<RefinedChannel> = refined_channels.collect();
 
     // Everything that needed the refiner is extracted; drop it — every
     // level's topology, a ×4/3 of the last — before the result's own copies
@@ -239,5 +300,7 @@ pub(crate) fn subdivide(
         normals,
         faces,
         uvs,
+        extra,
+        base_face: base_face.filter(|_| req.want_base_face),
     })
 }

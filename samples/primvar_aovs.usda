@@ -1,0 +1,149 @@
+#usda 1.0
+(
+    doc = """Primvar AOVs (sourceType = "primvar"): a subdivided cube authoring a rest
+position (`primvars:rest`, vertex), a second UV set (`primvars:uv2`,
+faceVarying and indexed, one square per face, so every edge is a seam) and a
+per-face colour (`primvars:displayColor`, uniform), on a floor that authors
+none of them. The product writes the beauty with every one of them as a layer,
+plus `P` to compare `Pref` with:
+
+    cargo run --release -- render -i samples/primvar_aovs.usda
+
+writes renders/primvar_aovs.exr (+ .png). `Pref` and `P` agree on the cube
+(its rest position is its own points, refined with it) and the floor holds
+the clear value in every primvar layer. `Pref` and `Cd`'s default
+accumulation differ: the position is closest, the colour filtered."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.4, 5)
+        float3 xformOp:rotateXYZ = (-12, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Mesh "Cube"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 5, 4, 7, 6, 4, 0, 3, 7, 1, 5, 6, 2, 3, 2, 6, 7, 4, 5, 1, 0]
+        point3f[] points = [(-0.8, -0.8, 0.8), (0.8, -0.8, 0.8), (0.8, 0.8, 0.8), (-0.8, 0.8, 0.8),
+                            (-0.8, -0.8, -0.8), (0.8, -0.8, -0.8), (0.8, 0.8, -0.8), (-0.8, 0.8, -0.8)]
+        # The rest position: the cage's own points, refined with them.
+        point3f[] primvars:rest = [(-0.8, -0.8, 0.8), (0.8, -0.8, 0.8), (0.8, 0.8, 0.8), (-0.8, 0.8, 0.8),
+                                   (-0.8, -0.8, -0.8), (0.8, -0.8, -0.8), (0.8, 0.8, -0.8), (-0.8, 0.8, -0.8)] (
+            interpolation = "vertex"
+        )
+        # A second UV set: each face its own unit square, shared values
+        # indexed per face-vertex.
+        texCoord2f[] primvars:uv2 = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        int[] primvars:uv2:indices = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+        color3f[] primvars:displayColor = [(0.8, 0.2, 0.2), (0.2, 0.8, 0.2), (0.2, 0.2, 0.8),
+                                           (0.8, 0.8, 0.2), (0.2, 0.8, 0.8), (0.8, 0.2, 0.8)] (
+            interpolation = "uniform"
+        )
+        uniform token faceVaryingLinearInterpolation = "all"
+        double3 xformOp:translate = (0, 1, 0)
+        float3 xformOp:rotateXYZ = (20, 35, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Mesh "Floor"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, 0, -4), (4, 0, -4), (4, 0, 4), (-4, 0, 4)]
+        double3 xformOp:translate = (0, -0.2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def RectLight "KeyLight"
+    {
+        float inputs:width = 2
+        float inputs:height = 1.5
+        color3f inputs:color = (8, 8, 8)
+        double3 xformOp:translate = (0, 3, 3)
+        float3 xformOp:rotateXYZ = (-40, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.2, 0.25, 0.35)
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (160, 90)
+        rel products = [</Render/Products/primvars>]
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 4
+        int crust:subdivisionLevel = 2
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "primvars"
+        {
+            token productName = "renders/primvar_aovs.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/C>,
+                </Render/Products/Vars/P>,
+                </Render/Products/Vars/Pref>,
+                </Render/Products/Vars/uv2>,
+                </Render/Products/Vars/Cd>,
+            ]
+        }
+
+        def Scope "Vars"
+        {
+            def RenderVar "C"
+            {
+                uniform token dataType = "color4f"
+                uniform string sourceName = "color"
+            }
+
+            def RenderVar "P"
+            {
+                uniform token dataType = "point3f"
+                uniform string sourceName = "P"
+            }
+
+            # The rest position: point3f, so closest by default.
+            def RenderVar "Pref"
+            {
+                uniform token dataType = "point3f"
+                uniform string sourceName = "rest"
+                uniform token sourceType = "primvar"
+            }
+
+            def RenderVar "uv2"
+            {
+                uniform token dataType = "texCoord2f"
+                uniform string sourceName = "primvars:uv2"
+                uniform token sourceType = "primvar"
+            }
+
+            # A colour: filtered by default.
+            def RenderVar "Cd"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "displayColor"
+                uniform token sourceType = "primvar"
+            }
+        }
+    }
+}

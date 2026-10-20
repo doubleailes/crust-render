@@ -146,7 +146,8 @@ warning.
 
 The type must fit the source: three or four channels for the beauty, three for positions
 and normals, two for UVs and motion vectors, one for scalars. An integer type is accepted
-only for `sampleCount`. A var whose type does not fit is skipped with a warning.
+only for `sampleCount` and [primvars](#primvars). A var whose type does not fit is
+skipped with a warning.
 
 ### Source types
 
@@ -154,7 +155,7 @@ only for `sampleCount`. A var whose type does not fit is skipped with a warning.
 |--------------|---------|
 | `raw` (default) | `sourceName` is looked up in the table below. An empty `sourceName` uses the channel name. |
 | `lpe` | `sourceName` is a [light path expression](#light-path-expressions). An `lpe:` prefix (Hydra's) is dropped. |
-| `primvar` | Not supported yet: skipped with a warning. |
+| `primvar` | `sourceName` names a primvar of the hit prim, with or without the `primvars:` prefix. See [Primvars](#primvars). |
 | `intrinsic` | Unimplemented in UsdRender itself: skipped with a warning. |
 
 `sourceType` and `driver:parameters:aov:name` may be authored as a `token` or a
@@ -257,6 +258,72 @@ These authored attributes change the mode, first match wins:
 nothing was hit. Houdini authors `0` for every var, including depth.
 
 The beauty, `sampleCount` and `variance` are per-pixel quantities and ignore the mode.
+
+## Primvars
+
+A var with `sourceType = "primvar"` holds a primvar of the prim the camera ray hits
+first, interpolated at the hit as it is authored: `constant`, `uniform`, `vertex`,
+`varying` or `faceVarying`, indexed (`primvars:<name>:indices`) or not. `sourceName`
+names the primvar, with or without the `primvars:` prefix: `rest` and `primvars:rest` are
+the same channel. The pass production asks for most is the rest position, which keeps a
+compositing mask on a deforming surface:
+
+```usda
+def RenderVar "Pref"
+{
+    uniform token dataType = "point3f"
+    uniform string sourceName = "rest"
+    uniform token sourceType = "primvar"
+}
+```
+
+Other common ones are a second UV set (`texCoord2f`), `displayColor` (`color3f`) and an
+integer ID (`int`).
+
+- **Meshes and curves.** A primvar is read on `Mesh`, `BasisCurves` and `NurbsCurves`
+  prims, whatever their material reads. A prim that does not author it, a volume and
+  the background hold the var's clear value.
+- **Refined with the surface.** On a subdivided mesh, uniform or adaptive, a `vertex`
+  or `varying` primvar is refined like the points and a `faceVarying` one under the
+  mesh's `faceVaryingLinearInterpolation`, as the texture chart is; a `uniform` one
+  gives each refined face its cage face's value. A `rest` equal to the points therefore
+  agrees with `P` on a subdivided surface.
+- **Displacement leaves it.** A displaced point reads the primvar of the undisplaced
+  point it came from: `Pref` is the rest position, not the displaced one.
+- **Read as authored.** A colour primvar is not converted into the working colour space.
+
+### Types
+
+`dataType` gives the channel count, which must be 1, 2 or 3: a four-component type
+(`color4f`, `float4`) is refused with a warning. The primvar must have that many
+components (an `int` primvar fits an `int` or a `float` var). On a prim whose primvar
+has another count, or no numeric value per element (a `string`, a `token`, a matrix, an
+array-valued primvar with `elementSize` above 1), the var is refused with one warning per
+var and prim, and that prim reads the clear value.
+
+The `dataType`'s family sets the default [accumulation](#accumulation) and the channel
+names:
+
+| `dataType` | accumulation | channels |
+|------------|--------------|----------|
+| `point3f`, `vector3f`, `normal3f` | closest | `.X .Y .Z` |
+| `int`, `uint` | closest | one channel, written as UINT |
+| `color3f` | filtered | `.R .G .B` |
+| `texCoord2f`, `float2` | filtered | `.U .V` |
+| `float`, `half` | filtered | one channel |
+
+A position, a direction or an ID is closest because a value blended across an edge
+belongs to neither surface. The overrides in [Accumulation](#accumulation) still apply.
+An integer is exact in the channel up to 2²⁴.
+
+### Cost
+
+Primvars are read only when a var names them: a render without a primvar var reads,
+stores and evaluates none beyond what its materials read, and its beauty is unchanged.
+With one, each mesh authoring a named primvar keeps a table of about 12 bytes per
+triangle plus 16 per value, and a curves prim keeps a strand table (which takes its
+hits off the fastest intersection path); `--stats` reports both, as `primvar tables` and
+`curve strand tables`.
 
 ## Light path expressions
 
@@ -687,7 +754,12 @@ Each of these is refused with a warning when authored, never ignored silently:
 - identity AOVs (`primId`, `instanceId`, `elementId`) and ID mattes. ID mattes are
   planned as [OpenEXRId](https://github.com/MercenariesEngineering/openexrid) deep EXRs,
   not Cryptomatte, once crust can write deep EXRs;
-- `sourceType = "primvar"`;
+- primvars a prim inherits: a `constant` primvar authored on an ancestor, the
+  per-instance primvars of a `PointInstancer`, and primvars authored on an instance prim.
+  Each is reported once per var, and the prims below read the clear value;
+- primvars of implicit shapes (`Sphere`, `Cube`, …), Gaussian splats and volumes: these
+  read the clear value without a warning;
+- four-component primvar vars;
 - the geometric normal `Ng`;
 - deep output (`productType = "deepRaster"`);
 - more than one camera or resolution in a render;

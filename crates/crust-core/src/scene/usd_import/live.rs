@@ -361,6 +361,13 @@ fn refresh_settings(
         if read.domes_seen_by_camera != facts.domes_seen_by_camera {
             return Err(Structural("the dome's camera visibility changed".into()));
         }
+        // The geometry kept the primvars the products asked for when it was
+        // read, and nothing else: asking for another needs it read again.
+        if read.products.primvars.key() != facts.primvars {
+            return Err(Structural(
+                "the products ask for other primvars than the geometry kept".into(),
+            ));
+        }
         if read
             .wanted_camera
             .as_ref()

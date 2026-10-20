@@ -94,14 +94,16 @@ The new type lives in `crust-core`:
 
 ```
 PrimvarTable { channels: Vec<Option<PrimvarChannel>> }   // indexed by keep-set index
-PrimvarChannel = Constant(Val)
-               | PerTriangle { values: Vec<Val>, of: Vec<u32> }       // uniform
-               | Corners     { values: Vec<Val>, corners: Vec<[u32; 3]> } // vertex / varying / faceVarying
+PrimvarChannel = Constant([f32; 4])
+               | PerTriangle { values: Vec<[f32; 4]>, of: Vec<u32> }       // uniform
+               | Corners     { values: Vec<[f32; 4]>, corners: Vec<[u32; 3]> } // vertex / varying / faceVarying
 ```
 
-- **Lane format.** Values are `crust_mtlx::Val`, so meshes and curves share
-  one lane format. The memory cost of four lanes is accepted, because the
-  table exists only when asked for.
+- **Lane format.** Values are four lanes, `[f32; 4]` (the arity is the
+  keep-set entry's, so `crust_mtlx::Val`'s arity byte would only repeat it);
+  curves' `StrandTable` channels are read out as the same lanes. The memory
+  cost of four lanes is accepted, because the table exists only when asked
+  for.
 - **Built in `triangulate`**, from a new N-lane `PrimvarSource`:
   - It reads interpolation, `:indices` and element size properly, for all
     five interpolations.
@@ -109,16 +111,19 @@ PrimvarChannel = Constant(Val)
   - On a subdivided mesh, each triangle maps to its refined face's base
     face, which the refiner's parent-face map provides; the Ptex `FaceMap`
     path already relies on it.
-- **Attached** with `World::set_primvars(id, Arc<PrimvarTable>)`, which does
-  **not** clear `plain`. The table is never read by `intersect`; only by the
-  AOV first hit (D4). A geometry with a primvar table therefore costs the
-  beauty nothing per hit.
+- **Attached** with `World::set_primvars(id, Arc<PrimvarTable>, swapped)`,
+  which does **not** clear `plain`. The table is never read by `intersect`;
+  only by the AOV first hit (D4). A geometry with a primvar table therefore
+  costs the beauty nothing per hit. *As built:* the tables sit in a sparse
+  list sorted by `geom_id`, like the motion records, not in `SideTables`: a
+  field there would cost every geometry 8 bytes in renders without a primvar
+  var.
 - **Deduplication.** `MeshKey` hashes the kept channels' values. Otherwise
   two prims that share points but differ in `rest` would share one slot,
   the failure `mesh.rs` documents for charts.
 - **Curves.** The curve side builds no `PrimvarTable`. The `StrandRequest`
   gains the keep set, and its `StrandTable` channels serve the AOV through
-  the same `Val`.
+  the same four lanes.
 
 *Alternative:* resolve primvars inside `intersect`, as the chart is.
 Rejected: it would clear `plain`, so every hit on every geometry carrying a
@@ -138,6 +143,12 @@ interpolated for every bounce, not just the camera's first hit.
     mesh in USD, not of the primvar, so the one-rule-per-refiner limit
     matches the schema.
 - **Adaptive tessellation.**
+  - *As built:* extra face-varying channels get a refiner and patch table of
+    their own. `consider_fvar_channels` isolates a face irregular in *any*
+    face-varying channel, so adding one to the surface's refiner would move
+    the beauty's geometry. Ptex face ids follow the cage alone, so both
+    tables are evaluated at the same `(ptex, u, v)`. The chart stays the
+    surface refiner's one channel, as before.
   - Control values are refined per channel.
   - Patches evaluate each channel the way they evaluate `uv_control`, and
     FVar channels by their channel index rather than a hard-coded 0.
@@ -154,32 +165,41 @@ interpolated for every bounce, not just the camera's first hit.
 subdivided meshes. Rejected: extra UV sets are face-varying, and they are
 half the issue.
 
-### D4. The first hit resolves primvars from `(geom_id, prim_id, p)`
+### D4. The first hit resolves primvars from `(geom_id, prim_id, barycentrics)`
 
-The AOV first hit records `geom_id`, `prim_id` and `p`.
+The AOV first hit records `geom_id`, `prim_id`, and — only when the layout
+has primvar slots — the triangle's barycentrics.
 
-- **`first_wall`.** Its tuple gains `prim_id`.
-- **Meshes.** When the layout has primvar slots, `World::primvars_at`
-  looks up the geometry's table and the triangle's three corners:
-  - It recomputes the barycentrics from `p` and the triangle's vertices,
-    which are readable through the geometry's `VertexSource`, as tangents
-    are.
-  - It undoes the `swapped` corner order, as `UvMap::resolve` does.
-  - It writes each kept channel into a scratch `[Val; K]`.
+- **`first_wall`.** Its tuple gains the hit's prim (`HitPrim`).
+- **Meshes.** `World::primvars_at` looks up the geometry's table and the
+  triangle's three corners, undoes the `swapped` corner order as
+  `UvMap::resolve` does, and writes each kept channel into the scratch.
+- **The barycentrics are the kernel's** (amended while implementing). The
+  plan recomputed them from `p` and the triangle's vertices through
+  `VertexSource`, but `VertexSource` is `Unresolved` for a part placed
+  through a group (a forwarded id names a slot, not a placement) and for a
+  moving instance: every multi-part prototype and every
+  `crust:motion:translate` placement would have read the clear value.
+  Instead `World::hit_barycentrics` traces the camera ray again, restarted
+  just short of the hit, and keeps the kernel's `(u, v)` when it lands on
+  the same `(geom_id, prim_id)`. The restart, not narrower bounds: every
+  kernel query asks for `(TRACE_T_MIN, ∞)`, LLVM propagates those constants
+  into the traversal, and the first version's `(t − d, t + d)` cost
+  cornellbox's zero-AOV render +0.15% of its instructions.
 - **Curves.** A curve hit on a geometry with a `StrandTable` already
   carries a `CurveHit` with its `(prim_id, u)`. The AOV path reads the kept
   channel from it. A curves prim with a table built only for the AOV loses
   `plain` (see Risks).
 - **Volumes, escapes and non-table geometry** leave the scratch at the
   clear value.
-- **Cost.** Recomputing barycentrics costs one 2×2 solve per camera sample,
-  and only in the AOV instantiation. The alternative, adding `(u, v)` to
-  `WorldHit`, would widen a struct every hit copies, in the beauty's path
-  too.
+- **Cost.** One extra kernel traversal per camera sample, from just short
+  of the hit, and only in the AOV instantiation of a render with a primvar
+  var. Adding `(u, v)` to `WorldHit` would widen a struct every hit copies,
+  in the beauty's path too.
 
-*Precision:* barycentrics from `p` lose a few ulps against the kernel's.
-That is invisible in a closest-mode `rest`. The spec's "agree with `P`"
-scenario allows float rounding.
+*Precision:* the restarted ray's barycentrics differ from the original's by
+float rounding. That is invisible in a closest-mode `rest`. The spec's
+"agree with `P`" scenario allows float rounding.
 
 ### D5. A primvar slot carries a keep-set index and a role
 
@@ -233,8 +253,8 @@ zero-cost scenario reads.
 
 ## Risks / Trade-offs
 
-- **[Risk] Memory on dense scenes:** `Val` is 20 bytes, and a `rest` corner
-  table costs 12 B per triangle plus 20 B per value. → It is only paid when
+- **[Risk] Memory on dense scenes:** a value is 16 bytes, and a `rest`
+  corner table costs 12 B per triangle plus 16 B per value. → It is only paid when
   asked for, and it is reported by `--stats`. Packing values at their arity
   is a later optimisation, behind the same type.
 - **[Risk] Generalising the adaptive tessellator can shift the chart's bits**
@@ -243,9 +263,9 @@ zero-cost scenario reads.
   samples, plus the adaptive tests, pin this before the primvar work lands.
 - **[Risk] opensubdiv-rs may not accept `[f32; 4]`.** → Task 1.1 checks this
   first. The fallback is width-specialised calls for 1, 2 and 3 lanes.
-- **[Trade-off] Recomputing barycentrics instead of carrying them** costs a
-  few ulps of precision for zero cost to the beauty. This is acceptable for
-  data AOVs.
+- **[Trade-off] Re-tracing for barycentrics instead of carrying them** costs
+  one traversal per camera sample in primvar renders, for zero cost to the
+  beauty. This is acceptable for data AOVs.
 - **[Trade-off] Curves with an AOV-only `StrandTable` take the non-`plain`
   path in `intersect`.** That is the path every curve whose material reads
   a curve property already takes. → Accepted: it applies only to renders

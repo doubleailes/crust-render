@@ -473,7 +473,9 @@ Schema mapping:
     (`elevate`). A prim that needs no table keeps its linear segments.
   - **Prototypes** carry their table on the part's slot (`PartSlot::strands`), set on
     every placement's `geom_id` like the UV map; `World::strand_table_bytes` counts a
-    shared table once (`--stats`: `curve strand tables`). Curves carry no motion blur:
+    shared table once (`--stats`: `curve strand tables`). A primvar AOV adds its kept
+    channels to the table (`StrandTable::kept`), and builds one for a prim authoring a
+    kept primvar whatever its material reads (see the `aovs` record). Curves carry no motion blur:
     `crust:motion:translate` is not read on them.
   - **Live edits.** What a table was decoded for is part of `Signature` on a curves slot
     only (`SideTables::curves`, set for every curves geometry, table or not): a curve

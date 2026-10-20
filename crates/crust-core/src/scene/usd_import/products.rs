@@ -18,6 +18,7 @@
 //! valid.
 
 use crate::warning;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use openusd::sdf;
@@ -28,7 +29,9 @@ use openusd_schemas::render::{
 };
 use tracing::debug;
 
-use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
+use crate::aov::{
+    Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision, PrimvarRole, PrimvarSource,
+};
 use crate::region::PixelRect;
 
 use super::attrs::{custom_bool, custom_token, decode_bool, decode_number, prim_value, value_at};
@@ -42,6 +45,9 @@ const DRIVER_PARAMETERS: &str = "driver:parameters:";
 #[derive(Debug)]
 pub(super) struct RenderProducts {
     pub(super) request: AovRequest,
+    /// The primvars the request's primvar vars read, which the geometry
+    /// import keeps (and nothing else for them).
+    pub(super) primvars: PrimvarKeep,
     /// The first product's resolved camera — the settings' own when the
     /// product authors none.
     pub(super) camera: Option<sdf::Path>,
@@ -64,6 +70,7 @@ impl Default for RenderProducts {
     fn default() -> Self {
         RenderProducts {
             request: AovRequest::default(),
+            primvars: PrimvarKeep::default(),
             camera: None,
             resolution: None,
             data_window: None,
@@ -142,6 +149,156 @@ impl Base {
     }
 }
 
+/// The primvars a render's primvar vars read: `(name, components)` without
+/// the `primvars:` prefix, deduplicated, in first-use order. An entry's index
+/// is the [`PrimvarSource::index`] of every var reading it.
+///
+/// It also remembers, for the import that reads geometry with it, which
+/// ancestors author a kept primvar crust does not inherit, and which entries
+/// have been warned about ([`PrimvarKeep::report_inherited`]); two keep sets
+/// are equal when their entries are.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PrimvarKeep {
+    pub(crate) entries: Vec<KeptPrimvar>,
+    /// `(entry, ancestor path)` → whether that prim authors the primvar.
+    authored_on: RefCell<HashMap<(usize, String), bool>>,
+    /// Per entry, whether its not-inherited warning was raised.
+    warned: RefCell<Vec<bool>>,
+}
+
+impl PartialEq for PrimvarKeep {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for PrimvarKeep {}
+
+/// One primvar the geometry import keeps for the AOVs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeptPrimvar {
+    /// Without the `primvars:` prefix.
+    pub(crate) name: String,
+    /// The components every var reading it asks for: 1, 2 or 3.
+    pub(crate) components: u8,
+    /// The RenderVar prims reading it, for the warnings that name them.
+    pub(crate) vars: Vec<String>,
+}
+
+impl KeptPrimvar {
+    /// The vars reading it and the verb: `/Render/Pref asks for`.
+    pub(crate) fn asking(&self) -> String {
+        let verb = if self.vars.len() == 1 {
+            "asks for"
+        } else {
+            "ask for"
+        };
+        format!("{} {verb}", self.vars.join(", "))
+    }
+}
+
+impl PrimvarKeep {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// What the geometry import keeps: each entry's `(name, components)`.
+    pub(crate) fn key(&self) -> Vec<(String, u8)> {
+        self.entries
+            .iter()
+            .map(|e| (e.name.clone(), e.components))
+            .collect()
+    }
+
+    /// Kept primvar `i`, which geometry prim `prim` does not author: when an
+    /// ancestor authors it, warns — once per entry — that it is not
+    /// inherited. Walks the ancestors once per `(entry, ancestor)`.
+    pub(crate) fn report_inherited(&self, prim: &Prim, i: usize) {
+        if self.warned.borrow().get(i).copied().unwrap_or(false) {
+            return;
+        }
+        let name = format!("primvars:{}", self.entries[i].name);
+        let mut at = prim.parent();
+        while let Some(a) = at {
+            let key = (i, a.path().to_string());
+            let authored = *self
+                .authored_on
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| prim_value(&a, &name).is_some());
+            if authored {
+                self.warn_not_inherited(i, Some(prim), &a, "an ancestor");
+                return;
+            }
+            at = a.parent();
+        }
+    }
+
+    /// An instance prim or a `PointInstancer` (`what`) placing geometry:
+    /// warns, once per entry, about each kept primvar it or an ancestor
+    /// authors, which the placed geometry does not inherit.
+    pub(crate) fn report_placement(&self, placement: &Prim, what: &str) {
+        for i in 0..self.entries.len() {
+            if self.warned.borrow().get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let name = format!("primvars:{}", self.entries[i].name);
+            if prim_value(placement, &name).is_some() {
+                self.warn_not_inherited(i, None, placement, what);
+            } else {
+                self.report_inherited(placement, i);
+            }
+        }
+    }
+
+    /// Warns that kept primvar `i`, which `what` authors on `on` (above the
+    /// geometry prim `below`, when one asked), is not inherited.
+    fn warn_not_inherited(&self, i: usize, below: Option<&Prim>, on: &Prim, what: &str) {
+        let e = &self.entries[i];
+        let above = below.map_or(String::new(), |b| format!(" above {}", b.path()));
+        warning!(
+            AovPrimvarNotInherited,
+            at = on.path(),
+            "{} primvar {:?}, which {what} authors on {}{above}; crust does not inherit \
+             primvars yet, so the prims it would reach read the clear value",
+            e.asking(),
+            e.name,
+            on.path(),
+        );
+        let mut warned = self.warned.borrow_mut();
+        if warned.len() < self.entries.len() {
+            warned.resize(self.entries.len(), false);
+        }
+        warned[i] = true;
+    }
+
+    /// The index of `(name, components)`, added if new, with `var` among
+    /// the vars reading it.
+    fn index_of(&mut self, name: &str, components: u8, var: &sdf::Path) -> u16 {
+        let i = match self
+            .entries
+            .iter()
+            .position(|e| e.name == name && e.components == components)
+        {
+            Some(i) => i,
+            None => {
+                self.entries.push(KeptPrimvar {
+                    name: name.to_owned(),
+                    components,
+                    vars: Vec::new(),
+                });
+                self.warned.borrow_mut().push(false);
+                self.entries.len() - 1
+            }
+        };
+        let var = var.to_string();
+        if !self.entries[i].vars.contains(&var) {
+            self.entries[i].vars.push(var);
+        }
+        i as u16
+    }
+}
+
 /// Resolves the render settings prim's products. Empty when the stage has no
 /// settings prim or the prim authors no `products` — the "write the single
 /// beauty EXR" case.
@@ -160,6 +317,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     if targets.is_empty() {
         return RenderProducts {
             request: AovRequest::default(),
+            primvars: PrimvarKeep::default(),
             motion_blur: base.motion_blur(),
             camera: base.camera,
             resolution: base.resolution,
@@ -170,6 +328,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
 
     let mut out = RenderProducts {
         request: AovRequest::default(),
+        primvars: PrimvarKeep::default(),
         camera: base.camera.clone(),
         resolution: base.resolution,
         data_window: base.data_window,
@@ -277,7 +436,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             seen.push(var_path.clone());
             let var = vars
                 .entry(var_path.clone())
-                .or_insert_with(|| resolve_var(stage, &var_path))
+                .or_insert_with(|| resolve_var(stage, &var_path, &mut out.primvars))
                 .clone();
             // One DFA holds every expression of the render, each accepting
             // as one bit of a u64 and all sharing a bounded number of
@@ -530,12 +689,16 @@ pub(super) fn parse_data_type(name: &str) -> Option<(usize, Precision)> {
 }
 
 /// Whether `source` can be written as `components` channels of `precision`.
+/// A primvar's width is its data type's, so any one to three components fit,
+/// as integers too.
 fn type_fits(source: AovSource, components: usize, precision: Precision) -> bool {
     let components_fit = match source {
         AovSource::Color | AovSource::Lpe => components == 3 || components == 4,
+        AovSource::Primvar(_) => (1..=3).contains(&components),
         s => components == s.components(),
     };
-    let precision_fits = precision != Precision::Uint || source == AovSource::SampleCount;
+    let precision_fits = precision != Precision::Uint
+        || matches!(source, AovSource::SampleCount | AovSource::Primvar(_));
     components_fit && precision_fits
 }
 
@@ -591,7 +754,7 @@ fn authored_accumulation(prim: &Prim) -> Option<Accumulation> {
 
 /// One RenderVar as a channel layer, or `None` (warned) when crust cannot
 /// honour it.
-fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
+fn resolve_var(stage: &Stage, path: &sdf::Path, keep: &mut PrimvarKeep) -> Option<AovVar> {
     if RenderVar::get(stage, path.clone()).ok().flatten().is_none() {
         warning!(
             AovNotARenderVar,
@@ -611,6 +774,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     let source_type = custom_token(&prim, "sourceType").unwrap_or_else(|| "raw".to_owned());
     let source_name = custom_token(&prim, "sourceName").unwrap_or_default();
     let mut expression = None;
+    let mut primvar = None;
     let mut raw = false;
     let raw_authored = custom_bool(&prim, "crust:aov:raw") == Some(true);
     let variance = custom_bool(&prim, "crust:aov:variance") == Some(true);
@@ -708,12 +872,25 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             AovSource::Lpe
         }
         "primvar" => {
-            warning!(
-                AovUnsupportedSource,
-                at = path,
-                "{path}: primvar source {source_name:?} is not supported yet; no channel written"
-            );
-            return None;
+            let name = source_name
+                .strip_prefix("primvars:")
+                .unwrap_or(&source_name);
+            if name.is_empty() {
+                warning!(
+                    AovPrimvarNoName,
+                    at = path,
+                    "{path}: sourceType \"primvar\" needs a sourceName naming the primvar; no \
+                     channel written"
+                );
+                return None;
+            }
+            primvar = Some(name.to_owned());
+            // Its index, width and role come with the data type, below.
+            AovSource::Primvar(PrimvarSource {
+                index: 0,
+                components: 0,
+                role: PrimvarRole::Float,
+            })
         }
         "intrinsic" => {
             warning!(
@@ -745,6 +922,32 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             "{path}: data type {type_name:?} is not a numeric type; no channel written"
         );
         return None;
+    };
+    let source = match (source, &primvar) {
+        (AovSource::Primvar(_), Some(name)) => {
+            if components == 4 {
+                warning!(
+                    AovPrimvarFourComponents,
+                    at = path,
+                    "{path}: primvar {name:?} as {type_name:?}: four-component primvar vars are \
+                     not supported yet; no channel written"
+                );
+                return None;
+            }
+            // The role is the `dataType`'s (Houdini's `aov:format` names only
+            // the storage, `float3` for a `point3f`).
+            let role = custom_token(&prim, "dataType")
+                .and_then(|t| PrimvarRole::of_type(&t))
+                .or_else(|| PrimvarRole::of_type(&type_name))
+                .unwrap_or(PrimvarRole::Float);
+            let components = components as u8;
+            AovSource::Primvar(PrimvarSource {
+                index: keep.index_of(name, components, path),
+                components,
+                role,
+            })
+        }
+        (source, _) => source,
     };
     if variance && (components != 1 || precision == Precision::Uint) {
         warning!(

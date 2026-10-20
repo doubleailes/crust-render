@@ -4,7 +4,8 @@
 //! and agreement with `openusd_schemas::render::compute_render_spec`.
 
 use crust_core::{
-    Accumulation, AovRequest, AovSource, NoAssets, PixelRect, Precision, Scene, UsdImportOptions,
+    Accumulation, AovRequest, AovSource, ChannelKind, NoAssets, PixelRect, Precision, PrimvarRole,
+    PrimvarSource, Scene, UsdImportOptions, WarningCode,
 };
 use std::path::PathBuf;
 
@@ -298,7 +299,7 @@ fn unsupported_products_and_vars_are_refused() {
     {
         token productName = "flat.exr"
         rel orderedVars = [</Render/intrinsic>, </Render/unknown>, </Render/lpe>,
-                           </Render/primvar>, </Render/int_color>, </Render/float_normal>,
+                           </Render/int_color>, </Render/float_normal>,
                            </Render/later>, </Render/depth>, </Render/notavar>]
     }
     def Scope "notaproduct"
@@ -318,11 +319,6 @@ fn unsupported_products_and_vars_are_refused() {
     {
         uniform string sourceName = "C<RD>?L"
         uniform token sourceType = "lpe"
-    }
-    def RenderVar "primvar"
-    {
-        uniform string sourceName = "displayColor"
-        uniform token sourceType = "primvar"
     }
     def RenderVar "int_color"
     {
@@ -1562,4 +1558,194 @@ fn a_window_is_no_longer_listed_as_not_honoured() {
         !warnings.iter().any(|w| w.contains("not honoured")),
         "{warnings:?}"
     );
+}
+
+/// The codes the import recorded, in first-fire order.
+fn codes(scene: &Scene) -> Vec<WarningCode> {
+    scene.warnings.iter().map(|w| w.code).collect()
+}
+
+const PRIMVAR_VARS: &str = r#"
+    def RenderSettings "settings"
+    {
+        rel camera = </World/cam>
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/Pref>, </Render/rest2>, </Render/uv2>, </Render/Cd>,
+                           </Render/objectId>, </Render/nameless>, </Render/rgba>]
+    }
+    def RenderVar "Pref"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "rest2"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "primvars:rest"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "uv2"
+    {
+        uniform token dataType = "texCoord2f"
+        uniform string sourceName = "uv2"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "Cd"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "displayColor"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "objectId"
+    {
+        uniform token dataType = "int"
+        uniform string sourceName = "objectId"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "nameless"
+    {
+        uniform token dataType = "float"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "rgba"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "displayColor"
+        uniform token sourceType = "primvar"
+    }
+"#;
+
+/// "Primvar var accepted", "Primvar var without a name refused" and "Four
+/// components refused": each accepted var reads its keep-set entry, with
+/// the role, width and default accumulation its `dataType` gives; the
+/// prefix does not make a second entry.
+#[test]
+fn primvar_vars_resolve_by_data_type() {
+    let scene = load("primvar_vars", PRIMVAR_VARS);
+    let vars = &scene.aovs.products[0].vars;
+    let got: Vec<_> = vars
+        .iter()
+        .map(|v| {
+            (
+                v.name.as_str(),
+                v.source,
+                v.components,
+                v.accumulation,
+                v.precision,
+            )
+        })
+        .collect();
+    let pv = |index, components, role| {
+        AovSource::Primvar(PrimvarSource {
+            index,
+            components,
+            role,
+        })
+    };
+    use Accumulation::{Closest, Filtered};
+    assert_eq!(
+        got,
+        [
+            (
+                "Pref",
+                pv(0, 3, PrimvarRole::Vector),
+                3,
+                Closest,
+                Precision::Float
+            ),
+            (
+                "rest2",
+                pv(0, 3, PrimvarRole::Vector),
+                3,
+                Closest,
+                Precision::Float
+            ),
+            (
+                "uv2",
+                pv(1, 2, PrimvarRole::TexCoord),
+                2,
+                Filtered,
+                Precision::Float
+            ),
+            (
+                "Cd",
+                pv(2, 3, PrimvarRole::Color),
+                3,
+                Filtered,
+                Precision::Float
+            ),
+            (
+                "objectId",
+                pv(3, 1, PrimvarRole::Integer),
+                1,
+                Closest,
+                Precision::Uint
+            ),
+        ]
+    );
+    let kinds: Vec<_> = vars.iter().map(|v| v.channel_kind()).collect();
+    assert_eq!(
+        kinds,
+        [
+            ChannelKind::Vector,
+            ChannelKind::Vector,
+            ChannelKind::Uv,
+            ChannelKind::Color,
+            ChannelKind::Scalar
+        ]
+    );
+    assert_eq!(
+        codes(&scene),
+        [
+            WarningCode::AovPrimvarNoName,
+            WarningCode::AovPrimvarFourComponents
+        ]
+    );
+    let four = scene
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::AovPrimvarFourComponents)
+        .unwrap();
+    assert_eq!(four.prims, ["/Render/rgba"]);
+    assert!(
+        four.message.contains("not supported yet"),
+        "{}",
+        four.message
+    );
+}
+
+/// The accumulation overrides still apply to a primvar var.
+#[test]
+fn a_primvar_var_takes_an_authored_accumulation() {
+    let scene = load(
+        "primvar_multisampled",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/Pref>]
+    }
+    def RenderVar "Pref"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+        bool driver:parameters:aov:multiSampled = 1
+        float driver:parameters:aov:clearValue = -1
+    }
+"#,
+    );
+    let var = &scene.aovs.products[0].vars[0];
+    assert_eq!(var.accumulation, Accumulation::Filtered);
+    assert_eq!(var.clear, -1.0);
+    assert!(scene.warnings.is_empty(), "{:#?}", scene.warnings);
 }

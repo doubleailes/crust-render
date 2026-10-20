@@ -20,16 +20,20 @@ use rayon::prelude::*;
 use tracing::debug;
 
 use crate::material::{Displacement, Material};
-use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
+use crate::rt_world::{
+    FaceMap, FanSlice, PrimvarChannel, PrimvarTable, SubFace, UvMap, WorldBuilder,
+};
 use crate::scene::displace::{self, VertexChart};
 use crate::scene::subdiv;
 
 use super::adaptive::{self, Aabb, Cull, ScreenRate};
+use super::attrs::decode_text;
 use super::attrs::{
     custom_f32, custom_i32, custom_i32_array, decode_f32_array, decode_i32_array,
     decode_vec3f_array, prim_motion_translate, prim_ray_mask, prim_value, value_at,
 };
 use super::materials::BoundMaterial;
+use super::products::{KeptPrimvar, PrimvarKeep};
 use super::time::eval_time;
 
 /// Identity of an imported mesh's shared geometry: a content hash of the
@@ -49,7 +53,9 @@ use super::time::eval_time;
 ///
 /// The chart is folded in only when one was read, which is exactly when the
 /// bound material reports `uses_uv()`. An untextured stage hashes nothing
-/// extra and dedupes as before.
+/// extra and dedupes as before. The primvars a render var keeps belong in it
+/// for the same reason — a slot owns the one `PrimvarTable` every placement
+/// reads — and are folded in only when some are kept.
 #[derive(PartialEq, Eq, Hash)]
 pub(super) struct MeshKey {
     pub(super) geo_hash: u64,
@@ -93,6 +99,23 @@ impl MeshKey {
             }
             None => 0u8.hash(&mut h),
         }
+        if !src.primvars.is_empty() {
+            for p in &src.primvars {
+                match p {
+                    Some(p) => {
+                        1u8.hash(&mut h);
+                        p.interp.hash(&mut h);
+                        for v in &p.values {
+                            for x in v {
+                                x.to_bits().hash(&mut h);
+                            }
+                        }
+                        p.indices.hash(&mut h);
+                    }
+                    None => 0u8.hash(&mut h),
+                }
+            }
+        }
         MeshKey {
             geo_hash: h.finish(),
             n_points: src.points.len(),
@@ -133,6 +156,9 @@ pub(super) struct MeshSlot {
     /// the tangent frame, which is per placement, is derived at the hit
     /// from the kernel's vertices rather than held here.
     pub(super) uvs: Option<Arc<UvMap>>,
+    /// The primvars render vars keep, per triangle, when the mesh authors
+    /// any of them. Beside `uvs`, for the same reason.
+    pub(super) primvars: Option<Arc<PrimvarTable>>,
     /// Set once some path needed this mesh as a real kernel scene — which
     /// prototypes always do, since an instance is the only way to place one.
     pub(super) committed: Option<Arc<RtScene>>,
@@ -156,6 +182,9 @@ pub(super) struct MeshArena {
     /// import context because every path that reads a mesh — direct prims
     /// and prototype parts alike — already holds the arena.
     pub(super) subdiv: SubdivPolicy,
+    /// The primvars render vars ask for, which every mesh read keeps (see
+    /// [`MeshNeeds::primvars`]). Here for the reason `subdiv` is.
+    pub(super) primvars: PrimvarKeep,
     /// What displacement did, for `--stats`.
     pub(super) displaced: crate::stats::DisplacementCounters,
     /// Distinct meshes whose offsets exceeded their authored bound — one
@@ -323,6 +352,7 @@ impl MeshArena {
             slots: Vec::new(),
             by_key: HashMap::new(),
             subdiv,
+            primvars: PrimvarKeep::default(),
             displaced: Default::default(),
             bound_exceeded: 0,
         }
@@ -397,6 +427,10 @@ impl MeshArena {
             m.build_density(&verts, &tris);
             Arc::new(m)
         });
+        // Built on the undisplaced connectivity, so a displaced point reads
+        // the primvar of the point it was moved from.
+        let primvars =
+            primvar_table(&src.counts, &src.indices, verts.len(), &src.primvars).map(Arc::new);
         let slot = self.slots.len() as u32;
         self.slots.push(MeshSlot {
             local: Some(MeshGeom {
@@ -406,6 +440,7 @@ impl MeshArena {
             }),
             faces,
             uvs,
+            primvars,
             committed: None,
             n_place: 0,
         });
@@ -573,7 +608,7 @@ pub(super) fn emit_mesh(
         displacement,
     } = bound;
     let displacement = prim_displacement(prim, displacement);
-    let needs = MeshNeeds::of(&*material, displacement.as_deref());
+    let needs = MeshNeeds::of(&*material, displacement.as_deref(), &meshes.primvars);
     let Some(src) = mesh_source(
         prim,
         mesh,
@@ -620,8 +655,8 @@ pub(super) fn place_mesh_source(
         material,
         displacement,
     } = bound;
-    let needs = MeshNeeds::of(&*material, displacement.as_deref());
-    let (want_faces, want_uvs) = (needs.faces, needs.uvs);
+    let want_faces = material.face_texture().is_some();
+    let want_uvs = material.uses_uv();
     let mask = prim_ray_mask(prim);
     let motion = prim_motion_translate(prim);
 
@@ -654,6 +689,7 @@ pub(super) fn place_mesh_source(
             .map(|p| world_xf.transform_point3(Vec3::from_array(*p)).to_array())
             .collect();
         check_face_count(prim, src.base_face_count, material.as_ref());
+        let primvars = primvar_table(&src.counts, &src.indices, verts.len(), &src.primvars);
         match triangulate(
             &src.counts,
             &src.indices,
@@ -702,6 +738,9 @@ pub(super) fn place_mesh_source(
                 }
                 if let Some(map) = uvs {
                     world.set_uv_map(geom_id, map, false);
+                }
+                if let Some(table) = primvars {
+                    world.set_primvars(geom_id, Arc::new(table), false);
                 }
             }
             None => debug!("Mesh at {} produced no triangles", prim.path()),
@@ -776,6 +815,7 @@ pub(super) fn flush_meshes(
 
         let faces = slot.faces.clone();
         let uvs = slot.uvs.clone();
+        let primvars = slot.primvars.clone();
         let mirrored = p.l2w.matrix3.determinant() < 0.0;
         if bake {
             let geom = meshes.slots[p.slot as usize]
@@ -806,6 +846,9 @@ pub(super) fn flush_meshes(
             if let Some(map) = uvs {
                 world.set_uv_map(p.geom_id, map, mirrored);
             }
+            if let Some(table) = primvars {
+                world.set_primvars(p.geom_id, table, mirrored);
+            }
             // The vertices were baked into world space but the densities were
             // not: they are shared with (or cloned from) the slot's
             // local-frame tables, so the placement's scale still has to be
@@ -835,6 +878,9 @@ pub(super) fn flush_meshes(
             // placement record), so there is nothing per placement to hold.
             if let Some(map) = uvs {
                 world.set_uv_map(p.geom_id, map, false);
+            }
+            if let Some(table) = primvars {
+                world.set_primvars(p.geom_id, table, false);
             }
             world.set_placement_scale(p.geom_id, placement_scale(&l2w));
             instanced += 1;
@@ -1004,6 +1050,10 @@ pub(super) struct MeshSource {
     /// cage's UVs on refined triangles would stretch every texture across the
     /// patch it came from.
     pub(super) uvs: Option<UvSource>,
+    /// The primvars render vars keep, by keep-set index (`None` where the
+    /// prim does not author one it can give); empty when none are kept. For
+    /// a subdivided mesh, refined with it like the chart.
+    pub(super) primvars: Vec<Option<PrimvarData>>,
     /// Whether the arrays are a refinement rather than the authored cage —
     /// what `--stats` counts a displaced mesh "at cage resolution" by.
     pub(super) refined: bool,
@@ -1043,6 +1093,7 @@ pub(super) fn mesh_source(
         uvs: want_uvs,
         uv_primvar,
         displacement,
+        primvars: keep,
     } = needs;
     // A displacement reads its own chart, whether or not the surface does.
     let want_faces = want_faces || displacement.is_some_and(Displacement::needs_ptex);
@@ -1051,7 +1102,11 @@ pub(super) fn mesh_source(
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
     let uvs = want_uvs.then(|| mesh_uvs(prim, uv_primvar)).flatten();
-    let cage = |points, counts, indices, uvs| MeshSource {
+    let primvars = match keep.filter(|k| !k.is_empty()) {
+        Some(keep) => mesh_primvars(prim, keep, points.len(), counts.len(), indices.len()),
+        None => Vec::new(),
+    };
+    let cage = |points, counts, indices, uvs, primvars| MeshSource {
         points,
         counts,
         indices,
@@ -1059,6 +1114,7 @@ pub(super) fn mesh_source(
         subdiv_faces: None,
         base_face_count,
         uvs,
+        primvars,
         refined: false,
     };
 
@@ -1076,7 +1132,7 @@ pub(super) fn mesh_source(
 
     let usd_scheme = effective_scheme(prim, mesh, &counts, displacement, policy);
     if !policy.enabled || usd_scheme == SubdivisionScheme::None {
-        return Some(cage(points, counts, indices, uvs));
+        return Some(cage(points, counts, indices, uvs, primvars));
     }
     // Adaptive mode tessellates unshared meshes per face, but for a `loop`
     // cage, which keeps the per-mesh level: the tessellator cuts quad Ptex
@@ -1125,7 +1181,7 @@ pub(super) fn mesh_source(
         let normals = subdiv::smooth_cage_normals(&points, &counts, &indices);
         return Some(MeshSource {
             normals,
-            ..cage(points, counts, indices, uvs)
+            ..cage(points, counts, indices, uvs, primvars)
         });
     }
     let scheme = match usd_scheme {
@@ -1140,17 +1196,43 @@ pub(super) fn mesh_source(
                      mesh — rendering the base cage",
                     prim.path()
                 );
-                return Some(cage(points, counts, indices, uvs));
+                return Some(cage(points, counts, indices, uvs, primvars));
             }
             subdiv::SubdivScheme::Loop
         }
-        SubdivisionScheme::None => return Some(cage(points, counts, indices, uvs)),
+        SubdivisionScheme::None => return Some(cage(points, counts, indices, uvs, primvars)),
     };
 
     let boundary = vtx_boundary(mesh);
     let sharpness = SharpnessArrays::read(mesh);
 
     let chart = refinable_chart(prim, mesh, uvs.as_ref(), points.len(), indices.len());
+    // The kept `vertex` and `faceVarying` primvars refine with the surface;
+    // a `uniform` one maps each refined face to its cage face's value.
+    let linear = face_varying_linear(mesh);
+    let (extra, extra_of): (Vec<subdiv::PrimvarChannel>, Vec<usize>) = primvars
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let p = p.as_ref()?;
+            let face_varying = match p.interp {
+                PrimvarInterp::Vertex => false,
+                PrimvarInterp::FaceVarying => true,
+                PrimvarInterp::Constant | PrimvarInterp::Uniform => return None,
+            };
+            let channel = subdiv::PrimvarChannel {
+                values: &p.values,
+                indices: p.indices.as_deref(),
+                face_varying,
+                linear,
+            };
+            Some((channel, i))
+        })
+        .unzip();
+    let want_base_face = primvars
+        .iter()
+        .flatten()
+        .any(|p| p.interp == PrimvarInterp::Uniform);
 
     let req = subdiv::SubdivRequest {
         scheme,
@@ -1163,6 +1245,8 @@ pub(super) fn mesh_source(
         corner_sharpnesses: &sharpness.corner_sharpnesses,
         want_face_uvs: want_faces,
         uvs: chart,
+        extra: &extra,
+        want_base_face,
     };
     if per_face
         && let Some(rate) = policy.adaptive
@@ -1180,7 +1264,18 @@ pub(super) fn mesh_source(
                     t.rate_range.0,
                     t.rate_range.1
                 );
-                return Some(MeshSource::tessellated(t, base_face_count));
+                let primvars =
+                    refined_primvars(&primvars, &extra_of, t.extra, t.cage_face.as_deref());
+                return Some(MeshSource::tessellated(
+                    t.points,
+                    t.indices,
+                    t.normals,
+                    t.faces,
+                    t.uvs,
+                    t.face_varying_uvs,
+                    primvars,
+                    base_face_count,
+                ));
             }
             Err(e) => {
                 warning!(
@@ -1189,7 +1284,7 @@ pub(super) fn mesh_source(
                     "Mesh at {}: per-face tessellation failed ({e}) — rendering the base cage",
                     prim.path()
                 );
-                return Some(cage(points, counts, indices, uvs));
+                return Some(cage(points, counts, indices, uvs, primvars));
             }
         }
     }
@@ -1201,7 +1296,22 @@ pub(super) fn mesh_source(
                 base_face_count,
                 refined.counts.len()
             );
-            Some(MeshSource::subdivided(refined, base_face_count))
+            let primvars = refined_primvars(
+                &primvars,
+                &extra_of,
+                refined.extra,
+                refined.base_face.as_deref(),
+            );
+            Some(MeshSource::subdivided(
+                refined.points,
+                refined.counts,
+                refined.indices,
+                refined.normals,
+                refined.faces,
+                refined.uvs,
+                primvars,
+                base_face_count,
+            ))
         }
         Err(e) => {
             warning!(
@@ -1212,7 +1322,7 @@ pub(super) fn mesh_source(
             );
             // The cage fallback recovers the chart: unrefined triangles
             // index it exactly as authored.
-            Some(cage(points, counts, indices, uvs))
+            Some(cage(points, counts, indices, uvs, primvars))
         }
     }
 }
@@ -1229,16 +1339,26 @@ pub(super) struct MeshNeeds<'a> {
     pub(super) uv_primvar: Option<&'a str>,
     /// The displacement the prim applies, which reads its own chart.
     pub(super) displacement: Option<&'a Displacement>,
+    /// The primvars render vars ask for: read, and refined with the surface,
+    /// whatever the material reads. `None` or empty — nothing read — without
+    /// such a var.
+    pub(super) primvars: Option<&'a PrimvarKeep>,
 }
 
 impl<'a> MeshNeeds<'a> {
-    /// What `material` reads, with the displacement the prim applies.
-    pub(super) fn of(material: &'a dyn Material, displacement: Option<&'a Displacement>) -> Self {
+    /// What `material` reads, with the displacement the prim applies and the
+    /// primvars the render keeps.
+    pub(super) fn of(
+        material: &'a dyn Material,
+        displacement: Option<&'a Displacement>,
+        primvars: &'a PrimvarKeep,
+    ) -> Self {
         MeshNeeds {
             faces: material.face_texture().is_some(),
             uvs: material.uses_uv(),
             uv_primvar: material.uv_primvar(),
             displacement,
+            primvars: Some(primvars),
         }
     }
 }
@@ -1369,17 +1489,28 @@ fn refinable_chart<'a>(
 
 impl MeshSource {
     /// A per-face tessellation, all triangles.
-    fn tessellated(t: subdiv::TessellatedMesh, base_face_count: usize) -> Self {
-        let n_tris = t.indices.len() / 3;
+    #[allow(clippy::too_many_arguments)]
+    fn tessellated(
+        points: Vec<Vec3f>,
+        indices: Vec<i32>,
+        normals: Vec<[f32; 3]>,
+        faces: Option<subdiv::TessellatedFaces>,
+        uvs: Option<Vec<[f32; 2]>>,
+        face_varying_uvs: Option<(Vec<[f32; 2]>, Vec<i32>)>,
+        primvars: Vec<Option<PrimvarData>>,
+        base_face_count: usize,
+    ) -> Self {
+        let n_tris = indices.len() / 3;
         MeshSource {
-            points: t.points,
+            points,
             counts: vec![3; n_tris],
-            indices: t.indices,
-            normals: Some(t.normals),
-            subdiv_faces: t.faces.map(RefinedFaces::PerFace),
+            indices,
+            normals: Some(normals),
+            subdiv_faces: faces.map(RefinedFaces::PerFace),
             base_face_count,
             refined: true,
-            uvs: match (t.uvs, t.face_varying_uvs) {
+            primvars,
+            uvs: match (uvs, face_varying_uvs) {
                 (Some(values), _) => Some(UvSource {
                     values,
                     indices: None,
@@ -1396,16 +1527,27 @@ impl MeshSource {
     }
 
     /// A uniform refinement.
-    fn subdivided(refined: subdiv::SubdividedMesh, base_face_count: usize) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn subdivided(
+        points: Vec<Vec3f>,
+        counts: Vec<i32>,
+        indices: Vec<i32>,
+        normals: Vec<[f32; 3]>,
+        faces: Option<subdiv::SubdivFaces>,
+        uvs: Option<subdiv::RefinedUvs>,
+        primvars: Vec<Option<PrimvarData>>,
+        base_face_count: usize,
+    ) -> Self {
         MeshSource {
-            points: refined.points,
-            counts: refined.counts,
-            indices: refined.indices,
-            normals: Some(refined.normals),
-            subdiv_faces: refined.faces.map(RefinedFaces::Uniform),
+            points,
+            counts,
+            indices,
+            normals: Some(normals),
+            subdiv_faces: faces.map(RefinedFaces::Uniform),
             base_face_count,
             refined: true,
-            uvs: refined.uvs.map(|uv| UvSource {
+            primvars,
+            uvs: uvs.map(|uv| UvSource {
                 values: uv.values,
                 indices: uv.indices,
                 face_varying: uv.face_varying,
@@ -1625,6 +1767,302 @@ fn check_face_count(prim: &Prim, n_base_faces: usize, material: &dyn Material) {
     }
 }
 
+/// How a kept primvar is interpolated over a mesh: `varying` reads as
+/// `vertex`, which on a polygon mesh is the same per-point linear blend.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum PrimvarInterp {
+    Constant,
+    Uniform,
+    Vertex,
+    FaceVarying,
+}
+
+/// A primvar a render var keeps, as one mesh authors it (or as its
+/// refinement carries it): values in four lanes, the authored `:indices`
+/// into them, every addressed entry checked in range.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PrimvarData {
+    pub(super) values: Vec<[f32; 4]>,
+    pub(super) indices: Option<Vec<i32>>,
+    pub(super) interp: PrimvarInterp,
+}
+
+impl PrimvarData {
+    /// The value index entry `i` (a face, a point or a face-vertex, by
+    /// interpolation) addresses.
+    fn value_index(&self, i: usize) -> u32 {
+        match &self.indices {
+            Some(idx) => idx[i] as u32,
+            None => i as u32,
+        }
+    }
+}
+
+/// Each kept primvar as `prim` authors it, by keep-set index: `None` for one
+/// it does not author, and, with one warning per var and prim, for one whose
+/// type the var cannot read.
+pub(super) fn mesh_primvars(
+    prim: &Prim,
+    keep: &PrimvarKeep,
+    n_points: usize,
+    n_faces: usize,
+    n_face_vertices: usize,
+) -> Vec<Option<PrimvarData>> {
+    keep.entries
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let read = read_mesh_primvar(prim, k, n_points, n_faces, n_face_vertices);
+            if matches!(read, Read::Unauthored) {
+                keep.report_inherited(prim, i);
+            }
+            match read {
+                Read::Primvar(p) => Some(p),
+                Read::Unauthored | Read::Refused => None,
+            }
+        })
+        .collect()
+}
+
+/// What [`read_mesh_primvar`] found.
+enum Read {
+    Primvar(PrimvarData),
+    /// Not authored on the prim (or authored empty).
+    Unauthored,
+    /// Authored, refused with a warning.
+    Refused,
+}
+
+fn read_mesh_primvar(
+    prim: &Prim,
+    kept: &KeptPrimvar,
+    n_points: usize,
+    n_faces: usize,
+    n_face_vertices: usize,
+) -> Read {
+    let attr_name = format!("primvars:{}", kept.name);
+    let Some(value) = prim_value(prim, &attr_name) else {
+        return Read::Unauthored;
+    };
+    let attr = prim.attribute(&attr_name);
+    let type_name = attr
+        .type_name()
+        .ok()
+        .flatten()
+        .map(|t| t.as_str().to_string())
+        .unwrap_or_default();
+    let refuse = |why: String| -> Read {
+        warning!(
+            AovPrimvarMismatch,
+            at = prim.path(),
+            "{} primvar {:?} as {} component(s), but {} authors it as {type_name} ({why}); \
+             that prim reads the clear value",
+            kept.asking(),
+            kept.name,
+            kept.components,
+            prim.path(),
+        );
+        Read::Refused
+    };
+    if let Some(n) = attr
+        .metadata::<sdf::Value>("elementSize")
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            sdf::Value::Int(n) => Some(n),
+            _ => None,
+        })
+        && n > 1
+    {
+        return refuse(format!(
+            "elementSize {n}: array-valued primvars are not read"
+        ));
+    }
+    let Some(values) = super::strands::decode(value) else {
+        return refuse("no numeric value of one to three components per element".into());
+    };
+    let Some(arity) = values.first().map(|v| v.arity) else {
+        return Read::Unauthored; // authored empty: nothing to read
+    };
+    if arity != kept.components {
+        return refuse(format!("{arity} component(s)"));
+    }
+    let interp = match attr
+        .metadata::<sdf::Value>("interpolation")
+        .ok()
+        .flatten()
+        .and_then(decode_text)
+        .as_deref()
+    {
+        None | Some("constant") => PrimvarInterp::Constant,
+        Some("uniform") => PrimvarInterp::Uniform,
+        Some("vertex" | "varying") => PrimvarInterp::Vertex,
+        Some("faceVarying") => PrimvarInterp::FaceVarying,
+        Some(other) => return refuse(format!("interpolation {other:?}")),
+    };
+    let needed = match interp {
+        PrimvarInterp::Constant => 1,
+        PrimvarInterp::Uniform => n_faces,
+        PrimvarInterp::Vertex => n_points,
+        PrimvarInterp::FaceVarying => n_face_vertices,
+    };
+    let indices = custom_i32_array(prim, &format!("{attr_name}:indices"));
+    let addressed = indices.as_ref().map_or(values.len(), Vec::len);
+    if addressed < needed {
+        return refuse(format!(
+            "{addressed} entries where its {interp:?} interpolation needs {needed}"
+        ));
+    }
+    if let Some(idx) = &indices
+        && idx[..needed]
+            .iter()
+            .any(|&i| i < 0 || i as usize >= values.len())
+    {
+        return refuse("indices out of its values' range".into());
+    }
+    Read::Primvar(PrimvarData {
+        values: values.iter().map(|v| v.v).collect(),
+        indices,
+        interp,
+    })
+}
+
+/// The kept primvars of a refined mesh: each refined `vertex` and
+/// `faceVarying` channel (`refined`, the request's `extra` in order, whose
+/// primvar indices are `extra_of`), each `uniform` one mapped through
+/// `base_face` (per refined face, its cage face), and each `constant` one as
+/// authored.
+fn refined_primvars(
+    authored: &[Option<PrimvarData>],
+    extra_of: &[usize],
+    refined: Vec<subdiv::RefinedChannel>,
+    base_face: Option<&[u32]>,
+) -> Vec<Option<PrimvarData>> {
+    let mut out: Vec<Option<PrimvarData>> = authored
+        .iter()
+        .map(|p| {
+            let p = p.as_ref()?;
+            match p.interp {
+                PrimvarInterp::Constant => Some(p.clone()),
+                PrimvarInterp::Uniform => base_face.map(|base| PrimvarData {
+                    values: p.values.clone(),
+                    indices: Some(
+                        base.iter()
+                            .map(|&f| p.value_index(f as usize) as i32)
+                            .collect(),
+                    ),
+                    interp: PrimvarInterp::Uniform,
+                }),
+                // Replaced below by its refinement.
+                PrimvarInterp::Vertex | PrimvarInterp::FaceVarying => None,
+            }
+        })
+        .collect();
+    for (&i, r) in extra_of.iter().zip(refined) {
+        out[i] = Some(PrimvarData {
+            interp: if r.face_varying {
+                PrimvarInterp::FaceVarying
+            } else {
+                PrimvarInterp::Vertex
+            },
+            values: r.values,
+            indices: r.indices,
+        });
+    }
+    out
+}
+
+/// Calls `f(face, face_vertex_offset, k, [i0, i1, i2])` for every triangle
+/// the fan triangulation of the faces emits, skipping exactly what
+/// [`triangulate`] skips: the one walk both tables are built from, so they
+/// index the same triangles.
+fn for_each_fan_triangle(
+    counts: &[i32],
+    indices: &[i32],
+    n_verts: usize,
+    mut f: impl FnMut(usize, usize, usize, [u32; 3]),
+) {
+    let mut offset = 0usize;
+    for (face, &fc) in counts.iter().enumerate() {
+        let fc = fc as usize;
+        if fc < 3 || offset + fc > indices.len() {
+            offset += fc;
+            continue;
+        }
+        for k in 1..(fc - 1) {
+            let i0 = indices[offset];
+            let i1 = indices[offset + k];
+            let i2 = indices[offset + k + 1];
+            if i0 < 0 || i1 < 0 || i2 < 0 {
+                continue;
+            }
+            let (i0, i1, i2) = (i0 as u32, i1 as u32, i2 as u32);
+            if i0 as usize >= n_verts || i1 as usize >= n_verts || i2 as usize >= n_verts {
+                continue;
+            }
+            f(face, offset, k, [i0, i1, i2]);
+        }
+        offset += fc;
+    }
+}
+
+/// The kept primvars per triangle of the fan triangulation, or `None` when
+/// the mesh authors none of them (no primvar var, or none on this prim).
+fn primvar_table(
+    counts: &[i32],
+    indices: &[i32],
+    n_verts: usize,
+    primvars: &[Option<PrimvarData>],
+) -> Option<PrimvarTable> {
+    if primvars.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut channels: Vec<Option<PrimvarChannel>> = primvars
+        .iter()
+        .map(|p| {
+            let p = p.as_ref()?;
+            Some(match p.interp {
+                PrimvarInterp::Constant => {
+                    PrimvarChannel::Constant(p.values[p.value_index(0) as usize])
+                }
+                PrimvarInterp::Uniform => PrimvarChannel::PerTriangle {
+                    values: p.values.clone(),
+                    of: Vec::new(),
+                },
+                PrimvarInterp::Vertex | PrimvarInterp::FaceVarying => PrimvarChannel::Corners {
+                    values: p.values.clone(),
+                    corners: Vec::new(),
+                },
+            })
+        })
+        .collect();
+    for_each_fan_triangle(counts, indices, n_verts, |face, offset, k, [i0, i1, i2]| {
+        for (c, p) in channels.iter_mut().zip(primvars) {
+            let (Some(c), Some(p)) = (c, p) else {
+                continue;
+            };
+            match c {
+                PrimvarChannel::Constant(_) => {}
+                PrimvarChannel::PerTriangle { of, .. } => of.push(p.value_index(face)),
+                PrimvarChannel::Corners { corners, .. } => corners.push(match p.interp {
+                    PrimvarInterp::FaceVarying => [
+                        p.value_index(offset),
+                        p.value_index(offset + k),
+                        p.value_index(offset + k + 1),
+                    ],
+                    _ => [
+                        p.value_index(i0 as usize),
+                        p.value_index(i1 as usize),
+                        p.value_index(i2 as usize),
+                    ],
+                }),
+            }
+        }
+    });
+    let table = PrimvarTable { channels };
+    (!table.is_empty()).then_some(table)
+}
+
 /// The triangle list, plus the per-face and per-triangle-UV side tables
 /// when the material asked for them.
 type Triangulated = (Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>);
@@ -1653,55 +2091,37 @@ fn triangulate(
     // source cannot index (`UvSource::at`'s answer), so a corner is an index
     // and never a copied value.
     let fallback = uv_src.map_or(0, |src| src.values.len() as u32);
-    let mut offset = 0usize;
-    for (face, &fc) in counts.iter().enumerate() {
-        let fc = fc as usize;
-        if fc < 3 || offset + fc > indices.len() {
-            offset += fc;
-            continue;
+    for_each_fan_triangle(counts, indices, n_verts, |face, offset, k, [i0, i1, i2]| {
+        let fc = counts[face] as usize;
+        tris.push([i0, i1, i2]);
+        // Pushed in the same statement sequence as the triangle, so the
+        // walk's skip paths cannot desynchronise the tables from it — the
+        // same discipline `faces`/`slices` rely on.
+        if let Some(src) = uv_src {
+            // A faceVarying chart is indexed by the *face-vertex* slot,
+            // which is why the fan's offsets are carried through rather
+            // than just the point indices: two faces meeting at a seam
+            // share `i0` but not its texture coordinate.
+            corners.push([
+                src.index_at(offset, i0 as usize).unwrap_or(fallback),
+                src.index_at(offset + k, i1 as usize).unwrap_or(fallback),
+                src.index_at(offset + k + 1, i2 as usize)
+                    .unwrap_or(fallback),
+            ]);
         }
-        for k in 1..(fc - 1) {
-            let i0 = indices[offset];
-            let i1 = indices[offset + k];
-            let i2 = indices[offset + k + 1];
-            if i0 < 0 || i1 < 0 || i2 < 0 {
-                continue;
-            }
-            let (i0, i1, i2) = (i0 as u32, i1 as u32, i2 as u32);
-            if i0 as usize >= n_verts || i1 as usize >= n_verts || i2 as usize >= n_verts {
-                continue;
-            }
-            tris.push([i0, i1, i2]);
-            // Pushed in the same statement sequence as the triangle, so the
-            // skip paths above cannot desynchronise the tables from it —
-            // the same discipline `faces`/`slices` rely on.
-            if let Some(src) = uv_src {
-                // A faceVarying chart is indexed by the *face-vertex* slot,
-                // which is why the fan's offsets are carried through rather
-                // than just the point indices: two faces meeting at a seam
-                // share `i0` but not its texture coordinate.
-                corners.push([
-                    src.index_at(offset, i0 as usize).unwrap_or(fallback),
-                    src.index_at(offset + k, i1 as usize).unwrap_or(fallback),
-                    src.index_at(offset + k + 1, i2 as usize)
-                        .unwrap_or(fallback),
-                ]);
-            }
-            if want_faces {
-                faces.push(face as u32);
-                // Ptex defines quad and triangle faces only, so a larger
-                // polygon has no addressable texture — mark it rather than
-                // inventing a parameterisation for it.
-                slices.push(match (fc, k) {
-                    (3, _) => FanSlice::Triangle,
-                    (4, 1) => FanSlice::QuadLower,
-                    (4, 2) => FanSlice::QuadUpper,
-                    _ => FanSlice::Unmappable,
-                });
-            }
+        if want_faces {
+            faces.push(face as u32);
+            // Ptex defines quad and triangle faces only, so a larger
+            // polygon has no addressable texture — mark it rather than
+            // inventing a parameterisation for it.
+            slices.push(match (fc, k) {
+                (3, _) => FanSlice::Triangle,
+                (4, 1) => FanSlice::QuadLower,
+                (4, 2) => FanSlice::QuadUpper,
+                _ => FanSlice::Unmappable,
+            });
         }
-        offset += fc;
-    }
+    });
     if tris.is_empty() {
         return None;
     }
@@ -1943,6 +2363,8 @@ mod face_table_tests {
             corner_sharpnesses: &[],
             want_face_uvs: true,
             uvs: None,
+            extra: &[],
+            want_base_face: false,
         };
         // Rates 1 to 6, varying by edge.
         let segment =
@@ -2008,6 +2430,8 @@ mod face_table_tests {
             corner_sharpnesses: &[],
             want_face_uvs: true,
             uvs: None,
+            extra: &[],
+            want_base_face: false,
         };
         let refined = subdiv::subdivide(&points, &counts, &indices, &req).unwrap();
         let sub = refined.faces.as_ref().unwrap();
@@ -2281,6 +2705,7 @@ mod subdiv_policy_tests {
                     uvs: false,
                     uv_primvar: None,
                     displacement: Some(&d),
+                    ..MeshNeeds::default()
                 },
                 &mut policy,
                 MeshPlace::World(&eye),
@@ -2397,6 +2822,7 @@ mod displacement_tests {
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(d),
+                ..MeshNeeds::default()
             },
             &mut arena.subdiv,
             MeshPlace::World(&eye),
@@ -2611,6 +3037,7 @@ def Mesh "G"
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(&d),
+                ..MeshNeeds::default()
             },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
@@ -2664,6 +3091,7 @@ def Mesh "T"
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(&d),
+                ..MeshNeeds::default()
             },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
@@ -2690,6 +3118,7 @@ def Mesh "T"
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(&uv),
+                ..MeshNeeds::default()
             },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
