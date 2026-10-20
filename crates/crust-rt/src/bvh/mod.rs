@@ -11,11 +11,13 @@
 //! split wins. A primitive can therefore appear in several leaves, while
 //! the primitives themselves are stored exactly once.
 //!
-//! The binary tree is then collapsed into 4-wide SoA nodes whose slab
-//! tests run on `Vec4` lanes, with the lane verdicts extracted as a bitmask
-//! rather than read back one at a time. (With the nightly-only `bvh8`
-//! feature the nodes are 8 wide on `std::simd::f32x8` instead — see
-//! `lanes8.rs`; everything below is written against [`LANES`].) Each leaf's
+//! The binary tree is then collapsed into wide SoA nodes whose slab tests
+//! run on `Vec4` lanes, with the lane verdicts extracted as a bitmask rather
+//! than read back one at a time. The width is chosen per tree
+//! ([`NodeWidth`]): 4 lanes for a tree that fits the cache, 8 (two `Vec4`
+//! halves, or one `std::simd::f32x8` under the nightly-only `bvh8` feature)
+//! for one that does not — see `lanes8.rs`; everything below is written
+//! against the [`Width`] trait. Each leaf's
 //! payload lands in the separate `leaves` table — which keeps [`WideNode`] at two cache lines —
 //! and its triangles are packed into 4-wide [`Tri4`] packets so a leaf
 //! intersects four triangles per vector round; everything else (spheres,
@@ -63,14 +65,81 @@ macro_rules! tstat {
 
 mod build;
 mod collapse;
-#[cfg(not(feature = "bvh8"))]
 mod lanes4;
-#[cfg(feature = "bvh8")]
 mod lanes8;
-#[cfg(not(feature = "bvh8"))]
-use lanes4::{LANES, Lanes, RaySlab, splat};
-#[cfg(feature = "bvh8")]
-use lanes8::{LANES, Lanes, RaySlab, splat};
+use lanes4::W4;
+use lanes8::W8;
+
+/// A node width: how many children a [`WideNode`] tests per round, and the
+/// lane types that test runs on. [`W4`] and [`W8`] are the two; the BVH is
+/// compiled for both and each tree picks one at commit ([`NodeWidth`]).
+///
+/// The array-shaped associated types stand in for `[_; LANES]`, which a
+/// generic struct cannot spell on stable.
+pub(super) trait Width: Sized + 'static {
+    /// Children per wide node.
+    const LANES: usize;
+    /// Lane-validity bits of [`WideNode::flags`] (bit `k` = lane `k` holds a
+    /// real child); the leaf bits sit above them, from bit `LANES`.
+    const VALID_MASK: u32 = (1 << Self::LANES) - 1;
+    /// One slab-bound coordinate for every lane of a node.
+    type Lanes: Copy + std::ops::IndexMut<usize, Output = f32>;
+    /// One child index per lane.
+    type Children: Copy
+        + std::fmt::Debug
+        + PartialEq
+        + AsRef<[u32]>
+        + AsMut<[u32]>
+        + std::ops::IndexMut<usize, Output = u32>;
+    /// Each lane's entry distance, as the slab test spills it.
+    type Dist: std::ops::Index<usize, Output = f32>;
+    /// Scratch for sorting a node's hit lanes.
+    type Order: AsMut<[(f32, usize)]>;
+    /// The ray, pre-broadcast into lanes once per traversal.
+    type RaySlab;
+
+    fn splat(v: f32) -> Self::Lanes;
+    fn children(fill: u32) -> Self::Children;
+    fn order() -> Self::Order;
+    fn ray_slab(ray: &Ray, t_min: f32) -> Self::RaySlab;
+    /// Every child box of `node` against the ray at once: bit `l` of the
+    /// mask is set iff lane `l` holds a real child whose box the ray crosses
+    /// in `(t_min, t_max)`, beside each lane's entry distance.
+    fn slab(rs: &Self::RaySlab, node: &WideNode<Self>, t_max: f32) -> (u32, Self::Dist);
+}
+
+/// Which node width a tree is collapsed into — see
+/// [`crate::NodeWidth`], whose `Auto` resolves here by tree size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeWidth {
+    Four,
+    Eight,
+}
+
+/// The primitive count from which [`crate::NodeWidth::Auto`] collapses a
+/// tree 8 wide. Below it the tree fits the cache and the 4-wide node's
+/// cheaper test wins; above it node fetches dominate and the 8-wide node,
+/// fetched less often, does.
+///
+/// Measured with `ray_throughput --large` on a 33 MiB L3 (`docs/simd.md`,
+/// "BVH8 per tree"): a 250 k-triangle soup (~35 MiB of kernel, about the
+/// cache) still traces 6-10% faster 4 wide, a 500 k one 13-19% faster 8
+/// wide, and the gain holds to 4 M. 2^18 primitives is about 35 MiB of a
+/// triangle tree. A larger last-level cache moves the crossover up; the
+/// cost of being early is the few percent the 250 k soup shows.
+pub(crate) const AUTO_EIGHT_FROM: usize = 1 << 18;
+
+impl NodeWidth {
+    /// The width [`crate::NodeWidth::Auto`] picks for a tree of
+    /// `primitives`.
+    pub(crate) fn auto(primitives: usize) -> Self {
+        if primitives >= AUTO_EIGHT_FROM {
+            NodeWidth::Eight
+        } else {
+            NodeWidth::Four
+        }
+    }
+}
 
 /// Leaves are forced at this depth so the traversal stack can never
 /// overflow; SAH partitions are otherwise free to be arbitrarily uneven.
@@ -101,7 +170,7 @@ const SBVH_ALPHA: f32 = 1e-5;
 /// references for negligible traversal gain.
 const SBVH_MAX_DEPTH: usize = 32;
 
-/// Binary build node — an intermediate: the finished tree is the 4-wide
+/// Binary build node — an intermediate: the finished tree is the
 /// [`WideNode`] array produced by collapsing these.
 ///
 /// 32 bytes: the bounds are stored unpadded. As two `Vec3A`s they made
@@ -138,30 +207,25 @@ impl Node {
 /// Marks an unused lane of a [`WideNode`].
 const EMPTY_LANE: u32 = u32::MAX;
 
-/// Lane-validity bits of [`WideNode::flags`] (bit `k` = lane `k` holds a
-/// real child) and leaf bits (bit `LANES + k` = that child is a leaf).
-const VALID_MASK: u32 = (1 << LANES) - 1;
-const LEAF_SHIFT: u32 = LANES as u32;
-
-/// A [`LANES`]-wide BVH node in SoA layout: lane `k` of each vector holds
+/// A [`Width::LANES`]-wide BVH node in SoA layout: lane `k` of each vector holds
 /// child `k`'s slab bounds, so one round of vector min/max tests every child
 /// box against the ray at once (Embree's BVH4 / BVH8 idea).
 ///
-/// At the default width exactly 128 bytes (two cache lines): six `Vec4`s,
-/// one child index per lane, and the flag nibbles; 256 bytes under `bvh8`.
+/// At 4 lanes exactly 128 bytes (two cache lines): six `Vec4`s, one child
+/// index per lane, and the flag nibbles; 256 bytes (four) at 8 lanes.
 /// The leaf payload — how many primitives, and where their SIMD packets
 /// live — sits in the separate [`Leaf`] table
 /// rather than in the node, which is what keeps the node this small.
-struct WideNode {
-    bmin_x: Lanes,
-    bmin_y: Lanes,
-    bmin_z: Lanes,
-    bmax_x: Lanes,
-    bmax_y: Lanes,
-    bmax_z: Lanes,
+pub(super) struct WideNode<W: Width> {
+    bmin_x: W::Lanes,
+    bmin_y: W::Lanes,
+    bmin_z: W::Lanes,
+    bmax_x: W::Lanes,
+    bmax_y: W::Lanes,
+    bmax_z: W::Lanes,
     /// Leaf lane: index into the BVH's `leaves`. Internal lane: index into
     /// `wide`. Unused lane: [`EMPTY_LANE`].
-    child: [u32; LANES],
+    child: W::Children,
     /// Bits `0..LANES`: lane `k` holds a real child. Bits `LANES..2·LANES`:
     /// that child is a leaf.
     ///
@@ -185,9 +249,9 @@ struct Leaf {
     idx_count: u32,
 }
 
-impl WideNode {
+impl<W: Width> WideNode<W> {
     fn empty() -> Self {
-        let inf = splat(f32::INFINITY);
+        let inf = W::splat(f32::INFINITY);
         WideNode {
             bmin_x: inf,
             bmin_y: inf,
@@ -195,7 +259,7 @@ impl WideNode {
             bmax_x: inf,
             bmax_y: inf,
             bmax_z: inf,
-            child: [EMPTY_LANE; LANES],
+            child: W::children(EMPTY_LANE),
             flags: 0,
         }
     }
@@ -212,11 +276,11 @@ impl WideNode {
 
     #[inline]
     fn is_leaf(&self, lane: usize) -> bool {
-        self.flags & (1 << (LEAF_SHIFT + lane as u32)) != 0
+        self.flags & (1 << (W::LANES + lane)) != 0
     }
 
     fn mark_leaf(&mut self, lane: usize) {
-        self.flags |= 1 << (LEAF_SHIFT + lane as u32);
+        self.flags |= 1 << (W::LANES + lane);
     }
 }
 
@@ -381,7 +445,7 @@ impl Primitives {
 /// a box can neither grow nor hold capacity slack the memory footprint would
 /// have to count.
 pub(crate) struct Bvh {
-    wide: Box<[WideNode]>,
+    wide: Tree,
     /// Leaf payloads, indexed by a leaf lane's `child`.
     leaves: Box<[Leaf]>,
     /// 4-wide triangle packets, grouped per leaf; one of the two tables
@@ -412,6 +476,23 @@ pub(crate) struct Bvh {
     n_degenerate: usize,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
+}
+
+/// The wide nodes of a finished tree, at the width it was collapsed into.
+/// The match on it is once per query, not per node: each arm runs a
+/// traversal monomorphised for its width.
+enum Tree {
+    Four(Box<[WideNode<W4>]>),
+    Eight(Box<[WideNode<W8>]>),
+}
+
+impl Tree {
+    fn bytes(&self) -> usize {
+        match self {
+            Tree::Four(n) => std::mem::size_of_val(&**n),
+            Tree::Eight(n) => std::mem::size_of_val(&**n),
+        }
+    }
 }
 
 /// One build reference: conservative bounds of (a fragment of) primitive
@@ -475,7 +556,14 @@ impl Candidate {
 }
 
 impl Bvh {
+    /// A tree at the width [`NodeWidth::auto`] picks for its size.
+    #[cfg(test)]
     pub(crate) fn new(input: Primitives, layout: Layout) -> Self {
+        let width = NodeWidth::auto(input.len());
+        Self::with_width(input, layout, width)
+    }
+
+    pub(crate) fn with_width(input: Primitives, layout: Layout, width: NodeWidth) -> Self {
         // One reference per primitive, in input order (the order decides
         // ties, so it is part of the build's determinism); degenerate
         // records get none.
@@ -483,18 +571,33 @@ impl Bvh {
             .filter_map(|i| input.bbox(i).map(|bbox| PrimRef::new(bbox, i)))
             .collect();
 
-        let (wide, collected, root_bbox) = if refs.is_empty() {
-            (Vec::new(), LeafData::default(), None)
-        } else {
+        // The binary tree is the same at either width; only the collapse
+        // differs.
+        let subtree = (!refs.is_empty()).then(|| {
             let root_bbox = union_all(&refs);
-            let subtree = build_subtree(&input, refs, 0, surface_area(&root_bbox));
-            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &input, layout);
-            (wide, collected, Some(root_bbox))
+            (
+                build_subtree(&input, refs, 0, surface_area(&root_bbox)),
+                root_bbox,
+            )
+        });
+        let root_bbox = subtree.as_ref().map(|(_, b)| *b);
+        let (wide, collected) = match (&subtree, width) {
+            (None, NodeWidth::Four) => (Tree::Four(Box::new([])), LeafData::default()),
+            (None, NodeWidth::Eight) => (Tree::Eight(Box::new([])), LeafData::default()),
+            (Some((t, _)), NodeWidth::Four) => {
+                let (w, c) = collapse::<W4>(&t.nodes, &t.indices, &input, layout);
+                (Tree::Four(w.into_boxed_slice()), c)
+            }
+            (Some((t, _)), NodeWidth::Eight) => {
+                let (w, c) = collapse::<W8>(&t.nodes, &t.indices, &input, layout);
+                (Tree::Eight(w.into_boxed_slice()), c)
+            }
         };
+        drop(subtree);
 
         let n_degenerate = input.tris.iter().filter(|r| r.is_degenerate()).count();
         Bvh {
-            wide: wide.into_boxed_slice(),
+            wide,
             leaves: collected.leaves.into_boxed_slice(),
             packets: collected.packets.into_boxed_slice(),
             packets_i: collected.packets_i.into_boxed_slice(),
@@ -770,7 +873,7 @@ impl Bvh {
     ) {
         use std::mem::size_of_val;
         acc.prim_nodes += size_of_val(&*self.prims);
-        acc.bvh_nodes += size_of_val(&*self.wide);
+        acc.bvh_nodes += self.wide.bytes();
         acc.leaves += size_of_val(&*self.leaves);
         acc.packets += size_of_val(&*self.packets);
         acc.packets_indexed += size_of_val(&*self.packets_i);
@@ -883,7 +986,22 @@ impl Bvh {
 
     /// Closest hit in `(t_min, t_max)`.
     pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
-        if self.wide.is_empty() {
+        match &self.wide {
+            Tree::Four(nodes) => self.hit_in(nodes, ray, t_min, t_max),
+            Tree::Eight(nodes) => self.hit_in(nodes, ray, t_min, t_max),
+        }
+    }
+
+    /// [`Bvh::hit`] over one width's nodes.
+    #[inline]
+    fn hit_in<W: Width>(
+        &self,
+        wide: &[WideNode<W>],
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+    ) -> Option<PrimHit> {
+        if wide.is_empty() {
             return None;
         }
         tstat!(QUERIES, 1);
@@ -893,15 +1011,15 @@ impl Bvh {
         // Splat the ray into SoA lanes once for the whole traversal
         // instead of once per visited node, and likewise derive the Woop
         // shear once instead of once per triangle.
-        let rs = RaySlab::new(ray, t_min);
+        let rs = W::ray_slab(ray, t_min);
         let shear = self.shear(ray);
 
         let mut stack = TraversalStack::new(0);
 
         while let Some(node_idx) = stack.pop() {
             tstat!(NODES_VISITED, 1);
-            let node = &self.wide[node_idx as usize];
-            let (mut mask, tn) = rs.slab(node, closest);
+            let node = &wide[node_idx as usize];
+            let (mut mask, tn) = W::slab(&rs, node, closest);
             if mask == 0 {
                 continue;
             }
@@ -909,7 +1027,8 @@ impl Bvh {
             // Hit lanes, insertion-sorted near-to-far (≤ LANES entries).
             // The distances are read from one spilled copy of the vector
             // rather than re-extracting a lane at a time.
-            let mut order = [(0f32, 0usize); LANES];
+            let mut order = W::order();
+            let order = order.as_mut();
             let mut n_hit = 0;
             while mask != 0 {
                 let l = mask.trailing_zeros() as usize;
@@ -1059,17 +1178,32 @@ impl Bvh {
     /// Early-exit occlusion traversal: no ordering, returns on the first
     /// confirmed hit anywhere in `(t_min, t_max)`.
     pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        if self.wide.is_empty() {
+        match &self.wide {
+            Tree::Four(nodes) => self.hit_any_in(nodes, ray, t_min, t_max),
+            Tree::Eight(nodes) => self.hit_any_in(nodes, ray, t_min, t_max),
+        }
+    }
+
+    /// [`Bvh::hit_any`] over one width's nodes.
+    #[inline]
+    fn hit_any_in<W: Width>(
+        &self,
+        wide: &[WideNode<W>],
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        if wide.is_empty() {
             return false;
         }
-        let rs = RaySlab::new(ray, t_min);
+        let rs = W::ray_slab(ray, t_min);
         let shear = self.shear(ray);
 
         let mut stack = TraversalStack::new(0);
 
         while let Some(node_idx) = stack.pop() {
-            let node = &self.wide[node_idx as usize];
-            let (mut mask, _) = rs.slab(node, t_max);
+            let node = &wide[node_idx as usize];
+            let (mut mask, _) = W::slab(&rs, node, t_max);
             while mask != 0 {
                 let l = mask.trailing_zeros() as usize;
                 mask &= mask - 1;

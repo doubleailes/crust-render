@@ -381,10 +381,9 @@ fn hit_any_matches_hit() {
 /// was moved into a side table precisely so the node still fits two
 /// cache lines. Growing it would silently cost traversal bandwidth.
 #[test]
-#[cfg(not(feature = "bvh8"))]
 fn wide_node_is_two_cache_lines() {
-    assert_eq!(std::mem::size_of::<WideNode>(), 128);
-    assert_eq!(std::mem::align_of::<WideNode>(), 16);
+    assert_eq!(std::mem::size_of::<WideNode<W4>>(), 128);
+    assert_eq!(std::mem::align_of::<WideNode<W4>>(), 16);
 }
 
 /// A triangle is three vertex indices, two ids and a mask — 24 bytes — with
@@ -431,12 +430,29 @@ fn a_primitive_hit_is_64_bytes() {
     assert_eq!(std::mem::size_of::<crate::prim::PrimHit>(), 64);
 }
 
-/// The `bvh8` node: six `f32x8`s and eight child indices, four cache lines.
+/// The 8-wide node: six 8-lane vectors and eight child indices, four cache
+/// lines — two `Vec4` halves on stable, one `f32x8` under `bvh8`, aligned
+/// alike.
 #[test]
-#[cfg(feature = "bvh8")]
 fn wide8_node_is_four_cache_lines() {
-    assert_eq!(std::mem::size_of::<WideNode>(), 256);
-    assert_eq!(std::mem::align_of::<WideNode>(), 32);
+    assert_eq!(std::mem::size_of::<WideNode<W8>>(), 256);
+    assert_eq!(std::mem::align_of::<WideNode<W8>>(), 32);
+}
+
+/// The 4-wide nodes of a tree built at that width.
+fn nodes4(bvh: &Bvh) -> &[WideNode<W4>] {
+    match &bvh.wide {
+        Tree::Four(n) => n,
+        Tree::Eight(_) => panic!("built 8 wide"),
+    }
+}
+
+/// The 8-wide nodes of a tree built at that width.
+fn nodes8(bvh: &Bvh) -> &[WideNode<W8>] {
+    match &bvh.wide {
+        Tree::Eight(n) => n,
+        Tree::Four(_) => panic!("built 4 wide"),
+    }
 }
 
 /// Parallel subtree builds must not change the tree: the same input
@@ -445,7 +461,8 @@ fn wide8_node_is_four_cache_lines() {
 fn build_is_deterministic() {
     let a = Bvh::new(sphere_grid(6), Layout::Gathered);
     let b = Bvh::new(sphere_grid(6), Layout::Gathered);
-    assert_eq!(a.wide.len(), b.wide.len());
+    let (wa, wb) = (nodes4(&a), nodes4(&b));
+    assert_eq!(wa.len(), wb.len());
     assert_eq!(a.indices, b.indices);
     assert_eq!(a.packets.len(), b.packets.len());
     assert_eq!(a.leaves.len(), b.leaves.len());
@@ -453,7 +470,7 @@ fn build_is_deterministic() {
         assert_eq!((x.pkt_first, x.pkt_count), (y.pkt_first, y.pkt_count));
         assert_eq!((x.idx_first, x.idx_count), (y.idx_first, y.idx_count));
     }
-    for (x, y) in a.wide.iter().zip(&b.wide) {
+    for (x, y) in wa.iter().zip(wb) {
         assert_eq!(x.child, y.child);
         assert_eq!(x.flags, y.flags);
         assert_eq!(x.bmin_x, y.bmin_x);
@@ -462,25 +479,128 @@ fn build_is_deterministic() {
 }
 
 /// The collapse must actually widen: a big tree ends up with far
-/// fewer wide nodes than a binary tree would need.
+/// fewer wide nodes than a binary tree would need, and an 8-wide one with
+/// fewer still.
 #[test]
 fn collapse_widens_the_tree() {
-    let bvh = Bvh::new(sphere_grid(6), Layout::Gathered); // 216 prims
-    let n_leaf_slots: usize = bvh
-        .wide
-        .iter()
-        .map(|w| (0..LANES).filter(|&l| w.is_leaf(l)).count())
-        .sum();
+    fn leaf_slots<W: Width>(wide: &[WideNode<W>]) -> usize {
+        wide.iter()
+            .map(|w| (0..W::LANES).filter(|&l| w.is_leaf(l)).count())
+            .sum()
+    }
+    let four = Bvh::with_width(triangle_field(), Layout::Gathered, NodeWidth::Four);
+    let eight = Bvh::with_width(triangle_field(), Layout::Gathered, NodeWidth::Eight);
+    let (w4, w8) = (nodes4(&four), nodes8(&eight));
+    let n_leaf_slots = leaf_slots(w4);
     assert!(n_leaf_slots > 0);
-    assert_eq!(n_leaf_slots, bvh.leaves.len());
+    assert_eq!(n_leaf_slots, four.leaves.len());
+    // The binary tree is shared, so both widths reach the same leaves.
+    assert_eq!(leaf_slots(w8), n_leaf_slots);
+    assert_eq!(eight.leaves.len(), four.leaves.len());
     // A binary tree over L leaves has L-1 internal nodes; BVH4 should
-    // need roughly a third of that.
+    // need roughly a third of that, BVH8 roughly a seventh.
     assert!(
-        bvh.wide.len() * 2 < n_leaf_slots.max(2) * 2 - 1,
+        w4.len() * 2 < n_leaf_slots.max(2) * 2 - 1,
         "{} wide nodes for {} leaves",
-        bvh.wide.len(),
+        w4.len(),
         n_leaf_slots
     );
+    assert!(
+        w8.len() * 3 < w4.len() * 2,
+        "{} 8-wide nodes against {} 4-wide",
+        w8.len(),
+        w4.len()
+    );
+}
+
+/// 4 096 small triangles scattered through a 40-unit cube — enough for an
+/// 8-wide tree several levels deep — on a fixed lattice walk, plus every
+/// sphere of a grid so leaves mix packets and scalar primitives.
+fn triangle_field() -> Primitives {
+    let mut out = sphere_grid(4);
+    let mut k = 0u32;
+    for i in 0..16 {
+        for j in 0..16 {
+            for l in 0..16 {
+                let c = Vec3A::new(i as f32, j as f32, l as f32) * 2.5 - Vec3A::splat(20.0);
+                let w = Vec3A::new((k % 7) as f32, (k % 5) as f32, (k % 3) as f32) * 0.1;
+                out.push_triangle(
+                    [
+                        c,
+                        c + Vec3A::new(1.2, 0.1, 0.3) + w,
+                        c + Vec3A::new(0.2, 1.1, -0.4) - w,
+                    ],
+                    1 + k / 512,
+                    k,
+                    MASK_ALL,
+                );
+                k += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The width is scheduling only: the same primitives at 4 and 8 lanes give
+/// bitwise-identical closest hits and the same occlusion verdicts, for
+/// every query of a sweep that grazes edges and stops at every `t_max`.
+///
+/// "Only" up to exact ties: two *different* primitives hit at the same `t`
+/// (coplanar contact faces, which these scenes do not have) go to the leaf
+/// visited first, and the widths order leaves differently. Occlusion has no
+/// such case — any hit is the answer.
+#[test]
+fn eight_wide_hits_are_bitwise_the_four_wide_hits() {
+    let scenes: [fn() -> Primitives; 3] =
+        [triangle_field, || sphere_grid(6), || diagonal_shards(256)];
+    for scene in scenes {
+        let four = Bvh::with_width(scene(), Layout::Gathered, NodeWidth::Four);
+        let eight = Bvh::with_width(scene(), Layout::Gathered, NodeWidth::Eight);
+        nodes8(&eight);
+        let b = four.bounds().expect("bounded");
+        let (lo, ext) = (b.minimum, b.maximum - b.minimum);
+        let mut n = 0;
+        for i in 0..24 {
+            for j in 0..24 {
+                // A lattice over the box's face, 10% past its edges, and
+                // rays from in front of it: straight on, and toward the
+                // mirrored point of the back face (so every ray is skewed
+                // differently).
+                let (fx, fy) = (-0.1 + 1.2 * i as f32 / 23.0, -0.1 + 1.2 * j as f32 / 23.0);
+                let o = lo + ext * Vec3A::new(fx, fy, 0.0) - Vec3A::new(0.0, 0.0, 10.0);
+                let target = lo + ext * Vec3A::new(1.0 - fx, 1.0 - fy, 1.0);
+                for d in [
+                    Vec3A::Z,
+                    (target - o).normalize(),
+                    (target - o + ext * Vec3A::new(0.3, -0.2, 0.0)).normalize(),
+                ] {
+                    let ray = Ray::new(o, d);
+                    for t_max in [f32::INFINITY, 10.0 + 0.5 * ext.z, 10.0] {
+                        let (a, b) = (four.hit(&ray, 0.001, t_max), eight.hit(&ray, 0.001, t_max));
+                        match (a, b) {
+                            (None, None) => {}
+                            (Some(a), Some(b)) => {
+                                n += 1;
+                                assert_eq!(a.t.to_bits(), b.t.to_bits(), "{o:?} {d:?}");
+                                assert_eq!((a.geom_id, a.prim_id), (b.geom_id, b.prim_id));
+                                assert_eq!(a.outward.to_array(), b.outward.to_array());
+                                assert_eq!(
+                                    (a.u.to_bits(), a.v.to_bits()),
+                                    (b.u.to_bits(), b.v.to_bits())
+                                );
+                            }
+                            _ => panic!("hit disagreement for {o:?} {d:?} t_max={t_max}"),
+                        }
+                        assert_eq!(
+                            four.hit_any(&ray, 0.001, t_max),
+                            eight.hit_any(&ray, 0.001, t_max)
+                        );
+                    }
+                }
+            }
+        }
+        assert!(n > 50, "the sweep must actually hit something ({n} hits)");
+    }
 }
 
 /// The finished tree's tables live as long as the scene, and the memory
@@ -500,8 +620,10 @@ fn collapsed_tables_hold_no_spare_capacity() {
         let root = union_all(&refs);
         let subtree = build_subtree(&prims, refs, 0, surface_area(&root));
         let (wide, collected) =
-            collapse(&subtree.nodes, &subtree.indices, &prims, Layout::Gathered);
+            collapse::<W4>(&subtree.nodes, &subtree.indices, &prims, Layout::Gathered);
         assert_eq!(wide.capacity(), wide.len());
+        let (wide8, _) = collapse::<W8>(&subtree.nodes, &subtree.indices, &prims, Layout::Gathered);
+        assert_eq!(wide8.capacity(), wide8.len());
         assert_eq!(collected.leaves.capacity(), collected.leaves.len());
         assert_eq!(collected.packets.capacity(), collected.packets.len());
         assert_eq!(collected.indices.capacity(), collected.indices.len());

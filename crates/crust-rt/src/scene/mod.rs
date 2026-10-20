@@ -47,19 +47,35 @@ pub enum PacketLayout {
     Auto,
 }
 
+/// How many children each node of a committed scene's tree tests per
+/// round — see [`SceneBuilder::commit_with`]. Every width answers every
+/// query with the same bits but one case: two primitives hit at exactly the
+/// same distance (coplanar contact, like an object resting on a floor) go
+/// to whichever leaf is visited first, and the widths visit in different
+/// orders. Otherwise they differ only in speed and memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NodeWidth {
+    /// 4-wide nodes, 128 bytes: the fastest while the tree fits the cache.
+    /// The only width before 8-wide nodes existed.
+    Four,
+    /// 8-wide nodes, 256 bytes: about a third fewer node visits per ray,
+    /// each a dearer test — the trade that wins once every visit is a
+    /// cache miss.
+    Eight,
+    /// Picks per tree by size: `Eight` from a measured primitive count up,
+    /// `Four` below it. Each instanced scene is its own tree and picks for
+    /// itself, so a huge top level over small prototypes gets both.
+    #[default]
+    Auto,
+}
+
 /// What [`SceneBuilder::commit_with`] lets a caller choose about the build.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CommitOptions {
     /// The triangle packet layout.
     pub layout: PacketLayout,
-}
-
-impl Default for CommitOptions {
-    fn default() -> Self {
-        CommitOptions {
-            layout: PacketLayout::Auto,
-        }
-    }
+    /// The node width.
+    pub width: NodeWidth,
 }
 
 /// Exact bytes a committed [`Scene`] holds, by structure — the kernel's
@@ -424,8 +440,13 @@ impl SceneBuilder {
             PacketLayout::Gathered | PacketLayout::Auto => crate::bvh::Layout::Gathered,
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
         };
+        let width = match options.width {
+            NodeWidth::Four => crate::bvh::NodeWidth::Four,
+            NodeWidth::Eight => crate::bvh::NodeWidth::Eight,
+            NodeWidth::Auto => crate::bvh::NodeWidth::auto(sink.input.len()),
+        };
         Scene {
-            bvh: Bvh::new(sink.input, layout),
+            bvh: Bvh::with_width(sink.input, layout, width),
             n_geoms,
             has_motion: sink.has_motion,
             max_hit_id: sink.max_hit_id,

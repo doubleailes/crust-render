@@ -48,8 +48,11 @@ pointer-heavy data structures. Writing each part from scratch keeps the project 
 light and fully readable.
 
 **Trade-off.** SIMD stops at 128 bits (SSE2/NEON width). Wider vectors would need
-`std::simd`, which is nightly-only, or `unsafe` intrinsics. An 8-wide BVH was tried on
-nightly behind the `bvh8` feature. There is no GPU path.
+`std::simd`, which is nightly-only, or `unsafe` intrinsics. Large trees still get 8-wide
+BVH nodes, tested as two 4-wide halves: out of cache the gain is in fetching fewer
+nodes, not in wider arithmetic (see
+[`CRUST_BVH_WIDTH`](@/docs/reference/environment-variables.md#crust-bvh-width)). There
+is no GPU path.
 
 ## An Embree-shaped kernel in its own crate
 
@@ -63,7 +66,8 @@ Inside:
 - triangles use a **watertight** intersection test (Woop et al. 2013), so rays can't slip
   through shared edges;
 - the acceleration structure is an **SBVH** with spatial splits (Stich et al. 2009),
-  collapsed into 4-wide nodes tested four boxes at a time;
+  collapsed into 4-wide nodes tested four boxes at a time, or 8-wide ones for a tree too
+  large for the CPU cache;
 - leaf triangles are packed into 4-wide SIMD packets;
 - the build runs in parallel and is **deterministic**: the same scene always produces the
   same tree.

@@ -24,7 +24,7 @@ opened with — `usd_import::stage_builder()`). Do not add loaders for any other
 |-------|-----------------------------------------------|------|
 | CLI, command cookbook (every probe / A/B recipe), logging, `--stats` / `--profile`, env switches | `cli` | `docs/architecture.md` § Environment switches |
 | integrator, MIS, Russian roulette, media, volumes, guiding, adaptive sampling, pixel filters, openqmc | `rendering` | `docs/light_sampling.md` |
-| `crust-rt`: SBVH → BVH4, watertight `Tri4` packets, instancing, SIMD | `intersection-kernel` | `docs/simd.md`, `docs/embree_comparison.md` |
+| `crust-rt`: SBVH → BVH4 / BVH8 per tree, watertight `Tri4` packets, instancing, SIMD | `intersection-kernel` | `docs/simd.md`, `docs/embree_comparison.md` |
 | `Material` / `resolve` / `ShadingPoint`, OpenPBR, MaterialX (`crust-mtlx`, `crust-jit`), `UsdPreviewSurface` | `materials` | `docs/openpbr_reference_alignment.md`, `docs/shading_performance.md`, `docs/material_fidelity.md` |
 | lights, light selection (`power` / `uniform` / `learned`), UsdLux units, shaping, IES | `lighting` | `docs/light_sampling.md` |
 | UV / UDIM textures, `.tx` streaming, Ptex (preload and streaming), ray-cone filtering | `textures` | `docs/ptex_streaming.md`, `docs/color_management.md` |
@@ -151,6 +151,7 @@ without the other (full list: `docs/architecture.md` § Invariants):
   `C.*[LO]` is pinned bitwise to the
   beauty, and the zero-AOV render to its instruction count (`docs/architecture.md`).
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
+  8-wide ↔ 4-wide BVH nodes (up to exact ties, which go to the leaf visited first);
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; streamed `capped` Ptex ↔
   preloaded Ptex at and below the cap (one `decode_face`, one `reduce_level`); tiles ↔
   scanlines (a render mode is scheduling only); the staged first sweep ↔ one unstaged

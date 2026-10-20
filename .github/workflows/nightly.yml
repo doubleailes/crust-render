@@ -2,7 +2,7 @@ name: Nightly
 
 # The same CI as rust.yml, on nightly Rust, as a separate workflow so it runs
 # in parallel with the stable pipeline and reports as its own set of checks.
-# It exists for two reasons: the nightly-only `bvh8` feature (8-wide BVH
+# It exists for two reasons: the nightly-only `bvh8` feature (the 8-wide BVH
 # nodes on `std::simd`, docs/simd.md "BVH8 on nightly") can only be built
 # here, and a nightly break in the rest of the workspace is worth seeing
 # weeks before it reaches a stable release.
@@ -158,9 +158,9 @@ jobs:
           path: receipt-test.txt
           retention-days: 1
 
-  # What only nightly can build. The kernel is linted and tested with 8-wide
-  # nodes (its tests pin both node layouts, and hit results against a linear
-  # scan), and the renderer is checked with the feature forwarded through
+  # What only nightly can build. The kernel is linted and tested with its
+  # 8-wide nodes on `f32x8` (its tests pin both node layouts, 8-wide hits
+  # against 4-wide ones bit for bit, and hit results against a linear scan), and the renderer is checked with the feature forwarded through
   # crust-core, so the plumbing cannot rot either.
   #
   # At `x86-64-v3` (AVX2 + FMA + BMI), the configuration bvh8 was designed

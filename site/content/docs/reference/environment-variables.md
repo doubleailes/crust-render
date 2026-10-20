@@ -73,6 +73,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_ADAPTIVE_PER_FACE`](#crust-adaptive-per-face) | on | USD import |
 | [`CRUST_ADAPTIVE_FRUSTUM`](#crust-adaptive-frustum) | on | USD import |
 | [`CRUST_TRI_PACKETS`](#crust-tri-packets) | `auto` | ray tracing |
+| [`CRUST_BVH_WIDTH`](#crust-bvh-width) | `auto` | ray tracing |
 | [`CRUST_MTLX_OPT`](#crust-mtlx-opt) | on | shading |
 | [`CRUST_SHADER_JIT`](#crust-shader-jit) | on | shading |
 | [`CRUST_RAY_CONES`](#crust-ray-cones) | on | textures |
@@ -205,6 +206,25 @@ bit-identical results.
 | `indexed` | 92-byte packets of vertex indices. About a quarter less kernel memory per triangle, with 13–30% slower traversal. On the Moana island at subdivision level 1 it saves 8.4 GiB of 36.6 for an 8–9% slower render, and the import gets slightly faster. |
 
 Use `indexed` when a scene doesn't otherwise fit in memory.
+
+### CRUST_BVH_WIDTH
+
+Keyword, default **`auto`**.
+
+How many child boxes each node of the ray tracing kernel's BVH tests at once. Every width
+gives bit-identical results, except where two surfaces are hit at exactly the same
+distance, such as coplanar faces where an object rests on a floor: which one a ray reports
+there can change with the width. Each tree chooses on its own, so an instanced object's
+prototype has its own width, independent of the scene around it.
+
+| value | meaning |
+|-------|---------|
+| `auto` | 8 wide for a tree of 2^18 (262 144) primitives or more, 4 wide below that |
+| `four` (or `4`) | 128-byte nodes testing four boxes. Fastest while a tree fits in the CPU cache. The only width before 8-wide nodes. |
+| `eight` (or `8`) | 256-byte nodes testing eight boxes. About a third fewer node visits per ray: 4–21% faster traversal on trees too large for the cache, a few percent slower on trees that fit. |
+
+The `auto` threshold was measured on a machine with a 33 MiB last-level cache. On a CPU
+with a much larger cache, `four` can be a few percent faster for mid-sized scenes.
 
 ## Shading
 

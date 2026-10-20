@@ -82,8 +82,10 @@ worth re-measuring the day `std::simd` or `wide` is on the table.
 
 That leaves **BVH8 nodes** — 8 child boxes per vector round, and roughly half
 the tree depth — as the one remaining place where 256-bit vectors could pay.
-It now exists as a nightly-only experiment, and **it measured slower**; see
-"BVH8 on nightly" below.
+It was first a nightly-only experiment that **measured slower in cache and
+faster out of it** ("BVH8 on nightly" below), and is now compiled into the
+stable build and **chosen per tree by size** ("BVH8 per tree" below): 8 wide,
+as two `Vec4` halves, only for a tree too large for the cache.
 
 ## The two kinds of SIMD in a ray tracer
 
@@ -432,8 +434,9 @@ unaffected, since only unused capacity changed.
 for a tree too large for cache (a baked top level, the island's
 `osOcean` / `isCoral`), 4-wide for the small prototypes it instances. A
 compile-time feature cannot do that; it needs both widths compiled in and
-picked at `commit()`. That is a refactor (the traversal generic over
-`LANES` rather than selected by `cfg`), not a toolchain question, and its
+picked at `commit()` (since done, on stable: "BVH8 per tree" below). That
+is a refactor (the traversal generic over `LANES` rather than selected by
+`cfg`), not a toolchain question, and its
 payoff on the island is unmeasured: the island mixes both regimes, and
 where it lands depends on how its ray time splits between them. Until
 then, the toolchain verdict stands: not worth a nightly toolchain. The feature stays as the
@@ -452,12 +455,96 @@ is two SSE halves. It checks first that the runner implements v3, rather than
 dying on `SIGILL`. The other nightly legs, the stable pipeline and every
 shipped binary stay baseline x86-64.
 
+## BVH8 per tree (stable)
+
+The verdict above asked for both widths compiled in and picked at `commit()`.
+That is what the kernel does now, on stable and in safe code:
+
+- **Generic over the width.** `WideNode<W>`, `collapse::<W>` and the two
+  traversals are generic over a `Width` trait (`bvh/mod.rs`), with `W4`
+  (`bvh/lanes4.rs`, one `Vec4` per coordinate) and `W8` (`bvh/lanes8.rs`)
+  as its two instances. A finished tree holds its nodes in `enum Tree {
+  Four, Eight }`, and `Bvh::hit` / `hit_any` match on it once per query, not
+  per node. The binary SBVH, the leaves and the `Tri4` packets are the same
+  at either width; only the collapse differs.
+- **8 wide on stable is two `Vec4` halves.** `W8::slab` runs the 4-wide slab
+  test twice over one 256-byte node (32-byte aligned, as an `f32x8` would
+  be) and joins the two verdict nibbles. That is the wide *tree* without
+  wide *instructions*, and out of cache the tree is what pays: the saving is
+  node fetches, not arithmetic. The nightly `bvh8` feature now only swaps
+  those halves for one `std::simd::f32x8`; it no longer changes which trees
+  are 8 wide.
+- **Chosen per tree** (`crust_rt::NodeWidth`, `CommitOptions::width`):
+  `Four`, `Eight`, or `Auto` (the default), which collapses 8 wide from
+  `AUTO_EIGHT_FROM` = 2^18 primitives. Each instanced scene is its own tree
+  and picks for itself, so a huge top level over small prototypes gets an
+  8-wide top and 4-wide prototypes — the split the instance-field numbers
+  above asked for. `CRUST_BVH_WIDTH=four|eight|auto` forces it in the
+  renderer; `four` is the behaviour before.
+- **Bit-identical but for exact ties.** `eight_wide_hits_are_bitwise_the_four_wide_hits`
+  sweeps three scenes (packets and scalar primitives mixed, SBVH shards,
+  spheres) at three `t_max`s and compares `t`, ids, barycentrics and normals
+  by bit, and occlusion verdicts; 2.2 M random primary and secondary rays
+  over `ray_throughput`'s scenes agree to the bit as well. The one case that
+  does not: two *different* primitives hit at exactly the same `t`. The
+  closest-hit traversal keeps the first of equal hits, so a tie goes to the
+  leaf visited first, and the widths visit leaves in different orders. It
+  happens where faces are coplanar at a contact: forcing `eight` on
+  `samples/subdivision.usda` (meshes resting on a ground quad),
+  `implicit_shapes.usda` and `hair.usda` changes a handful of pixels at 16
+  spp (trimmed relmse ≤ 5e-7, 0 on `implicit_shapes`), and a debug twin that
+  traced every query both ways found every mismatch at bitwise-equal `t`
+  between the ground and a mesh on it. Either answer is the same point of a
+  degenerate scene; the 4-wide answer was no less arbitrary — the same thing
+  a rebuilt BVH does to ties. `auto` leaves every sample scene 4 wide, so
+  their renders are bit-identical to before.
+
+**Measured** (4-core Xeon @ 2.80 GHz, 33 MiB L3, baseline x86-64, stable;
+`ray_throughput --large MTRIS --width four|eight|auto`, three interleaved
+rounds of the three widths per size, single-threaded traversal, 2^18
+incoherent rays; min ms, Δ against `four`):
+
+| scene | `four` | `eight` | Δ | `auto` | Δ |
+| --- | --- | --- | --- | --- | --- |
+| soup 0.25 M intersect | 1 538 | 1 696 | +10% | (4 wide) | — |
+| soup 0.25 M occluded | 1 287 | 1 364 | +6% | (4 wide) | — |
+| soup 0.5 M intersect | 2 923 | 2 532 | −13% | 2 473 | −15% |
+| soup 0.5 M occluded | 2 377 | 1 924 | −19% | 2 047 | −14% |
+| soup 1 M intersect | 4 328 | 4 015 | −7% | 3 901 | −10% |
+| soup 1 M occluded | 3 889 | 3 081 | −21% | 3 285 | −16% |
+| soup 4 M intersect | 8 621 | 8 266 | −4% | 7 824 | −9% |
+| soup 4 M occluded | 7 487 | 7 048 | −6% | 7 041 | −6% |
+| inst_field 250 k intersect | 2 323 | 2 042 | −12% | 1 995 | −14% |
+| inst_field 250 k occluded | 1 715 | 1 459 | −15% | 1 469 | −14% |
+| inst_field 1 M intersect | 4 109 | 4 200 | +2% | 3 805 | −7% |
+| inst_field 1 M occluded | 3 365 | 2 971 | −12% | 2 918 | −13% |
+
+`eight` and `auto` are the same trees on the soups from 0.5 M up (the sweep
+ran with the threshold at 2^17, so `auto` was 8 wide at 0.25 M too, and
+measured like `eight` there); the difference between their columns is this
+machine's noise, which reached 15% between identical runs. On the instance
+fields they differ only in the prototypes (1–8 k triangles each): `eight`
+collapses those 8 wide as well and gives back the closest-hit gain at 1 M,
+`auto` keeps them 4 wide and keeps it. The crossover sits where the tree
+outgrows the cache: the 0.25 M soup is ~35 MiB of kernel against a 33 MiB
+L3, and loses 6–10% (best of three) at 8 wide; from 0.5 M up 8 wide wins everywhere. That
+is what put the threshold at 2^18 primitives (~35 MiB of a triangle tree).
+A machine with a much larger last-level cache (the 260 MiB VM above) would
+put the crossover higher, and `auto` then pays a few percent on the trees
+between the two; `CRUST_BVH_WIDTH=four` is the escape hatch.
+
+In cache nothing moves: every tree under 2^18 primitives is collapsed 4
+wide exactly as before, and the default scenes of `ray_throughput` (43 k
+triangles) measured within ±5% between `--width four` and `--width eight`
+on stable — closer than the 12–37% of the `f32x8` experiment, though not a
+reason to go 8 wide there.
+
 ## Not done
 
-- **BVH8 (8-wide) nodes, done right.** A straightforward `f32x8` BVH8 now
-  exists behind the nightly `bvh8` feature and is 12–37% *slower* in the
-  kernel (see "BVH8 on nightly" above). What is not done is the version that
-  could win: compressed/quantised 8-wide nodes. Note `Tri8` packets are
+- **BVH8 (8-wide) nodes, done right.** 8-wide nodes now exist and are chosen
+  per tree ("BVH8 per tree" above), winning 6–21% out of cache. What is not
+  done is the version that could also win in cache: compressed/quantised
+  8-wide nodes. Note `Tri8` packets are
   ruled out by the occupancy data above — this is about nodes only.
 
   Re-measure before starting. The traversal counters previously said node
