@@ -137,6 +137,7 @@ fn var(key: &str, expression: &str, variance: bool) -> AovVar {
         expression: Some(expression.to_owned()),
         raw: false,
         variance,
+        primvar: None,
     }
 }
 
@@ -166,6 +167,7 @@ pub fn request(rows: &[(String, String)]) -> AovRequest {
                 .flat_map(|(k, e)| [var(k, e, false), var(k, e, true)])
                 .collect(),
             attributes: Vec::new(),
+            deep: false,
         }],
     }
 }

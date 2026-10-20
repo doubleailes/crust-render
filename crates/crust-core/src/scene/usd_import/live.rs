@@ -368,6 +368,14 @@ fn refresh_settings(
         {
             return Err(Structural("the render camera changed".into()));
         }
+        // The tables the identity and primvar AOVs read were kept by the
+        // traversal for the products it saw.
+        let request = &read.products.request;
+        if (request.identity(), request.primvars()) != facts.aov_tables {
+            return Err(Structural(
+                "the products read other identity or primvar tables than the import kept".into(),
+            ));
+        }
         drop(index);
         let stage = open_stage(layer, path_str, Some(cam_path.clone()))
             .map_err(|e| Structural(format!("cannot open the stage: {e}")))?;

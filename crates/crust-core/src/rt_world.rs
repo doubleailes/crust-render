@@ -6,6 +6,7 @@
 
 use crate::error::Structural;
 use crate::hittable::{FaceHit, HitPart, HitRecord};
+use crate::identity::{AovGeometry, ElementMap, Identity, PrimvarSet};
 use crate::material::Material;
 use crate::ray::Ray;
 use crate::strands::{CurveHit, StrandTable};
@@ -624,6 +625,12 @@ pub struct WorldBuilder {
     /// answer for it: an id inside a range gets no record, whichever
     /// geometry it belongs to.
     forwarded: Vec<(u32, u32)>,
+    /// Per `geom_id`, what the identity and primvar AOVs read of it; empty
+    /// unless a render asked the import for one (see
+    /// [`World::aov_geometry`]).
+    aov: Vec<AovGeometry>,
+    /// What the identity AOVs name ([`World::identity`]).
+    identity: Option<Arc<Identity>>,
 }
 
 impl WorldBuilder {
@@ -834,6 +841,43 @@ impl WorldBuilder {
         self.materials.len()
     }
 
+    /// The AOV entry of `id`, the table grown to reach it.
+    fn aov_entry(&mut self, id: u32) -> &mut AovGeometry {
+        assert!(
+            (id as usize) < self.count(),
+            "geometry {id} was never attached"
+        );
+        if self.aov.len() <= id as usize {
+            self.aov.resize_with(id as usize + 1, AovGeometry::default);
+        }
+        &mut self.aov[id as usize]
+    }
+
+    /// Records where each triangle of `id` lies in its authored mesh, for
+    /// `elementId` and the primvar AOVs. `swapped` as for
+    /// [`WorldBuilder::set_face_map`].
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_aov_elements(&mut self, id: u32, map: Arc<ElementMap>, swapped: bool) {
+        let e = self.aov_entry(id);
+        e.elements = Some(map);
+        e.swapped = swapped;
+    }
+
+    /// Records the primvars the render's primvar AOVs read on `id`.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_aov_primvars(&mut self, id: u32, primvars: Arc<PrimvarSet>) {
+        self.aov_entry(id).primvars = Some(primvars);
+    }
+
+    /// Installs what the identity AOVs name.
+    pub fn set_identity(&mut self, identity: Identity) {
+        self.identity = Some(Arc::new(identity));
+    }
+
     /// The material bound to `id`.
     ///
     /// # Panics
@@ -931,6 +975,8 @@ impl WorldBuilder {
                 Vec::new()
             },
             motion: self.motion,
+            aov: self.aov,
+            identity: self.identity,
         }
     }
 
@@ -1009,9 +1055,49 @@ pub struct World {
     /// The moving geometries' translations, sorted by `geom_id`; empty for a
     /// static scene (see [`World::motion`]).
     motion: Vec<(u32, Vec3A)>,
+    /// Per `geom_id`, what the identity and primvar AOVs read of it; empty
+    /// unless the import was asked for one.
+    aov: Vec<AovGeometry>,
+    /// What the identity AOVs name; `None` unless the import was asked.
+    identity: Option<Arc<Identity>>,
 }
 
 impl World {
+    /// What the identity AOVs and ID mattes name, when the import kept it
+    /// (a render asked for an identity var or a matte).
+    pub fn identity(&self) -> Option<&Arc<Identity>> {
+        self.identity.as_ref()
+    }
+
+    /// What the identity and primvar AOVs read of `geom_id`: its element
+    /// map and primvars, when the import kept them.
+    pub fn aov_geometry(&self, geom_id: u32) -> Option<&AovGeometry> {
+        self.aov.get(geom_id as usize)
+    }
+
+    /// The barycentrics `(u, v)` of the point `p` on `geom_id`'s triangle
+    /// `prim_id`, in the kernel's convention (`u` weighs the second vertex,
+    /// `v` the third), which [`WorldHit`] does not carry: solved in the
+    /// triangle's plane from its world-space vertices — the ones a hit's
+    /// tangent frame is derived from. `None` where those cannot be
+    /// recovered (see [`VertexSource`]) or the triangle is degenerate, and
+    /// the caller reads the face as a whole.
+    ///
+    /// For the primvar AOVs, at a camera ray's first hit only: the beauty
+    /// never needs it, so `WorldHit` stays the size it is. Not asked of the
+    /// kernel again either: a second caller of the traversal moved the
+    /// beauty-only render's instruction count (the `aovs` design record).
+    pub fn barycentrics(&self, p: Vec3A, geom_id: u32, prim_id: u32) -> Option<(f32, f32)> {
+        let tables = self.faces.get(geom_id as usize)?;
+        let [a, b, c] = self.world_vertices(geom_id, prim_id, tables)?;
+        let (e1, e2, d) = (b - a, c - a, p - a);
+        let (d11, d12, d22) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+        let (d1, d2) = (d.dot(e1), d.dot(e2));
+        let den = d11 * d22 - d12 * d12;
+        let (u, v) = ((d22 * d1 - d12 * d2) / den, (d11 * d2 - d12 * d1) / den);
+        (u.is_finite() && v.is_finite()).then_some((u, v))
+    }
+
     /// The world-space translation the geometry at `geom_id` moves through
     /// over the shutter — the `crust:motion:translate` the kernel blurs it
     /// by — or zero when it does not move, or moves in a way the record

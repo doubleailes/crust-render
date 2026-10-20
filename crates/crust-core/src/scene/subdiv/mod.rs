@@ -134,6 +134,9 @@ pub(crate) struct SubdivFaces {
     /// was not a quad — Ptex subfaces are out of scope, matching the
     /// unsubdivided importer's treatment of n-gons).
     pub base_face: Vec<Option<u32>>,
+    /// The cage face every refined face descends from, quad or not: what
+    /// `elementId` and the primvar AOVs read.
+    pub cage_face: Vec<u32>,
     /// Corner UVs of the refined quad, in `face_vertices` order.
     pub corner_uvs: Vec<[[f32; 2]; 4]>,
 }

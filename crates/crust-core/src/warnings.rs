@@ -177,7 +177,7 @@ warning_codes! {
     ProductNotARenderProduct => "product.not_a_render_product", Skipped, Each,
         "RenderSettings.products targets a prim that is not a RenderProduct.";
     ProductUnsupportedType => "product.unsupported_type", Skipped, Each,
-        "A RenderProduct's productType is not raster; no file is written for it.";
+        "A RenderProduct's productType is neither raster nor deepRaster; no file is written for it.";
     ProductCameraMismatch => "product.camera_mismatch", Skipped, Each,
         "A product renders through another camera or resolution than the first; no file is written for it.";
     ProductMotionBlurMismatch => "product.motion_blur_mismatch", Approximated, Each,
@@ -203,7 +203,7 @@ warning_codes! {
     AovNotARenderVar => "aov.not_a_render_var", Skipped, Each,
         "orderedVars targets a prim that is not a RenderVar.";
     AovUnsupportedSource => "aov.unsupported_source", Skipped, Each,
-        "A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written.";
+        "A RenderVar's source is one crust does not produce (planned, Cryptomatte, intrinsic); no channel is written.";
     AovUnknownSource => "aov.unknown_source", Skipped, Each,
         "A RenderVar names an unknown source or sourceType; no channel is written.";
     AovTypeMismatch => "aov.type_mismatch", Skipped, Each,
@@ -211,13 +211,19 @@ warning_codes! {
     AovUnknownAccumulation => "aov.unknown_accumulation", Refused, Each,
         "A RenderVar's accumulation token is not supported; the source's default is used.";
     AovAccumulationIgnored => "aov.accumulation_ignored", Approximated, Each,
-        "A per-pixel source cannot be accumulated as authored; its default accumulation is used.";
+        "A per-pixel source or an id cannot be accumulated as authored; its default accumulation is used.";
     AovInvalidVariance => "aov.invalid_variance", Skipped, Each,
         "crust:aov:variance is authored where it cannot apply; no channel is written.";
     AovRawIgnored => "aov.raw_ignored", Approximated, Each,
         "crust:aov:raw is authored on a source that is not a light path expression; it is ignored.";
     AovInvalidRaw => "aov.invalid_raw", Skipped, Each,
         "crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written.";
+    AovNotInMatte => "aov.not_in_matte", Skipped, Each,
+        "A deepRaster product's RenderVar is not one an OpenEXRId matte holds; no channel is written.";
+    AovPrimvarTypeMismatch => "aov.primvar_type_mismatch", Skipped, Once,
+        "A prim's primvar is not numeric or has another component count than its RenderVar's dataType; the channel holds the clear value there.";
+    AovPrimvarUnreadable => "aov.primvar_unreadable", Skipped, Once,
+        "A prim's primvar is spread in a way crust cannot read there (an interpolation off a mesh, or values its topology does not match); the channel holds the clear value there.";
     LpeInvalid => "lpe.invalid", Skipped, Each,
         "A light path expression does not parse or compile; no channel is written.";
 

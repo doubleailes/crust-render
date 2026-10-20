@@ -131,7 +131,7 @@ fn product_and_aov_warnings() {
     def RenderProduct "beauty"
     {
         token productName = "beauty.exr"
-        rel orderedVars = [</Render/color>, </Render/bogus>, </Render/badLpe>, </Render/primvar>]
+        rel orderedVars = [</Render/color>, </Render/bogus>, </Render/badLpe>, </Render/crypto>]
     }
     def Scope "notAProduct"
     {
@@ -149,10 +149,9 @@ fn product_and_aov_warnings() {
         uniform token sourceType = "lpe"
         uniform string sourceName = "C<<<"
     }
-    def RenderVar "primvar"
+    def RenderVar "crypto"
     {
-        uniform token sourceType = "primvar"
-        uniform string sourceName = "st"
+        uniform string sourceName = "crypto_object"
     }
 }
 "#,
@@ -171,7 +170,7 @@ fn product_and_aov_warnings() {
     );
     assert_eq!(
         record(&scene, WarningCode::AovUnsupportedSource).prims,
-        ["/Render/primvar"]
+        ["/Render/crypto"]
     );
     for w in &scene.warnings {
         assert_eq!(w.kind, WarningKind::Skipped, "{w:?}");

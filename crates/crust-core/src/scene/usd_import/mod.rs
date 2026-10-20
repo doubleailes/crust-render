@@ -68,6 +68,7 @@ use openusd_schemas::lux::{
 };
 
 mod adaptive;
+mod aov_keep;
 mod assets;
 mod attrs;
 mod camera;
@@ -90,6 +91,7 @@ mod volume;
 mod xform;
 
 use adaptive::{Frustum, ScreenProjection, ScreenRate};
+use aov_keep::AovKeep;
 use attrs::{
     custom_token, prim_value, resolve_adaptive_max_level, resolve_subdiv_edge_length,
     resolve_subdiv_level,
@@ -346,6 +348,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                     );
                     ctx.links
                         .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
+                    ctx.caches.aov.saw(&prim, geoms_before..ctx.world.count());
                     continue;
                 }
                 _ => warning!(
@@ -375,6 +378,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             );
             ctx.links
                 .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
+            ctx.caches.aov.saw(&prim, geoms_before..ctx.world.count());
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
@@ -429,6 +433,19 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             geoms_before..ctx.world.count(),
             vols_before..ctx.volumes.len(),
         );
+        ctx.caches.aov.saw(&prim, geoms_before..ctx.world.count());
+        // A gprim's own primvars (a light's emitter is no gprim).
+        if prim.is_a("Gprim").unwrap_or(false) {
+            let mesh = UsdMesh::get(stage, prim.path().clone()).ok().flatten();
+            let geoms = geoms_before..ctx.world.count();
+            ctx.caches.aov.assign_primvars(
+                &mut ctx.world,
+                &prim,
+                mesh.as_ref(),
+                geoms,
+                ctx.caches.working,
+            );
+        }
         // Every light adds at most one entry, so a grown list means `prim`
         // is the light that grew it.
         if ctx.lights.count() > lights_before {
@@ -1018,6 +1035,7 @@ pub(crate) fn load_scene(
         caches: ImportCaches {
             subtrees,
             implicit: ImplicitPolicy::new(projection),
+            aov: AovKeep::new(&products.request),
             ..ImportCaches::new(assets, path, subdiv, working)
         },
         pending_meshes: Vec::new(),
@@ -1030,6 +1048,9 @@ pub(crate) fn load_scene(
         layers: Default::default(),
     };
 
+    // The identity and primvar AOVs read where each triangle lies in its
+    // authored mesh, which every mesh then keeps.
+    ctx.caches.meshes.elements = ctx.caches.aov.elements();
     let traverse_start = Instant::now();
     traverse_stage(
         path,
@@ -1119,6 +1140,14 @@ pub(crate) fn load_scene(
 
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
+    // What the identity AOVs name, now that every geometry has its id and
+    // its material.
+    let material_paths = ctx.caches.materials.paths_by_address();
+    if let Some(identity) =
+        std::mem::take(&mut ctx.caches.aov).build(&geometry_runs, &ctx.world, &material_paths)
+    {
+        ctx.world.set_identity(identity);
+    }
 
     let commit_start = Instant::now();
     let committed = ctx.world.commit();
@@ -1168,6 +1197,7 @@ pub(crate) fn load_scene(
         geometry: geometry_runs,
         stage: StageFacts {
             options: options.clone(),
+            aov_tables: (scene.aovs.identity(), scene.aovs.primvars()),
             render_settings,
             subdiv_level: ctx.caches.meshes.subdiv.level,
             adaptive: ctx.caches.meshes.subdiv.adaptive.map(|r| r.key()),
@@ -1514,6 +1544,8 @@ struct ImportCaches<'a> {
     /// Its luminance weights, which every material's lobe selection weighs
     /// colours by ([`crate::color::luma`]).
     pub(super) luma: utils::Luma,
+    /// What the render's identity and primvar AOVs ask the import to keep.
+    pub(super) aov: AovKeep,
 }
 
 /// Geometry prims that neither walk reads as a surface or a volume — a
@@ -1606,6 +1638,7 @@ impl<'a> ImportCaches<'a> {
             unread: UnreadGprims::default(),
             working,
             luma: crate::color::luma(working),
+            aov: AovKeep::default(),
         }
     }
 }

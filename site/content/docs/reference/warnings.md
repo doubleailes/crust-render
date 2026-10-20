@@ -94,12 +94,12 @@ plain text and are not counted.
 | code | kind | meaning | what to do |
 |------|------|---------|------------|
 | `product.not_a_render_product` | skipped | RenderSettings.products targets a prim that is not a RenderProduct. | Point `products` at `RenderProduct` prims. |
-| `product.unsupported_type` | skipped | A RenderProduct's productType is not raster; no file is written for it. | Use `productType = "raster"`, or remove the product. |
+| `product.unsupported_type` | skipped | A RenderProduct's productType is neither raster nor deepRaster; no file is written for it. | Use `productType = "raster"`, or `"deepRaster"` for an [ID matte](@/docs/usd/aovs.md#id-mattes-openexrid), or remove the product. |
 | `product.camera_mismatch` | skipped | A product renders through another camera or resolution than the first; no file is written for it. | Render the other camera or resolution as a separate render. |
 | `product.motion_blur_mismatch` | approximated | A product asks for other motion blur than the first; its file is written with the first's. | Give every product the same motion-blur setting. |
 | `product.region_mismatch` | approximated | A product asks for another dataWindowNDC than the first; its file is written over the first's. | Give every product the same `dataWindowNDC`. |
 | `product.no_name` | skipped | A RenderProduct authors no productName; nothing is written for it. | Author `productName`, the file the product writes. |
-| `product.no_writable_vars` | skipped | A RenderProduct has no RenderVar crust can write; nothing is written for it. | Point `orderedVars` at RenderVars whose source crust produces; their own warnings say why each was dropped. |
+| `product.no_writable_vars` | skipped | A RenderProduct has no RenderVar crust can write; nothing is written for it. | Point `orderedVars` at RenderVars whose source crust produces; their own warnings say why each was dropped. A `deepRaster` product needs a var whose source is `primId`, `materialId` or `assetId`. |
 | `product.shared_path` | skipped | A RenderProduct writes the path an earlier one already writes; nothing is written for it. | Give each product its own `productName` (with `-o`, the first product's path is the one given). |
 | `product.unknown_variable` | refused | An output path names a variable crust does not expand; it is left in the path as written. | Use the frame variables `$F`, `$F2`–`$F9`, `$FF` (or `<F>`, `<F4>`, `<FF>`), or write `\$` for a literal `$`. |
 | `product.subframe_frame` | approximated | An output path's integer frame variable rounded a fractional frame to the nearest one. | Use `$FF` (or `<FF>`) to keep the fraction, so two subframes never write one file. |
@@ -107,14 +107,17 @@ plain text and are not counted.
 | `product.invalid_data_window` | refused | dataWindowNDC is not finite or selects no pixel; the full frame is rendered. | Author a finite window that covers at least one pixel. |
 | `product.data_window_clipped` | approximated | dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped. | Keep `dataWindowNDC` inside 0..1. |
 | `aov.not_a_render_var` | skipped | orderedVars targets a prim that is not a RenderVar. | Point `orderedVars` at `RenderVar` prims. |
-| `aov.unsupported_source` | skipped | A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written. | Remove the var; the [AOV page](@/docs/usd/aovs.md) lists the sources crust writes. |
+| `aov.unsupported_source` | skipped | A RenderVar's source is one crust does not produce (planned, Cryptomatte, intrinsic); no channel is written. | Remove the var; the [AOV page](@/docs/usd/aovs.md) lists the sources crust writes. For ID mattes, use a `deepRaster` product ([OpenEXRId](@/docs/usd/aovs.md#id-mattes-openexrid)). |
 | `aov.unknown_source` | skipped | A RenderVar names an unknown source or sourceType; no channel is written. | Use a source name from the [AOV page](@/docs/usd/aovs.md). |
 | `aov.type_mismatch` | skipped | A RenderVar's data type is not numeric or cannot hold its source; no channel is written. | Author a numeric `dataType` with enough components for the source. |
 | `aov.unknown_accumulation` | refused | A RenderVar's accumulation token is not supported; the source's default is used. | Use `zmin` or leave the accumulation unauthored. |
-| `aov.accumulation_ignored` | approximated | A per-pixel source cannot be accumulated as authored; its default accumulation is used. | Leave the accumulation unauthored for per-pixel sources. |
+| `aov.accumulation_ignored` | approximated | A per-pixel source or an id cannot be accumulated as authored; its default accumulation is used. | Leave the accumulation unauthored for per-pixel sources and ids (`sampleCount`, `variance`, `primId` …). |
 | `aov.invalid_variance` | skipped | crust:aov:variance is authored where it cannot apply; no channel is written. | Use `crust:aov:variance` only on an `lpe` var with a float type and filtered accumulation. |
 | `aov.raw_ignored` | approximated | crust:aov:raw is authored on a source that is not a light path expression; it is ignored. | Remove `crust:aov:raw`, or use it on an `lpe` var. |
 | `aov.invalid_raw` | skipped | crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written. | Start the expression with a diffuse reflection (`C<RD>…`). |
+| `aov.not_in_matte` | skipped | A deepRaster product's RenderVar is not one an OpenEXRId matte holds; no channel is written. | Give the product one var naming its ids (`primId`, `materialId` or `assetId`) and, for colour, one beauty var; write other AOVs in a `raster` product. |
+| `aov.primvar_type_mismatch` | skipped | A prim's primvar is not numeric or has another component count than its RenderVar's dataType; the channel holds the clear value there. | Give the var a `dataType` with the primvar's component count (`color3f` for `displayColor`). |
+| `aov.primvar_unreadable` | skipped | A prim's primvar is spread in a way crust cannot read there (an interpolation off a mesh, or values its topology does not match); the channel holds the clear value there. | Author the primvar `constant` on shapes, curves and points, and with as many values as its interpolation needs on meshes. |
 | `lpe.invalid` | skipped | A light path expression does not parse or compile; no channel is written. | Fix the expression; the message gives the parser's error. |
 
 ## Transforms

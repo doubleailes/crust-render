@@ -19,6 +19,7 @@ use openusd_schemas::geom::{
 use rayon::prelude::*;
 use tracing::debug;
 
+use crate::identity::ElementMap;
 use crate::material::{Displacement, Material};
 use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
 use crate::scene::displace::{self, VertexChart};
@@ -64,6 +65,11 @@ pub(super) struct MeshKey {
     /// every array yet shade smooth and faceted — without this, whichever
     /// interned first would shade both.
     pub(super) smooth: bool,
+    /// Whether the faces are authored: an authored mesh and an implicit
+    /// shape's tessellation can agree on every array, but only the first has
+    /// faces an `elementId` names, and the slot's element map is built from
+    /// whichever interned it first.
+    pub(super) authored: bool,
     pub(super) material: usize,
 }
 
@@ -99,6 +105,7 @@ impl MeshKey {
             n_indices: src.indices.len(),
             n_uvs: src.uvs.as_ref().map(|uv| uv.values.len()),
             smooth: src.normals.is_some(),
+            authored: src.authored,
             material: Arc::as_ptr(material) as *const u8 as usize,
         }
     }
@@ -133,6 +140,10 @@ pub(super) struct MeshSlot {
     /// the tangent frame, which is per placement, is derived at the hit
     /// from the kernel's vertices rather than held here.
     pub(super) uvs: Option<Arc<UvMap>>,
+    /// Where each triangle lies in the authored mesh, when the render's
+    /// identity or primvar AOVs read it. Geometry alone: shared by every
+    /// placement, whatever primvars each prim authors.
+    pub(super) elements: Option<Arc<ElementMap>>,
     /// Set once some path needed this mesh as a real kernel scene — which
     /// prototypes always do, since an instance is the only way to place one.
     pub(super) committed: Option<Arc<RtScene>>,
@@ -161,6 +172,9 @@ pub(super) struct MeshArena {
     /// Distinct meshes whose offsets exceeded their authored bound — one
     /// warning each.
     pub(super) bound_exceeded: u64,
+    /// Whether each distinct mesh keeps its [`ElementMap`]: the render reads
+    /// `elementId` or a primvar.
+    pub(super) elements: bool,
 }
 
 /// The load-wide subdivision choices [`mesh_source`] applies to each mesh.
@@ -325,6 +339,7 @@ impl MeshArena {
             subdiv,
             displaced: Default::default(),
             bound_exceeded: 0,
+            elements: false,
         }
     }
 
@@ -365,17 +380,22 @@ impl MeshArena {
         let want_faces = material.face_texture().is_some();
         // A chart read only for the displacement has been consumed by now:
         // the per-triangle table is built only when the surface reads it.
-        let (tris, faces, uvs) = triangulate(
+        let ((tris, faces, uvs), fans) = triangulate_tables(
             &src.counts,
             &src.indices,
             verts.len(),
             want_faces,
+            self.elements,
             src.uvs.as_ref().filter(|_| material.uses_uv()),
         )
         .or_else(|| {
             debug!("Mesh at {} produced no triangles", prim.path());
             None
         })?;
+        let elements = fans
+            .filter(|_| src.authored)
+            .and_then(|f| element_map(f, src.refined, src.subdiv_faces.as_ref(), &src.counts))
+            .map(Arc::new);
         // A subdivided face table numbers *refined* faces; rewrite it to the
         // base-cage ids Ptex actually indexes before anything caches it.
         let faces = match (&src.subdiv_faces, faces) {
@@ -406,6 +426,7 @@ impl MeshArena {
             }),
             faces,
             uvs,
+            elements,
             committed: None,
             n_place: 0,
         });
@@ -573,7 +594,10 @@ pub(super) fn emit_mesh(
         displacement,
     } = bound;
     let displacement = prim_displacement(prim, displacement);
-    let needs = MeshNeeds::of(&*material, displacement.as_deref());
+    let needs = MeshNeeds {
+        elements: meshes.elements,
+        ..MeshNeeds::of(&*material, displacement.as_deref())
+    };
     let Some(src) = mesh_source(
         prim,
         mesh,
@@ -622,6 +646,7 @@ pub(super) fn place_mesh_source(
     } = bound;
     let needs = MeshNeeds::of(&*material, displacement.as_deref());
     let (want_faces, want_uvs) = (needs.faces, needs.uvs);
+    let want_elements = meshes.elements;
     let mask = prim_ray_mask(prim);
     let motion = prim_motion_translate(prim);
 
@@ -654,14 +679,18 @@ pub(super) fn place_mesh_source(
             .map(|p| world_xf.transform_point3(Vec3::from_array(*p)).to_array())
             .collect();
         check_face_count(prim, src.base_face_count, material.as_ref());
-        match triangulate(
+        match triangulate_tables(
             &src.counts,
             &src.indices,
             verts.len(),
             want_faces,
+            want_elements,
             src.uvs.as_ref().filter(|_| want_uvs),
         ) {
-            Some((tris, faces, uvs)) => {
+            Some(((tris, faces, uvs), fans)) => {
+                let elements = fans.filter(|_| src.authored).and_then(|f| {
+                    element_map(f, src.refined, src.subdiv_faces.as_ref(), &src.counts)
+                });
                 // A singular transform has no inverse-transpose to push the
                 // prototype's normals through, but the smooth normals of the
                 // *transformed* mesh are still well-defined — recompute them.
@@ -702,6 +731,9 @@ pub(super) fn place_mesh_source(
                 }
                 if let Some(map) = uvs {
                     world.set_uv_map(geom_id, map, false);
+                }
+                if let Some(map) = elements {
+                    world.set_aov_elements(geom_id, Arc::new(map), false);
                 }
             }
             None => debug!("Mesh at {} produced no triangles", prim.path()),
@@ -776,6 +808,7 @@ pub(super) fn flush_meshes(
 
         let faces = slot.faces.clone();
         let uvs = slot.uvs.clone();
+        let elements = slot.elements.clone();
         let mirrored = p.l2w.matrix3.determinant() < 0.0;
         if bake {
             let geom = meshes.slots[p.slot as usize]
@@ -806,6 +839,9 @@ pub(super) fn flush_meshes(
             if let Some(map) = uvs {
                 world.set_uv_map(p.geom_id, map, mirrored);
             }
+            if let Some(map) = elements {
+                world.set_aov_elements(p.geom_id, map, mirrored);
+            }
             // The vertices were baked into world space but the densities were
             // not: they are shared with (or cloned from) the slot's
             // local-frame tables, so the placement's scale still has to be
@@ -835,6 +871,9 @@ pub(super) fn flush_meshes(
             // placement record), so there is nothing per placement to hold.
             if let Some(map) = uvs {
                 world.set_uv_map(p.geom_id, map, false);
+            }
+            if let Some(map) = elements {
+                world.set_aov_elements(p.geom_id, map, false);
             }
             world.set_placement_scale(p.geom_id, placement_scale(&l2w));
             instanced += 1;
@@ -994,7 +1033,7 @@ pub(super) struct MeshSource {
     /// faceted, exactly as before).
     pub(super) normals: Option<Vec<[f32; 3]>>,
     /// Refined-face → base-cage-face mapping, `Some` iff subdivided and the
-    /// material wants a face table.
+    /// material wants a face table, or the AOVs an [`ElementMap`].
     pub(super) subdiv_faces: Option<RefinedFaces>,
     /// The *authored* cage's face count — what Ptex face ids index, whether
     /// or not the mesh was refined.
@@ -1007,6 +1046,9 @@ pub(super) struct MeshSource {
     /// Whether the arrays are a refinement rather than the authored cage —
     /// what `--stats` counts a displaced mesh "at cage resolution" by.
     pub(super) refined: bool,
+    /// Whether the cage's faces are authored ones: false for an implicit
+    /// shape's tessellation, whose faces no `elementId` can name.
+    pub(super) authored: bool,
 }
 
 /// How a refined mesh's triangles map back to the cage faces Ptex addresses.
@@ -1043,6 +1085,7 @@ pub(super) fn mesh_source(
         uvs: want_uvs,
         uv_primvar,
         displacement,
+        elements: want_elements,
     } = needs;
     // A displacement reads its own chart, whether or not the surface does.
     let want_faces = want_faces || displacement.is_some_and(Displacement::needs_ptex);
@@ -1060,6 +1103,7 @@ pub(super) fn mesh_source(
         base_face_count,
         uvs,
         refined: false,
+        authored: true,
     };
 
     if custom_i32(prim, "crust:subdivisionLevel").is_some() {
@@ -1161,7 +1205,9 @@ pub(super) fn mesh_source(
         crease_sharpnesses: &sharpness.crease_sharpnesses,
         corner_indices: &sharpness.corner_indices,
         corner_sharpnesses: &sharpness.corner_sharpnesses,
-        want_face_uvs: want_faces,
+        // Loop refinement tracks no faces (the cage is kept for Ptex above);
+        // a Loop mesh refined for its surface keeps no element map.
+        want_face_uvs: want_faces || (want_elements && usd_scheme != SubdivisionScheme::Loop),
         uvs: chart,
     };
     if per_face
@@ -1229,6 +1275,10 @@ pub(super) struct MeshNeeds<'a> {
     pub(super) uv_primvar: Option<&'a str>,
     /// The displacement the prim applies, which reads its own chart.
     pub(super) displacement: Option<&'a Displacement>,
+    /// The identity or primvar AOVs: keep where each triangle lies in the
+    /// authored mesh, through refinement ([`ElementMap`]). Never changes the
+    /// geometry: the refiner only also reports the faces it already tracks.
+    pub(super) elements: bool,
 }
 
 impl<'a> MeshNeeds<'a> {
@@ -1239,6 +1289,7 @@ impl<'a> MeshNeeds<'a> {
             uvs: material.uses_uv(),
             uv_primvar: material.uv_primvar(),
             displacement,
+            elements: false,
         }
     }
 }
@@ -1379,6 +1430,7 @@ impl MeshSource {
             subdiv_faces: t.faces.map(RefinedFaces::PerFace),
             base_face_count,
             refined: true,
+            authored: true,
             uvs: match (t.uvs, t.face_varying_uvs) {
                 (Some(values), _) => Some(UvSource {
                     values,
@@ -1405,6 +1457,7 @@ impl MeshSource {
             subdiv_faces: refined.faces.map(RefinedFaces::Uniform),
             base_face_count,
             refined: true,
+            authored: true,
             uvs: refined.uvs.map(|uv| UvSource {
                 values: uv.values,
                 indices: uv.indices,
@@ -1629,6 +1682,70 @@ fn check_face_count(prim: &Prim, n_base_faces: usize, material: &dyn Material) {
 /// when the material asked for them.
 type Triangulated = (Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>);
 
+/// Per triangle, the face it was cut from and its slice `k` of that face's
+/// fan — `(v0, v[k], v[k+1])` — for every face, Ptex-addressable or not.
+type Fans = (Vec<u32>, Vec<u32>);
+
+/// [`triangulate_tables`] without the fan table.
+#[cfg(test)]
+fn triangulate(
+    counts: &[i32],
+    indices: &[i32],
+    n_verts: usize,
+    want_faces: bool,
+    uv_src: Option<&UvSource>,
+) -> Option<Triangulated> {
+    triangulate_tables(counts, indices, n_verts, want_faces, false, uv_src).map(|(t, _)| t)
+}
+
+/// The [`ElementMap`] of a mesh source from its triangles' [`Fans`]: the
+/// fans themselves for the authored cage; for a refinement, each triangle's
+/// cage face, and its place in it through the same face table Ptex reads
+/// (quads only — a refined triangle or n-gon is read at its face's centre).
+/// `None` for a refinement that tracked no faces (Loop).
+fn element_map(
+    (faces, fan): Fans,
+    refined: bool,
+    subdiv_faces: Option<&RefinedFaces>,
+    counts: &[i32],
+) -> Option<ElementMap> {
+    if !refined {
+        return Some(ElementMap::Cage { faces, fan });
+    }
+    let refined = subdiv_faces?;
+    let slices = faces
+        .iter()
+        .zip(&fan)
+        .map(|(&f, &k)| match (counts.get(f as usize), k) {
+            (Some(3), _) => FanSlice::Triangle,
+            (Some(4), 1) => FanSlice::QuadLower,
+            (Some(4), 2) => FanSlice::QuadUpper,
+            _ => FanSlice::Unmappable,
+        })
+        .collect();
+    let cage: Vec<u32> = match refined {
+        RefinedFaces::Uniform(sub) => faces
+            .iter()
+            .map(|&f| sub.cage_face.get(f as usize).copied().unwrap_or(u32::MAX))
+            .collect(),
+        RefinedFaces::PerFace(t) => faces
+            .iter()
+            .map(|&f| t.cage_face.get(f as usize).copied().unwrap_or(u32::MAX))
+            .collect(),
+    };
+    let map = remap_refined_faces(
+        FaceMap {
+            faces,
+            slices,
+            sub: None,
+            corners: None,
+            density: Vec::new(),
+        },
+        refined,
+    );
+    Some(ElementMap::Refined { faces: cage, map })
+}
+
 /// Fan-triangulates the faces into an index-triple list; `None` if
 /// nothing survives.
 ///
@@ -1638,14 +1755,20 @@ type Triangulated = (Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>);
 /// outputs are index-parallel by construction: every `push` to one pushes to
 /// the other in the same statement, so the skip paths cannot desynchronise
 /// them.
-fn triangulate(
+///
+/// With `want_fans`, also the [`Fans`] of every triangle (what the AOVs'
+/// [`ElementMap`] is built from), pushed in the same statements as well.
+fn triangulate_tables(
     counts: &[i32],
     indices: &[i32],
     n_verts: usize,
     want_faces: bool,
+    want_fans: bool,
     uv_src: Option<&UvSource>,
-) -> Option<Triangulated> {
+) -> Option<(Triangulated, Option<Fans>)> {
     let mut tris: Vec<[u32; 3]> = Vec::new();
+    let mut fan_faces: Vec<u32> = Vec::new();
+    let mut fan_ks: Vec<u32> = Vec::new();
     let mut faces: Vec<u32> = Vec::new();
     let mut slices: Vec<FanSlice> = Vec::new();
     let mut corners: Vec<[u32; 3]> = Vec::new();
@@ -1672,6 +1795,10 @@ fn triangulate(
                 continue;
             }
             tris.push([i0, i1, i2]);
+            if want_fans {
+                fan_faces.push(face as u32);
+                fan_ks.push(k as u32);
+            }
             // Pushed in the same statement sequence as the triangle, so the
             // skip paths above cannot desynchronise the tables from it —
             // the same discipline `faces`/`slices` rely on.
@@ -1726,7 +1853,10 @@ fn triangulate(
             density: Vec::new(),
         }
     });
-    Some((tris, map, uv_map))
+    Some((
+        (tris, map, uv_map),
+        want_fans.then_some((fan_faces, fan_ks)),
+    ))
 }
 
 #[cfg(test)]
@@ -2083,6 +2213,7 @@ mod face_table_tests {
         };
         let sub = subdiv::SubdivFaces {
             base_face: vec![None, None],
+            cage_face: vec![0, 0],
             corner_uvs: vec![[[0.0; 2]; 4]; 2],
         };
         let map = remap_subdivided_faces(map, &sub);
@@ -2281,6 +2412,7 @@ mod subdiv_policy_tests {
                     uvs: false,
                     uv_primvar: None,
                     displacement: Some(&d),
+                    elements: false,
                 },
                 &mut policy,
                 MeshPlace::World(&eye),
@@ -2318,6 +2450,37 @@ mod subdiv_policy_tests {
             }
         }
         assert!(seams > 0, "the cube's chart has seams to test");
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use crate::material::OpenPBR;
+
+    /// An authored mesh and an implicit shape's tessellation with the same
+    /// arrays and material do not share a slot: the slot's element map
+    /// would name the faces of whichever interned first.
+    #[test]
+    fn authored_and_implicit_meshes_do_not_share_a_slot() {
+        let source = |authored| MeshSource {
+            points: vec![
+                Vec3f::from([0.0, 0.0, 0.0]),
+                Vec3f::from([1.0, 0.0, 0.0]),
+                Vec3f::from([0.0, 1.0, 0.0]),
+            ],
+            counts: vec![3],
+            indices: vec![0, 1, 2],
+            normals: None,
+            subdiv_faces: None,
+            base_face_count: 1,
+            uvs: None,
+            refined: false,
+            authored,
+        };
+        let material: Arc<dyn Material> = Arc::new(OpenPBR::default());
+        assert!(MeshKey::new(&source(true), &material) != MeshKey::new(&source(false), &material));
+        assert!(MeshKey::new(&source(true), &material) == MeshKey::new(&source(true), &material));
     }
 }
 
@@ -2397,6 +2560,7 @@ mod displacement_tests {
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(d),
+                elements: false,
             },
             &mut arena.subdiv,
             MeshPlace::World(&eye),
@@ -2611,6 +2775,7 @@ def Mesh "G"
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(&d),
+                elements: false,
             },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
@@ -2664,6 +2829,7 @@ def Mesh "T"
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(&d),
+                elements: false,
             },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
@@ -2690,6 +2856,7 @@ def Mesh "T"
                 uvs: false,
                 uv_primvar: None,
                 displacement: Some(&uv),
+                elements: false,
             },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),

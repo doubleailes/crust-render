@@ -4,6 +4,7 @@
 //! counting allocator) and `crust-jit` (calling generated code).
 #![forbid(unsafe_code)]
 
+mod exrid;
 mod logging;
 #[cfg(feature = "mcp")]
 mod mcp;
@@ -2132,7 +2133,8 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         }
         info!("Products written: {}", written.join(", "));
         let first = &aovs.products[0];
-        if first.beauty().is_some() {
+        // A matte's beauty colours its ids; it is no image to preview.
+        if !first.deep && first.beauty().is_some() {
             let png_path = preview_png(&first.name);
             match write_png(&buffer, &png_path, &output_color) {
                 Ok(_) => info!("Image written to: {:?}", png_path),

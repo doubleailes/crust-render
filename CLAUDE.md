@@ -28,7 +28,7 @@ opened with — `usd_import::stage_builder()`). Do not add loaders for any other
 | `Material` / `resolve` / `ShadingPoint`, OpenPBR, MaterialX (`crust-mtlx`, `crust-jit`), `UsdPreviewSurface` | `materials` | `docs/openpbr_reference_alignment.md`, `docs/shading_performance.md`, `docs/material_fidelity.md` |
 | lights, light selection (`power` / `uniform` / `learned`), UsdLux units, shaping, IES | `lighting` | `docs/light_sampling.md` |
 | UV / UDIM textures, `.tx` streaming, Ptex (preload and streaming), ray-cone filtering | `textures` | `docs/ptex_streaming.md`, `docs/color_management.md` |
-| AOVs: `RenderProduct` / `RenderVar` resolution, the source vocabulary and its aliases, accumulation modes, light path expressions and their routing, albedo, light groups, the per-product EXR writer | `aovs` | `site/content/docs/usd/aovs.md` |
+| AOVs: `RenderProduct` / `RenderVar` resolution, the source vocabulary and its aliases, accumulation modes, light path expressions and their routing, albedo, light groups, identity and primvar sources, OpenEXRId ID mattes (`deepRaster`), the per-product EXR writer | `aovs` | `site/content/docs/usd/aovs.md` |
 | USD import: streaming import, schema mapping, subdivision, displacement, instancing, time, camera, settings, Moana, ALab | `usd-scene-import` | `docs/alab_profile.md`, `docs/moana_profile.md`, `docs/issues/` |
 | `crust diagnostic`: probe conditions, crops, trials and verdicts, the budget, the `crust-diagnostic/1` report, `--baseline`, the clamp counter's cost | `diagnostics` | `site/content/docs/help/diagnosing-a-render.md` |
 | `crust light-paths`: the inspection fold over a path's `Route` (one record per emission-ending term), the inspection alphabet and lights by index, dominant-lobe labels, the per-unit record store and its groups, what reproduces the frame, the `crust-light-paths/1` report and its hints, the MCP `light_paths` tool | `light-path-inspection` | `site/content/docs/help/light-paths.md` |
@@ -69,6 +69,7 @@ cargo test -p crust-core --test adobe_oracle        # native OpenPBR vs Adobe's 
 scripts/adobe_oracle.py                             # regenerate those values (needs a C++17 compiler + network)
 cargo test -p crust-core --test geomutil_oracle     # implicit shapes vs OpenUSD's GeomUtil meshes, point for point
 scripts/geomutil_oracle.py                          # regenerate them (needs a C++17 compiler + conda.anaconda.org)
+scripts/openexrid_oracle.py                         # ID mattes read by OpenEXR 3 + OpenEXRId's C++ reader (same needs + github.com)
 
 # CI (toolchain pinned by rust-toolchain.toml, Cargo.lock committed,
 # RUSTFLAGS=-D warnings), four parallel jobs; skipped when a change touches only
@@ -106,7 +107,7 @@ selection; no dependencies at all, the caller brings threads and random numbers)
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
 `crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
 writes their files — the images, the reports — while the engine writes nothing: `main.rs`,
-`products.rs`, `logging.rs`) and `utils` (stateless math:
+`products.rs`, `exrid.rs` (the OpenEXRId matte writer), `logging.rs`, and `mcp/` for `crust mcp`) and `utils` (stateless math:
 warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
 `opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
 re-exports the public surface.

@@ -1421,6 +1421,66 @@ fn instanced_meshes_get_tangents_through_their_placement() {
     );
 }
 
+/// `World::barycentrics` — what the primvar AOVs place a hit within its face
+/// by — solves the kernel's own `(u, v)` from the triangle's vertices, on a
+/// baked mesh and through a rotated direct placement alike, so it never has
+/// to ask the kernel again. A forwarded slot has no vertices to solve on.
+#[test]
+fn barycentrics_are_the_kernels_through_every_resolvable_placement() {
+    let mut inner = crust_core::rt::SceneBuilder::new();
+    inner.attach(quad());
+    let inner = Arc::new(inner.commit());
+    let mut b = WorldBuilder::new();
+    b.attach(quad(), emissive(1.0));
+    b.attach(
+        Geometry::Instance {
+            scene: Arc::clone(&inner),
+            transform: glam::Affine3A::from_rotation_translation(
+                glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                glam::Vec3::new(5.0, 0.0, 0.0),
+            ),
+            transform_end: None,
+        },
+        emissive(1.0),
+    );
+    let slot = b.reserve_slot(emissive(1.0), crust_core::MASK_ALL);
+    b.attach_labelled(
+        Geometry::Instance {
+            scene: inner,
+            transform: glam::Affine3A::from_translation(glam::Vec3::new(-5.0, 0.0, 0.0)),
+            transform_end: None,
+        },
+        emissive(1.0),
+        crust_core::MASK_ALL,
+        crust_core::rt::InstanceHitId::As(slot),
+    );
+    let world = b.commit();
+    let mut solved = 0;
+    for (x, y) in [(0.2, 0.7), (0.8, 0.1), (0.55, 0.45), (0.05, 0.95)] {
+        for base in [0.0, 4.0] {
+            let ray = crust_core::rt::Ray::new(Vec3A::new(base + x, y, -1.0), Vec3A::Z);
+            let h = world.intersect_geometry(&ray).expect("the quad is hit");
+            let p = ray.origin + ray.dir * h.t;
+            let (u, v) = world
+                .barycentrics(p, h.geom_id, h.prim_id)
+                .expect("a resolvable placement");
+            assert!(
+                (u - h.u).abs() < 1e-5 && (v - h.v).abs() < 1e-5,
+                "({x}, {y}) at {base}: ({u}, {v}) against the kernel's ({}, {})",
+                h.u,
+                h.v
+            );
+            solved += 1;
+        }
+        let ray = crust_core::rt::Ray::new(Vec3A::new(x - 5.0, y, -1.0), Vec3A::Z);
+        let h = world.intersect_geometry(&ray).expect("the slot is hit");
+        assert_eq!(h.geom_id, slot);
+        let p = ray.origin + ray.dir * h.t;
+        assert_eq!(world.barycentrics(p, h.geom_id, h.prim_id), None);
+    }
+    assert_eq!(solved, 8);
+}
+
 /// Two placements of one prototype through an instancer's group report the
 /// same forwarded slot id with different transforms, so the hit names the
 /// slot, not the placement traversed: neither gets a tangent frame (nor the

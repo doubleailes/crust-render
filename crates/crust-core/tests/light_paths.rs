@@ -369,6 +369,7 @@ fn lpe_var(expr: &str) -> AovVar {
         expression: Some(expr.to_owned()),
         raw: false,
         variance: false,
+        primvar: None,
     }
 }
 
@@ -393,6 +394,7 @@ fn every_expression_routes_its_path() {
                 name: "p.exr".into(),
                 vars: vec![var.clone()],
                 attributes: Vec::new(),
+                deep: false,
             }],
         };
         let (beauty, film, _) = r.render_with_aovs(true, &|_, _| {}, &request);

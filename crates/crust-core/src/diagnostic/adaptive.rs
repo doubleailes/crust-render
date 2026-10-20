@@ -66,6 +66,7 @@ pub(super) fn count_and_variance() -> crate::AovRequest {
         expression: None,
         raw: false,
         variance: false,
+        primvar: None,
     };
     AovRequest {
         products: vec![AovProduct {
@@ -76,6 +77,7 @@ pub(super) fn count_and_variance() -> crate::AovRequest {
                 var("variance", AovSource::Variance),
             ],
             attributes: Vec::new(),
+            deep: false,
         }],
     }
 }

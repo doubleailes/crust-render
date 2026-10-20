@@ -92,6 +92,10 @@ pub struct LightOrigin {
 pub(crate) struct StageFacts {
     /// The host's import options.
     pub(crate) options: crate::UsdImportOptions,
+    /// What the products' identity and primvar AOVs asked the import to keep
+    /// (the identity tables, element maps and primvars): products that ask
+    /// for other ones need the import again.
+    pub(crate) aov_tables: (crate::aov::IdentityNeeds, Vec<crate::aov::PrimvarRead>),
     /// The `RenderSettings` prim the import read, when one.
     pub(crate) render_settings: Option<String>,
     pub(crate) subdiv_level: u32,

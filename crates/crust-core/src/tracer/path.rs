@@ -5,7 +5,7 @@
 //! `escaped_emission`, and for a shadow-linked light `link_twin`); change both
 //! or neither.
 
-use glam::Vec3A;
+use glam::{Vec3, Vec3A};
 use utils::exp3;
 
 use crate::aov::FirstHit;
@@ -503,9 +503,10 @@ struct ThinWalls {
     /// without its straight transmission, which the passes carry instead.
     reduced: bool,
     /// The first thin wall passed, as the camera's first hit when this is
-    /// the camera's segment: its `t`, the hit there and its `geom_id` (for
-    /// the wall's motion, read in the AOV instantiation only).
-    first: Option<(f32, HitRecord<'static>, u32)>,
+    /// the camera's segment: its `t`, the hit there and its `geom_id` and
+    /// `prim_id` (for the wall's motion and what the identity and primvar
+    /// AOVs read of it, in the AOV instantiation only).
+    first: Option<(f32, HitRecord<'static>, [u32; 2])>,
     /// The hidden light sources the segment crossed, in order. Written by
     /// every [`pass_cutouts`], in a world with any.
     crossed: Vec<Crossing>,
@@ -1643,7 +1644,7 @@ fn pass_walls<'w, S: SamplerImpl>(
             thin.passes.push((h.rec.t, p / q));
             if thin.first.is_none() {
                 // Kept for its geometry only, past this world's borrow.
-                thin.first = Some((h.rec.t, h.rec.detached(), h.geom_id));
+                thin.first = Some((h.rec.t, h.rec.detached(), [h.geom_id, h.prim_id]));
             }
         } else {
             if opacity >= 1.0 {
@@ -1684,16 +1685,18 @@ fn first_wall(
     world: &World,
     motion_on: bool,
 ) -> Option<FirstHit> {
-    let (t_wall, rec, geom_id) = thin.first.filter(|_| walls)?;
+    let (t_wall, rec, [geom_id, prim_id]) = thin.first.filter(|_| walls)?;
     (t_wall < t).then(|| FirstHit::Surface {
         p: rec.p,
-        n: rec.normal,
+        n: rec.normal.into(),
         uv: rec.uv,
         motion: if motion_on {
-            world.motion(geom_id)
+            world.motion(geom_id).into()
         } else {
-            Vec3A::ZERO
+            Vec3::ZERO
         },
+        geom_id,
+        prim_id,
     })
 }
 
@@ -3200,13 +3203,15 @@ pub(super) fn trace_path<
             *first =
                 first_wall(thin, walls, rec.t, world, motion_on).unwrap_or(FirstHit::Surface {
                     p: rec.p,
-                    n: sp.normal(),
+                    n: sp.normal().into(),
                     uv: rec.uv,
                     motion: if motion_on {
-                        world.motion(hit.geom_id)
+                        world.motion(hit.geom_id).into()
                     } else {
-                        Vec3A::ZERO
+                        Vec3::ZERO
                     },
+                    geom_id: hit.geom_id,
+                    prim_id: hit.prim_id,
                 });
         }
         let emitted = sp.emitted();

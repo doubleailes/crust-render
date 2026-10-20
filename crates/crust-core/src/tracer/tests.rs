@@ -949,6 +949,7 @@ fn every_kind_of_aov() -> crate::AovRequest {
         expression: None,
         raw: false,
         variance: false,
+        primvar: None,
     };
     let mut beauty = var("beauty", AovSource::Color);
     beauty.components = 4;
@@ -970,6 +971,7 @@ fn every_kind_of_aov() -> crate::AovRequest {
                 var("variance", AovSource::Variance),
             ],
             attributes: Vec::new(),
+            deep: false,
         }],
     }
 }
@@ -1559,6 +1561,7 @@ fn count_and_variance() -> crate::AovRequest {
         expression: None,
         raw: false,
         variance: false,
+        primvar: None,
     };
     AovRequest {
         products: vec![AovProduct {
@@ -1569,6 +1572,7 @@ fn count_and_variance() -> crate::AovRequest {
                 var("variance", AovSource::Variance),
             ],
             attributes: Vec::new(),
+            deep: false,
         }],
     }
 }

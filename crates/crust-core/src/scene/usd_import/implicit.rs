@@ -781,6 +781,7 @@ impl ImplicitPolicy {
             subdiv_faces: None,
             uvs: None,
             refined: false,
+            authored: false,
         }
     }
 }

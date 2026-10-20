@@ -558,8 +558,10 @@ fn a_motion_vector_var_alone_needs_the_film() {
                 expression: None,
                 raw: false,
                 variance: false,
+                primvar: None,
             }],
             attributes: Vec::new(),
+            deep: false,
         }],
     };
     assert!(request.needs_film());

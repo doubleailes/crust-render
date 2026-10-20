@@ -35,9 +35,11 @@ use openusd_schemas::geom::{
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
+use crate::identity::{ElementMap, PrimvarSet};
 use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
+use super::aov_keep::MaterialScope;
 use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
 };
@@ -103,6 +105,18 @@ pub(super) struct PartSlot {
     strands: Option<Arc<StrandTable>>,
     /// Whether the slot is curves, table or not ([`WorldBuilder::mark_curves`]).
     curves: bool,
+    /// Where each triangle lies in the authored mesh, when the render's
+    /// identity or primvar AOVs read it ([`WorldBuilder::set_aov_elements`]).
+    elements: Option<Arc<ElementMap>>,
+    /// The prototype prim's primvars the render's AOVs read. Those the
+    /// prototype leaves open ([`PrimvarSet::open`]) are resolved per
+    /// placement, through the prim that places it ([`place_primvars`]).
+    primvars: Option<Arc<PrimvarSet>>,
+    /// Where a nested native instance placed this slot's prototype inside
+    /// the part's: what turns a material in that inner prototype into its
+    /// instance-proxy path ([`MaterialScope`]). `None` for the part's own
+    /// prototype's geometry.
+    scope: Option<MaterialScope>,
     /// Uniform scale from the slot's own geometry frame, which its tables'
     /// densities are in, to the part's frame. 1 for a leaf part; inside a
     /// group, the member's placement. Nested *instancer* placements are not
@@ -149,6 +163,9 @@ impl ProtoPart {
                 uvs,
                 strands: None,
                 curves: false,
+                elements: None,
+                primvars: None,
+                scope: None,
                 scale: 1.0,
             }]),
         }
@@ -214,9 +231,24 @@ pub(super) fn collect_proto_parts(
             match prim.prototype() {
                 Ok(Some(inner)) => {
                     let inner_parts = prototype_parts(stage, &inner, caches, depth + 1);
-                    parts.extend(inner_parts.iter().map(|part| ProtoPart {
-                        local: this_local * part.local,
-                        ..part.clone()
+                    // The inner prototype's open primvars, as this prim
+                    // (still inside the outer prototype) hands them down.
+                    let placed = place_primvars(&inner_parts, &prim, caches);
+                    let inner_parts = placed.as_deref().unwrap_or(&inner_parts);
+                    let scope = MaterialScope::of(&prim);
+                    parts.extend(inner_parts.iter().map(|part| {
+                        ProtoPart {
+                            local: this_local * part.local,
+                            slots: part
+                                .slots
+                                .iter()
+                                .map(|slot| PartSlot {
+                                    scope: Some(scope.within(slot.scope.as_ref())),
+                                    ..slot.clone()
+                                })
+                                .collect(),
+                            ..part.clone()
+                        }
                     }));
                     continue;
                 }
@@ -260,7 +292,10 @@ pub(super) fn collect_proto_parts(
             if let Some(src) = mesh_source(
                 &prim,
                 &mesh,
-                MeshNeeds::of(&*material, displacement),
+                MeshNeeds {
+                    elements: caches.meshes.elements,
+                    ..MeshNeeds::of(&*material, displacement)
+                },
                 &mut caches.meshes.subdiv,
                 part_world
                     .as_ref()
@@ -269,15 +304,15 @@ pub(super) fn collect_proto_parts(
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();
+                let elements = caches.meshes.slots[slot as usize].elements.clone();
                 pending_meshes.push((parts.len(), slot));
-                parts.push(ProtoPart::leaf(
-                    placeholder_scene(),
-                    this_local,
-                    mask,
-                    material,
-                    faces,
-                    uvs,
-                ));
+                let mut part =
+                    ProtoPart::leaf(placeholder_scene(), this_local, mask, material, faces, uvs);
+                let primvars = caches.aov.primvars_of(&prim, Some(&mesh), caches.working);
+                let slot = &mut Arc::make_mut(&mut part.slots)[0];
+                slot.elements = elements;
+                slot.primvars = primvars;
+                parts.push(part);
             }
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, caches);
@@ -291,14 +326,17 @@ pub(super) fn collect_proto_parts(
                 center: Vec3A::ZERO,
                 radius,
             });
-            parts.push(ProtoPart::leaf(
+            let mut part = ProtoPart::leaf(
                 Arc::new(b.commit_with(crate::commit_options())),
                 this_local,
                 mask,
                 material,
                 None,
                 None,
-            ));
+            );
+            Arc::make_mut(&mut part.slots)[0].primvars =
+                caches.aov.primvars_of(&prim, None, caches.working);
+            parts.push(part);
         } else if let Some(read) = match UsdBasisCurves::get(stage, prim.path().clone()) {
             Ok(Some(curves)) => Some(Curve::Basis(curves)),
             _ => match UsdNurbsCurves::get(stage, prim.path().clone()) {
@@ -321,9 +359,11 @@ pub(super) fn collect_proto_parts(
                     None,
                     None,
                 );
+                let primvars = caches.aov.primvars_of(&prim, None, caches.working);
                 let slot = &mut Arc::make_mut(&mut part.slots)[0];
                 slot.curves = true;
                 slot.strands = strands.map(Arc::new);
+                slot.primvars = primvars;
                 parts.push(part);
             }
         } else if let Some(shape) = Shape::read(&prim) {
@@ -345,14 +385,11 @@ pub(super) fn collect_proto_parts(
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();
                 pending_meshes.push((parts.len(), slot));
-                parts.push(ProtoPart::leaf(
-                    placeholder_scene(),
-                    this_local,
-                    mask,
-                    material,
-                    faces,
-                    uvs,
-                ));
+                let mut part =
+                    ProtoPart::leaf(placeholder_scene(), this_local, mask, material, faces, uvs);
+                Arc::make_mut(&mut part.slots)[0].primvars =
+                    caches.aov.primvars_of(&prim, None, caches.working);
+                parts.push(part);
             }
         } else if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
             // A PointInstancer inside a prototype: expand it into nested
@@ -705,8 +742,15 @@ pub(super) fn emit_native_instance(
         ProtoPlace::Shared
     };
     let parts = placed_parts(stage, proto_path, caches, place);
+    let placed = place_primvars(&parts, prim, caches);
     let first = world.count();
-    attach_proto_parts(world, &parts, world_xf, "native instance");
+    attach_proto_parts(
+        world,
+        placed.as_deref().unwrap_or(&parts),
+        world_xf,
+        "native instance",
+        |id, slot| caches.aov.scope(id, slot.scope.as_ref()),
+    );
     debug!(
         "Instance {} uses prototype {proto_path} ({} instance(s), geom ids {first}..{})",
         prim.path(),
@@ -715,9 +759,59 @@ pub(super) fn emit_native_instance(
     );
 }
 
+/// `parts` as `placer` places them: each slot's primvars that its prototype
+/// left open, looked up on `placer` and its ancestors
+/// ([`AovKeep::placed_primvars`](super::aov_keep::AovKeep::placed_primvars)).
+/// `None` when no slot has one open, so every placement shares the parts.
+fn place_primvars(
+    parts: &[ProtoPart],
+    placer: &Prim,
+    caches: &ImportCaches<'_>,
+) -> Option<Vec<ProtoPart>> {
+    let open = |slot: &PartSlot| {
+        slot.primvars
+            .as_ref()
+            .is_some_and(|set| !set.open.is_empty())
+    };
+    if !parts.iter().any(|part| part.slots.iter().any(open)) {
+        return None;
+    }
+    Some(
+        parts
+            .iter()
+            .map(|part| {
+                if !part.slots.iter().any(open) {
+                    return part.clone();
+                }
+                let slots: Vec<PartSlot> = part
+                    .slots
+                    .iter()
+                    .map(|slot| {
+                        let primvars = slot.primvars.as_ref().map(|set| {
+                            caches
+                                .aov
+                                .placed_primvars(set, placer, caches.working)
+                                .unwrap_or_else(|| set.clone())
+                        });
+                        PartSlot {
+                            primvars,
+                            ..slot.clone()
+                        }
+                    })
+                    .collect();
+                ProtoPart {
+                    slots: slots.into(),
+                    ..part.clone()
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Attaches every part of a prototype at `placement`, one instance each,
 /// and returns how many kernel instances that was. A group's instance takes
-/// one `geom_id` per slot, so the ids consumed can exceed the count.
+/// one `geom_id` per slot, so the ids consumed can exceed the count. `each`
+/// is handed every slot attached, with its `geom_id`.
 /// Non-invertible placements are skipped: the kernel's instance transform
 /// must be invertible, and a zero scale is a common "hide this instance"
 /// idiom rather than an error.
@@ -726,6 +820,7 @@ fn attach_proto_parts(
     parts: &[ProtoPart],
     placement: GMat4,
     what: &str,
+    mut each: impl FnMut(u32, &PartSlot),
 ) -> usize {
     let mut attached = 0;
     for part in parts {
@@ -778,7 +873,14 @@ fn attach_proto_parts(
                 None if slot.curves => world.mark_curves(id),
                 None => {}
             }
+            if let Some(map) = &slot.elements {
+                world.set_aov_elements(id, map.clone(), false);
+            }
+            if let Some(set) = &slot.primvars {
+                world.set_aov_primvars(id, set.clone());
+            }
             world.set_placement_scale(id, scale * slot.scale);
+            each(id, slot);
         }
         attached += 1;
     }
@@ -806,6 +908,9 @@ struct InstancerLayout {
     /// the instancer)`. Instances hidden by `invisibleIds` are already
     /// dropped.
     pub(super) placements: Vec<(usize, GMat4)>,
+    /// Each placement's index in the instancer's arrays — what `instanceId`
+    /// reports, counting the hidden instances it skips.
+    pub(super) indices: Vec<u32>,
     /// How many instances `invisibleIds` removed, for reporting.
     pub(super) hidden: usize,
 }
@@ -874,6 +979,7 @@ fn read_instancer(
     }
 
     let mut placements = Vec::with_capacity(proto_indices.len());
+    let mut indices = Vec::with_capacity(proto_indices.len());
     let mut hidden = 0usize;
     for (i, &proto_index) in proto_indices.iter().enumerate() {
         let Some(pos) = positions.get(i) else { break };
@@ -913,11 +1019,13 @@ fn read_instancer(
             k,
             GMat4::from_scale_rotation_translation(scale, rotation, Vec3::new(pos.x, pos.y, pos.z)),
         ));
+        indices.push(i as u32);
     }
 
     Some(InstancerLayout {
         targets,
         placements,
+        indices,
         hidden,
     })
 }
@@ -1119,12 +1227,25 @@ pub(super) fn emit_point_instancer(
 
     let mut attached = 0usize;
     let first = world.count();
-    for (&(_, xf), version) in layout.placements.iter().zip(&placement_versions) {
+    for ((&(_, xf), version), &index) in layout
+        .placements
+        .iter()
+        .zip(&placement_versions)
+        .zip(&layout.indices)
+    {
         // A hidden placement has no version in adaptive mode.
         let Some(parts) = proto_parts.get(version) else {
             continue;
         };
-        attached += attach_proto_parts(world, parts, world_xf * xf, "PointInstancer instance");
+        let before = world.count();
+        attached += attach_proto_parts(
+            world,
+            parts,
+            world_xf * xf,
+            "PointInstancer instance",
+            |id, slot| caches.aov.scope(id, slot.scope.as_ref()),
+        );
+        caches.aov.instance(before..world.count(), index);
     }
 
     debug!(

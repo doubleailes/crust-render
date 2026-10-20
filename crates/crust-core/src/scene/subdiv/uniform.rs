@@ -145,6 +145,7 @@ pub(crate) fn subdivide(
                 *f = refinement.child_face_parent_face(*f as usize);
             }
         }
+        let cage_face = base_face.clone();
         let base_face: Vec<Option<u32>> = base_face
             .into_iter()
             .map(|f| (counts[f as usize] == 4).then_some(f))
@@ -172,6 +173,7 @@ pub(crate) fn subdivide(
             .collect();
         SubdivFaces {
             base_face,
+            cage_face,
             corner_uvs,
         }
     });

@@ -2,7 +2,7 @@
 title = "Render products and AOVs"
 description = "RenderProduct and RenderVar: which files a render writes, and which AOVs go in them."
 date = 2026-10-03T08:00:00+00:00
-updated = 2026-10-09T08:00:00+00:00
+updated = 2026-10-17T08:00:00+00:00
 draft = false
 weight = 25
 sort_by = "weight"
@@ -76,7 +76,9 @@ def Scope "Render"
 }
 ```
 
-`samples/aovs.usda` asks for every source on this page.
+`samples/aovs.usda` asks for the geometric and colour sources on this page;
+`samples/openexrid.usda` for the identity and primvar sources and the
+[ID mattes](#id-mattes-openexrid).
 
 ## Products
 
@@ -99,10 +101,12 @@ what it authors itself, as `UsdRenderComputeSpec` does.
   with a warning. This includes a product whose path `-o` gives to the first. Paths are
   compared once their frame variables are expanded, so `out.$F4.exr` and `out.0003.exr`
   collide at frame 3.
-- **`productType`** must be `raster` (the default). A `deepRaster` product is skipped with
+- **`productType`** is `raster` (the default) or `deepRaster`. A `deepRaster` product is
+  an [ID matte](#id-mattes-openexrid): one OpenEXRId file. Any other type is skipped with
   a warning.
 - **The PNG preview** is made from the first product's beauty var and written beside that
-  product, with a `.png` extension. A first product with no beauty var gets no PNG.
+  product, with a `.png` extension. A first product with no beauty var gets no PNG, and
+  neither does a first product that is an ID matte.
 
 Text attributes authored as `driver:parameters:*` on a product are copied into its EXR
 header: `driver:parameters:artist` as `artist`, and `driver:parameters:OpenEXR:<key>` as
@@ -123,7 +127,12 @@ A var is one layer of channels named `<layer>.<component>`. The layer is the var
 | vector (positions, normals) | `<layer>.X`, `.Y`, `.Z` |
 | UV | `<layer>.U`, `.V` |
 | motion vector | `<layer>.u`, `.v` (lowercase, Nuke's names: a var named `forward` lands on Nuke's built-in `forward` layer) |
-| scalar | one channel named `<layer>` |
+| scalar (ids included) | one channel named `<layer>` |
+
+A [primvar](#primvars) takes the layout of its var's type: a colour type
+(`color3f`, `color4f`) `R/G/B[/A]`, a texture coordinate (`texCoord2f`, `texCoord3f`)
+`U/V[/W]`, any other vector (`float2`, `float3`, `normal3f`, `float4`, …) `X/Y[/Z/W]`,
+and one component a scalar.
 
 The product's first beauty var is written without a prefix: `R`, `G`, `B`[, `A`]. Every
 viewer shows it as the image. A var named `Z` therefore gives the conventional `Z`
@@ -142,11 +151,13 @@ warning.
 |------|-----------|
 | `half`, `half3`, `color3h`, ... | HALF |
 | `float`, `float3`, `color3f`, `normal3f`, `point3f`, `texCoord2f`, ... | FLOAT |
-| `int` | UINT; `-1` is written as `0xFFFFFFFF` |
+| `int`, `uint` | UINT; `-1` is written as `0xFFFFFFFF` |
 
 The type must fit the source: three or four channels for the beauty, three for positions
-and normals, two for UVs and motion vectors, one for scalars. An integer type is accepted
-only for `sampleCount`. A var whose type does not fit is skipped with a warning.
+and normals, two for UVs and motion vectors, one for scalars, one to four for a primvar.
+An [identity](#identity) needs an integer type, and is `int` when no type is authored. An
+integer type is otherwise accepted only for `sampleCount` and primvars. A var whose type
+does not fit is skipped with a warning.
 
 ### Source types
 
@@ -154,7 +165,7 @@ only for `sampleCount`. A var whose type does not fit is skipped with a warning.
 |--------------|---------|
 | `raw` (default) | `sourceName` is looked up in the table below. An empty `sourceName` uses the channel name. |
 | `lpe` | `sourceName` is a [light path expression](#light-path-expressions). An `lpe:` prefix (Hydra's) is dropped. |
-| `primvar` | Not supported yet: skipped with a warning. |
+| `primvar` | `sourceName` names a primvar, with or without its `primvars:` namespace: see [Primvars](#primvars). |
 | `intrinsic` | Unimplemented in UsdRender itself: skipped with a warning. |
 
 `sourceType` and `driver:parameters:aov:name` may be authored as a `token` or a
@@ -185,6 +196,11 @@ case-sensitive.
 | `rawGI` | `RawGI` | `color3f` / `color4f` | filtered | Indirect diffuse light without the surface's colour. |
 | `rawTotalLight` | `RawTotalLighting` | `color3f` / `color4f` | filtered | Both. |
 | `motionvector` | none | `float2` / `half2` | closest | The first hit's forward 2D motion over the shutter, in pixels, `+v` up. See [Motion vectors](#motion-vectors). |
+| `primId` | `id`, `ID`, `Object Index` | `int` | closest | A stable integer per prim. See [Identity](#identity). |
+| `materialId` | none | `int` | closest | A stable integer per bound material. |
+| `assetId` | none | `int` | closest | A stable integer per asset (the nearest `component` or `assembly` model). |
+| `instanceId` | `id2` | `int` | closest | The hit instance's index in its `PointInstancer`. |
+| `elementId` | `faceindex` | `int` | closest | The authored face the camera ray hit. |
 
 Any other name is skipped with a warning, and no channel is written for it. Crust Render
 never writes a black channel that looks valid.
@@ -257,6 +273,8 @@ These authored attributes change the mode, first match wins:
 nothing was hit. Houdini authors `0` for every var, including depth.
 
 The beauty, `sampleCount` and `variance` are per-pixel quantities and ignore the mode.
+An [identity](#identity) is always closest: an authored filtered mode is warned about and
+ignored, since the average of two ids names nothing.
 
 ## Light path expressions
 
@@ -600,6 +618,156 @@ wrong channel.
 `samples/motionvector.usda` renders two spheres and a plane moving in different
 directions, sharp, with a `forward` var.
 
+## Identity
+
+The identity sources name what the camera ray's first hit lies on, as an integer per
+pixel: what a compositor keys a matte with, or a script looks an object up by. They are
+closest by default and always (two ids are never blended), written as UINT, and clear to
+`-1` (`0xFFFFFFFF`) where the camera ray met no surface.
+
+| source | the integer |
+|--------|-------------|
+| `primId` | the [MurmurHash3](https://github.com/aappleby/smhasher) (32-bit, seed 0) of the path of the prim the hit geometry came from |
+| `materialId` | the MurmurHash3 of the path of the material bound to the hit geometry |
+| `assetId` | the MurmurHash3 of the path of the hit prim's asset: the nearest of the prim and its ancestors whose `kind` is `component` or `assembly`, else the prim itself |
+| `instanceId` | the hit instance's index in its `PointInstancer`'s arrays (hidden instances counted), `-1` off a `PointInstancer` |
+| `elementId` | the index of the authored face the hit lies in, before triangulation and subdivision, `-1` off a mesh |
+
+A hash, not a running number, so a prim keeps its id in every frame and every render,
+whatever else the stage holds. The prim of instanced geometry is the instance or
+instancer prim, never a prototype's own path (`/__Prototype_N`, which a stage numbers as
+it composes it): every placement of a native instance has its own `primId`; the
+instances of one `PointInstancer` share the instancer's, and `instanceId` tells them
+apart. A material inside a native instance's prototype is named after the instance, as
+its instance-proxy path: `/World/Tree_12/Looks/Bark`, and through a nested instance
+`/World/House_3/Chair/Looks/Wood`. Geometry with no material prim
+bound (the default material, a light's own surface) is named `crust:unbound`.
+
+```usda
+def RenderVar "primId"
+{
+    uniform token dataType = "int"
+    uniform string sourceName = "primId"
+}
+```
+
+The tables these read are kept by the import only when a var asks for them.
+
+## Primvars
+
+A var with `sourceType = "primvar"` writes the named primvar at the camera ray's first
+hit, interpolated as the primvar is authored:
+
+- `constant`: its value;
+- `uniform`: the value of the authored face the hit lies in;
+- `vertex` and `varying`: the values at the face's points, interpolated across it;
+- `faceVarying`: the values at the face's corners, interpolated across it.
+
+It is filtered by default, like every value that can be averaged; an integer type (`int`)
+is closest by default, since averaged integers name nothing. A colour type (`color3f`,
+`color4f`) reads the primvar as a colour, taken into the
+[working colour space](@/docs/usd/render-settings.md#renderingcolorspace) as every
+authored colour is. A constant primvar authored on an ancestor (an `Xform` above the
+mesh) applies, as UsdGeom's primvar inheritance says — on a native instance too, where
+each instance prim's own value reaches the prototype's meshes under it — and one blocked
+on the mesh (`= None`) is not inherited. Where the hit surface does not
+author the primvar, the channel holds the var's clear value.
+
+```usda
+def RenderVar "displayColor"
+{
+    uniform token dataType = "color3f"
+    uniform string sourceName = "displayColor"
+    uniform token sourceType = "primvar"
+}
+```
+
+A primvar whose type has another number of components than the var's, or that is not a
+number, is refused with a warning (`aov.primvar_type_mismatch`) and the channel holds
+the clear value on that prim. So is one spread in a way crust cannot read there
+(`aov.primvar_unreadable`): any interpolation but `constant` on a sphere, an implicit
+shape, curves or points, too few values for the mesh, or an `elementSize` above 1.
+
+On a subdivision surface a primvar is read on the authored face the hit lies in: a
+`vertex` primvar is interpolated bilinearly across a quad face rather than by the
+subdivision scheme, and on the refinement of a triangle or of a larger polygon a `vertex`,
+`varying` or `faceVarying` primvar takes the face's average. A `loop` mesh that is
+refined keeps no faces at all: only its `constant` primvars are read, and its
+`elementId` is `-1`.
+
+On a mesh placed by a `PointInstancer`, a mesh of a native instance whose prototype holds
+more than one mesh, or an instance with motion blur, a `vertex`, `varying` or
+`faceVarying` primvar also takes the face's average: Crust Render cannot place the hit
+within the face there without tracing the camera ray again, which would slow every
+render, AOVs or not. `constant` and `uniform` primvars and `elementId` are exact
+everywhere.
+
+## ID mattes (OpenEXRId)
+
+A `RenderProduct` with `productType = "deepRaster"` writes an ID matte: an
+[OpenEXRId](https://github.com/MercenariesEngineering/openexrid) file, the deep EXR its
+Nuke node (DeepOpenEXRId) and OpenFX plug-in read. Each pixel holds one deep sample per
+name its camera samples hit first, with that name's coverage of the pixel and its depth.
+A compositor selects objects by name, or by a pattern on the names, and gets their exact
+coverage, edges and transparency included, from any selection, without a matte rendered
+for it.
+
+The product's vars say what the matte holds:
+
+- **one identity var** says what the names are: `primId` for prims, `materialId` for
+  bound materials, `assetId` for assets (the names [Identity](#identity) hashes);
+- **a beauty var** (`color`, `Ci`, …), optional, adds each name's share of the beauty:
+  colour-correct a selection in the matte, composite it back over the rest, and the
+  edges stay clean.
+
+Any other var of a `deepRaster` product is refused with a warning
+(`aov.not_in_matte`), and a `deepRaster` product with no identity var writes nothing.
+
+```usda
+def RenderProduct "objects"
+{
+    uniform token productType = "deepRaster"
+    token productName = "renders/objects.$F4.exr"
+    rel orderedVars = [</Render/Vars/primId>, </Render/Vars/beauty>]
+}
+```
+
+The file is OpenEXRId's version 3, as its own writer lays it out:
+
+- one deep scanline part, ZIPS compression;
+- channels `Id` (UINT, an index into the file's name table), `Z` (FLOAT, the name's mean
+  camera depth in the pixel), `A` (HALF, its coverage) and, with a beauty var, `R`, `G`,
+  `B` (HALF, its share of the beauty, in the working colour space);
+- each pixel's samples front to back, in the deep "over" form, which a deep compositor
+  undoes. That form holds coverage between 0 and 1, summing to at most 1: with a pixel
+  filter that has negative lobes (Mitchell), a name's share can fall outside
+  that range near an edge, and is clipped to what the form can hold;
+- `EXRIdVersion = 3`, and `EXRIdNames`: the names the file uses, sorted, one per line,
+  zlib-compressed and base64-encoded.
+
+Coverage is weighted by the same pixel filter as the beauty, so in every pixel the
+coverage of the names, plus the background's, is one: where geometry covers the pixel,
+the names' coverage sums to one, and their colour to the beauty. A cutout is passed as in
+the beauty: the surface behind it gets the coverage. Thin glass is a hit, as for every
+other AOV. The sky, a dome and volumes are no name.
+
+A pixel holds at most 64 names. The rare pixel that sees more objects than that gives the
+coverage of the ones past the 63rd to one more name, `crust:spill`, so its coverage
+still sums to one.
+
+The header also carries what every product's does: `software`, `colorInteropID`, the
+[sampling stamp](#how-the-pixels-were-sampled), and copied `driver:parameters`.
+
+{% alert(icon="ℹ️") %}
+**Name separators.** OpenEXRId's Nuke node splits a version 3 name table at line
+breaks, and Crust Render writes it so. The library's own reader (and its OpenFX
+plug-in) splits it at NUL bytes, and reads Crust Render's table as a single name: the
+coverage it reads is right, the names are not. Use the Nuke node.
+{% end %}
+
+Cryptomatte is not written: its layer names (`crypto_object`, `crypto_material`,
+`crypto_asset`) are refused with a warning.
+
 ## The EXR files
 
 Each product is one single-part, scanline, ZIP-compressed EXR. The header carries
@@ -679,17 +847,17 @@ product's region.
   all.
 - AOVs see exactly the samples the beauty took, adaptive sampling and path guiding
   included. A guided render blends its passes' AOVs with the same weights as its beauty.
+- Asking for identity, primvar or matte AOVs changes no geometry: the faces a primvar is
+  read through are the ones subdivision already tracks.
 
 ## Not supported
 
 Each of these is refused with a warning when authored, never ignored silently:
 
-- identity AOVs (`primId`, `instanceId`, `elementId`) and ID mattes. ID mattes are
-  planned as [OpenEXRId](https://github.com/MercenariesEngineering/openexrid) deep EXRs,
-  not Cryptomatte, once crust can write deep EXRs;
-- `sourceType = "primvar"`;
+- Cryptomatte layers: ID mattes are [OpenEXRId](#id-mattes-openexrid) files;
 - the geometric normal `Ng`;
-- deep output (`productType = "deepRaster"`);
+- deep output of any AOV but an ID matte (a `deepRaster` product holds an identity and a
+  beauty var only);
 - more than one camera or resolution in a render;
 - `pixelAspectRatio` and `disableDepthOfField` (warned only when authored with a value
   that would change the image). `disableMotionBlur` and `instantaneousShutter` are

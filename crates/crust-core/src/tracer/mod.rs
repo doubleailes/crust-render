@@ -614,6 +614,9 @@ impl Renderer {
         }
         let mut layout = AovLayout::new(request);
         layout.luma = self.lights.luma();
+        if !layout.mattes.is_empty() || layout.identity.any() {
+            layout.names = self.world.identity().cloned();
+        }
         if !layout.lpes.is_empty() || layout.albedo || layout.diffuse_filter {
             // One DFA for every expression of the render, over the lights'
             // tags; shared read-only by every worker.
@@ -1824,6 +1827,8 @@ impl Renderer {
                     albedo: scratch.route.albedo,
                     diffuse_filter: scratch.route.diffuse_filter,
                     time,
+                    world: Some(&self.world),
+                    radiance,
                 };
                 planes.add(&scratch.first, &extras, fx, fy, wx * wy);
             }
