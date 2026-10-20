@@ -1404,7 +1404,7 @@ source = "git+https://github.com/doubleailes/OpenSubdiv-rs?tag=0.5.0#c672796f958
 [[package]]
 name = "openusd"
 version = "0.8.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#a6cae17686264d685c8218fcdfba783cb56bdf8c"
+source = "git+https://github.com/mxpv/openusd?branch=main#bb9058e8d47d44f983caabf1e663401f59e3c7f0"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -1426,7 +1426,7 @@ dependencies = [
 [[package]]
 name = "openusd-build"
 version = "0.8.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#a6cae17686264d685c8218fcdfba783cb56bdf8c"
+source = "git+https://github.com/mxpv/openusd?branch=main#bb9058e8d47d44f983caabf1e663401f59e3c7f0"
 dependencies = [
  "openusd",
  "prettyplease",
@@ -1441,8 +1441,9 @@ dependencies = [
 [[package]]
 name = "openusd-schemas"
 version = "0.8.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#a6cae17686264d685c8218fcdfba783cb56bdf8c"
+source = "git+https://github.com/mxpv/openusd?branch=main#bb9058e8d47d44f983caabf1e663401f59e3c7f0"
 dependencies = [
+ "bitflags 2.13.2",
  "derive_more",
  "openusd",
  "openusd-build",

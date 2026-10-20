@@ -181,6 +181,9 @@ const RENDER_BINDING_PURPOSE: &str = "full";
 /// - **Purpose.** ALab authors `material:binding:full` and
 ///   `material:binding:preview` and almost never the all-purpose relationship,
 ///   so asking for `""` alone found nothing on 7 256 prims.
+///
+/// A binding whose target is not a `Material` prim binds nothing, as in C++
+/// `ComputeBoundMaterial`: the prim takes the default material.
 pub(super) fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
     let mut path = Some(prim.path().clone());
     while let Some(p) = path {
@@ -188,7 +191,8 @@ pub(super) fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
             return None;
         }
         if let Ok(Some(api)) = MaterialBindingAPI::get(stage, p.clone()) {
-            return api.bound_material(RENDER_BINDING_PURPOSE).ok().flatten();
+            let material = api.bound_material(RENDER_BINDING_PURPOSE).ok().flatten()?;
+            return Some(material.path().clone());
         }
         path = p.parent();
     }

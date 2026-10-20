@@ -159,7 +159,11 @@
   bindings inherited from ancestors, binding strength honoured, and collection bindings
   read. The walk starts at the nearest ancestor that *carries* the API, because
   `MaterialBindingAPI::get` refuses any other prim — which is every mesh under a bound
-  group. `preview` bindings are never used. Prims under a `proxy` or `guide` purpose are
+  group. A winning binding whose target is not a `Material` prim — a prim of another
+  type, or a path with nothing at it — binds nothing, as in C++ `ComputeBoundMaterial`
+  (openusd-schemas since `c3af19e` returns the `Material`, not the target path): the prim
+  takes the default grey OpenPBR, logged at `DEBUG` as unbound, with no
+  `material.fallback_default` warning. `preview` bindings are never used. Prims under a `proxy` or `guide` purpose are
   pruned with their subtree, like `active = false`, and so is a `visibility =
   "invisible"` subtree (read at the evaluated time, lights included — ALab parks four
   lights that way), except that the top-level walk still descends it **for cameras
