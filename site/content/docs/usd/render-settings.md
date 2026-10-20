@@ -108,7 +108,8 @@ def RenderSettings "settings"
 Turns off the camera's [depth of field](#camera-depth-of-field) for the whole render.
 Every camera ray starts at the camera's position, as with a camera that authors no
 `fStop`: the image is sharp at every depth. The field of view and the framing do not
-change, and neither does anything else the camera authors.
+change, and neither does anything else the camera authors. A stage with no camera
+renders through crust's built-in fallback camera, and this closes its lens too.
 
 It is resolved like `disableMotionBlur`: from the first `RenderProduct` when it
 authors it, else from this prim. A later product that asks for the other setting is
@@ -476,7 +477,8 @@ none, is a pinhole: no blur at all.
 The field of view depends only on `focalLength` and the apertures, so neither `fStop`,
 `focusDistance` nor `metersPerUnit` reframes the image.
 
-A `metersPerUnit` that is not a positive number (0, say) is refused with a
+A `metersPerUnit` that is not a positive number (0, say), or one so small that the lens
+would be wider than a float can hold (`1e-42`), is refused with a
 [`camera.invalid_meters_per_unit`](@/docs/reference/warnings.md) warning and read as
 0.01. Only a camera with a lens checks it, so a pinhole render says nothing about it.
 [`disableDepthOfField`](#disabledepthoffield) on the render settings turns the lens off

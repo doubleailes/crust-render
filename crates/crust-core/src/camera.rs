@@ -76,6 +76,15 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// This camera with its lens closed: every ray leaves the eye, as
+    /// `disableDepthOfField` asks of the procedural fallback too.
+    pub(crate) fn pinhole(self) -> Self {
+        Self {
+            lens_radius: 0.0,
+            ..self
+        }
+    }
+
     /// Creates a new `Camera` with the specified parameters.
     pub fn new(
         lookfrom: Vec3A,

@@ -872,9 +872,15 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
                 CameraMissing,
                 "USD stage has no UsdGeomCamera — falling back to world::get_settings camera"
             );
+            let camera = crate::world::get_settings().0;
+            let camera = if ctx.settings.depth_of_field() {
+                camera
+            } else {
+                camera.pinhole()
+            };
             (
                 RenderCamera {
-                    camera: crate::world::get_settings().0,
+                    camera,
                     exposure_scale: 1.0,
                     refused_meters_per_unit: None,
                 },

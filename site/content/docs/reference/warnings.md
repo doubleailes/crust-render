@@ -88,7 +88,7 @@ plain text and are not counted.
 | `camera.missing` | skipped | The stage authors no camera; the procedural default camera is used. | Author a `Camera` prim. |
 | `camera.invalid_exposure` | refused | The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled. | Check `exposure:fStop` (not 0) and that `exposure:time`, `exposure:iso` and `exposure:responsivity` are positive. |
 | `camera.unreadable` | skipped | A camera prim could not be built into a camera. | Check the camera's attributes (focal length, aperture, clipping). |
-| `camera.invalid_meters_per_unit` | refused | The stage's metersPerUnit is not finite or not positive; the lens reads it as 0.01, a centimetre. | Author the stage's `metersPerUnit` as a positive length in metres (0.01 for centimetres, 1 for metres). |
+| `camera.invalid_meters_per_unit` | refused | The stage's metersPerUnit is not finite, not positive, or so small that the lens diameter overflows; the lens reads it as 0.01, a centimetre. | Author the stage's `metersPerUnit` as a positive length in metres (0.01 for centimetres, 1 for metres). |
 
 ## Products and AOVs
 
