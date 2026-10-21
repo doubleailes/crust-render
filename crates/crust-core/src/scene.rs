@@ -99,6 +99,10 @@ pub struct Scene {
     /// The active render pass and what it held out and hid
     /// ([`UsdImportOptions::pass`]); `None` with no pass.
     pub pass: Option<crate::PassSummary>,
+    /// The `RenderSettings` prim the import read its settings from (the
+    /// active pass's `renderSource`, else the stage's); `None` when the stage
+    /// has none there and the settings are the defaults.
+    pub settings_prim: Option<String>,
     /// What shaped the image beyond its settings — the lens, the blurs, the
     /// root layer stack and the visibility overrides — for the stamp
     /// ([`Source`]). A hand-assembled scene records its
@@ -123,6 +127,7 @@ impl Scene {
             provenance: None,
             layers: Vec::new(),
             pass: None,
+            settings_prim: None,
             source: Source {
                 depth_of_field: camera.has_depth_of_field(),
                 ..Default::default()

@@ -859,7 +859,8 @@ and reports:
 - **the render it describes**: the stage, the frame, the camera the render goes through
   (after any fallback), the resolution, the region, the [`--pass`](#pass) (with how many
   prims it holds out and hides from the camera; `null` in the JSON without one), the
-  `RenderSettings` prim the render reads, and every file the render would write
+  `RenderSettings` prim the render reads (`null` in the JSON when the stage has none and
+  the render uses the defaults), and every file the render would write
   with its channels. A stage with no `RenderProduct` reports the one beauty EXR a render
   writes, `output.exr`;
 - **effective settings**: every setting the render would run with, each with the flag

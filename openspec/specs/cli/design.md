@@ -553,7 +553,9 @@ warning code: removing a code bumps every report that carries warnings, by the
 `region`); `pass` (`null` with no `--pass`, else `path`, `holdouts`, `camera_hidden`:
 how many prims that bring geometry in the pass holds out and hides from the camera);
 `settings` (the `RenderSettings` prim the render reads — the pass's `renderSource`, else
-the stage's — as the import's provenance records it); `products[]` (`prim` — `null` for
+the stage's — or `null` when no settings prim is there and the render uses the defaults;
+the provenance keeps the fallback path itself, so an edit authoring settings there is
+still classified as a settings edit); `products[]` (`prim` — `null` for
 the default beauty — `file`, `channels`);
 `effective_settings[]` (`name`, `value`, `flag`, `usd_attribute`, from the one
 `diagnostic::effective_settings`); `import[]` (`crust-stats/1`'s phase objects:
