@@ -305,8 +305,9 @@ refines `primvars:st`, and each refined face keeps its cage face's `uniform` val
 displaced point reads the primvar of the point it was moved from.
 
 A mesh that does not author the primvar gives the node's `default`, silently. One
-authored with another type, an array whose length does not match its interpolation, or
-indices out of range gives the `default` too, with
+authored with another type, an empty array or one whose length does not match its
+interpolation, or indices that are out of range or not an `int[]` gives the `default`
+too, with
 [`mesh.unsupported_primvar`](@/docs/reference/warnings.md#meshes-subdivision-and-displacement).
 
 `Sphere`, `Cube`, `Cylinder`, `Cone`, `Capsule` and `Plane` read `constant` primvars

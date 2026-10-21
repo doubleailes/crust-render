@@ -981,6 +981,11 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   translated as whatever category that parse gives, which the compiler then
   reports as unsupported. Nodegraph-scoped names are flattened: every node is
   addressed by its prim path.
+- **A displacement reads no primvar.** It is evaluated at the import's
+  vertices, before any `PrimvarTable` exists, so a `geompropvalue` in a
+  `displacementshader` graph gives its default (`mtlx.incomplete`). Reading one
+  would mean interpolating the mesh's shading primvars at each displaced vertex
+  into `VertexCtx`.
 
 - **A `zeltner` sheen is Adobe's, not MaterialX's.** MaterialX's own GLSL
   evaluates `mode = zeltner` with analytic fits to the LTC coefficients and the
@@ -1163,8 +1168,12 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   `channels` in the same table (usd-scene-import record, "Mesh primvars").
   `materialx::run` looks the values up into the per-thread buffer only for a
   program that reads one, on a hit that carries some, as for a curve. The opacity
-  and displacement slices share the surface program's `primvars` list
-  (`Program::optimize` keeps it), so one table serves all three. The variant fits
+  slice shares the surface program's `primvars` list (`Program::optimize` keeps
+  it), so one table serves both. The displacement slice keeps the list too, but
+  runs at the import's vertices, which supply none (`MtlxDisplacement::eval_with`
+  passes `&[]`): a `geompropvalue` it reads gives its default, reported per material
+  (`mtlx.incomplete`) when the sliced program `reads_primvar` — asked of the
+  optimised slice whatever the optimiser setting, or a surface read would count. The variant fits
   in `HitPart` beside the strand only because `MeshHit` is `repr(C, packed(4))`:
   20 bytes, where aligned to eight it pads to 24, leaves the tag no room and made
   the record 112 bytes (the record stays 96, `a_world_hit_stays_an_inline_copy`).

@@ -291,6 +291,18 @@ fn an_unreadable_primvar_reads_the_default_and_warns() {
             r#"float[] primvars:label = [1] (interpolation = "uniform")
         int[] primvars:label:indices = [0, 3]"#,
         ),
+        // Values enough to read unindexed: refused, not read as if the
+        // indices were absent.
+        (
+            "indices_type",
+            r#"float[] primvars:label = [1, 1] (interpolation = "uniform")
+        int64[] primvars:label:indices = [0, 1]"#,
+        ),
+        // As on curves: an empty array is told, not read as unauthored.
+        (
+            "empty",
+            r#"float[] primvars:label = [] (interpolation = "vertex")"#,
+        ),
     ] {
         let s = load(
             &format!("unreadable_{name}"),
