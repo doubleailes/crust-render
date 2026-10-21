@@ -205,6 +205,8 @@ pub(super) struct RenderCamera {
     /// The pixel aspect ratio `adjustPixelAspectRatio` asked for and the
     /// frame did not honour ([`CameraFrame::unhonoured_pixel_aspect`]).
     pub(super) unhonoured_pixel_aspect: Option<f32>,
+    /// Its lens, for the stamp; `None` for the procedural camera.
+    pub(super) lens: Option<crate::stamp::Lens>,
 }
 
 impl RenderCamera {
@@ -249,12 +251,20 @@ pub(super) fn build_camera(
     let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
     let frame = CameraFrame::read(&cam, stage, prim, settings, framing);
     let (camera, refused_meters_per_unit) = lens_camera(&cam, stage, &frame, settings);
+    let read = lens(&cam, &frame);
     Some(RenderCamera {
         camera,
         exposure_scale: exposure_scale(&cam),
         refused_meters_per_unit,
         shutter: offsets(&cam),
         unhonoured_pixel_aspect: frame.unhonoured_pixel_aspect,
+        lens: Some(crate::stamp::Lens {
+            focal_length: read.focal_length,
+            aperture: read.aperture,
+            conform: framing.policy.as_token().to_owned(),
+            f_stop: read.f_stop,
+            focus_distance: read.focus_distance,
+        }),
     })
 }
 

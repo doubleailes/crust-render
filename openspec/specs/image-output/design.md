@@ -88,6 +88,43 @@ maps each to the flag and USD attribute it mirrors.
   compared whole headers, and the goldens of `check_images.sh` are compared channel by
   channel (`crust diff`), so old unstamped goldens still pass, reading `unknown`.
 
+### The lens, the blurs and the layer stack
+
+A set of compositing passes once inherited depth of field from the shot's render
+layer, and nothing in the files said so: the blur was found only by comparing against
+sharp references, after measurements had been taken on the blurred images. So the stamp
+also records what shaped the pixels beyond the sampling settings, from
+`Scene::source` (`crust_core::stamp::Source`, filled by the import):
+
+- **The lens** under its USD names (`crust:focalLength`, the two apertures as authored,
+  `crust:aspectRatioConformPolicy`, `crust:fStop`, `crust:focusDistance`), read by the
+  same `lens()` the camera is built from, so the stamp cannot describe a lens the rays
+  did not use. Absent for the procedural camera.
+- **`crust:depthOfField` / `crust:motionBlur`** are the effective switches, not the
+  settings: the built camera's lens radius is above 0; motion blur is on *and* the
+  shutter opens an interval. A `disableDepthOfField` render through an `fStop = 2.8`
+  camera stamps the lens and `crust:depthOfField = 0`.
+- **`crust:layerStack`** is the index stage's root layer stack (`Stage::layer_stack`:
+  session, root, sublayers), strongest first, as files (`stack_files`, the mapping of
+  `Scene::layers`). Each line carries an FNV-1a hash of the file's bytes, read by the
+  host after the render (crust-core opens no file here: `SamplingStamp::with_source`
+  takes a reader). FNV-1a, not `DefaultHasher`, because a hash stamped today must
+  compare with one stamped by a later toolchain. One text attribute rather than one per
+  layer, so the attribute set stays fixed.
+- **`crust:invisibleOverrides`** counts `over` prims on which the strongest layer of
+  that stack authors `visibility = "invisible"` (a default or any time sample): what an
+  override layer — an MCP session's, or a lighter's — hid of the scene beneath it. A
+  `def` authored invisible is the scene's own and is not counted.
+
+An MCP in-place settings update refreshes the lens, the blurs and the overrides on the
+scene (`SettingsUpdate`), so a stamp taken after it describes the camera re-read.
+
+`crust diff` lists every stamped value that differs (`Comparability::differences`, the
+layer stack layer by layer) and adds a note only for what changes what can be compared:
+depth of field or motion blur on one side, another blur, another framing, a layer in one
+stack only, another override count. Each is judged only when both files record it, so
+files stamped before these attributes existed raise none of them.
+
 ## The interrupted-render attribute
 
 An EXR written from a render Ctrl-C stopped carries `crust:renderStatus = "interrupted"`

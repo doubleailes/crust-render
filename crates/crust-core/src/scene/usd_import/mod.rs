@@ -914,6 +914,7 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
                     refused_meters_per_unit: None,
                     shutter: ShutterOffsets::default(),
                     unhonoured_pixel_aspect: None,
+                    lens: None,
                 },
                 None,
             )
@@ -1121,6 +1122,7 @@ pub(crate) fn load_scene(
     let RenderCamera {
         camera,
         exposure_scale,
+        lens,
         ..
     } = render_camera;
     let settings = apply_exposure(
@@ -1148,8 +1150,10 @@ pub(crate) fn load_scene(
             }
             None => false,
         });
+    let mut root_stack = (Vec::new(), None);
     if let Some(index) = ctx.index.take() {
         ctx.layers.extend(index.layer_identifiers());
+        root_stack = (index.layer_stack(), Some(invisible_overrides(&index)));
     }
     if !domes_seen_by_camera {
         debug!(
@@ -1220,6 +1224,13 @@ pub(crate) fn load_scene(
     scene.time = time;
     scene.warnings = warning_scope.finish();
     scene.layers = layer_files(&ctx.layers, path);
+    scene.source = crate::stamp::Source {
+        lens,
+        depth_of_field: scene.camera.has_depth_of_field(),
+        motion_blur: scene.settings.motion_blur() && shutter.interval.is_some(),
+        layer_stack: stack_files(&root_stack.0, path),
+        invisible_overrides: root_stack.1,
+    };
     scene.provenance = Some(Provenance {
         materials: ctx.caches.materials.origins(&scene.world),
         material_reads: ctx.caches.materials.reads(),
@@ -1273,6 +1284,57 @@ fn layer_files(
         })
         .collect();
     files.into_iter().collect()
+}
+
+/// The files of the root layer stack `identifiers`, in their order: each
+/// mapped as [`layer_files`] maps it, an anonymous layer left out, and a
+/// package met twice kept once, where it is strongest.
+fn stack_files(identifiers: &[String], root: &Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for id in identifiers {
+        let one = std::collections::BTreeSet::from([id.clone()]);
+        for file in layer_files(&one, root) {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The prims the strongest layer of `stage`'s root layer stack — its session
+/// layer when it has one, else its root layer — hides with an `over`: a
+/// `visibility` spec on an `over` prim whose default or a time sample is
+/// `invisible`. What a session or override layer hid of the scene beneath
+/// it; a prim the layer itself defines invisible is the scene's own.
+pub(super) fn invisible_overrides(stage: &Stage) -> u32 {
+    let strongest = stage.session_layer().unwrap_or_else(|| stage.root_layer());
+    let data = strongest.data();
+    let invisible = |v: &sdf::Value| matches!(v, sdf::Value::Token(t) if t.as_str() == "invisible");
+    let mut count = 0u32;
+    for path in data.spec_paths() {
+        if !path.is_property() || !path.as_str().ends_with(".visibility") {
+            continue;
+        }
+        let prim = path.prim_path();
+        let is_over = matches!(
+            data.try_field(&prim, "specifier"),
+            Ok(Some(v)) if matches!(&*v, sdf::Value::Specifier(sdf::Specifier::Over))
+        );
+        if !is_over {
+            continue;
+        }
+        let default = matches!(data.try_field(&path, "default"), Ok(Some(v)) if invisible(&v));
+        let sampled = matches!(
+            data.try_field(&path, "timeSamples"),
+            Ok(Some(v)) if matches!(&*v, sdf::Value::TimeSamples(samples)
+                if samples.iter().any(|(_, v)| invisible(v)))
+        );
+        if default || sampled {
+            count = count.saturating_add(1);
+        }
+    }
+    count
 }
 
 /// What the import reads before it traverses anything: the index stage's

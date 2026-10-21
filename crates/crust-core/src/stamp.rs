@@ -1,13 +1,14 @@
 //! The sampling stamp: what every EXR `crust render` writes records about
 //! how its pixels were sampled and what they were rendered from (the
-//! `image-output` spec's "EXRs record how they were sampled" and "... what
-//! they were rendered from").
+//! `image-output` spec's "EXRs record how they were sampled", "... what
+//! they were rendered from" and "... the lens and the layer stack").
 //!
 //! Built once per render, after tracing, from the settings the render ran
-//! with, its ray counters, and what the import recorded (the camera prim and
-//! the time code). The host writes [`SamplingStamp::attributes`] into each
-//! EXR header; `crust diff` reads them back ([`crate::compare`]) to say
-//! whether two images can be compared pixel for pixel.
+//! with, its ray counters, and what the import recorded (the camera prim, the
+//! time code, and the [`Source`]: the lens, the blurs and the layer stack).
+//! The host writes [`SamplingStamp::attributes`] into each EXR header;
+//! `crust diff` reads them back ([`crate::compare`]) to say whether two
+//! images can be compared pixel for pixel.
 //!
 //! Names are `crust:` plus the USD render-setting attribute that sets the
 //! value (`crust:indirectClamp`), so one vocabulary runs through USD, the CLI
@@ -15,6 +16,7 @@
 
 use crate::stats::RayStats;
 use crate::tracer::{RenderOutcome, RenderSettings};
+use std::path::{Path, PathBuf};
 
 /// The prefix every stamped attribute carries, and that a RenderProduct may
 /// not author.
@@ -43,6 +45,88 @@ impl std::fmt::Display for StampValue {
     }
 }
 
+/// The render camera's lens as the import read it at the frame, unauthored
+/// values at the render's fallbacks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lens {
+    /// Millimetres.
+    pub focal_length: f32,
+    /// Horizontal and vertical, in millimetres, as authored; the vertical
+    /// defaults to the horizontal over the image's aspect ratio.
+    pub aperture: [f32; 2],
+    /// The `aspectRatioConformPolicy` the aperture was conformed to the
+    /// image by.
+    pub conform: String,
+    /// `0` is a pinhole.
+    pub f_stop: f32,
+    pub focus_distance: f32,
+}
+
+/// What shaped a render beyond its settings: the lens it was seen through,
+/// whether its blurs were on, and the layers the stage was composed from.
+/// Recorded by the import ([`crate::Scene::source`]); the default is a
+/// hand-assembled scene's, which has no camera prim and no layers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Source {
+    /// `None` for the procedural camera.
+    pub lens: Option<Lens>,
+    /// Whether the camera rendered through has an open lens: an `fStop`
+    /// above 0 and depth of field not disabled.
+    pub depth_of_field: bool,
+    /// Whether moving geometry was blurred: motion blur on, and a shutter
+    /// that opens an interval at a frame.
+    pub motion_blur: bool,
+    /// The files of the stage's root layer stack in strength order: the
+    /// session layer when there is one, the root layer, its sublayers. A
+    /// layer inside a package is the package; an anonymous layer is left out.
+    pub layer_stack: Vec<PathBuf>,
+    /// The prims the strongest layer of that stack hides with an `over`
+    /// authoring `visibility = "invisible"` (as a default or in a time
+    /// sample): the visibility overrides a session or override layer
+    /// applied. `None` for a hand-assembled scene.
+    pub invisible_overrides: Option<u32>,
+}
+
+/// One layer of the stamped layer stack: its file, and a hash of its bytes
+/// ([`content_hash`]) when the host could read them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StampedLayer {
+    pub path: String,
+    pub hash: Option<u64>,
+}
+
+/// FNV-1a over `bytes`: a hash with no seed, the same across runs, builds
+/// and platforms, so two files stamped years apart compare. Not a
+/// cryptographic hash: it tells an edited layer from the one rendered, not a
+/// forged one.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The `crust:layerStack` text: one layer per line, strongest first, its
+/// hash in hex (`-` when its bytes could not be read), a space, its path.
+pub fn layer_stack_text(layers: &[StampedLayer]) -> String {
+    layers
+        .iter()
+        .map(|l| match l.hash {
+            Some(h) => format!("{h:016x} {}", l.path),
+            None => format!("- {}", l.path),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The layers of a `crust:layerStack` text, read back: `(hash, path)` per
+/// line, the hash as written (`-` when it was not read).
+pub fn parse_layer_stack(text: &str) -> Vec<(&str, &str)> {
+    text.lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.split_once(' ').unwrap_or(("-", l)))
+        .collect()
+}
+
 /// How a render was sampled, and what it was rendered from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SamplingStamp {
@@ -69,6 +153,14 @@ pub struct SamplingStamp {
     pub frame: Option<f64>,
     /// The camera prim rendered through; `None` for the procedural camera.
     pub camera: Option<String>,
+    /// The camera's lens; `None` for the procedural camera.
+    pub lens: Option<Lens>,
+    pub depth_of_field: bool,
+    pub motion_blur: bool,
+    /// The root layer stack, strongest first; empty for a hand-assembled
+    /// scene.
+    pub layer_stack: Vec<StampedLayer>,
+    pub invisible_overrides: Option<u32>,
     pub version: String,
 }
 
@@ -110,13 +202,40 @@ impl SamplingStamp {
             sampler: settings.sampler().name().to_owned(),
             frame: time,
             camera: camera_path.map(str::to_owned),
+            lens: None,
+            depth_of_field: false,
+            motion_blur: false,
+            layer_stack: Vec::new(),
+            invisible_overrides: None,
             version: crate::report::CRUST_VERSION.to_owned(),
         }
     }
 
+    /// This stamp with what the import recorded of `source`; `read` returns
+    /// a layer file's bytes, `None` when it cannot (the host reads them:
+    /// crust-core opens no file of its own here). Read after the render, so
+    /// a layer edited while it rendered is hashed as edited.
+    pub fn with_source(mut self, source: &Source, read: impl Fn(&Path) -> Option<Vec<u8>>) -> Self {
+        self.lens = source.lens.clone();
+        self.depth_of_field = source.depth_of_field;
+        self.motion_blur = source.motion_blur;
+        self.layer_stack = source
+            .layer_stack
+            .iter()
+            .map(|path| StampedLayer {
+                path: path.to_string_lossy().into_owned(),
+                hash: read(path).map(|bytes| content_hash(&bytes)),
+            })
+            .collect();
+        self.invisible_overrides = source.invisible_overrides;
+        self
+    }
+
     /// The header attributes, by full name, in a fixed order. `crust:frame`
     /// and `crust:camera` are left out when there is no time code or no
-    /// camera prim.
+    /// camera prim, the lens with the camera prim, `crust:layerStack` when
+    /// no layer is known and `crust:invisibleOverrides` for a hand-assembled
+    /// scene.
     pub fn attributes(&self) -> Vec<(&'static str, StampValue)> {
         use StampValue::*;
         // Counts and ints fit an EXR `int`: every one is clamped far below
@@ -155,6 +274,28 @@ impl SamplingStamp {
         }
         if let Some(c) = &self.camera {
             out.push(("crust:camera", Text(c.clone())));
+        }
+        // The lens under its USD attribute names; the policy is the render
+        // settings' token.
+        if let Some(lens) = &self.lens {
+            out.push(("crust:focalLength", Float(lens.focal_length)));
+            out.push(("crust:horizontalAperture", Float(lens.aperture[0])));
+            out.push(("crust:verticalAperture", Float(lens.aperture[1])));
+            out.push(("crust:aspectRatioConformPolicy", Text(lens.conform.clone())));
+            out.push(("crust:fStop", Float(lens.f_stop)));
+            out.push(("crust:focusDistance", Float(lens.focus_distance)));
+        }
+        let flag = |on: bool| Int(i32::from(on));
+        out.push(("crust:depthOfField", flag(self.depth_of_field)));
+        out.push(("crust:motionBlur", flag(self.motion_blur)));
+        if !self.layer_stack.is_empty() {
+            out.push((
+                "crust:layerStack",
+                Text(layer_stack_text(&self.layer_stack)),
+            ));
+        }
+        if let Some(n) = self.invisible_overrides {
+            out.push(("crust:invisibleOverrides", int(n)));
         }
         out.push(("crust:version", Text(self.version.clone())));
         out
@@ -307,13 +448,90 @@ mod tests {
         );
     }
 
+    fn source() -> Source {
+        Source {
+            lens: Some(Lens {
+                focal_length: 50.0,
+                aperture: [20.955, 15.2908],
+                conform: "expandAperture".into(),
+                f_stop: 0.02,
+                focus_distance: 360.0,
+            }),
+            depth_of_field: true,
+            motion_blur: false,
+            layer_stack: vec![
+                PathBuf::from("/s/session.usda"),
+                PathBuf::from("/s/shot.usda"),
+            ],
+            invisible_overrides: Some(3),
+        }
+    }
+
+    /// The lens, the blurs and the layer stack are stamped, each layer with
+    /// the hash of the bytes the host read, `-` where it read none.
+    #[test]
+    fn the_lens_and_the_layer_stack_are_stamped() {
+        let read = |p: &Path| (p == Path::new("/s/shot.usda")).then(|| b"#usda 1.0\n".to_vec());
+        let s = SamplingStamp::new(&settings(), &RayStats::default(), Some("/cam"), None)
+            .with_source(&source(), read);
+        let attrs = s.attributes();
+        assert_eq!(get(&attrs, "crust:fStop"), Some(&StampValue::Float(0.02)));
+        assert_eq!(
+            get(&attrs, "crust:focusDistance"),
+            Some(&StampValue::Float(360.0))
+        );
+        assert_eq!(
+            get(&attrs, "crust:focalLength"),
+            Some(&StampValue::Float(50.0))
+        );
+        assert_eq!(
+            get(&attrs, "crust:aspectRatioConformPolicy"),
+            Some(&StampValue::Text("expandAperture".into()))
+        );
+        assert_eq!(get(&attrs, "crust:depthOfField"), Some(&StampValue::Int(1)));
+        assert_eq!(get(&attrs, "crust:motionBlur"), Some(&StampValue::Int(0)));
+        assert_eq!(
+            get(&attrs, "crust:invisibleOverrides"),
+            Some(&StampValue::Int(3))
+        );
+        let hash = content_hash(b"#usda 1.0\n");
+        let text = format!("- /s/session.usda\n{hash:016x} /s/shot.usda");
+        assert_eq!(
+            get(&attrs, "crust:layerStack"),
+            Some(&StampValue::Text(text.clone()))
+        );
+        assert_eq!(
+            parse_layer_stack(&text),
+            vec![
+                ("-", "/s/session.usda"),
+                (format!("{hash:016x}").as_str(), "/s/shot.usda")
+            ]
+        );
+        // The version stays last.
+        assert_eq!(attrs.last().map(|(n, _)| *n), Some("crust:version"));
+    }
+
+    /// FNV-1a's published values: the hash must not change between builds.
+    #[test]
+    fn the_content_hash_is_fnv1a() {
+        assert_eq!(content_hash(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(content_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(content_hash(b"foobar"), 0x8594_4171_f739_67e8);
+    }
+
     #[test]
     fn frame_and_camera_are_omitted_when_absent() {
         let attrs = SamplingStamp::new(&settings(), &RayStats::default(), None, None).attributes();
         assert!(get(&attrs, "crust:frame").is_none());
         assert!(get(&attrs, "crust:camera").is_none());
         assert!(get(&attrs, "crust:version").is_some());
+        // So are the lens, the layers and the overrides; the blurs are not.
+        assert!(get(&attrs, "crust:fStop").is_none());
+        assert!(get(&attrs, "crust:layerStack").is_none());
+        assert!(get(&attrs, "crust:invisibleOverrides").is_none());
+        assert_eq!(get(&attrs, "crust:depthOfField"), Some(&StampValue::Int(0)));
         let attrs = SamplingStamp::new(&settings(), &RayStats::default(), Some("/cam"), Some(10.5))
+            .with_source(&source(), |_| None)
             .attributes();
         assert_eq!(get(&attrs, "crust:frame"), Some(&StampValue::Double(10.5)));
         assert_eq!(

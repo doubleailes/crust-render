@@ -191,3 +191,49 @@ without `crust:sampler` was written before the sampler was selectable and SHALL 
 
 - **WHEN** the samplers differ and the pixels are identical
 - **THEN** the exit status is still 0
+
+### Requirement: Every stamp difference is listed
+
+`crust diff` SHALL list every `crust:*` attribute whose value differs between the
+two stamps — with each file's value, or none where it records none — as
+`comparability.differences` in the JSON report and on stderr in the text one,
+whether or not it changes the comparability status. The layer stack SHALL be
+listed layer by layer: a layer in one file only, a layer whose content hash
+differs, and shared layers in another order. Nothing is listed when a file has no
+stamp.
+
+#### Scenario: Two builds
+
+- **WHEN** the stamps differ only in `crust:version`
+- **THEN** the status is `ok` and the version is the one difference listed
+
+### Requirement: The lens, the blurs and the layers are comparability warnings
+
+When both stamps record them, `crust diff` SHALL report comparability `warn` with
+a note when:
+
+- `crust:depthOfField` differs, naming each side's lens (`fStop` and focus
+  distance) or "no depth of field";
+- both have depth of field and `crust:fStop` or `crust:focusDistance` differs;
+- `crust:motionBlur` differs;
+- `crust:focalLength`, either aperture or `crust:aspectRatioConformPolicy`
+  differs: the lens frames the image differently;
+- a layer is in one file's `crust:layerStack` only;
+- `crust:invisibleOverrides` differs.
+
+A difference these rules do not name (another `fStop` on two pinholes, a layer
+whose content alone changed) SHALL be listed without a note. A file written
+before these attributes were recorded SHALL warn of none of them.
+
+#### Scenario: Depth of field inherited by one pass
+
+- **WHEN** `a` records `crust:depthOfField = 1`, `crust:fStop = 0.02` and
+  `crust:focusDistance = 360`, and `b` records `crust:depthOfField = 0`
+- **THEN** the status is `warn`, with the note "depth of field differs (a:
+  fStop 0.02, focus 360; b: no depth of field) …"
+
+#### Scenario: A session layer on one side
+
+- **WHEN** `b`'s layer stack holds an override layer above the shot that `a`'s
+  does not
+- **THEN** the status is `warn`, with a note naming the layer only in `b`

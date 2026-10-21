@@ -54,6 +54,11 @@ pub struct Scene {
     /// a package as the package — sorted. What a host watches to see the
     /// stage change on disk. Empty for a hand-assembled scene.
     pub layers: Vec<std::path::PathBuf>,
+    /// What shaped the image beyond its settings — the lens, the blurs, the
+    /// root layer stack and the visibility overrides — for the stamp
+    /// ([`crate::stamp::Source`]). A hand-assembled scene records its
+    /// camera's depth of field and nothing else.
+    pub source: crate::stamp::Source,
 }
 
 impl Scene {
@@ -72,6 +77,10 @@ impl Scene {
             warnings: Vec::new(),
             provenance: None,
             layers: Vec::new(),
+            source: crate::stamp::Source {
+                depth_of_field: camera.has_depth_of_field(),
+                ..Default::default()
+            },
         }
     }
 

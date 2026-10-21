@@ -888,11 +888,13 @@ mean abs diff: 2.4019428117913372e-2
 rmse: 4.149975813667258e-2
 relmse: 4.757807812359412e-2
 relmse (trimmed 0.1%): 4.602686768547243e-2
+stamp differences:
+  crust:spp: 16 vs 4
 comparability: warn
   crust:spp differs: 16 vs 4
 ```
 
-(The last two lines are on stderr.)
+(The last four lines are on stderr.)
 
 When both files have `R`, `G` and `B`, it lists the first eight differing pixels and the
 beauty's error metrics against `A`: the largest absolute and relative difference, the mean
@@ -937,7 +939,20 @@ count, the depth, the light samples, the threshold, the pixel filter and its rad
 strategy, the light selection, and `colorInteropID`. Two builds of crust are never a
 reason to warn: comparing them is what `diff` is for.
 
-In text mode the notes go to stderr, so stdout reads the same either way. Comparability
+The lens and the stage are judged too, when both files record them: depth of field on one
+side only (the note names each side's lens, for example `depth of field differs (a: fStop
+0.02, focus 360; b: no depth of field)`), another `fStop` or focus distance with depth of
+field on both, motion blur on one side only, a focal length, aperture or conform policy
+that frames the image differently, a layer in one file's layer stack only (a session or
+override layer on one side), and another count of prims hidden by visibility overrides.
+
+Every stamped value that differs is also listed, with or without a note, under `stamp
+differences:` (`comparability.differences` in the JSON): the version, an `fStop` on two
+pinholes, and the layer stack layer by layer — a layer in one file only, a layer whose
+content changed, shared layers in another order. A layer whose content alone changed has
+no note, since an edited layer is often the change under test.
+
+In text mode the differences and the notes go to stderr, so stdout reads the same either way. Comparability
 **never changes the exit status**, which answers only whether the pixels changed. And
 `ok` only means the stamps match: it is not proof that a difference is noise. To show
 that, render both sides at several sample counts and check that the difference falls as

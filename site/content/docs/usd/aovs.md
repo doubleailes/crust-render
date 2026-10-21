@@ -744,6 +744,16 @@ it mirrors:
 | `crust:pixelFilterRadius` | `float` | its radius in pixels | [`--filter-radius`](@/docs/reference/command-line.md#filter-radius), `crust:pixelFilterRadius` |
 | `crust:frame` | `double` | the time code evaluated, a subframe included (not the sampler seed); absent without one | [`-f`](@/docs/reference/command-line.md#frame) |
 | `crust:camera` | `string` | the camera rendered through, after any fallback; absent for the procedural camera | [`--camera`](@/docs/reference/command-line.md#camera), `rel camera` |
+| `crust:focalLength` | `float` | the render camera's focal length, mm; absent for the procedural camera (as are the five below) | `focalLength` |
+| `crust:horizontalAperture` | `float` | its horizontal aperture as authored, mm | `horizontalAperture` |
+| `crust:verticalAperture` | `float` | its vertical aperture as authored, mm (the horizontal over the image's aspect when unauthored) | `verticalAperture` |
+| `crust:aspectRatioConformPolicy` | `string` | how the aperture was conformed to the image | `aspectRatioConformPolicy` |
+| `crust:fStop` | `float` | the lens's f-stop, `0` for a pinhole | `fStop` |
+| `crust:focusDistance` | `float` | the focus distance | `focusDistance` |
+| `crust:depthOfField` | `int` | `1` when the lens was open (an `fStop` above 0, depth of field not disabled), else `0` | `fStop`, `disableDepthOfField` |
+| `crust:motionBlur` | `int` | `1` when moving geometry was blurred (motion blur on, over a shutter that opens an interval), else `0` | `disableMotionBlur`, `shutter:open` / `shutter:close` |
+| `crust:layerStack` | `string` | the stage's root layer stack, strongest first (session layer, root layer, sublayers): one line per file, the 16-digit hex FNV-1a hash of its bytes (`-` if unreadable), a space, its path; absent when no layer is known | — |
+| `crust:invisibleOverrides` | `int` | the prims the strongest layer of that stack hides with an `over` authoring `visibility = "invisible"` — what a session or override layer hid of the scene beneath it | — |
 | `crust:version` | `string` | the crust version | — |
 
 The working space is not repeated: `colorInteropID` already records it. The stamp
