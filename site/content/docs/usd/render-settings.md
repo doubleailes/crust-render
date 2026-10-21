@@ -299,7 +299,10 @@ counts bounces, such as Arnold's `GI_total_depth`, `crust:maxDepth = N` is a dep
 
 A value below `1` would shade nothing and render black, so it is refused with a warning
 and the default is used. There is no upper bound: a very large value, such as
-`2147483647`, means "no limit", and Russian roulette alone ends the paths.
+`2147483647`, means "no limit". Russian roulette then ends most paths, but it only
+ends a path whose throughput has fallen below 1: in a closed scene of lossless
+(albedo 1) surfaces a path keeps bouncing to the limit, so a render there may not
+finish. Keep a finite depth for such scenes.
 
 ### crust:indirectClamp
 
