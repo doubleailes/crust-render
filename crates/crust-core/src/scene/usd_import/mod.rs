@@ -34,7 +34,7 @@
 //! dependency list. The traversal is single-threaded; see [`time`] for why
 //! that matters.
 
-use crate::warning;
+use crate::{Warning, warning};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -46,7 +46,7 @@ use tracing::{debug, info};
 use crate::aov::AovSource;
 use crate::camera::Camera;
 use crate::light::LightList;
-use crate::live::{LightOrigin, Provenance, StageFacts};
+use crate::live::{ImportKey, LightOrigin, ProjectionUse, Provenance, StageFacts};
 use crate::rt_world::WorldBuilder;
 use crate::scene::AssetLoader;
 use crate::scene::Scene;
@@ -250,15 +250,9 @@ struct ImportCtx<'a> {
     world: WorldBuilder,
     lights: LightList,
     volumes: Vec<VolumeRegion>,
-    /// The camera built to render through, and its prim.
-    camera: Option<(RenderCamera, sdf::Path)>,
-    /// The camera to render through, when one was named; see
-    /// [`CameraChoice`]. `None` takes the first camera met.
-    wanted_camera: Option<CameraChoice>,
-    /// The first camera met, kept while a named one is still being looked
-    /// for: it is the fallback when a `RenderSettings.camera` target turns
-    /// out not to exist.
-    first_camera: Option<(RenderCamera, sdf::Path)>,
+    /// Per pass (one without a group), the search for the camera it renders
+    /// through.
+    searches: Vec<CameraSearch>,
     /// Every camera prim met, for the error that names the alternatives when
     /// a requested camera is missing. A path per camera, and a stage has a
     /// handful of them.
@@ -272,14 +266,12 @@ struct ImportCtx<'a> {
     /// Receivers seen and lights whose `collection:lightLink` restricts
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
-    /// The active render pass, decided at dispatch (see [`passes`]).
-    pass: Option<ActivePass>,
+    /// The active render pass, judged at dispatch (see [`passes`]); one per
+    /// pass of a group import, none without a pass.
+    passes: Vec<ActivePass>,
     /// Each light met, by prim path: where it went in the light list and the
     /// geometry it emitted ([`crate::live::Provenance`]).
     light_origins: Vec<(String, LightOrigin)>,
-    settings: RenderSettings,
-    /// How the cameras' apertures are conformed to the image.
-    framing: products::Framing,
     /// The stage file, for resolving asset paths against its directory.
     stage_path: &'a Path,
     /// The whole stage with payloads unloaded, where light collections are
@@ -293,11 +285,62 @@ struct ImportCtx<'a> {
     layers: std::collections::BTreeSet<String>,
 }
 
+/// One render's search for its camera through the traversal: what it wants,
+/// and the settings and framing its camera is built with when met.
+struct CameraSearch {
+    settings: RenderSettings,
+    /// How the cameras' apertures are conformed to the image.
+    framing: products::Framing,
+    /// The camera to render through, when one was named; see
+    /// [`CameraChoice`]. `None` takes the first camera met.
+    wanted: Option<CameraChoice>,
+    /// The camera built to render through, and its prim.
+    camera: Option<(RenderCamera, sdf::Path)>,
+    /// The first camera met, kept while a named one is still being looked
+    /// for: it is the fallback when a `RenderSettings.camera` target turns
+    /// out not to exist.
+    first: Option<(RenderCamera, sdf::Path)>,
+    /// Where its warnings go: `None` to the import's, `Some` to a pass of a
+    /// group import's own record.
+    warnings: Option<Vec<Warning>>,
+}
+
+impl CameraSearch {
+    fn new(
+        settings: RenderSettings,
+        framing: products::Framing,
+        wanted: Option<CameraChoice>,
+    ) -> Self {
+        CameraSearch {
+            settings,
+            framing,
+            wanted,
+            camera: None,
+            first: None,
+            warnings: None,
+        }
+    }
+}
+
+/// Runs `f`, its warnings recorded in `into` when that is `Some` (a pass of a
+/// group import), else in the import's own scope.
+fn captured<T>(into: &mut Option<Vec<Warning>>, f: impl FnOnce() -> T) -> T {
+    match into {
+        None => f(),
+        Some(into) => {
+            let scope = crate::WarningScope::enter();
+            let out = f();
+            crate::warnings::merge_warnings(into, scope.finish());
+            out
+        }
+    }
+}
+
 /// Walks `root` and its subtree, emitting geometry, lights and volumes
 /// into `ctx`. Takes the stage by reference and keeps nothing borrowed
 /// from it, so the caller may drop the stage afterwards and walk another.
 fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx) {
-    if let Some(pass) = &mut ctx.pass {
+    for pass in &mut ctx.passes {
         pass.begin_chunk(stage);
     }
     // The flag is "under an invisible ancestor", which hides everything but
@@ -480,7 +523,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         if ctx.lights.count() > lights_before {
             ctx.links
                 .light_added(ctx.index.as_ref(), stage, prim.path(), lights_before);
-            if let Some(pass) = &mut ctx.pass {
+            for pass in &mut ctx.passes {
                 pass.light_added(prim.path(), lights_before);
             }
             ctx.light_origins.push((
@@ -511,7 +554,7 @@ fn saw(
     geoms: std::ops::Range<usize>,
     vols: std::ops::Range<usize>,
 ) {
-    if let Some(pass) = &mut ctx.pass {
+    for pass in &mut ctx.passes {
         pass.saw(path, geoms.clone(), vols.clone());
     }
     ctx.links.saw(path, geoms, vols);
@@ -553,24 +596,31 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
         return false;
     }
     ctx.cameras_seen.push(prim.path().clone());
-    let named = ctx.wanted_camera.as_ref().map(CameraChoice::path);
-    let is_named = named == Some(prim.path());
-    // A named camera is built when met; otherwise only the first
-    // camera is, and kept aside as the fallback while a named one
-    // might still turn up later in the traversal.
-    if ctx.camera.is_none() && (is_named || ctx.first_camera.is_none()) {
-        match build_camera(stage, prim, &ctx.settings, ctx.framing) {
-            Some(c) if is_named || named.is_none() => {
-                debug!("Imported USD camera at {}", prim.path());
-                ctx.camera = Some((c, prim.path().clone()));
+    for search in &mut ctx.searches {
+        let named = search.wanted.as_ref().map(CameraChoice::path);
+        let is_named = named == Some(prim.path());
+        // A named camera is built when met; otherwise only the first
+        // camera is, and kept aside as the fallback while a named one
+        // might still turn up later in the traversal.
+        if search.camera.is_none() && (is_named || search.first.is_none()) {
+            let (settings, framing) = (&search.settings, search.framing);
+            match captured(&mut search.warnings, || {
+                build_camera(stage, prim, settings, framing)
+            }) {
+                Some(c) if is_named || named.is_none() => {
+                    debug!("Imported USD camera at {}", prim.path());
+                    search.camera = Some((c, prim.path().clone()));
+                }
+                Some(c) => search.first = Some((c, prim.path().clone())),
+                None => captured(&mut search.warnings, || {
+                    warning!(
+                        CameraUnreadable,
+                        at = prim.path(),
+                        "Failed to build camera from {}",
+                        prim.path()
+                    )
+                }),
             }
-            Some(c) => ctx.first_camera = Some((c, prim.path().clone())),
-            None => warning!(
-                CameraUnreadable,
-                at = prim.path(),
-                "Failed to build camera from {}",
-                prim.path()
-            ),
         }
     }
     true
@@ -771,6 +821,7 @@ fn open_stage_masked(
 /// The host's [`UsdImportOptions`](crate::UsdImportOptions) checked before
 /// the stage is opened: a bad frame, camera path or working space is refused
 /// here, not discovered after a four-minute traversal.
+#[derive(Clone)]
 struct ValidOptions {
     time: Option<f64>,
     camera: Option<sdf::Path>,
@@ -781,6 +832,18 @@ struct ValidOptions {
 }
 
 impl ValidOptions {
+    /// A pass named by the host, checked to be a prim path; that it is a
+    /// `RenderPass` is checked on the stage, by [`read_index`].
+    fn pass_path(p: &str) -> Result<sdf::Path, crate::Error> {
+        sdf::path(p)
+            .ok()
+            .filter(|p| p.is_abs() && p.is_prim() && !p.is_abs_root())
+            .ok_or_else(|| crate::Error::PassNotFound {
+                path: p.to_owned(),
+                why: "not an absolute prim path such as /Render/Passes/char".into(),
+            })
+    }
+
     fn check(options: &crate::UsdImportOptions) -> Result<Self, crate::Error> {
         let time = options.frame;
         // The authoritative check: every host reaches the importer through here,
@@ -808,15 +871,7 @@ impl ValidOptions {
             None => None,
         };
         let pass = match &options.pass {
-            Some(p) => Some(
-                sdf::path(p)
-                    .ok()
-                    .filter(|p| p.is_abs() && p.is_prim() && !p.is_abs_root())
-                    .ok_or_else(|| crate::Error::PassNotFound {
-                        path: p.clone(),
-                        why: "not an absolute prim path such as /Render/Passes/char".into(),
-                    })?,
-            ),
+            Some(p) => Some(Self::pass_path(p)?),
             None => None,
         };
         Ok(ValidOptions {
@@ -864,12 +919,11 @@ fn traverse_stage(
             // running totals are what say whether it is doing its job.
             let chunk_start = Instant::now();
             debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
-            // The active pass's collections are read on each chunk's stage
-            // (see `passes`), so the pass prim is composed in every one.
-            let mask = match &ctx.pass {
-                Some(pass) => vec![chunk.clone(), pass.path().clone()],
-                None => vec![chunk.clone()],
-            };
+            // The active passes' collections are read on each chunk's stage
+            // (see `passes`), so every pass prim is composed in every one.
+            let mask = std::iter::once(chunk.clone())
+                .chain(ctx.passes.iter().map(|pass| pass.path().clone()))
+                .collect();
             let stage = open_stage_masked(path, path_str, Some(mask))?;
             if ctx.caches.meshes.subdiv.adaptive.is_some() {
                 count_placements(&stage, &mut ctx.caches);
@@ -918,15 +972,19 @@ fn traverse_stage(
 /// path and the stage does not have is an error naming the alternatives.
 /// Returned with the prim it was built from, `None` for the procedural one,
 /// whose exposure scale is 1.
-fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>), crate::Error> {
+fn resolve_camera(
+    search: &mut CameraSearch,
+    cameras_seen: &[sdf::Path],
+) -> Result<(RenderCamera, Option<String>), crate::Error> {
     // `camera` is the wanted one when it was met, else (nothing named) the
-    // first; `first_camera` is the first, kept only while a named one was
-    // still being looked for.
+    // first; `first` is the first, kept only while a named one was still
+    // being looked for.
     let (built, wanted, first) = (
-        ctx.camera.take(),
-        ctx.wanted_camera.take(),
-        ctx.first_camera.take(),
+        search.camera.take(),
+        search.wanted.take(),
+        search.first.take(),
     );
+    let depth_of_field = search.settings.depth_of_field();
     let wanted_met = wanted.is_some() && built.is_some();
     let any_met = built.is_some() || first.is_some();
     let with_path = |(c, path): (RenderCamera, sdf::Path)| (c, Some(path.to_string()));
@@ -934,7 +992,7 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
         CameraPick::Missing(p) => {
             return Err(crate::Error::CameraNotFound {
                 path: p.to_string(),
-                available: ctx.cameras_seen.iter().map(ToString::to_string).collect(),
+                available: cameras_seen.iter().map(ToString::to_string).collect(),
             });
         }
         CameraPick::Wanted => with_path(built.expect("the wanted camera was met")),
@@ -959,7 +1017,7 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
                 "USD stage has no UsdGeomCamera — falling back to world::get_settings camera"
             );
             let camera = crate::world::get_settings().0;
-            let camera = if ctx.settings.depth_of_field() {
+            let camera = if depth_of_field {
                 camera
             } else {
                 camera.pinhole()
@@ -1022,11 +1080,140 @@ pub(crate) fn load_scene(
     assets: &dyn AssetLoader,
     options: &crate::UsdImportOptions,
 ) -> Result<Scene, crate::Error> {
+    Ok(import(path, assets, options, None)?.scene)
+}
+
+/// The passes at `passes` imported together: one traversal, judged for every
+/// pass that shares the first's [`ImportKey`] (see [`crate::PassGroup`]).
+pub(crate) fn load_passes(
+    path: &Path,
+    assets: &dyn AssetLoader,
+    options: &crate::UsdImportOptions,
+    passes: &[String],
+) -> Result<crate::PassGroup, crate::Error> {
+    assert!(!passes.is_empty(), "a group of passes holds one at least");
+    import(path, assets, options, Some(passes))
+}
+
+/// Each of `passes` with the products it writes and the group it imports
+/// with, read off the payload-free index stage alone and quietly: what
+/// [`crate::Scene::plan_usd_passes`] answers.
+pub(crate) fn plan_passes(
+    path: &Path,
+    options: &crate::UsdImportOptions,
+    passes: &[String],
+) -> Result<Vec<crate::PassPlan>, crate::Error> {
+    let valid = ValidOptions::check(options)?;
+    let _time_scope = EvalTimeScope::enter(valid.time);
+    // Read again, with their warnings, by the import that follows.
+    let _quiet = crate::warnings::QuietWarnings::enter();
+    let _scope = crate::WarningScope::enter();
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
+    let index = stage_builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(path_str)
+        .map_err(|e| crate::Error::UsdOpen {
+            path: path.to_path_buf(),
+            source: e.into(),
+        })?;
+    let mut keys: Vec<ImportKey> = Vec::new();
+    let mut plans = Vec::with_capacity(passes.len());
+    for p in passes {
+        let valid = ValidOptions {
+            pass: Some(ValidOptions::pass_path(p)?),
+            ..valid.clone()
+        };
+        let read = read_pass(&index, path, path_str, options, &valid, false)?;
+        // The projection is compared only once an import has used it.
+        let group = match keys
+            .iter()
+            .position(|k| k.refusal(ProjectionUse::default(), &read.key).is_none())
+        {
+            Some(g) => g,
+            None => {
+                keys.push(read.key);
+                keys.len() - 1
+            }
+        };
+        plans.push(crate::PassPlan {
+            path: p.clone(),
+            aovs: read.read.products.request,
+            group,
+        });
+    }
+    Ok(plans)
+}
+
+/// What the render of one pass (or of no pass) reads from the payload-free
+/// index stage before the traversal.
+struct PassRead {
+    /// The `RenderPass` prim; `None` without a pass.
+    path: Option<sdf::Path>,
+    read: IndexRead,
+    key: ImportKey,
+    render_settings: Option<String>,
+    settings_prim: Option<String>,
+    /// Where reading it warned: `None` into the import's own record, `Some`
+    /// into the pass's, for a pass of a group import.
+    warnings: Option<Vec<Warning>>,
+}
+
+/// Reads `pass` (or no pass) off `index`, its warnings kept apart when
+/// `own_warnings`.
+fn read_pass(
+    index: &Stage,
+    path: &Path,
+    path_str: &str,
+    options: &crate::UsdImportOptions,
+    valid: &ValidOptions,
+    own_warnings: bool,
+) -> Result<PassRead, crate::Error> {
+    let mut warnings = own_warnings.then(Vec::new);
+    let pass = valid.pass.as_ref();
+    let (read, render_settings, settings_prim) = captured(&mut warnings, || {
+        let read = read_index(index, path, path_str, options, valid)?;
+        let render_settings = settings::render_settings_path(index, pass).map(|p| p.to_string());
+        let settings_prim = settings::read_settings_prim(index, pass).map(|p| p.to_string());
+        Ok::<_, crate::Error>((read, render_settings, settings_prim))
+    })?;
+    Ok(PassRead {
+        path: valid.pass.clone(),
+        key: ImportKey::of(&read),
+        read,
+        render_settings,
+        settings_prim,
+        warnings,
+    })
+}
+
+/// The render camera, settings and source of one pass, settled after the
+/// traversal.
+struct PassCamera {
+    camera: crate::camera::Camera,
+    camera_path: Option<String>,
+    lens: Option<crate::scene::Lens>,
+    settings: RenderSettings,
+}
+
+/// The import itself: of the stage with the options' pass (or none), or, with
+/// `group`, of every pass there that shares the first's [`ImportKey`] — one
+/// traversal judging each, then each pass's own camera, settings, light list
+/// and flags ([`passes::apply_pass`]). The scene returned is the first pass's,
+/// as an import of it alone would build it.
+fn import(
+    path: &Path,
+    assets: &dyn AssetLoader,
+    options: &crate::UsdImportOptions,
+    group: Option<&[String]>,
+) -> Result<crate::PassGroup, crate::Error> {
     let valid = ValidOptions::check(options)?;
     let time = valid.time;
     let _time_scope = EvalTimeScope::enter(time);
     // Every coded warning this import raises, on this thread, is recorded
-    // here and handed back on the scene.
+    // here and handed back on the scene — in a group import, every warning
+    // that is not one pass's.
     let warning_scope = crate::WarningScope::enter();
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
@@ -1055,20 +1242,42 @@ pub(crate) fn load_scene(
     if let Some(t) = time {
         check_time_range(&index, t);
     }
-    let IndexRead {
-        settings,
-        products,
-        domes_seen_by_camera,
-        exposure_compensation,
-        working,
-        wanted_camera,
-        subdiv,
-        projection,
-        shutter,
-    } = read_index(&index, path, path_str, options, &valid)?;
-    let pass = valid.pass.as_ref();
-    let render_settings = settings::render_settings_path(&index, pass).map(|p| p.to_string());
-    let settings_prim = settings::read_settings_prim(&index, pass).map(|p| p.to_string());
+    // Each pass's settings, products and camera choice, read before the
+    // traversal; a pass whose key differs from the first's is left to an
+    // import of its own.
+    let mut reads = Vec::new();
+    let mut unserved = Vec::new();
+    match group {
+        None => reads.push(read_pass(&index, path, path_str, options, &valid, false)?),
+        Some(passes) => {
+            for p in passes {
+                let valid = ValidOptions {
+                    pass: Some(ValidOptions::pass_path(p)?),
+                    ..valid.clone()
+                };
+                let read = read_pass(&index, path, path_str, options, &valid, true)?;
+                let joins = reads.first().is_none_or(|first: &PassRead| {
+                    first
+                        .key
+                        .refusal(ProjectionUse::default(), &read.key)
+                        .is_none()
+                });
+                if joins {
+                    reads.push(read);
+                } else {
+                    unserved.push(p.clone());
+                }
+            }
+        }
+    }
+    let first = &reads[0];
+    // What the traversal builds is the same for every pass it serves: read
+    // off the first.
+    let working = first.read.working;
+    let subdiv = first.read.subdiv.clone();
+    let projection = first.read.projection;
+    let shutter = first.read.shutter.clone();
+    let primvars = first.read.products.primvars.clone();
     let chunks = stream_roots(&index);
     let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
         subtree_roots(&index)
@@ -1084,9 +1293,27 @@ pub(crate) fn load_scene(
     // lazily, and only the lights' prims are ever asked for.
     let open_elapsed = open_start.elapsed();
     let open_mem = MemorySample::now();
-    let asks_time = asks_about_time(&shutter, &products);
-    let frame_posed = frame_pose(&shutter, &products);
+    let asks_time = asks_about_time(&shutter, &first.read.products);
+    let frame_posed = frame_pose(&shutter, &first.read.products);
 
+    let searches = reads
+        .iter()
+        .map(|r| CameraSearch {
+            warnings: r.warnings.as_ref().map(|_| Vec::new()),
+            ..CameraSearch::new(
+                r.read.settings,
+                r.read.products.framing,
+                r.read.wanted_camera.clone(),
+            )
+        })
+        .collect();
+    let active = reads
+        .iter()
+        .filter_map(|r| {
+            let path = r.path.as_ref()?;
+            Some(ActivePass::read(&index, path, group.is_some()))
+        })
+        .collect();
     let mut ctx = ImportCtx {
         world: WorldBuilder::new(),
         lights: {
@@ -1095,9 +1322,7 @@ pub(crate) fn load_scene(
             lights
         },
         volumes: Vec::new(),
-        camera: None,
-        wanted_camera,
-        first_camera: None,
+        searches,
         cameras_seen: Vec::new(),
         // Prims binding the same material path share one Arc, and prims
         // with identical local geometry + material share one copy of that
@@ -1116,10 +1341,8 @@ pub(crate) fn load_scene(
         },
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
-        pass: pass.map(|p| ActivePass::read(&index, p)),
+        passes: active,
         light_origins: Vec::new(),
-        settings,
-        framing: products.framing,
         stage_path: path,
         index: Some(index),
         assets,
@@ -1127,7 +1350,7 @@ pub(crate) fn load_scene(
     };
     // The primvars the render vars read, resolved on the index stage before
     // any geometry: every mesh read from here keeps exactly these.
-    ctx.caches.meshes.primvars = products.primvars.clone();
+    ctx.caches.meshes.primvars = primvars;
 
     let traverse_start = Instant::now();
     traverse_stage(
@@ -1146,11 +1369,6 @@ pub(crate) fn load_scene(
     let asset_time = ctx.caches.asset_time;
     let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
     ctx.caches.unread.report();
-    report_unmoved(
-        &ctx.caches.motion,
-        &shutter,
-        products.request.asks_for(AovSource::MotionVector),
-    );
     let traverse_mem = MemorySample::now();
     debug!(
         "Traversal done in {:?}, plus {:?} of host asset decoding taken out of it and \
@@ -1162,22 +1380,70 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
-    let (render_camera, camera_path) = resolve_camera(&mut ctx)?;
-    render_camera.warn_lens_units(camera_path.as_deref());
-    render_camera.warn_framing(camera_path.as_deref());
-    check_shutter_camera(&shutter, camera_path.as_deref(), render_camera.shutter);
-    let RenderCamera {
-        camera,
-        exposure_scale,
-        lens,
-        ..
-    } = render_camera;
-    let settings = apply_exposure(
-        settings,
-        exposure_compensation,
-        exposure_scale,
-        camera_path.as_deref(),
-    );
+    // A pass whose implicit shapes the traversal sized for another camera
+    // projection than its own is not served after all.
+    let used = ProjectionUse {
+        on_screen: ctx.caches.implicit.on_screen,
+        fixed_count: ctx.caches.implicit.fixed_unshared,
+    };
+    let key = reads[0].key.clone();
+    let mut k = 1;
+    while k < reads.len() {
+        if key.refusal(used, &reads[k].key).is_some() {
+            let gone = reads.remove(k);
+            ctx.searches.remove(k);
+            ctx.passes.remove(k);
+            unserved.push(gone.path.expect("a pass of a group").to_string());
+        } else {
+            k += 1;
+        }
+    }
+
+    // Each pass's camera, and the settings its exposure scales.
+    let mut cameras = Vec::with_capacity(reads.len());
+    for (r, search) in reads.iter_mut().zip(&mut ctx.searches) {
+        let mut warnings = search.warnings.take();
+        let (motion_vectors, exposure_compensation) = (
+            r.read.products.request.asks_for(AovSource::MotionVector),
+            r.read.exposure_compensation,
+        );
+        let settings = r.read.settings;
+        let cameras_seen = &ctx.cameras_seen;
+        let motion = &ctx.caches.motion;
+        let pass_camera = captured(&mut warnings, || {
+            report_unmoved(motion, &r.read.shutter, motion_vectors);
+            let (render_camera, camera_path) = resolve_camera(search, cameras_seen)?;
+            render_camera.warn_lens_units(camera_path.as_deref());
+            render_camera.warn_framing(camera_path.as_deref());
+            check_shutter_camera(
+                &r.read.shutter,
+                camera_path.as_deref(),
+                render_camera.shutter,
+            );
+            let RenderCamera {
+                camera,
+                exposure_scale,
+                lens,
+                ..
+            } = render_camera;
+            let settings = apply_exposure(
+                settings,
+                exposure_compensation,
+                exposure_scale,
+                camera_path.as_deref(),
+            );
+            Ok::<_, crate::Error>(PassCamera {
+                camera,
+                camera_path,
+                lens,
+                settings,
+            })
+        })?;
+        if let (Some(into), Some(from)) = (&mut r.warnings, warnings) {
+            crate::warnings::merge_warnings(into, from);
+        }
+        cameras.push(pass_camera);
+    }
 
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen
@@ -1185,11 +1451,33 @@ pub(crate) fn load_scene(
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
     let geometry_runs = ctx.links.geometry_runs();
-    let mut table = ctx.world.mask_table(&ctx.volumes);
-    let remap = passes::apply_pass(ctx.pass.as_ref(), &ctx.links, &mut table, &mut ctx.lights);
-    ctx.world.set_mask_table(table, &mut ctx.volumes);
+    let base = ctx
+        .world
+        .mask_table(crate::volume::volume_flags(&ctx.volumes));
+    // Each pass's flags and light list, from the traversal's; the first's go
+    // into the world built below.
+    let mut states = Vec::with_capacity(reads.len());
+    for (k, r) in reads.iter_mut().enumerate() {
+        let mut table = base.clone();
+        let mut lights = ctx.lights.clone();
+        let pass = r.path.as_ref().map(|_| &ctx.passes[k]);
+        let remap = captured(&mut r.warnings, || {
+            passes::apply_pass(pass, &ctx.links, &mut table, &mut lights)
+        });
+        if !r.read.domes_seen_by_camera {
+            debug!(
+                "domeLightCameraVisibility = false: every light at infinity is hidden from the \
+                 camera"
+            );
+            lights.hide_infinite_from_camera();
+        }
+        states.push((table, lights, remap));
+    }
+    crate::volume::set_volume_flags(&mut ctx.volumes, &states[0].0.volumes);
+    ctx.world.set_mask_table(states[0].0.clone());
     // The provenance names each light by its place in the list as the links
     // left it; a light they took out of the list is no longer one to rebuild.
+    let remap = &states[0].2;
     ctx.light_origins
         .retain_mut(|(_, origin)| match remap[origin.index] {
             Some(index) => {
@@ -1203,14 +1491,8 @@ pub(crate) fn load_scene(
         ctx.layers.extend(index.layer_identifiers());
         root_stack = (index.layer_stack(), Some(invisible_overrides(&index)));
     }
-    if !domes_seen_by_camera {
-        debug!(
-            "domeLightCameraVisibility = false: every light at infinity is hidden from the camera"
-        );
-        ctx.lights.hide_infinite_from_camera();
-    }
 
-    record_geometry_counters(&ctx.caches.meshes, &camera, &mut stats);
+    record_geometry_counters(&ctx.caches.meshes, &cameras[0].camera, &mut stats);
     let implicit = &ctx.caches.implicit;
     if implicit.shapes > 0 {
         debug!(
@@ -1259,28 +1541,69 @@ pub(crate) fn load_scene(
         footprint: committed.memory_footprint(),
         strand_tables_bytes: committed.strand_table_bytes(),
         primvar_tables_bytes: committed.primvar_table_bytes(),
-        lights: ctx.lights.count(),
+        lights: states[0].1.count(),
         volumes: ctx.volumes.len(),
     };
-    stats.image = (&settings).into();
+    let shared_warnings = warning_scope.finish();
+    let layer_stack = stack_files(&root_stack.0, path);
 
-    let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
+    // One description per pass served; the scene is the first's.
+    let mut pass_scenes = Vec::with_capacity(reads.len());
+    for (((r, pass_camera), (table, lights, _)), active) in
+        reads.into_iter().zip(cameras).zip(states).zip(
+            ctx.passes
+                .iter_mut()
+                .map(Some)
+                .chain(std::iter::repeat_with(|| None)),
+        )
+    {
+        let summary = active.as_ref().map(|p| p.summary());
+        let own = match (r.warnings, active) {
+            (Some(mut own), Some(active)) => {
+                crate::warnings::merge_warnings(&mut own, active.take_warnings());
+                own
+            }
+            (own, _) => own.unwrap_or_default(),
+        };
+        let mut all = shared_warnings.clone();
+        crate::warnings::merge_warnings(&mut all, own.clone());
+        let motion_blur = pass_camera.settings.motion_blur() && r.read.shutter.interval.is_some();
+        pass_scenes.push(crate::PassScene {
+            summary,
+            depth_of_field: pass_camera.camera.has_depth_of_field(),
+            motion_blur,
+            settings: pass_camera.settings,
+            camera: pass_camera.camera,
+            camera_path: pass_camera.camera_path,
+            lens: pass_camera.lens,
+            aovs: r.read.products.request,
+            settings_prim: r.settings_prim,
+            render_settings: r.render_settings,
+            warnings: own,
+            all_warnings: all,
+            lights,
+            table,
+        });
+    }
+    let first = &pass_scenes[0];
+    stats.image = (&first.settings).into();
+    let mut scene = Scene::new(
+        first.camera,
+        committed,
+        first.lights.clone(),
+        first.settings,
+    )
+    .with_volumes(ctx.volumes);
     scene.stats = stats;
-    scene.aovs = products.request;
     scene.working_space = working;
-    scene.camera_path = camera_path;
     scene.time = time;
-    scene.warnings = warning_scope.finish();
     scene.layers = layer_files(&ctx.layers, path);
-    scene.pass = ctx.pass.as_ref().map(ActivePass::summary);
-    scene.settings_prim = settings_prim;
     scene.source = crate::scene::Source {
-        lens,
-        depth_of_field: scene.camera.has_depth_of_field(),
-        motion_blur: scene.settings.motion_blur() && shutter.interval.is_some(),
-        layer_stack: stack_files(&root_stack.0, path),
+        layer_stack,
         invisible_overrides: root_stack.1,
+        ..Default::default()
     };
+    scene.apply_pass_settings(first);
     scene.provenance = Some(Provenance {
         materials: ctx.caches.materials.origins(&scene.world),
         material_reads: ctx.caches.materials.reads(),
@@ -1288,24 +1611,21 @@ pub(crate) fn load_scene(
         geometry: geometry_runs,
         stage: StageFacts {
             options: options.clone(),
-            render_settings,
-            subdiv_level: ctx.caches.meshes.subdiv.level,
-            adaptive: ctx.caches.meshes.subdiv.adaptive.map(|r| r.key()),
-            domes_seen_by_camera,
-            working: Some(working),
+            render_settings: first.render_settings.clone(),
             camera: scene.camera_path.clone(),
-            on_screen_shapes: ctx
-                .caches
-                .implicit
-                .on_screen
-                .then(|| ctx.caches.implicit.projection.map(|p| p.key()))
-                .flatten(),
-            unsized_shapes: ctx.caches.implicit.fixed_unshared,
-            primvars: ctx.caches.meshes.primvars.key(),
-            shutter: shutter.key(asks_time, frame_posed),
+            key,
+            used,
         },
     });
-    Ok(scene)
+    if group.is_none() {
+        // The one pass's description is the scene itself.
+        pass_scenes.clear();
+    }
+    Ok(crate::PassGroup {
+        scene,
+        passes: pass_scenes,
+        unserved,
+    })
 }
 
 /// The files behind layer `identifiers`, sorted and without repeats: a layer

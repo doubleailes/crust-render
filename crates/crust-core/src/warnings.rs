@@ -441,6 +441,29 @@ pub struct Warning {
     pub message: String,
 }
 
+/// Adds the records `from` (one scope's) to `into` (another's, or several
+/// scopes' so far): a code already in `into` adds its count and the prims it
+/// does not hold yet, up to [`MAX_PRIMS`], and keeps its first message; a new
+/// code is appended. What one scope around both would have recorded.
+pub fn merge_warnings(into: &mut Vec<Warning>, from: Vec<Warning>) {
+    for w in from {
+        match into.iter_mut().find(|r| r.code == w.code) {
+            Some(r) => {
+                r.count += w.count;
+                for prim in w.prims {
+                    if r.prims.len() < MAX_PRIMS && !r.prims.contains(&prim) {
+                        r.prims.push(prim);
+                    }
+                }
+                if r.message.is_empty() {
+                    r.message = w.message;
+                }
+            }
+            None => into.push(w),
+        }
+    }
+}
+
 /// The records of one scope, in first-fire order, and where each code's
 /// record sits.
 #[derive(Default)]
@@ -465,6 +488,8 @@ thread_local! {
     static LOGGED_OUTSIDE: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     /// Whether this thread has a scope, read without borrowing the collector.
     static IN_SCOPE: Cell<bool> = const { Cell::new(false) };
+    /// Whether warnings raised on this thread are not logged ([`Quiet`]).
+    static QUIET: Cell<bool> = const { Cell::new(false) };
     /// How many [`cause_warning!`](crate::cause_warning)s this thread has
     /// raised, scope or not ([`causes_raised`]).
     static CAUSES: Cell<u64> = const { Cell::new(0) };
@@ -539,6 +564,31 @@ impl Drop for WarningScope {
     }
 }
 
+/// While it lives, warnings raised on this thread are recorded as usual (by a
+/// [`WarningScope`]) but not logged: for a read made ahead of the one that reports, so the same
+/// warning is not said twice (`--all-passes` reads every pass's products
+/// before it imports any).
+pub struct QuietWarnings {
+    previous: bool,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl QuietWarnings {
+    /// Stops logging warnings on this thread until the guard drops.
+    pub fn enter() -> QuietWarnings {
+        QuietWarnings {
+            previous: QUIET.with(|q| q.replace(true)),
+            _not_send: PhantomData,
+        }
+    }
+}
+
+impl Drop for QuietWarnings {
+    fn drop(&mut self) {
+        QUIET.with(|q| q.set(self.previous));
+    }
+}
+
 /// What a site does after [`__occur`]: whether to log, and whether the
 /// record wants its message.
 #[doc(hidden)]
@@ -607,6 +657,7 @@ pub fn __occur(code: WarningCode, prim: Option<&dyn Display>, log: bool) -> __Em
         Some((first, record.message.is_empty()))
     });
     let log = log
+        && !QUIET.with(Cell::get)
         && match code.log_policy() {
             LogPolicy::Each => true,
             LogPolicy::Once => match recorded {

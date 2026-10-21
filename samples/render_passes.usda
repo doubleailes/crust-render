@@ -13,9 +13,19 @@
   stays. It reads the stage's /Render/settings, whose product writes
   props.exr.
 
-Each sample of a frame ends up in exactly one of the two passes, so adding
+Each sample of a frame ends up in exactly one of those two passes, so adding
 them (plus) gives back the render with no pass named. Rendered without
---pass, the stage is a plain render of the whole scene."""
+--pass, the stage is a plain render of the whole scene.
+
+Two more passes show what a pass can change without restating the shot:
+- /Render/Passes/plate keeps only the floor in collection:renderVisibility:
+  every other prim, the lights included, is hidden from every ray. The
+  plate renders unlit, with the alpha of its coverage.
+- /Render/Passes/util renders through /Render/sharp, which inherits
+  /Render/settings and authors only disableDepthOfField and its product:
+  the shot's camera, resolution and samples, without the lens blur.
+
+crust render --all-passes renders all four from one import."""
     defaultPrim = "World"
     renderSettingsPrimPath = "/Render/settings"
     upAxis = "Y"
@@ -27,6 +37,9 @@ def Xform "World"
     {
         float focalLength = 30
         float horizontalAperture = 20.955
+        # A lens focused on the hero: the floor and sky behind it blur.
+        float fStop = 4
+        float focusDistance = 7.6
         double3 xformOp:translate = (0, 1.6, 7)
         float xformOp:rotateX = -8
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
@@ -126,6 +139,23 @@ def Scope "Render"
         rel products = </Render/Products/char>
     }
 
+    # Per-pass overrides through composition: everything the shot's settings
+    # say, but the product and what each authors.
+    def RenderSettings "plateSettings" (
+        inherits = </Render/settings>
+    )
+    {
+        rel products = </Render/Products/plate>
+    }
+
+    def RenderSettings "sharp" (
+        inherits = </Render/settings>
+    )
+    {
+        uniform bool disableDepthOfField = 1
+        rel products = </Render/Products/util>
+    }
+
     def Scope "Products"
     {
         def RenderProduct "props"
@@ -137,6 +167,18 @@ def Scope "Render"
         def RenderProduct "char"
         {
             token productName = "char.exr"
+            rel orderedVars = </Render/Vars/color>
+        }
+
+        def RenderProduct "plate"
+        {
+            token productName = "plate.exr"
+            rel orderedVars = </Render/Vars/color>
+        }
+
+        def RenderProduct "util"
+        {
+            token productName = "util.exr"
             rel orderedVars = </Render/Vars/color>
         }
     }
@@ -163,6 +205,20 @@ def Scope "Render"
         def RenderPass "props"
         {
             prepend rel collection:matte:includes = </World/Chars>
+        }
+
+        # The floor alone, the lights off.
+        def RenderPass "plate"
+        {
+            rel renderSource = </Render/plateSettings>
+            uniform bool collection:renderVisibility:includeRoot = 0
+            prepend rel collection:renderVisibility:includes = </World/Set>
+        }
+
+        # The whole shot, sharp.
+        def RenderPass "util"
+        {
+            rel renderSource = </Render/sharp>
         }
     }
 }

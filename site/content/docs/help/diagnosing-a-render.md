@@ -27,7 +27,8 @@ crust check -i shot.usda
 It imports the stage exactly as the render would, renders nothing, and reports the
 camera, resolution and files the render would use, its effective settings, what the
 import cost, the diagnostic's findings that need no render (textures without a `.tx`,
-many lights picked uniformly, a visualisation strategy, peak memory), and every
+many lights picked uniformly, a visualisation strategy, peak memory, and with
+`--all-passes` two render passes that would write one file, `passes_share_output`), and every
 [warning](@/docs/reference/warnings.md) the import raised: what crust refused,
 approximated or skipped. In a pipeline, `--deny refused,skipped` makes it exit `3`
 when the stage raised a warning of those kinds, so a broken stage stops before it is

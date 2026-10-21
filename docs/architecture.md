@@ -346,6 +346,21 @@ other. The pairs:
   reduced as OIIO's `maketx` reduces, DWAA-compressed), so the A/B is pinned by the
   bounds of the `textures` design record (`a_converted_tx_streams_what_its_source_preloads`,
   and the image-level check there).
+- **`--pass` ↔ the one-pass case of `--all-passes`.** Both import through
+  `usd_import::import`, judge the pass in the traversal and apply it with the one
+  `passes::apply_pass`; a group import then gives each pass its own copy of the
+  `MaskTable` and light list, and `Scene::apply_pass` writes them into the built world
+  (`World::apply_pass`, through `remask`). Each pass of a group reads its settings,
+  camera and products with the readers a `--pass` import uses
+  (`each_pass_of_a_group_reads_as_it_does_alone`), and a world committed for one pass
+  renders another bit for bit as that pass imported alone
+  (`a_world_reapplied_to_another_pass_renders_as_that_pass_alone`; end to end,
+  `every_pass_renders_as_it_does_alone_from_one_import` in `crust-render`). A pass flag
+  written anywhere but the table — at dispatch, into the builder — breaks it.
+- **`ImportKey` ↔ MCP and `--all-passes`.** "Can these settings share this import?" has
+  one answer, `ImportKey::refusal` (`live.rs`): an MCP settings edit applies in place
+  exactly when the passes of `--all-passes` would share an import. A setting the import
+  starts building into the scene belongs in the key, or both go wrong together.
 - **`Scene::remask` ↔ `SceneBuilder::commit`.** Remasking a committed scene with a
   mask table must give the scene a commit with that table builds, field for field
   (`remask_of_a_commit_is_the_commit_of_the_new_masks`). It holds because the build

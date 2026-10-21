@@ -142,7 +142,8 @@ pub mod implicit_shapes {
 pub use rt_world::traversal_report;
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
-    MaterialRecord, NoAssets, PassRecord, PassSummary, UsdImportOptions, usd_schema_registry,
+    MaterialRecord, NoAssets, PassGroup, PassPlan, PassRecord, PassScene, PassSummary,
+    UsdImportOptions, usd_schema_registry,
 };
 pub use stats::{
     DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,
@@ -157,5 +158,7 @@ pub use tracer::{
 };
 pub use utils::Luma;
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
-pub use warnings::{LogPolicy, Warning, WarningCode, WarningKind, WarningScope};
+pub use warnings::{
+    LogPolicy, QuietWarnings, Warning, WarningCode, WarningKind, WarningScope, merge_warnings,
+};
 pub use world::{get_settings, simple_scene};

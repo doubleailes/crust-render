@@ -379,6 +379,24 @@ pub enum VolumeEvent {
     },
 }
 
+/// The volume regions' `(mask, light class)` each, in order.
+pub(crate) fn volume_flags(volumes: &[VolumeRegion]) -> Vec<(RayMask, u16)> {
+    volumes.iter().map(|v| (v.mask, v.light_class)).collect()
+}
+
+/// Sets each of `volumes`' mask and light class from `flags`, as
+/// [`volume_flags`] read them (a render pass's `MaskTable`).
+///
+/// # Panics
+/// If `flags` is not one entry per region.
+pub(crate) fn set_volume_flags(volumes: &mut [VolumeRegion], flags: &[(RayMask, u16)]) {
+    assert_eq!(flags.len(), volumes.len(), "one entry per volume");
+    for (v, &(mask, class)) in volumes.iter_mut().zip(flags) {
+        v.mask = mask;
+        v.light_class = class;
+    }
+}
+
 /// All volume regions in the scene.
 #[derive(Default)]
 pub struct Volumes {

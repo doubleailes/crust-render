@@ -895,3 +895,232 @@ fn the_active_pass_and_its_settings_are_reported() {
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(parse(&out.stdout)["settings"].is_null());
 }
+
+/// The `scene-check` spec's "A pass that hides geometry from every ray": the
+/// pass's `renderVisibility` leaves out two meshes, and the report counts
+/// them, in text and JSON.
+#[test]
+fn render_hidden_geometry_is_counted() {
+    let dir = work_dir("render_hidden");
+    let mesh = |name: &str, x: f32| {
+        format!(
+            "    def Mesh \"{name}\"\n    {{\n        int[] faceVertexCounts = [3]\n        \
+             int[] faceVertexIndices = [0, 1, 2]\n        point3f[] points = [({x}, 0, 0), \
+             ({x}, 1, 0), ({}, 0, 0)]\n    }}\n",
+            x + 1.0
+        )
+    };
+    let body = [mesh("A", 0.0), mesh("B", 2.0), mesh("C", 4.0)].concat();
+    let input = stage(
+        &dir,
+        &body,
+        "def Scope \"Render\"\n{\n    def RenderPass \"pass\"\n    {\n        prepend rel \
+         collection:renderVisibility:excludes = [</World/A>, </World/B>]\n    }\n}\n",
+    );
+    let input = input.to_str().unwrap();
+    let args = ["check", "-i", input, "--pass", "/Render/pass"];
+    let out = crust(&dir, &[&args[..], &["--json", "-"]].concat());
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    assert_eq!(v["pass"]["render_hidden"], 2);
+    assert_eq!(v["pass"]["holdouts"], 0);
+    let out = crust(&dir, &args);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("2 hidden from every ray"), "{text}");
+}
+
+/// A shot whose camera has a lens, and a `util` pass reading `utilSettings`,
+/// which inherits the shot's settings, writes its own product and authors
+/// `extra`.
+fn lens_shot(dir: &Path, extra: &str) -> PathBuf {
+    stage(
+        dir,
+        "    def Camera \"Lens\"\n    {\n        float fStop = 2.8\n        float focusDistance = 5\n    }\n",
+        &format!(
+            r#"def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int2 resolution = (32, 16)
+        rel camera = </World/Lens>
+        rel products = </Render/beauty>
+    }}
+    def RenderSettings "utilSettings" (
+        inherits = </Render/settings>
+    )
+    {{
+        rel products = </Render/util>
+{extra}    }}
+    def RenderProduct "beauty"
+    {{
+        token productName = "beauty.exr"
+        rel orderedVars = </Render/color>
+    }}
+    def RenderProduct "util"
+    {{
+        token productName = "util.exr"
+        rel orderedVars = </Render/color>
+    }}
+    def RenderVar "color"
+    {{
+        string sourceName = "color"
+    }}
+    def Scope "Passes"
+    {{
+        def RenderPass "util"
+        {{
+            rel renderSource = </Render/utilSettings>
+        }}
+    }}
+}}
+"#
+        ),
+    )
+}
+
+/// The `scene-check` spec's "A depth of field that leaks into a pass" and "An
+/// override that applies".
+#[test]
+fn a_pass_s_depth_of_field_is_described_against_the_shot() {
+    let dir = work_dir("passes_lens");
+    let leaked = lens_shot(&dir, "");
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            leaked.to_str().unwrap(),
+            "--all-passes",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    let util = &v["passes"][0];
+    assert_eq!(util["path"], "/Render/Passes/util");
+    assert_eq!(util["depth_of_field"], true, "the lens leaks into the pass");
+    let differs: Vec<&str> = util["differs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(differs, ["products"], "{util}");
+
+    let sharp = lens_shot(&dir, "        uniform bool disableDepthOfField = 1\n");
+    let out = crust(
+        &dir,
+        &["check", "-i", sharp.to_str().unwrap(), "--all-passes"],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("    lens        depth of field off, motion blur off"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    differs     depth_of_field: on -> off"),
+        "{text}"
+    );
+}
+
+/// The `scene-check` spec's "Passes in the text report", "Passes in the
+/// JSON", "No all-passes" and "A stage with no passes".
+#[test]
+fn every_pass_of_the_sample_is_described() {
+    let dir = work_dir("passes_sample");
+    let input = render_passes();
+    let input = input.to_str().unwrap();
+    let out = crust(&dir, &["check", "-i", input, "--all-passes"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("no {s:?} in {text}"));
+    assert!(at("Render\n") < at("Passes\n"));
+    assert!(at("  /Render/Passes/char (") < at("  /Render/Passes/props ("));
+    assert!(
+        text.contains("    settings    /Render/charSettings"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    writes      char.exr (/Render/Products/char)"),
+        "{text}"
+    );
+
+    let out = crust(&dir, &["check", "-i", input, "--all-passes", "--json", "-"]);
+    let v = parse(&out.stdout);
+    let passes = v["passes"].as_array().unwrap();
+    assert_eq!(passes.len(), 4);
+    assert_eq!(passes[0]["path"], "/Render/Passes/char");
+    assert_eq!(passes[0]["settings"], "/Render/charSettings");
+    assert_eq!(
+        passes[2]["render_hidden"], 4,
+        "all but the floor, the key's bulb too"
+    );
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["id"] != "passes_share_output")
+    );
+
+    let out = crust(&dir, &["check", "-i", input, "--json", "-"]);
+    assert!(parse(&out.stdout)["passes"].is_null());
+
+    let cornell = cornellbox();
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            cornell.to_str().unwrap(),
+            "--all-passes",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(parse(&out.stdout)["passes"], serde_json::json!([]));
+    assert!(files(&dir).is_empty(), "{:?}", files(&dir));
+}
+
+/// The `scene-check` spec's "Two passes on the default path": one
+/// `passes_share_output` finding naming the default beauty file and both
+/// passes, and the check still exits 0.
+#[test]
+fn passes_that_share_an_output_are_a_finding() {
+    let dir = work_dir("passes_share");
+    let input = stage(
+        &dir,
+        "",
+        "def Scope \"Render\"\n{\n    def RenderPass \"a\"\n    {\n    }\n    def RenderPass \
+         \"b\"\n    {\n    }\n}\n",
+    );
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            input.to_str().unwrap(),
+            "--all-passes",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    let shared: Vec<&serde_json::Value> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["id"] == "passes_share_output")
+        .collect();
+    assert_eq!(shared.len(), 1, "{v}");
+    assert_eq!(shared[0]["kind"], "correctness");
+    assert_eq!(shared[0]["evidence"]["file"], "output.exr");
+    assert_eq!(
+        shared[0]["evidence"]["passes"],
+        serde_json::json!(["/Render/a", "/Render/b"])
+    );
+}

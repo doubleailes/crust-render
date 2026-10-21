@@ -10,7 +10,6 @@ use crate::material::Material;
 use crate::primvars::{MeshHit, PrimvarTable};
 use crate::ray::Ray;
 use crate::strands::{CurveHit, StrandTable};
-use crate::volume::VolumeRegion;
 use crate::warning;
 use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, RayMask, SceneBuilder};
 use glam::{Affine3A, Vec3A};
@@ -676,7 +675,8 @@ pub struct MaskTable {
     pub(crate) transparent_emitters: Vec<bool>,
     /// Sparse, indexed by `geom_id`, as [`WorldBuilder`]'s.
     pub(crate) holdouts: Vec<bool>,
-    /// Per volume region: its mask and light-link class.
+    /// Per volume region: its mask and light-link class
+    /// ([`crate::volume::set_volume_flags`]).
     pub(crate) volumes: Vec<(RayMask, u16)>,
 }
 
@@ -1186,36 +1186,31 @@ impl WorldBuilder {
         self.light_classes = classes;
     }
 
-    /// A copy of every geometry's pass and link flags, with `volumes`' — see
-    /// [`MaskTable`].
-    pub(crate) fn mask_table(&self, volumes: &[VolumeRegion]) -> MaskTable {
+    /// A copy of every geometry's pass and link flags, with the volume
+    /// regions' `volumes` (mask and class each) — see [`MaskTable`].
+    pub(crate) fn mask_table(&self, volumes: Vec<(RayMask, u16)>) -> MaskTable {
         MaskTable {
             masks: (0..self.count() as u32).map(|id| self.mask(id)).collect(),
             light_classes: self.light_classes.clone(),
             transparent_emitters: self.transparent_emitters.clone(),
             holdouts: self.holdouts.clone(),
-            volumes: volumes.iter().map(|v| (v.mask, v.light_class)).collect(),
+            volumes,
         }
     }
 
-    /// Writes `table` back: every geometry's flags, and `volumes`' masks and
-    /// classes — see [`MaskTable`].
+    /// Writes `table`'s geometry flags back — see [`MaskTable`]; its volumes'
+    /// are the caller's ([`crate::volume::set_volume_flags`]).
     ///
     /// # Panics
-    /// If `table` holds flags for another number of geometries or volumes.
-    pub(crate) fn set_mask_table(&mut self, table: MaskTable, volumes: &mut [VolumeRegion]) {
+    /// If `table` holds flags for another number of geometries.
+    pub(crate) fn set_mask_table(&mut self, table: MaskTable) {
         assert_eq!(table.count(), self.count(), "one mask per geometry");
-        assert_eq!(table.volumes.len(), volumes.len(), "one entry per volume");
         for (id, &mask) in table.masks.iter().enumerate() {
             self.set_mask(id as u32, mask);
         }
         self.light_classes = table.light_classes;
         self.transparent_emitters = table.transparent_emitters;
         self.holdouts = table.holdouts;
-        for (v, (mask, class)) in volumes.iter_mut().zip(table.volumes) {
-            v.mask = mask;
-            v.light_class = class;
-        }
     }
 }
 
@@ -1264,6 +1259,32 @@ pub struct World {
 }
 
 impl World {
+    /// Replaces every flag a render pass and light linking decide — each
+    /// geometry's ray mask, its light-link class, the transparent emitters and
+    /// the holdouts — with `table`'s, in place: the world is then the one a
+    /// commit of the same geometry with those flags builds
+    /// (`crust_rt::Scene::remask`). What lets one import render several passes.
+    ///
+    /// # Panics
+    /// If `table` holds flags for another number of geometries.
+    pub(crate) fn apply_pass(&mut self, table: &MaskTable) {
+        assert_eq!(table.count(), self.count(), "one mask per geometry");
+        self.scene.remask(|id| table.masks[id as usize]);
+        self.light_classes = table.light_classes.clone();
+        let emitters = table.transparent_emitters.contains(&true);
+        self.transparent_emitters = if emitters {
+            table.transparent_emitters.clone()
+        } else {
+            Vec::new()
+        };
+        self.holdouts = if table.holdouts.contains(&true) {
+            table.holdouts.clone()
+        } else {
+            Vec::new()
+        };
+        self.bounce_pass_throughs = self.pass_throughs || emitters;
+    }
+
     /// The kept primvars on primitive `prim_id` of geometry `geom_id`, by
     /// keep-set index, into `out`: at the kernel's barycentrics `bary` on a
     /// triangle, at `curve_u` along a curve span; `None` for each one the

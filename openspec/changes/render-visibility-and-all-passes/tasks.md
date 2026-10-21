@@ -66,22 +66,22 @@
 
   Also update the rows in `site/content/docs/reference/warnings.md` and verify the
   warnings-page test.
-- [ ] 3.3 Add `World::apply_pass(&PassState)`: `remask`, the holdout table, the
+- [x] 3.3 Add `World::apply_pass(&PassState)`: `remask`, the holdout table, the
   light classes, transparent emitters, volume masks. Verify with a test that a
   world committed for pass A, after `apply_pass(B)`, renders `render_passes.usda`
   bitwise like a world committed for B.
-- [ ] 3.4 Add the render-hidden count to `PassSummary` / `PassInfo` and to
+- [x] 3.4 Add the render-hidden count to `PassSummary` / `PassInfo` and to
   `crust check`'s pass line and JSON. Verify with the check-report test for a pass
   whose `renderVisibility` leaves out two meshes.
 
 ## 4. Import groups (crust-core)
 
-- [ ] 4.1 Extract `refresh_settings`' refusal checks into `ImportKey::of` (design
+- [x] 4.1 Extract `refresh_settings`' refusal checks into `ImportKey::of` (design
   D3), and have `refresh_settings` compare keys. Verify that every MCP test in
   `crust-render/src/mcp/tests.rs` passes unchanged, and add a unit test that
   passes differing only in products share a key while `crust:subdivisionLevel`
   splits them.
-- [ ] 4.2 Let `UsdImportOptions` take a group of passes. Judge each in the one
+- [x] 4.2 Let `UsdImportOptions` take a group of passes. Judge each in the one
   traversal, mask every chunk to every pass prim, and return the shared `Scene`
   plus one `PassScene` per pass (settings, camera, aovs, settings prim, summary,
   that pass's warnings) re-read from the kept stage (design D4). Verify with a
@@ -90,15 +90,15 @@
 
 ## 5. `crust render --all-passes` (crust-render)
 
-- [ ] 5.1 Add `--all-passes` to `render` and `check`. It is refused with `--pass`,
+- [x] 5.1 Add `--all-passes` to `render` and `check`. It is refused with `--pass`,
   `-o`, `--stats-json`, or without `-i`. Verify with clap tests beside
   `cli_pass_is_a_scene_argument`, and document the flag in
   `site/content/docs/reference/command-line.md`.
-- [ ] 5.2 Split `render_and_write` so one pass renders from parts and gives the
+- [x] 5.2 Split `render_and_write` so one pass renders from parts and gives the
   world and lights back (design D5). Verify that a plain render and `--pass`
   render are bitwise unchanged (`scripts/check_images.sh check`) and that the
   `render_final` MCP test still passes.
-- [ ] 5.3 Implement the loop:
+- [x] 5.3 Implement the loop:
   - list the passes and group them;
   - compute every product file and refuse collisions before any import;
   - import once per group, then `apply_pass`, render and write per pass;
@@ -113,14 +113,14 @@
   - two passes with no products fail before rendering, naming both;
   - a `crust:subdivisionLevel` split imports twice;
   - an interrupt after the first pass leaves the third unwritten.
-- [ ] 5.4 Add a plate-and-lights-off pass and a sharp utility pass (inheriting
+- [x] 5.4 Add a plate-and-lights-off pass and a sharp utility pass (inheriting
   the base settings with `disableDepthOfField`) to `samples/render_passes.usda`.
   Verify that `crust render -i samples/render_passes.usda --all-passes -s 16`
   writes every pass, and that `crust ls pass` lists them in order.
 
 ## 6. `crust check --all-passes` (crust-core + crust-render)
 
-- [ ] 6.1 Build each pass entry from `check_scene`'s pieces over its `PassScene`,
+- [x] 6.1 Build each pass entry from `check_scene`'s pieces over its `PassScene`,
   with the diff against the no-pass entry and the always-printed depth of field
   and motion blur (design D6). Add the `passes` key (`null` without the flag) and
   the text section after the render described. Verify with check-report tests:
@@ -129,14 +129,14 @@
   - `passes` is `null` without the flag;
   - the JSON lists `/Render/Passes/char` first with `/Render/charSettings`;
   - a stage with no pass exits 0 with an empty list.
-- [ ] 6.2 Raise `passes_share_output` from the collision function `render` uses.
+- [x] 6.2 Raise `passes_share_output` from the collision function `render` uses.
   Verify with a test where two passes have no products: one finding naming the
   default beauty file and both passes, exit status 0. Add the finding to the
   diagnostics findings list in the user docs.
 
 ## 7. User documentation and design records
 
-- [ ] 7.1 Update `site/content/docs/usd/render-passes.md`:
+- [x] 7.1 Update `site/content/docs/usd/render-passes.md`:
   - `renderVisibility` (geometry, lights off, precedence);
   - the settings-override recipe with `inherits`;
   - `--all-passes` and the shared import;
@@ -146,7 +146,7 @@
 
   Describe the shared import on the `site/` architecture page. Verify that
   `zola build` (0.21) in `site/` passes its link and anchor check.
-- [ ] 7.2 Add to `docs/architecture.md` § Invariants: `--pass` ↔ the one-pass case
+- [x] 7.2 Add to `docs/architecture.md` § Invariants: `--pass` ↔ the one-pass case
   of `--all-passes` (one `apply_pass`), and `ImportKey` shared by MCP and
   grouping. Verify `cargo doc -p crust-core --no-deps` builds without broken
   intra-doc links.

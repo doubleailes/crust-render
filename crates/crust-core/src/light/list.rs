@@ -165,6 +165,7 @@ pub struct LightLinks {
 /// [`LightList::iter`] report the same number for the same light: the bounce
 /// side weights emission it found by chance with it, and the two sides must
 /// describe one strategy or emission is double-counted.
+#[derive(Clone)]
 pub struct LightList {
     /// The lights. Private, so that [`LightList::add`] is the only way in:
     /// it keeps the geometry index and the selection in step with this

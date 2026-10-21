@@ -39,7 +39,7 @@
 //! ([`ActivePass::read`] warns when it restricts anything). Volume regions
 //! are not held out or hidden (`render_pass.volume_ignored`).
 
-use crate::warning;
+use crate::{Warning, warning};
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -53,7 +53,7 @@ use crate::ray::{MASK_CAMERA, RayMask};
 use crate::rt_world::MaskTable;
 
 use super::light_links::{LightLinks, Opinions, index_remap, inside_instance, opinions};
-use super::prim_at;
+use super::{captured, prim_at};
 
 /// `renderVisibility`, which `openusd-schemas` names no constant for.
 const COLLECTION_RENDER_VISIBILITY: &str = "renderVisibility";
@@ -143,24 +143,33 @@ pub(super) struct ActivePass {
     /// light link.
     hidden: HashSet<sdf::Path>,
     summary: PassSummary,
+    /// Where its warnings go: `None` to the import's, `Some` to its own
+    /// record, for a pass of a group import.
+    warnings: Option<Vec<Warning>>,
 }
 
 impl ActivePass {
     /// The pass at `path` on the payload-free `index` stage, which
     /// [`super::settings::check_pass`] has found to be a `RenderPass`. Warns
-    /// when `prune`, which it does not read, restricts anything.
-    pub(super) fn read(index: &Stage, path: &sdf::Path) -> Self {
+    /// when `prune`, which it does not read, restricts anything. With
+    /// `own_warnings`, every warning the pass raises is kept on it
+    /// ([`ActivePass::take_warnings`]) rather than the import's.
+    pub(super) fn read(index: &Stage, path: &sdf::Path, own_warnings: bool) -> Self {
+        let mut warnings = own_warnings.then(Vec::new);
         let prim = prim_at(index, path.clone());
         let o = opinions(&prim, COLLECTION_PRUNE);
         if o.expression || !o.includes.is_empty() || o.include_root == Some(true) {
-            warning!(
-                RenderPassCollectionNotRead,
-                at = path,
-                "{path}: collection:{COLLECTION_PRUNE} restricts what renders, which crust does \
-                 not read — rendered as if it were unauthored"
-            );
+            captured(&mut warnings, || {
+                warning!(
+                    RenderPassCollectionNotRead,
+                    at = path,
+                    "{path}: collection:{COLLECTION_PRUNE} restricts what renders, which crust \
+                     does not read — rendered as if it were unauthored"
+                )
+            });
         }
         ActivePass {
+            warnings,
             path: path.clone(),
             queries: [None, None, None],
             warned_instance: [false; 3],
@@ -183,9 +192,26 @@ impl ActivePass {
         &self.path
     }
 
+    /// The warnings the pass kept on itself (see [`ActivePass::read`]).
+    pub(super) fn take_warnings(&mut self) -> Vec<Warning> {
+        self.warnings.take().unwrap_or_default()
+    }
+
+    /// Runs `f` on the pass, its warnings going where the pass's go.
+    fn capture<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let mut into = self.warnings.take();
+        let out = captured(&mut into, || f(self));
+        self.warnings = into;
+        out
+    }
+
     /// Builds the queries for the chunk `stage` is about to be walked from,
     /// for each collection that restricts anything on that stage.
     pub(super) fn begin_chunk(&mut self, stage: &Stage) {
+        self.capture(|pass| pass.begin_chunk_inner(stage));
+    }
+
+    fn begin_chunk_inner(&mut self, stage: &Stage) {
         self.queries = [None, None, None];
         let prim = prim_at(stage, self.path.clone());
         if !prim.is_valid().unwrap_or(false) {
@@ -289,12 +315,14 @@ impl ActivePass {
             } else {
                 ("outside", "cameraVisibility", "the camera sees")
             };
-            warning!(
-                RenderPassVolumeIgnored,
-                at = path,
-                "{path}: a volume region {why} collection:{name} of render pass {pass}, which \
-                 crust does not apply to volumes — {sees} it as without the pass"
-            );
+            captured(&mut self.warnings, || {
+                warning!(
+                    RenderPassVolumeIgnored,
+                    at = path,
+                    "{path}: a volume region {why} collection:{name} of render pass {pass}, \
+                     which crust does not apply to volumes — {sees} it as without the pass"
+                )
+            });
         }
     }
 

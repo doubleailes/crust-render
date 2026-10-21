@@ -87,8 +87,10 @@ of its base settings, `disableDepthOfField` included, without restating the rest
 ### Requirement: Every pass of a stage in one render
 
 `crust render --all-passes` SHALL render every `RenderPass` prim that
-`crust ls pass` lists, one after another in that order. Each pass SHALL render
-as the active pass, with its own settings and products. A stage with no
+`crust ls pass` lists, one after another in that order, except that passes
+sharing an import render together: the imports in the order of their first
+pass, each one's passes in `crust ls pass` order. Each pass SHALL render as
+the active pass, with its own settings and products. A stage with no
 `RenderPass` SHALL stop with an error before rendering.
 
 #### Scenario: Two passes in one command

@@ -488,7 +488,12 @@ fn passes_are_listed_in_namespace_order() {
     let sample = sample("render_passes.usda");
     assert_eq!(
         Scene::list_usd(&sample, ListKind::Pass).expect("lists"),
-        ["/Render/Passes/char", "/Render/Passes/props"]
+        [
+            "/Render/Passes/char",
+            "/Render/Passes/props",
+            "/Render/Passes/plate",
+            "/Render/Passes/util"
+        ]
     );
     let path = stage(
         "passes.usda",

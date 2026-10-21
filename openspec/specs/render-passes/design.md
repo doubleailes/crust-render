@@ -177,13 +177,14 @@ A missing or non-pass `--pass` is an error, not a warning.
 
 ## Measured: the two-pass composites
 
-On `samples/render_passes.usda` at 48×27, unclamped, adaptive sampling off
-(`crust-core/tests/render_passes.rs`, the composite tests):
+On `samples/render_passes.usda` (its camera focused on the hero at `fStop` 4)
+at 48×27, unclamped, adaptive sampling off (`crust-core/tests/render_passes.rs`,
+the composite tests):
 
 - **Holding each other out, `plus`.** The char and props passes sum to the
   no-pass render at 16 and 64 spp: RMS < 1e-6 for the beauty, the alpha and a
-  `C<RS>.*[LO]` light path expression. `char over props` is off by 0.0100 at
-  16 spp and 0.0102 at 64: a bias, not noise.
+  `C<RS>.*[LO]` light path expression. `char over props` is off by 0.0107 at
+  16 spp and 0.0104 at 64: a bias, not noise.
 - **Double counting.** With `/World/Sky` dropped from the char pass's `matte`,
   `char + props` equals the no-pass render plus a pass that holds out every
   object and keeps only the sky (RMS < 1e-6 in all three).
@@ -194,17 +195,21 @@ On `samples/render_passes.usda` at 48×27, unclamped, adaptive sampling off
 
   | spp | edge pixels | RMS, all edges | sky-backed (n) | floor-backed (n) |
   |-----|-------------|----------------|----------------|------------------|
-  | 16   | 84  | 0.00484 | 1.5e-8 (40) | 0.00722 (37) |
-  | 64   | 101 | 0.00444 | 3.4e-8 (48) | 0.00662 (45) |
-  | 256  | 109 | 0.00406 | 1.0e-7 (52) | 0.00603 (49) |
-  | 1024 | 115 | 0.00373 | 3.2e-7 (56) | 0.00558 (51) |
+  | 16   | 91  | 0.00591 | 1.4e-8 (40) | 0.00694 (37) |
+  | 64   | 106 | 0.00401 | 3.6e-8 (44) | 0.00474 (39) |
+  | 256  | 119 | 0.00331 | 9.2e-8 (48) | 0.00341 (46) |
+  | 1024 | 128 | 0.00347 | 3.1e-7 (54) | 0.00375 (44) |
 
-  Against the uniform dome both conditional means are equal, so the composite
-  is exact to float rounding. Against the floor, what lies behind the hero's
-  silhouette is its own contact shadow: background and coverage are correlated,
-  and the error falls far slower than 1/√N (a factor 1.3 over 64× the samples,
-  where noise alone would give 8). So `over` is exact only where the background
-  behind an edge does not depend on which side of the edge a sample lands.
+  (Edge pixels whose background is part sky, part floor are in neither
+  column.) Against the uniform dome both conditional means are equal, so the
+  composite is exact to float rounding. Against the floor the error falls
+  while noise dominates, then stops near 0.0035: what lies behind the hero's
+  silhouette is its own contact shadow, so background and coverage are
+  correlated. 64× the samples divide it by 1.85, where noise alone would
+  divide it by 8. `over` is exact at an edge only where the background behind
+  it does not depend on which side of the edge a sample lands. (Measured
+  first with a pinhole camera, before the sample's lens: 0.0072 → 0.0056 over
+  the same range, the same conclusion.)
 
 ## Risks and trade-offs
 

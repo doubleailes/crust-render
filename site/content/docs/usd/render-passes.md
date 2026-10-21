@@ -1,22 +1,23 @@
 +++
 title = "Render passes"
-description = "UsdRenderPass: one stage, several passes — holdouts (matte) and camera visibility, chosen with --pass."
+description = "UsdRenderPass: one stage, several passes — holdouts (matte), camera and render visibility, chosen with --pass or rendered all at once with --all-passes."
 date = 2026-10-21T08:00:00+00:00
-updated = 2026-10-21T08:00:00+00:00
+updated = 2026-10-21T22:00:00+00:00
 draft = false
 weight = 27
 sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'A shot is often rendered in passes: the characters in one, the set in another. A <code>RenderPass</code> prim describes each, and <code>--pass</code> renders one, from the same stage, with no asset edits.'
+lead = 'A shot is often rendered in passes: the characters in one, the set in another. A <code>RenderPass</code> prim describes each; <code>--pass</code> renders one, and <code>--all-passes</code> every one from a single import, from the same stage, with no asset edits.'
 toc = true
 top = false
 +++
 
 A `RenderPass` prim describes one pass of a shot with collections: what the pass holds
-out (`matte`), and what the camera sees (`cameraVisibility`). Crust Render reads both,
-and the pass's `renderSource`, for the pass you name on the command line.
+out (`matte`), what the camera sees (`cameraVisibility`), and what renders at all
+(`renderVisibility`). Crust Render reads all three, and the pass's `renderSource`, for the
+pass you name on the command line, or for every pass of the stage with `--all-passes`.
 
 ## Choosing a pass
 
@@ -45,6 +46,33 @@ settings are read, as without a pass (see
 A `renderSource` that targets anything else logs the warning
 [`render_pass.render_source_invalid`](@/docs/reference/warnings.md#render-passes) and
 reads the stage's settings.
+
+### Overriding one setting for a pass
+
+The settings prim is read as composed, so a pass can change one of the shot's settings
+without restating the rest: give it a `RenderSettings` that `inherits` the shot's (or
+`references` or `specializes` it) and authors only what differs. The usual case is a
+utility pass that must not blur where the beauty does:
+
+```usda
+def RenderSettings "sharp" (
+    inherits = </Render/settings>
+)
+{
+    uniform bool disableDepthOfField = 1
+    rel products = </Render/Products/util>
+}
+
+def RenderPass "util"
+{
+    rel renderSource = </Render/sharp>
+}
+```
+
+The util pass renders through the shot's camera, at its resolution and sample count, as
+a pinhole. A pass whose settings prim copies the shot's instead keeps every setting the
+copy does, the lens included; [`crust check --all-passes`](#checking-every-pass) shows
+which passes still render depth of field.
 
 ## matte: holdouts
 
@@ -80,9 +108,39 @@ A `DomeLight` or `DistantLight` outside `cameraVisibility`, or in `matte`, is in
 to escaping camera rays, as `domeLightCameraVisibility = false` makes every one; how it
 lights the scene does not change.
 
+## renderVisibility
+
+What the pass's `collection:renderVisibility` leaves out is **hidden from every ray**:
+camera, shadow, indirect and light-sampling rays all pass it, as
+[`crust:rayMask = 0`](@/docs/usd/geometry.md#crust-raymask) makes it. It casts no shadow and shows in
+no reflection. The collection holds everything by default (`includeRoot` is true), so
+a background plate alone is:
+
+```usda
+def RenderPass "plate"
+{
+    uniform bool collection:renderVisibility:includeRoot = 0
+    prepend rel collection:renderVisibility:includes = </World/Set>
+}
+```
+
+A **light** outside `renderVisibility` is off: it lights nothing, an escaping camera ray
+sees no dome, its area light's surface stops no ray, and an AOV that selects only that
+light (a light group, a light path expression naming it) is zero. Leave `/World/Lights`
+out and the plate renders unlit. Light linking is decided after the pass: a light
+linked only to geometry the pass hides lights nothing, as a light linked to nothing does.
+
+`renderVisibility` comes first. A prim it leaves out is not a holdout and not counted as
+one, whatever `matte` and `cameraVisibility` say: it is absent, so camera rays go through
+where it stands. As with `cameraVisibility`, a pass only takes visibility away: geometry
+`crust:rayMask` hides stays hidden.
+
+Hidden geometry stays in the acceleration structure the passes of a shot share; the rays
+skip it, so a pass that hides most of the set still pays to traverse it.
+
 ## Collections
 
-Both collections are read with full `UsdCollectionAPI` semantics: the nearest
+The three collections are read with full `UsdCollectionAPI` semantics: the nearest
 `includes` / `excludes` opinion wins, `expansionRule` (`explicitOnly` names only the
 listed prims), included collections, and `membershipExpression`, predicates included
 (`/World//{isa:Mesh}`).
@@ -95,7 +153,8 @@ instance's prototype cannot tell the instances apart, so it logs
 ## Example: a character pass and a background pass
 
 `samples/render_passes.usda` holds a hero, a crate in front of it, a mirror ball, a
-floor and a sky, and two passes:
+floor and a sky, seen through a lens focused on the hero, and four passes. The first two
+split the shot:
 
 ```usda
 def Scope "Render"
@@ -138,6 +197,46 @@ In `char.exr` the hero has a hole where the crate stands in front of it, and the
 shadow still falls on it. In `props.exr` the hero is a hole, its shadow still on the
 floor, and its reflection still in the mirror ball. Both products write `color4f`
 (RGB with alpha), so each is premultiplied and ready to composite.
+
+The other two use what a pass can change without restating the shot: `plate` keeps only
+the floor in `renderVisibility` (the lights are left out, so it renders unlit, with the
+floor's alpha), and `util` renders through `/Render/sharp`, the
+[override recipe](#overriding-one-setting-for-a-pass) above, writing `util.exr`
+without the lens blur.
+
+## Every pass at once
+
+[`crust render --all-passes`](@/docs/reference/command-line.md#all-passes) renders every
+pass the stage defines, each to its own products, exactly as `--pass` renders it alone:
+
+```bash
+crust render -i samples/render_passes.usda --all-passes -s 16   # char, props, plate, util
+```
+
+The passes share one import whenever their settings agree on everything the import builds
+into the scene: the geometry, its subdivision and displacement, the materials, the
+textures and the acceleration structure are built once, and each pass changes only what
+each ray sees, its light list and its settings. All four passes of the sample share one.
+A pass whose settings dice differently (another `crust:subdivisionLevel`, say), measure
+motion over another shutter, or render in another colour space gets an import of its own;
+the log says how many passes each import served.
+
+Before importing anything, `--all-passes` works out every file each pass would write, and
+refuses a stage where two passes would write the same one. That is what happens to two
+passes whose settings have no `RenderProduct`: both would write `output.exr`.
+
+## Checking every pass
+
+[`crust check --all-passes`](@/docs/reference/command-line.md#check) describes the render
+with no pass, then each pass: its settings prim, what it holds out and hides, whether it
+renders depth of field and motion blur, its products, and every setting it changes from
+the render with no pass. A pass whose settings copy the shot's says `depth of field on`
+with nothing changed; one with the override above says `depth_of_field: on -> off`. Two
+passes that would write one file are reported as the `passes_share_output` finding.
+
+```bash
+crust check -i samples/render_passes.usda --all-passes
+```
 
 ## Compositing
 
@@ -182,21 +281,22 @@ part of it.
 
 ## Collections not read
 
-`prune` and `renderVisibility` are not read. When the active pass's `prune` or
-`renderVisibility` restricts anything, the render logs
-[`render_pass.collection_not_read`](@/docs/reference/warnings.md#render-passes) once per
-collection and renders as if it were unauthored.
+`prune` is not read. When the active pass's `prune` restricts anything, the render logs
+[`render_pass.collection_not_read`](@/docs/reference/warnings.md#render-passes) and
+renders as if it were unauthored; leave the prims out of `renderVisibility` instead.
 
 ## Known gaps
 
-- `prune` and `renderVisibility` are not read, and a volume region in `matte` or left out
-  of `cameraVisibility` is neither held out nor hidden: it logs
-  `render_pass.volume_ignored` and the camera sees it as without the pass.
+- `prune` is not read, and a volume region in `matte` or left out of `cameraVisibility`
+  or `renderVisibility` is neither held out nor hidden: it logs
+  `render_pass.volume_ignored` and renders as without the pass.
 - A holdout behind a thin wall that the camera ray passes straight through (glass at
   IOR 1) renders black with the wall's alpha of 1, not as a hole.
 - There is no shadow catcher: a holdout records no shadow or reflection of the other
   objects into its alpha.
-- One render renders one pass; several passes import the stage once each.
+- Geometry a pass hides from every ray still costs that pass traversal time: it stays in
+  the acceleration structure the passes share. Rendering that pass alone with `--pass`
+  imports no less.
 - In a streamed import, a pass collection that includes another collection authored in
   a different top-level subtree cannot read it while that subtree's chunk is imported
   (`render_pass.nested_not_composed`); author the collection on the pass, or set

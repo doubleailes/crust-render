@@ -1172,15 +1172,20 @@ fn passes_sample() -> PathBuf {
 
 /// `samples/render_passes.usda` with `passes` added beside its own.
 fn passes_sample_with(name: &str, passes: &str) -> PathBuf {
-    let text = std::fs::read_to_string(passes_sample()).expect("read sample");
     let anchor = "        def RenderPass \"props\"";
-    assert!(text.contains(anchor), "the sample's props pass moved");
+    sample_with(name, &[(anchor, &format!("{passes}{anchor}"))])
+}
+
+/// `samples/render_passes.usda` with each `(from, to)` replaced, written
+/// beside the other test stages as `name.usda`.
+fn sample_with(name: &str, edits: &[(&str, &str)]) -> PathBuf {
+    let mut text = std::fs::read_to_string(passes_sample()).expect("read sample");
+    for (from, to) in edits {
+        assert!(text.contains(from), "the sample holds no {from:?}");
+        text = text.replacen(from, to, 1);
+    }
     let path = dir().join(format!("{name}.usda"));
-    std::fs::write(
-        &path,
-        text.replacen(anchor, &format!("{passes}{anchor}"), 1),
-    )
-    .expect("write stage");
+    std::fs::write(&path, text).expect("write stage");
     path
 }
 
@@ -1199,8 +1204,12 @@ fn render_sample(pass: Option<&str>, spp: u32) -> Vec<Px> {
 /// `path` rendered with `pass` (or none) at `spp`, small, unclamped and
 /// without adaptive sampling, top-down as a product writes it.
 fn render_stage(path: &Path, pass: Option<&str>, spp: u32) -> Vec<Px> {
+    render_scene(load(path, pass), spp)
+}
+
+/// [`render_stage`] of a scene already imported.
+fn render_scene(scene: Scene, spp: u32) -> Vec<Px> {
     use crust_core::{AovProduct, AovRequest, AovSource, AovVar, Precision, Renderer};
-    let scene = load(path, pass);
     let (w, h) = (48, 27);
     let settings = scene
         .settings
@@ -1392,4 +1401,135 @@ fn a_back_pass_that_hides_the_character_goes_under_it() {
         b16 > 1e-3 && b256 > 0.5 * b16,
         "floor edges: {b16} then {b256}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Passes imported together
+// ---------------------------------------------------------------------------
+
+fn group(path: &Path, passes: &[&str]) -> crust_core::PassGroup {
+    let passes: Vec<String> = passes.iter().map(|p| p.to_string()).collect();
+    Scene::from_usd_passes(path, &NoAssets, &UsdImportOptions::default(), &passes)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The render_pass warnings of `warnings`, as `(code, count, prims)`.
+fn pass_warnings(warnings: &[crust_core::Warning]) -> Vec<(WarningCode, u64, Vec<String>)> {
+    warnings
+        .iter()
+        .filter(|w| w.code.as_str().starts_with("render_pass."))
+        .map(|w| (w.code, w.count, w.prims.clone()))
+        .collect()
+}
+
+/// render-visibility-and-all-passes task 4.2: each pass of a group import
+/// reads what an import of that pass alone reads — settings, camera,
+/// products, settings prim, what it held out and hid, the warnings reading it
+/// raised — and the scene is the first pass's.
+#[test]
+fn each_pass_of_a_group_reads_as_it_does_alone() {
+    let path = sample_with(
+        "group_reads",
+        &[(
+            "            prepend rel collection:matte:includes = </World/Chars>",
+            "            prepend rel collection:matte:includes = </World/Chars>\n\
+                         prepend rel collection:renderVisibility:excludes = </World/Props/Crate>\n\
+                         prepend rel collection:prune:includes = </World/Set>",
+        )],
+    );
+    let names = ["/Render/Passes/char", "/Render/Passes/props"];
+    let g = group(&path, &names);
+    assert!(g.unserved.is_empty(), "{:?}", g.unserved);
+    assert_eq!(g.passes.len(), 2);
+    for (pass, name) in g.passes.iter().zip(names) {
+        let alone = load(&path, Some(name));
+        assert_eq!(pass.settings, alone.settings, "{name}");
+        assert_eq!(format!("{:?}", pass.camera), format!("{:?}", alone.camera));
+        assert_eq!(pass.camera_path, alone.camera_path, "{name}");
+        assert_eq!(pass.aovs, alone.aovs, "{name}");
+        assert_eq!(pass.settings_prim, alone.settings_prim, "{name}");
+        assert_eq!(pass.summary, alone.pass, "{name}");
+        assert_eq!(pass.depth_of_field, alone.source.depth_of_field, "{name}");
+        assert_eq!(pass.motion_blur, alone.source.motion_blur, "{name}");
+        assert_eq!(pass.lights.count(), alone.lights.count(), "{name}");
+        assert_eq!(
+            pass_warnings(&pass.warnings),
+            pass_warnings(&alone.warnings),
+            "{name}"
+        );
+    }
+    // Only the props pass prunes, so only it warns.
+    assert!(pass_warnings(&g.passes[0].warnings).is_empty());
+    assert_eq!(pass_warnings(&g.passes[1].warnings).len(), 1);
+    let first = load(&path, Some(names[0]));
+    assert_eq!(
+        pass_warnings(&g.scene.warnings),
+        pass_warnings(&first.warnings)
+    );
+    assert_eq!(g.scene.settings, first.settings);
+    assert_eq!(g.scene.pass, first.pass);
+    assert_eq!(g.scene.settings_prim, first.settings_prim);
+}
+
+/// render-visibility-and-all-passes task 3.3: a world committed for one pass,
+/// then given another pass's flags, renders that pass bit for bit as an
+/// import of it alone does — beauty, alpha and a light path expression — and
+/// back again.
+#[test]
+fn a_world_reapplied_to_another_pass_renders_as_that_pass_alone() {
+    let path = sample_with(
+        "group_reapplied",
+        &[(
+            "            prepend rel collection:matte:includes = </World/Chars>",
+            "            prepend rel collection:matte:includes = </World/Chars>\n\
+                         prepend rel collection:renderVisibility:excludes = </World/Props/Crate>",
+        )],
+    );
+    let names = ["/Render/Passes/char", "/Render/Passes/props"];
+    let alone: Vec<Vec<Px>> = names
+        .iter()
+        .map(|n| render_stage(&path, Some(n), 4))
+        .collect();
+    let bits = |img: &[Px]| -> Vec<u32> { img.iter().flatten().map(|v| v.to_bits()).collect() };
+    // The group's scene is committed for its first pass; each order.
+    for order in [[0, 1], [1, 0]] {
+        let g = group(&path, &[names[order[0]], names[order[1]]]);
+        for k in [1, 0] {
+            let mut scene = group(&path, &[names[order[0]], names[order[1]]]).scene;
+            scene.apply_pass(&g.passes[k]);
+            assert!(
+                bits(&render_scene(scene, 4)) == bits(&alone[order[k]]),
+                "{} after committing for {}",
+                names[order[k]],
+                names[order[0]]
+            );
+        }
+    }
+}
+
+/// render-visibility-and-all-passes task 4.1 and the render-passes spec's
+/// "One import for two passes" and "A pass that dices differently": passes
+/// that differ only in products share an import; one whose settings author
+/// another `crust:subdivisionLevel` does not.
+#[test]
+fn passes_share_an_import_unless_the_import_differs() {
+    let g = group(
+        &passes_sample(),
+        &["/Render/Passes/char", "/Render/Passes/props"],
+    );
+    assert!(g.unserved.is_empty());
+    assert_eq!(g.passes.len(), 2);
+
+    let path = sample_with(
+        "group_dicing",
+        &[(
+            "        int crust:maxDepth = 4\n        rel camera = </World/Cam>\n        rel products = </Render/Products/char>",
+            "        int crust:maxDepth = 4\n        int crust:subdivisionLevel = 3\n        rel camera = </World/Cam>\n        rel products = </Render/Products/char>",
+        )],
+    );
+    let g = group(&path, &["/Render/Passes/char", "/Render/Passes/props"]);
+    assert_eq!(g.passes.len(), 1);
+    assert_eq!(g.unserved, ["/Render/Passes/props"]);
+    let g = group(&path, &["/Render/Passes/props", "/Render/Passes/char"]);
+    assert_eq!(g.unserved, ["/Render/Passes/char"]);
 }

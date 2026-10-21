@@ -94,27 +94,92 @@ pub(crate) struct StageFacts {
     pub(crate) options: crate::UsdImportOptions,
     /// The `RenderSettings` prim the import read, when one.
     pub(crate) render_settings: Option<String>,
+    /// The camera rendered through, `None` for the procedural one.
+    pub(crate) camera: Option<String>,
+    /// Everything the import built into the scene from the settings.
+    pub(crate) key: ImportKey,
+    /// How the import's implicit shapes used the camera projection.
+    pub(crate) used: ProjectionUse,
+}
+
+/// What an import builds into the scene from the settings it reads: the
+/// settings that, read differently, would give other geometry, other
+/// materials or other warnings. Two renders whose settings give the same key
+/// can share one import — an MCP settings edit applied in place, the passes
+/// of `--all-passes` imported once — and [`ImportKey::refusal`] is the one
+/// predicate both ask (design D3 of `render-visibility-and-all-passes`).
+/// Everything else the settings say (the camera, the resolution, the
+/// products, the sample counts) a render reads, and an import does not.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ImportKey {
+    pub(crate) working: Option<crate::color::Space>,
     pub(crate) subdiv_level: u32,
     /// What adaptive subdivision read from the render camera (its projection,
     /// target and ceiling), as bits; `None` for uniform subdivision.
     pub(crate) adaptive: Option<ScreenKey>,
+    /// The render camera's projection, as bits, when a camera is named before
+    /// the traversal: what an implicit shape would take its radial count
+    /// from. Compared only when the import used it ([`ProjectionUse`]).
+    pub(crate) projection: Option<ScreenKey>,
     pub(crate) domes_seen_by_camera: bool,
-    pub(crate) working: Option<crate::color::Space>,
-    /// The camera rendered through, `None` for the procedural one.
-    pub(crate) camera: Option<String>,
-    /// The camera projection an implicit shape took its radial count from,
-    /// as bits; `None` when no count came from it.
-    pub(crate) on_screen_shapes: Option<ScreenKey>,
-    /// Whether an unshared curved implicit shape took the fixed radial count
-    /// because no camera was named: naming one then moves geometry.
-    pub(crate) unsized_shapes: bool,
-    /// The primvars the geometry kept for the render's primvar vars, as
+    /// The primvars the geometry keeps for the render's primvar vars, as
     /// `(name, components)`: a product that asks for others needs geometry
     /// read again.
     pub(crate) primvars: Vec<(String, u8)>,
-    /// The shutter motion was measured over: geometry was placed at its
-    /// ends, so another shutter is another scene.
+    /// The shutter motion is measured over: geometry is placed at its ends,
+    /// so another shutter is another scene. Without the camera it was read
+    /// from, which only a check after the traversal reads.
     pub(crate) shutter: ShutterKey,
+}
+
+/// How an import's implicit shapes used the camera projection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProjectionUse {
+    /// An implicit shape took its radial count from the projection.
+    pub(crate) on_screen: bool,
+    /// An unshared curved implicit shape took the fixed radial count because
+    /// no camera was named: naming one then moves geometry.
+    pub(crate) fixed_count: bool,
+}
+
+impl ImportKey {
+    /// Why a scene imported under `self`, whose implicit shapes used the
+    /// projection as `used` says, cannot serve settings whose key is `other`;
+    /// `None` when it can.
+    pub(crate) fn refusal(&self, used: ProjectionUse, other: &ImportKey) -> Option<&'static str> {
+        if other.working != self.working {
+            return Some("the working colour space changed");
+        }
+        if other.subdiv_level != self.subdiv_level {
+            return Some("the subdivision level changed");
+        }
+        // Tessellation that reads the camera stands only when what it read is
+        // what it would read now, bit for bit: an exposure keeps it, a move,
+        // a lens or a resolution does not.
+        if other.adaptive != self.adaptive {
+            return Some("adaptive subdivision would read another camera projection");
+        }
+        if used.on_screen && other.projection != self.projection {
+            return Some("implicit shapes would be sized for another camera projection");
+        }
+        if used.fixed_count && other.projection.is_some() {
+            return Some("implicit shapes would be sized for the newly named camera");
+        }
+        // Geometry was placed at the shutter's ends, so another shutter
+        // re-imports, as a transform edit does.
+        if other.shutter != self.shutter {
+            return Some("the camera shutter changed");
+        }
+        if other.domes_seen_by_camera != self.domes_seen_by_camera {
+            return Some("the dome's camera visibility changed");
+        }
+        // The geometry kept the primvars the products asked for when it was
+        // read, and nothing else: asking for another needs it read again.
+        if other.primvars != self.primvars {
+            return Some("the products ask for other primvars than the geometry kept");
+        }
+        None
+    }
 }
 
 /// The shutter an import measured motion over, as bits: the camera it was

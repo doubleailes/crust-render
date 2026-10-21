@@ -209,6 +209,13 @@ struct CheckArgs {
     /// reports are written either way, with the matching codes in `denied`.
     #[arg(long, value_name = "KIND[,KIND…]", value_enum, value_delimiter = ',')]
     deny: Vec<DenyKind>,
+    /// Also describe every `RenderPass` of the stage (`crust ls pass`), each
+    /// with what differs from the render with no pass: its settings, its
+    /// holdouts and hidden geometry, its products, and every setting it
+    /// changes. Two passes that would write one file are a finding. Refused
+    /// with `--pass`, and without `-i`.
+    #[arg(long, conflicts_with = "pass", requires = "input")]
+    all_passes: bool,
 }
 
 /// `crust ls`'s kinds, each the engine's [`crust_core::ListKind`].
@@ -481,6 +488,14 @@ struct RenderArgs {
     /// last rewrite. The final EXR and PNG are the same with or without it.
     #[arg(long, value_name = "SECONDS", allow_negative_numbers = true, value_parser = parse_checkpoint)]
     checkpoint: Option<Duration>,
+    /// Render every `RenderPass` of the stage (`crust ls pass`), each as
+    /// `--pass` renders it alone, to its own products. Passes whose settings
+    /// agree on everything the import builds into the scene share one import.
+    /// Two passes that would write the same file stop the render before it
+    /// starts. Refused with `--pass`, `-o` and `--stats-json`, and without
+    /// `-i`.
+    #[arg(long, conflicts_with_all = ["pass", "output", "stats_json"], requires = "input")]
+    all_passes: bool,
 }
 
 /// A render's scene flags read as its own (`cli.strategy`), as they were
@@ -900,15 +915,7 @@ fn load_scene(
     let scene = if let Some(t) = &cli.input {
         let input_path = std::path::Path::new(&t);
         debug!("Loading USD scene from {}", input_path.display());
-        let options = crust_core::UsdImportOptions {
-            frame: cli.frame,
-            camera: cli.camera.clone(),
-            pass: cli.pass.clone(),
-            subdivision_level: cli.subdiv_level,
-            subdivision_edge_length: cli.subdiv_edge_length,
-            skip_stage_teardown: keep_stage,
-            working_space: working_space.cloned(),
-        };
+        let options = import_options(cli, working_space, keep_stage);
         match Scene::from_usd_with_options(input_path, assets, &options) {
             Ok(scene) => scene,
             Err(e) => return Err(format!("Failed to load USD scene: {e}")),
@@ -1249,8 +1256,14 @@ fn check(args: &CheckArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut report = checked.report;
+    if args.all_passes
+        && let Err(e) = check_passes(args, &assets, &checked.scene, &mut report)
+    {
+        error!("{e}");
+        return ExitCode::FAILURE;
+    }
     assets.release_texture_files();
-    let report = checked.report;
 
     // The reports first, the status after: a report that cannot be written
     // is an error even when a warning was denied. The JSON file before the
@@ -1273,6 +1286,168 @@ fn check(args: &CheckArgs) -> ExitCode {
     } else {
         ExitCode::from(DENIED)
     }
+}
+
+/// `crust check --all-passes`: every pass of the stage described in
+/// `report` against the render it describes (`base`, with no pass), each
+/// imported as `crust render --all-passes` imports it; the files two passes
+/// would share become `passes_share_output` findings, and the warnings only
+/// a pass raised join the report's. The error is the message to log.
+fn check_passes(
+    args: &CheckArgs,
+    assets: &FileAssets,
+    base: &Scene,
+    report: &mut CheckReport,
+) -> std::result::Result<(), String> {
+    use crust_core::check::{PassEntry, differences, on_off};
+    use crust_core::diagnostic::report::{Action, Evidence, Finding, FindingKind};
+    let input = args.scene.input.as_deref().expect("clap requires -i");
+    let path = Path::new(input);
+    let options = import_options(&args.scene, None, true);
+    let plans = plan_passes(path, &options)?;
+    let frame = args.scene.frame.unwrap_or(1.0);
+    for (file, passes) in shared_pass_outputs(&plans, frame) {
+        report.findings.push(Finding {
+            id: "passes_share_output".into(),
+            kind: FindingKind::Correctness,
+            summary: format!("{} would all write {file}", passes.join(" and ")),
+            evidence: Evidence::new()
+                .with_text("file", &file)
+                .with_names("passes", &passes),
+            action: Action::None {
+                none: "give each pass its own RenderProduct productName; --all-passes refuses \
+                       to render this stage"
+                    .into(),
+            },
+        });
+    }
+    // Every pass, imported in its group; described in `crust ls pass` order.
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for plan in &plans {
+        match groups.get_mut(plan.group) {
+            Some(group) => group.push(plan.path.clone()),
+            None => groups.push(vec![plan.path.clone()]),
+        }
+    }
+    let mut scenes: Vec<crust_core::PassScene> = Vec::new();
+    let mut next = 0;
+    while next < groups.len() {
+        let group = groups[next].clone();
+        next += 1;
+        let imported = Scene::from_usd_passes(path, assets, &options, &group)
+            .map_err(|e| format!("Failed to load USD scene: {e}"))?;
+        if !imported.unserved.is_empty() {
+            groups.insert(next, imported.unserved);
+        }
+        scenes.extend(imported.passes);
+    }
+    let name_of = |s: &crust_core::PassScene| s.summary.as_ref().map(|p| p.path.clone());
+    let flags = SceneFlags {
+        subdivision_level: args.scene.subdiv_level,
+        subdivision_edge_length: args.scene.subdiv_edge_length,
+        auto_tx: args.scene.auto_tx,
+    };
+    let base_files: Vec<String> = report.products.iter().map(|p| p.file.clone()).collect();
+    let [bw, bh] = report.scene.resolution;
+    let mut entries = Vec::with_capacity(plans.len());
+    let mut warnings: Vec<crust_core::Warning> = Vec::new();
+    for plan in &plans {
+        let pass = scenes
+            .iter()
+            .find(|s| name_of(s).as_deref() == Some(plan.path.as_str()))
+            .ok_or_else(|| format!("{}: not imported", plan.path))?;
+        let mut settings = apply_scene_overrides(&args.scene, pass.settings);
+        if let Some(region) = args.scene.region {
+            settings = settings
+                .with_region(region)
+                .map_err(|e| format!("--region: {e}"))?;
+        }
+        let (w, h) = settings.get_dimensions();
+        let mut aovs = pass.aovs.clone();
+        {
+            // Said by the render of the pass, not by its description.
+            let _quiet = crust_core::QuietWarnings::enter();
+            let _scope = WarningScope::enter();
+            let _ = select_products(&mut aovs, None, frame);
+        }
+        let products: Vec<ProductInfo> = if aovs.products.is_empty() {
+            vec![ProductInfo {
+                prim: None,
+                file: beauty_output(None, frame),
+                channels: ["R", "G", "B"].map(String::from).to_vec(),
+            }]
+        } else {
+            aovs.products
+                .iter()
+                .map(|p| ProductInfo {
+                    prim: Some(p.prim_path.clone()),
+                    file: p.name.clone(),
+                    channels: crate::products::product_channels(p)
+                        .into_iter()
+                        .flat_map(|(_, names)| names)
+                        .collect(),
+                })
+                .collect()
+        };
+        let files: Vec<String> = products.iter().map(|p| p.file.clone()).collect();
+        let camera = |c: &Option<String>| c.clone().unwrap_or_else(|| "procedural default".into());
+        let mut rows = vec![
+            (
+                "camera",
+                camera(&report.scene.camera),
+                camera(&pass.camera_path),
+            ),
+            ("resolution", format!("{bw}x{bh}"), format!("{w}x{h}")),
+            (
+                "depth_of_field",
+                on_off(base.source.depth_of_field),
+                on_off(pass.depth_of_field),
+            ),
+            (
+                "motion_blur",
+                on_off(base.source.motion_blur),
+                on_off(pass.motion_blur),
+            ),
+        ];
+        let own = effective_settings(&settings, &flags);
+        let effective: Vec<(String, String, String)> = report
+            .effective_settings
+            .iter()
+            .zip(&own)
+            .map(|(b, p)| (b.name.clone(), b.value.clone(), p.value.clone()))
+            .collect();
+        rows.extend(
+            effective
+                .iter()
+                .map(|(name, b, p)| (name.as_str(), b.clone(), p.clone())),
+        );
+        rows.push(("products", base_files.join(", "), files.join(", ")));
+        entries.push(PassEntry {
+            pass: pass
+                .summary
+                .as_ref()
+                .map(Into::into)
+                .expect("a pass of the group"),
+            settings: pass.settings_prim.clone(),
+            depth_of_field: pass.depth_of_field,
+            motion_blur: pass.motion_blur,
+            products,
+            differs: differences(rows),
+        });
+        // What reading this pass raised that the render described did not.
+        let new: Vec<crust_core::Warning> = pass
+            .warnings
+            .iter()
+            .filter(|w| !report.warnings.iter().any(|r| r.code == w.code))
+            .cloned()
+            .collect();
+        crust_core::merge_warnings(&mut warnings, new);
+    }
+    crust_core::merge_warnings(&mut report.warnings, warnings);
+    let kinds: Vec<WarningKind> = args.deny.iter().flat_map(|d| d.kinds()).copied().collect();
+    report.denied = crust_core::check::denied(&report.warnings, &kinds);
+    report.passes = Some(entries);
+    Ok(())
 }
 
 /// A stage imported as `crust render` would import it, with what `crust
@@ -1404,6 +1579,7 @@ fn check_scene(
         },
         pass: scene.pass.as_ref().map(Into::into),
         settings: scene.settings_prim.clone(),
+        passes: None,
         products,
         effective_settings: effective_settings(&settings, &flags),
         import: scene.stats.phases.clone(),
@@ -1877,7 +2053,12 @@ fn render(cli: &RenderArgs) -> ExitCode {
         anchor: None,
         beauty: None,
     };
-    match render_and_write(cli, &run) {
+    let rendered = if cli.all_passes {
+        render_passes(cli, &run)
+    } else {
+        render_and_write(cli, &run)
+    };
+    match rendered {
         Ok(written) if written.stopped || written.interrupted => ExitCode::from(INTERRUPTED),
         Ok(_) => ExitCode::SUCCESS,
         Err(code) => code,
@@ -1926,7 +2107,197 @@ struct Written {
 /// EXR (or the beauty's) and the PNG preview, and report the statistics. A
 /// failure is already logged; the error is the exit code.
 fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Written, ExitCode> {
-    let output = cli.output.clone();
+    let assets = render_assets(cli)?;
+    let load_start = Instant::now();
+    let mut scene = match load_scene(cli, cli.working_space.as_ref(), &assets, true) {
+        Ok(scene) => scene,
+        Err(e) => {
+            error!("{e}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    debug!("Scene built in {:?}", load_start.elapsed());
+    let layer_hashes = hash_layers(&scene);
+    report_auto_tx(&assets);
+    write_scene(cli, run, &assets, &mut scene, &layer_hashes)
+}
+
+/// The import options of the stage `cli` names, as `crust render` takes them
+/// (`keep_stage`: see [`load_scene`]).
+fn import_options(
+    cli: &SceneArgs,
+    working_space: Option<&String>,
+    keep_stage: bool,
+) -> crust_core::UsdImportOptions {
+    crust_core::UsdImportOptions {
+        frame: cli.frame,
+        camera: cli.camera.clone(),
+        pass: cli.pass.clone(),
+        subdivision_level: cli.subdiv_level,
+        subdivision_edge_length: cli.subdiv_edge_length,
+        skip_stage_teardown: keep_stage,
+        working_space: working_space.cloned(),
+    }
+}
+
+/// Every `RenderPass` of the stage at `path`, in `crust ls pass` order, with
+/// what each would write and which can share an import; the error is the
+/// message to log.
+fn plan_passes(
+    path: &Path,
+    options: &crust_core::UsdImportOptions,
+) -> std::result::Result<Vec<crust_core::PassPlan>, String> {
+    let passes = Scene::list_usd(path, crust_core::ListKind::Pass)
+        .map_err(|e| format!("Failed to list the passes of {}: {e}", path.display()))?;
+    Scene::plan_usd_passes(path, options, &passes)
+        .map_err(|e| format!("Failed to read the passes of {}: {e}", path.display()))
+}
+
+/// The files `plans`' passes write at `frame` that more than one of them
+/// does, each with those passes in order: the products a render of each
+/// would write, frame variables expanded, or the default beauty image for a
+/// pass with none. What `crust render --all-passes` refuses before it renders
+/// and `crust check --all-passes` reports as `passes_share_output`.
+fn shared_pass_outputs(plans: &[crust_core::PassPlan], frame: f64) -> Vec<(String, Vec<String>)> {
+    // The render says these paths' warnings, when it chooses its products.
+    let _quiet = crust_core::QuietWarnings::enter();
+    let _scope = WarningScope::enter();
+    let mut files: Vec<(PathBuf, String, Vec<String>)> = Vec::new();
+    for plan in plans {
+        let mut aovs = plan.aovs.clone();
+        let expanded = select_products(&mut aovs, None, frame);
+        let written: Vec<String> = if aovs.products.is_empty() {
+            vec![expanded.unwrap_or_else(|| beauty_output(None, frame))]
+        } else {
+            aovs.products.into_iter().map(|p| p.name).collect()
+        };
+        for name in written {
+            // Compared as paths, as the products of one render are.
+            let path: PathBuf = Path::new(&name).components().collect();
+            match files.iter_mut().find(|(p, _, _)| *p == path) {
+                Some((_, _, passes)) if !passes.contains(&plan.path) => {
+                    passes.push(plan.path.clone())
+                }
+                Some(_) => {}
+                None => files.push((path, name, vec![plan.path.clone()])),
+            }
+        }
+    }
+    files
+        .into_iter()
+        .filter(|(_, _, passes)| passes.len() > 1)
+        .map(|(_, name, passes)| (name, passes))
+        .collect()
+}
+
+/// `crust render --all-passes`: every `RenderPass` of the stage, one after
+/// another, each rendered and written as `--pass` renders it alone. Passes
+/// that can share an import do, in the order of their first pass, each group
+/// in `crust ls pass` order. Two passes writing one file stop it before any
+/// import; an interrupt stops it at the pass it reaches.
+fn render_passes(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Written, ExitCode> {
+    let input = cli
+        .input
+        .as_deref()
+        .expect("clap requires -i with --all-passes");
+    let path = Path::new(input);
+    let options = import_options(cli, cli.working_space.as_ref(), true);
+    let plans = match plan_passes(path, &options) {
+        Ok(plans) => plans,
+        Err(e) => {
+            error!("{e}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    if plans.is_empty() {
+        error!(
+            "{}: the stage defines no RenderPass, so --all-passes has nothing to render",
+            path.display()
+        );
+        return Err(ExitCode::FAILURE);
+    }
+    let shared = shared_pass_outputs(&plans, cli.frame.unwrap_or(1.0));
+    if !shared.is_empty() {
+        for (file, passes) in &shared {
+            error!(
+                "--all-passes: {} would all write {file}",
+                passes.join(" and ")
+            );
+        }
+        error!("Nothing rendered: give each pass its own RenderProduct productName");
+        return Err(ExitCode::FAILURE);
+    }
+    let assets = render_assets(cli)?;
+    // The groups, in the order of their first pass.
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for plan in &plans {
+        match groups.get_mut(plan.group) {
+            Some(group) => group.push(plan.path.clone()),
+            None => groups.push(vec![plan.path.clone()]),
+        }
+    }
+    let mut written = Written {
+        files: Vec::new(),
+        interrupted: false,
+        stopped: false,
+    };
+    let mut next = 0;
+    while next < groups.len() {
+        let group = groups[next].clone();
+        next += 1;
+        let load_start = Instant::now();
+        let imported = match Scene::from_usd_passes(path, &assets, &options, &group) {
+            Ok(imported) => imported,
+            Err(e) => {
+                error!("Failed to load USD scene: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        if !imported.unserved.is_empty() {
+            // Implicit shapes sized for another camera: an import of their own.
+            groups.insert(next, imported.unserved.clone());
+        }
+        let names: Vec<&str> = imported
+            .passes
+            .iter()
+            .filter_map(|p| p.summary.as_ref().map(|s| s.path.as_str()))
+            .collect();
+        info!(
+            "Imported {} once for {} pass(es) in {:.1?}: {}",
+            path.display(),
+            names.len(),
+            load_start.elapsed(),
+            names.join(", ")
+        );
+        let mut scene = imported.scene;
+        let layer_hashes = hash_layers(&scene);
+        report_auto_tx(&assets);
+        for (k, pass) in imported.passes.iter().enumerate() {
+            info!("Pass {}", names[k]);
+            scene.apply_pass(pass);
+            if k > 0 {
+                // The import's phases are reported with the group's first pass.
+                scene.stats.phases.clear();
+            }
+            let pass_written = write_scene(cli, run, &assets, &mut scene, &layer_hashes)?;
+            written.files.extend(pass_written.files);
+            if pass_written.interrupted || pass_written.stopped {
+                written.interrupted |= pass_written.interrupted;
+                written.stopped |= pass_written.stopped;
+                warn!(
+                    "Stopped at pass {}: the passes after it are not rendered",
+                    names[k]
+                );
+                return Ok(written);
+            }
+        }
+    }
+    Ok(written)
+}
+
+/// The asset loader a render's imports read through, once `--ocio-config`
+/// (else `$OCIO`) is the config every colour is managed with.
+fn render_assets(cli: &RenderArgs) -> std::result::Result<FileAssets, ExitCode> {
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
     // last ray has been traced.
@@ -1944,20 +2315,16 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
             return Err(ExitCode::FAILURE);
         }
     }
-    let assets = scene_assets(cli);
-    let load_start = Instant::now();
-    let scene = match load_scene(cli, cli.working_space.as_ref(), &assets, true) {
-        Ok(scene) => scene,
-        Err(e) => {
-            error!("{e}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    debug!("Scene built in {:?}", load_start.elapsed());
+    Ok(scene_assets(cli))
+}
+
+/// A content hash of every file of `scene`'s root layer stack, taken as it
+/// was loaded, for the stamp.
+fn hash_layers(scene: &Scene) -> std::collections::HashMap<PathBuf, Option<u64>> {
     // The layers are hashed now, as loaded, not after the render: a layer
     // edited while it renders must not stamp pixels it did not make.
     // Streamed, so a large package is never held in memory.
-    let layer_hashes: std::collections::HashMap<PathBuf, Option<u64>> = scene
+    scene
         .source
         .layer_stack
         .iter()
@@ -1967,14 +2334,12 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
             });
             (layer.clone(), hash)
         })
-        .collect();
-    let output_color = match OutputColor::new(scene.working_space, &cli.display, &cli.view) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("{e}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
+        .collect()
+}
+
+/// The one line `--auto-tx` says about an import, however many textures it
+/// converted.
+fn report_auto_tx(assets: &FileAssets) {
     // One line however many textures were converted — the per-file lines are
     // DEBUG, since their count grows with the stage.
     let (converted, failed, secs) = assets.tx_report();
@@ -1984,9 +2349,31 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
             warn!("--auto-tx: {failed} tile(s) failed to convert; their textures were preloaded");
         }
     }
+}
+
+/// Renders `scene` and writes its products (or its beauty) and PNG preview,
+/// and reports the statistics: `crust render` once its scene is imported.
+/// The scene's world, lights and volumes are lent to the renderer and given
+/// back, so the scene can render again — another pass of the same import
+/// (`--all-passes`). `layer_hashes` are its layers' ([`hash_layers`]).
+fn write_scene(
+    cli: &RenderArgs,
+    run: &RenderRun,
+    assets: &FileAssets,
+    scene: &mut Scene,
+    layer_hashes: &std::collections::HashMap<PathBuf, Option<u64>>,
+) -> std::result::Result<Written, ExitCode> {
+    let output = cli.output.clone();
+    let output_color = match OutputColor::new(scene.working_space, &cli.display, &cli.view) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("{e}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
     // What to write: the stage's RenderProducts, with `-o` replacing the
     // first one's path; with none, the single beauty EXR at `-o`.
-    let mut aovs = scene.aovs;
+    let mut aovs = scene.aovs.clone();
     // Without -f, frame variables expand as frame 1, husk's default.
     let frame = cli.frame.unwrap_or(1.0);
     let expanded_output = select_products(&mut aovs, output.as_deref(), frame);
@@ -2006,14 +2393,15 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     };
     let beauty_path = beauty_path.as_str();
     let camera = scene.camera;
-    let world = scene.world;
-    let lights = scene.lights;
-    let volumes = scene.volumes;
-    let (camera_path, time) = (scene.camera_path, scene.time);
-    let source = scene.source;
+    // Lent to the renderer, and given back once it is done.
+    let world = std::mem::replace(&mut scene.world, crust_core::WorldBuilder::new().commit());
+    let lights = std::mem::replace(&mut scene.lights, crust_core::LightList::new());
+    let volumes = std::mem::take(&mut scene.volumes);
+    let (camera_path, time) = (scene.camera_path.clone(), scene.time);
+    let source = scene.source.clone();
     // Import phases and scene counts come from the loader; render and
     // output are timed here.
-    let mut stats = scene.stats;
+    let mut stats = scene.stats.clone();
     let mut settings = apply_overrides(cli, scene.settings);
     // After the import, because clipping needs the resolution; it replaces
     // whatever region the stage's `dataWindowNDC` chose.
@@ -2244,6 +2632,8 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         let out = crust_core::traversal_report(renderer.world(), ray_stats.camera_rays);
         info!(target: STATS_TARGET, "{out}");
     }
+    let (_, world, lights, _, volumes) = renderer.into_parts();
+    (scene.world, scene.lights, scene.volumes) = (world, lights, volumes.into_regions());
 
     // One snapshot, after every output is written, for both forms of the
     // report.
@@ -2705,6 +3095,157 @@ mod tests {
         }
         assert!(render([]).unwrap().pass.is_none());
         assert!(render(["--pass"]).is_err(), "a pass needs its path");
+    }
+
+    /// cli spec, "All-passes flag": `render` and `check` take `--all-passes`,
+    /// which is a usage error with `--pass`, with render's `-o` or
+    /// `--stats-json`, and without `-i`; every other flag stays.
+    #[test]
+    fn cli_all_passes_is_render_and_check_only_and_exclusive() {
+        let r = render(["-i", "s.usda", "--all-passes", "-s", "16", "-f", "12"]).unwrap();
+        assert!(r.all_passes && r.samples == Some(16) && r.frame == Some(12.0));
+        assert!(!render(["-i", "s.usda"]).unwrap().all_passes);
+        for refused in [
+            &["--pass", "/Render/Passes/char"][..],
+            &["-o", "out.exr"],
+            &["--stats-json", "-"],
+        ] {
+            let args = ["crust", "render", "-i", "s.usda", "--all-passes"]
+                .into_iter()
+                .chain(refused.iter().copied());
+            let err = Cli::try_parse_from(args).err().expect("refused");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+            let flag = refused[0].trim_start_matches('-');
+            assert!(err.to_string().contains(flag), "{refused:?}: {err}");
+        }
+        let err = Cli::try_parse_from(["crust", "render", "--all-passes"])
+            .err()
+            .expect("needs -i");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+
+        let check = |args: &[&str]| {
+            Cli::try_parse_from(["crust", "check"].iter().chain(args).copied()).map(|cli| match cli
+                .command
+            {
+                Command::Check(a) => a.all_passes,
+                _ => unreachable!(),
+            })
+        };
+        assert!(check(&["-i", "s.usda", "--all-passes"]).unwrap());
+        assert!(check(&["-i", "s.usda", "--all-passes", "--pass", "/P"]).is_err());
+        assert!(check(&["--all-passes"]).is_err());
+        for sub in ["diagnostic", "light-paths"] {
+            assert!(
+                Cli::try_parse_from(["crust", sub, "-i", "s.usda", "--all-passes"]).is_err(),
+                "{sub}"
+            );
+        }
+    }
+
+    /// cli spec, "Interrupted in the second pass": the first pass's files
+    /// are complete, the second's hold what it traced and say so, the third
+    /// pass is not rendered, and the run reports the interruption.
+    #[test]
+    fn an_interrupt_stops_all_passes_at_the_pass_it_reaches() {
+        let dir = std::env::temp_dir().join("crust_all_passes_interrupt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/render_passes.usda");
+        let mut text = std::fs::read_to_string(sample).unwrap();
+        for name in ["props", "char", "plate", "util"] {
+            let file = dir.join(format!("{name}.exr"));
+            text = text.replace(
+                &format!("productName = \"{name}.exr\""),
+                &format!("productName = \"{}\"", file.display()),
+            );
+        }
+        // A third pass, after the other two, writing its own file.
+        let third = dir.join("third.exr");
+        let props_pass =
+            "            prepend rel collection:matte:includes = </World/Chars>\n        }\n";
+        text = text.replace(
+            props_pass,
+            &format!(
+                "{props_pass}\n        def RenderPass \"third\"\n        {{\n            \
+                 rel renderSource = </Render/thirdSettings>\n        }}\n"
+            ),
+        );
+        text = text.replace(
+            "    def Scope \"Passes\"",
+            &format!(
+                "    def RenderSettings \"thirdSettings\"\n    {{\n        int2 resolution = \
+                 (160, 90)\n        rel camera = </World/Cam>\n        rel products = \
+                 </Render/thirdProduct>\n    }}\n    def RenderProduct \"thirdProduct\"\n    \
+                 {{\n        token productName = \"{}\"\n        rel orderedVars = \
+                 </Render/Vars/color>\n    }}\n\n    def Scope \"Passes\"",
+                third.display()
+            ),
+        );
+        let stage = dir.join("three.usda");
+        std::fs::write(&stage, text).unwrap();
+        let passes = Scene::list_usd(&stage, crust_core::ListKind::Pass).unwrap();
+        assert_eq!(
+            passes[..3],
+            [
+                "/Render/Passes/char",
+                "/Render/Passes/props",
+                "/Render/Passes/third"
+            ]
+        );
+
+        let cli = render([
+            "-i",
+            stage.to_str().unwrap(),
+            "--all-passes",
+            "-s",
+            "1",
+            "--region",
+            "0,0,8,8",
+        ])
+        .unwrap();
+        let control = RenderControl::without_snapshots();
+        let started = std::cell::Cell::new(0);
+        let rendering = || {
+            started.set(started.get() + 1);
+            if started.get() == 2 {
+                control.cancel();
+            }
+        };
+        let run = RenderRun {
+            control: &control,
+            progress_bar: false,
+            rendering: &rendering,
+            rendered: &|| false,
+            anchor: None,
+            beauty: None,
+        };
+        let written = render_passes(&cli, &run).expect("rendered");
+        assert!(written.interrupted);
+        assert_eq!(started.get(), 2, "the passes after the second never start");
+        let status = |name: &str| {
+            let path = dir.join(format!("{name}.exr"));
+            let image = exr::prelude::read()
+                .no_deep_data()
+                .largest_resolution_level()
+                .all_channels()
+                .first_valid_layer()
+                .all_attributes()
+                .from_file(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            image
+                .layer_data
+                .attributes
+                .other
+                .get(&Text::from("crust:renderStatus"))
+                .cloned()
+        };
+        assert!(status("char").is_none(), "the first pass is complete");
+        assert!(
+            status("props").is_some(),
+            "the second says it was interrupted"
+        );
+        assert!(!third.exists(), "the third pass is not rendered");
+        assert!(!dir.join("plate.exr").exists() && !dir.join("util.exr").exists());
     }
 
     #[test]
