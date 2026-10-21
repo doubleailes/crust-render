@@ -776,11 +776,11 @@
     through it reads 1.0 whatever the file holds, and a probe that cannot see
     the range is worse than no probe because it answers confidently.
   - **Node semantics are checked against the reference implementation.**
-    `crust-mtlx/tests/osl_oracle.rs` replays 4 420 one-node cases through
+    `crust-mtlx/tests/osl_oracle.rs` replays 5 440 one-node cases through
     `Compiler` + `Program::eval` and compares every lane with the value
     MaterialX's own OSL code generator (`genosl`) produces for the same
     document, compiled by `oslc` and run once by `testshade`. That covers all
-    316 stdlib signatures of the pattern nodes crust compiles, over the six
+    319 stdlib signatures of the pattern nodes crust compiles, over the six
     value types it models (plus the `integer` and `boolean` inputs and outputs
     of the conditionals and random nodes, carried as one-lane floats), with a
     zero-input "defaults" case plus 16 seeded
@@ -981,6 +981,11 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   translated as whatever category that parse gives, which the compiler then
   reports as unsupported. Nodegraph-scoped names are flattened: every node is
   addressed by its prim path.
+- **A displacement reads no primvar.** It is evaluated at the import's
+  vertices, before any `PrimvarTable` exists, so a `geompropvalue` in a
+  `displacementshader` graph gives its default (`mtlx.incomplete`). Reading one
+  would mean interpolating the mesh's shading primvars at each displaced vertex
+  into `VertexCtx`.
 
 - **A `zeltner` sheen is Adobe's, not MaterialX's.** MaterialX's own GLSL
   evaluates `mode = zeltner` with analytic fits to the LTC coefficients and the
@@ -1042,12 +1047,17 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   other multiple-scattering approximation, so a dense groom converges by
   tracing bounces, and there is no near-field azimuthal term for a tube wider
   than the pixel. Ribbons (`BasisCurves` `normals`) are not read.
-- **Curve primvars: curves only, and not `faceVarying`.** `geompropvalue` reads a
-  primvar by name on a curve hit (§ MaterialX, "Curve properties and primvars");
-  on a mesh it reads only the chart (`st`), and a mesh's other primvars give the
-  node's `default`. `curve:v` is the curve's parameter, not arc length: on a
-  strand with unevenly spaced control points a `v` ramp follows the parameter, as
-  USD's `vertex` primvars do.
+- **Primvars: not inherited, not `faceVarying` on curves, not beside Ptex.**
+  `geompropvalue` reads a primvar by name on a curve or a mesh hit (§ MaterialX,
+  "Curve properties and primvars", "Mesh primvars"). A primvar authored on an
+  ancestor or a `PointInstancer` is not read (the AOVs' gap, `aovs` record). A
+  curve's `faceVarying` primvar is refused, and an implicit shape reads `constant`
+  ones only. A mesh whose material reads a Ptex texture as well carries its face,
+  not its primvars (`HitPart` holds one), so its primvars give the `default`, with
+  `mesh.unsupported_primvar`: holding both would grow `HitRecord` past 96 bytes.
+  Point, vector and normal primvars are read in object space. `curve:v` is the
+  curve's parameter, not arc length: on a strand with unevenly spaced control
+  points a `v` ramp follows the parameter, as USD's `vertex` primvars do.
 - **Not applied.** glTF `occlusion` is reported, not implemented: a path
   tracer computes its own. Dispersion is ignored where MaterialX's own graphs
   ignore it, and reported.
@@ -1148,6 +1158,29 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   +0.47%: `WorldHit` passed 128 bytes and every move became a `memcpy`), and the
   no-table fast path in `World::intersect` saves more than the strand test adds
   (usd-scene-import record, "Curve attributes").
+- **Mesh primvars.** The values a program's `Op::Primvar` reads are
+  `ShadeCtx::primvars`, not the strand's (they were `CurveCtx::primvars`), so any
+  hit supplies them. A mesh supplies them through `HitPart::Mesh` (`MeshHit`: its
+  `PrimvarTable`, the kernel's triangle and barycentrics, the winding undone),
+  which `World::intersect` builds for a geometry whose table holds a channel of
+  `PrimvarTable::shading` — the material's `Material::primvars`, in
+  `Program::primvars` order, each with its authored arity, beside the AOVs'
+  `channels` in the same table (usd-scene-import record, "Mesh primvars").
+  `materialx::run` looks the values up into the per-thread buffer only for a
+  program that reads one, on a hit that carries some, as for a curve. The opacity
+  slice shares the surface program's `primvars` list (`Program::optimize` keeps
+  it), so one table serves both. The displacement slice keeps the list too, but
+  runs at the import's vertices, which supply none (`MtlxDisplacement::eval_with`
+  passes `&[]`): a `geompropvalue` it reads gives its default, reported per material
+  (`mtlx.incomplete`) when the sliced program `reads_primvar` — asked of the
+  optimised slice whatever the optimiser setting, or a surface read would count. The variant fits
+  in `HitPart` beside the strand only because `MeshHit` is `repr(C, packed(4))`:
+  20 bytes, where aligned to eight it pads to 24, leaves the tag no room and made
+  the record 112 bytes (the record stays 96, `a_world_hit_stays_an_inline_copy`).
+  The Ptex face wins where both exist.
+  `Signature` carries a non-curve slot's primvar names, so a material edit that
+  changes them re-imports. A mesh whose material reads none keeps the plain path:
+  every sample scene, which authors no such material, is unchanged.
 - **HSV, conditionals and random nodes.** `rgbtohsv` / `hsvtorgb` are ops over
   the `hsvadjust` transcriptions of OSL's `transformc` (Foley & van Dam); a
   `color4` keeps its alpha. `ifgreater` / `ifgreatereq` / `ifequal` are one

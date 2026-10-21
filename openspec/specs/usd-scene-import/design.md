@@ -493,6 +493,26 @@ Schema mapping:
     only (`SideTables::curves`, set for every curves geometry, table or not): a curve
     material edit that starts reading a primvar or the strand re-imports, while a mesh
     material's edit is never refused over what only a curve would read.
+- **Mesh primvars.** A mesh's material reads its primvars through the table the
+  primvar AOVs built (`aovs` record): `MeshNeeds::shading` (the material's
+  `Material::primvars`) is read by `mesh_source` after the AOVs' keep set, into the
+  same `MeshSource::primvars` (`MeshSource::shading` counts the trailing ones), so
+  both are refined by one path — `vertex` / `faceVarying` as subdivision extras,
+  `uniform` through the base-face map — and hashed into `MeshKey` (with their
+  arity). `primvar_table` splits them into `PrimvarTable::channels` and
+  `::shading`; every placement path (baked, mirrored, instanced, prototype parts)
+  already calls `set_primvars`, which takes a geometry off the plain path only
+  when `shading` holds a channel. The material's reader (`shading_primvar`)
+  converts a `color3` into the working space (its colour space resolved once per
+  attribute, not per value) and accepts any arity, where the AOV reader keeps
+  colours as authored and checks the var's component count; both are
+  `decode_mesh_primvar`. Authored `:indices` that are not an `int[]` are refused,
+  never read as absent (the values would be read unindexed). An authored empty
+  array is unauthored to the AOVs, as before, but warned to a material, as on
+  curves. Implicit shapes have no authored topology, so they read
+  `constant` ones only (`with_constant_primvars`; `constant_table` for the
+  analytic sphere, direct or in a prototype). A material that reads a Ptex texture
+  reads none (`mesh.unsupported_primvar`): a hit carries the face instead.
 - `UsdGeomNurbsCurves` → the same two batches (`nurbs_curve_segments`), read through
   openusd-schemas' typed `NurbsCurves` (generated from its vendored `usdGeom` schema, so
   absent from the crate's hand-written `src/`). Each knot interval `[u_i, u_i+1]` inside the domain `[u_p, u_n+1]` (narrowed

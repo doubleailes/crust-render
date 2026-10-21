@@ -7,6 +7,7 @@
 use crate::error::Structural;
 use crate::hittable::{FaceHit, HitPart, HitRecord};
 use crate::material::Material;
+use crate::primvars::{MeshHit, PrimvarTable};
 use crate::ray::Ray;
 use crate::strands::{CurveHit, StrandTable};
 use crate::warning;
@@ -432,85 +433,6 @@ impl UvMap {
     }
 }
 
-/// A mesh's primvars that render vars ask for, per triangle: one channel per
-/// entry of the render's primvar keep set, `None` where the mesh does not
-/// author it (or authors it with a type the var cannot read). Values are four
-/// lanes, the unused ones zero.
-///
-/// Read only by the AOV first hit ([`World::primvars_at`]), never by
-/// [`World::intersect`]: a geometry carrying one keeps the `plain` fast path,
-/// so the beauty pays nothing per hit. Shared by `Arc` across the placements
-/// of one distinct mesh, like [`UvMap`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct PrimvarTable {
-    pub channels: Vec<Option<PrimvarChannel>>,
-}
-
-/// One primvar of a [`PrimvarTable`], in the shape its interpolation needs.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PrimvarChannel {
-    /// `constant`: one value for the whole mesh.
-    Constant([f32; 4]),
-    /// `uniform`: per triangle, the index of its polygon's value.
-    PerTriangle { values: Vec<[f32; 4]>, of: Vec<u32> },
-    /// `vertex`, `varying` and `faceVarying`: per triangle, the index of each
-    /// corner's value, in the triangle's original vertex order.
-    Corners {
-        values: Vec<[f32; 4]>,
-        corners: Vec<[u32; 3]>,
-    },
-}
-
-impl PrimvarChannel {
-    /// The value at barycentrics `(u, v)` of triangle `prim_id` (in the
-    /// kernel's vertex order, which `swapped` undoes as [`UvMap::resolve`]
-    /// does), or `None` for a triangle or index the channel does not cover.
-    pub fn at(&self, prim_id: u32, u: f32, v: f32, swapped: bool) -> Option<[f32; 4]> {
-        match self {
-            PrimvarChannel::Constant(x) => Some(*x),
-            PrimvarChannel::PerTriangle { values, of } => {
-                values.get(*of.get(prim_id as usize)? as usize).copied()
-            }
-            PrimvarChannel::Corners { values, corners } => {
-                let [a, b, c] = corners
-                    .get(prim_id as usize)?
-                    .map(|i| values.get(i as usize));
-                let (a, b, c) = (a?, b?, c?);
-                let (u, v) = if swapped { (v, u) } else { (u, v) };
-                let w = 1.0 - u - v;
-                Some(std::array::from_fn(|l| w * a[l] + u * b[l] + v * c[l]))
-            }
-        }
-    }
-
-    fn bytes(&self) -> usize {
-        let lanes = std::mem::size_of::<[f32; 4]>();
-        match self {
-            PrimvarChannel::Constant(_) => lanes,
-            PrimvarChannel::PerTriangle { values, of } => values.len() * lanes + of.len() * 4,
-            PrimvarChannel::Corners { values, corners } => {
-                values.len() * lanes + corners.len() * 12
-            }
-        }
-    }
-}
-
-impl PrimvarTable {
-    /// Whether no channel holds anything: such a table is never attached.
-    pub fn is_empty(&self) -> bool {
-        self.channels.iter().all(Option::is_none)
-    }
-
-    /// Heap bytes of the values and indices, for `--stats`.
-    pub fn bytes(&self) -> usize {
-        self.channels
-            .iter()
-            .flatten()
-            .map(PrimvarChannel::bytes)
-            .sum()
-    }
-}
-
 /// The tangent of one triangle: the standard solve of
 /// `[dP1; dP2] = [duv1; duv2] · [T; B]` for `T` — the direction in which `u`
 /// grows across the triangle, from its world-space vertices and corner UVs
@@ -689,14 +611,17 @@ struct SideTables {
     /// A curves geometry's span → strand map, when its material reads a
     /// curve property, primvar or chart ([`crate::StrandTable`]).
     strands: Option<Arc<StrandTable>>,
+    /// A mesh's primvar table, when its material reads one of its channels
+    /// ([`PrimvarTable::shades`]); the AOVs' own are in `World::primvars`.
+    shading: Option<Arc<PrimvarTable>>,
     /// Whether the geometry is curves, table or not: what a material swapped
     /// into its slot must then agree on is also what the import decoded for
     /// it ([`Signature`]).
     curves: bool,
-    /// None of `map`, `uv` and `strands` is set: a hit is only its surface.
-    /// One flag for the three, kept by their setters, so the overwhelming
-    /// majority of hits ([`World::intersect`]) test one byte, not three
-    /// pointers.
+    /// None of `map`, `uv`, `strands` and `shading` is set: a hit is only
+    /// its surface. One flag for the four, kept by their setters, so the
+    /// overwhelming majority of hits ([`World::intersect`]) test one byte,
+    /// not four pointers.
     plain: bool,
     swapped: bool,
     /// Where a hit's triangle vertices may be read from, decided when the
@@ -724,6 +649,7 @@ impl Default for SideTables {
             map: None,
             uv: None,
             strands: None,
+            shading: None,
             curves: false,
             plain: true,
             swapped: false,
@@ -750,6 +676,9 @@ pub struct WorldBuilder {
     /// Per `geom_id`, whether it is a transparent emitter; empty when none
     /// is (see [`World::is_transparent_emitter`]).
     transparent_emitters: Vec<bool>,
+    /// Per `geom_id`, whether it is a holdout; empty when none is (see
+    /// [`World::is_holdout`]).
+    holdouts: Vec<bool>,
     /// The geometries that move over the shutter and how, as sorted,
     /// non-overlapping inclusive `geom_id` ranges (see [`World::motion`]): a
     /// single id for a geometry hit under its own id, the ids its slots take
@@ -968,8 +897,10 @@ impl WorldBuilder {
     }
 
     /// Records the primvar table of a mesh geometry, which the primvar AOVs
-    /// read at the camera's first hit. Unlike the other tables it leaves the
-    /// geometry `plain`: [`World::intersect`] never reads it.
+    /// read at the camera's first hit and its material at every hit. A table
+    /// only the AOVs read leaves the geometry `plain`: [`World::intersect`]
+    /// never reads their channels. One the material reads takes it off, and
+    /// its hits carry a [`MeshHit`].
     ///
     /// `swapped` when the placement mirrored the triangle winding, as for
     /// [`WorldBuilder::set_uv_map`].
@@ -981,6 +912,15 @@ impl WorldBuilder {
             (id as usize) < self.count(),
             "geometry {id} was never attached"
         );
+        if table.shades() {
+            let t = &mut self.faces[id as usize];
+            t.shading = Some(table.clone());
+            t.swapped = swapped;
+            t.plain = false;
+        }
+        if table.channels.iter().all(Option::is_none) {
+            return;
+        }
         match self.primvars.binary_search_by_key(&id, |(i, ..)| *i) {
             Ok(i) => self.primvars[i] = (id, table, swapped),
             Err(i) => self.primvars.insert(i, (id, table, swapped)),
@@ -1098,6 +1038,7 @@ impl WorldBuilder {
         let cutouts = self.materials.iter().any(|m| m.has_cutout());
         let straight = self.materials.iter().any(|m| m.has_straight_transmission());
         let emitters = self.transparent_emitters.contains(&true);
+        let holdouts = self.holdouts.contains(&true);
         let boundaries = self.materials.iter().any(|m| m.is_medium_boundary());
         // Something authored is approximated, so WARN; once, with the count,
         // because it grows with the scene.
@@ -1129,6 +1070,7 @@ impl WorldBuilder {
             } else {
                 Vec::new()
             },
+            holdouts: if holdouts { self.holdouts } else { Vec::new() },
             motion: self.motion,
             primvars: self.primvars,
         }
@@ -1157,6 +1099,26 @@ impl WorldBuilder {
             self.transparent_emitters.resize(id as usize + 1, false);
         }
         self.transparent_emitters[id as usize] = transparent;
+    }
+
+    /// Marks the geometry at `id` as a holdout (or, with `false`, no longer
+    /// one) — see [`World::is_holdout`]. Only camera rays read it; every
+    /// other ray meets the geometry as it would without the flag.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_holdout(&mut self, id: u32, holdout: bool) {
+        assert!(
+            (id as usize) < self.count(),
+            "geometry {id} was never attached"
+        );
+        if self.holdouts.len() <= id as usize {
+            if !holdout {
+                return;
+            }
+            self.holdouts.resize(id as usize + 1, false);
+        }
+        self.holdouts[id as usize] = holdout;
     }
 
     /// Installs the per-`geom_id` light-link classes (one entry per attached
@@ -1206,6 +1168,8 @@ pub struct World {
     light_classes: Vec<u16>,
     /// Sparse, indexed by `geom_id`; empty when no geometry is one.
     transparent_emitters: Vec<bool>,
+    /// Sparse, indexed by `geom_id`; empty when no geometry is a holdout.
+    holdouts: Vec<bool>,
     /// The moving geometries' motions over inclusive `geom_id` ranges, sorted;
     /// empty for a static scene (see [`World::motion`]).
     motion: Vec<(u32, u32, Motion)>,
@@ -1278,18 +1242,19 @@ impl World {
         !self.primvars.is_empty()
     }
 
-    /// Heap bytes of the primvar tables, each distinct table once.
+    /// Heap bytes of the primvar tables, each distinct table once: the
+    /// AOVs' and the materials' alike.
     pub fn primvar_table_bytes(&self) -> usize {
-        let mut seen: Vec<*const PrimvarTable> = Vec::new();
-        let mut bytes = 0;
-        for (_, t, _) in &self.primvars {
-            let ptr = Arc::as_ptr(t);
-            if !seen.contains(&ptr) {
-                seen.push(ptr);
-                bytes += t.bytes();
-            }
-        }
-        bytes
+        // A set: every geometry of a large stage may carry its own table.
+        let mut seen = std::collections::HashSet::new();
+        let shading = self.faces.iter().filter_map(|t| t.shading.as_ref());
+        self.primvars
+            .iter()
+            .map(|(_, t, _)| t)
+            .chain(shading)
+            .filter(|t| seen.insert(Arc::as_ptr(t)))
+            .map(|t| t.bytes())
+            .sum()
     }
 
     /// The world-space displacement over the whole shutter of the point hit
@@ -1379,6 +1344,11 @@ impl World {
             Some(c) => c.chart(),
             None => uv,
         };
+        // A mesh's primvars, where its material reads one.
+        let mesh = tables
+            .shading
+            .as_deref()
+            .map(|t| MeshHit::new(t, h.prim_id, h.u, h.v, tables.swapped));
         // The ray's texture footprint, converted into each parameterisation
         // the shader might index. Zero unless the ray carries a cone *and*
         // this geometry carries the density to convert it with, and zero
@@ -1424,14 +1394,17 @@ impl World {
                 normal: h.normal,
                 t: h.t,
                 front_face: h.front_face,
-                part: match (face, curve) {
-                    (Some((id, uv)), _) => HitPart::Face(FaceHit {
+                // At most one: a mesh read through Ptex keeps its face, and
+                // its primvars read their defaults (a known gap).
+                part: match (face, curve, mesh) {
+                    (Some((id, uv)), ..) => HitPart::Face(FaceHit {
                         id,
                         uv,
                         width: face_width,
                     }),
-                    (None, Some(c)) => HitPart::Curve(c),
-                    (None, None) => HitPart::None,
+                    (None, Some(c), _) => HitPart::Curve(c),
+                    (None, None, Some(m)) => HitPart::Mesh(m),
+                    (None, None, None) => HitPart::None,
                 },
                 uv,
                 tangent,
@@ -1509,6 +1482,25 @@ impl World {
     #[inline]
     pub fn has_transparent_emitters(&self) -> bool {
         !self.transparent_emitters.is_empty()
+    }
+
+    /// Whether any geometry is a holdout ([`World::is_holdout`]): the
+    /// integrator's one check per camera ray in a world without one.
+    #[inline]
+    pub fn has_holdouts(&self) -> bool {
+        !self.holdouts.is_empty()
+    }
+
+    /// Whether the geometry at `geom_id` is a holdout: a member of the active
+    /// render pass's `matte` collection. A camera ray that reaches it ends
+    /// there with no contribution and zero alpha; every other ray meets it
+    /// as ordinary geometry.
+    #[inline]
+    pub fn is_holdout(&self, geom_id: u32) -> bool {
+        self.holdouts
+            .get(geom_id as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Whether the geometry at `geom_id` is the source of a light the camera
@@ -1718,6 +1710,9 @@ pub(crate) struct Signature {
     /// strand table was decoded for. `None` elsewhere, so a mesh material's
     /// edit is never refused over what only a curve would read.
     curve: Option<(bool, bool, Vec<String>)>,
+    /// Elsewhere (a mesh, an implicit shape): the primvars by name its
+    /// primvar table was decoded for ([`PrimvarTable::shading`]).
+    primvars: Option<Vec<String>>,
 }
 
 impl Signature {
@@ -1728,6 +1723,7 @@ impl Signature {
         });
         Signature {
             curve,
+            primvars: (!curves).then(|| m.primvars().to_vec()),
             kind: m.kind(),
             cutout: m.has_cutout(),
             straight: m.has_straight_transmission(),
@@ -1841,6 +1837,7 @@ pub fn traversal_report(world: &World, camera_rays: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primvars::PrimvarChannel;
 
     /// A quad fan-triangulated into two triangles, as the importer emits it.
     fn quad() -> FaceMap {
@@ -1913,6 +1910,49 @@ mod tests {
 
     /// A `prim_id` past the table cannot panic: it is reachable from the
     /// integrator, where a panic kills a render thread.
+    fn sphere(b: &mut WorldBuilder) -> u32 {
+        b.attach(
+            Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            Arc::new(crate::material::OpenPBR::diffuse(Vec3A::splat(0.5))),
+        )
+    }
+
+    /// The holdout table is sparse: a world that never sets one has none, and
+    /// an id it never set, or one past its end, answers false.
+    #[test]
+    fn holdouts_are_empty_unless_set() {
+        let mut b = WorldBuilder::new();
+        for _ in 0..3 {
+            sphere(&mut b);
+        }
+        b.set_holdout(2, false);
+        let world = b.commit();
+        assert!(!world.has_holdouts());
+        assert!((0..4).all(|id| !world.is_holdout(id)));
+
+        let mut b = WorldBuilder::new();
+        for _ in 0..3 {
+            sphere(&mut b);
+        }
+        b.set_holdout(1, true);
+        let world = b.commit();
+        assert!(world.has_holdouts());
+        assert_eq!(
+            (0..4).map(|id| world.is_holdout(id)).collect::<Vec<_>>(),
+            [false, true, false, false]
+        );
+
+        // Set, then cleared: no holdout is left, so the fast path holds.
+        let mut b = WorldBuilder::new();
+        sphere(&mut b);
+        b.set_holdout(0, true);
+        b.set_holdout(0, false);
+        assert!(!b.commit().has_holdouts());
+    }
+
     /// A primvar table is read by the AOV first hit alone: the geometry
     /// stays on `intersect`'s plain path, and a mirrored placement's table
     /// undoes the swapped barycentrics.
@@ -1936,6 +1976,7 @@ mod tests {
         assert_eq!(corners.at(1, 0.25, 0.5, false), None);
         let table = Arc::new(PrimvarTable {
             channels: vec![Some(corners), None],
+            ..PrimvarTable::default()
         });
         b.set_primvars(id, table.clone(), false);
         assert!(b.faces[id as usize].plain);

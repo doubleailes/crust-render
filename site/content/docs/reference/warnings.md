@@ -156,6 +156,7 @@ plain text and are not counted.
 | `mesh.displaced_at_cage` | approximated | A displaced mesh is not refined, so only its cage vertices move. Logged once per import. | Raise `--subdiv-level` or set `--subdiv-edge-length` to dice the mesh finer. |
 | `mesh.ptex_displaced_at_cage` | approximated | A subdivisionScheme = none mesh with Ptex displacement and non-quad faces is displaced at its cage. Logged once per import. | Use quads, or author a subdivision scheme. |
 | `mesh.displacement_exceeds_bound` | approximated | Displacement reaches past crust:displacementBound; it is applied unclamped. | Raise `crust:displacementBound` to the reach the message gives. |
+| `mesh.unsupported_primvar` | skipped | A mesh or implicit-shape primvar a material reads has a type, interpolation or length crust cannot read, or is not constant on an implicit shape or a material read through Ptex; the material reads its geompropvalue's default there. | Author it as `float`, `float2`, `float3`, `color3f` or `int` with as many values as its interpolation needs; on an implicit shape, as `constant`. |
 | `subdiv.invalid_setting` | refused | A subdivision level is negative or an edge length is not a positive pixel length; it is clamped or ignored. | Author a level of 0 or more and a positive edge length. |
 | `subdiv.level_clamped` | approximated | A subdivision level is above the most crust refines to; it is clamped. | Author a level at most the maximum the message names. |
 | `subdiv.adaptive_needs_camera` | approximated | Adaptive subdivision has no render camera to measure from; the uniform level is used. | Name the render camera with `--camera` or `RenderSettings.camera`. |
@@ -215,6 +216,16 @@ plain text and are not counted.
 | `light_link.too_many_classes` | skipped | The scene needs more light-link classes than crust encodes; light links are ignored. | Reduce the number of distinct light-link sets. |
 | `light_link.ray_mask_rewritten` | approximated | Shadow linking rewrites the authored crust:rayMask bits 3-31. | Do not rely on `crust:rayMask` bits 3-31 with shadow linking. |
 | `light_link.shadow_link_unencodable` | approximated | A shadowLink collection cannot be encoded; the light is shadowed by every occluder. | Reduce the number of distinct shadow-link sets. |
+
+## Render passes
+
+| code | kind | meaning | what to do |
+|------|------|---------|------------|
+| `render_pass.render_source_invalid` | refused | The active render pass's renderSource does not target a RenderSettings prim; the stage's settings are read. | Target a `RenderSettings` prim, or remove `renderSource`. |
+| `render_pass.collection_not_read` | skipped | The active render pass's prune or renderVisibility collection restricts something; it is not read. | Use `matte` / `cameraVisibility`, or deactivate the prims instead of pruning them. |
+| `render_pass.target_in_instance` | approximated | A render pass collection targets a prim inside an instance; membership is judged on the instance. | Target the instance, or make the target not instanced. |
+| `render_pass.volume_ignored` | skipped | A volume region is in the active pass's matte or outside its cameraVisibility; the pass does not apply to it. | Leave volume regions out of the pass's collections. |
+| `render_pass.nested_not_composed` | skipped | A render pass collection includes a collection outside the streamed chunk that reads it; it contributes nothing there. | Author the nested collection on the pass, or set `CRUST_STREAM_IMPORT=0`. |
 
 ## Materials
 

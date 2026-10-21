@@ -69,6 +69,7 @@ fn session_matches_cli(name: &str, sample: &str, region: [usize; 4]) {
         .open_session(
             samples().join(sample).to_str().unwrap(),
             layer.to_str().unwrap(),
+            None,
         )
         .expect("opened");
     let open = state.session().expect("open");
@@ -120,6 +121,7 @@ fn an_undo_that_does_not_import_is_not_applied() {
         .open_session(
             samples().join("cornellbox.usda").to_str().unwrap(),
             layer.to_str().unwrap(),
+            None,
         )
         .expect("opened");
     let open = state.session().expect("open");
@@ -350,7 +352,7 @@ fn same_as_full_import(state: &mut State, dir: &Path, what: &str) {
     std::fs::copy(&layer, &copy).expect("copy the layer");
     let mut full = State::default();
     let opened = full
-        .open_session(input.to_str().unwrap(), copy.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), copy.to_str().unwrap(), None)
         .expect("the copy resumes");
     assert_eq!(opened["resumed"], true);
     assert_eq!(
@@ -373,7 +375,7 @@ fn lookdev_session(name: &str) -> (State, PathBuf) {
     let layer = dir.join("lookdev.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -676,7 +678,7 @@ fn probe_names_the_instance_or_the_instancer() {
     let input = samples().join("instancing.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     let job = finished_render(&mut state);
     assert_eq!(
@@ -699,6 +701,7 @@ fn cornell_render(name: &str, region: [usize; 4]) -> (State, std::sync::Arc<supe
         .open_session(
             samples().join("cornellbox.usda").to_str().unwrap(),
             layer.to_str().unwrap(),
+            None,
         )
         .expect("opened");
     let (job, _) = state
@@ -937,7 +940,7 @@ fn sourced_session(name: &str) -> (State, PathBuf) {
     let layer = dir.join("lookdev.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -1137,7 +1140,7 @@ fn session_on(name: &str, stage: &str) -> (State, PathBuf) {
     let layer = dir.join("edits.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -1383,7 +1386,7 @@ fn resuming_adds_the_inputs_metrics_the_layer_lacks() {
     .unwrap();
     let mut state = State::default();
     let opened = state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("resumed");
     assert_eq!(opened["resumed"], true);
     assert_eq!(
@@ -1675,7 +1678,7 @@ def Xform "World"
     let layer = dir.join("edits.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     let roughness = r#"over "World" { over "Looks" { over "Clay" { over "Surface" {
         float inputs:roughness = 0.15 } } } }"#;
@@ -1943,7 +1946,7 @@ fn placement_session(name: &str) -> (State, PathBuf) {
     let layer = dir.join("placed.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -2593,4 +2596,100 @@ fn a_product_asking_for_a_new_primvar_reimports() {
     same_as_full_import(&mut state, &dir, "products with Pref");
     assert_eq!(undo(&mut state), "full");
     same_as_full_import(&mut state, &dir, "products with Pref undone");
+}
+
+/// The `mcp-session` spec's "A session renders one pass": a session on
+/// `/Render/Passes/char` renders what `crust render --pass` of its layer
+/// renders, an edit to the pass's `matte` re-imports and holds the new target
+/// out, and a pass that is not one fails the call.
+#[test]
+fn a_session_renders_its_pass() {
+    let dir = work_dir("pass");
+    // The sample, small and quick.
+    let input = dir.join("shot.usda");
+    let text = std::fs::read_to_string(samples().join("render_passes.usda"))
+        .unwrap()
+        .replace("int2 resolution = (160, 90)", "int2 resolution = (32, 18)")
+        .replace(
+            "int crust:samplesPerPixel = 64",
+            "int crust:samplesPerPixel = 4",
+        );
+    std::fs::write(&input, text).unwrap();
+    let layer = dir.join("lookdev.usda");
+    let mut state = State::default();
+
+    let e = state
+        .open_session(
+            input.to_str().unwrap(),
+            layer.to_str().unwrap(),
+            Some("/World"),
+        )
+        .expect_err("not a pass");
+    assert!(e.contains("/World") && e.contains("RenderPass"), "{e}");
+    assert!(!layer.exists(), "a refused session leaves no layer");
+
+    let opened = state
+        .open_session(
+            input.to_str().unwrap(),
+            layer.to_str().unwrap(),
+            Some("/Render/Passes/char"),
+        )
+        .expect("opened");
+    assert_eq!(opened["pass"], "/Render/Passes/char");
+    let pass = |state: &mut State| state.session().unwrap().scene.report.pass.clone().unwrap();
+    assert_eq!(pass(&mut state).holdouts, 3);
+
+    // An edit applied in place keeps the pass in the check report.
+    let applied = author(
+        &mut state,
+        r#"over "World" { over "Key" { float inputs:intensity = 50 } }"#,
+    );
+    assert_eq!(applied, "lights", "a light input applies in place");
+    assert_eq!(pass(&mut state).holdouts, 3, "still the char pass");
+
+    state
+        .session()
+        .unwrap()
+        .render_final()
+        .expect("render_final");
+    let session = crust_assets::read_exr_planes(&dir.join("char.exr")).expect("char.exr");
+    let cli_dir = dir.join("cli");
+    std::fs::create_dir_all(&cli_dir).unwrap();
+    let Cli {
+        command: Command::Render(args),
+        ..
+    } = Cli::try_parse_from([
+        "crust",
+        "render",
+        "-i",
+        layer.to_str().unwrap(),
+        "--pass",
+        "/Render/Passes/char",
+    ])
+    .expect("render arguments")
+    else {
+        unreachable!("parsed as render")
+    };
+    let control = RenderControl::without_snapshots();
+    let beauty = cli_dir.join("output.exr");
+    let run = RenderRun {
+        control: &control,
+        progress_bar: false,
+        rendering: &|| {},
+        rendered: &|| false,
+        anchor: Some(&cli_dir),
+        beauty: Some(beauty.to_str().unwrap()),
+    };
+    render_and_write(&args, &run).expect("the CLI renders");
+    let cli = crust_assets::read_exr_planes(&cli_dir.join("char.exr")).expect("the CLI's char.exr");
+    let report = crust_core::compare::compare(&cli, &session);
+    assert!(report.identical, "render_final: {}", report.to_text());
+
+    let applied = author(
+        &mut state,
+        r#"over "Render" { over "Passes" { over "char" {
+            prepend rel collection:matte:includes = </World/Chars/Hero> } } }"#,
+    );
+    assert_eq!(applied, "full", "a collection edit re-imports");
+    assert_eq!(pass(&mut state).holdouts, 4, "the hero is held out too");
 }

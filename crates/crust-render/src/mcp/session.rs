@@ -46,6 +46,9 @@ pub struct Open {
     pub input: PathBuf,
     /// The override layer, absolute: the session itself.
     pub output: PathBuf,
+    /// The render pass the session renders (`open_session`'s `pass`): every
+    /// import and the final render take `--pass` with it.
+    pub pass: Option<String>,
     /// The authoring stage, opened on the override layer (its root layer, so
     /// the edit target) with payloads unloaded.
     pub stage: Stage,
@@ -89,10 +92,14 @@ fn loader(kept: Option<&Arc<FileAssets>>) -> (Arc<FileAssets>, usize) {
     }
 }
 
-/// Imports the saved layer at `layer` through `assets`, then lets go of the
-/// kept decodes the new scene does not use.
-fn import_kept(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String> {
-    let scene = import(layer, assets.clone())?;
+/// Imports the saved layer at `layer` through `assets`, rendering `pass`,
+/// then lets go of the kept decodes the new scene does not use.
+fn import_kept(
+    layer: &Path,
+    pass: Option<&str>,
+    assets: Arc<FileAssets>,
+) -> Result<Imported, String> {
+    let scene = import(layer, pass, assets.clone())?;
     let unused = assets.sweep();
     if unused > 0 {
         debug!("{unused} decoded asset(s) the scene no longer uses let go");
@@ -286,14 +293,16 @@ impl Open {
         self.refresh()?;
         let cancelled = self.renders.stop();
         let layer = self.output.to_str().ok_or("the layer path is not UTF-8")?;
-        let args = match Cli::try_parse_from(["crust", "render", "-i", layer]) {
-            Ok(Cli {
-                command: Command::Render(args),
-                ..
-            }) => args,
-            Ok(_) => unreachable!("parsed as render"),
-            Err(e) => return Err(e.to_string()),
-        };
+        let pass = self.pass.iter().flat_map(|p| ["--pass", p.as_str()]);
+        let args =
+            match Cli::try_parse_from(["crust", "render", "-i", layer].into_iter().chain(pass)) {
+                Ok(Cli {
+                    command: Command::Render(args),
+                    ..
+                }) => args,
+                Ok(_) => unreachable!("parsed as render"),
+                Err(e) => return Err(e.to_string()),
+            };
         let beauty = self.output.with_extension("exr");
         let beauty = beauty.to_str().ok_or("the layer path is not UTF-8")?;
         let dir = self.layer_dir();
@@ -580,14 +589,17 @@ impl Open {
         } else if self.assets.is_some()
             && let Some((applied, change)) = self.classify(before)
         {
-            match self.scene.update(&self.output, &change, applied) {
+            match self
+                .scene
+                .update(&self.output, self.pass.as_deref(), &change, applied)
+            {
                 Ok(()) => return Ok(()),
                 // One per edit batch that falls back.
                 Err(why) => debug!("{applied} edit applied as full instead: {why}"),
             }
         }
         let before = self.sources.now();
-        self.scene = import_kept(&self.output, assets)?;
+        self.scene = import_kept(&self.output, self.pass.as_deref(), assets)?;
         self.sources = Sources::of(&self.scene.layers, &self.output, &before);
         self.stale = None;
         Ok(())
@@ -756,7 +768,17 @@ impl State {
     /// anything is written when `output` is the input, is not a `.usda`, or
     /// exists without being an override layer of `input`; a refused or
     /// failed call leaves the open session as it was, its history included.
-    pub fn open_session(&mut self, input: &str, output: &str) -> Result<serde_json::Value, String> {
+    ///
+    /// With `pass` (spec: "A session renders one pass"), every import, probe
+    /// and final render of the session takes `--pass <pass>`; a pass that is
+    /// not a `RenderPass` on the stage fails the import, so the call, naming
+    /// the path.
+    pub fn open_session(
+        &mut self,
+        input: &str,
+        output: &str,
+        pass: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         let cancelled = self.open.as_mut().and_then(|open| open.renders.stop());
         let input = absolute(Path::new(input))?;
         let output = absolute(Path::new(output))?;
@@ -823,7 +845,7 @@ impl State {
         let assets = crust_core::config()
             .scene_deltas
             .then(|| Arc::new(FileAssets::new().keep_decoded()));
-        let imported = import_kept(&output, loader(assets.as_ref()).0);
+        let imported = import_kept(&output, pass, loader(assets.as_ref()).0);
         let scene = match restoring(&output, before_metrics.as_deref(), imported) {
             Ok(scene) => scene,
             Err(e) => {
@@ -838,6 +860,7 @@ impl State {
         let result = serde_json::json!({
             "input": input,
             "output": output,
+            "pass": pass,
             "resumed": resumed,
             "camera": report.scene.camera,
             "resolution": report.scene.resolution,
@@ -857,6 +880,7 @@ impl State {
         self.open = Some(Open {
             input,
             output,
+            pass: pass.map(str::to_owned),
             stage,
             scene,
             undo: Vec::new(),

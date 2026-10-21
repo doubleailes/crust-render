@@ -224,6 +224,9 @@ enum LsKind {
     /// Material prims a binding can reach, bound or not.
     #[value(alias = "materials")]
     Material,
+    /// The `RenderPass` prims `--pass` accepts.
+    #[value(alias = "passes")]
+    Pass,
 }
 
 impl From<LsKind> for crust_core::ListKind {
@@ -232,6 +235,7 @@ impl From<LsKind> for crust_core::ListKind {
             LsKind::Camera => crust_core::ListKind::Camera,
             LsKind::Light => crust_core::ListKind::Light,
             LsKind::Material => crust_core::ListKind::Material,
+            LsKind::Pass => crust_core::ListKind::Pass,
         }
     }
 }
@@ -267,6 +271,15 @@ struct SceneArgs {
     /// that is not a camera on the stage stops the render.
     #[arg(long, value_name = "PRIM_PATH")]
     camera: Option<String>,
+    /// Render pass to render, as the absolute path of a `RenderPass` prim
+    /// (e.g. `/Render/Passes/char`). The geometry in its `matte` collection
+    /// is held out (zero colour, zero alpha), what its `cameraVisibility`
+    /// collection leaves out is hidden from camera rays, and its
+    /// `renderSource`, when it targets a `RenderSettings` prim, is the
+    /// settings read. Without it no pass is active, whatever passes the stage
+    /// defines. A path that is not a `RenderPass` stops the render.
+    #[arg(long, value_name = "PRIM_PATH")]
+    pass: Option<String>,
     /// Subdivision refinement level for every mesh whose `subdivisionScheme`
     /// is not `none` (unauthored means USD's fallback, `catmullClark`).
     /// Overrides the scene's `crust:subdivisionLevel` render setting
@@ -851,6 +864,7 @@ fn load_scene(
         let options = crust_core::UsdImportOptions {
             frame: cli.frame,
             camera: cli.camera.clone(),
+            pass: cli.pass.clone(),
             subdivision_level: cli.subdiv_level,
             subdivision_edge_length: cli.subdiv_edge_length,
             skip_stage_teardown: keep_stage,
@@ -869,6 +883,9 @@ fn load_scene(
         }
         if let Some(camera) = &cli.camera {
             warn!("--camera {camera} has no effect without -i/--input");
+        }
+        if let Some(pass) = &cli.pass {
+            warn!("--pass {pass} has no effect without -i/--input");
         }
         if let Some(space) = working_space {
             warn!(
@@ -1104,6 +1121,13 @@ fn diff(a: &Path, b: &Path, json: Option<&Path>) -> ExitCode {
             print!("{}", report.to_text());
             // On stderr, so stdout reads as the report always did.
             let c = &report.comparability;
+            let differences = c.differences_text();
+            if !differences.is_empty() {
+                eprintln!("stamp differences:");
+                for d in &differences {
+                    eprintln!("  {d}");
+                }
+            }
             if c.status != crust_core::compare::ComparabilityStatus::Ok {
                 let status = match c.status {
                     crust_core::compare::ComparabilityStatus::Warn => "warn",
@@ -1339,6 +1363,8 @@ fn check_scene(
                 [r.x0, r.y0, r.x1, r.y1]
             }),
         },
+        pass: scene.pass.as_ref().map(Into::into),
+        settings: scene.settings_prim.clone(),
         products,
         effective_settings: effective_settings(&settings, &flags),
         import: scene.stats.phases.clone(),
@@ -1412,6 +1438,7 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
     let options = crust_core::diagnostic::Options {
         frame: args.scene.frame,
         camera: args.scene.camera.clone(),
+        pass: args.scene.pass.clone(),
         region: args.scene.region,
         budget: args.budget,
         repeats: args.repeats,
@@ -1888,6 +1915,20 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         }
     };
     debug!("Scene built in {:?}", load_start.elapsed());
+    // The layers are hashed now, as loaded, not after the render: a layer
+    // edited while it renders must not stamp pixels it did not make.
+    // Streamed, so a large package is never held in memory.
+    let layer_hashes: std::collections::HashMap<PathBuf, Option<u64>> = scene
+        .source
+        .layer_stack
+        .iter()
+        .map(|layer| {
+            let hash = std::fs::File::open(layer).ok().and_then(|f| {
+                crust_core::stamp::content_hash_read(std::io::BufReader::new(f)).ok()
+            });
+            (layer.clone(), hash)
+        })
+        .collect();
     let output_color = match OutputColor::new(scene.working_space, &cli.display, &cli.view) {
         Ok(c) => c,
         Err(e) => {
@@ -1930,6 +1971,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     let lights = scene.lights;
     let volumes = scene.volumes;
     let (camera_path, time) = (scene.camera_path, scene.time);
+    let source = scene.source;
     // Import phases and scene counts come from the loader; render and
     // output are timed here.
     let mut stats = scene.stats;
@@ -2102,7 +2144,8 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     }
     // How the pixels were sampled, recorded in every EXR written.
     let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time)
-        .for_outcome(rendered.outcome, &ray_stats);
+        .for_outcome(rendered.outcome, &ray_stats)
+        .with_source(&source, |layer| layer_hashes.get(layer).copied().flatten());
     let output_start = Instant::now();
     let mut files = Vec::new();
     if let Some(film) = &film {
@@ -2596,6 +2639,33 @@ mod tests {
             render(["--subdiv-level", "-1"]).is_err(),
             "a level is a count"
         );
+    }
+
+    /// `--pass` is a scene argument: every subcommand that imports a stage
+    /// takes it, and it reaches the import options as given.
+    #[test]
+    fn cli_pass_is_a_scene_argument() {
+        for sub in ["render", "diagnostic", "check", "light-paths"] {
+            let cli = Cli::try_parse_from([
+                "crust",
+                sub,
+                "-i",
+                "s.usda",
+                "--pass",
+                "/Render/Passes/char",
+            ])
+            .unwrap_or_else(|e| panic!("{sub}: {e}"));
+            let scene = match &cli.command {
+                Command::Render(a) => &a.scene,
+                Command::Diagnostic(a) => &a.scene,
+                Command::Check(a) => &a.scene,
+                Command::LightPaths(a) => &a.scene,
+                _ => unreachable!(),
+            };
+            assert_eq!(scene.pass.as_deref(), Some("/Render/Passes/char"), "{sub}");
+        }
+        assert!(render([]).unwrap().pass.is_none());
+        assert!(render(["--pass"]).is_err(), "a pass needs its path");
     }
 
     #[test]

@@ -31,6 +31,11 @@ struct Rest {
     camera_path: Option<String>,
     time: Option<f64>,
     provenance: Option<Provenance>,
+    /// The active render pass the import read, for the check report: an
+    /// in-place update changes neither its holdouts nor what it hides.
+    pass: Option<crust_core::PassSummary>,
+    /// The settings prim the import read, for the same report.
+    settings_prim: Option<String>,
     /// How many UV textures the import preloaded.
     preloaded: u64,
 }
@@ -144,6 +149,7 @@ impl Imported {
     pub fn update(
         &mut self,
         layer: &Path,
+        pass: Option<&str>,
         change: &Change,
         applied: Applied,
     ) -> Result<(), Structural> {
@@ -155,7 +161,7 @@ impl Imported {
             .ok_or_else(|| Structural("the scene has no provenance".into()))?;
         let update = provenance.rebuild(layer, &*self._assets, &self.rest.warnings, change)?;
         update.check(self.renderer.world(), self.renderer.lights())?;
-        let args = check_args(layer).map_err(Structural)?;
+        let args = check_args(layer, pass).map_err(Structural)?;
         // Past the checks nothing refuses: take the renderer apart into the
         // scene it was built from.
         let renderer = Arc::get_mut(&mut self.renderer)
@@ -182,6 +188,8 @@ impl Imported {
         scene.time = self.rest.time;
         scene.warnings = std::mem::take(&mut self.rest.warnings);
         scene.provenance = self.rest.provenance.take();
+        scene.pass = self.rest.pass.take();
+        scene.settings_prim = self.rest.settings_prim.take();
         scene.layers = std::mem::take(&mut self.layers);
         update
             .apply(&mut scene)
@@ -246,17 +254,21 @@ impl Imported {
                 camera_path: scene.camera_path,
                 time: scene.time,
                 provenance: scene.provenance,
+                pass: scene.pass,
+                settings_prim: scene.settings_prim,
                 preloaded,
             },
         }
     }
 }
 
-/// The arguments `crust <args>` would parse to for `check`: the session
-/// imports with the CLI's own defaults, by construction.
-fn check_args(layer: &Path) -> Result<CheckArgs, String> {
+/// The arguments `crust <args>` would parse to for `check`, with `--pass`
+/// when the session renders a pass: the session imports with the CLI's own
+/// defaults, by construction.
+fn check_args(layer: &Path, pass: Option<&str>) -> Result<CheckArgs, String> {
     let layer = layer.to_str().ok_or("the layer path is not UTF-8")?;
-    match Cli::try_parse_from(["crust", "check", "-i", layer]) {
+    let pass = pass.into_iter().flat_map(|p| ["--pass", p]);
+    match Cli::try_parse_from(["crust", "check", "-i", layer].into_iter().chain(pass)) {
         Ok(Cli {
             command: Command::Check(args),
             ..
@@ -266,9 +278,13 @@ fn check_args(layer: &Path) -> Result<CheckArgs, String> {
     }
 }
 
-/// Imports the saved layer at `layer` through `assets`.
-pub fn import(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String> {
-    let args = check_args(layer)?;
+/// Imports the saved layer at `layer` through `assets`, rendering `pass`.
+pub fn import(
+    layer: &Path,
+    pass: Option<&str>,
+    assets: Arc<FileAssets>,
+) -> Result<Imported, String> {
+    let args = check_args(layer, pass)?;
     let started = Instant::now();
     // The session imports once per edit batch and lives on: each stage is
     // freed, and with it any mapping of the layer it read.

@@ -36,7 +36,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
 use crate::material::Material;
-use crate::rt_world::{FaceMap, PrimvarTable, UvMap, WorldBuilder};
+use crate::primvars::PrimvarTable;
+use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
 use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_motion_translate,
@@ -44,7 +45,9 @@ use super::attrs::{
 };
 use super::implicit::{Shape, undisplaced};
 use super::materials::{resolve_bound, resolve_material};
-use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
+use super::mesh::{
+    MeshNeeds, MeshPlace, constant_table, mesh_source, placement_scale, with_constant_primvars,
+};
 use super::shapes::{Curves, curve_segments, curves_scene, nurbs_curve_segments, sphere_radius};
 use super::strands::StrandRequest;
 use super::xform::{Span, compose_with_parent};
@@ -269,7 +272,12 @@ pub(super) fn collect_proto_parts(
             if let Some(src) = mesh_source(
                 &prim,
                 &mesh,
-                MeshNeeds::of(&*material, displacement, &caches.meshes.primvars),
+                MeshNeeds::of(
+                    &*material,
+                    displacement,
+                    &caches.meshes.primvars,
+                    caches.working,
+                ),
                 &mut caches.meshes.subdiv,
                 part_world
                     .as_ref()
@@ -297,14 +305,17 @@ pub(super) fn collect_proto_parts(
                 center: Vec3A::ZERO,
                 radius,
             });
-            parts.push(ProtoPart::leaf(
+            let primvars = constant_table(&prim, &*material, caches.working).map(Arc::new);
+            let mut part = ProtoPart::leaf(
                 Arc::new(b.commit_with(crate::commit_options())),
                 this_local,
                 mask,
                 material,
                 None,
                 None,
-            ));
+            );
+            Arc::make_mut(&mut part.slots)[0].primvars = primvars;
+            parts.push(part);
         } else if let Some(read) = match UsdBasisCurves::get(stage, prim.path().clone()) {
             Ok(Some(curves)) => Some(Curve::Basis(curves)),
             _ => match UsdNurbsCurves::get(stage, prim.path().clone()) {
@@ -347,6 +358,7 @@ pub(super) fn collect_proto_parts(
                     .as_ref()
                     .map_or(MeshPlace::Shared, MeshPlace::World),
             );
+            let src = with_constant_primvars(src, &prim, &*material, caches.working);
             if let Some(slot) = caches.meshes.intern(&prim, src, &material, None) {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();

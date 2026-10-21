@@ -270,6 +270,8 @@ warning_codes! {
         "A subdivisionScheme = none mesh with Ptex displacement and non-quad faces is displaced at its cage.";
     MeshDisplacementExceedsBound => "mesh.displacement_exceeds_bound", Approximated, Each,
         "Displacement reaches past crust:displacementBound; it is applied unclamped.";
+    MeshUnsupportedPrimvar => "mesh.unsupported_primvar", Skipped, Each,
+        "A mesh or implicit-shape primvar a material reads has a type, interpolation or length crust cannot read, or is not constant on an implicit shape or a material read through Ptex; the material reads its geompropvalue's default there.";
     SubdivInvalidSetting => "subdiv.invalid_setting", Refused, Each,
         "A subdivision level is negative or an edge length is not a positive pixel length; it is clamped or ignored.";
     SubdivLevelClamped => "subdiv.level_clamped", Approximated, Each,
@@ -360,6 +362,18 @@ warning_codes! {
         "Shadow linking rewrites the authored crust:rayMask bits 3-31.";
     LightLinkShadowLinkUnencodable => "light_link.shadow_link_unencodable", Approximated, Each,
         "A shadowLink collection cannot be encoded; the light is shadowed by every occluder.";
+
+    // Render passes
+    RenderPassRenderSourceInvalid => "render_pass.render_source_invalid", Refused, Each,
+        "The active render pass's renderSource does not target a RenderSettings prim; the stage's settings are read.";
+    RenderPassCollectionNotRead => "render_pass.collection_not_read", Skipped, Each,
+        "The active render pass's prune or renderVisibility collection restricts something; it is not read.";
+    RenderPassTargetInInstance => "render_pass.target_in_instance", Approximated, Each,
+        "A render pass collection targets a prim inside an instance; membership is judged on the instance.";
+    RenderPassVolumeIgnored => "render_pass.volume_ignored", Skipped, Each,
+        "A volume region is in the active pass's matte or outside its cameraVisibility; the pass does not apply to it.";
+    RenderPassNestedNotComposed => "render_pass.nested_not_composed", Skipped, Each,
+        "A render pass collection includes a collection outside the streamed chunk that reads it; it contributes nothing there.";
 
     // Materials
     MaterialFallbackDefault => "material.fallback_default", Skipped, Each,

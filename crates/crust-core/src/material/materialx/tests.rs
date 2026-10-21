@@ -230,6 +230,43 @@ fn a_materialx_displacement_evaluates_at_the_vertex() {
     }
 }
 
+/// A displacement runs at the import's vertices, which supply no primvars: a
+/// `geompropvalue` there is reported (it reads its default), while one the
+/// surface alone reads is not.
+#[test]
+fn a_primvar_read_by_a_displacement_is_reported() {
+    let graph = |height: &str| {
+        format!(
+            r#"
+    <geompropvalue name="mask" type="float"><input name="geomprop" type="string" value="mask" /></geompropvalue>
+    <oren_nayar_diffuse_bsdf name="d" type="BSDF"><input name="weight" type="float" nodename="mask" /></oren_nayar_diffuse_bsdf>
+    <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="d" /></surface>
+    <constant name="one" type="float"><input name="value" type="float" value="1" /></constant>
+    <displacement name="disp" type="displacementshader">
+      <input name="displacement" type="float" nodename="{height}" />
+    </displacement>
+    <surfacematerial name="m" type="material">
+      <input name="surfaceshader" type="surfaceshader" nodename="s" />
+      <input name="displacementshader" type="displacementshader" nodename="disp" />
+    </surfacematerial>"#
+        )
+    };
+    let reported = |name: &str, height: &str| {
+        let loaded = load_inline(name, &graph(height)).expect("loads");
+        assert!(loaded.displacement.is_some() || !crate::config().displace);
+        loaded
+            .reported
+            .iter()
+            .any(|r| r.contains("geompropvalue in its displacement"))
+    };
+    assert_eq!(
+        reported("disp_primvar", "mask"),
+        crate::config().displace,
+        "the displacement reads one"
+    );
+    assert!(!reported("disp_plain", "one"), "only the surface reads one");
+}
+
 /// The JIT build of the displacement root matches the interpreter bit for
 /// bit, the pin every other MaterialX program carries.
 #[cfg(feature = "jit")]

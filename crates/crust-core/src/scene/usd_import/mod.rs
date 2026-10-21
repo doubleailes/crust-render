@@ -22,6 +22,7 @@
 //! | [`instancing`] | `PointInstancer` and native `instanceable` prototypes        |
 //! | [`lights`]     | every UsdLux light type, shaping and IES                     |
 //! | [`light_links`] | `collection:lightLink`: lights that illuminate nothing      |
+//! | [`passes`]     | the active `RenderPass`: `matte` holdouts, `cameraVisibility` |
 //! | [`materials`]  | binding resolution, the material cache, shader dispatch      |
 //! | [`preview`]    | `UsdPreviewSurface` + `UsdUVTexture` networks                |
 //! | [`mtlx_network`] | inline MaterialX (`ND_*`) networks → crust-mtlx documents  |
@@ -81,6 +82,7 @@ mod live;
 mod materials;
 mod mesh;
 mod mtlx_network;
+mod passes;
 mod preview;
 mod products;
 mod settings;
@@ -110,7 +112,10 @@ pub(crate) use live::{prim_frames, rebuild};
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{
     MeshArena, MeshPlace, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes, place_mesh_source,
+    with_constant_primvars,
 };
+use passes::ActivePass;
+pub use passes::PassSummary;
 use products::import_render_products;
 use settings::{
     CameraChoice, CameraPick, check_time_range, dome_light_camera_visibility,
@@ -267,6 +272,8 @@ struct ImportCtx<'a> {
     /// Receivers seen and lights whose `collection:lightLink` restricts
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
+    /// The active render pass, decided at dispatch (see [`passes`]).
+    pass: Option<ActivePass>,
     /// Each light met, by prim path: where it went in the light list and the
     /// geometry it emitted ([`crate::live::Provenance`]).
     light_origins: Vec<(String, LightOrigin)>,
@@ -290,6 +297,9 @@ struct ImportCtx<'a> {
 /// into `ctx`. Takes the stage by reference and keeps nothing borrowed
 /// from it, so the caller may drop the stage afterwards and walk another.
 fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx) {
+    if let Some(pass) = &mut ctx.pass {
+        pass.begin_chunk(stage);
+    }
     // The flag is "under an invisible ancestor", which hides everything but
     // cameras — see below. The timing is the parent's over the shutter
     // ([`TransformMotion`]).
@@ -357,8 +367,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                         span,
                         &mut ctx.caches,
                     );
-                    ctx.links
-                        .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
+                    saw(ctx, prim.path(), geoms_before..ctx.world.count(), 0..0);
                     continue;
                 }
                 _ => warning!(
@@ -387,8 +396,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 span,
                 &mut ctx.caches,
             );
-            ctx.links
-                .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
+            saw(ctx, prim.path(), geoms_before..ctx.world.count(), 0..0);
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
@@ -413,7 +421,14 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             ctx.caches.motion.drawn(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            emit_sphere(&mut ctx.world, &prim, &sphere, span, mat);
+            emit_sphere(
+                &mut ctx.world,
+                &prim,
+                &sphere,
+                span,
+                mat,
+                ctx.caches.working,
+            );
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             ctx.caches.motion.unmoved(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
@@ -433,6 +448,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 .caches
                 .implicit
                 .source(prim.path(), &shape, MeshPlace::World(&span.open));
+            let src = with_constant_primvars(src, &prim, &*bound.material, ctx.caches.working);
             let baked_moving = place_mesh_source(
                 &mut ctx.world,
                 &prim,
@@ -453,7 +469,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else {
             ctx.caches.unread.saw(&prim);
         }
-        ctx.links.saw(
+        saw(
+            ctx,
             prim.path(),
             geoms_before..ctx.world.count(),
             vols_before..ctx.volumes.len(),
@@ -463,6 +480,9 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         if ctx.lights.count() > lights_before {
             ctx.links
                 .light_added(ctx.index.as_ref(), stage, prim.path(), lights_before);
+            if let Some(pass) = &ctx.pass {
+                pass.light_added(prim.path(), lights_before, &mut ctx.lights);
+            }
             ctx.light_origins.push((
                 prim.path().to_string(),
                 LightOrigin {
@@ -480,6 +500,21 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             }
         }
     }
+}
+
+/// Records that the prim at `path` emitted the geometries `geoms` and the
+/// volume regions `vols`: for the light links, which judge them after the
+/// last chunk, and the active pass, which flags them now.
+fn saw(
+    ctx: &mut ImportCtx,
+    path: &sdf::Path,
+    geoms: std::ops::Range<usize>,
+    vols: std::ops::Range<usize>,
+) {
+    if let Some(pass) = &mut ctx.pass {
+        pass.saw(path, geoms.clone(), vols.clone(), &mut ctx.world);
+    }
+    ctx.links.saw(path, geoms, vols);
 }
 
 /// Emits `prim` if it is a UsdLux light — the one dispatch the traversal
@@ -740,6 +775,9 @@ struct ValidOptions {
     time: Option<f64>,
     camera: Option<sdf::Path>,
     working: Option<crate::color::Space>,
+    /// The active render pass ([`passes`]), checked to be a prim path; that
+    /// it is a `RenderPass` is checked on the stage, by [`read_index`].
+    pass: Option<sdf::Path>,
 }
 
 impl ValidOptions {
@@ -769,10 +807,23 @@ impl ValidOptions {
             Some(name) => Some(crate::color::working_space(name)?),
             None => None,
         };
+        let pass = match &options.pass {
+            Some(p) => Some(
+                sdf::path(p)
+                    .ok()
+                    .filter(|p| p.is_abs() && p.is_prim() && !p.is_abs_root())
+                    .ok_or_else(|| crate::Error::PassNotFound {
+                        path: p.clone(),
+                        why: "not an absolute prim path such as /Render/Passes/char".into(),
+                    })?,
+            ),
+            None => None,
+        };
         Ok(ValidOptions {
             time,
             camera: requested_camera,
             working: host_working,
+            pass,
         })
     }
 }
@@ -813,7 +864,13 @@ fn traverse_stage(
             // running totals are what say whether it is doing its job.
             let chunk_start = Instant::now();
             debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
-            let stage = open_stage(path, path_str, Some(chunk.clone()))?;
+            // The active pass's collections are read on each chunk's stage
+            // (see `passes`), so the pass prim is composed in every one.
+            let mask = match &ctx.pass {
+                Some(pass) => vec![chunk.clone(), pass.path().clone()],
+                None => vec![chunk.clone()],
+            };
+            let stage = open_stage_masked(path, path_str, Some(mask))?;
             if ctx.caches.meshes.subdiv.adaptive.is_some() {
                 count_placements(&stage, &mut ctx.caches);
             }
@@ -914,6 +971,7 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
                     refused_meters_per_unit: None,
                     shutter: ShutterOffsets::default(),
                     unhonoured_pixel_aspect: None,
+                    lens: None,
                 },
                 None,
             )
@@ -964,11 +1022,8 @@ pub(crate) fn load_scene(
     assets: &dyn AssetLoader,
     options: &crate::UsdImportOptions,
 ) -> Result<Scene, crate::Error> {
-    let ValidOptions {
-        time,
-        camera: requested_camera,
-        working: host_working,
-    } = ValidOptions::check(options)?;
+    let valid = ValidOptions::check(options)?;
+    let time = valid.time;
     let _time_scope = EvalTimeScope::enter(time);
     // Every coded warning this import raises, on this thread, is recorded
     // here and handed back on the scene.
@@ -1010,18 +1065,10 @@ pub(crate) fn load_scene(
         subdiv,
         projection,
         shutter,
-    } = read_index(
-        &index,
-        path,
-        path_str,
-        options,
-        &ValidOptions {
-            time,
-            camera: requested_camera,
-            working: host_working,
-        },
-    )?;
-    let render_settings = settings::render_settings_path(&index).map(|p| p.to_string());
+    } = read_index(&index, path, path_str, options, &valid)?;
+    let pass = valid.pass.as_ref();
+    let render_settings = settings::render_settings_path(&index, pass).map(|p| p.to_string());
+    let settings_prim = settings::read_settings_prim(&index, pass).map(|p| p.to_string());
     let chunks = stream_roots(&index);
     let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
         subtree_roots(&index)
@@ -1069,6 +1116,7 @@ pub(crate) fn load_scene(
         },
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
+        pass: pass.map(|p| ActivePass::read(&index, p)),
         light_origins: Vec::new(),
         settings,
         framing: products.framing,
@@ -1121,6 +1169,7 @@ pub(crate) fn load_scene(
     let RenderCamera {
         camera,
         exposure_scale,
+        lens,
         ..
     } = render_camera;
     let settings = apply_exposure(
@@ -1148,8 +1197,10 @@ pub(crate) fn load_scene(
             }
             None => false,
         });
+    let mut root_stack = (Vec::new(), None);
     if let Some(index) = ctx.index.take() {
         ctx.layers.extend(index.layer_identifiers());
+        root_stack = (index.layer_stack(), Some(invisible_overrides(&index)));
     }
     if !domes_seen_by_camera {
         debug!(
@@ -1220,6 +1271,15 @@ pub(crate) fn load_scene(
     scene.time = time;
     scene.warnings = warning_scope.finish();
     scene.layers = layer_files(&ctx.layers, path);
+    scene.pass = ctx.pass.as_ref().map(ActivePass::summary);
+    scene.settings_prim = settings_prim;
+    scene.source = crate::scene::Source {
+        lens,
+        depth_of_field: scene.camera.has_depth_of_field(),
+        motion_blur: scene.settings.motion_blur() && shutter.interval.is_some(),
+        layer_stack: stack_files(&root_stack.0, path),
+        invisible_overrides: root_stack.1,
+    };
     scene.provenance = Some(Provenance {
         materials: ctx.caches.materials.origins(&scene.world),
         material_reads: ctx.caches.materials.reads(),
@@ -1275,6 +1335,61 @@ fn layer_files(
     files.into_iter().collect()
 }
 
+/// The files of the root layer stack `identifiers`, in their order: each
+/// mapped as [`layer_files`] maps it and made absolute against the working
+/// directory (links not resolved), an anonymous layer left out, and a
+/// package met twice kept once, where it is strongest.
+fn stack_files(identifiers: &[String], root: &Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for id in identifiers {
+        let one = std::collections::BTreeSet::from([id.clone()]);
+        for file in layer_files(&one, root) {
+            // Absolute, so the same layer stamps the same path whatever the
+            // working directory and however the stage path was typed.
+            let file = std::path::absolute(&file).unwrap_or(file);
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The prims the strongest layer of `stage`'s root layer stack — its session
+/// layer when it has one, else its root layer — hides with an `over`: a
+/// `visibility` spec on an `over` prim whose default or a time sample is
+/// `invisible`. What a session or override layer hid of the scene beneath
+/// it; a prim the layer itself defines invisible is the scene's own.
+pub(super) fn invisible_overrides(stage: &Stage) -> u32 {
+    let strongest = stage.session_layer().unwrap_or_else(|| stage.root_layer());
+    let data = strongest.data();
+    let invisible = |v: &sdf::Value| matches!(v, sdf::Value::Token(t) if t.as_str() == "invisible");
+    let mut count = 0u32;
+    for path in data.spec_paths() {
+        if !path.is_property() || !path.as_str().ends_with(".visibility") {
+            continue;
+        }
+        let prim = path.prim_path();
+        let is_over = matches!(
+            data.try_field(&prim, "specifier"),
+            Ok(Some(v)) if matches!(&*v, sdf::Value::Specifier(sdf::Specifier::Over))
+        );
+        if !is_over {
+            continue;
+        }
+        let default = matches!(data.try_field(&path, "default"), Ok(Some(v)) if invisible(&v));
+        let sampled = matches!(
+            data.try_field(&path, "timeSamples"),
+            Ok(Some(v)) if matches!(&*v, sdf::Value::TimeSamples(samples)
+                if samples.iter().any(|(_, v)| invisible(v)))
+        );
+        if default || sampled {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
 /// What the import reads before it traverses anything: the index stage's
 /// render settings and products, and the stage-wide choices made from them.
 /// The settings carry the products' resolution, region and motion blur, and
@@ -1303,11 +1418,18 @@ fn read_index(
     options: &crate::UsdImportOptions,
     valid: &ValidOptions,
 ) -> Result<IndexRead, crate::Error> {
+    // The active pass first: it may choose the settings prim every read
+    // below goes through.
+    let pass = valid.pass.as_ref();
+    if let Some(p) = pass {
+        settings::check_pass(index, p)?;
+        debug!("Rendering pass {p}");
+    }
     // Render settings come first — the camera importer needs the aspect ratio.
-    let mut settings = import_render_settings(index);
+    let mut settings = import_render_settings(index, pass);
     // The products the render writes. The first one's camera and resolution
     // are the render's: the settings' own unless that product overrides them.
-    let products = import_render_products(index);
+    let products = import_render_products(index, pass);
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }
@@ -1325,26 +1447,26 @@ fn read_index(
     settings = settings
         .with_motion_blur(products.motion_blur)
         .with_depth_of_field(products.depth_of_field);
-    let domes_seen_by_camera = dome_light_camera_visibility(index);
-    let exposure_compensation = enable_exposure_compensation(index);
+    let domes_seen_by_camera = dome_light_camera_visibility(index, pass);
+    let exposure_compensation = enable_exposure_compensation(index, pass);
     // The working colour space, before any colour is read: every texture
     // request and authored colour is converted into it.
     let working = valid
         .working
-        .unwrap_or_else(|| render_settings_color_space(index));
+        .unwrap_or_else(|| render_settings_color_space(index, pass));
     debug!("Rendering in {} ({})", working.label(), working.name());
     // Geometry, not tracer, settings: every mesh whose scheme is not `none`
     // is refined to this one level, so it must be known before the traversal.
     let subdiv_level = resolve_subdiv_level(
         options.subdivision_level,
-        render_settings_subdiv_level(index),
+        render_settings_subdiv_level(index, pass),
     );
     debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
     // Which camera to render through: the host's explicit choice, else the
     // stage's own `RenderSettings.camera`. Decided here, on the index stage,
     // because the traversal needs it before it meets any camera.
     let wanted_camera =
-        settings::wanted_camera(valid.camera.clone(), products.camera.clone(), index);
+        settings::wanted_camera(valid.camera.clone(), products.camera.clone(), index, pass);
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
     }
@@ -1360,8 +1482,14 @@ fn read_index(
     if let Some((open, close)) = shutter.interval {
         debug!("Motion is measured over time codes {open} .. {close}");
     }
-    let (subdiv, projection) =
-        subdiv_policy(index, options, subdiv_level, wanted_camera.as_ref(), camera);
+    let (subdiv, projection) = subdiv_policy(
+        index,
+        options,
+        pass,
+        subdiv_level,
+        wanted_camera.as_ref(),
+        camera,
+    );
     if let Some(t) = valid.time {
         // The sampler's frame seed follows the frame being rendered, so an
         // image sequence gets independent noise per frame instead of one
@@ -1616,13 +1744,14 @@ fn check_shutter_camera(
 fn subdiv_policy(
     index: &Stage,
     options: &crate::UsdImportOptions,
+    pass: Option<&sdf::Path>,
     subdiv_level: u32,
     wanted_camera: Option<&CameraChoice>,
     camera: Option<camera::ScreenProjection>,
 ) -> (SubdivPolicy, Option<ScreenProjection>) {
     let target = resolve_subdiv_edge_length(
         options.subdivision_edge_length,
-        render_settings_subdiv_edge_length(index),
+        render_settings_subdiv_edge_length(index, pass),
     )
     .filter(|_| crate::config().subdiv);
     let Some(choice) = wanted_camera else {
@@ -1658,7 +1787,7 @@ fn subdiv_policy(
     };
     let max = resolve_adaptive_max_level(
         options.subdivision_level,
-        render_settings_subdiv_level(index),
+        render_settings_subdiv_level(index, pass),
     );
     info!(
         "Adaptive subdivision: unshared cage edges refined to at most {target} px through \
@@ -1836,7 +1965,10 @@ impl<'a> ImportCaches<'a> {
     ) -> Self {
         ImportCaches {
             materials: MaterialCache::default(),
-            meshes: MeshArena::new(subdiv),
+            meshes: MeshArena {
+                working,
+                ..MeshArena::new(subdiv)
+            },
             protos: HashMap::new(),
             groups: HashMap::new(),
             placements: HashMap::new(),

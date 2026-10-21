@@ -55,7 +55,8 @@ import MaterialX.PyMaterialXGenShader as mx_gen
 CATEGORIES = [
     "constant", "add", "subtract", "multiply", "divide", "power", "min", "max",
     "modulo", "absval", "ln", "exp", "sin", "cos", "asin", "acos", "sqrt",
-    "sign", "floor", "ceil", "normalize", "luminance", "dotproduct", "mix",
+    "sign", "floor", "ceil", "normalize", "magnitude", "luminance", "dotproduct",
+    "mix",
     "clamp", "contrast", "remap", "invert", "smoothstep", "convert", "extract",
     "combine2", "combine3", "normalmap", "artistic_ior", "rgbtohsv", "hsvtorgb",
     "ifgreater", "ifgreatereq", "ifequal", "cellnoise2d", "randomfloat", "randomcolor",

@@ -11,10 +11,11 @@
 //! value) do not. On the beauty (`R`, `G`, `B` at the image's size, in both
 //! files) it adds the error metrics, against `a` as the reference. From the
 //! two files' sampling stamps ([`crate::stamp`]) it judges whether the pixels
-//! can be compared at all — which never changes the verdict on the pixels.
+//! can be compared at all — which never changes the verdict on the pixels —
+//! and lists every stamped value that differs.
 
 use crate::report::{Report, finite_or_null};
-use crate::stamp::StampValue;
+use crate::stamp::{StampValue, parse_layer_stack};
 use serde::{Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -184,7 +185,85 @@ pub enum ComparabilityStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct Comparability {
     pub status: ComparabilityStatus,
+    /// The differences that change what can be compared, and why.
     pub notes: Vec<String>,
+    /// Every `crust:*` attribute whose value differs between the stamps, by
+    /// name; empty when a file carries no stamp. A difference without a note
+    /// (`crust:version`, a layer's content) is listed and leaves the status
+    /// alone.
+    pub differences: Vec<StampDifference>,
+}
+
+/// One stamped value that differs: its value in each file, `null` where the
+/// file does not record it.
+#[derive(Debug, Clone, Serialize)]
+pub struct StampDifference {
+    pub name: String,
+    pub a: Option<StampJson>,
+    pub b: Option<StampJson>,
+}
+
+impl Comparability {
+    /// The stamp differences as text, one per line: `name: a vs b`, and the
+    /// layer stack layer by layer — the layers in one file only, and those
+    /// whose content differs.
+    pub fn differences_text(&self) -> Vec<String> {
+        let show = |v: &Option<StampJson>| {
+            v.as_ref()
+                .map_or_else(|| "(absent)".to_owned(), |v| v.0.to_string())
+        };
+        let mut out = Vec::new();
+        for d in &self.differences {
+            if d.name != "crust:layerStack" {
+                out.push(format!("{}: {} vs {}", d.name, show(&d.a), show(&d.b)));
+                continue;
+            }
+            let text = |v: &Option<StampJson>| match v {
+                Some(StampJson(StampValue::Text(t))) => t.clone(),
+                _ => String::new(),
+            };
+            let (ta, tb) = (text(&d.a), text(&d.b));
+            let (la, lb) = (parse_layer_stack(&ta), parse_layer_stack(&tb));
+            fn find<'a>(stack: &'a [(String, String)], path: &str) -> Option<&'a str> {
+                stack
+                    .iter()
+                    .find(|(_, p)| p == path)
+                    .map(|(h, _)| h.as_str())
+            }
+            for (hash, path) in &la {
+                match find(&lb, path) {
+                    None => out.push(format!("crust:layerStack: {path} only in a")),
+                    // `-`: the bytes were not read, so nothing says the
+                    // content changed.
+                    Some(other) if other != hash && (other == "-" || hash == "-") => {
+                        let side = if hash == "-" { "a" } else { "b" };
+                        out.push(format!(
+                            "crust:layerStack: {path} content not compared (unread in {side})"
+                        ))
+                    }
+                    Some(other) if other != hash => {
+                        out.push(format!("crust:layerStack: {path} content differs"))
+                    }
+                    Some(_) => {}
+                }
+            }
+            for (_, path) in &lb {
+                if find(&la, path).is_none() {
+                    out.push(format!("crust:layerStack: {path} only in b"));
+                }
+            }
+            let order = |s: &[(String, String)], other: &[(String, String)]| -> Vec<String> {
+                s.iter()
+                    .filter(|(_, p)| find(other, p).is_some())
+                    .map(|(_, p)| p.clone())
+                    .collect()
+            };
+            if order(&la, &lb) != order(&lb, &la) {
+                out.push("crust:layerStack: the shared layers are in another order".into());
+            }
+        }
+        out
+    }
 }
 
 /// `crust diff`'s answer: the body of `crust-diff/1`, and what its text
@@ -524,6 +603,7 @@ pub fn comparability(a: &Stamp, b: &Stamp) -> Comparability {
         return Comparability {
             status: ComparabilityStatus::Unknown,
             notes,
+            differences: Vec::new(),
         };
     }
     let show = |v: Option<&StampValue>| v.map_or_else(|| "(absent)".to_owned(), |v| v.to_string());
@@ -587,6 +667,8 @@ pub fn comparability(a: &Stamp, b: &Stamp) -> Comparability {
         };
         notes.push(format!("colorInteropID differs: {} vs {}", id(a), id(b)));
     }
+    lens_notes(a, b, &mut notes);
+    layer_notes(a, b, &mut notes);
     Comparability {
         status: if notes.is_empty() {
             ComparabilityStatus::Ok
@@ -594,6 +676,139 @@ pub fn comparability(a: &Stamp, b: &Stamp) -> Comparability {
             ComparabilityStatus::Warn
         },
         notes,
+        differences: differences(a, b),
+    }
+}
+
+/// Every attribute either stamp records with another value in the other, by
+/// name.
+fn differences(a: &Stamp, b: &Stamp) -> Vec<StampDifference> {
+    let mut names: Vec<&String> = a.attributes.keys().chain(b.attributes.keys()).collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter(|n| a.get(n) != b.get(n))
+        .map(|n| StampDifference {
+            name: n.clone(),
+            a: a.get(n).cloned().map(StampJson),
+            b: b.get(n).cloned().map(StampJson),
+        })
+        .collect()
+}
+
+/// The lens values that decide what each pixel sees: a field of view, an
+/// aperture and how it is conformed to the image.
+const FRAMING: [&str; 4] = [
+    "crust:focalLength",
+    "crust:horizontalAperture",
+    "crust:verticalAperture",
+    "crust:aspectRatioConformPolicy",
+];
+
+/// Notes on the lens and the blurs: depth of field or motion blur in one
+/// file only, another blur, another framing. Each is judged only when both
+/// files record it: a file written before they were stamped warns of none.
+fn lens_notes(a: &Stamp, b: &Stamp, notes: &mut Vec<String>) {
+    let show = |v: Option<&StampValue>| v.map_or_else(|| "(absent)".to_owned(), |v| v.to_string());
+    let flag = |s: &Stamp, name: &str| s.int(name).map(|v| v != 0);
+    // A side's depth of field, as the note describes it.
+    let lens = |s: &Stamp| match flag(s, "crust:depthOfField") {
+        Some(true) => match (s.float("crust:fStop"), s.float("crust:focusDistance")) {
+            (Some(f), Some(d)) => format!("fStop {f}, focus {d}"),
+            _ => "depth of field".to_owned(),
+        },
+        _ => "no depth of field".to_owned(),
+    };
+    match (flag(a, "crust:depthOfField"), flag(b, "crust:depthOfField")) {
+        (Some(da), Some(db)) if da != db => notes.push(format!(
+            "depth of field differs (a: {}; b: {}): out-of-focus regions differ by their blur, \
+             not by the change under test; render both with the same lens (or \
+             disableDepthOfField on both)",
+            lens(a),
+            lens(b)
+        )),
+        (Some(true), Some(true))
+            if a.get("crust:fStop") != b.get("crust:fStop")
+                || a.get("crust:focusDistance") != b.get("crust:focusDistance") =>
+        {
+            notes.push(format!(
+                "the depth of field differs (a: {}; b: {}): out-of-focus regions are blurred \
+                 differently",
+                lens(a),
+                lens(b)
+            ))
+        }
+        _ => {}
+    }
+    match (flag(a, "crust:motionBlur"), flag(b, "crust:motionBlur")) {
+        (Some(ma), Some(mb)) if ma != mb => {
+            let on = |m: bool| if m { "on" } else { "off" };
+            notes.push(format!(
+                "motion blur differs (a: {}; b: {}): moving geometry is blurred in one file only",
+                on(ma),
+                on(mb)
+            ));
+        }
+        _ => {}
+    }
+    let framing: Vec<String> = FRAMING
+        .iter()
+        .filter(|n| a.get(n).is_some() && b.get(n).is_some() && a.get(n) != b.get(n))
+        .map(|n| format!("{n} {} vs {}", show(a.get(n)), show(b.get(n))))
+        .collect();
+    if !framing.is_empty() {
+        notes.push(format!(
+            "the lens frames the image differently ({}): a pixel does not see the same point \
+             in both",
+            framing.join(", ")
+        ));
+    }
+}
+
+/// Notes on what the stage was composed from: a layer in one file's stack
+/// only (a session or override layer on one side), and visibility overrides
+/// that hide another number of prims. A layer whose content alone differs is
+/// listed with the differences but has no note: an edited layer is often the
+/// change under test.
+fn layer_notes(a: &Stamp, b: &Stamp, notes: &mut Vec<String>) {
+    let text = |s: &Stamp| match s.get("crust:layerStack") {
+        Some(StampValue::Text(t)) => Some(t.clone()),
+        _ => None,
+    };
+    if let (Some(ta), Some(tb)) = (text(a), text(b)) {
+        let paths =
+            |t: &str| -> Vec<String> { parse_layer_stack(t).into_iter().map(|(_, p)| p).collect() };
+        let (pa, pb) = (paths(&ta), paths(&tb));
+        let only = |x: &[String], y: &[String]| -> Vec<String> {
+            x.iter().filter(|p| !y.contains(p)).cloned().collect()
+        };
+        let (oa, ob) = (only(&pa, &pb), only(&pb, &pa));
+        if !oa.is_empty() || !ob.is_empty() {
+            let side = |o: &[String]| {
+                if o.is_empty() {
+                    "none".to_owned()
+                } else {
+                    o.join(", ")
+                }
+            };
+            notes.push(format!(
+                "the layer stacks differ (only in a: {}; only in b: {}): the stage composed \
+                 other opinions, so the scene itself may differ",
+                side(&oa),
+                side(&ob)
+            ));
+        }
+    }
+    if let (Some(ia), Some(ib)) = (
+        a.int("crust:invisibleOverrides"),
+        b.int("crust:invisibleOverrides"),
+    ) && ia != ib
+    {
+        notes.push(format!(
+            "crust:invisibleOverrides differs ({ia} vs {ib}): a layer's visibility overrides \
+             hide prims in one file that the other may show"
+        ));
     }
 }
 
@@ -855,9 +1070,179 @@ mod tests {
         assert_eq!(comparability(&on, &on).status, ComparabilityStatus::Warn);
 
         let other_build = with(s16(), "crust:version", Text("0.7.0".into()));
+        let c = comparability(&base, &other_build);
+        assert_eq!(c.status, ComparabilityStatus::Ok);
+        // ... but the version is listed with the differences.
+        assert_eq!(c.differences_text(), ["crust:version: 0.6.0 vs 0.7.0"]);
+    }
+
+    /// A shot render's stamp: a pinhole lens through one layer.
+    fn shot() -> Vec<(&'static str, StampValue)> {
+        use StampValue::*;
+        let mut s = s16();
+        s.extend([
+            ("crust:focalLength", Float(50.0)),
+            ("crust:horizontalAperture", Float(20.955)),
+            ("crust:verticalAperture", Float(15.2908)),
+            (
+                "crust:aspectRatioConformPolicy",
+                Text("expandAperture".into()),
+            ),
+            ("crust:fStop", Float(0.0)),
+            ("crust:focusDistance", Float(10.0)),
+            ("crust:depthOfField", Int(0)),
+            ("crust:motionBlur", Int(0)),
+            (
+                "crust:layerStack",
+                Text("00000000000000aa /s/shot.usda".into()),
+            ),
+            ("crust:invisibleOverrides", Int(0)),
+        ]);
+        s
+    }
+
+    /// Depth of field on one side only is named with both lenses, as the
+    /// pass that inherited it would have needed; so is another blur.
+    #[test]
+    fn depth_of_field_on_one_side_warns_with_both_lenses() {
+        use StampValue::*;
+        let sharp = stamp(&shot());
+        let mut blurred = shot();
+        blurred.retain(|(n, _)| {
+            !matches!(
+                *n,
+                "crust:fStop" | "crust:focusDistance" | "crust:depthOfField"
+            )
+        });
+        blurred.extend([
+            ("crust:fStop", Float(0.02)),
+            ("crust:focusDistance", Float(360.0)),
+            ("crust:depthOfField", Int(1)),
+        ]);
+        let c = comparability(&stamp(&blurred), &sharp);
+        assert_eq!(c.status, ComparabilityStatus::Warn);
+        assert!(
+            c.notes.iter().any(|n| n.starts_with(
+                "depth of field differs (a: fStop 0.02, focus 360; b: no depth of field)"
+            )),
+            "{:?}",
+            c.notes
+        );
+        let names: Vec<&str> = c.differences.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(
-            comparability(&base, &other_build).status,
-            ComparabilityStatus::Ok
+            names,
+            ["crust:depthOfField", "crust:fStop", "crust:focusDistance"]
+        );
+        // Both blurred, at another f-stop: the blur differs.
+        let wider = {
+            let mut s = blurred.clone();
+            s.retain(|(n, _)| *n != "crust:fStop");
+            s.push(("crust:fStop", Float(2.8)));
+            stamp(&s)
+        };
+        let c = comparability(&stamp(&blurred), &wider);
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.starts_with("the depth of field differs")),
+            "{:?}",
+            c.notes
+        );
+        // Both pinholes, at another f-stop: listed, no note.
+        let c = comparability(&sharp, &with(shot(), "crust:fStop", Float(2.8)));
+        assert_eq!(c.status, ComparabilityStatus::Ok, "{:?}", c.notes);
+        assert_eq!(c.differences_text(), ["crust:fStop: 0 vs 2.8"]);
+    }
+
+    #[test]
+    fn motion_blur_and_framing_warn() {
+        use StampValue::*;
+        let base = stamp(&shot());
+        let c = comparability(&base, &with(shot(), "crust:motionBlur", Int(1)));
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.starts_with("motion blur differs (a: off; b: on)")),
+            "{:?}",
+            c.notes
+        );
+        for (k, v) in [
+            ("crust:focalLength", Float(35.0)),
+            ("crust:verticalAperture", Float(10.0)),
+            (
+                "crust:aspectRatioConformPolicy",
+                Text("cropAperture".into()),
+            ),
+        ] {
+            let c = comparability(&base, &with(shot(), k, v));
+            assert_eq!(c.status, ComparabilityStatus::Warn, "{k}");
+            assert!(
+                c.notes.iter().any(
+                    |n| n.starts_with("the lens frames the image differently") && n.contains(k)
+                ),
+                "{k}: {:?}",
+                c.notes
+            );
+        }
+        // A file stamped before the lens was: nothing to judge, only listed.
+        let c = comparability(&stamp(&s16()), &base);
+        assert_eq!(c.status, ComparabilityStatus::Ok, "{:?}", c.notes);
+        assert!(
+            c.differences
+                .iter()
+                .any(|d| d.name == "crust:fStop" && d.a.is_none())
+        );
+    }
+
+    /// A layer in one stack only, and visibility overrides, warn; a layer
+    /// whose content changed is listed only.
+    #[test]
+    fn the_layer_stack_and_its_overrides() {
+        use StampValue::*;
+        let base = stamp(&shot());
+        let session = with(
+            shot(),
+            "crust:layerStack",
+            Text("00000000000000bb /s/session.usda\n00000000000000aa /s/shot.usda".into()),
+        );
+        let c = comparability(&base, &session);
+        assert!(
+            c.notes.iter().any(|n| n.starts_with(
+                "the layer stacks differ (only in a: none; only in b: /s/session.usda)"
+            )),
+            "{:?}",
+            c.notes
+        );
+        assert_eq!(
+            c.differences_text(),
+            ["crust:layerStack: /s/session.usda only in b"]
+        );
+        let edited = with(
+            shot(),
+            "crust:layerStack",
+            Text("00000000000000cc /s/shot.usda".into()),
+        );
+        let c = comparability(&base, &edited);
+        assert_eq!(c.status, ComparabilityStatus::Ok, "{:?}", c.notes);
+        assert_eq!(
+            c.differences_text(),
+            ["crust:layerStack: /s/shot.usda content differs"]
+        );
+        // A layer unread on one side is not called edited.
+        let unread = with(shot(), "crust:layerStack", Text("- /s/shot.usda".into()));
+        let c = comparability(&base, &unread);
+        assert_eq!(
+            c.differences_text(),
+            ["crust:layerStack: /s/shot.usda content not compared (unread in b)"]
+        );
+        let hidden = with(shot(), "crust:invisibleOverrides", Int(4));
+        let c = comparability(&base, &hidden);
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.starts_with("crust:invisibleOverrides differs (0 vs 4)")),
+            "{:?}",
+            c.notes
         );
     }
 

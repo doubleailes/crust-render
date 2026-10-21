@@ -300,6 +300,11 @@ pub struct SettingsUpdate {
     pub camera: Camera,
     /// The products the stage asks for.
     pub aovs: crate::AovRequest,
+    /// What the stamp records of the re-read camera and stage
+    /// ([`Scene::source`]); the layer stack is the session's, unchanged.
+    pub(crate) lens: Option<crate::scene::Lens>,
+    pub(crate) motion_blur: bool,
+    pub(crate) invisible_overrides: u32,
 }
 
 /// One rebuilt light: its new light-list entry and the materials of the
@@ -367,6 +372,10 @@ impl Update {
             scene.settings = s.settings;
             scene.camera = s.camera;
             scene.aovs = s.aovs;
+            scene.source.lens = s.lens;
+            scene.source.depth_of_field = scene.camera.has_depth_of_field();
+            scene.source.motion_blur = s.motion_blur;
+            scene.source.invisible_overrides = Some(s.invisible_overrides);
             scene.stats.image = (&scene.settings).into();
         }
         Ok(())

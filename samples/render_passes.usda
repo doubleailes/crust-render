@@ -1,0 +1,168 @@
+#usda 1.0
+(
+    doc = """Render passes: one stage, two UsdRenderPass prims, no asset edits.
+
+- /Render/Passes/char renders the character. Its collection:matte holds out
+  the props, the set and the sky: where the crate stands in front of the
+  hero, and wherever the camera sees the floor or the sky, the pass has zero
+  colour and zero alpha. The crate still shadows the hero, and the hero still
+  shows in the mirror ball. Its renderSource is /Render/charSettings, whose
+  product writes char.exr.
+- /Render/Passes/props renders everything else. Its collection:matte holds
+  out the character, so the hero is a hole there; its shadow on the floor
+  stays. It reads the stage's /Render/settings, whose product writes
+  props.exr.
+
+Each sample of a frame ends up in exactly one of the two passes, so adding
+them (plus) gives back the render with no pass named. Rendered without
+--pass, the stage is a plain render of the whole scene."""
+    defaultPrim = "World"
+    renderSettingsPrimPath = "/Render/settings"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 30
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.6, 7)
+        float xformOp:rotateX = -8
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Xform "Set"
+    {
+        def Mesh "Floor"
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-8, 0, -8), (8, 0, -8), (8, 0, 8), (-8, 0, 8)]
+        }
+    }
+
+    def Xform "Chars"
+    {
+        def Sphere "Hero"
+        {
+            double radius = 0.9
+            double3 xformOp:translate = (0, 0.9, -0.5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Xform "Props"
+    {
+        # Stands in front of the hero's lower left.
+        def Cube "Crate"
+        {
+            double size = 0.8
+            double3 xformOp:translate = (-0.7, 0.4, 1.2)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Sphere "MirrorBall" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            double radius = 0.6
+            rel material:binding = </World/Looks/Mirror>
+            double3 xformOp:translate = (1.8, 0.6, 0.3)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Mirror"
+        {
+            token outputs:surface.connect = </World/Looks/Mirror/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.9, 0.9)
+                float inputs:metallic = 1
+                float inputs:roughness = 0.05
+                token outputs:surface
+            }
+        }
+    }
+
+    def SphereLight "Key"
+    {
+        float inputs:radius = 0.4
+        float inputs:intensity = 60
+        color3f inputs:color = (1, 0.9, 0.75)
+        double3 xformOp:translate = (-3, 5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.4
+        color3f inputs:color = (0.6, 0.75, 1)
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (160, 90)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 4
+        rel camera = </World/Cam>
+        rel products = </Render/Products/props>
+    }
+
+    def RenderSettings "charSettings"
+    {
+        int2 resolution = (160, 90)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 4
+        rel camera = </World/Cam>
+        rel products = </Render/Products/char>
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "props"
+        {
+            token productName = "props.exr"
+            rel orderedVars = </Render/Vars/color>
+        }
+
+        def RenderProduct "char"
+        {
+            token productName = "char.exr"
+            rel orderedVars = </Render/Vars/color>
+        }
+    }
+
+    def Scope "Vars"
+    {
+        # The colour with its alpha: premultiplied RGBA, ready to composite.
+        def RenderVar "color"
+        {
+            uniform token dataType = "color4f"
+            uniform string sourceName = "color"
+        }
+    }
+
+    def Scope "Passes"
+    {
+        def RenderPass "char"
+        {
+            rel renderSource = </Render/charSettings>
+            uniform bool collection:matte:includeRoot = 0
+            prepend rel collection:matte:includes = [</World/Props>, </World/Set>, </World/Sky>]
+        }
+
+        def RenderPass "props"
+        {
+            prepend rel collection:matte:includes = </World/Chars>
+        }
+    }
+}

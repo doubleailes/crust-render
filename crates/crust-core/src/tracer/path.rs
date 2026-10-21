@@ -1521,6 +1521,11 @@ fn point_sampled<'w>(rec: &HitRecord<'w>) -> HitRecord<'w> {
 /// count) and spends the same crossing budget. Shadow rays never meet one, so
 /// this has no shadow-side twin: their masks leave it out.
 ///
+/// `holdouts` is set on a camera segment in a world with holdouts: there a
+/// holdout's presence is its opacity alone, so a holdout with straight
+/// transmission (a glass matte) is never passed for it, and the camera ray
+/// stops there and ends with nothing instead of seeing through it.
+///
 /// Its shadow-side twin is [`cutout_through`].
 #[cold]
 #[inline(never)]
@@ -1531,13 +1536,14 @@ fn pass_cutouts<'w, S: SamplerImpl>(
     vertex: Sampler<S>,
     thin: &mut ThinWalls,
     stats: &mut RayStats,
+    holdouts: bool,
 ) -> bool {
     let emitters = world.has_transparent_emitters();
     if emitters {
         thin.crossed.clear();
     }
     if world.has_straight_transmission() {
-        return pass_walls(world, ray, hit, vertex, thin, stats);
+        return pass_walls(world, ray, hit, vertex, thin, stats, holdouts);
     }
     // Cutouts alone: the loop as it always was.
     let mut rng = None;
@@ -1606,6 +1612,7 @@ fn pass_walls<'w, S: SamplerImpl>(
     vertex: Sampler<S>,
     thin: &mut ThinWalls,
     stats: &mut RayStats,
+    holdouts: bool,
 ) -> bool {
     thin.passes.clear();
     thin.kinds.clear();
@@ -1637,7 +1644,10 @@ fn pass_walls<'w, S: SamplerImpl>(
             continue;
         }
         let cutout = h.mat.has_cutout();
-        let straight = h.mat.has_straight_transmission();
+        // A holdout on the camera segment is met or passed by its presence
+        // alone (see `pass_cutouts`).
+        let straight =
+            h.mat.has_straight_transmission() && !(holdouts && world.is_holdout(h.geom_id));
         if !(cutout || straight) {
             break;
         }
@@ -2766,7 +2776,7 @@ pub(super) fn trace_path<
                 let mut walls = false;
                 let mut crossed = false;
                 if world.has_bounce_pass_throughs() {
-                    walls = pass_cutouts(world, &ray, &mut hit, v, thin, stats);
+                    walls = pass_cutouts(world, &ray, &mut hit, v, thin, stats, false);
                     crossed = world.has_transparent_emitters() && !thin.crossed.is_empty();
                 }
                 // Through any medium boundaries, measuring what their
@@ -2866,7 +2876,8 @@ pub(super) fn trace_path<
         let mut walls = false;
         let mut crossed = false;
         if world.has_bounce_pass_throughs() && !exiting {
-            walls = pass_cutouts(world, &ray, &mut hit_opt, v, thin, stats);
+            let holdouts = world.has_holdouts() && records.is_empty();
+            walls = pass_cutouts(world, &ray, &mut hit_opt, v, thin, stats, holdouts);
             crossed = world.has_transparent_emitters() && !thin.crossed.is_empty();
         }
         // Cutouts and thin walls passed on the way here: `Ts` events before
@@ -3289,6 +3300,41 @@ pub(super) fn trace_path<
             }
             break;
         };
+        // === Holdout ===
+        // A camera ray that reaches a holdout (the active render pass's
+        // `matte`), past the cutouts it passed and the hidden lights it
+        // crossed, ends there with nothing: no emission, no NEE, no scatter,
+        // and the film records an escape (alpha 0, every data AOV clear) —
+        // unless a thin wall was passed first, which is then the first hit.
+        // A scatter before the surface never gets here, so fog in front of a
+        // holdout keeps its in-scatter, and what the segment's volumes emitted
+        // up to it stays, as an escape keeps it: an escape with no background.
+        // Secondary rays meet it as geometry.
+        // `has_holdouts` first: a world without one pays this one branch.
+        if world.has_holdouts() && records.is_empty() && world.is_holdout(hit.geom_id) {
+            stats.ended_escaped += 1;
+            terminal = vol_emit;
+            if AOV {
+                route.terminal_arrival(arrival_ts);
+                if routing.is_some() {
+                    route.escape_begin(vol_emit, vol_tr, Vec3A::ZERO);
+                }
+                *first = first_wall(
+                    thin,
+                    walls,
+                    hit.rec.t,
+                    world,
+                    motion_on,
+                    primvars_on,
+                    ray.time(),
+                )
+                .unwrap_or(FirstHit::Escaped);
+                if albedo_on {
+                    route.albedo_at(Vec3A::ZERO);
+                }
+            }
+            break;
+        }
         if boundaries && hit.mat.is_medium_boundary() {
             // === Medium boundary: crossed, not shaded ===
             // No vertex and no depth: the stretch up to here is carried into

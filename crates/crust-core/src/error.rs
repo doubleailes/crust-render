@@ -33,6 +33,13 @@ pub enum Error {
         path: String,
         available: Vec<String>,
     },
+    /// The requested render pass
+    /// ([`UsdImportOptions::pass`](crate::UsdImportOptions::pass)) is not an
+    /// absolute prim path, or names no `RenderPass` prim on the stage. An error
+    /// rather than a fallback, like a missing camera: rendering a pass without
+    /// its holdouts writes a plate that looks right and composites wrong.
+    /// Carries the path and why.
+    PassNotFound { path: String, why: String },
     /// The host's working colour space
     /// ([`UsdImportOptions::working_space`](crate::UsdImportOptions::working_space),
     /// [`color::working_space`](crate::color::working_space)) is not a
@@ -91,6 +98,9 @@ impl fmt::Display for Error {
                 "region {region} holds no pixel of the {width}x{height} frame"
             ),
             Error::Inspection(refusal) => write!(f, "{refusal}"),
+            Error::PassNotFound { path, why } => {
+                write!(f, "render pass {path}: {why}")
+            }
             Error::CameraNotFound { path, available } => {
                 write!(f, "no UsdGeomCamera at {path} on this stage")?;
                 if available.is_empty() {

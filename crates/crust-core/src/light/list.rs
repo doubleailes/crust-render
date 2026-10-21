@@ -985,6 +985,18 @@ impl LightList {
         self.backdrops.clear();
     }
 
+    /// Hides the light at infinity at `index` from the camera, as
+    /// [`LightList::hide_infinite_from_camera`] hides all of them: the active
+    /// render pass leaves it out of `cameraVisibility`. How it illuminates is
+    /// unchanged. Nothing for a finite light, whose camera visibility is its
+    /// geometry's mask.
+    pub fn hide_from_camera(&mut self, index: usize) {
+        if let Some(at) = self.infinite.iter().position(|&i| i as usize == index) {
+            let m = &mut self.infinite_masks[at];
+            *m = RayMask(m.0 & !MASK_CAMERA.0);
+        }
+    }
+
     /// Adds a backdrop: a light at infinity that illuminates nothing and
     /// that escaping camera rays see in front of every other light at
     /// infinity. Not a selectable light — see the `backdrops` field.

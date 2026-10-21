@@ -479,3 +479,54 @@ def Xform "geo"
     .collect();
     assert_eq!(bound, want);
 }
+
+/// The `cli` spec's "Listing the passes of a stage": every `RenderPass` not
+/// under an inactive ancestor, in namespace order, with the settings its
+/// `renderSource` names.
+#[test]
+fn passes_are_listed_in_namespace_order() {
+    let sample = sample("render_passes.usda");
+    assert_eq!(
+        Scene::list_usd(&sample, ListKind::Pass).expect("lists"),
+        ["/Render/Passes/char", "/Render/Passes/props"]
+    );
+    let path = stage(
+        "passes.usda",
+        r#"#usda 1.0
+def Scope "Render"
+{
+    def RenderPass "b"
+    {
+        rel renderSource = </Render/settings>
+    }
+    def RenderPass "a"
+    {
+    }
+    def Scope "Off" (active = false)
+    {
+        def RenderPass "c"
+        {
+        }
+    }
+    def RenderSettings "settings"
+    {
+    }
+}
+"#,
+    );
+    let passes: Vec<crust_core::PassRecord> = records(&path, ListKind::Pass, None)
+        .into_iter()
+        .map(|r| match r {
+            ListRecord::Pass(p) => p,
+            other => panic!("not a pass: {other:?}"),
+        })
+        .collect();
+    let listed: Vec<(&str, Option<&str>)> = passes
+        .iter()
+        .map(|p| (p.path.as_str(), p.render_source.as_deref()))
+        .collect();
+    assert_eq!(
+        listed,
+        [("/Render/b", Some("/Render/settings")), ("/Render/a", None)]
+    );
+}

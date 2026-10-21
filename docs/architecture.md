@@ -178,7 +178,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 |------|---------|
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/usd_import/implicit.rs` (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1` variants tessellated as OpenUSD's GeomUtil does, pinned point for point by `tests/geomutil_oracle.rs`, their radial count chosen from the screen when a camera is named); `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
-| geometry bridge | `rt_world.rs` (`World`, side tables), `strands.rs` (`StrandTable`, `CurveHit`), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
+| geometry bridge | `rt_world.rs` (`World`, side tables), `strands.rs` (`StrandTable`, `CurveHit`), `primvars.rs` (`PrimvarTable`, `MeshHit`), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
 | AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` (and `var_of_mean`, the one variance estimator), `region.rs` (`PixelRect`) |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`), `lobe.rs` (the lobe vocabulary: `Scatter`, `LobeLabel`, `LobeEvent`, `LobeSplit`, which `lpe` re-exports) |
@@ -198,7 +198,7 @@ stays a mechanical move. From the bottom:
 | layer | modules |
 |-------|---------|
 | foundation | `config`, `names`, `warnings`, `report`, `profile`, `stats`, `pdf`, `distribution`, `color`, `texture`, `lux`, `error` (with `Structural` and the inspection's `Refusal` and limits), `region`, `buffer` |
-| rays | `ray`, `medium`, `hittable`, `aabb`, `strands` |
+| rays | `ray`, `medium`, `hittable`, `aabb`, `strands`, `primvars` |
 | materials | `material/` (with the lobe vocabulary `lpe` matches, and `SubsurfaceEntry`), `lpe/` |
 | world | `rt_world` (with the material `Signature` an in-place edit is checked against, and `EVERY_CLASS`) |
 | lights | `light/` (with the learned selections' frozen tables), `environment` |
@@ -275,6 +275,23 @@ other. The pairs:
   `collect_crossings`). Change one side alone and NEE counts a light another
   hides while the bounce stops at the nearer one: biased MIS. The crossing's
   weight is `bounce_emission_weight_at`, its `L` event `Route::cross`.
+- **Holdouts ↔ the film's escape.** A camera ray that reaches a holdout (the
+  active render pass's `matte`, `World::is_holdout`) ends in `trace_path` right
+  after `pass_cutouts`, on the camera segment only (`records.is_empty()`), and
+  records `FirstHit::Escaped` (or the thin wall it passed first) with albedo 0
+  and no route event: every AOV then takes the escape's arm, so alpha is 0, data
+  AOVs keep their clear value and `C.*[LO]` stays the beauty bit for bit. Change
+  the check or the recording alone and a source disagrees with the beauty
+  (`aovs_see_a_holdout_sample_as_an_escape`, `tests/holdouts.rs`). The check
+  sits behind `World::has_holdouts`, so a world without one pays one branch.
+- **A pass's camera visibility ↔ light linking.** The active pass clears
+  `MASK_CAMERA` (geometry masks, an infinite light's escape mask) at dispatch,
+  during the traversal (`usd_import/passes.rs`); `LightLinks::resolve` runs after
+  it, and `demote` reads that bit to keep a light linked to nothing as a
+  camera-only backdrop or drop it. Move the pass after the links and a hidden
+  dome comes back as a backdrop (`camera_visibility_is_decided_before_light_linking`,
+  `tests/render_passes.rs`). Both judge a prim by the same stage path, at the same
+  dispatch site (`saw` in `usd_import/mod.rs`).
 - **The render camera ↔ `ls`'s `is_render_camera`.** Which camera a render goes
   through (`settings::wanted_camera`, then `pick_camera`'s fallback to the first
   camera the import's walk meets) is decided by the same two functions for the

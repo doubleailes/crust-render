@@ -103,6 +103,7 @@ impl<'a> Compiler<'a> {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            primvars: &[],
         };
         Some(apply(op, &slots, &ctx))
     }
@@ -262,6 +263,16 @@ impl<'a> Compiler<'a> {
                 let a = self.input_or(node, "in1", Val::ZERO);
                 let b = self.input_or(node, "in2", Val::ZERO);
                 self.emit(Op::DotProduct { a, b })
+            }
+            // `ND_magnitude_vector*`: the vector's length, as the
+            // dot product with itself, so the JIT inherits it exactly.
+            "magnitude" => {
+                let a = self.input_or(node, "in", Val::ZERO);
+                let d = self.emit(Op::DotProduct { a, b: a });
+                self.emit(Op::Unary {
+                    op: UnOp::Sqrt,
+                    a: d,
+                })
             }
             "mix" => {
                 let fg = self.input_or(node, "fg", Val::ZERO);

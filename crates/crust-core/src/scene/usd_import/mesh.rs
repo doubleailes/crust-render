@@ -20,14 +20,13 @@ use rayon::prelude::*;
 use tracing::debug;
 
 use crate::material::{Displacement, Material};
-use crate::rt_world::{
-    FaceMap, FanSlice, PrimvarChannel, PrimvarTable, SubFace, UvMap, WorldBuilder,
-};
+use crate::primvars::{PrimvarChannel, PrimvarTable};
+use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
 use crate::scene::displace::{self, VertexChart};
 use crate::scene::subdiv;
 
 use super::adaptive::{self, Aabb, Cull, ScreenRate};
-use super::attrs::decode_text;
+use super::attrs::{attr_color_space, decode_text};
 use super::attrs::{
     custom_f32, custom_i32, custom_i32_array, decode_f32_array, decode_i32_array,
     decode_vec3f_array, prim_motion_translate, prim_ray_mask, prim_value, value_at,
@@ -56,7 +55,8 @@ use super::xform::Span;
 /// bound material reports `uses_uv()`. An untextured stage hashes nothing
 /// extra and dedupes as before. The primvars a render var keeps belong in it
 /// for the same reason — a slot owns the one `PrimvarTable` every placement
-/// reads — and are folded in only when some are kept.
+/// reads — and are folded in only when some are kept; so do the ones its
+/// material reads, which the same table carries.
 #[derive(PartialEq, Eq, Hash)]
 pub(super) struct MeshKey {
     pub(super) geo_hash: u64,
@@ -106,6 +106,7 @@ impl MeshKey {
                     Some(p) => {
                         1u8.hash(&mut h);
                         p.interp.hash(&mut h);
+                        p.arity.hash(&mut h);
                         for v in &p.values {
                             for x in v {
                                 x.to_bits().hash(&mut h);
@@ -157,8 +158,8 @@ pub(super) struct MeshSlot {
     /// the tangent frame, which is per placement, is derived at the hit
     /// from the kernel's vertices rather than held here.
     pub(super) uvs: Option<Arc<UvMap>>,
-    /// The primvars render vars keep, per triangle, when the mesh authors
-    /// any of them. Beside `uvs`, for the same reason.
+    /// The primvars render vars keep and the material reads, per triangle,
+    /// when the mesh authors any of them. Beside `uvs`, for the same reason.
     pub(super) primvars: Option<Arc<PrimvarTable>>,
     /// Set once some path needed this mesh as a real kernel scene — which
     /// prototypes always do, since an instance is the only way to place one.
@@ -186,6 +187,10 @@ pub(super) struct MeshArena {
     /// The primvars render vars ask for, which every mesh read keeps (see
     /// [`MeshNeeds::primvars`]). Here for the reason `subdiv` is.
     pub(super) primvars: PrimvarKeep,
+    /// The working colour space a colour primvar a material reads is
+    /// converted into ([`MeshNeeds::working`]). Here for the reason `subdiv`
+    /// is.
+    pub(super) working: crate::color::Space,
     /// What displacement did, for `--stats`.
     pub(super) displaced: crate::stats::DisplacementCounters,
     /// Distinct meshes whose offsets exceeded their authored bound — one
@@ -356,6 +361,7 @@ impl MeshArena {
             by_key: HashMap::new(),
             subdiv,
             primvars: PrimvarKeep::default(),
+            working: crate::color::Space::LIN_REC709,
             displaced: Default::default(),
             bound_exceeded: 0,
         }
@@ -432,8 +438,14 @@ impl MeshArena {
         });
         // Built on the undisplaced connectivity, so a displaced point reads
         // the primvar of the point it was moved from.
-        let primvars =
-            primvar_table(&src.counts, &src.indices, verts.len(), &src.primvars).map(Arc::new);
+        let primvars = primvar_table(
+            &src.counts,
+            &src.indices,
+            verts.len(),
+            &src.primvars,
+            src.shading,
+        )
+        .map(Arc::new);
         let slot = self.slots.len() as u32;
         self.slots.push(MeshSlot {
             local: Some(MeshGeom {
@@ -611,7 +623,12 @@ pub(super) fn emit_mesh(
         displacement,
     } = bound;
     let displacement = prim_displacement(prim, displacement);
-    let needs = MeshNeeds::of(&*material, displacement.as_deref(), &meshes.primvars);
+    let needs = MeshNeeds::of(
+        &*material,
+        displacement.as_deref(),
+        &meshes.primvars,
+        meshes.working,
+    );
     let Some(src) = mesh_source(
         prim,
         mesh,
@@ -696,7 +713,13 @@ pub(super) fn place_mesh_source(
             .map(|p| world_xf.transform_point3(Vec3::from_array(*p)).to_array())
             .collect();
         check_face_count(prim, src.base_face_count, material.as_ref());
-        let primvars = primvar_table(&src.counts, &src.indices, verts.len(), &src.primvars);
+        let primvars = primvar_table(
+            &src.counts,
+            &src.indices,
+            verts.len(),
+            &src.primvars,
+            src.shading,
+        );
         match triangulate(
             &src.counts,
             &src.indices,
@@ -1116,9 +1139,13 @@ pub(super) struct MeshSource {
     /// patch it came from.
     pub(super) uvs: Option<UvSource>,
     /// The primvars render vars keep, by keep-set index (`None` where the
-    /// prim does not author one it can give); empty when none are kept. For
-    /// a subdivided mesh, refined with it like the chart.
+    /// prim does not author one it can give), then the `shading` ones the
+    /// material reads, in its program's order; empty when neither reads any.
+    /// For a subdivided mesh, refined with it like the chart.
     pub(super) primvars: Vec<Option<PrimvarData>>,
+    /// How many of `primvars`, at its end, are the material's
+    /// ([`Material::primvars`]) rather than the render vars'.
+    pub(super) shading: usize,
     /// Whether the arrays are a refinement rather than the authored cage —
     /// what `--stats` counts a displaced mesh "at cage resolution" by.
     pub(super) refined: bool,
@@ -1149,6 +1176,34 @@ pub(super) enum RefinedFaces {
 pub(super) fn mesh_source(
     prim: &Prim,
     mesh: &UsdMesh,
+    mut needs: MeshNeeds<'_>,
+    policy: &mut SubdivPolicy,
+    place: MeshPlace<'_>,
+) -> Option<MeshSource> {
+    // A Ptex hit carries its face, which leaves no room for the primvars
+    // (`HitPart`): they would never be read.
+    if needs.faces && !needs.shading.is_empty() {
+        warning!(
+            MeshUnsupportedPrimvar,
+            at = prim.path(),
+            "{}: its material reads primvars ({}) and a per-face (Ptex) texture, and a hit \
+             carries one or the other — the material reads its geompropvalue defaults there",
+            prim.path(),
+            needs.shading.join(", "),
+        );
+        needs.shading = &[];
+    }
+    let shading = needs.shading.len();
+    let mut src = read_mesh_source(prim, mesh, needs, policy, place)?;
+    src.shading = shading;
+    Some(src)
+}
+
+/// [`mesh_source`] past its Ptex check: every array, the material's primvars
+/// after the render vars' (the count of which the caller records).
+fn read_mesh_source(
+    prim: &Prim,
+    mesh: &UsdMesh,
     needs: MeshNeeds<'_>,
     policy: &mut SubdivPolicy,
     place: MeshPlace<'_>,
@@ -1159,6 +1214,8 @@ pub(super) fn mesh_source(
         uv_primvar,
         displacement,
         primvars: keep,
+        shading,
+        working,
     } = needs;
     // A displacement reads its own chart, whether or not the surface does.
     let want_faces = want_faces || displacement.is_some_and(Displacement::needs_ptex);
@@ -1169,10 +1226,18 @@ pub(super) fn mesh_source(
     let uvs = want_uvs
         .then(|| mesh_uvs(prim, uv_primvar, &counts, indices.len()))
         .flatten();
-    let primvars = match keep.filter(|k| !k.is_empty()) {
+    let mut primvars = match keep.filter(|k| !k.is_empty()) {
         Some(keep) => mesh_primvars(prim, keep, points.len(), counts.len(), indices.len()),
         None => Vec::new(),
     };
+    primvars.extend(shading.iter().map(|name| {
+        shading_primvar(
+            prim,
+            name,
+            working,
+            (points.len(), counts.len(), indices.len()),
+        )
+    }));
     let cage = |points, counts, indices, uvs, primvars| MeshSource {
         points,
         counts,
@@ -1182,6 +1247,7 @@ pub(super) fn mesh_source(
         base_face_count,
         uvs,
         primvars,
+        shading: 0,
         refined: false,
     };
 
@@ -1410,15 +1476,22 @@ pub(super) struct MeshNeeds<'a> {
     /// whatever the material reads. `None` or empty — nothing read — without
     /// such a var.
     pub(super) primvars: Option<&'a PrimvarKeep>,
+    /// The primvars the material reads by name ([`Material::primvars`]):
+    /// read, and refined with the surface, after the render vars'.
+    pub(super) shading: &'a [String],
+    /// The working space their colours are converted into; `None` reads
+    /// them as authored.
+    pub(super) working: Option<crate::color::Space>,
 }
 
 impl<'a> MeshNeeds<'a> {
-    /// What `material` reads, with the displacement the prim applies and the
-    /// primvars the render keeps.
+    /// What `material` reads, with the displacement the prim applies, the
+    /// primvars the render keeps and the working colour space.
     pub(super) fn of(
         material: &'a dyn Material,
         displacement: Option<&'a Displacement>,
         primvars: &'a PrimvarKeep,
+        working: crate::color::Space,
     ) -> Self {
         MeshNeeds {
             faces: material.face_texture().is_some(),
@@ -1426,6 +1499,8 @@ impl<'a> MeshNeeds<'a> {
             uv_primvar: material.uv_primvar(),
             displacement,
             primvars: Some(primvars),
+            shading: material.primvars(),
+            working: Some(working),
         }
     }
 }
@@ -1577,6 +1652,7 @@ impl MeshSource {
             base_face_count,
             refined: true,
             primvars,
+            shading: 0,
             uvs: match (uvs, face_varying_uvs) {
                 (Some(values), _) => Some(UvSource {
                     values,
@@ -1614,6 +1690,7 @@ impl MeshSource {
             base_face_count,
             refined: true,
             primvars,
+            shading: 0,
             uvs: uvs.map(|uv| UvSource {
                 values: uv.values,
                 indices: uv.indices,
@@ -1844,14 +1921,16 @@ pub(super) enum PrimvarInterp {
     FaceVarying,
 }
 
-/// A primvar a render var keeps, as one mesh authors it (or as its
-/// refinement carries it): values in four lanes, the authored `:indices`
-/// into them, every addressed entry checked in range.
+/// A primvar a render var keeps or a material reads, as one mesh authors it
+/// (or as its refinement carries it): values in four lanes, the authored
+/// `:indices` into them, every addressed entry checked in range.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PrimvarData {
     pub(super) values: Vec<[f32; 4]>,
     pub(super) indices: Option<Vec<i32>>,
     pub(super) interp: PrimvarInterp,
+    /// The authored component count, 1 to 3.
+    pub(super) arity: u8,
 }
 
 impl PrimvarData {
@@ -1907,30 +1986,142 @@ fn read_mesh_primvar(
     n_faces: usize,
     n_face_vertices: usize,
 ) -> Read {
-    let attr_name = format!("primvars:{}", kept.name);
-    let Some(value) = prim_value(prim, &attr_name) else {
-        return Read::Unauthored;
-    };
-    let attr = prim.attribute(&attr_name);
-    let type_name = attr
+    let counts = (n_points, n_faces, n_face_vertices);
+    match decode_mesh_primvar(prim, &kept.name, None, counts) {
+        Ok(None) => Read::Unauthored,
+        Ok(Some(p)) if p.arity == kept.components => Read::Primvar(p),
+        Ok(Some(p)) => refuse_kept(
+            prim,
+            kept,
+            &type_of(prim, &kept.name),
+            &format!("{} component(s)", p.arity),
+        ),
+        Err((type_name, why)) => refuse_kept(prim, kept, &type_name, &why),
+    }
+}
+
+fn refuse_kept(prim: &Prim, kept: &KeptPrimvar, type_name: &str, why: &str) -> Read {
+    warning!(
+        PrimvarMismatch,
+        at = prim.path(),
+        "{} primvar {:?} as {} component(s), but {} authors it as {type_name} ({why}); \
+         that prim reads the clear value",
+        kept.asking(),
+        kept.name,
+        kept.components,
+        prim.path(),
+    );
+    Read::Refused
+}
+
+/// `primvars:<name>`'s type name on `prim`, for a warning.
+fn type_of(prim: &Prim, name: &str) -> String {
+    prim.attribute(format!("primvars:{name}"))
         .type_name()
         .ok()
         .flatten()
         .map(|t| t.as_str().to_string())
-        .unwrap_or_default();
-    let refuse = |why: String| -> Read {
-        warning!(
-            PrimvarMismatch,
-            at = prim.path(),
-            "{} primvar {:?} as {} component(s), but {} authors it as {type_name} ({why}); \
-             that prim reads the clear value",
-            kept.asking(),
-            kept.name,
-            kept.components,
-            prim.path(),
-        );
-        Read::Refused
+        .unwrap_or_default()
+}
+
+/// The primvar `name` a material reads, as `prim` authors it, its colours
+/// converted into `working` when one is given; `None` for one it does not
+/// author, and, with a warning, for one that cannot be read. `counts` are the
+/// mesh's points, faces and face-vertices.
+fn shading_primvar(
+    prim: &Prim,
+    name: &str,
+    working: Option<crate::color::Space>,
+    counts: (usize, usize, usize),
+) -> Option<PrimvarData> {
+    let (type_name, why) = match decode_mesh_primvar(prim, name, working, counts) {
+        // Authored empty: as on curves, a material reading it is told.
+        Ok(None) if prim_value(prim, &format!("primvars:{name}")).is_some() => {
+            (type_of(prim, name), "authored empty".to_string())
+        }
+        Ok(p) => return p,
+        Err(e) => e,
     };
+    warning!(
+        MeshUnsupportedPrimvar,
+        at = prim.path(),
+        "{}: primvars:{name} is a {type_name} ({why}) — the material reads its \
+         geompropvalue's default there",
+        prim.path(),
+    );
+    None
+}
+
+/// The constant primvars `material` reads on an implicit shape `prim`, after
+/// `src`'s own (which it has none of): a shape's tessellation has no points,
+/// faces or face-vertices an authored array could address, so any other
+/// interpolation is refused with a warning.
+pub(super) fn with_constant_primvars(
+    mut src: MeshSource,
+    prim: &Prim,
+    material: &dyn Material,
+    working: crate::color::Space,
+) -> MeshSource {
+    let names = material.primvars();
+    src.primvars.extend(
+        names
+            .iter()
+            .map(|name| constant_primvar(prim, name, working)),
+    );
+    src.shading += names.len();
+    src
+}
+
+/// The table of an analytic sphere `prim`, whose material reads `material`'s
+/// constant primvars: `None` when it reads none the prim authors.
+pub(super) fn constant_table(
+    prim: &Prim,
+    material: &dyn Material,
+    working: crate::color::Space,
+) -> Option<PrimvarTable> {
+    let names = material.primvars();
+    let primvars: Vec<_> = names
+        .iter()
+        .map(|name| constant_primvar(prim, name, working))
+        .collect();
+    primvar_table(&[], &[], 0, &primvars, names.len())
+}
+
+/// One primvar of [`with_constant_primvars`] and [`constant_table`].
+fn constant_primvar(prim: &Prim, name: &str, working: crate::color::Space) -> Option<PrimvarData> {
+    let p = shading_primvar(prim, name, Some(working), (0, 0, 0))?;
+    if p.interp == PrimvarInterp::Constant {
+        return Some(p);
+    }
+    warning!(
+        MeshUnsupportedPrimvar,
+        at = prim.path(),
+        "{}: primvars:{name} is {:?}, and an implicit shape reads only constant primvars — \
+         the material reads its geompropvalue's default there",
+        prim.path(),
+        p.interp,
+    );
+    None
+}
+
+/// `primvars:<name>` on `prim`, decoded — colours into `working` when one is
+/// given, as authored otherwise — and checked against the mesh's points,
+/// faces and face-vertices: `Ok(None)` for one that is not authored (or is
+/// authored empty, which the AOVs read as unauthored and a material is warned
+/// of), `Err` with its type and the reason for one that cannot be read.
+fn decode_mesh_primvar(
+    prim: &Prim,
+    name: &str,
+    working: Option<crate::color::Space>,
+    (n_points, n_faces, n_face_vertices): (usize, usize, usize),
+) -> Result<Option<PrimvarData>, (String, String)> {
+    let attr_name = format!("primvars:{name}");
+    let Some(value) = prim_value(prim, &attr_name) else {
+        return Ok(None);
+    };
+    let attr = prim.attribute(&attr_name);
+    let type_name = type_of(prim, name);
+    let refuse = |why: String| Err((type_name.clone(), why));
     if let Some(n) = attr
         .metadata::<sdf::Value>("elementSize")
         .ok()
@@ -1945,14 +2136,21 @@ fn read_mesh_primvar(
             "elementSize {n}: array-valued primvars are not read"
         ));
     }
-    let Some(values) = super::strands::decode(value) else {
+    let Some(mut values) = super::strands::decode(value) else {
         return refuse("no numeric value of one to three components per element".into());
     };
     let Some(arity) = values.first().map(|v| v.arity) else {
-        return Read::Unauthored; // authored empty: nothing to read
+        return Ok(None); // authored empty: nothing to read
     };
-    if arity != kept.components {
-        return refuse(format!("{arity} component(s)"));
+    // One attribute, one colour space: resolved once, not per value.
+    if let Some(working) = working
+        && type_name.starts_with("color3")
+        && let Some(space) = attr_color_space(&attr)
+    {
+        for v in &mut values {
+            let rgb = crate::color::convert(Vec3A::new(v.v[0], v.v[1], v.v[2]), space, working);
+            *v = rgb.into();
+        }
     }
     let interp = match attr
         .metadata::<sdf::Value>("interpolation")
@@ -1973,7 +2171,15 @@ fn read_mesh_primvar(
         PrimvarInterp::Vertex => n_points,
         PrimvarInterp::FaceVarying => n_face_vertices,
     };
-    let indices = custom_i32_array(prim, &format!("{attr_name}:indices"));
+    // Authored indices that are not an `int[]` are refused, never read as
+    // absent: the values would then be read unindexed.
+    let indices = match prim_value(prim, &format!("{attr_name}:indices")) {
+        None => None,
+        Some(v) => match decode_i32_array(v) {
+            Some(indices) => Some(indices),
+            None => return refuse("indices that are not an int[]".into()),
+        },
+    };
     let addressed = indices.as_ref().map_or(values.len(), Vec::len);
     if addressed < needed {
         return refuse(format!(
@@ -1987,11 +2193,12 @@ fn read_mesh_primvar(
     {
         return refuse("indices out of its values' range".into());
     }
-    Read::Primvar(PrimvarData {
+    Ok(Some(PrimvarData {
         values: values.iter().map(|v| v.v).collect(),
         indices,
         interp,
-    })
+        arity,
+    }))
 }
 
 /// The kept primvars of a refined mesh: each refined `vertex` and
@@ -2012,6 +2219,7 @@ fn refined_primvars(
             match p.interp {
                 PrimvarInterp::Constant => Some(p.clone()),
                 PrimvarInterp::Uniform => base_face.map(|base| PrimvarData {
+                    arity: p.arity,
                     values: p.values.clone(),
                     indices: Some(
                         base.iter()
@@ -2026,7 +2234,9 @@ fn refined_primvars(
         })
         .collect();
     for (&i, r) in extra_of.iter().zip(refined) {
+        let arity = authored[i].as_ref().map_or(1, |p| p.arity);
         out[i] = Some(PrimvarData {
+            arity,
             interp: if r.face_varying {
                 PrimvarInterp::FaceVarying
             } else {
@@ -2073,13 +2283,16 @@ fn for_each_fan_triangle(
     }
 }
 
-/// The kept primvars per triangle of the fan triangulation, or `None` when
-/// the mesh authors none of them (no primvar var, or none on this prim).
-fn primvar_table(
+/// The kept primvars per triangle of the fan triangulation — the last
+/// `shading` of them the material's, the rest the render vars' — or `None`
+/// when the mesh authors none of them (no primvar var or material reading
+/// one, or none on this prim).
+pub(super) fn primvar_table(
     counts: &[i32],
     indices: &[i32],
     n_verts: usize,
     primvars: &[Option<PrimvarData>],
+    shading: usize,
 ) -> Option<PrimvarTable> {
     if primvars.iter().all(Option::is_none) {
         return None;
@@ -2126,7 +2339,14 @@ fn primvar_table(
             }
         }
     });
-    let table = PrimvarTable { channels };
+    let split = channels.len() - shading;
+    let shading = channels
+        .split_off(split)
+        .into_iter()
+        .zip(&primvars[split..])
+        .map(|(c, p)| Some((c?, p.as_ref()?.arity)))
+        .collect();
+    let table = PrimvarTable { channels, shading };
     (!table.is_empty()).then_some(table)
 }
 

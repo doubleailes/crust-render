@@ -404,11 +404,11 @@ def Xform "W"
     assert!(prov.light("/W/Dead").is_none());
 }
 
-/// What a curve's strand table was decoded for is part of what a swap must
-/// keep, on curves only: a material that starts reading a primvar is refused
-/// on a curves slot (its table lacks the primvar) and taken on a mesh's.
+/// What a geometry's table was decoded for is part of what a swap must keep:
+/// a material that starts reading a primvar is refused on a curves slot (its
+/// strand table lacks the primvar) and on a mesh's (its primvar table does).
 #[test]
-fn a_curve_material_swap_is_refused_when_it_reads_something_new() {
+fn a_material_swap_is_refused_when_it_reads_a_new_primvar() {
     let dir = std::env::temp_dir().join("crust_live_curve_swap");
     std::fs::create_dir_all(&dir).unwrap();
     let mtlx = dir.join("looks.mtlx");
@@ -482,8 +482,12 @@ def Xform "World"
         "a new primvar"
     );
     assert!(
-        swap_check(&scene, &[card], load("reads")),
-        "a mesh reads no table"
+        !swap_check(&scene, &[card], load("reads")),
+        "a new mesh primvar"
+    );
+    assert!(
+        swap_check(&scene, &[card], load("red")),
+        "same needs on a mesh"
     );
 }
 

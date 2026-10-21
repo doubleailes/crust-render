@@ -49,6 +49,7 @@ fn shading_points() -> Vec<ShadeCtx<'static>> {
                 position: Vec3A::new(t, 1.0 - t, t * t),
                 uv_width: if i % 3 == 0 { 0.0 } else { t * 0.01 },
                 curve: None,
+                primvars: &[],
             }
         })
         .collect()
@@ -358,8 +359,8 @@ fn the_random_nodes_jit_like_any_graph() {
     same(&optimised, "random nodes (optimised)");
 }
 
-/// A curve's primvars at one hit: one of each width, and one the curve
-/// does not have.
+/// A hit's primvars: one of each width, and one the geometry does not
+/// have.
 static PRIMVARS: [Option<Val>; 5] = [
     Some(Val::float(0.75)),
     Some(Val::vec2(0.2, -1.5)),
@@ -437,8 +438,9 @@ fn the_jit_matches_the_interpreter_on_curves() {
     let mut names = c.program.primvars.clone();
     names.sort();
     assert_eq!(names, ["hairColor", "melanin", "missing", "offset", "tint"]);
-    // Every point twice: on a strand (whose properties vary, and whose
-    // primvar list is cut short at some), and off any curve.
+    // Every point three times: on a strand (whose properties vary, and whose
+    // primvar list is cut short at some), on a mesh carrying the same
+    // primvars, and with neither.
     let points: Vec<ShadeCtx<'static>> = shading_points()
         .into_iter()
         .enumerate()
@@ -448,13 +450,16 @@ fn the_jit_matches_the_interpreter_on_curves() {
                 v: t,
                 index: i as u32 * 37,
                 random: (t * 7.0).fract(),
-                primvars: &PRIMVARS[..5 - i % 4],
             };
+            let primvars = &PRIMVARS[..5 - i % 4];
             [
                 ShadeCtx {
                     curve: Some(curve),
+                    primvars,
                     ..ctx
                 },
+                // A mesh hit: primvars, no strand.
+                ShadeCtx { primvars, ..ctx },
                 ctx,
             ]
         })

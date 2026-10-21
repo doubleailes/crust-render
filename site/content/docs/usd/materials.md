@@ -381,7 +381,9 @@ the mesh's UV tangent, so the card needs UVs whose `u` runs along the hair.
 
 A hair material can read where on its strand a hit lies, which curve it is, a random
 value per curve, and the groom's own primvars, through `geompropvalue`: see
-[curve attributes](@/docs/usd/geometry.md#curve-attributes-in-materials). These
+[curve attributes](@/docs/usd/geometry.md#curve-attributes-in-materials). Any other
+material reads its mesh's primvars the same way: see
+[primvars in materials](@/docs/usd/geometry.md#primvars-in-materials). These
 MaterialX nodes are what a per-strand look is usually built from:
 
 | node | what it does |
@@ -479,7 +481,9 @@ A `surfacematerial` whose `displacementshader` is a `displacement` node with a `
 `displacement` input is displaced by that input times the node's `scale`. The input can be
 any graph. It's evaluated at each vertex with the vertex's texture coordinate, and its
 object-space `position` and `normal`, as MaterialX defines displacement. Nodes that depend
-on the view direction have no meaningful value there. An `image` that can't be loaded
+on the view direction have no meaningful value there. A `geompropvalue` reads no primvar
+there: it gives its `default`, with an
+[`mtlx.incomplete`](@/docs/reference/warnings.md) warning. An `image` that can't be loaded
 falls back to its `default` (0.5 unless authored), as it does for shading.
 
 ```xml
