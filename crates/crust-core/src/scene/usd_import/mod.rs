@@ -1224,7 +1224,7 @@ pub(crate) fn load_scene(
     scene.time = time;
     scene.warnings = warning_scope.finish();
     scene.layers = layer_files(&ctx.layers, path);
-    scene.source = crate::stamp::Source {
+    scene.source = crate::scene::Source {
         lens,
         depth_of_field: scene.camera.has_depth_of_field(),
         motion_blur: scene.settings.motion_blur() && shutter.interval.is_some(),

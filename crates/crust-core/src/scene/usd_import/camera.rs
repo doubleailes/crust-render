@@ -206,7 +206,7 @@ pub(super) struct RenderCamera {
     /// frame did not honour ([`CameraFrame::unhonoured_pixel_aspect`]).
     pub(super) unhonoured_pixel_aspect: Option<f32>,
     /// Its lens, for the stamp; `None` for the procedural camera.
-    pub(super) lens: Option<crate::stamp::Lens>,
+    pub(super) lens: Option<crate::scene::Lens>,
 }
 
 impl RenderCamera {
@@ -258,7 +258,7 @@ pub(super) fn build_camera(
         refused_meters_per_unit,
         shutter: offsets(&cam),
         unhonoured_pixel_aspect: frame.unhonoured_pixel_aspect,
-        lens: Some(crate::stamp::Lens {
+        lens: Some(crate::scene::Lens {
             focal_length: read.focal_length,
             aperture: read.aperture,
             conform: framing.policy.as_token().to_owned(),

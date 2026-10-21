@@ -14,9 +14,10 @@
 //! value (`crust:indirectClamp`), so one vocabulary runs through USD, the CLI
 //! and the EXR.
 
+pub use crate::scene::{Lens, Source};
 use crate::stats::RayStats;
 use crate::tracer::{RenderOutcome, RenderSettings};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The prefix every stamped attribute carries, and that a RenderProduct may
 /// not author.
@@ -43,48 +44,6 @@ impl std::fmt::Display for StampValue {
             StampValue::Text(v) => f.write_str(v),
         }
     }
-}
-
-/// The render camera's lens as the import read it at the frame, unauthored
-/// values at the render's fallbacks.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Lens {
-    /// Millimetres.
-    pub focal_length: f32,
-    /// Horizontal and vertical, in millimetres, as authored; the vertical
-    /// defaults to the horizontal over the image's aspect ratio.
-    pub aperture: [f32; 2],
-    /// The `aspectRatioConformPolicy` the aperture was conformed to the
-    /// image by.
-    pub conform: String,
-    /// `0` is a pinhole.
-    pub f_stop: f32,
-    pub focus_distance: f32,
-}
-
-/// What shaped a render beyond its settings: the lens it was seen through,
-/// whether its blurs were on, and the layers the stage was composed from.
-/// Recorded by the import ([`crate::Scene::source`]); the default is a
-/// hand-assembled scene's, which has no camera prim and no layers.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Source {
-    /// `None` for the procedural camera.
-    pub lens: Option<Lens>,
-    /// Whether the camera rendered through has an open lens: an `fStop`
-    /// above 0 and depth of field not disabled.
-    pub depth_of_field: bool,
-    /// Whether moving geometry was blurred: motion blur on, and a shutter
-    /// that opens an interval at a frame.
-    pub motion_blur: bool,
-    /// The files of the stage's root layer stack in strength order: the
-    /// session layer when there is one, the root layer, its sublayers. A
-    /// layer inside a package is the package; an anonymous layer is left out.
-    pub layer_stack: Vec<PathBuf>,
-    /// The prims the strongest layer of that stack hides with an `over`
-    /// authoring `visibility = "invisible"` (as a default or in a time
-    /// sample): the visibility overrides a session or override layer
-    /// applied. `None` for a hand-assembled scene.
-    pub invisible_overrides: Option<u32>,
 }
 
 /// One layer of the stamped layer stack: its file, and a hash of its bytes
@@ -322,6 +281,7 @@ impl SamplingStamp {
 mod tests {
     use super::*;
     use crate::PixelFilter;
+    use std::path::PathBuf;
 
     /// A cancelled render whose image holds no final pass took no final-pass
     /// sample anywhere; a completed or cancelled render with counters keeps
