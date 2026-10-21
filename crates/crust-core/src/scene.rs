@@ -7,6 +7,48 @@ use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 use crate::warning;
 
+/// The render camera's lens as the import read it at the frame, unauthored
+/// values at the render's fallbacks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lens {
+    /// Millimetres.
+    pub focal_length: f32,
+    /// Horizontal and vertical, in millimetres, as authored; the vertical
+    /// defaults to the horizontal over the image's aspect ratio.
+    pub aperture: [f32; 2],
+    /// The `aspectRatioConformPolicy` the aperture was conformed to the
+    /// image by.
+    pub conform: String,
+    /// `0` is a pinhole.
+    pub f_stop: f32,
+    pub focus_distance: f32,
+}
+
+/// What shaped a render beyond its settings: the lens it was seen through,
+/// whether its blurs were on, and the layers the stage was composed from.
+/// Recorded by the import ([`Scene::source`]); the default is a
+/// hand-assembled scene's, which has no camera prim and no layers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Source {
+    /// `None` for the procedural camera.
+    pub lens: Option<Lens>,
+    /// Whether the camera rendered through has an open lens: an `fStop`
+    /// above 0 and depth of field not disabled.
+    pub depth_of_field: bool,
+    /// Whether moving geometry was blurred: motion blur on, and a shutter
+    /// that opens an interval at a frame.
+    pub motion_blur: bool,
+    /// The files of the stage's root layer stack in strength order: the
+    /// session layer when there is one, the root layer, its sublayers. A
+    /// layer inside a package is the package; an anonymous layer is left out.
+    pub layer_stack: Vec<std::path::PathBuf>,
+    /// The prims the strongest layer of that stack hides with an `over`
+    /// authoring `visibility = "invisible"` (as a default or in a time
+    /// sample): the visibility overrides a session or override layer
+    /// applied. `None` for a hand-assembled scene.
+    pub invisible_overrides: Option<u32>,
+}
+
 /// The renderer's runtime scene, produced from a USD stage
 /// (`Scene::from_usd`) or assembled by hand (`Scene::new`, e.g. from the
 /// procedural `world::simple_scene`). Its camera, world, lights and settings
@@ -56,9 +98,9 @@ pub struct Scene {
     pub layers: Vec<std::path::PathBuf>,
     /// What shaped the image beyond its settings — the lens, the blurs, the
     /// root layer stack and the visibility overrides — for the stamp
-    /// ([`crate::stamp::Source`]). A hand-assembled scene records its
+    /// ([`Source`]). A hand-assembled scene records its
     /// camera's depth of field and nothing else.
-    pub source: crate::stamp::Source,
+    pub source: Source,
 }
 
 impl Scene {
@@ -77,7 +119,7 @@ impl Scene {
             warnings: Vec::new(),
             provenance: None,
             layers: Vec::new(),
-            source: crate::stamp::Source {
+            source: Source {
                 depth_of_field: camera.has_depth_of_field(),
                 ..Default::default()
             },

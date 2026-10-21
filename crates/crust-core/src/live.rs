@@ -302,7 +302,7 @@ pub struct SettingsUpdate {
     pub aovs: crate::AovRequest,
     /// What the stamp records of the re-read camera and stage
     /// ([`Scene::source`]); the layer stack is the session's, unchanged.
-    pub(crate) lens: Option<crate::stamp::Lens>,
+    pub(crate) lens: Option<crate::scene::Lens>,
     pub(crate) motion_blur: bool,
     pub(crate) invisible_overrides: u32,
 }
