@@ -325,8 +325,11 @@ Schema mapping:
     value sits behind a seam wherever it differs from its neighbour's and stays
     constant across the face. Before, both were read per *point*, which silently
     smeared a constant chart towards `(0, 0)` and gave a uniform one another face's
-    value (#354). An unauthored `interpolation` stays `vertex` (not USD's `constant`),
-    except on a one-value chart. Both are snapped to
+    value (#354). The synthesized array has exactly one entry per `faceVertexIndices`
+    entry, never `sum(faceVertexCounts)`: a malformed count far past the indices would
+    otherwise size the allocation (`synthesized_chart_indices_follow_the_face_vertex_indices`).
+    An unauthored `interpolation` stays `vertex` (not USD's `constant`), except on a
+    one-value chart. Both are snapped to
     the limit with the positions, so a texel stays on the limit point its vertex was
     snapped to. A chart whose indices do not resolve is dropped with a warning,
     because a refiner cannot skip a bad value the way a triangle lookup can. Pinned by
