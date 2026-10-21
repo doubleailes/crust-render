@@ -574,8 +574,9 @@ impl PathScratch {
     /// `max_depth` is a capacity hint only; the walk may push fewer, and
     /// reserves at most [`Self::RESERVE_CAP`] up front: a depth authored as
     /// "unlimited" (`i32::MAX`) would otherwise reserve hundreds of GB per
-    /// worker, while Russian roulette ends real paths long before. A longer
-    /// path still grows the vector (#361).
+    /// worker, while Russian roulette ends almost every path long before. A
+    /// longer path (a lossless one roulette never kills) still grows the
+    /// vector (#361).
     pub(crate) fn new(max_depth: usize) -> Self {
         Self {
             records: Vec::with_capacity(max_depth.min(Self::RESERVE_CAP)),
