@@ -175,7 +175,7 @@ case-sensitive.
 | `distance` | `DistanceToCameraSD` | `float` | closest | Distance from the camera position to the first hit. `+inf` where nothing was hit. |
 | `P` | `Pworld`, `__Pworld`, `Position` | `point3f` | closest | World-space position of the first hit. |
 | `Peye` | `Pcam`, `__Pcam` | `point3f` | closest | Camera-space position of the first hit. |
-| `normal` | `N`, `Nworld`, `__Nworld`, `Normal` | `normal3f` | filtered | World-space shading normal, facing the camera. |
+| `normal` | `N`, `Nworld`, `__Nworld`, `Normal` | `normal3f` | filtered | World-space shading normal, facing the camera, after normal maps. |
 | `Neye` | `Nn` | `normal3f` | filtered | The same normal in camera space. |
 | `primvars:st` | `st`, `uv`, `UV` | `texCoord2f` | filtered | The first hit's texture coordinates. |
 | `sampleCount` | `__sampleCount` | `float` / `int` | per pixel | Samples the pixel took: shows where adaptive sampling stopped early. |
@@ -816,6 +816,3 @@ Each of these is refused with a warning when authored, never ignored silently:
 The `resolution` fallback is crust's 640×360, not the schema's 2048×1080, so scenes
 without a `resolution` keep their size.
 
-For MaterialX surfaces whose `normal` input is connected (a normal map inside the
-MaterialX graph), `normal` and `Neye` give the interpolated mesh normal, before that
-input. UsdPreviewSurface normal maps are applied.

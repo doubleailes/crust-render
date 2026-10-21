@@ -732,9 +732,14 @@ impl<'a> ShadingPoint<'a> {
     }
 
     /// The shading normal at this hit — after bump and normal mapping, the
-    /// one every query here shades with. For the AOVs only.
+    /// one every query here shades with. For the AOVs only. A MaterialX
+    /// closure shades each leaf in its own frame over the hit's record, so
+    /// its normal is the leaves' ([`ResolvedClosure::shading_normal`]).
     pub(crate) fn normal(&self) -> Vec3A {
-        self.rec.normal
+        match &self.bsdf {
+            Resolved::Closure(c) => c.shading_normal().unwrap_or(self.rec.normal),
+            _ => self.rec.normal,
+        }
     }
 
     /// [`Material::emitted_at`] at this hit.

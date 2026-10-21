@@ -480,6 +480,34 @@ fn a_coat_normal_perturbs_only_the_coat() {
 }
 
 #[test]
+fn the_shading_normal_is_the_normal_input_and_not_the_coat_normal() {
+    let tilted = Vec3A::new(0.3, 0.0, 0.954).normalize();
+    // A normal map on the base: the AOV's normal is the mapped one.
+    let mapped = doc(r#"
+      <constant name="n" type="vector3"><input name="value" type="vector3" value="0.3, 0, 0.954" /></constant>
+      <oren_nayar_diffuse_bsdf name="x" type="BSDF">
+        <input name="normal" type="vector3" nodename="n" />
+      </oren_nayar_diffuse_bsdf>"#);
+    let n = resolved(&mapped, "x", 0.3, true).shading_normal().unwrap();
+    assert!((n - tilted).length() < 1e-5, "{n}");
+    // A coat normal over an unmapped specular base: the base's normal.
+    let coated = doc(r#"
+      <constant name="n" type="vector3"><input name="value" type="vector3" value="0.3, 0, 0.954" /></constant>
+      <dielectric_bsdf name="c" type="BSDF">
+        <input name="normal" type="vector3" nodename="n" />
+      </dielectric_bsdf>
+      <conductor_bsdf name="m" type="BSDF" />
+      <layer name="x" type="BSDF">
+        <input name="top" type="BSDF" nodename="c" />
+        <input name="base" type="BSDF" nodename="m" />
+      </layer>"#);
+    let c = resolved(&coated, "x", 0.3, true);
+    assert!(c.leaves().iter().any(|l| l.coat), "the top is a coat");
+    let n = c.shading_normal().unwrap();
+    assert!((n - Vec3A::Z).length() < 1e-6, "{n}");
+}
+
+#[test]
 fn an_authored_tangent_orients_the_leaf_frame() {
     let body = doc(r#"
       <constant name="t" type="vector3"><input name="value" type="vector3" value="0, 1, 0" /></constant>
