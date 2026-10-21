@@ -88,6 +88,7 @@ plain text and are not counted.
 | `camera.missing` | skipped | The stage authors no camera; the procedural default camera is used. | Author a `Camera` prim. |
 | `camera.invalid_exposure` | refused | The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled. | Check `exposure:fStop` (not 0) and that `exposure:time`, `exposure:iso` and `exposure:responsivity` are positive. |
 | `camera.unreadable` | skipped | A camera prim could not be built into a camera. | Check the camera's attributes (focal length, aperture, clipping). |
+| `camera.invalid_meters_per_unit` | refused | The stage's metersPerUnit is not finite, not positive, or so small that the lens diameter overflows; the lens reads it as 0.01, a centimetre. | Author the stage's `metersPerUnit` as a positive length in metres (0.01 for centimetres, 1 for metres). |
 
 ## Products and AOVs
 
@@ -97,6 +98,7 @@ plain text and are not counted.
 | `product.unsupported_type` | skipped | A RenderProduct's productType is not raster; no file is written for it. | Use `productType = "raster"`, or remove the product. |
 | `product.camera_mismatch` | skipped | A product renders through another camera or resolution than the first; no file is written for it. | Render the other camera or resolution as a separate render. |
 | `product.motion_blur_mismatch` | approximated | A product asks for other motion blur than the first; its file is written with the first's. | Give every product the same motion-blur setting. |
+| `product.depth_of_field_mismatch` | approximated | A product asks for other depth of field than the first; its file is written with the first's. | Give every product the same `disableDepthOfField`. |
 | `product.region_mismatch` | approximated | A product asks for another dataWindowNDC than the first; its file is written over the first's. | Give every product the same `dataWindowNDC`. |
 | `product.no_name` | skipped | A RenderProduct authors no productName; nothing is written for it. | Author `productName`, the file the product writes. |
 | `product.no_writable_vars` | skipped | A RenderProduct has no RenderVar crust can write; nothing is written for it. | Point `orderedVars` at RenderVars whose source crust produces; their own warnings say why each was dropped. |

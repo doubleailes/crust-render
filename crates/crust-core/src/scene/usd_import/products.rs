@@ -41,7 +41,8 @@ use super::settings::render_settings_path;
 const DRIVER_PARAMETERS: &str = "driver:parameters:";
 
 /// The stage's products, and the camera, resolution, data window and
-/// motion-blur switch the render takes from the first of them.
+/// motion-blur and depth-of-field switches the render takes from the first
+/// of them.
 #[derive(Debug)]
 pub(super) struct RenderProducts {
     pub(super) request: AovRequest,
@@ -63,9 +64,13 @@ pub(super) struct RenderProducts {
     /// or its deprecated synonym `instantaneousShutter = true`. The stage's
     /// motion stays in the scene either way (`RenderSettings::with_motion_blur`).
     pub(super) motion_blur: bool,
+    /// Whether the camera's lens is kept: `false` when the first product
+    /// (else the settings prim) authors `disableDepthOfField = true`, and the
+    /// camera is built as a pinhole (`RenderSettings::with_depth_of_field`).
+    pub(super) depth_of_field: bool,
 }
 
-/// Hand-written for one field: a stage that authors nothing blurs.
+/// Hand-written for two fields: a stage that authors nothing blurs.
 impl Default for RenderProducts {
     fn default() -> Self {
         RenderProducts {
@@ -75,6 +80,7 @@ impl Default for RenderProducts {
             resolution: None,
             data_window: None,
             motion_blur: true,
+            depth_of_field: true,
         }
     }
 }
@@ -91,6 +97,7 @@ struct Base {
     /// own: a product that authors one of them inherits the other.
     disable_motion_blur: bool,
     instantaneous_shutter: bool,
+    disable_depth_of_field: bool,
 }
 
 fn read_resolution(view: &impl SettingsBaseSchema) -> Option<(usize, usize)> {
@@ -109,7 +116,7 @@ fn read_camera(view: &impl SettingsBaseSchema) -> Option<sdf::Path> {
 
 impl Base {
     /// Nothing authored anywhere: the first camera, the default resolution,
-    /// motion blur on.
+    /// motion blur and depth of field on.
     fn unauthored() -> Base {
         Base {
             camera: None,
@@ -117,6 +124,7 @@ impl Base {
             data_window: None,
             disable_motion_blur: false,
             instantaneous_shutter: false,
+            disable_depth_of_field: false,
         }
     }
 
@@ -132,6 +140,9 @@ impl Base {
             instantaneous_shutter: value_at(&view.instantaneous_shutter_attr())
                 .and_then(decode_bool)
                 .unwrap_or(fallback.instantaneous_shutter),
+            disable_depth_of_field: value_at(&view.disable_depth_of_field_attr())
+                .and_then(decode_bool)
+                .unwrap_or(fallback.disable_depth_of_field),
         }
     }
 
@@ -140,9 +151,14 @@ impl Base {
         !(self.disable_motion_blur || self.instantaneous_shutter)
     }
 
+    /// Whether the render camera keeps its lens.
+    fn depth_of_field(&self) -> bool {
+        !self.disable_depth_of_field
+    }
+
     /// Whether two products can be rendered by one render: the same camera
-    /// and resolution. The shutter flags and the data window are not part
-    /// of it — the render follows the first product's, and a later one that
+    /// and resolution. The shutter and depth-of-field flags and the data
+    /// window are not part of it — the render follows the first product's, and a later one that
     /// differs is warned about, not refused.
     fn same_render(&self, other: &Base) -> bool {
         self.camera == other.camera && self.resolution == other.resolution
@@ -319,6 +335,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             request: AovRequest::default(),
             primvars: PrimvarKeep::default(),
             motion_blur: base.motion_blur(),
+            depth_of_field: base.depth_of_field(),
             camera: base.camera,
             resolution: base.resolution,
             data_window: base.data_window,
@@ -333,6 +350,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         resolution: base.resolution,
         data_window: base.data_window,
         motion_blur: base.motion_blur(),
+        depth_of_field: base.depth_of_field(),
     };
     // The render's own base: the first accepted product's.
     let mut render_base: Option<Base> = None;
@@ -402,6 +420,23 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 );
             }
             Some(_) => {}
+        }
+        // Checked on its own, like the region: a product may differ from
+        // the first in both its shutter and its lens.
+        if let Some(first) = &render_base
+            && first.depth_of_field() != resolved.depth_of_field()
+        {
+            // One camera per render: the file is still written, with the
+            // first product's lens.
+            let state = |on: bool| if on { "on" } else { "off" };
+            warning!(
+                ProductDepthOfFieldMismatch,
+                at = product_path,
+                "{product_path}: asks for depth of field {}, but the render has it {} (the \
+                 first product's); its file is written with that",
+                state(resolved.depth_of_field()),
+                state(first.depth_of_field()),
+            );
         }
         // Compared as they render: an unauthored window is the full frame,
         // like an authored `(0, 0, 1, 1)`.
@@ -484,6 +519,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     }
     if let Some(first) = render_base {
         out.motion_blur = first.motion_blur();
+        out.depth_of_field = first.depth_of_field();
         out.camera = first.camera;
         out.resolution = first.resolution;
         out.data_window = first.data_window;
@@ -574,8 +610,8 @@ fn describe_resolution(resolution: Option<(usize, usize)>) -> String {
 /// `RenderSettingsBase` attributes crust does not honour, warned about only
 /// when authored with a value that would change the image — Houdini authors
 /// every one of them at its fallback, and those need no word.
-/// `disableMotionBlur`, `instantaneousShutter` and `dataWindowNDC` are
-/// honoured ([`Base`]), so they are not here.
+/// `disableMotionBlur`, `instantaneousShutter`, `disableDepthOfField` and
+/// `dataWindowNDC` are honoured ([`Base`]), so they are not here.
 fn warn_unhonoured(prim: &Prim) {
     let mut ignored = Vec::new();
     let value = |name: &str| prim_value(prim, name);
@@ -583,9 +619,6 @@ fn warn_unhonoured(prim: &Prim) {
         && a != 1.0
     {
         ignored.push(format!("pixelAspectRatio = {a}"));
-    }
-    if custom_bool(prim, "disableDepthOfField") == Some(true) {
-        ignored.push("disableDepthOfField = true".to_owned());
     }
     if !ignored.is_empty() {
         warning!(

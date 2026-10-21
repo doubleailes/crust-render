@@ -763,11 +763,12 @@ Each of these is refused with a warning when authored, never ignored silently:
 - the geometric normal `Ng`;
 - deep output (`productType = "deepRaster"`);
 - more than one camera or resolution in a render;
-- `pixelAspectRatio` and `disableDepthOfField` (warned only when authored with a value
-  that would change the image). `disableMotionBlur` and `instantaneousShutter` are
-  honoured: see [Render settings](@/docs/usd/render-settings.md#disablemotionblur), and
-  so is `dataWindowNDC`: see
-  [Render settings](@/docs/usd/render-settings.md#datawindowndc);
+- `pixelAspectRatio` (warned only when authored with a value that would change the
+  image). `disableMotionBlur` and `instantaneousShutter` are honoured: see
+  [Render settings](@/docs/usd/render-settings.md#disablemotionblur), and so are
+  `disableDepthOfField`: see
+  [Render settings](@/docs/usd/render-settings.md#disabledepthoffield), and
+  `dataWindowNDC`: see [Render settings](@/docs/usd/render-settings.md#datawindowndc);
 - a `dataWindowNDC` reaching outside the frame (overscan): it is clipped to the frame.
 
 The `resolution` fallback is crust's 640×360, not the schema's 2048×1080, so scenes

@@ -872,10 +872,17 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
                 CameraMissing,
                 "USD stage has no UsdGeomCamera — falling back to world::get_settings camera"
             );
+            let camera = crate::world::get_settings().0;
+            let camera = if ctx.settings.depth_of_field() {
+                camera
+            } else {
+                camera.pinhole()
+            };
             (
                 RenderCamera {
-                    camera: crate::world::get_settings().0,
+                    camera,
                     exposure_scale: 1.0,
+                    refused_meters_per_unit: None,
                 },
                 None,
             )
@@ -1061,13 +1068,13 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
-    let (
-        RenderCamera {
-            camera,
-            exposure_scale,
-        },
-        camera_path,
-    ) = resolve_camera(&mut ctx)?;
+    let (render_camera, camera_path) = resolve_camera(&mut ctx)?;
+    render_camera.warn_lens_units(camera_path.as_deref());
+    let RenderCamera {
+        camera,
+        exposure_scale,
+        ..
+    } = render_camera;
     let settings = apply_exposure(
         settings,
         exposure_compensation,
@@ -1264,7 +1271,9 @@ fn read_index(
             debug!("dataWindowNDC: rendering region {region} of the {w}x{h} frame");
         }
     }
-    settings = settings.with_motion_blur(products.motion_blur);
+    settings = settings
+        .with_motion_blur(products.motion_blur)
+        .with_depth_of_field(products.depth_of_field);
     let domes_seen_by_camera = dome_light_camera_visibility(index);
     let exposure_compensation = enable_exposure_compensation(index);
     // The working colour space, before any colour is read: every texture
