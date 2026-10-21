@@ -299,6 +299,33 @@ model).
   `scripts/test_simd_matrix.sh -p crust-rt` passes under every codegen, and every
   sample scene renders bit-identically.
 
+## Remasking a committed scene
+
+`Scene::remask(mask_of)` rewrites every top-level geometry's mask in a committed
+scene: the `TriangleRecord`s, each packet's `LaneMasks` (`masks`, `mask_and`,
+`mask_or`, recomputed over the active lanes exactly as `LaneMasks::new` builds
+them), the `PrimNode`s, the cubic spans and the `InstancePrim`s (by attach id,
+`placement - 1`, since `geom_id` may be a label). It exists so one build serves
+several render passes, each hiding different geometry from different rays
+(`render-passes`, `--all-passes`).
+
+- **It rests on one property: the build never reads a mask.** The SBVH splits and
+  the binned SAH see only bounds; collapse packs each leaf's triangles into packets
+  in reference order and copies the mask into the lane; degenerate records are
+  decided by their indices. Masks gate traversal only, never what is built over.
+  `a_build_does_not_depend_on_masks` commits one scene holding every geometry kind
+  under random mask tables and compares the nodes, leaves, packets, indices and
+  records word for word, masks left out.
+- **`remask(commit(a), b)` is `commit(b)`, field for field**
+  (`remask_of_a_commit_is_the_commit_of_the_new_masks`, both packet layouts): a
+  geometry kind whose mask copy `remask` misses fails it. A new mask copy (a new
+  primitive kind, a curve packet) needs its arm in `Bvh::remask` and in the test's
+  `every_kind` scene.
+- **A prototype is never rewritten.** Only an instance's own mask changes; the
+  shared `Arc<Scene>` stays shared (the test pins the reference count). A pass
+  judges membership on the instance prim, so no pass needs more.
+- A degenerate record keeps `RayMask::NONE`, as at commit.
+
 ## Known gaps: geometry and acceleration
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*

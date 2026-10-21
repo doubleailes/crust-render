@@ -130,6 +130,15 @@ prims) without touching topology or bounds.
   record and packet for packet, for random mask tables. If leaf packing turns out
   to depend on masks, the fix is to make it not depend on them, verified against
   the goldens. Pinning the build is the simpler invariant.
+- **Spike result (task 1.1): it does not.** `build.rs` never reads a mask; the
+  splits and the binned SAH see only bounds. `collapse` packs each leaf's
+  triangles into packets in reference order and copies each record's mask into
+  its lane, and degenerate records are decided by their indices. Masks gate
+  traversal only. `a_build_does_not_depend_on_masks` (crust-rt
+  `scene/tests.rs`) commits one scene of every geometry kind under eight pairs of
+  random mask tables, in both packet layouts, and finds nodes, leaves, packets,
+  indices and records identical word for word apart from the masks. No packing
+  change was needed.
 - `World` gains `apply_pass(&mut self, &PassState)`. It calls `remask`, replaces
   the holdout table, the light classes and the transparent-emitter flags, and
   rewrites volume-region masks.

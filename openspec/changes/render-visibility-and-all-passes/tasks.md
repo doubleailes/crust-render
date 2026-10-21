@@ -10,7 +10,7 @@
 
 ## 1. Spikes that decide the approach
 
-- [ ] 1.1 Check whether BVH construction in crust-rt reads masks: SBVH splits,
+- [x] 1.1 Check whether BVH construction in crust-rt reads masks: SBVH splits,
   leaf packing, `Tri4` / `Tri4i` grouping (design D2). Verify by committing one
   scene twice with two different mask tables and comparing the node, packet
   and record layouts. They must be identical apart from mask fields. If they
@@ -30,13 +30,13 @@
 
 ## 2. Mask rewrite in crust-rt
 
-- [ ] 2.1 Add `Scene::remask` rewriting the top-level mask copies (triangle
+- [x] 2.1 Add `Scene::remask` rewriting the top-level mask copies (triangle
   records, leaf `LaneMasks` with `mask_and` / `mask_or`, prim nodes, instance
   prims) and never a prototype scene (design D2). Verify with a unit test over a
   scene holding every geometry kind and an instance: for random mask tables `a`
   and `b`, `remask(commit(a), b)` equals `commit(b)` field for field. Also verify
   `scripts/test_simd_matrix.sh -p crust-rt` passes.
-- [ ] 2.2 Pin the pair in `docs/architecture.md` § Invariants (`remask` ↔ commit),
+- [x] 2.2 Pin the pair in `docs/architecture.md` § Invariants (`remask` ↔ commit),
   and add `remask` to the intersection-kernel design record. Verify that
   `cargo doc -p crust-rt --no-deps` builds.
 

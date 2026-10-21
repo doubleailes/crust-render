@@ -340,6 +340,12 @@ other. The pairs:
   reduced as OIIO's `maketx` reduces, DWAA-compressed), so the A/B is pinned by the
   bounds of the `textures` design record (`a_converted_tx_streams_what_its_source_preloads`,
   and the image-level check there).
+- **`Scene::remask` ↔ `SceneBuilder::commit`.** Remasking a committed scene with a
+  mask table must give the scene a commit with that table builds, field for field
+  (`remask_of_a_commit_is_the_commit_of_the_new_masks`). It holds because the build
+  never reads a mask (`a_build_does_not_depend_on_masks`): a build decision that
+  reads one, or a new copy of a mask outside `Bvh::remask`, breaks every pass of a
+  shared import.
 - **Derived, not stored.** A hit's tangent (`tangent_of`) and a subdivided
   mesh's Ptex sub-face corners (`SubFace::corners`) are computed from the
   kernel's shared vertices and a 4-byte cell at the hit; the tests that pin

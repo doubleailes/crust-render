@@ -1143,3 +1143,258 @@ fn visit_skips_the_slots_an_offset_reserves() {
     scene.visit(reserved..reserved + 1, MASK_CAMERA, |_, _| none += 1);
     assert_eq!(none, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Remasking a committed scene
+// ---------------------------------------------------------------------------
+
+/// A deterministic hash of `(seed, i)` to 32 bits (splitmix64's finaliser).
+fn hash(seed: u64, i: u64) -> u32 {
+    let mut z = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ i.wrapping_add(0x632B_E59B_D9B4_E019);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) as u32
+}
+
+fn unit(seed: u64, i: u64) -> f32 {
+    hash(seed, i) as f32 / u32::MAX as f32
+}
+
+/// A random mask table: mostly a few category bits plus shadow classes, now
+/// and then `NONE` or `ALL`, so packets mix visible and hidden lanes.
+fn mask_table(seed: u64) -> impl Fn(u32) -> RayMask {
+    move |id| match hash(seed, id as u64) % 8 {
+        0 => RayMask::NONE,
+        1 => RayMask::ALL,
+        k => RayMask((hash(seed ^ 1, id as u64) & !7) | k),
+    }
+}
+
+/// One scene holding every geometry kind: interleaved triangle meshes (one
+/// with an out-of-range triangle), a sphere, a disk, a cylinder, round and
+/// cubic curves, and a prototype placed with each `InstanceHitId` and once
+/// moving, every geometry attached with `mask(attach id)`.
+fn every_kind(mask: &dyn Fn(u32) -> RayMask, proto: &Arc<Scene>, layout: PacketLayout) -> Scene {
+    let mut b = SceneBuilder::new();
+    let mut next = 0u32;
+    let mut add = |b: &mut SceneBuilder, g: Geometry, label: InstanceHitId| {
+        let id = b.attach_labelled(g, mask(next), label);
+        assert_eq!(id, next);
+        next += 1;
+    };
+    // Meshes whose triangles overlap in one box, so leaves and packets mix
+    // geometries.
+    for m in 0..6u64 {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for t in 0..23u64 {
+            let c = Vec3A::new(
+                unit(m, 3 * t) * 8.0 - 4.0,
+                unit(m, 3 * t + 1) * 8.0 - 4.0,
+                unit(m, 3 * t + 2) * 8.0 - 4.0,
+            );
+            let base = vertices.len() as u32;
+            for k in 0..3u64 {
+                let o = Vec3A::new(
+                    unit(m + 100, 9 * t + 3 * k),
+                    unit(m + 100, 9 * t + 3 * k + 1),
+                    unit(m + 100, 9 * t + 3 * k + 2),
+                ) - 0.5;
+                vertices.push((c + o).to_array());
+            }
+            indices.push([base, base + 1, base + 2]);
+        }
+        if m == 2 {
+            indices.push([0, 1, 9999]); // out of range: a degenerate record
+        }
+        let normals = (m % 2 == 0).then(|| vec![[0.0, 0.0, 1.0]; vertices.len()]);
+        add(
+            &mut b,
+            Geometry::TriangleMesh {
+                vertices,
+                indices,
+                normals,
+            },
+            InstanceHitId::Own,
+        );
+    }
+    add(
+        &mut b,
+        Geometry::Sphere {
+            center: Vec3A::new(1.0, 0.5, 0.0),
+            radius: 0.7,
+        },
+        InstanceHitId::Own,
+    );
+    add(
+        &mut b,
+        Geometry::Disk {
+            center: Vec3A::new(-1.0, 0.0, 1.0),
+            normal: Vec3A::Z,
+            radius: 0.8,
+        },
+        InstanceHitId::Own,
+    );
+    add(
+        &mut b,
+        Geometry::Cylinder {
+            p0: Vec3A::new(0.0, -2.0, 0.0),
+            p1: Vec3A::new(0.0, 2.0, 0.5),
+            radius: 0.3,
+        },
+        InstanceHitId::Own,
+    );
+    add(
+        &mut b,
+        Geometry::RoundCurves {
+            segments: vec![
+                CurveSegment {
+                    p0: Vec3A::new(-3.0, 0.0, 0.0),
+                    p1: Vec3A::new(-2.0, 1.0, 0.0),
+                    r0: 0.1,
+                    r1: 0.05,
+                },
+                CurveSegment {
+                    p0: Vec3A::new(-2.0, 1.0, 0.0),
+                    p1: Vec3A::new(-1.0, 1.5, 0.0),
+                    r0: 0.05,
+                    r1: 0.02,
+                },
+            ],
+        },
+        InstanceHitId::Own,
+    );
+    add(
+        &mut b,
+        Geometry::CubicCurves {
+            segments: vec![CubicCurveSegment {
+                cp: [
+                    Vec3A::new(2.0, -2.0, 0.0),
+                    Vec3A::new(2.5, -1.0, 0.0),
+                    Vec3A::new(3.0, 0.0, 0.5),
+                    Vec3A::new(3.5, 1.0, 0.0),
+                ],
+                r0: 0.1,
+                r1: 0.05,
+            }],
+        },
+        InstanceHitId::Own,
+    );
+    let at = |x: f32| Affine3A::from_translation(glam::Vec3::new(x, 0.0, 2.0));
+    for (k, label) in [
+        InstanceHitId::Own,
+        InstanceHitId::As(500),
+        InstanceHitId::Offset(1000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        add(
+            &mut b,
+            Geometry::Instance {
+                scene: proto.clone(),
+                transform: at(k as f32 * 2.0 - 2.0),
+                transform_end: None,
+            },
+            label,
+        );
+    }
+    add(
+        &mut b,
+        Geometry::Instance {
+            scene: proto.clone(),
+            transform: at(0.0),
+            transform_end: Some(Box::new(at(1.0))),
+        },
+        InstanceHitId::Own,
+    );
+    b.commit_with(CommitOptions { layout })
+}
+
+/// render-passes design D2: a build never reads a mask, so committing the same
+/// geometries with two mask tables gives the same tree, leaves, packets and
+/// records, apart from the mask fields.
+#[test]
+fn a_build_does_not_depend_on_masks() {
+    let proto = unit_sphere_scene();
+    for layout in [PacketLayout::Gathered, PacketLayout::Indexed] {
+        for seed in 0..8 {
+            let a = every_kind(&mask_table(seed), &proto, layout);
+            let b = every_kind(&mask_table(seed + 100), &proto, layout);
+            assert_eq!(
+                a.bvh.layout_words(false),
+                b.bvh.layout_words(false),
+                "{layout:?}, seed {seed}"
+            );
+            assert_ne!(a.bvh.layout_words(true), b.bvh.layout_words(true));
+        }
+    }
+}
+
+/// `remask(commit(a), b)` is `commit(b)`, field for field, for every geometry
+/// kind, both packet layouts and random tables — and so answers every query
+/// as `commit(b)` does. The prototype is never copied.
+#[test]
+fn remask_of_a_commit_is_the_commit_of_the_new_masks() {
+    let proto = unit_sphere_scene();
+    for layout in [PacketLayout::Gathered, PacketLayout::Indexed] {
+        for seed in 0..8 {
+            let (ta, tb) = (mask_table(seed), mask_table(seed + 100));
+            let mut a = every_kind(&ta, &proto, layout);
+            let b = every_kind(&tb, &proto, layout);
+            a.remask(&tb);
+            assert_eq!(
+                a.bvh.layout_words(true),
+                b.bvh.layout_words(true),
+                "{layout:?}, seed {seed}"
+            );
+            for r in 0..64u64 {
+                let o = Vec3A::new(
+                    unit(seed, r) * 8.0 - 4.0,
+                    unit(seed, r + 64) * 8.0 - 4.0,
+                    10.0,
+                );
+                let mask = RayMask(1 << (r % 5));
+                let ray = Ray::new(o, -Vec3A::Z).with_mask(mask);
+                let (ha, hb) = (
+                    a.intersect(&ray, 1e-3, f32::INFINITY),
+                    b.intersect(&ray, 1e-3, f32::INFINITY),
+                );
+                assert_eq!(
+                    ha.map(|h| (h.geom_id, h.prim_id, h.t.to_bits())),
+                    hb.map(|h| (h.geom_id, h.prim_id, h.t.to_bits()))
+                );
+                assert_eq!(
+                    a.occluded(&ray, 1e-3, f32::INFINITY),
+                    b.occluded(&ray, 1e-3, f32::INFINITY)
+                );
+            }
+        }
+    }
+    // Four placements hold the prototype, and the test its one reference.
+    assert_eq!(Arc::strong_count(&proto), 1);
+}
+
+/// A degenerate record stays invisible whatever the new mask, as a commit
+/// with that mask leaves it.
+#[test]
+fn remask_keeps_a_degenerate_triangle_hidden() {
+    let build = |mask| {
+        let mut b = SceneBuilder::new();
+        b.attach_masked(
+            Geometry::TriangleMesh {
+                vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                indices: vec![[0, 1, 2], [0, 1, 7]],
+                normals: None,
+            },
+            mask,
+        );
+        b.commit()
+    };
+    let mut s = build(RayMask::NONE);
+    s.remask(|_| RayMask::ALL);
+    assert_eq!(
+        s.bvh.layout_words(true),
+        build(RayMask::ALL).bvh.layout_words(true)
+    );
+}
