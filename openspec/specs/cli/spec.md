@@ -9,7 +9,9 @@ and writes the output image (`crust render`), lists what a stage holds
 capability), serves an editing session to an MCP client (`crust mcp`, the
 `mcp-session` capability), or diagnoses how to render it faster or cleaner (`crust diagnostic`,
 the `diagnostics` capability). Each can also write a machine-readable JSON report. This is the only user-facing surface of the tool.
+
 ## Requirements
+
 ### Requirement: Subcommands
 
 The CLI SHALL require a subcommand:
