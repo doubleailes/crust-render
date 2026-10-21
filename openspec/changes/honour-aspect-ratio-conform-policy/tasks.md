@@ -12,9 +12,9 @@
 - [x] 2.1 Thread `Framing` from `read_index` / the import context to `CameraFrame::read`'s callers (`build_camera`, `screen_projection`, `camera_lens`, and `live.rs`'s `refresh_settings`). Verify with `cargo build --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
 - [x] 2.2 In `CameraFrame::read`, after the unauthored-vertical default, call `openusd_schemas::render::conform_aperture(policy, [W, H], 1.0, [h, v])`, keeping both the authored and the conformed pair. `tan_half_vfov` and `f_px` read the conformed vertical. Add the `debug_assert` that conformed `h / v` matches `W / H` (design Decision 3). Verify with a test over a 36×24 aperture at 1:1, 2:1 and 1:2 for all five policies, against the apertures in the spec's scenarios (48×24, 36×36, 36×18, 24×24) computed by hand, not by calling `conform_aperture`.
 - [x] 2.3 For `adjustPixelAspectRatio` with a mismatched aperture, conform as `expandAperture` and raise `product.unhonoured_attribute` naming the needed pixel aspect ratio. A matching aperture raises nothing. Verify with a test: 36×24 at 200×100 gives one warning naming 0.75 and the `expandAperture` vfov.
-- [ ] 2.4 Write a render-level regression for #339, with the policy on `RenderSettings` over `samples/dome_backdrop.usda` at `-s 16`. With `adjustApertureHeight` the image differs from the image without the policy, and without the policy it is bit-identical to the pre-change binary (`crust diff` exit 0). Add a second case with the policy authored on the camera prim only, which must have no effect.
+- [x] 2.4 Write a render-level regression for #339, with the policy on `RenderSettings` over `samples/dome_backdrop.usda` at `-s 16`. With `adjustApertureHeight` the image differs from the image without the policy, and without the policy it is bit-identical to the pre-change binary (`crust diff` exit 0). Add a second case with the policy authored on the camera prim only, which must have no effect.
 - [ ] 2.5 Audit the test stages that author `verticalAperture` (`light_linking.rs`, `hidden_lights.rs`, `usd_listing.rs`) for an aperture wider than their resolution, and update any expectation the new `expandAperture` framing legitimately moves, saying so in the commit. Verify that `cargo test --workspace --no-fail-fast` is green.
-- [ ] 2.6 Run `scripts/check_images.sh record` on `main`, then `check` on the change. Verify zero diffs: every sample's conform is a no-op (the four samples authoring `verticalAperture` have apertures no wider than their image).
+- [x] 2.6 Run `scripts/check_images.sh record` on `main`, then `check` on the change. Verify zero diffs: every sample's conform is a no-op (the four samples authoring `verticalAperture` have apertures no wider than their image).
 
 ## 3. Readers of the framing
 
@@ -30,7 +30,7 @@
 ## 5. Integration
 
 - [ ] 5.1 Run the CI set locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`. All three are clean.
-- [ ] 5.2 Validate the change: `openspec validate honour-aspect-ratio-conform-policy --strict` passes.
+- [x] 5.2 Validate the change: `openspec validate honour-aspect-ratio-conform-policy --strict` passes.
 
 ## Workflow follow-up
 
