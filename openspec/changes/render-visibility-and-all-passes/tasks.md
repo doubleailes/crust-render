@@ -2,7 +2,7 @@
 
 ## 0. Prerequisite
 
-- [ ] 0.1 Archive `render-pass-matte-and-camera-visibility` (#340) once its tasks
+- [x] 0.1 Archive `render-pass-matte-and-camera-visibility` (#340) once its tasks
   3.4 and 5.1 are closed, so `openspec/specs/render-passes/spec.md` exists and
   `scene-check` / `cli` carry its requirements. Verify with
   `openspec validate render-visibility-and-all-passes`, which must resolve every
