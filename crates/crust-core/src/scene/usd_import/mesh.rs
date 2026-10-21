@@ -994,9 +994,15 @@ impl UvSource {
 /// and an asset with the chart under another name is otherwise silently
 /// untextured. The first one that yields values wins. `preferred` — the
 /// primvar the bound material's network names ([`Material::uv_primvar`]) — is
-/// tried before all of them. `counts` is the mesh's `faceVertexCounts`, which
-/// a `constant` or `uniform` chart needs to be spread over the face-vertices.
-pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>, counts: &[i32]) -> Option<UvSource> {
+/// tried before all of them. `counts` is the mesh's `faceVertexCounts` and
+/// `n_face_vertices` the length of its `faceVertexIndices`, which a `constant`
+/// or `uniform` chart needs to be spread over the face-vertices.
+pub(super) fn mesh_uvs(
+    prim: &Prim,
+    preferred: Option<&str>,
+    counts: &[i32],
+    n_face_vertices: usize,
+) -> Option<UvSource> {
     let preferred = preferred.map(|p| format!("primvars:{p}"));
     for name in preferred.as_deref().into_iter().chain([
         "primvars:st",
@@ -1054,15 +1060,27 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>, counts: &[i32]) -> 
         // handles faceVarying, and under subdivision each face's value sits
         // behind a seam wherever it differs from its neighbour's, so it stays
         // constant across the face whatever the linear-interpolation rule.
-        let mut fv_indices = Vec::with_capacity(counts.iter().map(|&c| c.max(0) as usize).sum());
+        //
+        // The array holds exactly one entry per authored face-vertex index —
+        // what triangulation and the refiner address — whatever the counts
+        // say: a count running past the indices (a face both skip) must not
+        // size an allocation, and the entries no face reaches, when the counts
+        // fall short, still resolve so they cannot make the chart look broken.
+        let resolve = |entry: usize| match &indices {
+            Some(idx) => idx.get(entry).copied().unwrap_or(-1),
+            None => i32::try_from(entry).unwrap_or(-1),
+        };
+        let mut fv_indices = Vec::with_capacity(n_face_vertices);
         for (face, &count) in counts.iter().enumerate() {
-            let entry = if per_face { face } else { 0 };
-            let resolved = match &indices {
-                Some(idx) => idx.get(entry).copied().unwrap_or(-1),
-                None => i32::try_from(entry).unwrap_or(-1),
-            };
-            fv_indices.extend(std::iter::repeat_n(resolved, count.max(0) as usize));
+            let room = n_face_vertices - fv_indices.len();
+            if room == 0 {
+                break;
+            }
+            let resolved = resolve(if per_face { face } else { 0 });
+            let count = usize::try_from(count).unwrap_or(0).min(room);
+            fv_indices.extend(std::iter::repeat_n(resolved, count));
         }
+        fv_indices.resize(n_face_vertices, resolve(0));
         return Some(UvSource {
             values,
             indices: Some(fv_indices),
@@ -1149,7 +1167,7 @@ pub(super) fn mesh_source(
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
     let uvs = want_uvs
-        .then(|| mesh_uvs(prim, uv_primvar, &counts))
+        .then(|| mesh_uvs(prim, uv_primvar, &counts, indices.len()))
         .flatten();
     let primvars = match keep.filter(|k| !k.is_empty()) {
         Some(keep) => mesh_primvars(prim, keep, points.len(), counts.len(), indices.len()),
@@ -3174,5 +3192,59 @@ def Mesh "T"
         )
         .unwrap();
         assert!(src.refined);
+    }
+}
+
+#[cfg(test)]
+mod uv_chart_tests {
+    use super::*;
+    use crate::scene::usd_import::stage_builder;
+
+    /// A `uniform` chart's synthesized indices are sized by the face-vertex
+    /// indices, not by `faceVertexCounts`: a count running far past them (a
+    /// face triangulation skips) neither sizes an allocation nor moves the
+    /// faces before it, and counts falling short still give one resolved
+    /// entry per index.
+    #[test]
+    fn synthesized_chart_indices_follow_the_face_vertex_indices() {
+        let dir = std::env::temp_dir().join("crust_uv_chart_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("uniform_counts.usda");
+        let mesh = |name: &str, counts: &str| {
+            format!(
+                r#"    def Mesh "{name}"
+    {{
+        int[] faceVertexCounts = [{counts}]
+        int[] faceVertexIndices = [0, 1, 2, 3, 0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0.25, 0.5), (0.75, 0.5)] (interpolation = "uniform")
+    }}
+"#
+            )
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "#usda 1.0\ndef Xform \"W\"\n{{\n{}{}}}\n",
+                mesh("Long", "4, 100000000"),
+                mesh("Short", "4")
+            ),
+        )
+        .expect("write stage");
+        let stage = stage_builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        for (name, expected) in [
+            ("/W/Long", [0, 0, 0, 0, 1, 1, 1, 1]),
+            ("/W/Short", [0, 0, 0, 0, 0, 0, 0, 0]),
+        ] {
+            let p = sdf::path(name).unwrap();
+            let prim = super::super::prim_at(&stage, p.clone());
+            let usd = UsdMesh::get(&stage, p).unwrap().expect("a mesh");
+            let (_, counts, indices) = mesh_arrays(&usd).unwrap();
+            let uv = mesh_uvs(&prim, None, &counts, indices.len()).expect("a chart");
+            assert!(uv.face_varying, "{name}");
+            assert_eq!(uv.indices.as_deref(), Some(&expected[..]), "{name}");
+        }
     }
 }
