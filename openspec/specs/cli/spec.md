@@ -449,7 +449,16 @@ the render falls back to.
 
 - **WHEN** the user runs `crust ls camera -i samples/cornellbox.usda --json -`
 - **THEN** each record has `focal_length_mm`, `aperture_mm` (horizontal,
-  vertical), `f_stop`, `focus_distance`, `is_render_camera` and `hidden`
+  vertical), `conformed_aperture_mm` (horizontal, vertical), `f_stop`,
+  `focus_distance`, `is_render_camera` and `hidden`
+
+#### Scenario: The conformed aperture
+
+- **WHEN** a camera authors a 36 × 24 aperture, and the settings author
+  `resolution = (200, 100)` and
+  `aspectRatioConformPolicy = "adjustApertureHeight"`
+- **THEN** its record has `aperture_mm = [36, 24]` and
+  `conformed_aperture_mm = [36, 18]`, the aperture the render frames
 
 #### Scenario: The camera a render would use
 
