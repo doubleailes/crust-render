@@ -6,8 +6,9 @@
 
 `crust render` and `crust check` SHALL accept `--all-passes`, which selects every
 `RenderPass` of the stage as the `render-passes` capability defines.
-`--all-passes` SHALL be a usage error with `--pass`, with `render`'s `-o`, or
-without `-i`. Every other flag SHALL apply to every pass, as it would to that
+`--all-passes` SHALL be a usage error with `--pass`, with `render`'s `-o` or
+`--stats-json`, or without `-i`. `--stats` SHALL print the import's phases once
+per import and each pass's render table. Every other flag SHALL apply to every pass, as it would to that
 pass rendered alone.
 
 #### Scenario: All passes and one pass

@@ -32,7 +32,7 @@ writes to the default path, shows up only in the images (issue #348).
   gets its own holdout flags, ray masks, light list, light selection and
   settings. Every pass's images SHALL be bit-identical to that pass rendered alone
   with `--pass`. Passes whose import-time settings differ get one import per
-  group. `--all-passes` cannot be combined with `--pass` or `-o`.
+  group. `--all-passes` cannot be combined with `--pass`, `-o` or `--stats-json`.
 - **Output collisions stop the render.** Before any pixel is rendered,
   `--all-passes` refuses a stage where two passes would write the same file.
   This is the case where a missing product override sends two passes to the
@@ -87,8 +87,11 @@ _None._
     `cameraVisibility`. `settings.rs` keeps resolving each pass's
     `renderSource`.
   - `rt_world.rs`: apply a pass's table (holdouts, masks) to a built `World`.
-  - The light list and light links: resolved per pass from the lights the pass
-    keeps.
+  - The light list and light links: `LightLinks::resolve` writes into a
+    per-pass table instead of `WorldBuilder`, so it runs once per pass over the
+    lights the pass keeps.
+  - `usd_import/live.rs`: the `refresh_settings` refusal checks become an
+    import key, which MCP and `--all-passes` grouping share.
   - The import options gain the set of passes; `check.rs` gains the per-pass
     description.
 - **crust-rt**: rewrite the masks in triangle and instance records of a built

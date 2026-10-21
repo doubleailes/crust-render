@@ -127,14 +127,14 @@ integrator settings) SHALL share one import.
 #### Scenario: One import for two passes
 
 - **WHEN** `render_passes.usda`'s two passes differ only in products, and the
-  user runs `crust render -i samples/render_passes.usda --all-passes --stats`
-- **THEN** the stats report one import phase and two renders
+  user runs `crust render -i samples/render_passes.usda --all-passes`
+- **THEN** the log reports one import serving both passes, and two renders
 
 #### Scenario: A pass that dices differently
 
-- **WHEN** one pass's settings author `crust:subdiv:level = 3` and the other's
+- **WHEN** one pass's settings author `crust:subdivisionLevel = 3` and the other's
   author none
-- **THEN** the stage is imported twice, once for each pass
+- **THEN** the log reports two imports, one for each pass
 
 ## MODIFIED Requirements
 
