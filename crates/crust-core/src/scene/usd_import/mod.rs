@@ -1068,6 +1068,7 @@ pub(crate) fn load_scene(
     } = read_index(&index, path, path_str, options, &valid)?;
     let pass = valid.pass.as_ref();
     let render_settings = settings::render_settings_path(&index, pass).map(|p| p.to_string());
+    let settings_prim = settings::read_settings_prim(&index, pass).map(|p| p.to_string());
     let chunks = stream_roots(&index);
     let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
         subtree_roots(&index)
@@ -1271,6 +1272,7 @@ pub(crate) fn load_scene(
     scene.warnings = warning_scope.finish();
     scene.layers = layer_files(&ctx.layers, path);
     scene.pass = ctx.pass.as_ref().map(ActivePass::summary);
+    scene.settings_prim = settings_prim;
     scene.source = crate::scene::Source {
         lens,
         depth_of_field: scene.camera.has_depth_of_field(),

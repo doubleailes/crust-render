@@ -8,8 +8,9 @@ The report SHALL give:
 
 - the stage path and the frame;
 - the camera path, the resolution and the region (`null` for the whole frame);
-- the active pass (`null` with none), the `RenderSettings` prim the render reads,
-  and, with a pass, how many geometries are holdouts and how many are hidden
+- the active pass (`null` with none), the `RenderSettings` prim the render reads
+  (`null` when the stage has none and the render uses the defaults), and, with a
+  pass, how many geometries are holdouts and how many are hidden
   from the camera;
 - every product, with the file a render would write and the channels in it;
   the file is the path with its frame variables expanded for the checked frame.

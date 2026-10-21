@@ -34,6 +34,8 @@ struct Rest {
     /// The active render pass the import read, for the check report: an
     /// in-place update changes neither its holdouts nor what it hides.
     pass: Option<crust_core::PassSummary>,
+    /// The settings prim the import read, for the same report.
+    settings_prim: Option<String>,
     /// How many UV textures the import preloaded.
     preloaded: u64,
 }
@@ -187,6 +189,7 @@ impl Imported {
         scene.warnings = std::mem::take(&mut self.rest.warnings);
         scene.provenance = self.rest.provenance.take();
         scene.pass = self.rest.pass.take();
+        scene.settings_prim = self.rest.settings_prim.take();
         scene.layers = std::mem::take(&mut self.layers);
         update
             .apply(&mut scene)
@@ -252,6 +255,7 @@ impl Imported {
                 time: scene.time,
                 provenance: scene.provenance,
                 pass: scene.pass,
+                settings_prim: scene.settings_prim,
                 preloaded,
             },
         }

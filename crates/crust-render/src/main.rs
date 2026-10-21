@@ -1364,11 +1364,7 @@ fn check_scene(
             }),
         },
         pass: scene.pass.as_ref().map(Into::into),
-        settings: scene
-            .provenance
-            .as_ref()
-            .and_then(|p| p.render_settings())
-            .map(str::to_owned),
+        settings: scene.settings_prim.clone(),
         products,
         effective_settings: effective_settings(&settings, &flags),
         import: scene.stats.phases.clone(),

@@ -756,4 +756,14 @@ fn the_active_pass_and_its_settings_are_reported() {
         "{stderr}"
     );
     assert!(files(&dir).is_empty(), "{:?}", files(&dir));
+
+    // A stage with no settings prim renders on the defaults, and says so:
+    // no settings prim is named, not the conventional path it fell back to.
+    let cornell = cornellbox();
+    let out = crust(
+        &dir,
+        &["check", "-i", cornell.to_str().unwrap(), "--json", "-"],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(parse(&out.stdout)["settings"].is_null());
 }

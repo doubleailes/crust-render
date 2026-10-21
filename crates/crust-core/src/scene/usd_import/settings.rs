@@ -122,6 +122,14 @@ pub(super) fn render_settings_path(stage: &Stage, pass: Option<&sdf::Path>) -> O
         })
 }
 
+/// The `RenderSettings` prim the render reads: [`render_settings_path`] when a
+/// settings prim is there, `None` when the stage has none and the render runs
+/// on the defaults. What `crust check` reports; the provenance keeps the path
+/// itself, so an edit that authors settings there is still a settings edit.
+pub(super) fn read_settings_prim(stage: &Stage, pass: Option<&sdf::Path>) -> Option<sdf::Path> {
+    render_settings_path(stage, pass).filter(|p| is_render_settings(stage, p))
+}
+
 /// The first target of `pass`'s `renderSource` relationship, if it authors one.
 pub(super) fn render_source(stage: &Stage, pass: &sdf::Path) -> Option<sdf::Path> {
     UsdRenderPass::get(stage, pass.clone())
