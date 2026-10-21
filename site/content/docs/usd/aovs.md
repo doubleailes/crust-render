@@ -287,7 +287,8 @@ integer ID (`int`).
   or `varying` primvar is refined like the points and a `faceVarying` one under the
   mesh's `faceVaryingLinearInterpolation`, as the texture chart is; a `uniform` one
   gives each refined face its cage face's value. A `rest` equal to the points therefore
-  agrees with `P` on a subdivided surface.
+  agrees with `P` on a subdivided surface. A `varying` primvar is smoothed like a
+  `vertex` one, not interpolated bilinearly over each face as USD defines it.
 - **Displacement leaves it.** A displaced point reads the primvar of the undisplaced
   point it came from: `Pref` is the rest position, not the displaced one.
 - **Read as authored.** A colour primvar is not converted into the working colour space.

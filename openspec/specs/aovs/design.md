@@ -1326,6 +1326,17 @@ to keep here:
 - Four-component primvar vars are refused (the per-sample value is 3 lanes).
 - Implicit shapes (`Sphere`, `Cube`, …), Gaussian splats and volumes read a
   primvar var's clear value, silently.
+- A `varying` primvar on a subdivided mesh is refined like the points
+  (smoothed and limit-projected), not bilinearly per face as USD and
+  OpenSubdiv's `InterpolateVarying` define it. The `st` chart has always done
+  the same. A fix means porting varying refinement into opensubdiv-rs, which
+  has no `interpolate_varying`, on the uniform and adaptive paths.
+- A subdivided mesh's UV chart is refined at four lanes, then narrowed back
+  to two (`RefinedChannel::narrowed`), even when no primvar var is requested.
+  The import's peak memory for the chart's refinement doubles for the time
+  it takes to refine, and `samples/subdivision.usda` costs +0.025%
+  instructions. The stored scene and the render are unchanged. Removing it
+  means making refinement generic over width.
 - A primvar table stores four lanes per value whatever its arity; packing at
   the arity would save up to 12 bytes a value.
 - A colour primvar is written as authored, not converted into the working

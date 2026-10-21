@@ -60,7 +60,8 @@ state that shapes the approach:
 
 - A render with no primvar var takes exactly today's code path. The
   zero-AOV instruction count and the `plain` fast path in `intersect` stay
-  untouched.
+  untouched. The import is the one exception: a subdivided mesh's chart is
+  refined at four lanes and narrowed back (`aovs` design record, Known gaps).
 - One N-lane primvar representation, shared by meshes (all their paths:
   plain, uniform subdivision, adaptive, displaced, instanced) and curves.
 
