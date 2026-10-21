@@ -159,6 +159,9 @@ without the other (full list: `docs/architecture.md` § Invariants):
   an MCP edit applied in place ↔ a full re-import of the same layer (`crust_core::live`
   rebuilds through the import's own functions; a material property the import bakes
   into geometry or a world flag belongs in `Signature`, in `rt_world.rs`).
+  A pass of a shared import (`--all-passes`: `Scene::apply_pass`, `crust_rt::Scene::remask`)
+  ↔ that pass imported alone (`--pass`): one `passes::apply_pass` decides both, and
+  "may these share an import" is `ImportKey::refusal`, the predicate the MCP edit uses.
 - Anything keyed on a prototype path is scoped by the stage epoch
   (`ImportCaches::epoch`): `/__Prototype_N` is renumbered per masked stage.
 - `Material::resolve` must return exactly what per-query shading would (pinned for every

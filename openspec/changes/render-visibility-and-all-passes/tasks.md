@@ -153,11 +153,11 @@
 
 ## 8. Integration
 
-- [ ] 8.1 Measure the shared import on `samples/render_passes.usda` and one
+- [x] 8.1 Measure the shared import on `samples/render_passes.usda` and one
   production-sized stage. Record import seconds for N passes, `--all-passes`
   against N × `--pass`, using `scripts/bench_ab.sh` style interleaving, in the
   render-passes design record.
-- [ ] 8.2 Run the CI set and verify each is clean:
+- [x] 8.2 Run the CI set and verify each is clean:
   - `cargo fmt --all -- --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --no-fail-fast`

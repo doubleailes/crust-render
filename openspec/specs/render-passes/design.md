@@ -211,6 +211,28 @@ the composite tests):
   first with a pinhole camera, before the sample's lens: 0.0072 → 0.0056 over
   the same range, the same conclusion.)
 
+## Measured: the shared import (`--all-passes`)
+
+Wall-clock seconds, release build, 4 cores, five interleaved rounds (one
+`--all-passes` run, then the four `--pass` runs, per round, so background load
+lands on both), each render at 1 spp over a 16×16 region so the import
+dominates; the import's own figure is `--stats`' "Parse USD stage"
+(`render-visibility-and-all-passes` task 8.1).
+
+| stage | import, one pass | import, the group of 4 | `--all-passes` min / mean | 4 × `--pass` min / mean |
+|-------|------------------|------------------------|---------------------------|-------------------------|
+| `samples/render_passes.usda` | 0.006 s | 0.003 s | 0.0227 / 0.0235 | 0.0589 / 0.0628 |
+| 6000 unique catmull-clark cubes at level 3, ~970 MiB peak | 4.57 – 4.80 s | 4.71 s | 5.47 / 5.74 | 19.34 / 19.75 |
+
+The second stage is synthetic (no production stage is in the repository): the
+sample's four passes over 6000 jittered cubes, so each is refined on its own.
+The group's import costs what one pass's does — judging four passes'
+collections at dispatch is lost in the noise — so N passes cost one import
+plus N renders: 3.4× faster for four passes there. What a pass adds over a
+render of it alone (its `MaskTable` and light list copied, `remask` over the
+built tree, its products written) is 0.26 s per pass against 0.24 s for the
+process of a `--pass` render past its import.
+
 ## Risks and trade-offs
 
 - **[Per-prim query cost on huge stages]** Moana-scale traversals dispatch

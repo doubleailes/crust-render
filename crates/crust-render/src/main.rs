@@ -1456,10 +1456,6 @@ fn check_passes(
 struct Checked {
     /// The imported scene, as the import left it: its own settings,
     /// products and warnings.
-    #[cfg_attr(
-        not(feature = "mcp"),
-        expect(dead_code, reason = "an MCP session renders it")
-    )]
     scene: Scene,
     /// The scene's settings with the scene flags applied: what it renders
     /// with.
@@ -2091,10 +2087,6 @@ struct RenderRun<'a> {
 /// What a render-and-write did.
 struct Written {
     /// Every file written, the EXRs and the PNG preview, in order.
-    #[cfg_attr(
-        not(feature = "mcp"),
-        expect(dead_code, reason = "render_final lists them")
-    )]
     files: Vec<PathBuf>,
     /// The render was cancelled: the files hold what it traced.
     interrupted: bool,
