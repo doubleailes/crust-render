@@ -1287,13 +1287,17 @@ fn layer_files(
 }
 
 /// The files of the root layer stack `identifiers`, in their order: each
-/// mapped as [`layer_files`] maps it, an anonymous layer left out, and a
+/// mapped as [`layer_files`] maps it and made absolute against the working
+/// directory (links not resolved), an anonymous layer left out, and a
 /// package met twice kept once, where it is strongest.
 fn stack_files(identifiers: &[String], root: &Path) -> Vec<std::path::PathBuf> {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     for id in identifiers {
         let one = std::collections::BTreeSet::from([id.clone()]);
         for file in layer_files(&one, root) {
+            // Absolute, so the same layer stamps the same path whatever the
+            // working directory and however the stage path was typed.
+            let file = std::path::absolute(&file).unwrap_or(file);
             if !files.contains(&file) {
                 files.push(file);
             }

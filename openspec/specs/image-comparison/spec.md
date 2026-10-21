@@ -199,7 +199,8 @@ two stamps — with each file's value, or none where it records none — as
 `comparability.differences` in the JSON report and on stderr in the text one,
 whether or not it changes the comparability status. The layer stack SHALL be
 listed layer by layer: a layer in one file only, a layer whose content hash
-differs, and shared layers in another order. Nothing is listed when a file has no
+differs, a layer whose content was not compared because one file could not hash
+it, and shared layers in another order. Nothing is listed when a file has no
 stamp.
 
 #### Scenario: Two builds

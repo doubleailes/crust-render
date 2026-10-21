@@ -106,11 +106,19 @@ also records what shaped the pixels beyond the sampling settings, from
   camera stamps the lens and `crust:depthOfField = 0`.
 - **`crust:layerStack`** is the index stage's root layer stack (`Stage::layer_stack`:
   session, root, sublayers), strongest first, as files (`stack_files`, the mapping of
-  `Scene::layers`). Each line carries an FNV-1a hash of the file's bytes, read by the
-  host after the render (crust-core opens no file here: `SamplingStamp::with_source`
-  takes a reader). FNV-1a, not `DefaultHasher`, because a hash stamped today must
-  compare with one stamped by a later toolchain. One text attribute rather than one per
-  layer, so the attribute set stays fixed.
+  `Scene::layers`), each made absolute against the working directory so the same
+  layer stamps the same path however `-i` was typed. Each line carries an FNV-1a hash
+  of the file's bytes, which the host streams (`content_hash_read`) right after the
+  scene is loaded, before tracing: hashed after the render, a layer edited while it
+  rendered would be credited with pixels it did not make. crust-core opens no file
+  here (`SamplingStamp::with_source` takes the hashes). FNV-1a, not `DefaultHasher`,
+  because a hash stamped today must compare with one stamped by a later toolchain. One
+  text attribute rather than one per layer, so the attribute set stays fixed. An EXR
+  text holds only Latin-1 and one other character drops the whole attribute, so each
+  path is written as printable ASCII with every other UTF-8 byte (and `%`) as `%XX`;
+  `parse_layer_stack` decodes it. A line splits at its first space, which ends the hash,
+  so a path keeps its own spaces. A layer unread on one side (`-`) is reported as "not
+  compared", never as edited.
 - **`crust:invisibleOverrides`** counts `over` prims on which the strongest layer of
   that stack authors `visibility = "invisible"` (a default or any time sample): what an
   override layer — an MCP session's, or a lighter's — hid of the scene beneath it. A

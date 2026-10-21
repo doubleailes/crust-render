@@ -424,8 +424,9 @@ sampling settings:
   geometry was blurred (motion blur on, over a shutter that opens an interval);
 - `crust:layerStack`: the files of the stage's root layer stack in strength order
   (the session layer, the root layer, its sublayers), one per line as the
-  16-digit hex FNV-1a hash of its bytes (`-` when they could not be read), a
-  space, and its path — absent when no layer is known;
+  16-digit hex FNV-1a hash of its bytes as the scene was loaded (`-` when they
+  could not be read), a space, and its absolute path, printable ASCII as is and
+  every other UTF-8 byte (and `%`) as `%XX` — absent when no layer is known;
 - `crust:invisibleOverrides`: the prims the strongest layer of that stack hides
   with an `over` authoring `visibility = "invisible"` (as a default or a time
   sample) — absent for a hand-assembled scene.
