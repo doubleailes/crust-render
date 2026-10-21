@@ -783,11 +783,16 @@ The importer SHALL accept authored values in these forms:
 - `driver:parameters:aov:*` keys on vars, and `driver:parameters:*` keys on
   products.
 
+The vars SHALL be resolved before any geometry is loaded, so the geometry
+import reads the primvars that `sourceType = "primvar"` vars name (see the
+aovs capability, "Primvar sources"), and no others for them.
+
 The importer SHALL refuse the following, each with one warning:
 
 - a target that is not a RenderProduct or RenderVar;
 - a product whose camera does not resolve;
-- `sourceType = "intrinsic"`.
+- `sourceType = "intrinsic"`;
+- `sourceType = "primvar"` with an empty `sourceName`.
 
 The render's camera and resolution SHALL be the first product's resolved
 values. `--camera` SHALL still take precedence.
@@ -813,6 +818,19 @@ values. `--camera` SHALL still take precedence.
 #### Scenario: Intrinsic source refused
 
 - **WHEN** a RenderVar authors `sourceType = "intrinsic"`
+- **THEN** a warning names the var and it is skipped
+
+#### Scenario: Primvar var accepted
+
+- **WHEN** a RenderVar `Pref` authors `uniform token dataType = "point3f"`,
+  `uniform string sourceName = "rest"` and
+  `uniform token sourceType = "primvar"`
+- **THEN** the product gets a closest-mode three-channel `Pref`, and no
+  warning is raised for the var
+
+#### Scenario: Primvar var without a name refused
+
+- **WHEN** a RenderVar authors `sourceType = "primvar"` and no `sourceName`
 - **THEN** a warning names the var and it is skipped
 
 ### Requirement: Imported opacity inputs are cutouts
