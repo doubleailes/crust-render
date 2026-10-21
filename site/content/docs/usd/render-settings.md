@@ -245,7 +245,8 @@ counts bounces, such as Arnold's `GI_total_depth`, `crust:maxDepth = N` is a dep
 `N - 1`.) Russian roulette usually ends paths sooner.
 
 A value below `1` would shade nothing and render black, so it is refused with a warning
-and the default is used.
+and the default is used. There is no upper bound: a very large value, such as
+`2147483647`, means "no limit", and Russian roulette alone ends the paths.
 
 ### crust:indirectClamp
 

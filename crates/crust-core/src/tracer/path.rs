@@ -568,10 +568,17 @@ impl Crossing {
 }
 
 impl PathScratch {
-    /// `max_depth` is a capacity hint only; the walk may push fewer.
+    /// The most vertex records reserved up front, whatever the depth.
+    const RESERVE_CAP: usize = 64;
+
+    /// `max_depth` is a capacity hint only; the walk may push fewer, and
+    /// reserves at most [`Self::RESERVE_CAP`] up front: a depth authored as
+    /// "unlimited" (`i32::MAX`) would otherwise reserve hundreds of GB per
+    /// worker, while Russian roulette ends real paths long before. A longer
+    /// path still grows the vector (#361).
     pub(crate) fn new(max_depth: usize) -> Self {
         Self {
-            records: Vec::with_capacity(max_depth),
+            records: Vec::with_capacity(max_depth.min(Self::RESERVE_CAP)),
             sss_exit: PendingExit::default(),
             first: FirstHit::Escaped,
             route_ctx: None,
