@@ -791,6 +791,32 @@ fn dotproduct_and_luminance() {
 }
 
 #[test]
+fn magnitude_is_the_vector_length() {
+    let magnitude = |ty: &str, value: &str| {
+        let doc = format!(
+            r#"<materialx>
+                 <magnitude name="n" type="float">
+                   <input name="in" type="{ty}" value="{value}" />
+                 </magnitude>
+               </materialx>"#
+        );
+        run(&doc, "n")
+    };
+    let v = magnitude("vector2", "3, 4");
+    assert_eq!(v.arity, 1);
+    assert!(approx(v.x(), 5.0));
+    assert!(approx(magnitude("vector3", "2, 3, 6").x(), 7.0));
+    assert!(approx(magnitude("vector4", "1, 2, 2, 4").x(), 5.0));
+    assert_eq!(magnitude("vector3", "0, 0, 0").x(), 0.0);
+    // Unauthored, `in` is the zero vector.
+    let v = run(
+        r#"<materialx><magnitude name="n" type="float" /></materialx>"#,
+        "n",
+    );
+    assert_eq!(v.x(), 0.0);
+}
+
+#[test]
 fn geometric_inputs_read_the_shading_context() {
     let c = ctx();
     let uv = run_with(

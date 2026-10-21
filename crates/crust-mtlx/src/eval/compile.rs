@@ -263,6 +263,16 @@ impl<'a> Compiler<'a> {
                 let b = self.input_or(node, "in2", Val::ZERO);
                 self.emit(Op::DotProduct { a, b })
             }
+            // `ND_magnitude_vector*`: the vector's length, as the
+            // dot product with itself, so the JIT inherits it exactly.
+            "magnitude" => {
+                let a = self.input_or(node, "in", Val::ZERO);
+                let d = self.emit(Op::DotProduct { a, b: a });
+                self.emit(Op::Unary {
+                    op: UnOp::Sqrt,
+                    a: d,
+                })
+            }
             "mix" => {
                 let fg = self.input_or(node, "fg", Val::ZERO);
                 let bg = self.input_or(node, "bg", Val::ZERO);
