@@ -315,7 +315,9 @@ fn run_at<R>(
         uv: rec.uv.unwrap_or((0.0, 0.0)),
         normal: rec.normal,
         tangent: rec.tangent,
-        view: r_in.direction(),
+        // A camera ray points at the focus plane and is not unit length;
+        // MaterialX's `viewdirection` is.
+        view: r_in.direction().normalize_or_zero(),
         position: rec.p,
         uv_width: rec.uv_width,
         curve,

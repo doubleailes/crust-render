@@ -61,7 +61,7 @@ pub struct ShadeCtx<'a> {
     pub tangent: Vec3A,
     /// Direction from the viewer *to* the surface — MaterialX's
     /// `viewdirection`, which is the incoming ray's direction, not its
-    /// negation.
+    /// negation. Unit length: the host normalizes the ray direction.
     pub view: Vec3A,
     pub position: Vec3A,
     /// Diameter of the shading point's texture footprint, in the same UV

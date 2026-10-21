@@ -291,3 +291,27 @@ fn only_reflection_only_leaves_are_opaque() {
         r#"<translucent_bsdf name="b" type="BSDF" />"#
     ));
 }
+
+#[test]
+fn viewdirection_is_unit_length_whatever_the_ray_length() {
+    // A camera ray points at the focus plane, so its direction is ~10 long
+    // here; `viewdirection` must not carry that length (#355).
+    let loaded = load_inline(
+        "view_length",
+        &emitter(
+            r#"<viewdirection name="v" type="vector3" />
+               <dotproduct name="len2" type="float">
+                 <input name="in1" type="vector3" nodename="v" />
+                 <input name="in2" type="vector3" nodename="v" />
+               </dotproduct>
+               <convert name="c" type="color3"><input name="in" type="float" nodename="len2" /></convert>
+               <uniform_edf name="e" type="EDF"><input name="color" type="color3" nodename="c" /></uniform_edf>"#,
+        ),
+    )
+    .expect("loads");
+    let (_, rec) = upward();
+    for dir in [Vec3A::new(0.0, 0.0, -10.0), Vec3A::new(3.0, -4.0, -0.5)] {
+        let e = loaded.material.emitted_at(&Ray::new(-dir, dir), &rec, 1.0);
+        assert!(e.abs_diff_eq(Vec3A::ONE, 1e-5), "|view|² = {e} for {dir}");
+    }
+}
