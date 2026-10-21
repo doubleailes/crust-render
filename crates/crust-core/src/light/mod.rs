@@ -16,7 +16,9 @@ mod tree;
 pub use area::{AreaLight, AreaShape};
 pub use infinite::{DistantLight, DomeLight, projected_cone_solid_angle};
 pub use kind::LightKind;
-pub use list::{EVERY_CLASS, LightLinks, LightList, LightSelection, TREE_DEFENSIVE_SHARE};
+pub use list::{
+    EVERY_CLASS, LightLinks, LightList, LightSelection, LobeGains, TREE_DEFENSIVE_SHARE,
+};
 pub use rect::RectShape;
 pub use shape::{
     AffineShape, LightShape, ShapeExtent, ShapeHits, SolidAngleSampler, SolidAngleSampling,

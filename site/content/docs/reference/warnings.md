@@ -199,7 +199,6 @@ plain text and are not counted.
 | code | kind | meaning | what to do |
 |------|------|---------|------------|
 | `light.non_finite_input` | refused | A light input is not finite; its fallback is used. | Author a finite value. |
-| `light.unsupported_multiplier` | approximated | A per-lobe light multiplier (diffuse, specular) is not supported; the light contributes at 1.0. | Remove `inputs:diffuse` / `inputs:specular`, or set them to 1. |
 | `light.degenerate_shape` | skipped | A light's size or transform collapses its shape; the light is skipped. | Give the light a finite, positive size and a non-zero scale. |
 | `light.unsupported_texture_format` | skipped | A DomeLight's texture:format is not latlong; it emits its uniform colour. | Convert the map to lat-long. |
 | `light.map_unreadable` | skipped | A light's or dome's texture could not be loaded; it emits its uniform colour. | Check the file path and format; the message gives the loader's reason. |

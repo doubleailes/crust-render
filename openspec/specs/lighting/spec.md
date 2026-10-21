@@ -552,6 +552,33 @@ lights' radiance per direction.
 - **WHEN** a rect light with `inputs:normalize = 1` is scaled to twice its area
 - **THEN** its total emitted power is unchanged
 
+### Requirement: Per-lobe light multipliers
+
+A light's `inputs:diffuse` and `inputs:specular` SHALL scale its contribution
+to a surface's diffuse and specular response: `inputs:specular` the specular,
+coat and transmission lobes and a fibre's primary reflection (R),
+`inputs:diffuse` the diffuse, sheen, subsurface and translucent lobes and a
+fibre's other terms (TT, TRT and beyond). Both sides of MIS SHALL apply the
+same scaling — NEE toward the light, and the light's emission reached by a
+BSDF-sampled bounce, an escaping ray or a link twin — as a factor of the
+integrand, never of a weight. Scattering in a volume SHALL take the light whole.
+A non-finite value SHALL fall back to 1 with a `light.non_finite_input`
+warning. The multipliers SHALL steer no sampling decision.
+
+#### Scenario: The image is linear in the multipliers
+
+- **WHEN** a glossy plastic floor is lit by a sphere light and a distant light
+  authoring `inputs:diffuse = d` and `inputs:specular = s`, under the `light`,
+  `bsdf` and `power` strategies
+- **THEN** each pixel equals, to rounding, `d` times the render at `(1, 0)` plus
+  `s` times the render at `(0, 1)`, and the strategies agree on its mean
+
+#### Scenario: A metal answers to the specular multiplier only
+
+- **WHEN** a metallic floor is lit by lights authoring `inputs:diffuse = 1`,
+  `inputs:specular = 0`
+- **THEN** it renders black
+
 ### Requirement: Light linking
 
 A light SHALL illuminate only the geometry that is a member of its
@@ -695,15 +722,16 @@ without this capability.
 ### Requirement: Known gaps
 
 The following SHALL be documented as unsupported: mesh lights, portal lights,
-light filters, `ShadowAPI`, `inputs:diffuse` / `inputs:specular` (warned and
-ignored), shaping on distant and dome lights, cone-aware sampling of shaped
+light filters, `ShadowAPI`, shaping on distant and dome lights, cone-aware sampling of shaped
 lights, and emissive MaterialX surfaces, curves, instances and volumes as
 light-list entries (they are found by BSDF sampling only). For light and shadow
 linking, the following SHALL be documented: membership inside an instance
 prototype is not distinguishable per instance, `membershipExpression` is refused,
 shadow-linked dome lights are NEE-only at non-delta vertices (noisier on glossy
 receivers), and every shadow-linked light is physically shadowed through delta
-vertices. Camera visibility SHALL be documented as the only per-light ray
+vertices. For a light's per-lobe multipliers it SHALL be documented that the
+emission a bounce reaches is routed to the light path expressions at the
+bounce's blended gain on each of that vertex's lobes. Camera visibility SHALL be documented as the only per-light ray
 visibility read: RenderMan's other `visibility:*` primvars (`indirect`,
 `transmission`) are not read.
 

@@ -377,6 +377,15 @@ other. The pairs:
   value by 0.2%); `escaped_emission` sums `escaped_split`'s single traversal.
   The indirect clamp's factor is the beauty's, applied to every expression's
   continuation.
+- **A light's per-lobe gain on NEE ↔ on the bounce side.** `inputs:diffuse` /
+  `inputs:specular` (`LobeGains`) scale NEE's connection share by share
+  (`gained_split`) and the emission a bounce reaches by the gain blended over
+  that bounce's own split (`bounce_gain`, from `PrevBounce::specular`), at every
+  site that collects it: a hit light, a crossing, an escape, a link twin. Both
+  read `LobeLabel::is_specular` through `ShadingPoint::specular_fraction`;
+  change the classes on one side alone and the strategies disagree
+  (`every_strategy_agrees_under_a_split_light`, and per pixel
+  `the_image_is_linear_in_the_multipliers`, in `crust-core/tests/lobe_gains.rs`).
 - **The light path inspector's records ↔ the beauty.** `Route::fold`
   (`tracer/route.rs`) walks the same recurrence forward and hands out one
   record per term that ends on emission — `segment_emit`, `emit_here`, each

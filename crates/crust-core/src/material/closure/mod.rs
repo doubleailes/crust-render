@@ -670,6 +670,23 @@ impl ResolvedClosure {
         self.hair_leaves
     }
 
+    /// The share of leaf `i`'s term toward `wi` (in
+    /// [`ResolvedClosure::eval_lobes`]'s order) that a light's
+    /// `inputs:specular` scales, per channel: a fibre's R term
+    /// ([`hair::Hair::r_fraction`]), or the whole leaf when its event's label
+    /// is a specular one ([`LobeLabel::is_specular`]).
+    ///
+    /// [`LobeLabel::is_specular`]: crate::material::lobe::LobeLabel::is_specular
+    pub fn specular_fraction(&self, i: usize, wi: Vec3A) -> Vec3A {
+        let leaf = &self.leaves[i];
+        let l = leaf.frame.to_local(wi.normalize());
+        match &leaf.lobe {
+            Lobe::Hair(h) => h.r_fraction(l),
+            _ if leaf.event(l.z < 0.0).label.is_specular() => Vec3A::ONE,
+            _ => Vec3A::ZERO,
+        }
+    }
+
     /// `eval`'s value toward `wi`, split into the fibres' share and the other
     /// leaves', each summed in leaf order.
     pub fn eval_hair_split(&self, wi: Vec3A) -> (Vec3A, Vec3A) {

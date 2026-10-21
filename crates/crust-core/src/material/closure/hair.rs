@@ -196,6 +196,25 @@ impl Hair {
         (sum / cos_n, pdf)
     }
 
+    /// The share of [`Hair::eval`]'s value toward local ωi `wi` that is the
+    /// primary reflection R (`p = 0`), per channel: what a light's
+    /// `inputs:specular` scales, the rest (TT, TRT and beyond) answering to
+    /// its `inputs:diffuse`. Zero where the value is.
+    pub fn r_fraction(&self, wi: Vec3A) -> Vec3A {
+        let (sum, _) = self.terms(wi);
+        let sin_i = wi.x.clamp(-1.0, 1.0);
+        let cos_i = safe_sqrt(1.0 - sin_i * sin_i);
+        let phi = wi.z.atan2(wi.y) - self.phi_o;
+        let mp = mp(cos_i, self.cos_o[0], sin_i, self.sin_o[0], self.v[0]);
+        let np = np(phi, 0, self.s[0], self.gamma_o, self.gamma_t);
+        let r = Vec3A::from_array(self.ap[0]) * (mp * np);
+        Vec3A::select(
+            sum.cmpgt(Vec3A::ZERO),
+            (r / sum).min(Vec3A::ONE),
+            Vec3A::ZERO,
+        )
+    }
+
     /// `Σ_p M_p·A_p·N_p` and `Σ_p pdf_p·M_p·N_p` toward ωi.
     fn terms(&self, wi: Vec3A) -> (Vec3A, f32) {
         let sin_i = wi.x.clamp(-1.0, 1.0);

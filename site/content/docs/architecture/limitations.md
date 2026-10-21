@@ -140,7 +140,11 @@ render.
 ## Lights
 
 - **Not supported:** mesh lights, portal lights, light filters, and shaping on distant and
-  dome lights. `inputs:diffuse` and `inputs:specular` are ignored with a warning.
+  dome lights.
+- **Diffuse and specular multipliers are averaged in the lobe AOVs.** The part of a light
+  with `inputs:diffuse` or `inputs:specular` that a surface receives through a bounce is
+  shared between its lobes' AOVs at the multipliers' average for that bounce
+  ([details](@/docs/usd/lights.md#diffuse-and-specular-multipliers)). The beauty is exact.
 - **Emissive surfaces aren't sampled as lights.** An emissive MaterialX surface, emissive
   curves, instances or volumes are found only by rays that hit them. Use UsdLux lights for
   a scene's main light sources.

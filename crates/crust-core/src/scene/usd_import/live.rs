@@ -263,10 +263,12 @@ impl Rebuilding<'_> {
             let emitters = geoms
                 .map(|id| (id, ctx.world.material(id).clone()))
                 .collect();
+            let gains = ctx.lights.lobe_gains(0);
             let (light, _) = ctx.lights.remove(0);
             Ok(LightUpdate {
                 index: origin.index,
                 light,
+                gains,
                 emitters,
             })
         })();
