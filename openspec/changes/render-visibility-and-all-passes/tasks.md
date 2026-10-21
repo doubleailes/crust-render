@@ -17,7 +17,7 @@
   are not, make packing mask-independent first and verify
   `scripts/check_images.sh check` and `scripts/test_simd_matrix.sh -p crust-rt`
   report no change. Record the result in the design.
-- [ ] 1.2 Check that a `def RenderSettings "sharp" (inherits = </Render/settings>)`
+- [x] 1.2 Check that a `def RenderSettings "sharp" (inherits = </Render/settings>)`
   that authors only `disableDepthOfField = 1` composes the base's camera,
   resolution, products and `crust:` settings through every settings reader. Verify
   with a test in `crust-core/tests/render_passes.rs` on a pass whose

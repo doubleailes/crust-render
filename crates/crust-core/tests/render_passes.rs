@@ -249,6 +249,100 @@ fn the_render_source_chooses_the_settings() {
     }
 }
 
+/// render-passes spec, "The render source is read as composed": a pass's
+/// `renderSource` that `inherits`, `references` or `specializes` the shot's
+/// settings and authors only `disableDepthOfField` renders the base's camera,
+/// resolution, products and `crust:` settings through a pinhole.
+#[test]
+fn a_render_source_composes_its_base_settings() {
+    for (arc, metadata) in [
+        ("inherits", "inherits = </Render/settings>"),
+        ("references", "references = </Render/settings>"),
+        ("specializes", "specializes = </Render/settings>"),
+    ] {
+        let path = dir().join(format!("composed_{arc}.usda"));
+        let text = format!(
+            r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{{
+    def Camera "Other"
+    {{
+        double3 xformOp:translate = (5, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Camera "Cam"
+    {{
+        float fStop = 2.8
+        float focusDistance = 10
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+}}
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int2 resolution = (12, 6)
+        int crust:samplesPerPixel = 5
+        rel camera = </World/Cam>
+        rel products = [</Render/baseProduct>]
+    }}
+    def RenderSettings "sharp" (
+        {metadata}
+    )
+    {{
+        uniform bool disableDepthOfField = 1
+    }}
+    def RenderProduct "baseProduct"
+    {{
+        token productName = "base.exr"
+        rel orderedVars = [</Render/color>]
+    }}
+    def RenderVar "color"
+    {{
+        string sourceName = "color"
+    }}
+    def Scope "Passes"
+    {{
+        def RenderPass "util"
+        {{
+            rel renderSource = </Render/sharp>
+        }}
+    }}
+}}
+"#
+        );
+        std::fs::write(&path, text).expect("write stage");
+        let base = load(&path, None);
+        let util = load(&path, Some("/Render/Passes/util"));
+        assert!(
+            base.camera.has_depth_of_field(),
+            "{arc}: the base has a lens"
+        );
+        assert!(
+            !util.camera.has_depth_of_field(),
+            "{arc}: the pass is sharp"
+        );
+        assert!(!util.settings.depth_of_field(), "{arc}");
+        for scene in [&base, &util] {
+            assert_eq!(scene.settings.get_dimensions(), (12, 6), "{arc}");
+            assert_eq!(scene.settings.samples_per_pixel(), 5, "{arc}");
+            assert_eq!(scene.camera_path.as_deref(), Some("/World/Cam"), "{arc}");
+            assert_eq!(scene.aovs.products.len(), 1, "{arc}");
+            assert_eq!(scene.aovs.products[0].name, "base.exr", "{arc}");
+        }
+        let prov = util.provenance.as_ref().expect("imported");
+        assert_eq!(prov.render_settings(), Some("/Render/sharp"), "{arc}");
+        assert_eq!(count(&util, WarningCode::RenderPassRenderSourceInvalid), 0);
+    }
+}
+
 /// render-passes spec, "A render source that is not settings": a warning
 /// names the pass and the target, and the stage's settings are read.
 #[test]
