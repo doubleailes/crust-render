@@ -48,12 +48,13 @@ SHALL hold the var's clear value.
 
 ### Requirement: Primvar types must fit the var
 
-A primvar var's channel count SHALL come from its `dataType`: 1, 2 or 3
-components; a four-component `dataType` SHALL refuse the var (not yet
-supported). A primvar whose component count differs from the var's, or with
-no numeric value per point (`string`, `token`, matrices), SHALL be refused on
-that prim with one warning per var and prim; that prim reads the clear value.
-An `int` primvar SHALL fit an `int` or `float` var.
+A primvar var's width and precision SHALL come from
+`driver:parameters:aov:format` when authored, else `dataType`: 1, 2 or 3
+components, four refusing the var (not yet supported). Its role SHALL come
+from `dataType`. A primvar whose component count differs from the var's, or
+with no numeric value per point, SHALL be refused on that prim with one
+warning per var and prim; that prim reads the clear value. An `int` primvar
+SHALL fit an `int` or `float` var.
 
 #### Scenario: Mismatched component count
 
@@ -61,6 +62,12 @@ An `int` primvar SHALL fit an `int` or `float` var.
   `point3f[] primvars:rest`
 - **THEN** one warning names the var, the prim and both types, and the mesh
   reads the clear value
+
+#### Scenario: Houdini's format sets the storage, not the role
+
+- **WHEN** a var authors `dataType = "point3f"` and
+  `driver:parameters:aov:format = "half3"` for `rest`
+- **THEN** the channel is three half channels, accumulated closest
 
 #### Scenario: Four components refused
 

@@ -326,7 +326,7 @@ impl StrandBuilder {
                 let c = c?;
                 if c.overrun {
                     warning!(
-                        AovPrimvarMismatch,
+                        PrimvarMismatch,
                         at = prim.path(),
                         "{}: primvars:{} has too few values for its {:?} interpolation; \
                          that prim reads the primvar vars' clear value",
@@ -369,7 +369,7 @@ fn read_kept(prim: &Prim, kept: &KeptPrimvar, counts: CurveCounts) -> Option<Cha
 
 fn refuse_kept(prim: &Prim, kept: &KeptPrimvar, why: &str) -> Option<Channel> {
     warning!(
-        AovPrimvarMismatch,
+        PrimvarMismatch,
         at = prim.path(),
         "{} primvar {:?} as {} component(s), but on {} it {why}; that prim reads the \
          clear value",

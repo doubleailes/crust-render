@@ -1298,10 +1298,15 @@ to keep here:
 - **Inheritance is detected, not honoured.** A geometry prim missing a kept
   primvar walks its ancestors, memoised per `(entry, ancestor)`; native
   instance prims and PointInstancers are checked where instancing meets them.
-  One `aov.primvar_not_inherited` per var.
+  One `primvar.not_inherited` per var.
 - **Live edits.** `StageFacts::primvars` records the keep set; a settings
   refresh whose products ask for another refuses, and the session re-imports
-  (`a_product_asking_for_a_new_primvar_reimports`).
+  (`a_product_asking_for_a_new_primvar_reimports`). The two warnings raised
+  reading geometry are the `primvar.` family, not `aov.`: `aov.` is one of the
+  settings families a refresh refuses on (`live.rs`, `SETTINGS_FAMILIES`), and
+  a scene carrying one would re-import on every camera edit. The keep-set
+  check already guarantees a refresh cannot move them
+  (`a_primvar_warning_does_not_block_a_settings_edit`).
 - **Measured.** Zero-AOV cornellbox, 2 spp, callgrind: 4,264.29M against
   `main`'s 4,264.22M (+0.0017%); `samples/subdivision.usda` +0.025%, the
   chart's four-lane refinement and its widening copy at import. Interleaved

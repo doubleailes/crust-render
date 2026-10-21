@@ -34,6 +34,8 @@ use super::{
 
 /// Warning codes a settings change can move, by family: the settings, the
 /// products and their AOVs, the camera, the time code and the colour space.
+/// Not `primvar.`: those are raised reading geometry, for the primvars the
+/// geometry kept, and a refresh that would change that set is refused.
 const SETTINGS_FAMILIES: &[&str] = &[
     "settings.",
     "product.",

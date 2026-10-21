@@ -1853,7 +1853,7 @@ fn read_mesh_primvar(
         .unwrap_or_default();
     let refuse = |why: String| -> Read {
         warning!(
-            AovPrimvarMismatch,
+            PrimvarMismatch,
             at = prim.path(),
             "{} primvar {:?} as {} component(s), but {} authors it as {type_name} ({why}); \
              that prim reads the clear value",

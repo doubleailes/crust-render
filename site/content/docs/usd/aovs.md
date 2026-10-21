@@ -316,6 +316,10 @@ A position, a direction or an ID is closest because a value blended across an ed
 belongs to neither surface. The overrides in [Accumulation](#accumulation) still apply.
 An integer is exact in the channel up to 2²⁴.
 
+Houdini authors `driver:parameters:aov:format` beside `dataType`. The format then sets
+the channel count and precision (`half3` writes three half channels), and the
+`dataType` still sets the family: a `point3f` var stored as `half3` stays closest.
+
 ### Cost
 
 Primvars are read only when a var names them: a render without a primvar var reads,
