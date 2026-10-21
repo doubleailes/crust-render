@@ -30,7 +30,10 @@ one stage hold every pass, with no asset edits.
   clear value, as an escaped camera ray does. Shadow, indirect and light-sampling
   rays see the holdout as ordinary geometry, so it still casts shadows and
   appears in reflections and refractions. The beauty and its alpha stay
-  premultiplied and consistent, so `A over B` composites the passes.
+  premultiplied and consistent. Passes that hold each other out split every
+  pixel's samples between them, so they recombine exactly with **plus**,
+  edges, transparency and motion blur included. `over` applies when the back
+  pass hides the front object from the camera instead of holding it out.
 - **`collection:cameraVisibility` → camera bit.** Geometry and lights outside
   the active pass's `cameraVisibility` collection are hidden from camera rays.
   Every other ray category sees them unchanged. A pass only removes camera

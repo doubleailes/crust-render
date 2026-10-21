@@ -72,10 +72,17 @@
   - the zero-AOV instruction-count test passes.
 
   Record the numbers in the rendering design record.
-- [ ] 3.4 Verify the two-pass composite end to end: a character pass and a props
-  pass from one sample stage, `over` composited, match the no-pass render within
-  sampling noise (difference falls as 1/√N between 16 and 64 spp,
-  `--indirect-clamp 0`). Add the sample stage under `samples/`.
+- [ ] 3.4 Verify the two-pass composites end to end on one sample stage (added
+  under `samples/`), at `-s 16` and `--indirect-clamp 0`:
+  - **holding each other out:** the character pass holds out the props, the
+    props pass holds out the character and the dome. The **sum** of their beauty,
+    alpha and LPE channels matches the no-pass render to float rounding;
+  - **double counting:** the same pair with the dome visible in both passes sums
+    to the no-pass render plus the dome once more where it is seen;
+  - **hidden in back:** the character pass holds out the props, the props pass
+    excludes the character from `cameraVisibility`. `char over props` matches the
+    no-pass render away from edges, and its edge error falls as 1/√N only where
+    the coverages are independent; record the edge error in the design record.
 
 ## 4. CLI, check and MCP (crust-render)
 
@@ -103,7 +110,10 @@
 
 - [ ] 5.1 Write `site/content/docs/usd/render-passes.md`. It covers choosing a pass,
   `renderSource`, `matte` and `cameraVisibility` with a worked character/background
-  example, compositing with `over`, the collections not read, and the known gaps
+  example, recombining passes (plus for passes that hold each other out, with the
+  rule that every camera-visible object and the dome are visible in exactly one
+  pass; `over` when the back pass hides the front object), the collections not
+  read, and the known gaps
   from the `render-passes` spec. Link it from `usd/_index.md` and
   `usd/render-settings.md`. Verify `zola build` (0.21) in `site/` passes its
   link and anchor check.

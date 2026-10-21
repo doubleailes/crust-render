@@ -17,12 +17,19 @@ filter). It SHALL still count toward the pixel's sample count and filter weight.
 - **THEN** both the beauty and its alpha converge to 0.5, so the pixel is a
   correctly premultiplied half-covered white
 
-#### Scenario: Passes composite with over
+#### Scenario: Passes that hold each other out add up
 
-- **WHEN** a character pass holds out the props and a props pass holds out the
-  character, both rendered from the same stage, camera and sample count
-- **THEN** compositing the character pass over the props pass matches, within
-  sampling noise, the render with no pass active
+- **WHEN** a character pass holds out the props, and a props pass holds out the
+  character and the dome, both rendered from the same stage and camera at `-s 16`
+- **THEN** the sum of the two passes' beauty, alpha and LPE channels matches the
+  render with no pass active, to float rounding, edge pixels included
+
+#### Scenario: Geometry visible in both passes is counted twice
+
+- **WHEN** the same two passes are rendered but neither holds out the dome
+- **THEN** their sum shows the dome's colour twice where the camera sees it, so
+  passes recombine by addition only when each camera-visible object is visible
+  in exactly one of them
 
 #### Scenario: Depth shows the visible surface
 
