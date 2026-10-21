@@ -318,14 +318,23 @@ Schema mapping:
   - **The UV chart is refined with the surface.** A `faceVarying` `primvars:st` (and
     `:indices`) becomes a real face-varying channel under the mesh's
     `faceVaryingLinearInterpolation` (USD fallback `cornersPlus1`, *not* OpenSubdiv's
-    `cornersOnly`); a `vertex` chart is refined like the points. Both are snapped to
+    `cornersOnly`); a `vertex` chart is refined like the points. A `constant` or
+    `uniform` chart is rewritten at read time (`mesh_uvs`) into faceVarying with
+    synthesized indices (all `0`, or the face index, composed with any authored
+    `:indices`), so neither refiner nor triangulation has a third case: each face's
+    value sits behind a seam wherever it differs from its neighbour's and stays
+    constant across the face. Before, both were read per *point*, which silently
+    smeared a constant chart towards `(0, 0)` and gave a uniform one another face's
+    value (#354). An unauthored `interpolation` stays `vertex` (not USD's `constant`),
+    except on a one-value chart. Both are snapped to
     the limit with the positions, so a texel stays on the limit point its vertex was
     snapped to. A chart whose indices do not resolve is dropped with a warning,
     because a refiner cannot skip a bad value the way a triangle lookup can. Pinned by
     `subdiv::tests` (affine charts reproduced exactly under all six rules, a UV seam
     keeps each side on its island, vertex charts) and by inline-USD tests reading the
     chart back through a hit (`a_subdivided_mesh_keeps_its_uv_chart`,
-    `every_face_varying_rule_is_read`).
+    `every_face_varying_rule_is_read`,
+    `a_uniform_or_constant_chart_is_read_per_face_or_per_mesh`).
   - **Ptex keeps indexing the base cage**: refined triangles carry explicit corner UVs
     (`FaceMap.uvs`) mapping them back into their cage face's unit square, from a
     synthetic face-varying channel, and `check_face_count` compares the texture

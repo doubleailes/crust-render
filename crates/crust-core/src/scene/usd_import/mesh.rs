@@ -956,9 +956,11 @@ pub(super) fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i
 ///
 /// USD stores texture coordinates as a value array plus an optional index
 /// array, interpolated either per **point** (`vertex`/`varying`) or per
-/// **face-vertex** (`faceVarying`). The distinction is not cosmetic: a vertex
-/// on a UV seam has one position but two texture coordinates, which only the
-/// faceVarying form can express — and it is the form both DPEL assets use.
+/// **face-vertex** (`faceVarying`); a `constant` or `uniform` chart is
+/// rewritten into the faceVarying form when it is read ([`mesh_uvs`]). The
+/// distinction is not cosmetic: a vertex on a UV seam has one position but two
+/// texture coordinates, which only the faceVarying form can express — and it
+/// is the form both DPEL assets use.
 pub(super) struct UvSource {
     pub(super) values: Vec<[f32; 2]>,
     /// `primvars:st:indices`, when authored. Indexes `values`.
@@ -992,8 +994,9 @@ impl UvSource {
 /// and an asset with the chart under another name is otherwise silently
 /// untextured. The first one that yields values wins. `preferred` — the
 /// primvar the bound material's network names ([`Material::uv_primvar`]) — is
-/// tried before all of them.
-pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource> {
+/// tried before all of them. `counts` is the mesh's `faceVertexCounts`, which
+/// a `constant` or `uniform` chart needs to be spread over the face-vertices.
+pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>, counts: &[i32]) -> Option<UvSource> {
     let preferred = preferred.map(|p| format!("primvars:{p}"));
     for name in preferred.as_deref().into_iter().chain([
         "primvars:st",
@@ -1011,21 +1014,59 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource>
             continue;
         }
         let indices = custom_i32_array(prim, &format!("{name}:indices"));
+        let interpolation = prim
+            .attribute(name)
+            .metadata::<sdf::Value>("interpolation")
+            .ok()
+            .flatten()
+            .and_then(decode_text);
         // USD's fallback interpolation for a primvar is `constant`, but for
         // `st` in practice it is always authored; treating an unauthored
         // metadatum as faceVarying would mis-index a vertex-interpolated
         // chart, so the authored value decides and `vertex` is the fallback.
-        let face_varying = matches!(
-            prim.attribute(name)
-                .metadata::<sdf::Value>("interpolation")
-                .ok()
-                .flatten(),
-            Some(sdf::Value::Token(t)) if t.as_str() == "faceVarying"
-        );
+        // The one unauthored chart that is unambiguous is a single value,
+        // which can only be constant.
+        let addressed = indices.as_ref().map_or(values.len(), Vec::len);
+        let per_face = match interpolation.as_deref() {
+            Some("faceVarying") => {
+                return Some(UvSource {
+                    values,
+                    indices,
+                    face_varying: true,
+                });
+            }
+            Some("constant") => Some(false),
+            Some("uniform") => Some(true),
+            None if addressed == 1 => Some(false),
+            _ => None,
+        };
+        let Some(per_face) = per_face else {
+            return Some(UvSource {
+                values,
+                indices,
+                face_varying: false,
+            });
+        };
+        // `constant` and `uniform` become faceVarying: every face-vertex of
+        // face `f` indexes the chart's entry `f` (uniform) or `0` (constant),
+        // through the authored indices when there are any. Everything
+        // downstream — triangulation, both refiners, `MeshKey` — already
+        // handles faceVarying, and under subdivision each face's value sits
+        // behind a seam wherever it differs from its neighbour's, so it stays
+        // constant across the face whatever the linear-interpolation rule.
+        let mut fv_indices = Vec::with_capacity(counts.iter().map(|&c| c.max(0) as usize).sum());
+        for (face, &count) in counts.iter().enumerate() {
+            let entry = if per_face { face } else { 0 };
+            let resolved = match &indices {
+                Some(idx) => idx.get(entry).copied().unwrap_or(-1),
+                None => i32::try_from(entry).unwrap_or(-1),
+            };
+            fv_indices.extend(std::iter::repeat_n(resolved, count.max(0) as usize));
+        }
         return Some(UvSource {
             values,
-            indices,
-            face_varying,
+            indices: Some(fv_indices),
+            face_varying: true,
         });
     }
     None
@@ -1107,7 +1148,9 @@ pub(super) fn mesh_source(
     let uv_primvar = uv_primvar.or_else(|| displacement.and_then(|d| d.uv_primvar.as_deref()));
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
-    let uvs = want_uvs.then(|| mesh_uvs(prim, uv_primvar)).flatten();
+    let uvs = want_uvs
+        .then(|| mesh_uvs(prim, uv_primvar, &counts))
+        .flatten();
     let primvars = match keep.filter(|k| !k.is_empty()) {
         Some(keep) => mesh_primvars(prim, keep, points.len(), counts.len(), indices.len()),
         None => Vec::new(),

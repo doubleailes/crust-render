@@ -499,12 +499,24 @@ refined with the surface:
 - a `faceVarying` primvar SHALL be interpolated under the mesh's
   `faceVaryingLinearInterpolation` (`none`, `cornersOnly`, `cornersPlus1`,
   `cornersPlus2`, `boundaries` or `all`; `cornersPlus1` when unauthored);
-- a `vertex` or `varying` primvar SHALL be refined like the points.
+- a `vertex` or `varying` primvar SHALL be refined like the points;
+- a `constant` or `uniform` primvar SHALL be read as the faceVarying primvar it
+  is equivalent to (every face-vertex indexing value 0, or its face's value),
+  so it reads one coordinate per mesh or per face, on the cage and at every
+  level alike. An unauthored `interpolation` SHALL be read as `vertex`, except
+  on a chart of exactly one value, which is `constant`.
 
 A UV-textured material bound to a subdivided mesh SHALL therefore sample its
 textures. Ptex lookups SHALL keep addressing the authored cage's face ids; a
 `loop` mesh whose material reads Ptex SHALL therefore render as its smooth cage
 with a warning rather than refine.
+
+#### Scenario: A uniform chart reads one coordinate per face
+
+- **WHEN** a two-quad mesh authors `primvars:st = [(0.25, 0.5), (0.75, 0.5)]`
+  with `interpolation = "uniform"`, at level 0 or 2
+- **THEN** every hit on the first face reads `(0.25, 0.5)` and every hit on the
+  second `(0.75, 0.5)`
 
 #### Scenario: Loop mesh with a Ptex texture
 

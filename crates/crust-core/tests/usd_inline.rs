@@ -2743,6 +2743,106 @@ fn a_subdivided_mesh_keeps_its_uv_chart() {
     }
 }
 
+/// A `uniform` chart is one coordinate per face, a `constant` one (authored,
+/// or a lone unauthored value) one for the whole mesh — read per face and per
+/// mesh, not per point, and the same whether the mesh renders its cage or a
+/// refinement (each face's value sits behind a seam, so it stays put).
+#[test]
+fn a_uniform_or_constant_chart_is_read_per_face_or_per_mesh() {
+    let dir = std::env::temp_dir().join("crust_usd_inline_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("chart_interp.mtlx"),
+        r#"<?xml version="1.0"?>
+<materialx version="1.38">
+  <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+    <input name="color" type="color3" value="0.8, 0.8, 0.8" />
+  </oren_nayar_diffuse_bsdf>
+  <surface name="s" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="d" />
+  </surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="s" />
+  </surfacematerial>
+</materialx>
+"#,
+    )
+    .expect("write probe mtlx");
+    let probe = |name: &str, st: &str, level: u32| {
+        load_at_level(
+            name,
+            &format!(
+                r#"
+    def Scope "Looks" {{
+        def Material "Mtl" (
+            prepend references = @chart_interp.mtlx@</MaterialX/Materials/m>
+        ) {{
+        }}
+    }}
+    def Mesh "Quads" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0)]
+        {st}
+        uniform token subdivisionScheme = "catmullClark"
+        rel material:binding = </World/Looks/Mtl>
+    }}"#
+            ),
+            level,
+        )
+    };
+    let left = (0.25, 0.5);
+    let right = (0.75, 0.5);
+    let cases = [
+        (
+            "uniform",
+            r#"texCoord2f[] primvars:st = [(0.25, 0.5), (0.75, 0.5)] (interpolation = "uniform")"#,
+            [left, right],
+        ),
+        (
+            "uniform_indexed",
+            r#"texCoord2f[] primvars:st = [(0.75, 0.5), (0.25, 0.5)] (interpolation = "uniform")
+        int[] primvars:st:indices = [1, 0]"#,
+            [left, right],
+        ),
+        (
+            "constant",
+            r#"texCoord2f[] primvars:st = [(0.75, 0.5)] (interpolation = "constant")"#,
+            [right, right],
+        ),
+        (
+            "constant_unauthored",
+            r#"texCoord2f[] primvars:st = [(0.25, 0.5)]"#,
+            [left, left],
+        ),
+    ];
+    for (what, st, expected) in cases {
+        for level in [0, 2] {
+            let scene = probe(&format!("chart_interp_{what}_{level}"), st, level);
+            for (x, y, (eu, ev)) in [
+                (0.1, 0.1, expected[0]),
+                (0.5, 0.9, expected[0]),
+                (0.9, 0.5, expected[0]),
+                (1.1, 0.5, expected[1]),
+                (1.5, 0.1, expected[1]),
+                (1.9, 0.9, expected[1]),
+            ] {
+                let r = Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
+                let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
+                let (u, v) = hit
+                    .rec
+                    .uv
+                    .unwrap_or_else(|| panic!("{what} level {level}: no chart at ({x}, {y})"));
+                assert!(
+                    (u - eu).abs() < 1e-5 && (v - ev).abs() < 1e-5,
+                    "{what} level {level}: ({x}, {y}) reads ({u}, {v}), not ({eu}, {ev})"
+                );
+            }
+        }
+    }
+}
+
 /// Each `faceVaryingLinearInterpolation` token reaches the refiner. A 2×2
 /// grid charted `(x, y) / 2`, except the interior vertex, pulled to
 /// `(0.9, 0.5)`: `all` interpolates the chart linearly, so the limit keeps
