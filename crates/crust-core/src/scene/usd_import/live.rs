@@ -29,7 +29,7 @@ use super::time::EvalTimeScope;
 use super::xform::compose_with_parent;
 use super::{
     ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, frame_pose,
-    open_stage, open_stage_masked, prim_at, read_index, stage_builder,
+    invisible_overrides, open_stage, open_stage_masked, prim_at, read_index, stage_builder,
 };
 
 /// Warning codes a settings change can move, by family: the settings, the
@@ -387,6 +387,8 @@ fn refresh_settings(
         {
             return Err(Structural("the render camera changed".into()));
         }
+        let invisible_overrides = invisible_overrides(&index);
+        let motion_blur = read.settings.motion_blur() && read.shutter.interval.is_some();
         drop(index);
         let stage = open_stage(layer, path_str, Some(cam_path.clone()))
             .map_err(|e| Structural(format!("cannot open the stage: {e}")))?;
@@ -405,6 +407,9 @@ fn refresh_settings(
             settings,
             camera: rc.camera,
             aovs: read.products.request,
+            lens: rc.lens,
+            motion_blur,
+            invisible_overrides,
         })
     })();
     let raised = scope.finish();

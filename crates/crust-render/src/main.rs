@@ -1104,6 +1104,13 @@ fn diff(a: &Path, b: &Path, json: Option<&Path>) -> ExitCode {
             print!("{}", report.to_text());
             // On stderr, so stdout reads as the report always did.
             let c = &report.comparability;
+            let differences = c.differences_text();
+            if !differences.is_empty() {
+                eprintln!("stamp differences:");
+                for d in &differences {
+                    eprintln!("  {d}");
+                }
+            }
             if c.status != crust_core::compare::ComparabilityStatus::Ok {
                 let status = match c.status {
                     crust_core::compare::ComparabilityStatus::Warn => "warn",
@@ -1930,6 +1937,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     let lights = scene.lights;
     let volumes = scene.volumes;
     let (camera_path, time) = (scene.camera_path, scene.time);
+    let source = scene.source;
     // Import phases and scene counts come from the loader; render and
     // output are timed here.
     let mut stats = scene.stats;
@@ -2102,7 +2110,8 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     }
     // How the pixels were sampled, recorded in every EXR written.
     let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time)
-        .for_outcome(rendered.outcome, &ray_stats);
+        .for_outcome(rendered.outcome, &ray_stats)
+        .with_source(&source, |layer| std::fs::read(layer).ok());
     let output_start = Instant::now();
     let mut files = Vec::new();
     if let Some(film) = &film {
