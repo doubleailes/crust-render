@@ -30,8 +30,11 @@ sampling only, no shadow rays). All four strategies are unbiased.
 
 #### Scenario: Recursion is bounded by max depth
 
-- **WHEN** the bounce depth for a path reaches `max_depth`
-- **THEN** the path terminates and contributes no further radiance (returns black)
+- **WHEN** a path has shaded `max_depth` vertices (`max_depth` counts vertices,
+  not bounces: 1 shades the camera hit alone, with its visible emission and
+  direct lighting)
+- **THEN** the path terminates: its last bounce ray collects the emission of
+  the surface it hits but no light at infinity, and nothing further
 
 #### Scenario: Russian roulette terminates long paths probabilistically
 

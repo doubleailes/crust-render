@@ -224,7 +224,24 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let prim = prim_at(stage, path);
     let spp =
         custom_i32(&prim, "crust:samplesPerPixel").map_or(d.samples_per_pixel(), |n| n as u32);
-    let max_depth = custom_i32(&prim, "crust:maxDepth").map_or(d.max_depth(), |n| n as u32);
+    // `crust:maxDepth` counts shaded path vertices, not bounces: 1 is the
+    // camera hit alone (visible emission and direct lighting), and 0 would
+    // shade nothing — a black frame. Both 0 and a negative depth (which a
+    // cast would wrap to `u32::MAX`) are refused.
+    let max_depth = match custom_i32(&prim, "crust:maxDepth") {
+        Some(n) if n < 1 => {
+            let fallback = d.max_depth();
+            warning!(
+                SettingsInvalidValue,
+                at = prim.path(),
+                "crust:maxDepth = {n} would shade no vertex (1 is direct lighting only) \
+                 — using {fallback}"
+            );
+            fallback
+        }
+        Some(n) => n as u32,
+        None => d.max_depth(),
+    };
     // A negative minimum is refused rather than cast: `-1 as u32` is
     // `u32::MAX`, which would overflow the first check point.
     let min_spp = match custom_i32(&prim, "crust:minSamplesPerPixel") {

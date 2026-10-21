@@ -385,6 +385,9 @@ back to defaults (128 spp, depth 32, 640×360, power MIS, guiding off,
 subdivision level 0, no products). `crust:subdivisionLevel` SHALL be clamped to
 0–6, with a warning when the authored value is out of range. A host override
 (the CLI's `--subdiv-level`) SHALL take precedence over the authored value.
+`crust:maxDepth` counts shaded path vertices, not bounces (1 is direct lighting
+only); a value below 1 SHALL be refused with a `settings.invalid_value`
+warning naming the attribute, and the default depth used.
 
 #### Scenario: Authored settings
 
@@ -395,6 +398,13 @@ subdivision level 0, no products). `crust:subdivisionLevel` SHALL be clamped to
 
 - **WHEN** a `crust:` param is absent
 - **THEN** the documented default is used in its place
+
+#### Scenario: A max depth below one is refused
+
+- **WHEN** the `RenderSettings` prim authors `int crust:maxDepth = 0` (or a
+  negative value)
+- **THEN** one `settings.invalid_value` warning names `crust:maxDepth`, and the
+  render uses depth 32 instead of rendering black
 
 #### Scenario: Subdivision level from render settings
 

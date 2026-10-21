@@ -180,6 +180,61 @@ def Scope "Render"
     assert_eq!(none.settings.sampler(), crust_core::SamplerKind::Sobol);
 }
 
+/// `crust:maxDepth` counts shaded vertices, so 0 would render black (#344)
+/// and a negative depth would wrap to `u32::MAX`: both warn once, naming
+/// the attribute, and keep the default. 1, direct lighting only, is read.
+#[test]
+fn a_max_depth_below_one_warns_and_keeps_the_default() {
+    for (name, n) in [("max_depth_zero", 0), ("max_depth_negative", -2)] {
+        let scene = load_with_settings(
+            name,
+            "",
+            &format!(
+                r#"
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int crust:maxDepth = {n}
+    }}
+}}"#
+            ),
+        );
+        assert_eq!(scene.settings.max_depth(), 32, "maxDepth = {n}");
+        let invalid: Vec<_> = scene
+            .warnings
+            .iter()
+            .filter(|w| w.code == crust_core::WarningCode::SettingsInvalidValue)
+            .collect();
+        assert_eq!(invalid.len(), 1, "{invalid:?}");
+        assert!(
+            invalid[0].message.contains("crust:maxDepth"),
+            "{}",
+            invalid[0].message
+        );
+    }
+
+    let direct = load_with_settings(
+        "max_depth_one",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int crust:maxDepth = 1
+    }
+}"#,
+    );
+    assert_eq!(direct.settings.max_depth(), 1);
+    assert!(
+        !direct
+            .warnings
+            .iter()
+            .any(|w| w.code == crust_core::WarningCode::SettingsInvalidValue)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Prims and geometry
 // ---------------------------------------------------------------------------
