@@ -915,10 +915,13 @@ Where the implementation departs from, or sharpens, the decisions above.
   record `Material::resolve` returned). UsdPreviewSurface and OpenPBR apply
   their normal maps there. A MaterialX closure applies its `normal` input per
   leaf (`closure::prepare`) and keeps the hit's record, so for a closure the
-  AOV is `ResolvedClosure::shading_normal`: the leaves' frame normals averaged
-  by their selection weights, coat leaves left out while a base sits under
-  them (a `coat_normal` is the coat's, as UsdPreviewSurface's one normal map
-  is the base's). It used to be the record's, the interpolated normal: a
+  AOV is `ResolvedClosure::shading_normal`: the frame normals of the leaves
+  under every layer, averaged by their selection weights — a layer's top is
+  left out while a weighted leaf sits under it (`Prepared::over_base`), so a
+  `coat_normal` never reaches the pass, as UsdPreviewSurface's one normal map
+  is the base's. Not the LPE `coat` flag: that needs a reflecting leaf under
+  the coat, and `standard_surface` at `specular = 0` prunes it, leaving the
+  coat straight over the diffuse. It used to be the record's, the interpolated normal: a
   production character's `Neye` correlated with another renderer's
   normal-mapped pass at only 0.98 / 0.97 / 0.91, the residual the maps.
 - **The zero-AOV gate had a trap.** The first version passed the pixel index
