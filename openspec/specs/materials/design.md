@@ -776,11 +776,11 @@
     through it reads 1.0 whatever the file holds, and a probe that cannot see
     the range is worse than no probe because it answers confidently.
   - **Node semantics are checked against the reference implementation.**
-    `crust-mtlx/tests/osl_oracle.rs` replays 4 420 one-node cases through
+    `crust-mtlx/tests/osl_oracle.rs` replays 5 440 one-node cases through
     `Compiler` + `Program::eval` and compares every lane with the value
     MaterialX's own OSL code generator (`genosl`) produces for the same
     document, compiled by `oslc` and run once by `testshade`. That covers all
-    316 stdlib signatures of the pattern nodes crust compiles, over the six
+    319 stdlib signatures of the pattern nodes crust compiles, over the six
     value types it models (plus the `integer` and `boolean` inputs and outputs
     of the conditionals and random nodes, carried as one-lane floats), with a
     zero-input "defaults" case plus 16 seeded
