@@ -270,6 +270,8 @@ warning_codes! {
         "A subdivisionScheme = none mesh with Ptex displacement and non-quad faces is displaced at its cage.";
     MeshDisplacementExceedsBound => "mesh.displacement_exceeds_bound", Approximated, Each,
         "Displacement reaches past crust:displacementBound; it is applied unclamped.";
+    MeshUnsupportedPrimvar => "mesh.unsupported_primvar", Skipped, Each,
+        "A mesh or implicit-shape primvar a material reads has a type, interpolation or length crust cannot read, or is not constant on an implicit shape or a material read through Ptex; the material reads its geompropvalue's default there.";
     SubdivInvalidSetting => "subdiv.invalid_setting", Refused, Each,
         "A subdivision level is negative or an edge length is not a positive pixel length; it is clamped or ignored.";
     SubdivLevelClamped => "subdiv.level_clamped", Approximated, Each,

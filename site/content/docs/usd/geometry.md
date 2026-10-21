@@ -208,9 +208,10 @@ is what root-to-tip ramps, faded tips and per-strand colour variation are built 
 | `curve:random` | `float` | a value in [0, 1) per curve: the same strand gets the same value on every frame and render, neighbouring curves and different prims get unrelated ones |
 | any other name | as authored | the primvar of that name (`hairColor` reads `primvars:hairColor`) |
 
-Anywhere else, on a mesh or a sphere, `geompropvalue` gives its `default`. A curve prim
-that does not author the primvar, or authors one that can't be read, gives the `default`
-there too.
+Anywhere else, on a mesh or a sphere, the `curve:` names give the node's `default`, and
+any other name reads that geometry's own primvar (see
+[primvars in materials](#primvars-in-materials)). A curve prim that does not author the
+primvar, or authors one that can't be read, gives the `default` there too.
 
 Curve primvars are read with any of these interpolations:
 
@@ -279,6 +280,63 @@ material only; `--stats` reports its size as `curve strand tables`. A
 [primvar AOV](@/docs/usd/aovs.md#primvars) gives a curve that authors its primvar a table
 too, whatever its material reads.
 
+
+## Primvars in materials
+
+A material bound to a `Mesh` reads the mesh's primvars by name through MaterialX
+`geompropvalue`, as a curve's material reads the groom's: `geomprop` `Alpha` reads
+`primvars:Alpha`, with or without the `primvars:` prefix, converted to the node's type as
+MaterialX's `convert` does (a `float` fills every channel of a `color3`, a wider value
+keeps its leading channels). That is how per-point opacity, vertex colours, per-face ids
+and `displayColor` reach a look.
+
+| interpolation | values | at a hit |
+|---------------|--------|----------|
+| `constant` | 1 | that value |
+| `uniform` | one per face | the face's value |
+| `vertex`, `varying` | one per point | linear across each triangle of the face |
+| `faceVarying` | one per face-vertex | linear across each triangle, discontinuous between faces |
+
+The types read are those curves read: `float`, `float2`, `float3`, `color3f` (converted
+from its `colorSpace`) and `int` (read as a float), in any precision, as an array or, for
+`constant`, a lone value. Indexed primvars (`primvars:<name>:indices`) are expanded. A
+subdivided mesh refines its `vertex` and `faceVarying` primvars with the surface, as it
+refines `primvars:st`, and each refined face keeps its cage face's `uniform` value. A
+displaced point reads the primvar of the point it was moved from.
+
+A mesh that does not author the primvar gives the node's `default`, silently. One
+authored with another type, an array whose length does not match its interpolation, or
+indices out of range gives the `default` too, with
+[`mesh.unsupported_primvar`](@/docs/reference/warnings.md#meshes-subdivision-and-displacement).
+
+`Sphere`, `Cube`, `Cylinder`, `Cone`, `Capsule` and `Plane` read `constant` primvars
+only: their tessellation has no points or faces an authored array could address, so any
+other interpolation is refused with the same warning.
+
+```usda
+def Mesh "Debris" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    int[] faceVertexCounts = [...]
+    int[] faceVertexIndices = [...]
+    point3f[] points = [...]
+    float[] primvars:Alpha = [...] (interpolation = "vertex")
+    rel material:binding = </World/Looks/Debris>
+}
+```
+
+```xml
+<geompropvalue name="alpha" type="float">
+  <input name="geomprop" type="string" value="Alpha" />
+  <input name="default" type="float" value="1" />
+</geompropvalue>
+<!-- into the surface's opacity, or open_pbr_surface's geometry_opacity -->
+```
+
+Only the primvars a material names are read, and only on the prims it is bound to, so
+a mesh whose material reads none pays nothing. A primvar is not inherited from an
+ancestor prim or a `PointInstancer`, and a material that reads both a Ptex texture and
+a primvar reads the primvar's `default`, with `mesh.unsupported_primvar`. See
+[limitations](@/docs/architecture/limitations.md#materials-and-textures).
 ## Standard geometry attributes
 
 Crust Render reads these standard `UsdGeom` attributes without any `crust:` attribute.

@@ -90,9 +90,14 @@ render.
   roughness of about 0.6.
 - **Curves are round, open tubes.** `BasisCurves` `normals` (ribbons) and `wrap`
   (periodic curves) are not read. Curve primvars reach materials, but `faceVarying`
-  ones are not read, and on meshes `geompropvalue` reads only the chart. Rational
+  ones are not read. Rational
   `NurbsCurves` (unequal `pointWeights`) are approximated by polynomial spans, and
   NURBS curves above order 4 are skipped.
+- **Mesh primvars in materials have gaps.** `geompropvalue` reads a mesh's own primvars,
+  but not one authored on an ancestor or a `PointInstancer`; implicit shapes read only
+  `constant` ones; and a material that also reads a Ptex texture reads every primvar's
+  `default`. Point, vector and normal primvars are read in the prim's own space, not
+  transformed to world space.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
   Zeltner sheen uses the table Adobe's reference uses rather than MaterialX's own curve

@@ -79,10 +79,7 @@ pub(super) fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             channel,
             arity,
             fallback,
-        } => match ctx
-            .curve
-            .and_then(|c| c.primvars.get(*channel as usize).copied().flatten())
-        {
+        } => match ctx.primvars.get(*channel as usize).copied().flatten() {
             // A `float` value broadcasts into a wider type and a wider one
             // keeps its leading lanes, as MaterialX's `convert` nodes do.
             Some(v) if v.arity == 1 => v.broadcast_to(*arity),

@@ -381,7 +381,9 @@ the mesh's UV tangent, so the card needs UVs whose `u` runs along the hair.
 
 A hair material can read where on its strand a hit lies, which curve it is, a random
 value per curve, and the groom's own primvars, through `geompropvalue`: see
-[curve attributes](@/docs/usd/geometry.md#curve-attributes-in-materials). These
+[curve attributes](@/docs/usd/geometry.md#curve-attributes-in-materials). Any other
+material reads its mesh's primvars the same way: see
+[primvars in materials](@/docs/usd/geometry.md#primvars-in-materials). These
 MaterialX nodes are what a per-strand look is usually built from:
 
 | node | what it does |

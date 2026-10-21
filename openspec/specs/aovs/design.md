@@ -1307,7 +1307,10 @@ to keep here:
   of a displaced mesh for free — by `primvar_table`, which walks the same
   `for_each_fan_triangle` as `triangulate`, so the two index the same
   triangles. `World::set_primvars` keeps it in a sparse list sorted by
-  `geom_id` and leaves `plain` alone: `intersect` never reads it. `MeshKey`
+  `geom_id` and leaves `plain` alone: `intersect` never reads it. The same
+  table carries the primvars a mesh's material reads (`PrimvarTable::shading`,
+  usd-scene-import record "Mesh primvars"); only those take a geometry off
+  `plain`, and a table holding only them is not on the AOVs' list. `MeshKey`
   hashes the kept channels, the failure `mesh.rs` documents for charts.
 - **Subdivision carries N lanes.** `SubdivRequest::extra` is refined by the
   chart's own code: the chart is widened to `[f32; 4]` and refined with the
