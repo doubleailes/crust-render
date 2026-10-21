@@ -1755,7 +1755,8 @@ impl Renderer {
             world: &self.world,
             lights: &self.lights,
             volumes: &self.volumes,
-            depth: self.settings.max_depth as i32,
+            // Saturating: a `u32` past `i32::MAX` must not wrap negative.
+            depth: i32::try_from(self.settings.max_depth).unwrap_or(i32::MAX),
             strategy: self.settings.sampling_strategy,
             guiding: gctx,
             light_samples: self.settings.light_samples,

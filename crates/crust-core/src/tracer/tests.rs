@@ -1743,3 +1743,26 @@ fn a_replay_takes_the_samples_an_adaptive_render_takes() {
         }
     }
 }
+
+/// A depth authored as "unlimited" renders (#361): the path scratch used to
+/// reserve `max_depth` vertex records per worker up front, which for
+/// `i32::MAX` is hundreds of GB. Russian roulette ends every path long
+/// before, so the image is the one a merely deep limit renders, and a `u32`
+/// past `i32::MAX` saturates rather than wrapping to a negative depth.
+#[test]
+fn an_unlimited_max_depth_renders() {
+    use crate::Renderer;
+    let render = |depth: u32| {
+        let scene = sample_scene("cornellbox.usda");
+        let s = scene
+            .settings
+            .with_resolution(8, 8)
+            .with_samples_per_pixel(4)
+            .with_max_depth(depth);
+        bits(&Renderer::new(scene.camera, scene.world, scene.lights, s).render_with_tiles())
+    };
+    let deep = render(4096);
+    assert!(deep.iter().any(|&b| f32::from_bits(b) > 0.0));
+    assert!(deep == render(i32::MAX as u32), "i32::MAX");
+    assert!(deep == render(u32::MAX), "u32::MAX");
+}

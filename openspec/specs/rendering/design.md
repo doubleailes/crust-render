@@ -485,7 +485,10 @@ served its purpose. What stays pinned: the same sample indices whatever the
 schedule, "exactly the samples the pixel would take alone" under `t < 0`, and
 tiles ↔ scanlines. Work units are tiles or rows as before — rows are now
 `width`×1 tiles through the one gather — with one `PathScratch` per rayon
-worker (`for_each_init`). Progress counts samples, not units: each unit has
+worker (`for_each_init`). A scratch reserves at most 64 vertex records up
+front whatever `max_depth` is, and grows past that only if a path does: a
+depth authored as "unlimited" (`i32::MAX`) once reserved hundreds of GB per
+worker and aborted the render at its first pixel (#361). Progress counts samples, not units: each unit has
 `min(spp, 64)` steps (`PROGRESS_STEPS`), and a unit finishing a stage of the first
 sweep or a round reports the share of them that stage or round scheduled —
 `taken · steps / spp`, so one a sample up to 64 spp. A step per unit per stage let the
