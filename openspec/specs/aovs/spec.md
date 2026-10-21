@@ -368,9 +368,12 @@ zero-AOV render, unchanged.
 The `motionvector` source SHALL be the first hit's forward 2D screen-space
 displacement from shutter open to shutter close, in pixels of the rendered
 image. `u` SHALL be positive to the right and `v` positive upwards, as Nuke
-expects. A hit on geometry authoring `crust:motion:translate` SHALL report
-where that translation moves the hit's shutter-open point on screen. Units
-SHALL be per shutter interval. The source SHALL have two floating-point
+expects. A hit on geometry that moves over the shutter SHALL report
+where that motion takes the hit's shutter-open point on screen. That motion is an
+authored `crust:motion:translate` or a time-sampled transform, including rotation and
+scale. Units
+SHALL be per shutter interval, the camera's `shutter:open` to `shutter:close`. The
+source SHALL have two floating-point
 components (float or half) and a clear value of 0.
 
 #### Scenario: Object moving right
@@ -388,10 +391,36 @@ components (float or half) and a clear value of 0.
   axis
 - **THEN** pixels on the sphere hold a positive `v`
 
+#### Scenario: Time-sampled translate
+
+- **WHEN** `samples/animation.usda`'s `Mover` (whose `xformOp:translate` goes from
+  (-2, 0.6, 0) at frame 1 to (2, 0.6, 0) at frame 10) is rendered with `-f 5`, a camera
+  authoring `shutter:close = 1`, and a `motionvector` var
+- **THEN** its centre pixel's `u` equals, within 0.01 px, the screen distance between the
+  projections of the hit's shutter-open point and that point moved 4/9 units along +X,
+  and its `v` is 0 within tolerance
+
+#### Scenario: Time-sampled rotation
+
+- **WHEN** a cube spinning about the camera's view axis through its centre by a
+  time-sampled `xformOp:rotateZ` is rendered with a non-instantaneous shutter and a
+  `motionvector` var
+- **THEN** each pixel on the cube holds the screen displacement of its hit point rotated
+  by the shutter's angle about that axis: tangential, longer away from the axis, and
+  near zero at its centre
+
+#### Scenario: Shutter length scales the vector
+
+- **WHEN** the same animated stage is rendered once with `shutter:close = 0.5` and once
+  with `shutter:close = 1`, both with `shutter:open = 0`, for a prim moving at constant
+  speed parallel to the image plane at constant depth
+- **THEN** the second render's vectors are twice the first's, within floating-point
+  tolerance
+
 #### Scenario: Static geometry and escapes
 
-- **WHEN** a pixel's chosen sample hits geometry with no
-  `crust:motion:translate`, hits a volume, or escapes to a dome or the sky
+- **WHEN** a pixel's chosen sample hits geometry that does not move over the
+  shutter, hits a volume, or escapes to a dome or the sky
 - **THEN** the pixel holds `(0, 0)`
 
 #### Scenario: Perspective varies the vector across an object
@@ -504,3 +533,24 @@ the samples a render takes do not depend on the exposure. An exposure scale of e
 
 - **WHEN** a camera authors no exposure attribute
 - **THEN** every output is bit-identical to the same render before this requirement
+
+### Requirement: Motion vectors over an instantaneous shutter are reported
+
+When a `motionvector` var is requested and the shutter is instantaneous, while a drawn
+prim's world transform varies over time, the render SHALL warn once. The warning SHALL
+say that the time-sampled motion reads zero, and that authoring the camera's
+`shutter:open` / `shutter:close` measures it. The vector SHALL still be produced for
+`crust:motion:translate`.
+
+#### Scenario: Animated stage with no shutter authored
+
+- **WHEN** `samples/animation.usda` is rendered with `-f 5` and a `motionvector` var,
+  and its camera authors no shutter
+- **THEN** one warning names the instantaneous shutter, and the vector is `(0, 0)` on the
+  moving sphere
+
+#### Scenario: Static stage with no shutter authored
+
+- **WHEN** a stage with no time-sampled transforms requests `motionvector` and its camera
+  authors no shutter
+- **THEN** no warning about the shutter is raised
