@@ -10,6 +10,7 @@ use crate::material::Material;
 use crate::primvars::{MeshHit, PrimvarTable};
 use crate::ray::Ray;
 use crate::strands::{CurveHit, StrandTable};
+use crate::volume::VolumeRegion;
 use crate::warning;
 use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, RayMask, SceneBuilder};
 use glam::{Affine3A, Vec3A};
@@ -659,6 +660,71 @@ impl Default for SideTables {
     }
 }
 
+/// The per-geometry flags a render pass and light linking decide, held apart
+/// from the world: each geometry's ray mask, its light-link class, whether it
+/// is a transparent emitter or a holdout, and each volume region's mask and
+/// class. [`WorldBuilder::mask_table`] reads them before commit and
+/// [`WorldBuilder::set_mask_table`] writes them back, so the same resolution
+/// can run on a copy of the flags as on the world being built.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MaskTable {
+    /// Per `geom_id`.
+    pub(crate) masks: Vec<RayMask>,
+    /// Per `geom_id`, or empty when no light authors a `lightLink`.
+    pub(crate) light_classes: Vec<u16>,
+    /// Sparse, indexed by `geom_id`, as [`WorldBuilder`]'s.
+    pub(crate) transparent_emitters: Vec<bool>,
+    /// Sparse, indexed by `geom_id`, as [`WorldBuilder`]'s.
+    pub(crate) holdouts: Vec<bool>,
+    /// Per volume region: its mask and light-link class.
+    pub(crate) volumes: Vec<(RayMask, u16)>,
+}
+
+impl MaskTable {
+    /// How many geometries it holds flags for.
+    pub(crate) fn count(&self) -> usize {
+        self.masks.len()
+    }
+
+    pub(crate) fn mask(&self, id: u32) -> RayMask {
+        self.masks[id as usize]
+    }
+
+    pub(crate) fn set_mask(&mut self, id: u32, mask: RayMask) {
+        self.masks[id as usize] = mask;
+    }
+
+    /// See [`WorldBuilder::set_transparent_emitter`].
+    pub(crate) fn set_transparent_emitter(&mut self, id: u32, transparent: bool) {
+        set_sparse(&mut self.transparent_emitters, id, transparent);
+    }
+
+    /// See [`WorldBuilder::set_holdout`].
+    pub(crate) fn set_holdout(&mut self, id: u32, holdout: bool) {
+        set_sparse(&mut self.holdouts, id, holdout);
+    }
+
+    /// See [`WorldBuilder::set_light_classes`].
+    ///
+    /// # Panics
+    /// If `classes` does not have one entry per geometry.
+    pub(crate) fn set_light_classes(&mut self, classes: Vec<u16>) {
+        assert_eq!(classes.len(), self.count(), "one class per geometry");
+        self.light_classes = classes;
+    }
+}
+
+/// Sets `flags[id]`, growing the sparse table only to set a flag.
+fn set_sparse(flags: &mut Vec<bool>, id: u32, on: bool) {
+    if flags.len() <= id as usize {
+        if !on {
+            return;
+        }
+        flags.resize(id as usize + 1, false);
+    }
+    flags[id as usize] = on;
+}
+
 /// Scene-construction container: kernel geometries plus the material
 /// table indexed by `geom_id`. Commit into a [`World`] to render.
 #[derive(Default)]
@@ -1092,13 +1158,7 @@ impl WorldBuilder {
             (id as usize) < self.count(),
             "geometry {id} was never attached"
         );
-        if self.transparent_emitters.len() <= id as usize {
-            if !transparent {
-                return;
-            }
-            self.transparent_emitters.resize(id as usize + 1, false);
-        }
-        self.transparent_emitters[id as usize] = transparent;
+        set_sparse(&mut self.transparent_emitters, id, transparent);
     }
 
     /// Marks the geometry at `id` as a holdout (or, with `false`, no longer
@@ -1112,13 +1172,7 @@ impl WorldBuilder {
             (id as usize) < self.count(),
             "geometry {id} was never attached"
         );
-        if self.holdouts.len() <= id as usize {
-            if !holdout {
-                return;
-            }
-            self.holdouts.resize(id as usize + 1, false);
-        }
-        self.holdouts[id as usize] = holdout;
+        set_sparse(&mut self.holdouts, id, holdout);
     }
 
     /// Installs the per-`geom_id` light-link classes (one entry per attached
@@ -1130,6 +1184,38 @@ impl WorldBuilder {
     pub fn set_light_classes(&mut self, classes: Vec<u16>) {
         assert_eq!(classes.len(), self.count(), "one class per geometry");
         self.light_classes = classes;
+    }
+
+    /// A copy of every geometry's pass and link flags, with `volumes`' — see
+    /// [`MaskTable`].
+    pub(crate) fn mask_table(&self, volumes: &[VolumeRegion]) -> MaskTable {
+        MaskTable {
+            masks: (0..self.count() as u32).map(|id| self.mask(id)).collect(),
+            light_classes: self.light_classes.clone(),
+            transparent_emitters: self.transparent_emitters.clone(),
+            holdouts: self.holdouts.clone(),
+            volumes: volumes.iter().map(|v| (v.mask, v.light_class)).collect(),
+        }
+    }
+
+    /// Writes `table` back: every geometry's flags, and `volumes`' masks and
+    /// classes — see [`MaskTable`].
+    ///
+    /// # Panics
+    /// If `table` holds flags for another number of geometries or volumes.
+    pub(crate) fn set_mask_table(&mut self, table: MaskTable, volumes: &mut [VolumeRegion]) {
+        assert_eq!(table.count(), self.count(), "one mask per geometry");
+        assert_eq!(table.volumes.len(), volumes.len(), "one entry per volume");
+        for (id, &mask) in table.masks.iter().enumerate() {
+            self.set_mask(id as u32, mask);
+        }
+        self.light_classes = table.light_classes;
+        self.transparent_emitters = table.transparent_emitters;
+        self.holdouts = table.holdouts;
+        for (v, (mask, class)) in volumes.iter_mut().zip(table.volumes) {
+            v.mask = mask;
+            v.light_class = class;
+        }
     }
 }
 

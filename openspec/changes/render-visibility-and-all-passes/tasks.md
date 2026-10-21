@@ -42,13 +42,13 @@
 
 ## 3. One pass state, one function (crust-core)
 
-- [ ] 3.1 Make `LightLinks::resolve` write masks, light classes and the remap into
+- [x] 3.1 Make `LightLinks::resolve` write masks, light classes and the remap into
   a mask table instead of `WorldBuilder` (design D1). The single-pass import
   applies that table to the builder before commit. Verify that every test in
   `light_linking.rs`, `render_passes.rs` and `holdouts.rs` passes unchanged,
   `scripts/check_images.sh check` reports no difference, and the zero-AOV
   instruction-count test passes.
-- [ ] 3.2 Make `ActivePass` judge `renderVisibility` beside `matte` and
+- [x] 3.2 Make `ActivePass` judge `renderVisibility` beside `matte` and
   `cameraVisibility`, record a three-bit membership per geom-id range, volume
   range and light, and apply precedence (design D7). Then build the pass state
   with `apply_pass(base, pass)`: masks, holdouts, lights outside

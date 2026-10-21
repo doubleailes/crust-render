@@ -372,10 +372,10 @@ fn a_render_source_that_is_not_settings_warns() {
 // Collections not read
 // ---------------------------------------------------------------------------
 
-/// render-passes spec, "A pass that prunes": one warning per collection, and
-/// what it names still renders.
+/// render-passes spec, "A pass that prunes": one warning, and what it names
+/// still renders.
 #[test]
-fn prune_and_render_visibility_warn_and_are_not_read() {
+fn prune_warns_and_is_not_read() {
     let path = stage(
         "prune",
         &ball("Set", 0.0),
@@ -385,21 +385,15 @@ fn prune_and_render_visibility_warn_and_are_not_read() {
                 "            prepend rel collection:prune:includes = </World/Set>",
             ),
             pass(
-                "invisible",
-                "            prepend rel collection:renderVisibility:excludes = </World/Set>",
-            ),
-            pass(
                 "quiet",
-                // Excluding from prune, including in renderVisibility:
-                // neither restricts anything.
-                "            prepend rel collection:prune:excludes = </World/Set>\n\
-                             prepend rel collection:renderVisibility:includes = </World/Set>",
+                // Excluding from prune restricts nothing.
+                "            prepend rel collection:prune:excludes = </World/Set>",
             ),
         ]
         .concat(),
         "",
     );
-    for (name, warned) in [("pruning", 1), ("invisible", 1), ("quiet", 0)] {
+    for (name, warned) in [("pruning", 1), ("quiet", 0)] {
         let scene = load(&path, Some(&format!("/Render/Passes/{name}")));
         assert_eq!(
             count(&scene, WarningCode::RenderPassCollectionNotRead),
@@ -412,6 +406,251 @@ fn prune_and_render_visibility_warn_and_are_not_read() {
             "{name}: the set renders"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// renderVisibility
+// ---------------------------------------------------------------------------
+
+/// Whether a ray of `mask` down −Z at `x` meets anything.
+fn any_hit(scene: &Scene, x: f32, mask: crust_core::RayMask) -> bool {
+    let ray = Ray::new(Vec3A::new(x, 0.0, 10.0), -Vec3A::Z).with_mask(mask);
+    scene.world.intersect(&ray, 1e-3, 1e4).is_some()
+}
+
+/// render-passes spec, "A background plate alone": what the pass leaves out
+/// of `renderVisibility` is seen by no ray — camera, shadow or indirect — and
+/// what it keeps renders as before.
+#[test]
+fn a_plate_alone_hides_the_rest_from_every_ray() {
+    use crust_core::MASK_INDIRECT;
+    let path = stage(
+        "plate_alone",
+        &[ball("PlateA", -2.0), ball("Hero", 2.0)].concat(),
+        &pass(
+            "plate",
+            "            uniform bool collection:renderVisibility:includeRoot = 0\n\
+                         prepend rel collection:renderVisibility:includes = </World/PlateA>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/plate"));
+    for mask in [MASK_CAMERA, MASK_SHADOW, MASK_INDIRECT] {
+        assert!(
+            any_hit(&plain, 2.0, mask),
+            "{mask:?}: seen without the pass"
+        );
+        assert!(!any_hit(&scene, 2.0, mask), "{mask:?}: hidden by the pass");
+        assert!(any_hit(&scene, -2.0, mask), "{mask:?}: the plate stays");
+    }
+    assert_eq!(camera_hit(&scene, -2.0), Some(false), "not a holdout");
+    let summary = scene.pass.as_ref().unwrap();
+    assert_eq!(
+        (
+            summary.render_hidden,
+            summary.holdouts,
+            summary.camera_hidden
+        ),
+        (1, 0, 0)
+    );
+    assert_eq!(count(&scene, WarningCode::RenderPassCollectionNotRead), 0);
+}
+
+/// render-passes spec, "Plates with the lights off": a pass that leaves the
+/// lights out of `renderVisibility` is lit by nothing, and escaping camera
+/// rays see no dome.
+#[test]
+fn lights_outside_render_visibility_are_off() {
+    let body = format!(
+        r#"{FLOOR}    def Xform "Lights"
+    {{
+        def RectLight "Key"
+        {{
+            float inputs:width = 2
+            float inputs:height = 2
+            float inputs:intensity = 10
+            double3 xformOp:translate = (0, 3, 0)
+            float xformOp:rotateX = -90
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+        }}
+        def DomeLight "Sky"
+        {{
+            float inputs:intensity = 2
+        }}
+    }}
+"#
+    );
+    let path = stage(
+        "lights_off",
+        &body,
+        &pass(
+            "dark",
+            "            prepend rel collection:renderVisibility:excludes = </World/Lights>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/dark"));
+    assert_eq!(plain.lights.count(), 2);
+    assert_eq!(scene.lights.count(), 0, "both lights are off");
+    assert!(scene.lights.backdrops().is_empty(), "no camera-only dome");
+    let up = Ray::new(Vec3A::ZERO, Vec3A::Y).with_mask(MASK_CAMERA);
+    let down = Ray::new(Vec3A::ZERO, -Vec3A::Y).with_mask(MASK_CAMERA);
+    assert!(radiance(&plain, &up, 4).iter().any(|c| *c != [0; 3]));
+    assert!(radiance(&plain, &down, 16).iter().any(|c| *c != [0; 3]));
+    assert!(
+        radiance(&scene, &up, 4).iter().all(|c| *c == [0; 3]),
+        "no dome"
+    );
+    assert!(
+        radiance(&scene, &down, 16).iter().all(|c| *c == [0; 3]),
+        "unlit"
+    );
+}
+
+/// render-passes spec, "A hidden area light no longer occludes": a
+/// camera-visible `RectLight` outside `renderVisibility` is met by no ray,
+/// shadow rays toward other lights included.
+#[test]
+fn a_render_hidden_area_light_does_not_occlude() {
+    let body = r#"    def RectLight "Panel"
+    {
+        bool crust:light:cameraVisible = true
+        float inputs:width = 1
+        float inputs:height = 1
+    }
+"#;
+    let path = stage(
+        "hidden_panel",
+        body,
+        &pass(
+            "pass",
+            "            prepend rel collection:renderVisibility:excludes = </World/Panel>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/pass"));
+    assert!(shadow_hit(&plain, 0.0) && camera_hit(&plain, 0.0).is_some());
+    assert!(!shadow_hit(&scene, 0.0), "no shadow ray hits it");
+    assert_eq!(camera_hit(&scene, 0.0), None, "nor any camera ray");
+    assert_eq!(
+        scene.lights.count(),
+        plain.lights.count() - 1,
+        "and it is off"
+    );
+    assert!(!scene.world.has_transparent_emitters());
+}
+
+/// render-passes spec, "Held out and render-hidden": `renderVisibility` wins;
+/// the prim is absent, not a holdout, and counts as neither held out nor
+/// camera-hidden.
+#[test]
+fn render_visibility_takes_precedence_over_matte() {
+    let path = stage(
+        "matte_and_hidden",
+        &ball("Crate", 0.0),
+        &pass(
+            "pass",
+            "            prepend rel collection:matte:includes = </World/Crate>\n\
+                         prepend rel collection:cameraVisibility:excludes = </World/Crate>\n\
+                         prepend rel collection:renderVisibility:excludes = </World/Crate>",
+        ),
+        "",
+    );
+    let scene = load(&path, Some("/Render/Passes/pass"));
+    assert_eq!(camera_hit(&scene, 0.0), None, "absent, not a holdout");
+    assert!(!shadow_hit(&scene, 0.0), "and casts no shadow");
+    assert!(!scene.world.has_holdouts());
+    let summary = scene.pass.as_ref().unwrap();
+    assert_eq!(
+        (
+            summary.render_hidden,
+            summary.holdouts,
+            summary.camera_hidden
+        ),
+        (1, 0, 0)
+    );
+}
+
+/// render-passes spec, "A light whose only target is hidden": linked only to
+/// geometry the pass hides from every ray, a light lights nothing — it leaves
+/// the list as a light linked to nothing does.
+#[test]
+fn a_light_linked_only_to_hidden_geometry_lights_nothing() {
+    let body = format!(
+        r#"{FLOOR}{hero}    def SphereLight "Bulb"
+    {{
+        float inputs:radius = 0.2
+        float inputs:intensity = 50
+        double3 xformOp:translate = (0, 3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        uniform bool collection:lightLink:includeRoot = 0
+        prepend rel collection:lightLink:includes = </World/Hero>
+    }}
+"#,
+        hero = ball("Hero", 2.0)
+    );
+    let path = stage(
+        "linked_to_hidden",
+        &body,
+        &pass(
+            "pass",
+            "            prepend rel collection:renderVisibility:excludes = </World/Hero>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/pass"));
+    assert_eq!(plain.lights.count(), 1, "it lights the hero");
+    assert_eq!(scene.lights.count(), 0, "it lights nothing");
+}
+
+/// render-passes spec, "A pass that authors no render visibility": a
+/// `renderVisibility` that restricts nothing leaves the pass exactly as
+/// without it — the same world answers and the same radiance, bit for bit.
+#[test]
+fn an_unrestricted_render_visibility_changes_nothing() {
+    let body = format!(
+        r#"{FLOOR}{a}{b}    def SphereLight "Bulb"
+    {{
+        float inputs:radius = 0.2
+        float inputs:intensity = 50
+        double3 xformOp:translate = (0, 3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+"#,
+        a = ball("A", -2.0),
+        b = ball("B", 2.0)
+    );
+    let matte = "            prepend rel collection:matte:includes = </World/A>";
+    let path = stage(
+        "unrestricted",
+        &body,
+        &[
+            pass("without", matte),
+            pass(
+                "with",
+                &format!(
+                    "{matte}\n            prepend rel collection:renderVisibility:includes = </World/B>"
+                ),
+            ),
+        ]
+        .concat(),
+        "",
+    );
+    let without = load(&path, Some("/Render/Passes/without"));
+    let with = load(&path, Some("/Render/Passes/with"));
+    for x in [-2.0, 0.0, 2.0] {
+        assert_eq!(camera_hit(&with, x), camera_hit(&without, x));
+        assert_eq!(shadow_hit(&with, x), shadow_hit(&without, x));
+    }
+    for dir in [Vec3A::Y, -Vec3A::Y, Vec3A::new(0.3, -1.0, 0.2).normalize()] {
+        let ray = Ray::new(Vec3A::new(0.0, 0.5, 0.0), dir).with_mask(MASK_CAMERA);
+        assert!(radiance(&with, &ray, 16) == radiance(&without, &ray, 16));
+    }
+    assert_eq!(with.pass.as_ref().unwrap().render_hidden, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -694,8 +933,8 @@ fn instances_are_judged_on_the_instance_prim() {
     assert_eq!(scene.pass.as_ref().unwrap().holdouts, 1, "one prim");
 }
 
-/// render-passes spec, "A held-out volume": one warning naming it, and the
-/// region as without the pass.
+/// render-passes spec, "A held-out volume" and "A render-hidden volume": one
+/// warning naming it, and the region as without the pass.
 #[test]
 fn a_held_out_volume_warns_and_is_unchanged() {
     let body = r#"    def Cube "Fog"
@@ -715,12 +954,16 @@ fn a_held_out_volume_warns_and_is_unchanged() {
                 "hidden",
                 "            prepend rel collection:cameraVisibility:excludes = </World/Fog>",
             ),
+            pass(
+                "invisible",
+                "            prepend rel collection:renderVisibility:excludes = </World/Fog>",
+            ),
         ]
         .concat(),
         "",
     );
     let plain = load(&path, None);
-    for name in ["matte", "hidden"] {
+    for name in ["matte", "hidden", "invisible"] {
         let scene = load(&path, Some(&format!("/Render/Passes/{name}")));
         let w = scene
             .warnings

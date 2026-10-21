@@ -480,8 +480,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         if ctx.lights.count() > lights_before {
             ctx.links
                 .light_added(ctx.index.as_ref(), stage, prim.path(), lights_before);
-            if let Some(pass) = &ctx.pass {
-                pass.light_added(prim.path(), lights_before, &mut ctx.lights);
+            if let Some(pass) = &mut ctx.pass {
+                pass.light_added(prim.path(), lights_before);
             }
             ctx.light_origins.push((
                 prim.path().to_string(),
@@ -504,7 +504,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
 
 /// Records that the prim at `path` emitted the geometries `geoms` and the
 /// volume regions `vols`: for the light links, which judge them after the
-/// last chunk, and the active pass, which flags them now.
+/// last chunk, and the active pass, which judges them now.
 fn saw(
     ctx: &mut ImportCtx,
     path: &sdf::Path,
@@ -512,7 +512,7 @@ fn saw(
     vols: std::ops::Range<usize>,
 ) {
     if let Some(pass) = &mut ctx.pass {
-        pass.saw(path, geoms.clone(), vols.clone(), &mut ctx.world);
+        pass.saw(path, geoms.clone(), vols.clone());
     }
     ctx.links.saw(path, geoms, vols);
 }
@@ -1185,8 +1185,9 @@ pub(crate) fn load_scene(
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
     let geometry_runs = ctx.links.geometry_runs();
-    let remap =
-        std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
+    let mut table = ctx.world.mask_table(&ctx.volumes);
+    let remap = passes::apply_pass(ctx.pass.as_ref(), &ctx.links, &mut table, &mut ctx.lights);
+    ctx.world.set_mask_table(table, &mut ctx.volumes);
     // The provenance names each light by its place in the list as the links
     // left it; a light they took out of the list is no longer one to rebuild.
     ctx.light_origins
