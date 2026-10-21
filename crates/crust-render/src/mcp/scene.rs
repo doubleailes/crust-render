@@ -31,6 +31,9 @@ struct Rest {
     camera_path: Option<String>,
     time: Option<f64>,
     provenance: Option<Provenance>,
+    /// The active render pass the import read, for the check report: an
+    /// in-place update changes neither its holdouts nor what it hides.
+    pass: Option<crust_core::PassSummary>,
     /// How many UV textures the import preloaded.
     preloaded: u64,
 }
@@ -183,6 +186,7 @@ impl Imported {
         scene.time = self.rest.time;
         scene.warnings = std::mem::take(&mut self.rest.warnings);
         scene.provenance = self.rest.provenance.take();
+        scene.pass = self.rest.pass.take();
         scene.layers = std::mem::take(&mut self.layers);
         update
             .apply(&mut scene)
@@ -247,6 +251,7 @@ impl Imported {
                 camera_path: scene.camera_path,
                 time: scene.time,
                 provenance: scene.provenance,
+                pass: scene.pass,
                 preloaded,
             },
         }

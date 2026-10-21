@@ -766,7 +766,13 @@ records `FirstHit::Escaped` (or the thin wall passed first) with albedo 0. Only 
 segment is checked (`records.is_empty()`); every other ray meets the holdout as geometry,
 so shadows and reflections of it are bitwise those of the render without the pass
 (`tests/holdouts.rs`). A volume scatter before the surface `continue`s before the check,
-so fog in front of a holdout keeps its in-scatter. The path counts as `ended_escaped`.
+so fog in front of a holdout keeps its in-scatter; what the segment's volumes emitted up
+to the holdout (`vol_emit`, carried boundary stretches included) is kept too, and routed
+as an escape with no background (`escape_begin(vol_emit, vol_tr, 0)`), so a glowing
+volume in front of a matte is not cut out by it. On the camera segment `pass_cutouts`
+judges a holdout by its presence alone: its straight transmission is ignored there, so a
+glass matte is a hole rather than a window onto what is behind it. The path counts as
+`ended_escaped`.
 
 The check is `world.has_holdouts() && records.is_empty() && world.is_holdout(geom_id)`,
 behind the sparse table's emptiness, so a world without holdouts pays one predictable

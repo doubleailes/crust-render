@@ -8,7 +8,8 @@ A camera ray whose segment ends at a holdout, after cutouts are met or passed
 and hidden light sources crossed, SHALL end there. The sample SHALL add nothing to
 the beauty: no emission, no light sampling, no scattering. A cutout holdout SHALL
 be met with its opacity's probability, like any cutout, so a partly present
-holdout leaves a partly covered pixel.
+holdout leaves a partly covered pixel. Its straight transmission SHALL NOT let
+the camera ray through.
 
 #### Scenario: A holdout in front of an emitter
 
@@ -21,6 +22,12 @@ holdout leaves a partly covered pixel.
 - **WHEN** a holdout plane of opacity 0.5 covers the whole frame in front of a
   white emissive wall of radiance 1
 - **THEN** the beauty converges to 0.5 and the alpha to 0.5
+
+#### Scenario: A glass holdout is a hole
+
+- **WHEN** an opaque thin-walled glass holdout covers the whole frame in front of
+  an emissive wall
+- **THEN** every beauty pixel and every alpha value is exactly 0
 
 #### Scenario: Interpenetrating edges resolve per sample
 
@@ -52,6 +59,13 @@ scatters (a volume scatter before the holdout) SHALL continue as a normal path.
   holdout wall
 - **THEN** the fog's in-scattered light renders as without the pass, and the
   samples that cross it unscattered end on the wall with nothing
+
+#### Scenario: A glowing volume in front of a holdout
+
+- **WHEN** an emissive, absorbing volume region lies between the camera and a
+  holdout wall
+- **THEN** the volume's emission renders, and light path expressions carry it,
+  as in front of an escape
 
 ### Requirement: A world without holdouts renders as before
 

@@ -448,6 +448,41 @@ def Xform "Asset"
     );
 }
 
+/// A pass that takes its `matte` opinion from a payload: only a chunk's stage
+/// loads it, so which collections restrict anything is decided there, not on
+/// the payload-free index stage.
+#[test]
+fn a_pass_whose_matte_comes_from_a_payload_holds_out() {
+    let payload = dir().join("matte_payload.usda");
+    std::fs::write(
+        &payload,
+        r#"#usda 1.0
+(
+    defaultPrim = "Pass"
+)
+def RenderPass "Pass"
+{
+    uniform bool collection:matte:includeRoot = 1
+}
+"#,
+    )
+    .unwrap();
+    let mut body = String::new();
+    for (i, x) in [0.0, 2.0, 4.0].into_iter().enumerate() {
+        body.push_str(&ball(&format!("Prop{i}"), x));
+    }
+    let path = stage(
+        "pass_payload",
+        &body,
+        "        def RenderPass \"fromPayload\" (prepend payload = @./matte_payload.usda@)\n        {\n        }\n",
+        "",
+    );
+    let scene = load(&path, Some("/Render/Passes/fromPayload"));
+    for x in [0.0, 2.0, 4.0] {
+        assert_eq!(camera_hit(&scene, x), Some(true), "ball at {x}");
+    }
+}
+
 /// render-passes spec, "A target inside an instance", and a `PointInstancer`
 /// judged on the instancer.
 #[test]

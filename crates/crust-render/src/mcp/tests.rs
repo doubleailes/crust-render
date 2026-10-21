@@ -2639,6 +2639,14 @@ fn a_session_renders_its_pass() {
     let pass = |state: &mut State| state.session().unwrap().scene.report.pass.clone().unwrap();
     assert_eq!(pass(&mut state).holdouts, 3);
 
+    // An edit applied in place keeps the pass in the check report.
+    let applied = author(
+        &mut state,
+        r#"over "World" { over "Key" { float inputs:intensity = 50 } }"#,
+    );
+    assert_eq!(applied, "lights", "a light input applies in place");
+    assert_eq!(pass(&mut state).holdouts, 3, "still the char pass");
+
     state
         .session()
         .unwrap()
