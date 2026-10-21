@@ -119,7 +119,7 @@
       with no primvar var still builds no table.
 - [x] 5.2 Walk the ancestors for kept names missing on a geometry prim
       (memoised per `(name, ancestor)`), and check `PointInstancer` and
-      instance prims for `primvars:<name>`. Raise `AovPrimvarNotInherited`
+      instance prims for `primvars:<name>`. Raise `PrimvarNotInherited`
       once per var (D6). Verify "Ancestor primvar is reported, not
       inherited", plus an instancer case.
 - [x] 5.3 Record the keep set in `StageFacts`. Make the settings refresh in

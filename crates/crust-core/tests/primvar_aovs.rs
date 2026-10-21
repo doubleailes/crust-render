@@ -402,6 +402,118 @@ fn a_uniform_colour_is_per_face() {
     assert_beauty_unchanged(&s, &r);
 }
 
+/// A `uniform` primvar on a subdivided cage that is not all quads — a
+/// `catmullClark` mesh joining a quad, a triangle and a pentagon, and a
+/// `loop` octahedron — reads its cage face's value on every refined face,
+/// at a uniform level and under adaptive tessellation: never the clear
+/// value, and every face's value somewhere.
+#[test]
+fn a_uniform_primvar_follows_non_quad_and_loop_cages() {
+    let mixed = r#"    def Mesh "mixed"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        int[] faceVertexCounts = [4, 3, 5]
+        int[] faceVertexIndices = [0, 1, 2, 3, 1, 4, 2, 4, 5, 6, 7, 2]
+        point3f[] points = [(-2, -1, 0), (-0.5, -1, 0), (-0.5, 1, 0), (-2, 1, 0), (0.5, 0, 0), (2, -1, 0), (2.5, 0.5, 0), (1.5, 1.5, 0)]
+        float[] primvars:faceId = [1, 2, 3] (
+            interpolation = "uniform"
+        )
+    }
+"#;
+    let octahedron = r#"    def Mesh "octa"
+    {
+        uniform token subdivisionScheme = "loop"
+        int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3]
+        int[] faceVertexIndices = [0, 2, 4, 2, 1, 4, 1, 3, 4, 3, 0, 4, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3, 5]
+        point3f[] points = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+        float[] primvars:faceId = [1, 2, 3, 4, 5, 6, 7, 8] (
+            interpolation = "uniform"
+        )
+    }
+"#;
+    // The octahedron's camera-facing half (+z) is faces 1-4.
+    for (what, world, seen) in [
+        ("mixed", mixed, vec![1.0, 2.0, 3.0]),
+        ("loop", octahedron, vec![1.0, 2.0, 3.0, 4.0]),
+    ] {
+        for settings in [
+            "        int crust:subdivisionLevel = 2",
+            "        float crust:subdivisionEdgeLength = 4",
+        ] {
+            let what = format!("{what}, {}", settings.trim());
+            // Closest: a filtered id would blend at the faces' edges.
+            let text = stage_with(
+                world,
+                &[(
+                    "id",
+                    &primvar_var(
+                        "faceId",
+                        "float",
+                        "        bool driver:parameters:aov:multiSampled = 0",
+                    ),
+                )],
+                settings,
+            );
+            let scene = load("uniform_cages", &text);
+            assert!(scene.warnings.is_empty(), "{what}: {:#?}", scene.warnings);
+            let s = setup(scene);
+            let r = render(&s);
+            let (p, id) = (r.pixels("P"), r.pixels("id"));
+            let mut found = vec![false; seen.len()];
+            for (p, id) in p.iter().zip(&id) {
+                if !hit(p) {
+                    continue;
+                }
+                let i = seen
+                    .iter()
+                    .position(|&v| v == id[0])
+                    .unwrap_or_else(|| panic!("{what}: id {} at {p:?}", id[0]));
+                found[i] = true;
+            }
+            assert!(found.iter().all(|&f| f), "{what}: ids seen {found:?}");
+        }
+    }
+}
+
+/// Houdini authors `driver:parameters:aov:format` beside `dataType`: the
+/// format sets the width and precision, the `dataType` the role. A
+/// `point3f` var stored as `half3` or `float3` stays closest; a `color3f`
+/// one stored as `half3` stays filtered.
+#[test]
+fn aov_format_sets_the_storage_and_data_type_the_role() {
+    use crust_core::{Accumulation, Precision};
+    let fmt = |f: &str| format!("        token driver:parameters:aov:format = \"{f}\"");
+    let text = stage(
+        &quad("q", -1.0, 1.0, 0.0, REST_POINTS),
+        &[
+            ("Pref_h", &primvar_var("rest", "point3f", &fmt("half3"))),
+            ("Pref_f", &primvar_var("rest", "point3f", &fmt("float3"))),
+            (
+                "Cd_h",
+                &primvar_var("displayColor", "color3f", &fmt("half3")),
+            ),
+        ],
+    );
+    let scene = load("aov_format", &text);
+    assert!(scene.warnings.is_empty(), "{:#?}", scene.warnings);
+    let var = |n: &str| {
+        scene.aovs.products[0]
+            .vars
+            .iter()
+            .find(|v| v.name == n)
+            .unwrap_or_else(|| panic!("no var {n}"))
+    };
+    for (n, accumulation, precision) in [
+        ("Pref_h", Accumulation::Closest, Precision::Half),
+        ("Pref_f", Accumulation::Closest, Precision::Float),
+        ("Cd_h", Accumulation::Filtered, Precision::Half),
+    ] {
+        assert_eq!(var(n).accumulation, accumulation, "{n}");
+        assert_eq!(var(n).precision, precision, "{n}");
+        assert_eq!(var(n).components, 3, "{n}");
+    }
+}
+
 /// Two quads at different depths whose silhouettes cross pixels: a
 /// constant `rest` and `displayColor` each, front and back.
 fn overlapping() -> String {
@@ -479,7 +591,7 @@ fn a_mismatched_component_count_is_refused_on_that_prim() {
     let w: Vec<_> = scene
         .warnings
         .iter()
-        .filter(|w| w.code == WarningCode::AovPrimvarMismatch)
+        .filter(|w| w.code == WarningCode::PrimvarMismatch)
         .collect();
     assert_eq!(w.len(), 1, "{:#?}", scene.warnings);
     assert_eq!(w[0].count, 1);
@@ -508,7 +620,7 @@ fn a_string_primvar_is_refused() {
         scene
             .warnings
             .iter()
-            .any(|w| w.code == WarningCode::AovPrimvarMismatch),
+            .any(|w| w.code == WarningCode::PrimvarMismatch),
         "{:#?}",
         scene.warnings
     );
@@ -718,7 +830,7 @@ fn varying_reads_as_vertex_and_malformed_primvars_are_refused() {
     let w = scene
         .warnings
         .iter()
-        .find(|w| w.code == WarningCode::AovPrimvarMismatch)
+        .find(|w| w.code == WarningCode::PrimvarMismatch)
         .unwrap_or_else(|| panic!("{:#?}", scene.warnings));
     let mut prims = w.prims.clone();
     prims.sort();
@@ -991,7 +1103,7 @@ fn an_ancestor_or_instancer_primvar_is_reported_not_inherited() {
     let w: Vec<_> = scene
         .warnings
         .iter()
-        .filter(|w| w.code == WarningCode::AovPrimvarNotInherited)
+        .filter(|w| w.code == WarningCode::PrimvarNotInherited)
         .collect();
     assert_eq!(w.len(), 1, "{:#?}", scene.warnings);
     assert_eq!(w[0].count, 1, "once per var, not per prim");
@@ -1031,7 +1143,7 @@ fn an_ancestor_or_instancer_primvar_is_reported_not_inherited() {
     let w: Vec<_> = scene
         .warnings
         .iter()
-        .filter(|w| w.code == WarningCode::AovPrimvarNotInherited)
+        .filter(|w| w.code == WarningCode::PrimvarNotInherited)
         .collect();
     assert_eq!(w.len(), 1, "{:#?}", scene.warnings);
     assert_eq!(w[0].prims, ["/World/scatter"]);

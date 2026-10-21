@@ -586,3 +586,43 @@ fn a_settings_change_asking_for_new_primvars_reimports() {
         Ok(())
     );
 }
+
+/// The primvar warnings are raised reading geometry, for the primvars it
+/// kept, which a settings refresh cannot change without being refused: a
+/// scene carrying them still takes a settings edit in place.
+#[test]
+fn a_primvar_warning_does_not_block_a_settings_edit() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = primvar_stage("</Render/withRest>");
+    let text = std::fs::read_to_string(&path).expect("read stage");
+    // `rest` moves to the mesh's parent (not inherited), and a second mesh
+    // authors it with two components (a mismatch).
+    let text = text
+        .replace(
+            "def Xform \"W\"\n{",
+            "def Xform \"W\"\n{\n    point3f primvars:rest = (0, 0, 0) (interpolation = \"constant\")",
+        )
+        .replace(
+            "point3f[] primvars:rest = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)] (\n            interpolation = \"vertex\"\n        )",
+            "",
+        )
+        .replace(
+            "    def Mesh \"M\"",
+            "    def Mesh \"N\"\n    {\n        int[] faceVertexCounts = [3]\n        int[] faceVertexIndices = [0, 1, 2]\n        point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 1, 0)]\n        float2[] primvars:rest = [(0, 0)] (interpolation = \"constant\")\n    }\n    def Mesh \"M\"",
+        );
+    let path = path.with_file_name("live_primvar_warnings.usda");
+    std::fs::write(&path, text).expect("write stage");
+    let scene = Scene::from_usd(&path).expect("load");
+    let codes: Vec<&str> = scene.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert!(codes.contains(&"primvar.not_inherited"), "{codes:?}");
+    assert!(codes.contains(&"primvar.mismatch"), "{codes:?}");
+    let prov = scene.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+}

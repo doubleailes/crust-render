@@ -273,7 +273,7 @@ impl PrimvarKeep {
         let e = &self.entries[i];
         let above = below.map_or(String::new(), |b| format!(" above {}", b.path()));
         warning!(
-            AovPrimvarNotInherited,
+            PrimvarNotInherited,
             at = on.path(),
             "{} primvar {:?}, which {what} authors on {}{above}; crust does not inherit \
              primvars yet, so the prims it would reach read the clear value",

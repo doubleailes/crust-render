@@ -225,7 +225,7 @@ float rounding. That is invisible in a closest-mode `rest`. The spec's
 
 When a kept primvar is missing on a mesh or curves prim, the import walks
 its ancestors once per `(name, ancestor)`, memoised. When an ancestor
-authors it as `constant`, it raises one `AovPrimvarNotInherited` warning per
+authors it as `constant`, it raises one `PrimvarNotInherited` warning per
 var. The same warning covers `primvars:<name>` on a `PointInstancer` and on
 an instance prim, where the instancing import meets them. The walk only
 runs for kept names, so a render without primvar vars never walks.

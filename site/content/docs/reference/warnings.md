@@ -119,8 +119,8 @@ plain text and are not counted.
 | `aov.invalid_raw` | skipped | crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written. | Start the expression with a diffuse reflection (`C<RD>…`). |
 | `aov.primvar_no_name` | skipped | A primvar RenderVar authors no sourceName; no channel is written. | Author `sourceName` with the primvar's name (`rest` or `primvars:rest`). |
 | `aov.primvar_four_components` | skipped | A primvar RenderVar's data type has four components, which are not supported yet; no channel is written. | Ask for one, two or three components (`color3f`, not `color4f`). |
-| `aov.primvar_mismatch` | skipped | A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value. | Author the var's `dataType` with the primvar's component count. |
-| `aov.primvar_not_inherited` | skipped | A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value. | Author the primvar on each mesh or curves prim itself. |
+| `primvar.mismatch` | skipped | A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value. | Author the var's `dataType` with the primvar's component count. |
+| `primvar.not_inherited` | skipped | A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value. | Author the primvar on each mesh or curves prim itself. |
 | `lpe.invalid` | skipped | A light path expression does not parse or compile; no channel is written. | Fix the expression; the message gives the parser's error. |
 
 ## Transforms

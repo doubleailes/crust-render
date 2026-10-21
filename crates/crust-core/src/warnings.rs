@@ -226,9 +226,9 @@ warning_codes! {
         "A primvar RenderVar authors no sourceName; no channel is written.";
     AovPrimvarFourComponents => "aov.primvar_four_components", Skipped, Each,
         "A primvar RenderVar's data type has four components, which are not supported yet; no channel is written.";
-    AovPrimvarMismatch => "aov.primvar_mismatch", Skipped, Each,
+    PrimvarMismatch => "primvar.mismatch", Skipped, Each,
         "A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value.";
-    AovPrimvarNotInherited => "aov.primvar_not_inherited", Skipped, Each,
+    PrimvarNotInherited => "primvar.not_inherited", Skipped, Each,
         "A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value.";
     LpeInvalid => "lpe.invalid", Skipped, Each,
         "A light path expression does not parse or compile; no channel is written.";
