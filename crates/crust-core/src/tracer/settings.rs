@@ -294,7 +294,9 @@ impl RenderSettings {
         self.region.flip_y(self.height)
     }
 
-    /// Set the longest path, in vertices.
+    /// Set the longest path, in shaded vertices (not bounces): 1 shades the
+    /// camera hit alone — visible emission and direct lighting — and 0 shades
+    /// nothing, so the frame is black.
     pub fn with_max_depth(mut self, max_depth: u32) -> Self {
         self.max_depth = max_depth;
         self

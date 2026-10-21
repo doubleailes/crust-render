@@ -238,7 +238,14 @@ refused with a warning, and the default is used.
 
 `int`, default **32**.
 
-The maximum number of bounces along a path. Russian roulette usually ends paths sooner.
+The longest path, counted in shaded vertices rather than bounces: `1` shades only the
+surface the camera sees, so it renders visible emitters and direct lighting with no
+indirect light; `2` adds one bounce of indirect light, and so on. (In a renderer that
+counts bounces, such as Arnold's `GI_total_depth`, `crust:maxDepth = N` is a depth of
+`N - 1`.) Russian roulette usually ends paths sooner.
+
+A value below `1` would shade nothing and render black, so it is refused with a warning
+and the default is used.
 
 ### crust:indirectClamp
 
