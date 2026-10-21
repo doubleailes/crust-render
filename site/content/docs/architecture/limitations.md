@@ -191,9 +191,22 @@ render.
 
 ## MCP sessions
 
-- **Every edit imports the whole stage again**, and a session holds the stage it authors
-  beside the scene it renders, about twice a render's import memory: Moana-scale stages
-  are out of reach. See [Look-dev with Claude Desktop](@/docs/help/claude-desktop.md#limits).
+- **Structural edits import the whole stage again.** An edit confined to values of the
+  render settings, the render camera, a light's inputs or a used material's shader inputs
+  is applied in place, keeping the scene's geometry and BVH. Anything else (a prim added
+  or removed, a binding, a transform, visibility, a variant, a light's size), or an
+  in-place update that cannot give the same scene a full import would, imports the saved
+  file again, which on a production stage takes as long as a render's import, less the
+  texture decoding the session keeps.
+  [`CRUST_SCENE_DELTAS=0`](@/docs/reference/environment-variables.md#crust-scene-deltas)
+  imports every edit whole.
+- **A large stage costs more memory in a session than in a render.** Between edits a
+  session holds the scene it renders, its authoring stage (payloads unloaded) and every
+  texture it decoded, including ones the scene no longer uses until the next full import.
+  A full import builds the new scene before the old one is let go, so its peak is about
+  two scenes; an in-place edit does not. Applying most edits in place makes look-dev
+  edits cheap, not the stage smaller: Moana-scale stages are still out of reach. See
+  [Look-dev with Claude Desktop](@/docs/help/claude-desktop.md#limits).
 - **`query` can show a fallback the render does not use.** An unauthored schema
   attribute answers the USD schema's fallback (`source` `fallback`), but where crust has
   its own default the render uses that instead: a DistantLight with no

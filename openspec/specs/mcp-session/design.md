@@ -355,6 +355,12 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   milliseconds go on a large stage, against ~1 ms on the teapot, was not profiled.
 - **Kept decodes are let go only by a full import.** A run of in-place edits that stops
   using a texture keeps it until the next `full` edit sweeps.
+- **A `full` edit peaks at two scenes.** `apply_change` assigns `self.scene` only once
+  `import_kept` returns, so the old scene lives through the new import. In-place edits
+  rebuild named parts and do not. Applying edits in place does not shrink what a session
+  holds between edits (the scene, the payload-unloaded authoring stage, the kept
+  decodes); no session's peak memory has been measured, and Moana-scale stages are
+  still out of reach.
 - **Environment maps are decoded again** by every import and dome rebuild.
 - **The session re-composes the stage per rebuild** (a masked stage per material or
   light, the index stage for settings) rather than keeping one composed stage across
