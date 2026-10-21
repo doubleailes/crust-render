@@ -563,13 +563,15 @@ same scaling — NEE toward the light, and the light's emission reached by a
 BSDF-sampled bounce, an escaping ray or a link twin — as a factor of the
 integrand, never of a weight. Scattering in a volume SHALL take the light whole.
 A non-finite value SHALL fall back to 1 with a `light.non_finite_input`
-warning. The multipliers SHALL steer no sampling decision.
+warning. The multipliers SHALL steer no sampling decision of an unguided render;
+path guiding SHALL train on the radiance they scale, as it does on a light's
+intensity.
 
 #### Scenario: The image is linear in the multipliers
 
 - **WHEN** a glossy plastic floor is lit by a sphere light and a distant light
   authoring `inputs:diffuse = d` and `inputs:specular = s`, under the `light`,
-  `bsdf` and `power` strategies
+  `bsdf` and `power` strategies, without path guiding
 - **THEN** each pixel equals, to rounding, `d` times the render at `(1, 0)` plus
   `s` times the render at `(0, 1)`, and the strategies agree on its mean
 
