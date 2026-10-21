@@ -639,8 +639,13 @@ shutter time is measured from where that point was at shutter open. The intended
 is a sharp beauty, with
 [`disableMotionBlur`](@/docs/usd/render-settings.md#disablemotionblur) on the render
 settings, and the blur added in Nuke. Blurring a beauty crust has already blurred doubles
-the blur. The sharp beauty is the scene at shutter open, so blurring it forward along the
-vector covers exactly the shutter.
+the blur. With `disableMotionBlur`, the sharp beauty is the scene at the frame, as
+`UsdRender` defines it, and each vector is the shutter's motion measured from there: a
+forward blur covers a shutter's length starting at the frame. With a shutter that opens at
+the frame (`shutter:open = 0`, as below) that is exactly the camera's shutter. With one
+that opens before it (`-0.25 .. 0.25`), the blur is shifted a quarter frame later; the
+deprecated `instantaneousShutter` keeps the sharp image at shutter open instead, where a
+forward blur covers the camera's shutter exactly.
 
 For an animated stage, that is three things: a shutter on the camera, blur off on the
 settings, and the var.

@@ -1204,7 +1204,12 @@ has the full reasoning (D1–D7); the points to keep here:
   in `advance_pixel::<false, false>` with and without this change), never
   the records. Off, no `K_TIME` domain is derived, every ray has `time = 0`
   and the beauty is sharp at the authored positions, bit-identical between
-  the two spellings. The two left `warn_unhonoured`. No CLI flag, no
+  the two spellings — unless a time-sampled transform moves over a shutter
+  that opens away from the frame, where `disableMotionBlur` is sharp at the
+  frame and `instantaneousShutter` at shutter open, the vector being the
+  shutter's displacement measured from the sharp pose either way
+  (`time-sampled-transform-motion`, the `usd-scene-import` record). The two
+  left `warn_unhonoured`. No CLI flag, no
   environment switch: a scene setting, not an optimisation to A/B.
 - **Verified in numbers, not by eye.** `crates/crust-render/tests/
   motion_vector.rs` renders `samples/motionvector.usda` through the CLI and

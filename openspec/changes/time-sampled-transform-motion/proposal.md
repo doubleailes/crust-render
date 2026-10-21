@@ -42,10 +42,16 @@ shutter interval defined here.
 - **`crust:motion:translate` keeps its meaning**: a world-space displacement over the
   shutter, whatever the shutter's length, including the instantaneous default. Authored
   together with an animated transform, it is added on top of that motion.
-- **Shutter open, not the frame, is the sharp pose.** With blur disabled, camera rays
-  stay at shutter open, as the existing requirement says. For a shutter that opens before
-  the frame (`-0.25 .. 0.25`), animated geometry renders sharp at `f - 0.25`. A forward
-  vector from there blurs over exactly the shutter.
+- **`disableMotionBlur` is sharp at the frame**, as UsdRender defines it (a `[0, 0]`
+  shutter at the current time code). Animated geometry renders where it is at `f`, and
+  its vector is the shutter's motion measured from there. The deprecated
+  `instantaneousShutter` closes the shutter where it opens, so it is sharp at
+  `f + shutter:open`. The two agree when the shutter opens at the frame; with both set,
+  `disableMotionBlur` wins.
+- **Moving instances keep their normal maps.** A moving direct instance's hit vertices
+  are carried through its transforms interpolated at the ray's time, so its tangent
+  frame survives; otherwise every animated prim would lose its normal map as soon as a
+  shutter is authored.
 - **No silent zero.** Each of the following is reported with one summarised warning:
   - a `motionvector` var is requested over an instantaneous shutter while drawn geometry's
     transform varies over time;
@@ -77,7 +83,9 @@ None.
   - the camera's `shutter:open` / `shutter:close` are read and define the motion
     interval;
   - time-sampled transforms produce motion over that interval;
-  - `disableMotionBlur` traces at shutter open, which is no longer always the frame;
+  - `disableMotionBlur` is sharp at the frame and `instantaneousShutter` at shutter open,
+    which differ when the shutter does not open at the frame;
+  - moving direct instances get a tangent frame (normal maps);
   - the new warnings.
 - `aovs`:
   - `motionvector` covers time-sampled transform motion, including rotation and scale;

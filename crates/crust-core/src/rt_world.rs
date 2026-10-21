@@ -544,19 +544,22 @@ pub fn tangent_of(uv: &[[f32; 2]; 3], p0: Vec3A, p1: Vec3A, p2: Vec3A) -> Vec3A 
 /// A hit carries `(geom_id, prim_id)` and nothing about the placement it was
 /// traversed through, so the only geometries whose vertices can be recovered
 /// are those where the id *is* the placement: a baked mesh (the top-level
-/// scene holds its world-space vertices under its own id) and a direct,
+/// scene holds its world-space vertices under its own id), a direct,
 /// unlabelled, static instance (one scene, one transform, recorded here at
-/// attach time). Everything else is `Unresolved`, deliberately: a prototype
-/// part placed through an instancer's group reports a forwarded slot id
-/// (`InstanceHitId::As` / `Offset`) that names the slot, not the placement
-/// traversed — two differently transformed placements of one prototype
-/// share it, so no transform can be recovered from the hit; and a
-/// motion-blurred instance was intersected through a transform interpolated
-/// at the ray's time, which no retained start transform reproduces. Neither
-/// consults any scene: resolving a forwarded id against the top-level scene
-/// would hand back whatever geometry happens to sit at that index. Both
-/// shade normal maps with the geometric normal, as every instance did before
-/// tangents were derived at the hit.
+/// attach time), and a direct, unlabelled, moving instance over a static
+/// scene (both of its transforms, recorded here, interpolated at the ray's
+/// shutter time with the kernel's own arithmetic, so the vertices are the
+/// ones the ray was intersected against). Everything else is `Unresolved`,
+/// deliberately: a prototype part placed through an instancer's group
+/// reports a forwarded slot id (`InstanceHitId::As` / `Offset`) that names
+/// the slot, not the placement traversed — two differently transformed
+/// placements of one prototype share it, so no transform can be recovered
+/// from the hit; and an instance whose inner scene itself moves has a second
+/// interpolation the hit does not name. Neither consults any scene:
+/// resolving a forwarded id against the top-level scene would hand back
+/// whatever geometry happens to sit at that index. Both shade normal maps
+/// with the geometric normal, as every instance did before tangents were
+/// derived at the hit.
 enum VertexSource {
     /// No vertices, no tangent frame.
     Unresolved,
@@ -565,6 +568,11 @@ enum VertexSource {
     /// A direct, unlabelled, static instance: that scene in local space,
     /// carried into the world through its placement.
     Placed(Arc<crust_rt::Scene>, Affine3A),
+    /// A direct, unlabelled, moving instance over a static scene: that scene
+    /// in local space, carried into the world through its start and end
+    /// transforms interpolated at the ray's shutter time. Boxed: few
+    /// geometries move.
+    Moving(Arc<crust_rt::Scene>, Box<[Affine3A; 2]>),
 }
 
 /// What a geometry's motion over the shutter is, read off the end transform
@@ -908,7 +916,7 @@ impl WorldBuilder {
     }
 
     /// Where a hit's vertices can be read from — see [`VertexSource`] for
-    /// why only these two shapes resolve.
+    /// why only these shapes resolve.
     fn vertex_source(geometry: &Geometry, label: InstanceHitId) -> VertexSource {
         match geometry {
             Geometry::TriangleMesh { .. } if label == InstanceHitId::Own => VertexSource::Baked,
@@ -917,6 +925,13 @@ impl WorldBuilder {
                 transform,
                 transform_end: None,
             } if label == InstanceHitId::Own => VertexSource::Placed(Arc::clone(scene), *transform),
+            Geometry::Instance {
+                scene,
+                transform,
+                transform_end: Some(end),
+            } if label == InstanceHitId::Own && !scene.has_motion() => {
+                VertexSource::Moving(Arc::clone(scene), Box::new([*transform, **end]))
+            }
             _ => VertexSource::Unresolved,
         }
     }
@@ -1341,7 +1356,7 @@ impl World {
         });
         let (uv, tangent) = match &tables.uv {
             Some(m) => {
-                let verts = self.world_vertices(h.geom_id, h.prim_id, tables);
+                let verts = self.world_vertices(h.geom_id, h.prim_id, tables, ray.time());
                 match m.resolve(h.prim_id, h.u, h.v, tables.swapped, verts) {
                     Some((uv, tangent)) => (Some(uv), tangent),
                     None => (None, Vec3A::ZERO),
@@ -1431,13 +1446,15 @@ impl World {
 
     /// The world-space vertices of the triangle a hit landed on, in the
     /// kernel's vertex order: read from the top-level scene for a baked
-    /// mesh, or through the placement of a direct instance. `None` where
-    /// neither applies — see [`VertexSource`].
+    /// mesh, or through the placement of a direct instance — a moving one's
+    /// at `time`, the shutter time the ray was intersected at. `None` where
+    /// none applies — see [`VertexSource`].
     fn world_vertices(
         &self,
         geom_id: u32,
         prim_id: u32,
         tables: &SideTables,
+        time: f32,
     ) -> Option<[Vec3A; 3]> {
         match &tables.vertices {
             VertexSource::Unresolved => None,
@@ -1445,6 +1462,12 @@ impl World {
             VertexSource::Placed(scene, l2w) => scene
                 .triangle_vertices(0, prim_id)
                 .map(|vs| vs.map(|v| l2w.transform_point3a(v))),
+            VertexSource::Moving(scene, ends) => {
+                let l2w = lerp_affine(&ends[0], &ends[1], time);
+                scene
+                    .triangle_vertices(0, prim_id)
+                    .map(|vs| vs.map(|v| l2w.transform_point3a(v)))
+            }
         }
     }
 

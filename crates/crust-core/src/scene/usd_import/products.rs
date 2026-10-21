@@ -64,6 +64,11 @@ pub(super) struct RenderProducts {
     /// or its deprecated synonym `instantaneousShutter = true`. The stage's
     /// motion stays in the scene either way (`RenderSettings::with_motion_blur`).
     pub(super) motion_blur: bool,
+    /// Whether the sharp beauty is posed at the frame rather than at shutter
+    /// open: `disableMotionBlur = true`, which UsdRender defines as a `[0, 0]`
+    /// shutter at the current time code. `instantaneousShutter` alone keeps
+    /// shutter open.
+    pub(super) sharp_at_frame: bool,
     /// Whether the camera's lens is kept: `false` when the first product
     /// (else the settings prim) authors `disableDepthOfField = true`, and the
     /// camera is built as a pinhole (`RenderSettings::with_depth_of_field`).
@@ -80,6 +85,7 @@ impl Default for RenderProducts {
             resolution: None,
             data_window: None,
             motion_blur: true,
+            sharp_at_frame: false,
             depth_of_field: true,
         }
     }
@@ -149,6 +155,21 @@ impl Base {
     /// Whether the render blurs moving geometry: either flag turns it off.
     fn motion_blur(&self) -> bool {
         !(self.disable_motion_blur || self.instantaneous_shutter)
+    }
+
+    /// Whether the sharp beauty is posed at the frame: `disableMotionBlur`
+    /// wins over `instantaneousShutter`, which poses it at shutter open.
+    fn sharp_at_frame(&self) -> bool {
+        self.disable_motion_blur
+    }
+
+    /// How the render treats moving geometry, as a product's warning names it.
+    fn blur_mode(&self) -> &'static str {
+        match (self.motion_blur(), self.sharp_at_frame()) {
+            (true, _) => "on",
+            (false, true) => "off (sharp at the frame)",
+            (false, false) => "off (sharp at shutter open)",
+        }
     }
 
     /// Whether the render camera keeps its lens.
@@ -335,6 +356,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             request: AovRequest::default(),
             primvars: PrimvarKeep::default(),
             motion_blur: base.motion_blur(),
+            sharp_at_frame: base.sharp_at_frame(),
             depth_of_field: base.depth_of_field(),
             camera: base.camera,
             resolution: base.resolution,
@@ -350,6 +372,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         resolution: base.resolution,
         data_window: base.data_window,
         motion_blur: base.motion_blur(),
+        sharp_at_frame: base.sharp_at_frame(),
         depth_of_field: base.depth_of_field(),
     };
     // The render's own base: the first accepted product's.
@@ -406,17 +429,16 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 );
                 continue;
             }
-            Some(first) if first.motion_blur() != resolved.motion_blur() => {
+            Some(first) if first.blur_mode() != resolved.blur_mode() => {
                 // One shutter per stage, like one camera: the file is still
                 // written, with the first product's blur.
-                let state = |on: bool| if on { "on" } else { "off" };
                 warning!(
                     ProductMotionBlurMismatch,
                     at = product_path,
                     "{product_path}: asks for motion blur {}, but the render has it {} (the \
                      first product's); its file is written with that",
-                    state(resolved.motion_blur()),
-                    state(first.motion_blur()),
+                    resolved.blur_mode(),
+                    first.blur_mode(),
                 );
             }
             Some(_) => {}
@@ -519,6 +541,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     }
     if let Some(first) = render_base {
         out.motion_blur = first.motion_blur();
+        out.sharp_at_frame = first.sharp_at_frame();
         out.depth_of_field = first.depth_of_field();
         out.camera = first.camera;
         out.resolution = first.resolution;

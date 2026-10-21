@@ -104,8 +104,10 @@ frame. It lives on the import context, and on the scene's provenance for MCP (D8
 Stack entries grow from `(prim, W_f, hidden)` to `(prim, W_f, hidden, Option<Pair>)`, with
 `Pair { open: GMat4, close: GMat4 }`:
 
-- A prim gets a pair when the shutter is not instantaneous and either its parent has a
-  pair or `Xformable::transform_might_be_time_varying()` is true for it.
+- A prim gets a pair when the shutter is not instantaneous and either
+  `Xformable::transform_might_be_time_varying()` is true for it, or its parent has a pair
+  and it does not `!resetXformStack!` (a reset drops the parent's motion along with its
+  transform).
 - The pair is composed with a new `compose_at(prim, parent, time)`. It is
   `compose_with_parent` under a nested `EvalTimeScope`, so the composition rule stays the
   one function every walk applies.
@@ -175,6 +177,17 @@ a box per moving geometry with a linear change.
 - **Storing `S⁻¹` and ignoring `t`.** That is wrong for blurred renders, whose hits are
   made at `t > 0`.
 
+**Tangents ride the same pair.** A normal map needs the hit triangle's world vertices, and
+`World` recovered them only for a baked mesh or a static direct instance: a moving
+instance was `VertexSource::Unresolved`, so its tangent was zero. Harmless while only
+`crust:motion:translate` moved anything; once every animated transform becomes an
+instance with an end transform, it would cost every animated prim its normal map, blur on
+or off. A direct, `Own`-labelled moving instance over a static scene therefore keeps both
+transforms (`VertexSource::Moving`), and `World::intersect` carries the prototype's
+vertices through `lerp_affine(S, E, ray.time)`, the kernel's own arithmetic at the time the
+ray was intersected. At `time = 0` that is `S` exactly, so a sharp render's tangents equal a
+static placement's.
+
 ### D5. Offset-labelled placements get one record per id range
 
 A native instance of a multi-part prototype is attached with `InstanceHitId::Offset(base)`,
@@ -188,15 +201,42 @@ length 1, and the lookup stays a binary search.
 of its own stay `Unresolved`, with the existing warning. This change produces none of
 these cases.
 
-### D6. The sharp pose stays at shutter open
+### D6. `disableMotionBlur` is sharp at the frame; `instantaneousShutter` at shutter open
 
-With blur off, rays keep `time = 0`, which is shutter open, as the current requirement
-states. The VectorBlur workflow blurs forward from the sharp image, so a sharp image at
-shutter open blurred by a forward vector covers exactly `[open, close]`.
+UsdRender defines `disableMotionBlur` as a `[0, 0]` shutter: one sample at the current
+time code. Only the deprecated `instantaneousShutter` closes the shutter where it opens.
+The two differ once the shutter is read and opens away from the frame.
 
-*Rejected:* a sharp image at the frame `f` (`τ_f = −open / (close − open)`). With a forward
-vector, it would blur over `[f, f + close − open]`, a different interval than the one the
-camera authors.
+- **`instantaneousShutter`**: rays keep `time = 0`, shutter open, and the placements span
+  shutter open to shutter close as with blur on.
+- **`disableMotionBlur`** (it wins when both are set), over a shutter that opens away from
+  the frame: a moving placement starts at its transform at the frame, `X(f)`, and ends at
+  `D · X(f)`, where `D = X(close) · X(open)⁻¹` is the shutter's world-space displacement.
+  Rays at `time = 0` see it exactly where it is at the frame (not an interpolation of the
+  shutter's ends, which differs from `X(f)` whenever a time sample falls inside the
+  shutter). The motion record is read off the same pair, so the vector is the shutter's
+  displacement measured from the frame pose: the same vector as shutter open's for a
+  translation, the same displacement applied at the frame for a rotation.
+  (`TransformMotion::span`; a singular `X(open)` has no `D` and keeps its shutter span.)
+- When the shutter opens at the frame, the two are one: `X(f) = X(open)`.
+
+A forward blur from a sharp image at the frame covers `[f, f + close − open]`, not the
+camera's interval, when the shutter opens before the frame. That is the cost of following
+the schema, and the user documentation says so: a team that wants VectorBlur to cover the
+camera's shutter exactly authors `shutter:open = 0`, or uses `instantaneousShutter`.
+
+The pose is decided before the traversal (`RenderProducts::sharp_at_frame`), and it moves
+geometry, so the MCP shutter key carries it (D8): toggling `disableMotionBlur` over such a
+shutter re-imports, elsewhere it stays an in-place settings edit.
+
+*Rejected:*
+
+- **A sharp image at shutter open for both flags** (this design's first version): renders
+  a centred-shutter stage a quarter frame early, against the schema and the other Hydra
+  delegates.
+- **Rays at `τ_f = −open / (close − open)` over the shutter pair**: the interpolated pose
+  is not `X(f)` when a time sample lies inside the shutter, which per-frame animation
+  caches always have.
 
 ### D7. Warnings: four codes, each summarised once
 

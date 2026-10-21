@@ -213,13 +213,15 @@ impl Shutter {
 
     /// What the MCP session compares to decide whether a settings edit
     /// changed the shutter ([`crate::live::ShutterKey`]); `query` is whether
-    /// the import asks prims about time ([`super::xform::TransformMotion`]).
-    pub(super) fn key(&self, query: bool) -> crate::live::ShutterKey {
+    /// the import asks prims about time ([`super::xform::TransformMotion`]),
+    /// `frame_pose` whether moving placements are posed at the frame.
+    pub(super) fn key(&self, query: bool, frame_pose: bool) -> crate::live::ShutterKey {
         crate::live::ShutterKey {
             camera: self.camera.as_ref().map(ToString::to_string),
             offsets: [self.offsets.open.to_bits(), self.offsets.close.to_bits()],
             interval: self.interval.map(|(o, c)| [o.to_bits(), c.to_bits()]),
             query,
+            frame_pose,
         }
     }
 

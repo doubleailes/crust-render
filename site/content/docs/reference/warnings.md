@@ -134,7 +134,7 @@ plain text and are not counted.
 | `xform.uncomposable` | refused | An xformOp stack could not be composed; the local transform is identity. | Fix the xformOp stack; the message gives the reason. |
 | `xform.unknown_type` | skipped | A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored. | Author the transform on an `Xform` above the prim, or use a stock USD type; a plugin or studio schema is not known to Crust Render. |
 | `xform.motion_vector_unsupported` | approximated | Geometry moves in a way the vector cannot attribute to one placement; it is motion blurred but the motionvector AOV reads zero. | Expect a zero motion vector on motion inside a nested instancer or a prototype. |
-| `xform.motion_ignored` | skipped | A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders at shutter open. | Expect these prims sharp; animate the instance or mesh that places them instead. |
+| `xform.motion_ignored` | skipped | A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders without motion. | Expect these prims sharp; animate the instance or mesh that places them instead. |
 
 ## Geometry types
 

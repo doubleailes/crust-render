@@ -28,8 +28,8 @@ use super::mesh::SubdivPolicy;
 use super::time::EvalTimeScope;
 use super::xform::compose_with_parent;
 use super::{
-    ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, open_stage,
-    open_stage_masked, prim_at, read_index, stage_builder,
+    ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, frame_pose,
+    open_stage, open_stage_masked, prim_at, read_index, stage_builder,
 };
 
 /// Warning codes a settings change can move, by family: the settings, the
@@ -362,10 +362,10 @@ fn refresh_settings(
         }
         // Geometry was placed at the shutter's ends, so another shutter
         // re-imports, as a transform edit does.
-        if read
-            .shutter
-            .key(asks_about_time(&read.shutter, &read.products))
-            != facts.shutter
+        if read.shutter.key(
+            asks_about_time(&read.shutter, &read.products),
+            frame_pose(&read.shutter, &read.products),
+        ) != facts.shutter
         {
             return Err(Structural("the camera shutter changed".into()));
         }

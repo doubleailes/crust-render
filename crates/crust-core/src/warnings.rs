@@ -249,7 +249,7 @@ warning_codes! {
     XformMotionVectorUnsupported => "xform.motion_vector_unsupported", Approximated, Each,
         "Geometry moves in a way the vector cannot attribute to one placement; it is motion blurred but the motionvector AOV reads zero.";
     XformMotionIgnored => "xform.motion_ignored", Skipped, Each,
-        "A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders at shutter open.";
+        "A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders without motion.";
 
     // Meshes, subdivision, displacement
     MeshNonInvertibleTransform => "mesh.non_invertible_transform", Approximated, Each,

@@ -69,7 +69,7 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 | `float4 dataWindowNDC` | `(0, 0, 1, 1)` | the part of the frame to render. The first render product's own value overrides it. See [below](#datawindowndc). |
 | `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
-| `bool disableMotionBlur` | `false` | render moving geometry sharp, at its shutter-open position. The first render product's own value overrides it. See [below](#disablemotionblur). |
+| `bool disableMotionBlur` | `false` | render moving geometry sharp, where it is at the frame. The first render product's own value overrides it. See [below](#disablemotionblur). |
 | `bool instantaneousShutter` | `false` | the same switch under its older `UsdRender` name. Either one set to `true` turns the blur off. |
 | `bool disableDepthOfField` | `false` | render through a pinhole, sharp at every depth, whatever the camera's `fStop`. The first render product's own value overrides it. See [below](#disabledepthoffield). |
 | `token renderingColorSpace` | `lin_rec709` | the working colour space. See [below](#renderingcolorspace). |
@@ -78,21 +78,27 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 
 `uniform bool disableMotionBlur = 1`
 
-Turns off motion blur for the whole render. Every camera ray is traced at shutter open, so
-moving geometry renders sharp where it is when the [shutter](#camera-shutter) opens, in
-the beauty and in every AOV: at its authored position for
+Turns off motion blur for the whole render. `UsdRender` defines it as a `[0, 0]` shutter:
+one sample at the current time code. Moving geometry therefore renders sharp where it is
+at the frame, in the beauty and in every AOV: at its authored position for
 [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), and at its
-transform at `frame + shutter:open` for a time-sampled transform. With a shutter that
-opens before the frame (`-0.25 .. 0.25`), that is a quarter frame before the frame. The motion itself stays in the
-scene: the [`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, so
-the blur can be added in compositing from a sharp beauty.
+transform at the frame for a time-sampled one, whatever the camera's
+[shutter](#camera-shutter). The motion itself stays in the scene: the
+[`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, measuring the
+shutter's motion from that sharp position, so the blur can be added in compositing from a
+sharp beauty.
 
-`instantaneousShutter` is the attribute's older name in `UsdRender`, and means the same.
-Either one set to `true` turns the blur off; both are resolved like the render's camera and
-resolution, from the first `RenderProduct` when it authors them, else from this prim. A
-product that authors only one of the two inherits the other from this prim. A later
-product that asks for the other setting is still written, with the first product's, and a
-warning says so: one render has one shutter, as it has one camera.
+`instantaneousShutter` is the attribute's older, deprecated name in `UsdRender`, which
+closes the shutter where it opens. It also turns the blur off, but the sharp image is at
+shutter open, `frame + shutter:open`. The two agree unless the shutter opens before or
+after the frame: with a `-0.25 .. 0.25` shutter, `instantaneousShutter` renders a quarter
+frame before the frame. When both are set, `disableMotionBlur` wins.
+
+Both are resolved like the render's camera and resolution, from the first `RenderProduct`
+when it authors them, else from this prim. A product that authors only one of the two
+inherits the other from this prim. A later product that asks for another setting is still
+written, with the first product's, and a warning says so: one render has one shutter, as
+it has one camera.
 
 ```usda
 def RenderSettings "settings"
@@ -533,9 +539,11 @@ Over that interval, every mesh, sphere, implicit shape, native instance and
 `PointInstancer` placement whose transform is time-sampled (its own `xformOp`s or an
 ancestor's) moves from its transform at shutter open to its transform at shutter close.
 The beauty is blurred along that path, unless [`disableMotionBlur`](#disablemotionblur)
-is set, and the [`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV measures the same
-path. Only the transform is read at the two ends: every other attribute, points
-included, is read at the frame.
+is set (the prim is then sharp where it is at the frame), and the
+[`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV measures the same motion. Only the
+transform is read at the two ends: every other attribute, points included, is read at the
+frame, and prims that get no motion (curves, lights, volumes) sit where they are at the
+frame.
 
 The shutter is **instantaneous**, and nothing time-sampled moves, when:
 
