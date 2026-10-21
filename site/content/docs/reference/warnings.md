@@ -103,6 +103,7 @@ plain text and are not counted.
 | `product.motion_blur_mismatch` | approximated | A product asks for other motion blur than the first; its file is written with the first's. | Give every product the same motion-blur setting. |
 | `product.depth_of_field_mismatch` | approximated | A product asks for other depth of field than the first; its file is written with the first's. | Give every product the same `disableDepthOfField`. |
 | `product.region_mismatch` | approximated | A product asks for another dataWindowNDC than the first; its file is written over the first's. | Give every product the same `dataWindowNDC`. |
+| `product.framing_mismatch` | approximated | A product asks for another aspectRatioConformPolicy than the first; its file is framed by the first's. | Give every product the same `aspectRatioConformPolicy`, or author it once on the RenderSettings prim. |
 | `product.no_name` | skipped | A RenderProduct authors no productName; nothing is written for it. | Author `productName`, the file the product writes. |
 | `product.no_writable_vars` | skipped | A RenderProduct has no RenderVar crust can write; nothing is written for it. | Point `orderedVars` at RenderVars whose source crust produces; their own warnings say why each was dropped. |
 | `product.shared_path` | skipped | A RenderProduct writes the path an earlier one already writes; nothing is written for it. | Give each product its own `productName` (with `-o`, the first product's path is the one given). |
@@ -110,6 +111,7 @@ plain text and are not counted.
 | `product.subframe_frame` | approximated | An output path's integer frame variable rounded a fractional frame to the nearest one. | Use `$FF` (or `<FF>`) to keep the fraction, so two subframes never write one file. |
 | `product.unhonoured_attribute` | approximated | A product authors a setting crust does not honour; it renders without it. | Remove the attribute, or accept that it is ignored. |
 | `product.invalid_data_window` | refused | dataWindowNDC is not finite or selects no pixel; the full frame is rendered. | Author a finite window that covers at least one pixel. |
+| `product.invalid_conform_policy` | refused | aspectRatioConformPolicy names none of the five policies; it is read as unauthored. | Author one of `expandAperture`, `cropAperture`, `adjustApertureWidth`, `adjustApertureHeight` or `adjustPixelAspectRatio`. |
 | `product.data_window_clipped` | approximated | dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped. | Keep `dataWindowNDC` inside 0..1. |
 | `aov.not_a_render_var` | skipped | orderedVars targets a prim that is not a RenderVar. | Point `orderedVars` at `RenderVar` prims. |
 | `aov.unsupported_source` | skipped | A RenderVar's source is one crust does not produce yet (planned, intrinsic); no channel is written. | Remove the var; the [AOV page](@/docs/usd/aovs.md) lists the sources crust writes. |

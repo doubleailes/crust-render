@@ -31,7 +31,7 @@ use super::camera::camera_lens;
 use super::implicit::Shape;
 use super::lights::{LightInputs, light_inputs};
 use super::materials::{bound_material, surface_shader_id};
-use super::products::import_render_products;
+use super::products::{Framing, import_render_products};
 use super::settings::{CameraPick, import_render_settings, pick_camera, wanted_camera};
 use super::time::EvalTimeScope;
 use super::{
@@ -87,6 +87,7 @@ pub(crate) fn list_records(
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }
+    let framing = products.framing;
     let wanted = wanted_camera(None, products.camera, &index);
     drop(index);
 
@@ -97,7 +98,7 @@ pub(crate) fn list_records(
     let mut bound: HashSet<String> = HashSet::new();
     for_each_chunk(path, path_str, &chunks, |stage| {
         collect(stage, kind, Order::Authored, |prim, hidden| {
-            if let Some(r) = record(stage, prim, kind, hidden, &settings) {
+            if let Some(r) = record(stage, prim, kind, hidden, &settings, framing) {
                 found.push(prim.path().to_string(), r);
             }
         });
@@ -197,15 +198,17 @@ fn record(
     kind: ListKind,
     hidden: bool,
     settings: &RenderSettings,
+    framing: Framing,
 ) -> Option<ListRecord> {
     let path = prim.path().to_string();
     Some(match kind {
         ListKind::Camera => {
-            let lens = camera_lens(stage, prim, settings)?;
+            let lens = camera_lens(stage, prim, settings, framing)?;
             ListRecord::Camera(CameraRecord {
                 path,
                 focal_length_mm: lens.focal_length,
                 aperture_mm: lens.aperture,
+                conformed_aperture_mm: lens.conformed_aperture,
                 f_stop: lens.f_stop,
                 focus_distance: lens.focus_distance,
                 is_render_camera: false,

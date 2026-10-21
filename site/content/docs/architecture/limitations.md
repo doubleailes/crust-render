@@ -2,7 +2,7 @@
 title = "Limitations"
 description = "What Crust Render does not do, or does only partly."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-14T08:00:00+00:00
+updated = 2026-10-21T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
@@ -127,6 +127,15 @@ render.
   map is read raw.
 - **Some inputs are read but not used**, with a warning: `subsurface*` and `specularTint`
   on `PxrDisneyBsdf`, and `UsdTransform2d` on `UsdPreviewSurface` textures.
+
+## Camera and framing
+
+- **Square pixels only.** An authored `pixelAspectRatio` other than 1 is ignored with a
+  warning, and the `aspectRatioConformPolicy` `adjustPixelAspectRatio` frames as
+  `expandAperture` with a warning naming the pixel aspect it would have needed
+  ([details](@/docs/usd/render-settings.md#aspectratioconformpolicy)).
+- **No lens shift.** `horizontalApertureOffset` and `verticalApertureOffset` are not read:
+  the frame is always centred on the camera's axis.
 
 ## Lights
 

@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::render::{
-    Product as RenderProduct, ProductSchema, Settings as UsdRenderSettings, SettingsBaseSchema,
-    SettingsSchema, Var as RenderVar,
+    AspectRatioConformPolicy, Product as RenderProduct, ProductSchema,
+    Settings as UsdRenderSettings, SettingsBaseSchema, SettingsSchema, Var as RenderVar,
 };
 use tracing::debug;
 
@@ -40,9 +40,20 @@ use super::settings::render_settings_path;
 
 const DRIVER_PARAMETERS: &str = "driver:parameters:";
 
-/// The stage's products, and the camera, resolution, data window and
-/// motion-blur and depth-of-field switches the render takes from the first
-/// of them.
+/// How the render camera's aperture is fitted to the image: the first
+/// product's resolved `aspectRatioConformPolicy`, which
+/// [`super::camera`]'s frame read applies before any field of view is
+/// derived. Kept beside the resolution rather than on
+/// [`crate::tracer::RenderSettings`], which holds no USD vocabulary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Framing {
+    /// `expandAperture` when nothing authors one.
+    pub(super) policy: AspectRatioConformPolicy,
+}
+
+/// The stage's products, and the camera, resolution, data window, framing
+/// and motion-blur and depth-of-field switches the render takes from the
+/// first of them.
 #[derive(Debug)]
 pub(super) struct RenderProducts {
     pub(super) request: AovRequest,
@@ -59,6 +70,8 @@ pub(super) struct RenderProducts {
     /// ymax`, bottom-left origin), when the settings or the product author
     /// one; [`region_from_ndc`] turns it into the render's region.
     pub(super) data_window: Option<[f32; 4]>,
+    /// The first product's resolved conform policy.
+    pub(super) framing: Framing,
     /// Whether moving geometry is motion blurred: `false` when the first
     /// product (else the settings prim) authors `disableMotionBlur = true`
     /// or its deprecated synonym `instantaneousShutter = true`. The stage's
@@ -84,6 +97,7 @@ impl Default for RenderProducts {
             camera: None,
             resolution: None,
             data_window: None,
+            framing: Framing::default(),
             motion_blur: true,
             sharp_at_frame: false,
             depth_of_field: true,
@@ -99,6 +113,7 @@ struct Base {
     camera: Option<sdf::Path>,
     resolution: Option<(usize, usize)>,
     data_window: Option<[f32; 4]>,
+    conform: AspectRatioConformPolicy,
     /// `disableMotionBlur` and `instantaneousShutter`, each resolved on its
     /// own: a product that authors one of them inherits the other.
     disable_motion_blur: bool,
@@ -116,6 +131,37 @@ fn read_data_window(view: &impl SettingsBaseSchema) -> Option<[f32; 4]> {
     Some([v.x, v.y, v.z, v.w])
 }
 
+/// The authored `aspectRatioConformPolicy`; `None` when unauthored, or when
+/// it names none of the five policies, which is refused at the prim that
+/// authors it.
+fn read_conform_policy(view: &impl SettingsBaseSchema) -> Option<AspectRatioConformPolicy> {
+    let value = value_at(&view.aspect_ratio_conform_policy_attr())?;
+    match AspectRatioConformPolicy::try_from(value.clone()) {
+        Ok(policy) => Some(policy),
+        Err(_) => {
+            let path = view.prim().path();
+            warning!(
+                ProductInvalidConformPolicy,
+                at = path,
+                "{path}: aspectRatioConformPolicy = {} is not one of expandAperture, \
+                 cropAperture, adjustApertureWidth, adjustApertureHeight or \
+                 adjustPixelAspectRatio; read as unauthored",
+                describe_value(&value),
+            );
+            None
+        }
+    }
+}
+
+/// An authored value as a warning quotes it: a token in quotes, anything
+/// else as its debug form.
+fn describe_value(value: &sdf::Value) -> String {
+    match value {
+        sdf::Value::Token(t) => format!("{:?}", t.as_str()),
+        other => format!("{other:?}"),
+    }
+}
+
 fn read_camera(view: &impl SettingsBaseSchema) -> Option<sdf::Path> {
     view.camera_rel().targets().ok()?.into_iter().next()
 }
@@ -128,6 +174,7 @@ impl Base {
             camera: None,
             resolution: None,
             data_window: None,
+            conform: AspectRatioConformPolicy::ExpandAperture,
             disable_motion_blur: false,
             instantaneous_shutter: false,
             disable_depth_of_field: false,
@@ -140,6 +187,7 @@ impl Base {
             camera: read_camera(view).or_else(|| fallback.camera.clone()),
             resolution: read_resolution(view).or(fallback.resolution),
             data_window: read_data_window(view).or(fallback.data_window),
+            conform: read_conform_policy(view).unwrap_or(fallback.conform),
             disable_motion_blur: value_at(&view.disable_motion_blur_attr())
                 .and_then(decode_bool)
                 .unwrap_or(fallback.disable_motion_blur),
@@ -177,9 +225,15 @@ impl Base {
         !self.disable_depth_of_field
     }
 
+    fn framing(&self) -> Framing {
+        Framing {
+            policy: self.conform,
+        }
+    }
+
     /// Whether two products can be rendered by one render: the same camera
-    /// and resolution. The shutter and depth-of-field flags and the data
-    /// window are not part of it — the render follows the first product's, and a later one that
+    /// and resolution. The shutter and depth-of-field flags, the data
+    /// window and the conform policy are not part of it — the render follows the first product's, and a later one that
     /// differs is warned about, not refused.
     fn same_render(&self, other: &Base) -> bool {
         self.camera == other.camera && self.resolution == other.resolution
@@ -358,6 +412,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             motion_blur: base.motion_blur(),
             sharp_at_frame: base.sharp_at_frame(),
             depth_of_field: base.depth_of_field(),
+            framing: base.framing(),
             camera: base.camera,
             resolution: base.resolution,
             data_window: base.data_window,
@@ -371,6 +426,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         camera: base.camera.clone(),
         resolution: base.resolution,
         data_window: base.data_window,
+        framing: base.framing(),
         motion_blur: base.motion_blur(),
         sharp_at_frame: base.sharp_at_frame(),
         depth_of_field: base.depth_of_field(),
@@ -476,6 +532,20 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 describe_window(first.data_window),
             );
         }
+        // One framing per render, like one region: the file is still
+        // written, framed by the first product's policy.
+        if let Some(first) = &render_base
+            && first.conform != resolved.conform
+        {
+            warning!(
+                ProductFramingMismatch,
+                at = product_path,
+                "{product_path}: asks for aspectRatioConformPolicy {:?}, but the render's is {:?} \
+                 (the first product's); its file is written with that framing",
+                resolved.conform.as_token(),
+                first.conform.as_token(),
+            );
+        }
         warn_unhonoured(&prim);
 
         let name = custom_token(&prim, "productName").unwrap_or_default();
@@ -543,6 +613,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         out.motion_blur = first.motion_blur();
         out.sharp_at_frame = first.sharp_at_frame();
         out.depth_of_field = first.depth_of_field();
+        out.framing = first.framing();
         out.camera = first.camera;
         out.resolution = first.resolution;
         out.data_window = first.data_window;
@@ -1072,6 +1143,140 @@ fn resolve_var(stage: &Stage, path: &sdf::Path, keep: &mut PrimvarKeep) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The products of a stage holding `render` under `/Render` (which must
+    /// hold `/Render/settings`), and the warnings resolving them raised.
+    fn resolve(name: &str, render: &str) -> (RenderProducts, Vec<crate::Warning>) {
+        let dir = std::env::temp_dir().join("crust_products_framing");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("{name}.usda"));
+        std::fs::write(
+            &path,
+            format!("#usda 1.0\ndef Scope \"Render\"\n{{\n{render}\n}}\n"),
+        )
+        .expect("write stage");
+        let stage = super::super::stage_builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        let scope = crate::WarningScope::enter();
+        let products = import_render_products(&stage);
+        (products, scope.finish())
+    }
+
+    fn policy(name: &str, render: &str) -> AspectRatioConformPolicy {
+        let (products, warnings) = resolve(name, render);
+        assert!(warnings.is_empty(), "{name}: {warnings:?}");
+        products.framing.policy
+    }
+
+    fn settings(body: &str) -> String {
+        format!("    def RenderSettings \"settings\"\n    {{\n{body}\n    }}\n")
+    }
+
+    fn product(name: &str, body: &str) -> String {
+        format!(
+            "    def RenderProduct \"{name}\"\n    {{\n{body}\n        token productName = \
+             \"{name}.exr\"\n    }}\n"
+        )
+    }
+
+    const HEIGHT: &str =
+        "        uniform token aspectRatioConformPolicy = \"adjustApertureHeight\"";
+    const WIDTH: &str = "        uniform token aspectRatioConformPolicy = \"adjustApertureWidth\"";
+
+    #[test]
+    fn the_conform_policy_resolves_like_the_resolution() {
+        use AspectRatioConformPolicy::*;
+        assert_eq!(policy("unauthored", &settings("")), ExpandAperture);
+        assert_eq!(RenderProducts::default().framing.policy, ExpandAperture);
+        assert_eq!(
+            policy("settings_only", &settings(HEIGHT)),
+            AdjustApertureHeight
+        );
+        // A product that authors none inherits the settings'.
+        let inherits =
+            settings(&format!("{WIDTH}\n        rel products = [</Render/a>]")) + &product("a", "");
+        assert_eq!(policy("inherited", &inherits), AdjustApertureWidth);
+        // The first product's own wins over the settings'.
+        let overrides = settings(&format!("{WIDTH}\n        rel products = [</Render/a>]"))
+            + &product("a", HEIGHT);
+        assert_eq!(policy("overridden", &overrides), AdjustApertureHeight);
+    }
+
+    #[test]
+    fn a_misspelt_conform_policy_is_refused_as_unauthored() {
+        let (products, warnings) = resolve(
+            "misspelt",
+            &settings("        uniform token aspectRatioConformPolicy = \"adjustApertureHieght\""),
+        );
+        assert_eq!(
+            products.framing.policy,
+            AspectRatioConformPolicy::ExpandAperture
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert_eq!(w.code, crate::WarningCode::ProductInvalidConformPolicy);
+        assert_eq!(w.count, 1);
+        assert_eq!(w.prims, ["/Render/settings"]);
+        assert!(
+            w.message.contains("\"adjustApertureHieght\""),
+            "{}",
+            w.message
+        );
+
+        // On a product, it falls back to the settings' policy.
+        let (products, warnings) = resolve(
+            "misspelt_product",
+            &(settings(&format!("{WIDTH}\n        rel products = [</Render/a>]"))
+                + &product(
+                    "a",
+                    "        uniform token aspectRatioConformPolicy = \"stretch\"",
+                )),
+        );
+        assert_eq!(
+            products.framing.policy,
+            AspectRatioConformPolicy::AdjustApertureWidth
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].prims, ["/Render/a"]);
+    }
+
+    #[test]
+    fn a_later_product_with_another_policy_is_written_with_the_first_framing() {
+        let (products, warnings) = resolve(
+            "framing_mismatch",
+            &(settings("        rel products = [</Render/a>, </Render/b>]")
+                + &product(
+                    "a",
+                    "        uniform token aspectRatioConformPolicy = \"expandAperture\"",
+                )
+                + &product("b", HEIGHT)),
+        );
+        let names: Vec<&str> = products
+            .request
+            .products
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["a.exr", "b.exr"]);
+        assert_eq!(
+            products.framing.policy,
+            AspectRatioConformPolicy::ExpandAperture
+        );
+        let mismatch: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.code == crate::WarningCode::ProductFramingMismatch)
+            .collect();
+        assert_eq!(mismatch.len(), 1, "{warnings:?}");
+        assert_eq!(mismatch[0].count, 1);
+        assert_eq!(mismatch[0].prims, ["/Render/b"]);
+        assert!(
+            warnings
+                .iter()
+                .all(|w| w.code != crate::WarningCode::ProductCameraMismatch),
+            "{warnings:?}"
+        );
+    }
 
     #[test]
     fn data_types_parse_whole_names_only() {

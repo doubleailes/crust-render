@@ -59,6 +59,7 @@ fn ls_json_records_are_the_text_listing_with_their_values() {
                 "path",
                 "focal_length_mm",
                 "aperture_mm",
+                "conformed_aperture_mm",
                 "f_stop",
                 "focus_distance",
                 "is_render_camera",

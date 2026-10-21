@@ -970,6 +970,49 @@ same point.
   so a fallback candidate the traversal built and dropped says nothing. `metersPerUnit`
   is read for the lens only: light units, displacement bounds and edge lengths still
   ignore it.
+- **Camera framing: `aspectRatioConformPolicy`** (`honour-aspect-ratio-conform-policy`,
+  #339). The policy is a `UsdRenderSettingsBase` attribute, resolved on `Base` in
+  `products.rs` like `resolution` (the first product's, else the settings prim's,
+  unauthored `expandAperture`) and carried as `products::Framing` beside the resolution —
+  not on `RenderSettings`, the tracer's struct, which holds no USD vocabulary. Authored
+  on the camera prim (where #339's repro put it) it is not read, as in OpenUSD. The
+  conform happens inside `CameraFrame::read`, after an unauthored `verticalAperture` is
+  defaulted to `horizontal · H / W` (which needs none), through
+  `openusd_schemas::render::conform_aperture` with pixel aspect 1. Inside the read
+  because `CameraFrame` is the one camera every reader derives from — `lens_camera`
+  (rays), `screen_projection` (adaptive subdivision and on-screen implicit shapes) and
+  `camera_lens` (`crust ls camera --json`, which reports the authored `aperture_mm` and
+  the `conformed_aperture_mm`): conforming in `lens_camera` alone would tessellate for
+  one frame and render another. Before it, every policy collapsed to
+  `adjustApertureWidth`: `lens_camera` derived the vertical field of view from the
+  vertical aperture alone and the horizontal one from the image, so the horizontal
+  aperture never framed anything. With square pixels the conformed aperture has the
+  image's aspect, so `Camera::new` keeps taking `W / H` (a `debug_assert` pins the two at
+  1e-5) and `screen_projection`'s `tan_h` stays `tan_v · W / H`, as the rays have it. An
+  aperture within 1e-6 (relative) of the image's aspect is not conformed at all, so a
+  conform that would only round cannot move the vertical aperture by an ulp: that is
+  why every repo sample and golden is unchanged. Under the default, an aperture *wider*
+  than the image now expands vertically instead of being cropped — the one framing
+  change; `adjustApertureWidth` restores the old crop. A token outside the five is
+  `product.invalid_conform_policy` at the prim authoring it and reads as unauthored; a
+  later product with another policy is `product.framing_mismatch`, written with the
+  first's framing (not part of `same_render`: framing, like the window, does not change
+  what can be rendered). In an MCP session a policy edit re-frames through the existing
+  projection key: in place unless adaptive subdivision or on-screen shapes read the old
+  projection. There is no environment switch: this is a scene setting, like
+  `dataWindowNDC`.
+  - *Non-square pixels*: `adjustPixelAspectRatio` keeps the aperture and asks for
+    `pixelAspectRatio = aperture aspect / (W / H)`; crust renders square pixels, so it is
+    conformed as `expandAperture` (the closest square-pixel frame that keeps the whole
+    aperture) and `RenderCamera::warn_framing` raises `product.unhonoured_attribute`
+    naming the pixel aspect it needed, for the camera rendered through only, like
+    `warn_lens_units`. An authored `pixelAspectRatio != 1` is still warned about by
+    `warn_unhonoured` and is not fed to the conform: conforming to a non-square image and
+    rendering square would distort. Honouring both is a small follow-up: the rays would
+    take independent tangents (aspect = conformed `h / v` instead of `W / H`), and the
+    `exr` crate's `ImageAttributes::pixel_aspect` carries the header.
+  - *Lens shift*: `horizontalApertureOffset` / `verticalApertureOffset` are unread; they
+    need an off-centre window in `Camera`.
 - **`disableDepthOfField`** is resolved in `import_render_products` like
   `disableMotionBlur` — the first product's authored value, else the settings prim's —
   and sets `RenderSettings::depth_of_field = false`, which `lens_camera` reads to build a
@@ -996,7 +1039,8 @@ same point.
   differ: `disableMotionBlur` is sharp at the frame, `instantaneousShutter` at shutter open
   (above). The
   two left `warn_unhonoured` when they became honoured; it still warns about
-  `pixelAspectRatio` (`disableDepthOfField` left it with `physical-depth-of-field`). `dataWindowNDC` left it too
+  `pixelAspectRatio`, now described with the camera framing above
+  (`disableDepthOfField` left it with `physical-depth-of-field`). `dataWindowNDC` left it too
   (`add-render-region`): it is resolved like `resolution` (first product, else the
   settings prim) and `region_from_ndc` turns it into the render's region — the pixels
   whose centres lie inside the window, NDC `y` bottom-up, overscan clipped and an empty

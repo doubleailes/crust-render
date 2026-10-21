@@ -271,6 +271,8 @@ struct ImportCtx<'a> {
     /// geometry it emitted ([`crate::live::Provenance`]).
     light_origins: Vec<(String, LightOrigin)>,
     settings: RenderSettings,
+    /// How the cameras' apertures are conformed to the image.
+    framing: products::Framing,
     /// The stage file, for resolving asset paths against its directory.
     stage_path: &'a Path,
     /// The whole stage with payloads unloaded, where light collections are
@@ -522,7 +524,7 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
     // camera is, and kept aside as the fallback while a named one
     // might still turn up later in the traversal.
     if ctx.camera.is_none() && (is_named || ctx.first_camera.is_none()) {
-        match build_camera(stage, prim, &ctx.settings) {
+        match build_camera(stage, prim, &ctx.settings, ctx.framing) {
             Some(c) if is_named || named.is_none() => {
                 debug!("Imported USD camera at {}", prim.path());
                 ctx.camera = Some((c, prim.path().clone()));
@@ -911,6 +913,7 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
                     exposure_scale: 1.0,
                     refused_meters_per_unit: None,
                     shutter: ShutterOffsets::default(),
+                    unhonoured_pixel_aspect: None,
                 },
                 None,
             )
@@ -1068,6 +1071,7 @@ pub(crate) fn load_scene(
         links: LightLinks::default(),
         light_origins: Vec::new(),
         settings,
+        framing: products.framing,
         stage_path: path,
         index: Some(index),
         assets,
@@ -1112,6 +1116,7 @@ pub(crate) fn load_scene(
 
     let (render_camera, camera_path) = resolve_camera(&mut ctx)?;
     render_camera.warn_lens_units(camera_path.as_deref());
+    render_camera.warn_framing(camera_path.as_deref());
     check_shutter_camera(&shutter, camera_path.as_deref(), render_camera.shutter);
     let RenderCamera {
         camera,
@@ -1349,6 +1354,7 @@ fn read_index(
         path_str,
         wanted_camera.as_ref(),
         &settings,
+        products.framing,
         valid.time,
     )?;
     if let Some((open, close)) = shutter.interval {
@@ -1422,11 +1428,13 @@ fn read_camera_ahead(
     path_str: &str,
     wanted_camera: Option<&CameraChoice>,
     settings: &RenderSettings,
+    framing: products::Framing,
     frame: Option<f64>,
 ) -> Result<(Option<camera::ScreenProjection>, Shutter), crate::Error> {
     let read = |stage: &Stage, at: &sdf::Path| {
         let prim = prim_at(stage, at.clone());
-        shutter_offsets(stage, &prim).map(|s| (screen_projection(stage, &prim, settings), s))
+        shutter_offsets(stage, &prim)
+            .map(|s| (screen_projection(stage, &prim, settings, framing), s))
     };
     if let Some(choice) = wanted_camera {
         let camera_path = choice.path().clone();

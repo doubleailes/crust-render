@@ -128,12 +128,33 @@ fn camera_records_read_the_lens_as_the_render_does() {
     let layout = &cams[0];
     assert_eq!(layout.focal_length_mm, 35.0);
     assert_eq!(layout.aperture_mm, [36.0, 24.0]);
+    // Narrower than the 2:1 image: `expandAperture` widens it.
+    assert_eq!(layout.conformed_aperture_mm, [48.0, 24.0]);
     assert_eq!((layout.f_stop, layout.focus_distance), (2.8, 4.0));
     let shot = &cams[1];
     assert_eq!(shot.focal_length_mm, 50.0);
     assert_eq!(shot.aperture_mm, [20.955, 20.955 * 100.0 / 200.0]);
+    assert_eq!(shot.conformed_aperture_mm, shot.aperture_mm);
     assert_eq!((shot.f_stop, shot.focus_distance), (0.0, 10.0));
     assert!(!shot.hidden && cams[2].hidden);
+}
+
+/// `conformed_aperture_mm` is the aperture the render frames, by the
+/// render's `aspectRatioConformPolicy`; `aperture_mm` stays as authored.
+#[test]
+fn camera_records_report_the_conformed_aperture() {
+    let path = stage(
+        "conformed.usda",
+        &format!(
+            "{CAMERAS}def Scope \"Render\"\n{{\n    def RenderSettings \"settings\"\n    {{\n        \
+             int2 resolution = (200, 100)\n        uniform token aspectRatioConformPolicy = \
+             \"adjustApertureHeight\"\n    }}\n}}\n"
+        ),
+    );
+    let layout = &cameras(&path)[0];
+    assert_eq!(layout.path, "/cams/layout");
+    assert_eq!(layout.aperture_mm, [36.0, 24.0]);
+    assert_eq!(layout.conformed_aperture_mm, [36.0, 18.0]);
 }
 
 /// The camera marked is the one the render goes through: a product's over
