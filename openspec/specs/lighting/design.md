@@ -664,9 +664,13 @@ paths, for direct-light variance falling about as 1/N.
   (`Hair::r_fraction`): R is specular, TT / TRT / TRRT+ diffuse — the classes the
   issue asking for this named (#341). A gain is a factor of the integrand, never of an
   MIS weight, and nothing it changes steers a sampling decision (selection power,
-  BSDF and light sampling, roulette all ignore it), so the image is exactly linear in
-  the pair — `lobe_gains.rs` pins that pixel by pixel, which is the sharp test of a
-  one-sided gain. *NEE*: a gained light's connection is made share by share
+  BSDF and light sampling, roulette all ignore it), so an unguided image is exactly
+  linear in the pair — `lobe_gains.rs` pins that pixel by pixel, which is the sharp test of a
+  one-sided gain. Path guiding is the exception, by design: its field trains on the
+  gathered radiance, gains included, as it trains on a light's intensity — a guide
+  that learned the ungained light would send samples toward a highlight
+  `inputs:specular = 0` has removed. A guided render is therefore not linear in the
+  pair, only unbiased at each. *NEE*: a gained light's connection is made share by share
   (`gained_split`: `eval_lobes`, each share times `blend(specular_fraction)`), the
   mixed-fibre transmittances per share as before. *Bounce side*: the vertex records
   the specular share of its own sample's value (`PrevBounce::specular`, from the split

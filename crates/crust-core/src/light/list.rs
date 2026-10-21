@@ -247,9 +247,14 @@ impl LobeGains {
     /// The gain, per channel, on a BSDF value whose `specular` share (per
     /// channel, in [0, 1]) answers to `inputs:specular` and the rest to
     /// `inputs:diffuse`.
+    ///
+    /// Weighted sum, not `d + s·(spec − d)`: the difference of two finite
+    /// gains of opposite sign can overflow, and a zero share times its
+    /// infinity is a NaN in the film. Each term here is bounded by its own
+    /// gain, and a share of 0 or 1 gives that gain exactly.
     #[inline]
     pub fn blend(self, specular: Vec3A) -> Vec3A {
-        Vec3A::splat(self.diffuse) + specular * (self.specular - self.diffuse)
+        (Vec3A::ONE - specular) * self.diffuse + specular * self.specular
     }
 }
 

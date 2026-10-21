@@ -310,7 +310,7 @@ pub(super) fn ray_cones_enabled() -> bool {
 // profiler switch LLVM stopped inlining them into either copy — +1.1%
 // instructions on cornellbox with profiling off.
 #[inline(always)]
-fn sample_bounce_direction<S: SamplerImpl>(
+fn sample_bounce_direction<S: SamplerImpl, const SPLIT: bool>(
     r: &Ray,
     rec: &HitRecord,
     sp: &ShadingPoint,
@@ -320,8 +320,9 @@ fn sample_bounce_direction<S: SamplerImpl>(
 ) -> Option<ScatterSample> {
     // The material's own sample — split by lobe at the direction it drew
     // (see `ShadingPoint::scatter_split`) when light path expressions or a
-    // light's per-lobe multipliers want the split.
-    let mut split = split;
+    // light's per-lobe multipliers want the split, which only the `SPLIT`
+    // instantiation can ask for: the other compiles the split path away.
+    let mut split = if SPLIT { split } else { None };
     // Distinct sub-domains: the BSDF scatter block, and the guide block whose
     // first dimension is the α-coin and whose incidental stream drives the
     // quadtree descent. The material is handed the numbers, not the domain:
@@ -345,7 +346,7 @@ fn sample_bounce_direction<S: SamplerImpl>(
         if let Some((wi, p_guide)) = g.field.sample(rec.p, &mut guide_dom.rng())
             && let Some((value, p_bsdf)) = sp.eval(r, wi)
         {
-            if let Some(out) = split {
+            if SPLIT && let Some(out) = split {
                 // `value` is `eval` toward `wi`, so the split is `eval`'s.
                 sp.eval_lobes(r, wi, out);
             }
@@ -3499,16 +3500,21 @@ pub(super) fn trace_path<
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         let mut bounce = {
             let _p = profile::scope_if::<PROFILE>(Section::Bounce);
-            sample_bounce_direction::<S>(
-                &ray,
-                &rec,
-                &sp,
-                guiding_here,
-                v,
-                // A light's per-lobe multipliers read the split too
-                // (`bounce_specular`).
-                (routing.is_some() || lights.has_lobe_gains()).then_some(&mut *bounce_split),
-            )
+            // A light's per-lobe multipliers read the split too
+            // (`bounce_specular`); a beauty-only render of a scene without
+            // them keeps the copy with no split path in it.
+            if AOV || lights.has_lobe_gains() {
+                sample_bounce_direction::<S, true>(
+                    &ray,
+                    &rec,
+                    &sp,
+                    guiding_here,
+                    v,
+                    (routing.is_some() || lights.has_lobe_gains()).then_some(&mut *bounce_split),
+                )
+            } else {
+                sample_bounce_direction::<S, false>(&ray, &rec, &sp, guiding_here, v, None)
+            }
         };
         // A subsurface leaf was selected: walk the interior now. The walk is
         // part of this surface event — the entry's record carries its weight

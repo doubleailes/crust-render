@@ -190,7 +190,8 @@ fn a_non_finite_multiplier_falls_back_to_one() {
     );
 }
 
-/// Nothing a multiplier changes steers sampling, so under every strategy the
+/// Nothing a multiplier changes steers an unguided render's sampling (a
+/// guided one trains on the gained radiance), so under every strategy the
 /// image is linear in the pair pixel by pixel, to rounding: `(d, s)` renders
 /// as `d` times the diffuse-only light plus `s` times the specular-only one,
 /// and the two halves sum to the light at `(1, 1)` — which takes the plain,
@@ -311,4 +312,22 @@ fn a_multiplier_edit_applies_in_place_as_a_reimport_would() {
     let after = beauty_bits(scene);
     assert_eq!(after, beauty_bits(fresh));
     assert_ne!(after, before, "the edit changed the render");
+}
+
+#[test]
+fn opposite_extreme_gains_blend_to_finite_values() {
+    // Both finite, so the import keeps them; their difference is not.
+    let gains = LobeGains {
+        diffuse: -f32::MAX,
+        specular: f32::MAX,
+    };
+    for s in [0.0, 0.25, 0.5, 1.0] {
+        let g = gains.blend(glam::Vec3A::splat(s));
+        assert!(g.is_finite(), "share {s}: {g}");
+    }
+    assert_eq!(
+        gains.blend(glam::Vec3A::ZERO),
+        glam::Vec3A::splat(-f32::MAX)
+    );
+    assert_eq!(gains.blend(glam::Vec3A::ONE), glam::Vec3A::splat(f32::MAX));
 }
