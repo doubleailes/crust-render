@@ -757,6 +757,33 @@ a sampler, where a flat three-standard-error bound fails one by chance (run it w
 which also prints each sampler's worst |z|). A `crust diagnostic` trial over samplers is the
 natural follow-up; this change only makes it possible.
 
+## Holdouts at the camera vertex
+
+A holdout (the active render pass's `matte`, `World::is_holdout`) ends a camera path in
+`trace_path` right after `pass_cutouts` has settled where the camera segment ends, before
+the medium-boundary crossing and any shading: no emission, NEE or scatter, and the film
+records `FirstHit::Escaped` (or the thin wall passed first) with albedo 0. Only the camera
+segment is checked (`records.is_empty()`); every other ray meets the holdout as geometry,
+so shadows and reflections of it are bitwise those of the render without the pass
+(`tests/holdouts.rs`). A volume scatter before the surface `continue`s before the check,
+so fog in front of a holdout keeps its in-scatter. The path counts as `ended_escaped`.
+
+The check is `world.has_holdouts() && records.is_empty() && world.is_holdout(geom_id)`,
+behind the sparse table's emptiness, so a world without holdouts pays one predictable
+branch per segment and nothing else. Measured when it went in (`render-pass-matte-and-
+camera-visibility`): callgrind on `cornellbox.usda -s 2`, `RAYON_NUM_THREADS=1`,
+4,268,951,482 instructions before and 4,266,418,438 after (−0.06%, code layout: well
+inside one branch per camera ray, 460,800 of them), the images bit-identical; and
+`scripts/check_images.sh check` against goldens recorded by the binary before the change
+reported every checked-in sample identical.
+
+Two passes that hold each other out split the samples between them, so their beauties
+**add** to the render with no pass: measured on `samples/render_passes.usda` at 48×27,
+`--indirect-clamp 0`, RMS 3.5e-9 at 16 spp and 8.2e-9 at 64 (float rounding). `over`
+instead plateaus at 4.5e-2 at both counts: it attenuates the background a second time
+at edge pixels, a bias rather than noise
+(`passes_that_hold_each_other_out_add_up_to_the_whole`).
+
 ## Known gaps: the sampler setting
 
 - **Blue-noise seams at 256-pixel tiles.** `advance_pixel` derives `new_domain(tile)` per

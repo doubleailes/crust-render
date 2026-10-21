@@ -550,7 +550,11 @@ warning code: removing a code bumps every report that carries warnings, by the
 `scene-warnings` versioning rule. The shape did not change.)
 `format`, `crust_version`; `scene` (the diagnostic's `SceneInfo`: `path`, `frame`,
 `camera` — the camera the import resolved, after any fallback — `resolution`,
-`region`); `products[]` (`prim` — `null` for the default beauty — `file`, `channels`);
+`region`); `pass` (`null` with no `--pass`, else `path`, `holdouts`, `camera_hidden`:
+how many prims that bring geometry in the pass holds out and hides from the camera);
+`settings` (the `RenderSettings` prim the render reads — the pass's `renderSource`, else
+the stage's — as the import's provenance records it); `products[]` (`prim` — `null` for
+the default beauty — `file`, `channels`);
 `effective_settings[]` (`name`, `value`, `flag`, `usd_attribute`, from the one
 `diagnostic::effective_settings`); `import[]` (`crust-stats/1`'s phase objects:
 `name`, `depth`, `time_s`, `rss_end_bytes`, `peak_end_bytes`); `counts`

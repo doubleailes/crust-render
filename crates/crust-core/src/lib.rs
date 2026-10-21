@@ -142,7 +142,7 @@ pub mod implicit_shapes {
 pub use rt_world::traversal_report;
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
-    MaterialRecord, NoAssets, UsdImportOptions, usd_schema_registry,
+    MaterialRecord, NoAssets, PassRecord, PassSummary, UsdImportOptions, usd_schema_registry,
 };
 pub use stats::{
     DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,

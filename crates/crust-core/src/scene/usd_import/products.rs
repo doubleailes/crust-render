@@ -393,8 +393,8 @@ impl PrimvarKeep {
 /// Resolves the render settings prim's products. Empty when the stage has no
 /// settings prim or the prim authors no `products` — the "write the single
 /// beauty EXR" case.
-pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn import_render_products(stage: &Stage, pass: Option<&sdf::Path>) -> RenderProducts {
+    let Some(path) = render_settings_path(stage, pass) else {
         return RenderProducts::default();
     };
     let Some(settings) = UsdRenderSettings::get(stage, path.clone()).ok().flatten() else {
@@ -1159,7 +1159,7 @@ mod tests {
             .open(path.to_str().unwrap())
             .expect("stage opens");
         let scope = crate::WarningScope::enter();
-        let products = import_render_products(&stage);
+        let products = import_render_products(&stage, None);
         (products, scope.finish())
     }
 

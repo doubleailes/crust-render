@@ -16,7 +16,9 @@ top = false
 
 All the attributes on this page go on the `RenderSettings` prim. This is the prim named
 by the stage's `renderSettingsPrimPath` metadata, or `/Render/settings` if there is none.
-See [Overview](@/docs/usd/overview.md#which-prim-holds-the-render-settings).
+See [Overview](@/docs/usd/overview.md#which-prim-holds-the-render-settings). A
+[render pass](@/docs/usd/render-passes.md#rendersource) rendered with `--pass` can name
+another `RenderSettings` prim with its `renderSource`.
 
 ## Example
 

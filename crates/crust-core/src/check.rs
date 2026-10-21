@@ -30,11 +30,37 @@ pub struct ProductInfo {
     pub channels: Vec<String>,
 }
 
+/// The active render pass and what it did to the scene.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PassInfo {
+    /// The `RenderPass` prim.
+    pub path: String,
+    /// How many prims that bring geometry in are holdouts (its `matte`).
+    pub holdouts: usize,
+    /// How many are hidden from the camera (outside its `cameraVisibility`).
+    pub camera_hidden: usize,
+}
+
+impl From<&crate::PassSummary> for PassInfo {
+    fn from(p: &crate::PassSummary) -> Self {
+        PassInfo {
+            path: p.path.clone(),
+            holdouts: p.holdouts,
+            camera_hidden: p.camera_hidden,
+        }
+    }
+}
+
 /// The `crust-check/2` report, keys in the order the `scene-check` spec
 /// fixes.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckReport {
     pub scene: SceneInfo,
+    /// The active render pass; `null` with none.
+    pub pass: Option<PassInfo>,
+    /// The `RenderSettings` prim the render reads (the pass's `renderSource`,
+    /// else the stage's); `null` for a scene not imported from a stage.
+    pub settings: Option<String>,
     pub products: Vec<ProductInfo>,
     pub effective_settings: Vec<Setting>,
     /// The import's phases, as `crust-stats/1` writes them.
@@ -90,6 +116,23 @@ fn to_text(r: &CheckReport) -> String {
         |[x0, y0, x1, y1]| format!("{x0},{y0},{x1},{y1}"),
     );
     let _ = writeln!(o, "  region      {region}");
+    match &r.pass {
+        Some(p) => {
+            let _ = writeln!(
+                o,
+                "  pass        {} ({} holdout{}, {} hidden from the camera)",
+                p.path,
+                p.holdouts,
+                if p.holdouts == 1 { "" } else { "s" },
+                p.camera_hidden
+            );
+        }
+        None => {
+            let _ = writeln!(o, "  pass        none");
+        }
+    }
+    let settings = r.settings.as_deref().unwrap_or("none");
+    let _ = writeln!(o, "  settings    {settings}");
     for p in &r.products {
         let from = p
             .prim
@@ -259,6 +302,12 @@ mod tests {
                 resolution: [64, 32],
                 region: None,
             },
+            pass: Some(PassInfo {
+                path: "/Render/Passes/char".into(),
+                holdouts: 3,
+                camera_hidden: 1,
+            }),
+            settings: Some("/Render/charSettings".into()),
             products: vec![ProductInfo {
                 prim: None,
                 file: "output.exr".into(),
@@ -330,6 +379,8 @@ mod tests {
                 "format",
                 "crust_version",
                 "scene",
+                "pass",
+                "settings",
                 "products",
                 "effective_settings",
                 "import",
@@ -349,6 +400,9 @@ mod tests {
             "scene.camera",
             "scene.resolution",
             "scene.region",
+            "pass.path",
+            "pass.holdouts",
+            "pass.camera_hidden",
             "products[].prim",
             "products[].file",
             "products[].channels",
@@ -378,6 +432,34 @@ mod tests {
             serde_json::json!(["light.degenerate_shape"])
         );
         assert_eq!(value["warnings"][0]["kind"], "skipped");
+    }
+
+    /// The pass and the settings prim, in text and JSON; no pass is `null`.
+    #[test]
+    fn the_pass_and_its_settings_are_reported() {
+        let r = report();
+        let text = r.to_text();
+        assert!(
+            text.contains(
+                "  pass        /Render/Passes/char (3 holdouts, 1 hidden from the camera)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  settings    /Render/charSettings"),
+            "{text}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
+        assert_eq!(value["pass"]["holdouts"], 3);
+        assert_eq!(value["settings"], "/Render/charSettings");
+
+        let mut none = report();
+        none.pass = None;
+        none.settings = Some("/Render/settings".into());
+        assert!(none.to_text().contains("  pass        none"));
+        let value: serde_json::Value = serde_json::from_str(&none.to_json()).unwrap();
+        assert!(value["pass"].is_null());
+        assert_eq!(value["settings"], "/Render/settings");
     }
 
     /// A number that is not finite, or not measured, is `null`.

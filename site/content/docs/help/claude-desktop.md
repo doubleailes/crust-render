@@ -45,6 +45,14 @@ always the saved file, imported exactly as `crust render <output>` imports it. S
 - calling `open_session` again with the same `input` and `output` resumes it, with
   every opinion it holds. Undo history does not survive the process.
 
+`open_session` also takes an optional `pass`, the path of a `RenderPass` prim: the
+session then renders that [render pass](@/docs/usd/render-passes.md) everywhere, as
+`crust render <output> --pass <pass>` does — its holdouts, its camera visibility and
+the settings its `renderSource` names, in every render, probe and `render_final`. The
+pass is not written to the layer, so a resumed session names it again. A path that is
+not a `RenderPass` on the stage fails the call. An edit to the pass's collections (a
+new `collection:matte:includes` target, say) takes effect on the next render.
+
 The output must be a `.usda`: a session is a small text file of opinions, readable
 and diffable. The sublayer path is written relative to the output's directory
 (absolute when the two are on different drives), so the layer can move with its
@@ -107,7 +115,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 
 | tool | what it does |
 |------|--------------|
-| `open_session(input, output)` | creates the override layer `output` on `input` (or resumes it) and imports it; reports the camera, the resolution and the warnings |
+| `open_session(input, output, pass?)` | creates the override layer `output` on `input` (or resumes it) and imports it, rendering the render pass `pass` when given; reports the camera, the resolution and the warnings |
 | `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from, `fallback` for a schema's fallback nothing authors, or null when nothing gives it a value) |
 | `check()` | the [`crust check`](@/docs/reference/command-line.md#check) report of the current layer, as `crust-check/2` JSON |
 | `set_attribute(path, value, type?)` | authors an attribute value in the layer, typed as the attribute is declared |

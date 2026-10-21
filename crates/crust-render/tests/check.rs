@@ -704,3 +704,56 @@ fn an_unknown_path_variable_is_kept_and_reported() {
     assert_eq!(unknown["prims"], serde_json::json!(["/Render/main"]));
     assert_eq!(unknown["kind"], "refused");
 }
+
+fn render_passes() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/render_passes.usda")
+        .canonicalize()
+        .expect("samples/render_passes.usda")
+}
+
+/// The `scene-check` spec's "A pass with its own settings" and "No pass":
+/// the report names the pass, the settings its `renderSource` chooses, the
+/// products those write and what it held out.
+#[test]
+fn the_active_pass_and_its_settings_are_reported() {
+    let dir = work_dir("pass");
+    let input = render_passes();
+    let input = input.to_str().unwrap();
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            input,
+            "--pass",
+            "/Render/Passes/char",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    assert_eq!(v["pass"]["path"], "/Render/Passes/char");
+    // The crate, the mirror ball and the floor; the sky is a light.
+    assert_eq!(v["pass"]["holdouts"], 3);
+    assert_eq!(v["pass"]["camera_hidden"], 0);
+    assert_eq!(v["settings"], "/Render/charSettings");
+    assert_eq!(v["products"][0]["file"], "char.exr");
+
+    let out = crust(&dir, &["check", "-i", input, "--json", "-"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    assert!(v["pass"].is_null());
+    assert_eq!(v["settings"], "/Render/settings");
+    assert_eq!(v["products"][0]["file"], "props.exr");
+
+    let out = crust(&dir, &["check", "-i", input, "--pass", "/World"]);
+    assert_eq!(code(&out), 1, "a path that is not a pass stops the check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("/World") && stderr.contains("RenderPass"),
+        "{stderr}"
+    );
+    assert!(files(&dir).is_empty(), "{:?}", files(&dir));
+}

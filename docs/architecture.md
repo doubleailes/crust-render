@@ -275,6 +275,23 @@ other. The pairs:
   `collect_crossings`). Change one side alone and NEE counts a light another
   hides while the bounce stops at the nearer one: biased MIS. The crossing's
   weight is `bounce_emission_weight_at`, its `L` event `Route::cross`.
+- **Holdouts ↔ the film's escape.** A camera ray that reaches a holdout (the
+  active render pass's `matte`, `World::is_holdout`) ends in `trace_path` right
+  after `pass_cutouts`, on the camera segment only (`records.is_empty()`), and
+  records `FirstHit::Escaped` (or the thin wall it passed first) with albedo 0
+  and no route event: every AOV then takes the escape's arm, so alpha is 0, data
+  AOVs keep their clear value and `C.*[LO]` stays the beauty bit for bit. Change
+  the check or the recording alone and a source disagrees with the beauty
+  (`aovs_see_a_holdout_sample_as_an_escape`, `tests/holdouts.rs`). The check
+  sits behind `World::has_holdouts`, so a world without one pays one branch.
+- **A pass's camera visibility ↔ light linking.** The active pass clears
+  `MASK_CAMERA` (geometry masks, an infinite light's escape mask) at dispatch,
+  during the traversal (`usd_import/passes.rs`); `LightLinks::resolve` runs after
+  it, and `demote` reads that bit to keep a light linked to nothing as a
+  camera-only backdrop or drop it. Move the pass after the links and a hidden
+  dome comes back as a backdrop (`camera_visibility_is_decided_before_light_linking`,
+  `tests/render_passes.rs`). Both judge a prim by the same stage path, at the same
+  dispatch site (`saw` in `usd_import/mod.rs`).
 - **The render camera ↔ `ls`'s `is_render_camera`.** Which camera a render goes
   through (`settings::wanted_camera`, then `pick_camera`'s fallback to the first
   camera the import's walk meets) is decided by the same two functions for the

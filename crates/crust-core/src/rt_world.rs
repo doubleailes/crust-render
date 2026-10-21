@@ -676,6 +676,9 @@ pub struct WorldBuilder {
     /// Per `geom_id`, whether it is a transparent emitter; empty when none
     /// is (see [`World::is_transparent_emitter`]).
     transparent_emitters: Vec<bool>,
+    /// Per `geom_id`, whether it is a holdout; empty when none is (see
+    /// [`World::is_holdout`]).
+    holdouts: Vec<bool>,
     /// The geometries that move over the shutter and how, as sorted,
     /// non-overlapping inclusive `geom_id` ranges (see [`World::motion`]): a
     /// single id for a geometry hit under its own id, the ids its slots take
@@ -1035,6 +1038,7 @@ impl WorldBuilder {
         let cutouts = self.materials.iter().any(|m| m.has_cutout());
         let straight = self.materials.iter().any(|m| m.has_straight_transmission());
         let emitters = self.transparent_emitters.contains(&true);
+        let holdouts = self.holdouts.contains(&true);
         let boundaries = self.materials.iter().any(|m| m.is_medium_boundary());
         // Something authored is approximated, so WARN; once, with the count,
         // because it grows with the scene.
@@ -1066,6 +1070,7 @@ impl WorldBuilder {
             } else {
                 Vec::new()
             },
+            holdouts: if holdouts { self.holdouts } else { Vec::new() },
             motion: self.motion,
             primvars: self.primvars,
         }
@@ -1094,6 +1099,26 @@ impl WorldBuilder {
             self.transparent_emitters.resize(id as usize + 1, false);
         }
         self.transparent_emitters[id as usize] = transparent;
+    }
+
+    /// Marks the geometry at `id` as a holdout (or, with `false`, no longer
+    /// one) — see [`World::is_holdout`]. Only camera rays read it; every
+    /// other ray meets the geometry as it would without the flag.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_holdout(&mut self, id: u32, holdout: bool) {
+        assert!(
+            (id as usize) < self.count(),
+            "geometry {id} was never attached"
+        );
+        if self.holdouts.len() <= id as usize {
+            if !holdout {
+                return;
+            }
+            self.holdouts.resize(id as usize + 1, false);
+        }
+        self.holdouts[id as usize] = holdout;
     }
 
     /// Installs the per-`geom_id` light-link classes (one entry per attached
@@ -1143,6 +1168,8 @@ pub struct World {
     light_classes: Vec<u16>,
     /// Sparse, indexed by `geom_id`; empty when no geometry is one.
     transparent_emitters: Vec<bool>,
+    /// Sparse, indexed by `geom_id`; empty when no geometry is a holdout.
+    holdouts: Vec<bool>,
     /// The moving geometries' motions over inclusive `geom_id` ranges, sorted;
     /// empty for a static scene (see [`World::motion`]).
     motion: Vec<(u32, u32, Motion)>,
@@ -1455,6 +1482,25 @@ impl World {
     #[inline]
     pub fn has_transparent_emitters(&self) -> bool {
         !self.transparent_emitters.is_empty()
+    }
+
+    /// Whether any geometry is a holdout ([`World::is_holdout`]): the
+    /// integrator's one check per camera ray in a world without one.
+    #[inline]
+    pub fn has_holdouts(&self) -> bool {
+        !self.holdouts.is_empty()
+    }
+
+    /// Whether the geometry at `geom_id` is a holdout: a member of the active
+    /// render pass's `matte` collection. A camera ray that reaches it ends
+    /// there with no contribution and zero alpha; every other ray meets it
+    /// as ordinary geometry.
+    #[inline]
+    pub fn is_holdout(&self, geom_id: u32) -> bool {
+        self.holdouts
+            .get(geom_id as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Whether the geometry at `geom_id` is the source of a light the camera
@@ -1864,6 +1910,49 @@ mod tests {
 
     /// A `prim_id` past the table cannot panic: it is reachable from the
     /// integrator, where a panic kills a render thread.
+    fn sphere(b: &mut WorldBuilder) -> u32 {
+        b.attach(
+            Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            Arc::new(crate::material::OpenPBR::diffuse(Vec3A::splat(0.5))),
+        )
+    }
+
+    /// The holdout table is sparse: a world that never sets one has none, and
+    /// an id it never set, or one past its end, answers false.
+    #[test]
+    fn holdouts_are_empty_unless_set() {
+        let mut b = WorldBuilder::new();
+        for _ in 0..3 {
+            sphere(&mut b);
+        }
+        b.set_holdout(2, false);
+        let world = b.commit();
+        assert!(!world.has_holdouts());
+        assert!((0..4).all(|id| !world.is_holdout(id)));
+
+        let mut b = WorldBuilder::new();
+        for _ in 0..3 {
+            sphere(&mut b);
+        }
+        b.set_holdout(1, true);
+        let world = b.commit();
+        assert!(world.has_holdouts());
+        assert_eq!(
+            (0..4).map(|id| world.is_holdout(id)).collect::<Vec<_>>(),
+            [false, true, false, false]
+        );
+
+        // Set, then cleared: no holdout is left, so the fast path holds.
+        let mut b = WorldBuilder::new();
+        sphere(&mut b);
+        b.set_holdout(0, true);
+        b.set_holdout(0, false);
+        assert!(!b.commit().has_holdouts());
+    }
+
     /// A primvar table is read by the AOV first hit alone: the geometry
     /// stays on `intersect`'s plain path, and a mirrored placement's table
     /// undoes the swapped barycentrics.

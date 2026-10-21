@@ -63,8 +63,10 @@ camera's shutter when one is authored: see
 
 Crust Render looks for the render settings on:
 
-1. the prim named by the stage's `renderSettingsPrimPath` metadata, or else
-2. `/Render/settings`.
+1. with [`--pass`](@/docs/reference/command-line.md#pass), the `RenderSettings` prim the
+   pass's [`renderSource`](@/docs/usd/render-passes.md#rendersource) targets, if any;
+2. the prim named by the stage's `renderSettingsPrimPath` metadata, or else
+3. `/Render/settings`.
 
 That prim should be a `RenderSettings` prim. Its standard `resolution` and `camera`
 attributes are read as well:
