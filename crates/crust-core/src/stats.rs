@@ -183,7 +183,8 @@ pub struct RayStats {
     /// Their ratio says whether roulette is doing anything worth tuning.
     pub rr_tested: u64,
     pub rr_killed: u64,
-    /// Paths that ended by leaving the scene.
+    /// Paths that ended by leaving the scene, or at a holdout — a camera ray
+    /// the film records as an escape.
     pub ended_escaped: u64,
     /// Paths that ended by exhausting `max_depth` — if this is ~0, the
     /// depth ceiling is not what a render is paying for.

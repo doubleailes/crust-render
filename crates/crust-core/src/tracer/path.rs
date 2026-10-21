@@ -3183,6 +3183,34 @@ pub(super) fn trace_path<
             }
             break;
         };
+        // === Holdout ===
+        // A camera ray that reaches a holdout (the active render pass's
+        // `matte`), past the cutouts it passed and the hidden lights it
+        // crossed, ends there with nothing: no emission, no NEE, no scatter,
+        // and the film records an escape (alpha 0, every data AOV clear) —
+        // unless a thin wall was passed first, which is then the first hit.
+        // A scatter before the surface never gets here, so fog in front of a
+        // holdout keeps its in-scatter. Secondary rays meet it as geometry.
+        // `has_holdouts` first: a world without one pays this one branch.
+        if world.has_holdouts() && records.is_empty() && world.is_holdout(hit.geom_id) {
+            stats.ended_escaped += 1;
+            if AOV {
+                *first = first_wall(
+                    thin,
+                    walls,
+                    hit.rec.t,
+                    world,
+                    motion_on,
+                    primvars_on,
+                    ray.time(),
+                )
+                .unwrap_or(FirstHit::Escaped);
+                if albedo_on {
+                    route.albedo_at(Vec3A::ZERO);
+                }
+            }
+            break;
+        }
         if boundaries && hit.mat.is_medium_boundary() {
             // === Medium boundary: crossed, not shaded ===
             // No vertex and no depth: the stretch up to here is carried into

@@ -293,6 +293,7 @@ fn scratch_ctx<'a>(r: &'a Rebuilding<'a>, world: WorldBuilder) -> ImportCtx<'a> 
         caches: r.caches(),
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
+        pass: None,
         light_origins: Vec::new(),
         settings: crate::tracer::RenderSettings::default(),
         framing: Default::default(),

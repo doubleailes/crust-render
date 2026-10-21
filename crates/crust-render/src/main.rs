@@ -224,6 +224,9 @@ enum LsKind {
     /// Material prims a binding can reach, bound or not.
     #[value(alias = "materials")]
     Material,
+    /// The `RenderPass` prims `--pass` accepts.
+    #[value(alias = "passes")]
+    Pass,
 }
 
 impl From<LsKind> for crust_core::ListKind {
@@ -232,6 +235,7 @@ impl From<LsKind> for crust_core::ListKind {
             LsKind::Camera => crust_core::ListKind::Camera,
             LsKind::Light => crust_core::ListKind::Light,
             LsKind::Material => crust_core::ListKind::Material,
+            LsKind::Pass => crust_core::ListKind::Pass,
         }
     }
 }
@@ -267,6 +271,15 @@ struct SceneArgs {
     /// that is not a camera on the stage stops the render.
     #[arg(long, value_name = "PRIM_PATH")]
     camera: Option<String>,
+    /// Render pass to render, as the absolute path of a `RenderPass` prim
+    /// (e.g. `/Render/Passes/char`). The geometry in its `matte` collection
+    /// is held out (zero colour, zero alpha), what its `cameraVisibility`
+    /// collection leaves out is hidden from camera rays, and its
+    /// `renderSource`, when it targets a `RenderSettings` prim, is the
+    /// settings read. Without it no pass is active, whatever passes the stage
+    /// defines. A path that is not a `RenderPass` stops the render.
+    #[arg(long, value_name = "PRIM_PATH")]
+    pass: Option<String>,
     /// Subdivision refinement level for every mesh whose `subdivisionScheme`
     /// is not `none` (unauthored means USD's fallback, `catmullClark`).
     /// Overrides the scene's `crust:subdivisionLevel` render setting
@@ -851,6 +864,7 @@ fn load_scene(
         let options = crust_core::UsdImportOptions {
             frame: cli.frame,
             camera: cli.camera.clone(),
+            pass: cli.pass.clone(),
             subdivision_level: cli.subdiv_level,
             subdivision_edge_length: cli.subdiv_edge_length,
             skip_stage_teardown: keep_stage,
@@ -869,6 +883,9 @@ fn load_scene(
         }
         if let Some(camera) = &cli.camera {
             warn!("--camera {camera} has no effect without -i/--input");
+        }
+        if let Some(pass) = &cli.pass {
+            warn!("--pass {pass} has no effect without -i/--input");
         }
         if let Some(space) = working_space {
             warn!(
@@ -1346,6 +1363,12 @@ fn check_scene(
                 [r.x0, r.y0, r.x1, r.y1]
             }),
         },
+        pass: scene.pass.as_ref().map(Into::into),
+        settings: scene
+            .provenance
+            .as_ref()
+            .and_then(|p| p.render_settings())
+            .map(str::to_owned),
         products,
         effective_settings: effective_settings(&settings, &flags),
         import: scene.stats.phases.clone(),
@@ -1419,6 +1442,7 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
     let options = crust_core::diagnostic::Options {
         frame: args.scene.frame,
         camera: args.scene.camera.clone(),
+        pass: args.scene.pass.clone(),
         region: args.scene.region,
         budget: args.budget,
         repeats: args.repeats,
@@ -2619,6 +2643,33 @@ mod tests {
             render(["--subdiv-level", "-1"]).is_err(),
             "a level is a count"
         );
+    }
+
+    /// `--pass` is a scene argument: every subcommand that imports a stage
+    /// takes it, and it reaches the import options as given.
+    #[test]
+    fn cli_pass_is_a_scene_argument() {
+        for sub in ["render", "diagnostic", "check", "light-paths"] {
+            let cli = Cli::try_parse_from([
+                "crust",
+                sub,
+                "-i",
+                "s.usda",
+                "--pass",
+                "/Render/Passes/char",
+            ])
+            .unwrap_or_else(|e| panic!("{sub}: {e}"));
+            let scene = match &cli.command {
+                Command::Render(a) => &a.scene,
+                Command::Diagnostic(a) => &a.scene,
+                Command::Check(a) => &a.scene,
+                Command::LightPaths(a) => &a.scene,
+                _ => unreachable!(),
+            };
+            assert_eq!(scene.pass.as_deref(), Some("/Render/Passes/char"), "{sub}");
+        }
+        assert!(render([]).unwrap().pass.is_none());
+        assert!(render(["--pass"]).is_err(), "a pass needs its path");
     }
 
     #[test]

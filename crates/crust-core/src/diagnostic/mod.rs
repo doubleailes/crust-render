@@ -62,6 +62,8 @@ pub struct Options<'a> {
     pub scene_path: String,
     pub frame: Option<f64>,
     pub camera: Option<String>,
+    /// `--pass`, when given: the render pass the scene was imported with.
+    pub pass: Option<String>,
     /// `--region`, image space: the only crop.
     pub region: Option<PixelRect>,
     pub budget: Duration,
@@ -91,6 +93,7 @@ impl Options<'_> {
             scene_path: scene_path.into(),
             frame: None,
             camera: None,
+            pass: None,
             region: None,
             budget: Duration::from_secs(120),
             repeats: 3,
@@ -2201,6 +2204,9 @@ fn command(
     }
     if let Some(c) = &options.camera {
         parts.extend(["--camera".into(), quote(c)]);
+    }
+    if let Some(p) = &options.pass {
+        parts.extend(["--pass".into(), quote(p)]);
     }
     if let Some(r) = options.region.and(region) {
         parts.extend([

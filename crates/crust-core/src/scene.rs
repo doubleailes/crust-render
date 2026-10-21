@@ -96,6 +96,9 @@ pub struct Scene {
     /// a package as the package — sorted. What a host watches to see the
     /// stage change on disk. Empty for a hand-assembled scene.
     pub layers: Vec<std::path::PathBuf>,
+    /// The active render pass and what it held out and hid
+    /// ([`UsdImportOptions::pass`]); `None` with no pass.
+    pub pass: Option<crate::PassSummary>,
     /// What shaped the image beyond its settings — the lens, the blurs, the
     /// root layer stack and the visibility overrides — for the stamp
     /// ([`Source`]). A hand-assembled scene records its
@@ -119,6 +122,7 @@ impl Scene {
             warnings: Vec::new(),
             provenance: None,
             layers: Vec::new(),
+            pass: None,
             source: Source {
                 depth_of_field: camera.has_depth_of_field(),
                 ..Default::default()
@@ -138,7 +142,7 @@ mod tessellate;
 mod usd_import;
 
 pub(crate) use usd_import::implicit;
-pub use usd_import::usd_schema_registry;
+pub use usd_import::{PassSummary, usd_schema_registry};
 pub(crate) use usd_import::{prim_frames, rebuild};
 
 impl Scene {
@@ -253,7 +257,7 @@ pub const LS_FORMAT: &str = "crust-ls/1";
 /// records in the text listing's order.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Listing {
-    /// `camera`, `light` or `material`.
+    /// `camera`, `light`, `material` or `pass`.
     pub kind: &'static str,
     /// The time code the values were evaluated at; `null` for defaults.
     pub frame: Option<f64>,
@@ -273,6 +277,7 @@ pub enum ListRecord {
     Camera(CameraRecord),
     Light(LightRecord),
     Material(MaterialRecord),
+    Pass(PassRecord),
 }
 
 impl ListRecord {
@@ -282,6 +287,7 @@ impl ListRecord {
             ListRecord::Camera(r) => &r.path,
             ListRecord::Light(r) => &r.path,
             ListRecord::Material(r) => &r.path,
+            ListRecord::Pass(r) => &r.path,
         }
     }
 }
@@ -328,6 +334,16 @@ pub struct LightRecord {
     pub normalize: bool,
 }
 
+/// A `RenderPass`: the settings it renders with.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct PassRecord {
+    pub path: String,
+    /// The first target of its `renderSource`, as authored; `None` when it
+    /// authors none. A target that is not a `RenderSettings` prim is listed
+    /// as authored, and a render with the pass warns and reads the stage's.
+    pub render_source: Option<String>,
+}
+
 /// A `UsdShadeMaterial`: the surface shader the render decodes, and whether
 /// anything it renders is bound to it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -362,6 +378,9 @@ pub enum ListKind {
     /// inactive ancestor or inside an instance's prototype, whether or not
     /// anything binds them.
     Material,
+    /// `RenderPass` prims [`UsdImportOptions::pass`] accepts: all but those
+    /// under an inactive ancestor.
+    Pass,
 }
 
 impl ListKind {
@@ -371,6 +390,7 @@ impl ListKind {
             ListKind::Camera => "camera",
             ListKind::Light => "light",
             ListKind::Material => "material",
+            ListKind::Pass => "pass",
         }
     }
 }
@@ -430,6 +450,14 @@ pub struct UsdImportOptions {
     /// ([`Error::InvalidWorkingSpace`](crate::Error::InvalidWorkingSpace)
     /// otherwise). See [`crate::color`].
     pub working_space: Option<String>,
+    /// The `RenderPass` prim to render (the CLI's `--pass`), as an absolute
+    /// prim path. Its `matte` collection's geometry is held out, what its
+    /// `cameraVisibility` collection leaves out is hidden from camera rays,
+    /// and its `renderSource`, when it targets a `RenderSettings` prim, is
+    /// the settings the render reads. `None` renders with no active pass,
+    /// whatever passes the stage defines. A path that is not a `RenderPass`
+    /// on the stage is an error ([`crate::Error::PassNotFound`]).
+    pub pass: Option<String>,
 }
 
 /// How the engine asks its host to decode an image.

@@ -4,7 +4,9 @@
 use crate::warning;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
-use openusd_schemas::render::{Settings as UsdRenderSettings, SettingsBaseSchema};
+use openusd_schemas::render::{
+    Pass as UsdRenderPass, PassSchema, Settings as UsdRenderSettings, SettingsBaseSchema,
+};
 use tracing::debug;
 
 use crate::color::Space;
@@ -53,11 +55,12 @@ pub(super) fn wanted_camera(
     requested: Option<sdf::Path>,
     product_camera: Option<sdf::Path>,
     index: &Stage,
+    pass: Option<&sdf::Path>,
 ) -> Option<CameraChoice> {
     match requested {
         Some(p) => Some(CameraChoice::Requested(p)),
         None => product_camera
-            .or_else(|| render_settings_camera(index))
+            .or_else(|| render_settings_camera(index, pass))
             .map(CameraChoice::Settings),
     }
 }
@@ -102,20 +105,85 @@ impl std::fmt::Display for CameraChoice {
     }
 }
 
-/// The prim holding the stage's render settings: the one the stage's
+/// The prim holding the render settings: the active `pass`'s `renderSource`
+/// target when it is a `RenderSettings` prim, else the one the stage's
 /// `renderSettingsPrimPath` metadatum names, else the conventional
-/// `/Render/settings`.
-pub(super) fn render_settings_path(stage: &Stage) -> Option<sdf::Path> {
-    UsdRenderSettings::stage_settings_path(stage)
+/// `/Render/settings`. The one answer every settings reader, the products
+/// and the provenance take, so a pass's own settings reach all of them.
+/// [`check_render_source`] warns about a target this passes over.
+pub(super) fn render_settings_path(stage: &Stage, pass: Option<&sdf::Path>) -> Option<sdf::Path> {
+    pass.and_then(|p| render_source(stage, p))
+        .filter(|target| is_render_settings(stage, target))
+        .or_else(|| {
+            UsdRenderSettings::stage_settings_path(stage)
+                .ok()
+                .flatten()
+                .or_else(|| sdf::path("/Render/settings").ok())
+        })
+}
+
+/// The first target of `pass`'s `renderSource` relationship, if it authors one.
+pub(super) fn render_source(stage: &Stage, pass: &sdf::Path) -> Option<sdf::Path> {
+    UsdRenderPass::get(stage, pass.clone())
+        .ok()
+        .flatten()?
+        .render_source_rel()
+        .targets()
+        .ok()?
+        .into_iter()
+        .next()
+}
+
+fn is_render_settings(stage: &Stage, path: &sdf::Path) -> bool {
+    path.is_prim()
+        && UsdRenderSettings::get(stage, path.clone())
+            .ok()
+            .flatten()
+            .is_some()
+}
+
+/// Checks the host's `pass` names a `RenderPass` prim on `stage`, and warns
+/// when its `renderSource` targets something [`render_settings_path`] passes
+/// over. Run once per import, on the index stage, before anything is read.
+pub(super) fn check_pass(stage: &Stage, pass: &sdf::Path) -> Result<(), crate::Error> {
+    if UsdRenderPass::get(stage, pass.clone())
         .ok()
         .flatten()
-        .or_else(|| sdf::path("/Render/settings").ok())
+        .is_none()
+    {
+        let prim = prim_at(stage, pass.clone());
+        let why = if !prim.is_valid().unwrap_or(false) {
+            "there is no prim at this path on the stage".to_string()
+        } else {
+            match prim.type_name().ok().flatten() {
+                Some(t) if !t.as_str().is_empty() => {
+                    format!("a {} is not a RenderPass", t.as_str())
+                }
+                _ => "a typeless prim is not a RenderPass".to_string(),
+            }
+        };
+        return Err(crate::Error::PassNotFound {
+            path: pass.to_string(),
+            why,
+        });
+    }
+    if let Some(target) = render_source(stage, pass)
+        && !is_render_settings(stage, &target)
+    {
+        warning!(
+            RenderPassRenderSourceInvalid,
+            at = pass,
+            "{pass}: renderSource targets {target}, which is not a RenderSettings prim — \
+             reading the stage's render settings"
+        );
+    }
+    Ok(())
 }
 
 /// The first target of the render settings' `camera` relationship — the USD
 /// way for a stage to say which of its cameras is the shot camera.
-pub(super) fn render_settings_camera(stage: &Stage) -> Option<sdf::Path> {
-    let s = UsdRenderSettings::get(stage, render_settings_path(stage)?)
+pub(super) fn render_settings_camera(stage: &Stage, pass: Option<&sdf::Path>) -> Option<sdf::Path> {
+    let s = UsdRenderSettings::get(stage, render_settings_path(stage, pass)?)
         .ok()
         .flatten()?;
     s.camera_rel().targets().ok()?.into_iter().next()
@@ -127,8 +195,8 @@ pub(super) fn render_settings_camera(stage: &Stage) -> Option<sdf::Path> {
 /// winning when both are authored. Default `true`. `false` hides every dome,
 /// distant light and backdrop from camera rays whatever the lights themselves
 /// author; how they illuminate is unchanged.
-pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn dome_light_camera_visibility(stage: &Stage, pass: Option<&sdf::Path>) -> bool {
+    let Some(path) = render_settings_path(stage, pass) else {
         return DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY;
     };
     let prim = prim_at(stage, path);
@@ -142,8 +210,8 @@ pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
 /// off the `RenderSettings` prim, with `crust:enableExposureCompensation`
 /// winning when both are authored. Default `true`. `false` renders at a scale
 /// of 1 whatever the camera authors.
-pub(super) fn enable_exposure_compensation(stage: &Stage) -> bool {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn enable_exposure_compensation(stage: &Stage, pass: Option<&sdf::Path>) -> bool {
+    let Some(path) = render_settings_path(stage, pass) else {
         return DEFAULT_ENABLE_EXPOSURE_COMPENSATION;
     };
     let prim = prim_at(stage, path);
@@ -158,8 +226,8 @@ pub(super) fn enable_exposure_compensation(stage: &Stage) -> bool {
 /// ([`resolve_subdiv_level`](super::attrs::resolve_subdiv_level)) applies the
 /// host override, the default and the clamp. A geometry setting, not a
 /// tracer one, so it stays out of [`RenderSettings`].
-pub(super) fn render_settings_subdiv_level(stage: &Stage) -> Option<i32> {
-    let prim = prim_at(stage, render_settings_path(stage)?);
+pub(super) fn render_settings_subdiv_level(stage: &Stage, pass: Option<&sdf::Path>) -> Option<i32> {
+    let prim = prim_at(stage, render_settings_path(stage, pass)?);
     custom_i32(&prim, "crust:subdivisionLevel")
 }
 
@@ -168,8 +236,11 @@ pub(super) fn render_settings_subdiv_level(stage: &Stage) -> Option<i32> {
 /// caller ([`resolve_subdiv_edge_length`](super::attrs::resolve_subdiv_edge_length))
 /// applies the host override and refuses a bad value. A geometry setting, like
 /// [`render_settings_subdiv_level`].
-pub(super) fn render_settings_subdiv_edge_length(stage: &Stage) -> Option<f32> {
-    let prim = prim_at(stage, render_settings_path(stage)?);
+pub(super) fn render_settings_subdiv_edge_length(
+    stage: &Stage,
+    pass: Option<&sdf::Path>,
+) -> Option<f32> {
+    let prim = prim_at(stage, render_settings_path(stage, pass)?);
     custom_f32(&prim, "crust:subdivisionEdgeLength")
 }
 
@@ -178,8 +249,8 @@ pub(super) fn render_settings_subdiv_edge_length(stage: &Stage) -> Option<f32> {
 /// Unauthored or empty is `lin_rec709`; a name the config does not know, or a
 /// space that is not scene-linear, is refused with a warning and is
 /// `lin_rec709` too.
-pub(super) fn render_settings_color_space(stage: &Stage) -> Space {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn render_settings_color_space(stage: &Stage, pass: Option<&sdf::Path>) -> Space {
+    let Some(path) = render_settings_path(stage, pass) else {
         return Space::LIN_REC709;
     };
     match custom_token(&prim_at(stage, path.clone()), "renderingColorSpace") {
@@ -197,8 +268,8 @@ pub(super) fn render_settings_color_space(stage: &Stage) -> Space {
     }
 }
 
-pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn import_render_settings(stage: &Stage, pass: Option<&sdf::Path>) -> RenderSettings {
+    let Some(path) = render_settings_path(stage, pass) else {
         return default_settings();
     };
 

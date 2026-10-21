@@ -77,6 +77,11 @@ struct OpenSession {
     /// The override layer to write (a new .usda), or an existing one of the
     /// same input to resume. It sublayers the input and holds every edit.
     output: String,
+    /// The render pass every render of the session renders (a `RenderPass`
+    /// prim path, as `crust render --pass`). Not written to the layer: a
+    /// resumed session names it again. Omitted: no pass is active.
+    #[serde(default)]
+    pass: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -276,7 +281,8 @@ const DEFAULT_BUDGET_S: f64 = 10.0;
 impl Server {
     /// Opens a session: creates the override layer `output` on `input` (or
     /// resumes it when it already is one) and imports it as `crust render
-    /// <output>` would. Closes any session already open.
+    /// <output>` would — with `--pass <pass>` when a pass is named. Closes
+    /// any session already open.
     #[tool]
     async fn open_session(
         &self,
@@ -284,7 +290,7 @@ impl Server {
     ) -> Result<CallToolResult, ErrorData> {
         reply(
             self.session
-                .call(move |state| state.open_session(&p.input, &p.output))
+                .call(move |state| state.open_session(&p.input, &p.output, p.pass.as_deref()))
                 .await,
         )
     }
