@@ -286,6 +286,9 @@ pub(super) struct TransformMotion {
     /// Shutter open is the frame itself: the transform at the frame is
     /// already the open one.
     open_at_frame: bool,
+    /// Moving placements are posed at the frame rather than at shutter open
+    /// (`disableMotionBlur`, see [`TransformMotion::span`]).
+    frame_pose: bool,
     /// Whether prims are asked about time at all.
     query: bool,
     /// Drawn prims whose transform varies over time, while the shutter
@@ -299,13 +302,46 @@ pub(super) struct TransformMotion {
 
 impl TransformMotion {
     /// `interval` is the shutter's; `open_at_frame` when its open end is the
-    /// frame; `query` when transforms are asked about time at all.
-    pub(super) fn new(interval: Option<(f64, f64)>, open_at_frame: bool, query: bool) -> Self {
+    /// frame; `frame_pose` when moving placements start at the frame
+    /// ([`TransformMotion::span`]); `query` when transforms are asked about
+    /// time at all.
+    pub(super) fn new(
+        interval: Option<(f64, f64)>,
+        open_at_frame: bool,
+        frame_pose: bool,
+        query: bool,
+    ) -> Self {
         TransformMotion {
             interval,
             open_at_frame,
+            frame_pose: frame_pose && !open_at_frame,
             query: query || interval.is_some(),
             ..Default::default()
+        }
+    }
+
+    /// The span of a prim at `world` (its transform at the frame) with
+    /// `timing`.
+    ///
+    /// A moving prim normally spans shutter open to shutter close. Posed at
+    /// the frame (`disableMotionBlur`, which UsdRender defines as a `[0, 0]`
+    /// shutter at the current time code), it starts at `world` instead and
+    /// moves by the shutter's world-space displacement,
+    /// `X(close) · X(open)⁻¹`: the camera rays, all at the span's start, see
+    /// it exactly where it is at the frame, and the `motionvector` AOV
+    /// measures the shutter's motion from there. A singular shutter-open
+    /// transform has no displacement to carry, and keeps its shutter span.
+    pub(super) fn span(&self, world: GMat4, timing: &Timing) -> Span {
+        let span = Span::of(world, timing);
+        let Some(close) = span.close.filter(|_| self.frame_pose) else {
+            return span;
+        };
+        if span.open.determinant().abs() < 1e-12 {
+            return span;
+        }
+        Span {
+            open: world,
+            close: Some(close * span.open.inverse() * world),
         }
     }
 
@@ -577,7 +613,7 @@ def Xform "Still"
     fn the_shutter_pair_follows_moving_ancestors_but_not_a_reset() {
         let stage = open("pair", ANIMATED);
         let _frame = EvalTimeScope::enter(Some(2.0));
-        let motion = TransformMotion::new(Some((2.0, 3.0)), true, false);
+        let motion = TransformMotion::new(Some((2.0, 3.0)), true, false, false);
         let timing = |path: &str, parent: Timing, parent_world: GMat4| {
             let p = prim(&stage, path);
             let world = compose_with_parent(&p, parent_world);
@@ -613,6 +649,38 @@ def Xform "Still"
         assert_eq!(reset, Timing::Static);
     }
 
+    /// A shutter that opens before the frame: the span runs from shutter open
+    /// to shutter close, unless the placement is posed at the frame
+    /// (`disableMotionBlur`), when it starts at the frame and moves by the
+    /// shutter's displacement from there. Opening at the frame, both agree.
+    #[test]
+    fn a_frame_pose_starts_at_the_frame_and_moves_by_the_shutter() {
+        let stage = open("frame_pose", ANIMATED);
+        let _frame = EvalTimeScope::enter(Some(2.0));
+        let a = prim(&stage, "/A");
+        let world = compose_with_parent(&a, GMat4::IDENTITY);
+        let at = |m: GMat4| m.transform_point3(Vec3::ZERO);
+        let ends = |motion: &TransformMotion| {
+            let timing = motion.timing(&a, &Timing::Static, GMat4::IDENTITY, world);
+            let span = motion.span(world, &timing);
+            (at(span.open), at(span.close.expect("it moves")))
+        };
+
+        let centred = TransformMotion::new(Some((1.75, 2.25)), false, false, false);
+        assert_eq!(
+            ends(&centred),
+            (Vec3::new(1.75, 0.0, 0.0), Vec3::new(2.25, 0.0, 0.0))
+        );
+        let posed = TransformMotion::new(Some((1.75, 2.25)), false, true, false);
+        assert_eq!(
+            ends(&posed),
+            (Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.5, 0.0, 0.0))
+        );
+        let at_frame = TransformMotion::new(Some((2.0, 2.5)), true, true, false);
+        let unposed = TransformMotion::new(Some((2.0, 2.5)), true, false, false);
+        assert_eq!(ends(&at_frame), ends(&unposed));
+    }
+
     /// With an instantaneous shutter the question is still answered when
     /// asked (for the warnings), but nothing is composed twice; unasked, a
     /// moving prim reads static. A static stage with a shutter creates no
@@ -622,17 +690,17 @@ def Xform "Still"
         let stage = open("varies", ANIMATED);
         let a = prim(&stage, "/A");
         let world = compose_with_parent(&a, GMat4::IDENTITY);
-        let asked = TransformMotion::new(None, true, true);
+        let asked = TransformMotion::new(None, true, false, true);
         assert_eq!(
             asked.timing(&a, &Timing::Static, GMat4::IDENTITY, world),
             Timing::Varies
         );
-        let unasked = TransformMotion::new(None, true, false);
+        let unasked = TransformMotion::new(None, true, false, false);
         assert_eq!(
             unasked.timing(&a, &Timing::Static, GMat4::IDENTITY, world),
             Timing::Static
         );
-        let moving = TransformMotion::new(Some((0.0, 1.0)), true, false);
+        let moving = TransformMotion::new(Some((0.0, 1.0)), true, false, false);
         let still = prim(&stage, "/Still");
         let still_world = compose_with_parent(&still, GMat4::IDENTITY);
         assert_eq!(

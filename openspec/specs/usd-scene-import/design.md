@@ -880,6 +880,23 @@ same point.
     `part.local` in on both sides and now read `v` on the instance prim.
     `PointInstancer` placements get `W(open)·P_i → W(close)·P_i` from the
     instancer prim's pair; per-instance arrays are read at the frame.
+  - *`disableMotionBlur` is sharp at the frame* (`TransformMotion::span`,
+    `RenderProducts::sharp_at_frame`). UsdRender defines it as a `[0, 0]` shutter
+    at the current time code; only the deprecated `instantaneousShutter` closes
+    the shutter where it opens. So with `disableMotionBlur` (it wins over the
+    other) and a shutter that opens away from the frame, a moving placement starts
+    at `X(f)` and ends at `D·X(f)`, `D = X(close)·X(open)⁻¹` the shutter's
+    world-space displacement: rays at `time = 0` see it exactly where it is at the
+    frame, and the vector is the shutter's displacement measured from there (the
+    same as from shutter open for a translation). An interpolation of the
+    shutter's ends at `τ_f = −open / (close − open)` was rejected: it misses `X(f)`
+    whenever a time sample lies inside the shutter, as in every per-frame cache.
+    `instantaneousShutter` keeps the shutter span and `time = 0`, so it is sharp at
+    `f + open`. The first version of this change posed both at shutter open, a
+    quarter frame early on a centred shutter (review of #347).
+  - *Moving instances keep their tangents* (`VertexSource::Moving`, the
+    `textures` record): otherwise every animated prim would lose its normal map
+    the moment a shutter is authored, blur on or off.
   - *Warnings* (`report_unmoved`, once per cause with a count):
     `time.motion_needs_frame` (offsets open, no frame, a drawn prim varies),
     `camera.shutter_instantaneous` (a `motionvector` var, offsets that open
@@ -888,7 +905,8 @@ same point.
     meshes). `camera.` and `time.` are settings families, so a scene carrying
     one refuses MCP's in-place settings refresh.
   - *MCP*: `StageFacts::shutter` is a `ShutterKey` (the camera, the offsets and
-    interval as bits, and whether prims were asked about time); a settings refresh
+    interval as bits, whether prims were asked about time, and whether moving
+    placements were posed at the frame); a settings refresh
     whose key differs is `Structural("the camera shutter changed")`. The offsets
     and the query flag are in it because they decide warnings even when the
     interval does not move: the session renders without a frame, where a
@@ -973,7 +991,10 @@ same point.
   The tracer's shutter gate is then `world.has_motion() && settings.motion_blur`: no
   `K_TIME` domain is derived (so the other sample dimensions are a static scene's), every
   ray has `time = 0`, `transforms_at` returns the start transforms, and the beauty is sharp
-  at the authored positions while the motion records stay for the `motionvector` AOV. The
+  at the authored positions while the motion records stay for the `motionvector` AOV. With
+  a time-sampled transform and a shutter that opens away from the frame the two flags
+  differ: `disableMotionBlur` is sharp at the frame, `instantaneousShutter` at shutter open
+  (above). The
   two left `warn_unhonoured` when they became honoured; it still warns about
   `pixelAspectRatio` (`disableDepthOfField` left it with `physical-depth-of-field`). `dataWindowNDC` left it too
   (`add-render-region`): it is resolved like `resolution` (first product, else the

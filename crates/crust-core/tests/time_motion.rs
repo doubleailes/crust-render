@@ -390,26 +390,45 @@ fn every_placement_of_an_animated_point_instancer_moves() {
     }
 }
 
-/// A shutter opening before the frame with blur off: the sharp image is at
-/// time code 4.75, a quarter frame before frame 5.
+/// A shutter opening before the frame with blur off. `disableMotionBlur` is
+/// UsdRender's `[0, 0]` shutter at the current time code: the sharp image is
+/// at frame 5 itself, and the vector is the shutter's half-frame
+/// displacement measured from there. `instantaneousShutter` alone keeps the
+/// sharp image at shutter open, time code 4.75; with both, `disableMotionBlur`
+/// wins.
 #[test]
-fn blur_off_is_sharp_at_shutter_open_before_the_frame() {
+fn blur_off_is_sharp_at_the_frame_and_instantaneous_at_shutter_open() {
     let centred = "double shutter:open = -0.25\n        double shutter:close = 0.25";
-    let scene = load(
-        "centred",
-        &stage(
-            centred,
-            &ball("Ball", TRACK),
-            "        uniform bool disableMotionBlur = 1",
-        ),
+    let sharp = |name: &str, settings: &str| {
+        let scene = load(name, &stage(centred, &ball("Ball", TRACK), settings));
+        assert!(!scene.settings.motion_blur(), "{name}");
+        scene
+    };
+    // Centred at `x`: the ray through it meets the ball's front at z = 0.3,
+    // its radius; one a quarter unit off would meet it at z ≈ 0.17.
+    let at_x = |scene: &Scene, x: f32| {
+        let (_, p) = probe(scene, x, 0.0, 0.0).unwrap_or_else(|| panic!("hit at x = {x}"));
+        assert!((p.z - 0.3).abs() < 1e-3, "centred at {x}: {p}");
+        assert!(near(motion(scene, x, 0.0, 0.0), Vec3A::new(0.5, 0.0, 0.0)));
+    };
+
+    let frame = sharp(
+        "centred_frame",
+        "        uniform bool disableMotionBlur = 1",
     );
-    assert!(!scene.settings.motion_blur());
-    let (_, p) = probe(&scene, -0.75, 0.0, 0.0).expect("at x = -0.75 at shutter open");
-    assert!((p.x + 0.75).abs() < 1e-3, "{p}");
-    assert!(near(
-        motion(&scene, -0.75, 0.0, 0.0),
-        Vec3A::new(0.5, 0.0, 0.0)
-    ));
+    at_x(&frame, -0.5);
+
+    let open = sharp(
+        "centred_open",
+        "        uniform bool instantaneousShutter = 1",
+    );
+    at_x(&open, -0.75);
+
+    let both = sharp(
+        "centred_both",
+        "        uniform bool disableMotionBlur = 1\n        uniform bool instantaneousShutter = 1",
+    );
+    at_x(&both, -0.5);
 }
 
 /// A static stage renders exactly as it would with an instantaneous

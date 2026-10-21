@@ -129,18 +129,22 @@ the finest level held at every footprint). See
     prototype shared by N instances — N transforms against one table — got
     none. Now `World` reads the hit triangle's vertices from the kernel
     (`Scene::triangle_vertices`: the top-level scene for a baked mesh, the
-    prototype through its placement for a direct static instance) and derives
-    the tangent with the same arithmetic (`tangent_of`), so directly instanced
-    meshes shade normal maps too. What still has no frame, by construction
+    prototype through its placement for a direct static instance, and for a
+    direct moving instance through both of its transforms interpolated at the
+    ray's shutter time with the kernel's own arithmetic) and derives the
+    tangent with the same arithmetic (`tangent_of`), so directly instanced
+    meshes shade normal maps too, moving or not
+    (`motion_blurred_instances_get_a_tangent_at_the_ray_time`; the moving case
+    was a gap until `time-sampled-transform-motion` made every animated
+    transform an instance with an end transform, which would otherwise have
+    lost its normal map). What still has no frame, by construction
     (`VertexSource::Unresolved`, never a lookup against the top-level scene):
     a prototype part placed through an instancer's group, whose hit id is a
     forwarded slot shared by every placement of that prototype, so the hit
-    names no transform (`forwarded_placements_sharing_a_slot_get_no_tangent`);
-    and a motion-blurred instance, intersected through a transform
-    interpolated at the ray's time that no retained start transform
-    reproduces (`motion_blurred_instances_get_no_tangent`). Closing both needs
-    the kernel to hand back the traversed instance's composed transform with
-    the hit. A mirrored baked placement's stored
+    names no transform (`forwarded_placements_sharing_a_slot_get_no_tangent`),
+    and an instance whose inner scene itself moves. Closing those needs the
+    kernel to hand back the traversed instance's composed transform with the
+    hit. A mirrored baked placement's stored
     tangent paired the swapped vertex order with unswapped corners; the derived
     one un-swaps first (`tangent_unswaps_a_mirrored_placement`).
   - **The resolution cap is not an optimisation.** Fourteen 4096² tiles is 674
@@ -990,8 +994,7 @@ the finest level held at every footprint). See
 ## Known gaps: UV textures
 
 - **UV texture caveats.** Normal maps need a tangent, which prototype parts
-  placed through an instancer's group and motion-blurred instances still lack
-  (above). On the
+  placed through an instancer's group still lack (above). On the
   `UsdPreviewSurface` side: `UsdTransform2d` is
   not evaluated, `occlusion`/`specularColor` are not read (`displacement` is, at import —
   see the `usd-scene-import` design record § Displacement), and a

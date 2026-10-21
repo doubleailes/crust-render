@@ -131,8 +131,8 @@ Static stages and stages with an instantaneous shutter SHALL raise none of these
 
 - **WHEN** a `BasisCurves` prim's transform is time-sampled and the shutter is not
   instantaneous
-- **THEN** the curves render sharp at their shutter-open placement, and one warning
-  counts them
+- **THEN** the curves render sharp where their transform places them at the frame, and
+  one warning counts them
 
 #### Scenario: Instantaneous shutter is not warned about here
 
@@ -143,14 +143,13 @@ Static stages and stages with an instantaneous shutter SHALL raise none of these
 
 ### Requirement: Render settings can disable motion blur
 
-`disableMotionBlur = true` SHALL trace every camera ray at shutter open, so
-the beauty and every AOV show moving geometry sharp at its shutter-open position.
-That is its authored position for `crust:motion:translate`, and its transform at
-`f + shutter:open` for a time-sampled transform.
-`instantaneousShutter = true` SHALL mean the same. Motion stays in the scene,
-so motion vectors are still produced. The value is resolved like the
-render's camera: the first product's value, else the settings prim's.
-Neither attribute SHALL be warned about as not honoured.
+`disableMotionBlur = true` SHALL render moving geometry sharp where it is at the
+frame (UsdRender's `[0, 0]` shutter at the current time code), in the beauty and
+every AOV. `instantaneousShutter = true` SHALL also turn blur off, but sharp at
+shutter open, `f + shutter:open`; with both, `disableMotionBlur` wins. Motion
+stays in the scene, so motion vectors are still produced. Each value is resolved
+like the render's camera: the first product's, else the settings prim's.
+Neither SHALL be warned about as not honoured.
 
 #### Scenario: Sharp beauty with motion authored
 
@@ -159,18 +158,33 @@ Neither attribute SHALL be warned about as not honoured.
 - **THEN** the sphere renders sharp at its authored position, with no streak
   along X, and no warning about `disableMotionBlur` is logged
 
-#### Scenario: Sharp beauty at shutter open for an animated transform
+#### Scenario: Sharp beauty at the frame for an animated transform
 
 - **WHEN** a sphere's transform is time-sampled, the camera authors
   `shutter:open = -0.25` and `shutter:close = 0.25`, the render is made with `-f 5`, and the
   render settings author `disableMotionBlur = true`
+- **THEN** the sphere renders sharp where its transform places it at time code 5, and its
+  `motionvector` is the screen displacement its transform makes from time code 4.75 to
+  5.25, measured from there
+
+#### Scenario: instantaneousShutter is sharp at shutter open
+
+- **WHEN** the same stage authors `instantaneousShutter = true` and not
+  `disableMotionBlur`
 - **THEN** the sphere renders sharp where its transform places it at time code 4.75
 
 #### Scenario: instantaneousShutter is a synonym
 
-- **WHEN** the render settings author `instantaneousShutter = true` and not
-  `disableMotionBlur`
+- **WHEN** the camera's `shutter:open` is 0, or the stage authors no shutter, and the
+  render settings author `instantaneousShutter = true` and not `disableMotionBlur`
 - **THEN** the render is the same as with `disableMotionBlur = true`
+
+#### Scenario: Toggling the frame pose in a session re-imports
+
+- **WHEN** an MCP session's stage has a time-sampled transform and a shutter opening
+  before the frame, and an edit authors `disableMotionBlur = true`
+- **THEN** the edit re-imports the stage, and the render equals a fresh import of the same
+  layer
 
 #### Scenario: Product overrides the settings
 
@@ -183,3 +197,27 @@ Neither attribute SHALL be warned about as not honoured.
 - **WHEN** neither attribute is authored
 - **THEN** a prim authoring `crust:motion:translate` is motion blurred, as
   before this change
+
+### Requirement: Directly instanced meshes have tangents
+
+A mesh placed more than once through direct instances SHALL shade normal maps with a
+tangent frame, computed at the hit from the prototype's vertices and the placement's
+transform, exactly as a baked mesh does. A moving direct instance (a time-sampled
+transform or `crust:motion:translate`) SHALL use its transform interpolated at the
+ray's shutter time, the one the ray was intersected through. A prototype part placed
+through an instancer's group (a `PointInstancer` or native-instancing prototype), whose
+hit id is forwarded rather than its own, still shades with the geometric normal; that is
+the remaining gap.
+
+#### Scenario: A normal map on a directly instanced mesh
+
+- **WHEN** a normal-mapped material is bound to a mesh prim authored twice
+- **THEN** each placement shades with a perturbed normal, and a placement whose
+  transform is the identity matches the baked render of the same mesh bit for bit
+
+#### Scenario: A normal map on an animated mesh
+
+- **WHEN** a normal-mapped mesh has a time-sampled rotation and the camera authors a
+  non-instantaneous shutter, with or without `disableMotionBlur`
+- **THEN** it shades with a perturbed normal whose tangent follows the mesh's rotation at
+  each ray's shutter time, as it did before the shutter was read

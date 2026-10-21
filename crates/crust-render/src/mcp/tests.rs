@@ -1461,6 +1461,18 @@ def Xform "World"
     same_as_full_import(&mut state, &dir, "shutter close");
     assert_eq!(undo(&mut state), "full", "undo the shutter");
     same_as_full_import(&mut state, &dir, "undo shutter close");
+
+    // Over a shutter that opens before the frame, `disableMotionBlur` poses
+    // the moving sphere at the frame rather than at shutter open: geometry
+    // moves, so the settings edit re-imports.
+    let centred = r#"over "World" { over "Cam" {
+        double shutter:open = -0.25
+        double shutter:close = 0.25
+    } }"#;
+    assert_eq!(author(&mut state, centred), "full");
+    let sharp = r#"over "Render" { over "settings" { uniform bool disableMotionBlur = 1 } }"#;
+    assert_eq!(author(&mut state, sharp), "full");
+    same_as_full_import(&mut state, &dir, "sharp at the frame");
 }
 
 /// A light-linked scene keeps its resolved links through an in-place light

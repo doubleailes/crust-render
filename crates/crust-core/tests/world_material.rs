@@ -1466,31 +1466,50 @@ fn forwarded_placements_sharing_a_slot_get_no_tangent() {
     }
 }
 
-/// A motion-blurred instance is intersected through a transform interpolated
-/// at the ray's time, which no retained start transform reproduces, so it
-/// gets no tangent frame either.
+/// A motion-blurred instance is intersected through its transforms
+/// interpolated at the ray's shutter time, and its hit's vertices are carried
+/// through the same interpolation: the tangent is the chart's +u direction
+/// as the quad lies at that time. The quad turns a quarter turn about Z over
+/// the shutter, so +u goes from world +X at shutter open to world +Y at
+/// shutter close, through the diagonal half way (the element-wise
+/// interpolation the kernel uses).
 #[test]
-fn motion_blurred_instances_get_no_tangent() {
+fn motion_blurred_instances_get_a_tangent_at_the_ray_time() {
     let mut inner = crust_core::rt::SceneBuilder::new();
     inner.attach(quad());
     let inner = Arc::new(inner.commit());
 
+    let start = glam::Affine3A::from_translation(glam::Vec3::new(5.0, 0.0, 0.0));
+    let end = glam::Affine3A::from_rotation_translation(
+        glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        glam::Vec3::new(5.0, 0.0, 0.0),
+    );
     let mut b = WorldBuilder::new();
     let id = b.attach(
         Geometry::Instance {
             scene: inner,
-            transform: glam::Affine3A::from_translation(glam::Vec3::new(5.0, 0.0, 0.0)),
-            transform_end: Some(Box::new(glam::Affine3A::from_translation(glam::Vec3::new(
-                6.0, 0.0, 0.0,
-            )))),
+            transform: start,
+            transform_end: Some(Box::new(end)),
         },
         emissive(1.0),
     );
     b.set_uv_map(id, Arc::new(quad_uv_map()), false);
     let world = b.commit();
-    let hit = world
-        .intersect(&Ray::new(Vec3A::new(5.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
-        .expect("the moving quad is hit at time 0");
-    assert!(hit.rec.uv.is_some());
-    assert_eq!(hit.rec.tangent, Vec3A::ZERO);
+    let diagonal = Vec3A::new(1.0, 1.0, 0.0).normalize();
+    for (origin, time, tangent) in [
+        (Vec3A::new(5.5, 0.5, -1.0), 0.0, Vec3A::X),
+        // The quad's centre at half the shutter: 5 + (0.5, 0.5)/2 + (-0.5, 0.5)/2.
+        (Vec3A::new(5.0, 0.5, -1.0), 0.5, diagonal),
+        (Vec3A::new(4.5, 0.5, -1.0), 1.0, Vec3A::Y),
+    ] {
+        let hit = world
+            .intersect(&Ray::new(origin, Vec3A::Z).with_time(time), 1e-3, 10.0)
+            .unwrap_or_else(|| panic!("the moving quad is hit at time {time}"));
+        assert!(hit.rec.uv.is_some());
+        assert!(
+            hit.rec.tangent.abs_diff_eq(tangent, 1e-5),
+            "time {time}: {}",
+            hit.rec.tangent
+        );
+    }
 }

@@ -121,7 +121,7 @@ use shapes::{curve_segments, emit_curves, emit_sphere, nurbs_curve_segments};
 use strands::StrandRequest;
 use time::EvalTimeScope;
 use volume::emit_volume;
-use xform::{Span, Timing, TransformMotion, compose_with_parent};
+use xform::{Timing, TransformMotion, compose_with_parent};
 
 /// `Stage::prim` for a path that is already an `sdf::Path`.
 ///
@@ -329,7 +329,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             .caches
             .motion
             .timing(&prim, &parent_timing, parent_world, this_world);
-        let span = Span::of(this_world, &timing);
+        let span = ctx.caches.motion.span(this_world, &timing);
 
         // What this prim emits, for the light links: ids are handed out in
         // traversal order, so the range recorded after dispatch is exactly
@@ -1035,6 +1035,7 @@ pub(crate) fn load_scene(
     let open_elapsed = open_start.elapsed();
     let open_mem = MemorySample::now();
     let asks_time = asks_about_time(&shutter, &products);
+    let frame_posed = frame_pose(&shutter, &products);
 
     let mut ctx = ImportCtx {
         world: WorldBuilder::new(),
@@ -1055,7 +1056,12 @@ pub(crate) fn load_scene(
         caches: ImportCaches {
             subtrees,
             implicit: ImplicitPolicy::new(projection),
-            motion: TransformMotion::new(shutter.interval, shutter.offsets.open == 0.0, asks_time),
+            motion: TransformMotion::new(
+                shutter.interval,
+                shutter.offsets.open == 0.0,
+                frame_posed,
+                asks_time,
+            ),
             ..ImportCaches::new(assets, path, subdiv, working)
         },
         pending_meshes: Vec::new(),
@@ -1230,7 +1236,7 @@ pub(crate) fn load_scene(
                 .flatten(),
             unsized_shapes: ctx.caches.implicit.fixed_unshared,
             primvars: ctx.caches.meshes.primvars.key(),
-            shutter: shutter.key(asks_time),
+            shutter: shutter.key(asks_time, frame_posed),
         },
     });
     Ok(scene)
@@ -1501,6 +1507,17 @@ fn first_camera(index: &Stage) -> Option<sdf::Path> {
 /// would report zero for what does ([`TransformMotion`]).
 fn asks_about_time(shutter: &Shutter, products: &products::RenderProducts) -> bool {
     shutter.offsets.opens() || products.request.asks_for(AovSource::MotionVector)
+}
+
+/// Whether moving placements are posed at the frame rather than at shutter
+/// open: `disableMotionBlur` (not `instantaneousShutter` alone) over a
+/// shutter that opens an interval away from the frame. Opening at the frame,
+/// the two poses are one.
+fn frame_pose(shutter: &Shutter, products: &products::RenderProducts) -> bool {
+    products.sharp_at_frame
+        && !products.motion_blur
+        && shutter.interval.is_some()
+        && shutter.offsets.open != 0.0
 }
 
 /// The summarised warnings for time-varying transforms the render does not

@@ -1332,11 +1332,35 @@ fn a_product_differing_only_in_motion_blur_is_kept_and_warned_about() {
         "{warnings:?}"
     );
 
-    // The same setting under its two names: both written, nothing to say.
+    // The two names are no longer one setting: `disableMotionBlur` is sharp at
+    // the frame, `instantaneousShutter` at shutter open. Both written, blur
+    // off, and the second named with the pose the render keeps.
     let (scene, warnings) = load_warnings(
-        "blur_products_synonyms",
+        "blur_products_spellings",
         &products(
             "uniform bool disableMotionBlur = 1",
+            "uniform bool instantaneousShutter = 1",
+        ),
+    );
+    assert_eq!(scene.aovs.products.len(), 2);
+    assert!(!scene.settings.motion_blur());
+    let blur: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("motion blur"))
+        .collect();
+    assert_eq!(blur.len(), 1, "{warnings:?}");
+    assert!(
+        blur[0].contains("/Render/b")
+            && blur[0].contains("off (sharp at shutter open)")
+            && blur[0].contains("off (sharp at the frame)"),
+        "{blur:?}"
+    );
+
+    // The same setting twice: both written, nothing to say.
+    let (scene, warnings) = load_warnings(
+        "blur_products_same",
+        &products(
+            "uniform bool instantaneousShutter = 1",
             "uniform bool instantaneousShutter = 1",
         ),
     );

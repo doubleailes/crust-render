@@ -122,13 +122,18 @@ pub(crate) struct StageFacts {
 /// when instantaneous), and whether prims were asked whether their transform
 /// varies. The last two decide warnings as well as geometry
 /// (`time.motion_needs_frame`, `camera.shutter_instantaneous`), so a change to
-/// any part re-imports.
+/// any part re-imports. `frame_pose` is whether moving placements were posed
+/// at the frame (`disableMotionBlur` over a shutter that does not open at
+/// the frame), which moves geometry, so turning that flag on or off
+/// re-imports too where it matters, and stays an in-place settings edit
+/// elsewhere.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ShutterKey {
     pub(crate) camera: Option<String>,
     pub(crate) offsets: [u64; 2],
     pub(crate) interval: Option<[u64; 2]>,
     pub(crate) query: bool,
+    pub(crate) frame_pose: bool,
 }
 
 /// A value the import's tessellation read from the render camera, as the

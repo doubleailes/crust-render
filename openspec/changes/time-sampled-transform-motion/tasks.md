@@ -153,6 +153,28 @@
       `cargo clippy --workspace --all-targets -- -D warnings` and
       `cargo test --workspace --no-fail-fast`, all clean.
 
+## 8. Review fixes on #347 (design D2, D4, D6)
+
+- [x] 8.1 Moving direct instances keep a tangent frame: `VertexSource::Moving` carries the
+      hit's vertices through both transforms interpolated at the ray's time. Verify with
+      `motion_blurred_instances_get_a_tangent_at_the_ray_time` (a quad turning a quarter
+      turn: +X at time 0, the diagonal at 0.5, +Y at 1), replacing the test that pinned the
+      gap, and update the `textures` design record and the tangent requirement.
+- [x] 8.2 `disableMotionBlur` is sharp at the frame, `instantaneousShutter` at shutter open
+      (`RenderProducts::sharp_at_frame`, `TransformMotion::span`), with both set
+      `disableMotionBlur` winning, and a product that differs in either warned about.
+      Verify with `a_frame_pose_starts_at_the_frame_and_moves_by_the_shutter` and
+      `blur_off_is_sharp_at_the_frame_and_instantaneous_at_shutter_open` (centred shutter:
+      sharp at x = −0.5 vs −0.75, the vector the shutter's 0.5 either way).
+- [x] 8.3 The frame pose enters the MCP shutter key, so toggling `disableMotionBlur` over a
+      shutter that opens away from the frame re-imports. Verify with the extended
+      `a_shutter_edit_reimports_and_an_exposure_stays_in_place`.
+- [x] 8.4 Correct the texts the review found inconsistent: D2's rule (a reset child does
+      not inherit the parent's pair), the animated-curves scenario and
+      `xform.motion_ignored` (unmoved prims sit at the frame, not shutter open), and the
+      user documentation for both flags (`render-settings.md`, `aovs.md`). Verify with
+      `openspec validate --strict`, the warnings-doc test, and the docs workflow on the PR.
+
 ## Workflow follow-up
 
 - Archive the change after review, then start the deforming-points / `velocities` change
