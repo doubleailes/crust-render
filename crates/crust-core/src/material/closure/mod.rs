@@ -170,6 +170,11 @@ pub struct Prepared {
     /// MaterialX leaves carry no component name, so the tree's shape is
     /// what tells — see `ResolvedClosure::walk`.
     pub coat: bool,
+    /// The top of a layer with a weighted leaf under it — any leaf, not only
+    /// a reflecting one, so a coat over a bare diffuse (`standard_surface`
+    /// at `specular = 0`) is one too. The shading normal the AOVs report is
+    /// read from the leaves under every layer.
+    pub over_base: bool,
 }
 
 impl Prepared {
@@ -303,6 +308,7 @@ const EMPTY: Prepared = Prepared {
     select: 0.0,
     category: "",
     coat: false,
+    over_base: false,
 };
 
 /// A MaterialX closure tree collapsed at one vertex.
@@ -744,6 +750,11 @@ impl ResolvedClosure {
                         }
                     }
                 }
+                if self.leaves[middle..self.len].iter().any(|p| p.select > 0.0) {
+                    for p in &mut self.leaves[first..middle] {
+                        p.over_base = true;
+                    }
+                }
                 t_top * t_base
             }
             Closure::Mix { fg, bg, mix } => {
@@ -890,18 +901,20 @@ impl ResolvedClosure {
         sum.clamp(Vec3A::ZERO, Vec3A::ONE)
     }
 
-    /// The shading normal the `normal` and `Neye` AOVs report: the leaves'
-    /// normals — each its MaterialX `normal` input where one is connected —
-    /// averaged by their selection weights, so the lobes that carry the
-    /// surface's look carry its normal. A coat's `coat_normal` is left out
-    /// while any leaf sits under it, as for UsdPreviewSurface, whose single
-    /// normal map is the base's. `None` when no leaf has weight.
+    /// The shading normal the `normal` and `Neye` AOVs report: the normals
+    /// of the leaves under every layer — each its MaterialX `normal` input
+    /// where one is connected — averaged by their selection weights. A
+    /// layer's top is left out while a weighted leaf sits under it, so a
+    /// coat's `coat_normal` never reaches the pass, as UsdPreviewSurface's
+    /// single normal map is the base's; `standard_surface`'s base specular
+    /// shares the base's `normal`, so leaving it out loses nothing. `None`
+    /// when no leaf has weight.
     pub fn shading_normal(&self) -> Option<Vec3A> {
         let leaves = &self.leaves[..self.len];
-        let base = leaves.iter().any(|l| !l.coat && l.select > 0.0);
+        let base = leaves.iter().any(|l| !l.over_base && l.select > 0.0);
         let n = leaves
             .iter()
-            .filter(|l| !(base && l.coat))
+            .filter(|l| !(base && l.over_base))
             .fold(Vec3A::ZERO, |a, l| a + l.frame.n * l.select.max(0.0));
         (n.is_finite() && n.length_squared() > 1e-12).then(|| n.normalize())
     }
@@ -1227,6 +1240,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             select,
             category: leaf.bsdf.category(),
             coat: false,
+            over_base: false,
         },
         throughput,
     )

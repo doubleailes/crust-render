@@ -480,7 +480,7 @@ fn a_coat_normal_perturbs_only_the_coat() {
 }
 
 #[test]
-fn the_shading_normal_is_the_normal_input_and_not_the_coat_normal() {
+fn the_shading_normal_is_the_base_normal_input_and_not_the_coat_normal() {
     let tilted = Vec3A::new(0.3, 0.0, 0.954).normalize();
     // A normal map on the base: the AOV's normal is the mapped one.
     let mapped = doc(r#"
@@ -505,6 +505,30 @@ fn the_shading_normal_is_the_normal_input_and_not_the_coat_normal() {
     assert!(c.leaves().iter().any(|l| l.coat), "the top is a coat");
     let n = c.shading_normal().unwrap();
     assert!((n - Vec3A::Z).length() < 1e-6, "{n}");
+    // A coat straight over a diffuse — `standard_surface` at `specular = 0`,
+    // where no reflecting leaf under it makes it a `coat` — with distinct
+    // normals: still the base's.
+    let over_diffuse = doc(r#"
+      <constant name="cn" type="vector3"><input name="value" type="vector3" value="0.3, 0, 0.954" /></constant>
+      <constant name="bn" type="vector3"><input name="value" type="vector3" value="0, 0.3, 0.954" /></constant>
+      <dielectric_bsdf name="c" type="BSDF">
+        <input name="normal" type="vector3" nodename="cn" />
+      </dielectric_bsdf>
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+        <input name="normal" type="vector3" nodename="bn" />
+      </oren_nayar_diffuse_bsdf>
+      <layer name="x" type="BSDF">
+        <input name="top" type="BSDF" nodename="c" />
+        <input name="base" type="BSDF" nodename="d" />
+      </layer>"#);
+    let c = resolved(&over_diffuse, "x", 0.3, true);
+    assert!(
+        !c.leaves().iter().any(|l| l.coat),
+        "no reflecting leaf under it"
+    );
+    let n = c.shading_normal().unwrap();
+    let base = Vec3A::new(0.0, 0.3, 0.954).normalize();
+    assert!((n - base).length() < 1e-5, "{n}");
 }
 
 #[test]
