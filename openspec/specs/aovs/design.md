@@ -913,9 +913,14 @@ Where the implementation departs from, or sharpens, the decisions above.
   the IDs.
 - **`normal` is the shading point's normal** (`ShadingPoint::normal`, the
   record `Material::resolve` returned). UsdPreviewSurface and OpenPBR apply
-  their normal maps there; a MaterialX closure applies its `normal` input per
-  leaf (`closure::prepare`), after resolve, so for those the AOV is the
-  interpolated normal. Recorded in Known gaps.
+  their normal maps there. A MaterialX closure applies its `normal` input per
+  leaf (`closure::prepare`) and keeps the hit's record, so for a closure the
+  AOV is `ResolvedClosure::shading_normal`: the leaves' frame normals averaged
+  by their selection weights, coat leaves left out while a base sits under
+  them (a `coat_normal` is the coat's, as UsdPreviewSurface's one normal map
+  is the base's). It used to be the record's, the interpolated normal: a
+  production character's `Neye` correlated with another renderer's
+  normal-mapped pass at only 0.98 / 0.97 / 0.91, the residual the maps.
 - **The zero-AOV gate had a trap.** The first version passed the pixel index
   and the AOV planes as new `advance_pixel` arguments and branched on the film
   per pixel: +3.6M instructions on cornellbox at 2 spp (+0.086%, against a
@@ -1383,9 +1388,6 @@ to keep here:
   inversion) are not parsed.
 - `B` is not an event; the dome is `L`.
 - `Ng` (geometric normal) is refused: the kernel reports one normal per hit.
-- `normal` / `Neye` ignore a MaterialX closure's own `normal` input (applied
-  per leaf, after the shading point exists); UsdPreviewSurface and OpenPBR
-  normal maps are honoured.
 - Guided renders with ≥ 2 training iterations are not repeatable (`ΔEff` is
   wall-clock), so neither are their AOVs.
 - Light groups read `crust:light:lpeTag` only; other renderers' tag

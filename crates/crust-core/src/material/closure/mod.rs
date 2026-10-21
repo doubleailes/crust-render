@@ -890,6 +890,22 @@ impl ResolvedClosure {
         sum.clamp(Vec3A::ZERO, Vec3A::ONE)
     }
 
+    /// The shading normal the `normal` and `Neye` AOVs report: the leaves'
+    /// normals — each its MaterialX `normal` input where one is connected —
+    /// averaged by their selection weights, so the lobes that carry the
+    /// surface's look carry its normal. A coat's `coat_normal` is left out
+    /// while any leaf sits under it, as for UsdPreviewSurface, whose single
+    /// normal map is the base's. `None` when no leaf has weight.
+    pub fn shading_normal(&self) -> Option<Vec3A> {
+        let leaves = &self.leaves[..self.len];
+        let base = leaves.iter().any(|l| !l.coat && l.select > 0.0);
+        let n = leaves
+            .iter()
+            .filter(|l| !(base && l.coat))
+            .fold(Vec3A::ZERO, |a, l| a + l.frame.n * l.select.max(0.0));
+        (n.is_finite() && n.length_squared() > 1e-12).then(|| n.normalize())
+    }
+
     /// [`crate::Material::eval`].
     pub fn eval(&self, _r_in: &Ray, _rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
         if self.len == 0 {

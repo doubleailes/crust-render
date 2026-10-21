@@ -47,7 +47,8 @@ parentheses.
 - `P` (`Pworld`, `__Pworld`, `Position`) and `Peye` (`Pcam`, `__Pcam`):
   first-hit position, in world space and camera space respectively.
 - `normal` (`N`, `Nworld`, `__Nworld`, `Normal`) and `Neye` (`Nn`): the
-  shading normal, facing the ray, in world space and camera space
+  shading normal after any normal map (a MaterialX `normal` input included),
+  facing the ray, in world space and camera space
   respectively. Values are in [-1, 1].
 - `primvars:st` (`st`, `uv`, `UV`): the first hit's UV.
 - `sampleCount` (`__sampleCount`): the samples the pixel took.
