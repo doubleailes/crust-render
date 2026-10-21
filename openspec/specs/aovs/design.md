@@ -185,7 +185,9 @@ AOVs. Crust should combine:
   `aspectRatioConformPolicy`.
 - `disableMotionBlur` / `disableDepthOfField`. (`disableMotionBlur` and its
   synonym `instantaneousShutter` were honoured later, by
-  `add-motion-vector-aov`; see "Motion vector AOV" below.)
+  `add-motion-vector-aov`; see "Motion vector AOV" below. `disableDepthOfField`
+  was honoured by `physical-depth-of-field`, resolved the same way; the
+  `usd-scene-import` design record has it.)
 - `includedPurposes` / `materialBindingPurposes`.
 
 These are UsdRender settings worth a separate change ("camera and settings
@@ -867,9 +869,10 @@ sample.
 ## Follow-ups
 
 - Camera and settings conformance: `pixelAspectRatio`,
-  `aspectRatioConformPolicy`, `disableDepthOfField`, `includedPurposes`,
+  `aspectRatioConformPolicy`, `includedPurposes`,
   `materialBindingPurposes`. (`disableMotionBlur` / `instantaneousShutter`
-  are done: "Motion vector AOV" below. `dataWindowNDC` is done by
+  are done: "Motion vector AOV" below. `disableDepthOfField` is done by
+  `physical-depth-of-field`: the `usd-scene-import` design record. `dataWindowNDC` is done by
   `add-render-region`: every product of a cropped render is written with the
   frame as display window and the region as data window; overscan is not.)
 - One render per (camera, resolution) group.
@@ -1104,9 +1107,11 @@ has the full reasoning (D1–D7); the points to keep here:
   open to shutter close, in pixels of the rendered image, `u` right and `v`
   up (Nuke's conventions, Arnold's raw `motionvector`), measured through the
   pinhole at the lens centre (depth of field ignored on purpose: the vector
-  describes the in-focus image). Per-shutter units: the authored
-  `crust:motion:translate` *is* the displacement over the shutter;
-  `shutter:open/close` are still not read. Closest by default, clear `0`,
+  describes the in-focus image). Per-shutter units: the camera's
+  `shutter:open` / `shutter:close` around the frame (read by the import
+  since `time-sampled-transform-motion`; see `usd-scene-import`), and the
+  authored `crust:motion:translate` *is* the displacement over that shutter
+  whatever its length. Closest by default, clear `0`,
   two floating-point components only (`float2`, `half2`, `texCoord2f`;
   `int2`/`uint2` refused through the UINT-is-`sampleCount`-only rule,
   `vector2f` because `vector` is 3-component in USD). Channels are
@@ -1117,28 +1122,45 @@ has the full reasoning (D1–D7); the points to keep here:
   have their own conventions). The D5 trap again: an alias would be a
   plausible but wrong channel. Each can be added later as its own row.
 - **The motion is derived in `WorldBuilder`, not stated by the importer**
-  (`rt_world.rs`, `MotionRecord::of` → `World::motion`). Every
-  `Geometry::Instance` attached or set with `InstanceHitId::Own` and an end
-  transform whose linear part equals the start's records `end.translation −
-  start.translation`, in a sparse table sorted by `geom_id` (16 bytes per
-  *moving* geometry; a field on every `SideTables` would charge every static
-  id). The record is read off the very transform the kernel interpolates, so
+  (`rt_world.rs`, `MotionRecord::of` → `World::motion(geom_id, p, time)`).
+  The record is read off the very transform pair the kernel interpolates, so
   the vector and the blur cannot disagree, and the importer's cases fall out
   for free: a non-invertible mesh drops its motion (baked, no end transform,
-  no record), a prototype has `transform_end: None`. An end transform with a
-  different linear part, a forwarded label, or an instance over a scene that
-  itself moves is `Unresolved`: vector 0, counted, one summarised `WARN` at
-  commit. So is any id a forwarding instance reports its inner hits under
-  (`InstanceHitId::As(k)`: `k`; `Offset(base)`: `base ..= base +
-  inner.max_hit_id()`): a hit carrying it may lie in the forwarding
+  no record), a prototype has `transform_end: None`. A moving
+  `Geometry::Instance` records one of two `Motion`s:
+  - `Translation(end.translation − start.translation)` when the end's linear
+    part equals the start's: exact, 16 bytes, no inverse;
+  - `Affine([start, end])` otherwise (a rotation, a scale: what time-sampled
+    transforms produce). The per-hit velocity is `v = E·L − S·L` with `L =
+    lerp_affine(S, E, t)⁻¹·p` — the kernel's own element-wise interpolation,
+    re-implemented beside the record with the same glam calls — which is
+    constant along the point's path because that path is a straight chord.
+    So the rebase `P0 = p − t·v` below stays exact, and `aov::motion_vector`
+    did not change. A singular `M(t)` (a scale through zero) answers 0. One
+    3×4 inverse per camera sample that hits such geometry, in the AOV
+    instantiation only.
+
+  The table is sorted, non-overlapping inclusive `geom_id` ranges (binary
+  search on the low end): a geometry hit under its own id is a range of one;
+  a multi-part instance labelled `Offset(base)` *at its own id* — the native
+  instance of a grouped prototype, whose further slots are `reserve_slot`s
+  taken right after it — covers `base ..= base + inner.max_hit_id()`, since
+  only its own hits carry those ids. A static slot recorded inside a range
+  (those reserved slots) leaves it alone. An `As(k)` label, an `Offset` based
+  anywhere else, or an instance over a scene that itself moves is
+  `Unresolved`: vector 0, counted, one summarised `WARN` at commit
+  (`xform.motion_vector_unsupported`, "moves in a way the vector cannot
+  attribute to one placement"). So is any range a forwarding label reports
+  its inner hits under: a hit carrying it may lie in the forwarding
   placement rather than on the geometry that owns the id, so the owner's
   record goes too, whichever was attached first. The unresolved ids are a
   set, the slots' current state, so a reserved slot given a geometry twice
-  is one id and a replaced one is none. Nothing produces any of those today;
-  the guards are for the next producer.
-  Rejected: storing both endpoint transforms and evaluating `(E − L)·M(t)⁻¹·P`
-  for rotation too — 96 bytes per moving geometry and an inverse per sample
-  for motion nothing produces.
+  is one id and a replaced one is none. The importer produces none of the
+  unresolved cases today; the guards are for the next producer.
+  Rejected: the kernel returning the instance-local hit point (a change to
+  `crust-rt`'s hit record that every hit pays for, to serve one AOV), and
+  storing `S⁻¹` and ignoring `t` (wrong for blurred renders, whose hits are
+  made at `t > 0`).
 - **Plumbing.** `FirstHit::Surface` carries `motion`, filled at vertex 0 and
   in `first_wall` (whose `ThinWalls::first` now keeps the wall's `geom_id`),
   looked up only when the layout has a `motionvector` slot
@@ -1182,7 +1204,12 @@ has the full reasoning (D1–D7); the points to keep here:
   in `advance_pixel::<false, false>` with and without this change), never
   the records. Off, no `K_TIME` domain is derived, every ray has `time = 0`
   and the beauty is sharp at the authored positions, bit-identical between
-  the two spellings. The two left `warn_unhonoured`. No CLI flag, no
+  the two spellings — unless a time-sampled transform moves over a shutter
+  that opens away from the frame, where `disableMotionBlur` is sharp at the
+  frame and `instantaneousShutter` at shutter open, the vector being the
+  shutter's displacement measured from the sharp pose either way
+  (`time-sampled-transform-motion`, the `usd-scene-import` record). The two
+  left `warn_unhonoured`. No CLI flag, no
   environment switch: a scene setting, not an optimisation to A/B.
 - **Verified in numbers, not by eye.** `crates/crust-render/tests/
   motion_vector.rs` renders `samples/motionvector.usda` through the CLI and
@@ -1197,9 +1224,22 @@ has the full reasoning (D1–D7); the points to keep here:
   instantiation pinned by callgrind on cornellbox, tiles ↔ scanlines and
   the beauty with and without the var bit-identical
   (`crates/crust-core/tests/motion_vector.rs`).
-- **Known gaps.** No 3D velocity, no backward or centred vector, no
-  per-frame units, no camera, rotation or deformation motion, no Arnold
-  normalised encoding; an instancer prototype authoring
+- **Time-sampled transforms** (`time-sampled-transform-motion`). The
+  end-to-end tests render `samples/animation.usda` through an override layer
+  (camera `shutter:close = 1`, `-f 5`, a `forward` var): `Mover`'s centre
+  pixel is the projection of its `P` moved 4/9 units along X within 0.01 px,
+  the sky `(0, 0)`, the blurred render's vectors its own hits' predictions,
+  and `shutter:close = 0.5` halves the vector at constant depth. A cube
+  spinning about the view axis by a time-sampled `rotateZ` checks every face
+  pixel against the projection of the chord `R·P0 − P0` computed from `P`
+  (the affine record end to end), near zero at the axis. Over an
+  instantaneous shutter a `motionvector` var on a stage with a time-varying
+  drawn transform raises `camera.shutter_instantaneous` once.
+- **Known gaps.** No 3D velocity, no backward or centred vector, no camera
+  or deformation motion, no Arnold normalised encoding. A rotation's vector
+  is its chord, as the kernel's blur is (the `intersection-kernel` gap), so a
+  large turn within one shutter reads short; motion inside a prototype or a
+  nested instancer reads 0 (`Unresolved`). An instancer prototype authoring
   `crust:motion:translate` neither blurs nor gets a vector (consistent with
   the beauty; `usd-scene-import` known gaps). Open: whether 3-component
   `dataType`s (`color3f`, `vector3f`) should be accepted with a zero third
@@ -1235,9 +1275,109 @@ skipped, so a camera without an exposure renders the bits it always did. Pinned 
 `exposure_scales_radiance_only` (×2 radiance, ×4 variances, every other channel
 identical) and `the_last_snapshot_is_exposed`.
 
+## Primvar sources (`add-primvar-aovs`)
+
+`sourceType = "primvar"`: a primvar of the camera ray's first hit, interpolated
+as authored. The change's `design.md` has the full reasoning (D1–D8); the points
+to keep here:
+
+- **A keep set, resolved before any geometry.** `import_render_products` (the
+  index stage, before `traverse_stage`) returns beside the request a
+  `PrimvarKeep`: the deduplicated `(name, components)` the primvar vars ask for,
+  `primvars:` stripped, in first-use order, each entry's index the
+  `PrimvarSource::index` of every var reading it (so `rest` and
+  `primvars:rest` are one slot, bitwise). It rides on `MeshArena` (every mesh
+  path already holds the arena) and reaches `MeshNeeds` and `StrandRequest`.
+  Empty, every path is the one it was: no read, no table, no hash.
+- **The `dataType` carries a role** (`PrimvarRole`): `point`/`vector`/`normal`
+  and integers are closest, colours, floats and `texCoord`s filtered; the role
+  also picks the channel names. The source's `exposure_power` is 0. A
+  four-component type is refused (the film's per-sample value is 3 lanes).
+- **Mesh tables are outside `plain`.** `PrimvarTable` (constant /
+  per-triangle / corners, values as `[f32; 4]`) is built in `MeshArena::intern`
+  on the *undisplaced* connectivity — which is why `Pref` is the rest position
+  of a displaced mesh for free — by `primvar_table`, which walks the same
+  `for_each_fan_triangle` as `triangulate`, so the two index the same
+  triangles. `World::set_primvars` keeps it in a sparse list sorted by
+  `geom_id` and leaves `plain` alone: `intersect` never reads it. `MeshKey`
+  hashes the kept channels, the failure `mesh.rs` documents for charts.
+- **Subdivision carries N lanes.** `SubdivRequest::extra` is refined by the
+  chart's own code: the chart is widened to `[f32; 4]` and refined with the
+  extras, and opensubdiv-rs's `Primvar for [f32; N]` works lane by lane, so the
+  chart's two lanes are bit-identical to the old two-lane refinement
+  (`an_extra_channel_refines_like_the_chart_bitwise`; every sample renders
+  identically). The trap: adaptive tessellation must not add extra
+  face-varying channels to the surface's refiner —
+  `consider_fvar_channels` isolates a face irregular in *any* channel, which
+  moves the surface. They get a refiner and patch table of their own,
+  evaluated at the same `(ptex, u, v)`
+  (`an_extra_face_varying_channel_leaves_the_adaptive_surface`). A `uniform`
+  primvar maps refined faces through the raw base-face map
+  (`want_base_face`).
+- **The first hit's barycentrics are the kernel's, by re-tracing.**
+  `VertexSource` cannot name a forwarded group slot's or a moving instance's
+  vertices, so recomputing them from `p` would read the clear value on every
+  multi-part prototype; `World::hit_barycentrics` traces the camera ray again
+  from just short of the hit and keeps `(u, v)` when it lands on the same
+  `(geom_id, prim_id)` (`every_placement_of_a_prototype_reads_its_table`:
+  translated, mirrored, PointInstancer). **The trap:** the first version asked
+  the kernel for `(t − d, t + d)`; every other query asks `(TRACE_T_MIN, ∞)`,
+  LLVM had propagated those constants into `Bvh::hit`, and the one new call
+  cost cornellbox's *zero-AOV* render +6.27M instructions (+0.15%, in
+  `Bvh::hit` and `World::intersect`). Restarting the ray instead
+  (`path.rs`'s `restarted` documents the same constraint) brought it to
+  +71k, allocator noise.
+- **Curves read their strand table.** `StrandTable::kept` holds the kept
+  channels, decoded as authored (no colour conversion, unlike the material's),
+  and a table is built for a curves prim authoring a kept primvar even when its
+  material reads nothing — which takes its hits off the `plain` path, as any
+  curve whose material reads a curve property already is.
+- **Inheritance is detected, not honoured.** A geometry prim missing a kept
+  primvar walks its ancestors, memoised per `(entry, ancestor)`; native
+  instance prims and PointInstancers are checked where instancing meets them.
+  One `primvar.not_inherited` per var.
+- **Live edits.** `StageFacts::primvars` records the keep set; a settings
+  refresh whose products ask for another refuses, and the session re-imports
+  (`a_product_asking_for_a_new_primvar_reimports`). The two warnings raised
+  reading geometry are the `primvar.` family, not `aov.`: `aov.` is one of the
+  settings families a refresh refuses on (`live.rs`, `SETTINGS_FAMILIES`), and
+  a scene carrying one would re-import on every camera edit. The keep-set
+  check already guarantees a refresh cannot move them
+  (`a_primvar_warning_does_not_block_a_settings_edit`).
+- **Measured.** Zero-AOV cornellbox, 2 spp, callgrind: 4,264.29M against
+  `main`'s 4,264.22M (+0.0017%); `samples/subdivision.usda` +0.025%, the
+  chart's four-lane refinement and its widening copy at import. Interleaved
+  (`bench_ab.sh`, Render phase): `samples/hair.usda` with a constant
+  `displayColor` on its seven prims and a `displayColor` var against the same
+  product without it — AOV-only strand tables, 8.78 KiB — 64 spp, 12 reps:
+  +2.5% min, −2.1% mean, inside the noise; `samples/primvar_aovs.usda` (160×90,
+  256 spp) with its three primvar vars against `C` and `P` alone: +12.2% min,
+  +14.2% mean, the re-trace per camera sample and three more slots together.
+
 ## Known gaps
 
 - Every Non-Goal above, which is warned when authored, not silent.
+- Primvars are not inherited: a `constant` primvar on an ancestor, a
+  PointInstancer's per-instance primvars and primvars on an instance prim are
+  reported once per var, and the prims below read the clear value.
+- Four-component primvar vars are refused (the per-sample value is 3 lanes).
+- Implicit shapes (`Sphere`, `Cube`, …), Gaussian splats and volumes read a
+  primvar var's clear value, silently.
+- A `varying` primvar on a subdivided mesh is refined like the points
+  (smoothed and limit-projected), not bilinearly per face as USD and
+  OpenSubdiv's `InterpolateVarying` define it. The `st` chart has always done
+  the same. A fix means porting varying refinement into opensubdiv-rs, which
+  has no `interpolate_varying`, on the uniform and adaptive paths.
+- A subdivided mesh's UV chart is refined at four lanes, then narrowed back
+  to two (`RefinedChannel::narrowed`), even when no primvar var is requested.
+  The import's peak memory for the chart's refinement doubles for the time
+  it takes to refine, and `samples/subdivision.usda` costs +0.025%
+  instructions. The stored scene and the render are unchanged. Removing it
+  means making refinement generic over width.
+- A primvar table stores four lanes per value whatever its arity; packing at
+  the arity would save up to 12 bytes a value.
+- A colour primvar is written as authored, not converted into the working
+  space.
 - The `resolution` fallback is 640×360, not the schema's 2048×1080.
 - LPE extensions (RenderMan lobe tokens and prefixes, Arnold `A`, `!`
   inversion) are not parsed.

@@ -1213,6 +1213,268 @@ def Xform "World"
     }
 }
 
+/// A stage authoring `metadata` whose camera has a lens (`fStop = 2`), for
+/// the depth-of-field edits.
+fn lens_stage(metadata: &str) -> String {
+    format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    {metadata}
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 50
+        float fStop = 2
+        float focusDistance = 6
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+
+    def DistantLight "Sun"
+    {{
+        float inputs:intensity = 3
+    }}
+
+    def Sphere "Near"
+    {{
+        double radius = 0.5
+        double3 xformOp:translate = (-1, 0, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+
+    def Sphere "Far"
+    {{
+        double radius = 2
+        double3 xformOp:translate = (1, 0, -6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+}}
+"#
+    )
+}
+
+fn has_warning(state: &mut State, code: &str) -> bool {
+    state
+        .session()
+        .expect("open")
+        .scene
+        .report
+        .warnings
+        .iter()
+        .any(|w| w.code.as_str() == code)
+}
+
+/// `disableDepthOfField` is a settings edit: in place, it turns the lens
+/// into a pinhole as a full import of the same layer does, and its undo
+/// brings the lens back the same way. On a stage whose `metersPerUnit` the
+/// lens refuses, the refusal goes with the lens, as a full import drops it.
+#[test]
+fn disabling_depth_of_field_edits_as_a_full_import() {
+    let disable = r#"over "Render" { over "settings" { uniform bool disableDepthOfField = 1 } }"#;
+
+    let (mut state, dir) = session_on("dof_in_place", &lens_stage("metersPerUnit = 0.01"));
+    assert!(state.session().unwrap().scene.settings.depth_of_field());
+    assert_eq!(author(&mut state, disable), "settings");
+    assert!(!state.session().unwrap().scene.settings.depth_of_field());
+    same_as_full_import(&mut state, &dir, "disable depth of field");
+    assert_eq!(undo(&mut state), "settings");
+    same_as_full_import(&mut state, &dir, "undo disable depth of field");
+
+    let refused = "camera.invalid_meters_per_unit";
+    let (mut state, dir) = session_on("dof_bad_unit", &lens_stage("metersPerUnit = 0"));
+    assert!(has_warning(&mut state, refused));
+    author(&mut state, disable);
+    assert!(!has_warning(&mut state, refused), "no stale refusal");
+    same_as_full_import(&mut state, &dir, "disable depth of field, bad unit");
+    undo(&mut state);
+    assert!(has_warning(&mut state, refused), "the lens is back");
+    same_as_full_import(&mut state, &dir, "undo disable depth of field, bad unit");
+}
+
+/// A session over a metre-scale input with a lens renders as `crust render`
+/// of the input does, in a session render and in `render_final`: the
+/// override layer carries the input's `metersPerUnit`, so the lens is the
+/// input's 25 mm, not one read in centimetres.
+#[test]
+fn a_session_renders_the_inputs_lens() {
+    let stage = lens_stage("metersPerUnit = 1").replace(
+        "int crust:maxDepth = 2",
+        "int crust:maxDepth = 2\n        int crust:samplesPerPixel = 16",
+    );
+    let (mut state, dir) = session_on("lens_units", &stage);
+    let open = state.session().expect("open");
+    let (input, output) = (open.input.clone(), open.output.clone());
+    let region = [0, 0, 48, 32];
+
+    let (job, _) = open.start_render(Some(region), Some(16)).expect("started");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(job.wait(Duration::from_secs(3600)));
+    let finished = job.finished().expect("finished");
+    let session = planes(&finished, &job.aovs, "session");
+    let [(None, session)] = &session[..] else {
+        panic!("one beauty: {:?}", session.len())
+    };
+
+    let cli_dir = dir.join("cli");
+    std::fs::create_dir_all(&cli_dir).unwrap();
+    cli_render(&input, region, &cli_dir);
+    let cli = crust_assets::read_exr_planes(&cli_dir.join("output.exr")).expect("the CLI's file");
+    let report = crust_core::compare::compare(&cli, session);
+    assert!(report.identical, "session render: {}", report.to_text());
+
+    state
+        .session()
+        .unwrap()
+        .render_final()
+        .expect("render_final");
+    let last = crust_assets::read_exr_planes(&output.with_extension("exr")).expect("render_final");
+    let report = crust_core::compare::compare(&cli, &last);
+    assert!(report.identical, "render_final: {}", report.to_text());
+}
+
+/// A session over a Z-up input is Z up on its own stage, which reads its
+/// metadata from the override layer.
+#[test]
+fn a_session_over_a_z_up_input_is_z_up() {
+    let stage = lens_stage("").replace("upAxis = \"Y\"", "upAxis = \"Z\"");
+    let (mut state, _dir) = session_on("z_up_units", &stage);
+    let open = state.session().expect("open");
+    let axis = openusd_schemas::geom::StageMetadata::up_axis(&open.stage).expect("readable");
+    assert_eq!(axis.as_ref().map(|t| t.as_str()), Some("Z"));
+}
+
+/// Resuming a layer written before sessions copied the input's metrics adds
+/// the ones it lacks, keeping its opinions and any value it authors.
+#[test]
+fn resuming_adds_the_inputs_metrics_the_layer_lacks() {
+    let dir = work_dir("resume_metrics");
+    let input = dir.join("input.usda");
+    std::fs::write(
+        &input,
+        lens_stage("metersPerUnit = 1").replace("upAxis = \"Y\"", "upAxis = \"Z\""),
+    )
+    .unwrap();
+    // As the old `new_layer_text` wrote it, with an edit and an up axis of
+    // its own.
+    let layer = dir.join("edits.usda");
+    std::fs::write(
+        &layer,
+        "#usda 1.0\n(\n    subLayers = [\n        @./input.usda@\n    ]\n    upAxis = \"Y\"\n)\n\n\
+         over \"World\"\n{\n    over \"Cam\"\n    {\n        float exposure = 1\n    }\n}\n",
+    )
+    .unwrap();
+    let mut state = State::default();
+    let opened = state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .expect("resumed");
+    assert_eq!(opened["resumed"], true);
+    assert_eq!(
+        layer_field(&layer, "/", "metersPerUnit"),
+        Some(openusd::sdf::Value::Double(1.0))
+    );
+    assert!(
+        matches!(layer_field(&layer, "/", "upAxis"), Some(openusd::sdf::Value::Token(t)) if t.as_str() == "Y"),
+        "the layer's own up axis stays"
+    );
+    assert_eq!(
+        layer_field(&layer, "/World/Cam.exposure", "default"),
+        Some(openusd::sdf::Value::Float(1.0)),
+        "the edit stays"
+    );
+    let text = std::fs::read_to_string(&layer).unwrap();
+    assert!(text.contains("input.usda"), "{text}");
+}
+
+/// The shutter motion is measured over was read before the traversal and
+/// placed geometry at its ends, so editing it re-imports, and renders as a
+/// full import of the same layer would; the camera's exposure still applies
+/// in place.
+#[test]
+fn a_shutter_edit_reimports_and_an_exposure_stays_in_place() {
+    let stage = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 10
+)
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+    }
+
+    def Sphere "Mover"
+    {
+        double radius = 0.5
+        double3 xformOp:translate.timeSamples = {
+            1: (-1, 0, 0),
+            10: (1, 0, 0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"#;
+    let (mut state, dir) = session_on("shutter_edit", stage);
+    let exposure = r#"over "World" { over "Cam" { float exposure = 1 } }"#;
+    assert_eq!(author(&mut state, exposure), "settings");
+    same_as_full_import(&mut state, &dir, "shutter exposure");
+    let shutter = r#"over "World" { over "Cam" { double shutter:close = 0.5 } }"#;
+    assert_eq!(author(&mut state, shutter), "full");
+    same_as_full_import(&mut state, &dir, "shutter close");
+    assert_eq!(undo(&mut state), "full", "undo the shutter");
+    same_as_full_import(&mut state, &dir, "undo shutter close");
+
+    // Over a shutter that opens before the frame, `disableMotionBlur` poses
+    // the moving sphere at the frame rather than at shutter open: geometry
+    // moves, so the settings edit re-imports.
+    let centred = r#"over "World" { over "Cam" {
+        double shutter:open = -0.25
+        double shutter:close = 0.25
+    } }"#;
+    assert_eq!(author(&mut state, centred), "full");
+    let sharp = r#"over "Render" { over "settings" { uniform bool disableMotionBlur = 1 } }"#;
+    assert_eq!(author(&mut state, sharp), "full");
+    same_as_full_import(&mut state, &dir, "sharp at the frame");
+}
+
 /// A light-linked scene keeps its resolved links through an in-place light
 /// edit: each linked light (shadow-linked, light-link excludes, include-only)
 /// dims and recolours in place as a full import of the same layer renders it.
@@ -2245,4 +2507,90 @@ fn a_curve_material_reading_a_new_primvar_reimports() {
     same_as_full_import(&mut state, &dir, "groom reads its primvar");
     assert_eq!(undo(&mut state), "full");
     same_as_full_import(&mut state, &dir, "groom primvar undone");
+}
+
+/// A stage with a mesh authoring `primvars:rest`, whose settings render the
+/// product without a primvar var.
+fn primvar_stage() -> String {
+    r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        double3 xformOp:translate = (0, 0, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+    }
+    def Mesh "M"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        point3f[] primvars:rest = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)] (
+            interpolation = "vertex"
+        )
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (32, 24)
+        int crust:maxDepth = 2
+        rel products = [</Render/plain>]
+    }
+    def RenderProduct "plain"
+    {
+        token productName = "plain.exr"
+        rel orderedVars = [</Render/C>]
+    }
+    def RenderProduct "withRest"
+    {
+        token productName = "rest.exr"
+        rel orderedVars = [</Render/C>, </Render/Pref>]
+    }
+    def RenderVar "C"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "color"
+    }
+    def RenderVar "Pref"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+    }
+}
+"#
+    .to_owned()
+}
+
+/// Retargeting `products` to one with a primvar var asks the geometry for a
+/// primvar it was read without, so the edit is `full`, and its render — the
+/// `Pref` channel included — is a full import's of the same layer, bit for
+/// bit; so is its undo.
+#[test]
+fn a_product_asking_for_a_new_primvar_reimports() {
+    let (mut state, dir) = session_on("primvar_products", &primvar_stage());
+    assert_eq!(
+        author(
+            &mut state,
+            r#"over "Render" { over "settings" { rel products = [</Render/withRest>] } }"#,
+        ),
+        "full"
+    );
+    same_as_full_import(&mut state, &dir, "products with Pref");
+    assert_eq!(undo(&mut state), "full");
+    same_as_full_import(&mut state, &dir, "products with Pref undone");
 }

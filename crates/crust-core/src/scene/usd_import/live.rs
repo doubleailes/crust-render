@@ -28,12 +28,14 @@ use super::mesh::SubdivPolicy;
 use super::time::EvalTimeScope;
 use super::xform::compose_with_parent;
 use super::{
-    ImportCaches, ImportCtx, ValidOptions, apply_exposure, emit_light, open_stage,
-    open_stage_masked, prim_at, read_index, stage_builder,
+    ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, frame_pose,
+    open_stage, open_stage_masked, prim_at, read_index, stage_builder,
 };
 
 /// Warning codes a settings change can move, by family: the settings, the
 /// products and their AOVs, the camera, the time code and the colour space.
+/// Not `primvar.`: those are raised reading geometry, for the primvars the
+/// geometry kept, and a refresh that would change that set is refused.
 const SETTINGS_FAMILIES: &[&str] = &[
     "settings.",
     "product.",
@@ -358,8 +360,24 @@ fn refresh_settings(
                 "implicit shapes would be sized for the newly named camera".into(),
             ));
         }
+        // Geometry was placed at the shutter's ends, so another shutter
+        // re-imports, as a transform edit does.
+        if read.shutter.key(
+            asks_about_time(&read.shutter, &read.products),
+            frame_pose(&read.shutter, &read.products),
+        ) != facts.shutter
+        {
+            return Err(Structural("the camera shutter changed".into()));
+        }
         if read.domes_seen_by_camera != facts.domes_seen_by_camera {
             return Err(Structural("the dome's camera visibility changed".into()));
+        }
+        // The geometry kept the primvars the products asked for when it was
+        // read, and nothing else: asking for another needs it read again.
+        if read.products.primvars.key() != facts.primvars {
+            return Err(Structural(
+                "the products ask for other primvars than the geometry kept".into(),
+            ));
         }
         if read
             .wanted_camera
@@ -374,6 +392,7 @@ fn refresh_settings(
         let prim: Prim = prim_at(&stage, cam_path.clone());
         let rc = build_camera(&stage, &prim, &read.settings)
             .ok_or_else(|| Structural(format!("{camera} is no longer a camera")))?;
+        rc.warn_lens_units(Some(camera));
         let settings = apply_exposure(
             read.settings,
             read.exposure_compensation,

@@ -432,6 +432,85 @@ impl UvMap {
     }
 }
 
+/// A mesh's primvars that render vars ask for, per triangle: one channel per
+/// entry of the render's primvar keep set, `None` where the mesh does not
+/// author it (or authors it with a type the var cannot read). Values are four
+/// lanes, the unused ones zero.
+///
+/// Read only by the AOV first hit ([`World::primvars_at`]), never by
+/// [`World::intersect`]: a geometry carrying one keeps the `plain` fast path,
+/// so the beauty pays nothing per hit. Shared by `Arc` across the placements
+/// of one distinct mesh, like [`UvMap`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimvarTable {
+    pub channels: Vec<Option<PrimvarChannel>>,
+}
+
+/// One primvar of a [`PrimvarTable`], in the shape its interpolation needs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrimvarChannel {
+    /// `constant`: one value for the whole mesh.
+    Constant([f32; 4]),
+    /// `uniform`: per triangle, the index of its polygon's value.
+    PerTriangle { values: Vec<[f32; 4]>, of: Vec<u32> },
+    /// `vertex`, `varying` and `faceVarying`: per triangle, the index of each
+    /// corner's value, in the triangle's original vertex order.
+    Corners {
+        values: Vec<[f32; 4]>,
+        corners: Vec<[u32; 3]>,
+    },
+}
+
+impl PrimvarChannel {
+    /// The value at barycentrics `(u, v)` of triangle `prim_id` (in the
+    /// kernel's vertex order, which `swapped` undoes as [`UvMap::resolve`]
+    /// does), or `None` for a triangle or index the channel does not cover.
+    pub fn at(&self, prim_id: u32, u: f32, v: f32, swapped: bool) -> Option<[f32; 4]> {
+        match self {
+            PrimvarChannel::Constant(x) => Some(*x),
+            PrimvarChannel::PerTriangle { values, of } => {
+                values.get(*of.get(prim_id as usize)? as usize).copied()
+            }
+            PrimvarChannel::Corners { values, corners } => {
+                let [a, b, c] = corners
+                    .get(prim_id as usize)?
+                    .map(|i| values.get(i as usize));
+                let (a, b, c) = (a?, b?, c?);
+                let (u, v) = if swapped { (v, u) } else { (u, v) };
+                let w = 1.0 - u - v;
+                Some(std::array::from_fn(|l| w * a[l] + u * b[l] + v * c[l]))
+            }
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        let lanes = std::mem::size_of::<[f32; 4]>();
+        match self {
+            PrimvarChannel::Constant(_) => lanes,
+            PrimvarChannel::PerTriangle { values, of } => values.len() * lanes + of.len() * 4,
+            PrimvarChannel::Corners { values, corners } => {
+                values.len() * lanes + corners.len() * 12
+            }
+        }
+    }
+}
+
+impl PrimvarTable {
+    /// Whether no channel holds anything: such a table is never attached.
+    pub fn is_empty(&self) -> bool {
+        self.channels.iter().all(Option::is_none)
+    }
+
+    /// Heap bytes of the values and indices, for `--stats`.
+    pub fn bytes(&self) -> usize {
+        self.channels
+            .iter()
+            .flatten()
+            .map(PrimvarChannel::bytes)
+            .sum()
+    }
+}
+
 /// The tangent of one triangle: the standard solve of
 /// `[dP1; dP2] = [duv1; duv2] · [T; B]` for `T` — the direction in which `u`
 /// grows across the triangle, from its world-space vertices and corner UVs
@@ -465,19 +544,22 @@ pub fn tangent_of(uv: &[[f32; 2]; 3], p0: Vec3A, p1: Vec3A, p2: Vec3A) -> Vec3A 
 /// A hit carries `(geom_id, prim_id)` and nothing about the placement it was
 /// traversed through, so the only geometries whose vertices can be recovered
 /// are those where the id *is* the placement: a baked mesh (the top-level
-/// scene holds its world-space vertices under its own id) and a direct,
+/// scene holds its world-space vertices under its own id), a direct,
 /// unlabelled, static instance (one scene, one transform, recorded here at
-/// attach time). Everything else is `Unresolved`, deliberately: a prototype
-/// part placed through an instancer's group reports a forwarded slot id
-/// (`InstanceHitId::As` / `Offset`) that names the slot, not the placement
-/// traversed — two differently transformed placements of one prototype
-/// share it, so no transform can be recovered from the hit; and a
-/// motion-blurred instance was intersected through a transform interpolated
-/// at the ray's time, which no retained start transform reproduces. Neither
-/// consults any scene: resolving a forwarded id against the top-level scene
-/// would hand back whatever geometry happens to sit at that index. Both
-/// shade normal maps with the geometric normal, as every instance did before
-/// tangents were derived at the hit.
+/// attach time), and a direct, unlabelled, moving instance over a static
+/// scene (both of its transforms, recorded here, interpolated at the ray's
+/// shutter time with the kernel's own arithmetic, so the vertices are the
+/// ones the ray was intersected against). Everything else is `Unresolved`,
+/// deliberately: a prototype part placed through an instancer's group
+/// reports a forwarded slot id (`InstanceHitId::As` / `Offset`) that names
+/// the slot, not the placement traversed — two differently transformed
+/// placements of one prototype share it, so no transform can be recovered
+/// from the hit; and an instance whose inner scene itself moves has a second
+/// interpolation the hit does not name. Neither consults any scene:
+/// resolving a forwarded id against the top-level scene would hand back
+/// whatever geometry happens to sit at that index. Both shade normal maps
+/// with the geometric normal, as every instance did before tangents were
+/// derived at the hit.
 enum VertexSource {
     /// No vertices, no tangent frame.
     Unresolved,
@@ -486,6 +568,11 @@ enum VertexSource {
     /// A direct, unlabelled, static instance: that scene in local space,
     /// carried into the world through its placement.
     Placed(Arc<crust_rt::Scene>, Affine3A),
+    /// A direct, unlabelled, moving instance over a static scene: that scene
+    /// in local space, carried into the world through its start and end
+    /// transforms interpolated at the ray's shutter time. Boxed: few
+    /// geometries move.
+    Moving(Arc<crust_rt::Scene>, Box<[Affine3A; 2]>),
 }
 
 /// What a geometry's motion over the shutter is, read off the end transform
@@ -493,24 +580,80 @@ enum VertexSource {
 /// cannot disagree, and every importer special case (a non-invertible mesh
 /// drops its motion, a prototype gets no end transform) is covered without
 /// a word here.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 enum MotionRecord {
     /// Nothing moves: a static geometry, or an instance without an end
     /// transform over a static scene.
     None,
-    /// Every point of the geometry moves by this world-space translation
-    /// over the shutter, at constant speed: an instance whose end transform
-    /// has the start's linear part. The one motion the importer produces.
-    Translation(Vec3A),
-    /// Motion the record cannot express — an end transform with a different
-    /// linear part (a rotation, a scale), or an instance whose inner scene
-    /// itself moves. The kernel blurs it; the AOV reports zero and the
-    /// import warns once with the count.
+    /// The geometry moves, and every hit on the ids it covers can be
+    /// attributed to it.
+    Moves(Motion),
+    /// Motion the record cannot attribute to one placement — an instance
+    /// whose inner scene itself moves, or one whose hits carry ids a
+    /// forwarding label names. The kernel blurs it; the AOV reports zero and
+    /// the import warns once with the count.
     Unresolved,
 }
 
+/// How a moving geometry's points travel over the shutter.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum Motion {
+    /// Every point moves by this world-space translation, at constant speed:
+    /// an instance whose end transform has the start's linear part. Exact,
+    /// and 16 bytes.
+    Translation(Vec3A),
+    /// The start and end transforms of an instance whose linear part changes
+    /// (a rotation, a scale): a point's path is where the kernel's
+    /// element-wise interpolation carries it, a straight chord.
+    Affine(Box<[Affine3A; 2]>),
+}
+
+impl Motion {
+    /// The world-space displacement over the whole shutter of the point hit
+    /// at `p` at shutter time `time`: constant along its path, since the
+    /// kernel's interpolation moves every point in a straight line.
+    ///
+    /// For the affine record, `M(t) = lerp(S, E, t)` is the kernel's own
+    /// interpolation, `L = M(t)⁻¹ · p` the point in the instance's frame, and
+    /// the answer `E·L − S·L`. A singular `M(t)` (a scale passing through
+    /// zero) has no inverse, and answers zero.
+    pub(crate) fn velocity(&self, p: Vec3A, time: f32) -> Vec3A {
+        match self {
+            Motion::Translation(v) => *v,
+            Motion::Affine(ends) => {
+                let [start, end] = **ends;
+                let m = lerp_affine(&start, &end, time);
+                if m.matrix3.determinant() == 0.0 {
+                    return Vec3A::ZERO;
+                }
+                let local = m.inverse().transform_point3a(p);
+                let v = end.transform_point3a(local) - start.transform_point3a(local);
+                if v.is_finite() { v } else { Vec3A::ZERO }
+            }
+        }
+    }
+}
+
+/// `crust_rt`'s instance interpolation, element by element — the same
+/// arithmetic, so a hit point is rebased through exactly the transform it
+/// was intersected through.
+fn lerp_affine(a: &Affine3A, b: &Affine3A, t: f32) -> Affine3A {
+    Affine3A {
+        matrix3: glam::Mat3A::from_cols(
+            a.matrix3.x_axis.lerp(b.matrix3.x_axis, t),
+            a.matrix3.y_axis.lerp(b.matrix3.y_axis, t),
+            a.matrix3.z_axis.lerp(b.matrix3.z_axis, t),
+        ),
+        translation: a.translation.lerp(b.translation, t),
+    }
+}
+
 impl MotionRecord {
-    fn of(geometry: &Geometry, label: InstanceHitId) -> MotionRecord {
+    /// The record of `geometry` attached at `id` with hits labelled `label`.
+    /// An `Offset` label based at the geometry's own id covers the ids its
+    /// slots take, which only its own hits carry; any other forwarding label
+    /// names ids it does not own.
+    fn of(geometry: &Geometry, label: InstanceHitId, id: u32) -> MotionRecord {
         let Geometry::Instance {
             scene,
             transform,
@@ -524,14 +667,13 @@ impl MotionRecord {
         }
         match transform_end {
             None => MotionRecord::None,
-            // A forwarded label names a slot, not the placement traversed:
-            // two differently placed prototypes share one id, so no single
-            // translation is the answer.
-            Some(_) if label != InstanceHitId::Own => MotionRecord::Unresolved,
-            Some(end) if end.matrix3 == transform.matrix3 => {
-                MotionRecord::Translation(end.translation - transform.translation)
+            Some(_) if label != InstanceHitId::Own && label != InstanceHitId::Offset(id) => {
+                MotionRecord::Unresolved
             }
-            Some(_) => MotionRecord::Unresolved,
+            Some(end) if end.matrix3 == transform.matrix3 => {
+                MotionRecord::Moves(Motion::Translation(end.translation - transform.translation))
+            }
+            Some(end) => MotionRecord::Moves(Motion::Affine(Box::new([*transform, **end]))),
         }
     }
 }
@@ -608,11 +750,17 @@ pub struct WorldBuilder {
     /// Per `geom_id`, whether it is a transparent emitter; empty when none
     /// is (see [`World::is_transparent_emitter`]).
     transparent_emitters: Vec<bool>,
-    /// The geometries that move over the shutter and by how much, sorted by
-    /// `geom_id` (see [`World::motion`]). Sparse: most geometries never
-    /// move, and a field on every `SideTables` would cost each static
-    /// `geom_id` 16 bytes for a value read at most once per camera sample.
-    motion: Vec<(u32, Vec3A)>,
+    /// The geometries that move over the shutter and how, as sorted,
+    /// non-overlapping inclusive `geom_id` ranges (see [`World::motion`]): a
+    /// single id for a geometry hit under its own id, the ids its slots take
+    /// for a multi-part instance. Sparse: most geometries never move, and a
+    /// field on every `SideTables` would cost each static `geom_id` for a
+    /// value read at most once per camera sample.
+    motion: Vec<(u32, u32, Motion)>,
+    /// The geometries carrying a [`PrimvarTable`], sorted by `geom_id`, each
+    /// with whether its placement mirrored the winding. Sparse, for the same
+    /// reason as `motion`, and empty unless a render var asks for a primvar.
+    primvars: Vec<(u32, Arc<PrimvarTable>, bool)>,
     /// The `geom_id`s whose motion the table cannot express
     /// ([`MotionRecord::Unresolved`]), sorted; warned about once at commit.
     /// A set, not a count: a slot given a geometry twice is one id.
@@ -661,18 +809,27 @@ impl WorldBuilder {
         label: InstanceHitId,
     ) -> u32 {
         let vertices = Self::vertex_source(&geometry, label);
-        let motion = MotionRecord::of(&geometry, label);
+        let id = self.materials.len() as u32;
+        let motion = MotionRecord::of(&geometry, label, id);
         // The ids this instance's hits will carry, when they are not its
-        // own: a translation recorded under one of them would be read by
-        // hits that lie in this placement instead.
-        let forwards = match (label, &geometry) {
-            (InstanceHitId::As(id), _) => Some((id, id)),
+        // own. An `Offset` range based at its own id is its own slots, and
+        // its motion covers them; any other is forwarded, and a motion
+        // recorded under one of its ids would be read by hits that lie in
+        // this placement instead.
+        let (forwards, hi) = match (label, &geometry) {
+            (InstanceHitId::As(k), _) => (Some((k, k)), id),
             (InstanceHitId::Offset(base), Geometry::Instance { scene, .. }) => {
-                Some((base, base.saturating_add(scene.max_hit_id())))
+                let range = (base, base.saturating_add(scene.max_hit_id()));
+                if base == id {
+                    (None, range.1)
+                } else {
+                    (Some(range), id)
+                }
             }
-            _ => None,
+            _ => (None, id),
         };
-        let id = self.rt.attach_labelled(geometry, mask, label);
+        let attached = self.rt.attach_labelled(geometry, mask, label);
+        debug_assert_eq!(attached, id);
         self.materials.push(material);
         self.faces.push(SideTables {
             vertices,
@@ -681,54 +838,69 @@ impl WorldBuilder {
         if let Some(range) = forwards {
             self.forward_ids(range);
         }
-        self.record_motion(id, motion);
+        self.record_motion(id, hi, motion);
         debug_assert_eq!(id as usize + 1, self.materials.len());
         id
     }
 
     /// Marks `range` (inclusive) as ids forwarding instances report: a
-    /// translation already recorded inside it becomes unresolved, and none
+    /// motion already recorded over any of them becomes unresolved, and none
     /// is recorded there later.
     fn forward_ids(&mut self, range: (u32, u32)) {
         self.forwarded.push(range);
         let (lo, hi) = range;
-        let shared: Vec<u32> = self
+        let shared: Vec<(u32, u32)> = self
             .motion
             .iter()
-            .map(|(id, _)| *id)
-            .filter(|id| (lo..=hi).contains(id))
+            .filter(|(a, b, _)| *a <= hi && lo <= *b)
+            .map(|(a, b, _)| (*a, *b))
             .collect();
-        for id in shared {
-            self.record_motion(id, MotionRecord::Unresolved);
+        for (a, b) in shared {
+            self.record_motion(a, b, MotionRecord::Unresolved);
         }
     }
 
-    /// Replaces `id`'s entry in the motion table with `motion`: the current
-    /// state of the slot, so a geometry given again drops what it replaced.
-    fn record_motion(&mut self, id: u32, motion: MotionRecord) {
+    /// Replaces the motion of the geometry at `id`, whose hits carry the ids
+    /// `id ..= hi`, with `motion`: the current state of the slot, so a
+    /// geometry given again drops what it replaced. A static slot inside a
+    /// recorded range (a multi-part instance's further slots) leaves the
+    /// range alone.
+    fn record_motion(&mut self, id: u32, hi: u32, motion: MotionRecord) {
+        // The common case, a static geometry in a static scene, has nothing
+        // to replace.
+        if motion == MotionRecord::None && self.motion.is_empty() && self.unresolved.is_empty() {
+            return;
+        }
         let motion = match motion {
-            MotionRecord::Translation(_)
+            MotionRecord::Moves(_)
                 if self
                     .forwarded
                     .iter()
-                    .any(|(lo, hi)| (*lo..=*hi).contains(&id)) =>
+                    .any(|(lo, fhi)| *lo <= hi && id <= *fhi) =>
             {
                 MotionRecord::Unresolved
             }
             m => m,
         };
-        let at = self.motion.binary_search_by_key(&id, |(i, _)| *i);
-        match (motion, at) {
-            (MotionRecord::Translation(v), Ok(i)) => self.motion[i].1 = v,
-            (MotionRecord::Translation(v), Err(i)) => self.motion.insert(i, (id, v)),
+        let at = self.motion.binary_search_by_key(&id, |(lo, ..)| *lo);
+        match (&motion, at) {
+            (MotionRecord::Moves(m), Ok(i)) => self.motion[i] = (id, hi, m.clone()),
+            (MotionRecord::Moves(m), Err(i)) => {
+                debug_assert!(
+                    self.motion.get(i).is_none_or(|(lo, ..)| *lo > hi)
+                        && (i == 0 || self.motion[i - 1].1 < id),
+                    "motion ranges overlap at {id}..={hi}"
+                );
+                self.motion.insert(i, (id, hi, m.clone()));
+            }
             (MotionRecord::None | MotionRecord::Unresolved, Ok(i)) => {
                 self.motion.remove(i);
             }
             (MotionRecord::None | MotionRecord::Unresolved, Err(_)) => {}
         }
-        match (motion, self.unresolved.binary_search(&id)) {
+        match (&motion, self.unresolved.binary_search(&id)) {
             (MotionRecord::Unresolved, Err(i)) => self.unresolved.insert(i, id),
-            (MotionRecord::None | MotionRecord::Translation(_), Ok(i)) => {
+            (MotionRecord::None | MotionRecord::Moves(_), Ok(i)) => {
                 self.unresolved.remove(i);
             }
             _ => {}
@@ -744,7 +916,7 @@ impl WorldBuilder {
     }
 
     /// Where a hit's vertices can be read from — see [`VertexSource`] for
-    /// why only these two shapes resolve.
+    /// why only these shapes resolve.
     fn vertex_source(geometry: &Geometry, label: InstanceHitId) -> VertexSource {
         match geometry {
             Geometry::TriangleMesh { .. } if label == InstanceHitId::Own => VertexSource::Baked,
@@ -753,6 +925,13 @@ impl WorldBuilder {
                 transform,
                 transform_end: None,
             } if label == InstanceHitId::Own => VertexSource::Placed(Arc::clone(scene), *transform),
+            Geometry::Instance {
+                scene,
+                transform,
+                transform_end: Some(end),
+            } if label == InstanceHitId::Own && !scene.has_motion() => {
+                VertexSource::Moving(Arc::clone(scene), Box::new([*transform, **end]))
+            }
             _ => VertexSource::Unresolved,
         }
     }
@@ -786,6 +965,26 @@ impl WorldBuilder {
         t.uv = Some(map);
         t.swapped = swapped;
         t.plain = false;
+    }
+
+    /// Records the primvar table of a mesh geometry, which the primvar AOVs
+    /// read at the camera's first hit. Unlike the other tables it leaves the
+    /// geometry `plain`: [`World::intersect`] never reads it.
+    ///
+    /// `swapped` when the placement mirrored the triangle winding, as for
+    /// [`WorldBuilder::set_uv_map`].
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_primvars(&mut self, id: u32, table: Arc<PrimvarTable>, swapped: bool) {
+        assert!(
+            (id as usize) < self.count(),
+            "geometry {id} was never attached"
+        );
+        match self.primvars.binary_search_by_key(&id, |(i, ..)| *i) {
+            Ok(i) => self.primvars[i] = (id, table, swapped),
+            Err(i) => self.primvars.insert(i, (id, table, swapped)),
+        }
     }
 
     /// Records the strand table of a curves geometry, so hits on it report
@@ -865,9 +1064,9 @@ impl WorldBuilder {
     /// If `id` was never reserved.
     pub fn set_geometry(&mut self, id: u32, geometry: Geometry) {
         self.faces[id as usize].vertices = Self::vertex_source(&geometry, InstanceHitId::Own);
-        let motion = MotionRecord::of(&geometry, InstanceHitId::Own);
+        let motion = MotionRecord::of(&geometry, InstanceHitId::Own, id);
         self.rt.set_geometry(id, geometry);
-        self.record_motion(id, motion);
+        self.record_motion(id, id, motion);
     }
 
     /// The ray mask the geometry at `id` was attached with.
@@ -907,9 +1106,9 @@ impl WorldBuilder {
             let one = unresolved == 1;
             warning!(
                 XformMotionVectorUnsupported,
-                "{unresolved} geometr{} move{} other than by a translation (a rotating or \
-                 scaling end transform, nested motion, or an id shared with a forwarding \
-                 instance); motion blurred, but the motionvector AOV reports zero for {}",
+                "{unresolved} geometr{} move{} in a way the vector cannot attribute to one \
+                 placement (nested motion, or an id shared with a forwarding instance); motion \
+                 blurred, but the motionvector AOV reports zero for {}",
                 if one { "y" } else { "ies" },
                 if one { "s" } else { "" },
                 if one { "it" } else { "them" },
@@ -931,6 +1130,7 @@ impl WorldBuilder {
                 Vec::new()
             },
             motion: self.motion,
+            primvars: self.primvars,
         }
     }
 
@@ -1006,22 +1206,104 @@ pub struct World {
     light_classes: Vec<u16>,
     /// Sparse, indexed by `geom_id`; empty when no geometry is one.
     transparent_emitters: Vec<bool>,
-    /// The moving geometries' translations, sorted by `geom_id`; empty for a
-    /// static scene (see [`World::motion`]).
-    motion: Vec<(u32, Vec3A)>,
+    /// The moving geometries' motions over inclusive `geom_id` ranges, sorted;
+    /// empty for a static scene (see [`World::motion`]).
+    motion: Vec<(u32, u32, Motion)>,
+    /// See [`WorldBuilder`]'s field of the same name.
+    primvars: Vec<(u32, Arc<PrimvarTable>, bool)>,
 }
 
 impl World {
-    /// The world-space translation the geometry at `geom_id` moves through
-    /// over the shutter — the `crust:motion:translate` the kernel blurs it
-    /// by — or zero when it does not move, or moves in a way the record
-    /// cannot express (see [`WorldBuilder::unresolved_motion`]). Derived at
-    /// attach time from the same end transform the kernel interpolates, so
-    /// the `motionvector` AOV and the beauty's blur never disagree.
-    pub fn motion(&self, geom_id: u32) -> Vec3A {
-        match self.motion.binary_search_by_key(&geom_id, |(i, _)| *i) {
-            Ok(i) => self.motion[i].1,
-            Err(_) => Vec3A::ZERO,
+    /// The kept primvars on primitive `prim_id` of geometry `geom_id`, by
+    /// keep-set index, into `out`: at the kernel's barycentrics `bary` on a
+    /// triangle, at `curve_u` along a curve span; `None` for each one the
+    /// geometry does not carry (and every one with neither parameter).
+    pub(crate) fn primvars_at(
+        &self,
+        geom_id: u32,
+        prim_id: u32,
+        bary: Option<(f32, f32)>,
+        curve_u: Option<f32>,
+        out: &mut [Option<[f32; 4]>],
+    ) {
+        out.fill(None);
+        if let Some(u) = curve_u {
+            if let Some(t) = &self.faces[geom_id as usize].strands {
+                t.kept_into(prim_id, u, out);
+            }
+            return;
+        }
+        if let Some((u, v)) = bary
+            && let Ok(i) = self.primvars.binary_search_by_key(&geom_id, |(id, ..)| *id)
+        {
+            let (_, table, swapped) = &self.primvars[i];
+            for (o, c) in out.iter_mut().zip(&table.channels) {
+                *o = c.as_ref().and_then(|c| c.at(prim_id, u, v, *swapped));
+            }
+        }
+    }
+
+    /// The kernel's barycentrics of the triangle `ray` hit at `t`, for the
+    /// primvar AOVs: the ray is traced again from just short of `t`, and the
+    /// answer is kept only when it lands on the same `(geom_id, prim_id)`.
+    /// Exact through every placement — baked, instanced, grouped or moving —
+    /// which recomputing them from the hit point is not (a forwarded or
+    /// moving instance names no vertices).
+    ///
+    /// The ray is restarted rather than bounded: every kernel query asks for
+    /// `(TRACE_T_MIN, ∞)`, LLVM propagates those constants into the
+    /// traversal, and one query with other bounds costs every ray of every
+    /// render (+0.15% of cornellbox's instructions, measured). The restart
+    /// leaves the hit `TRACE_T_MIN` plus a relative step ahead.
+    pub(crate) fn hit_barycentrics(
+        &self,
+        ray: &Ray,
+        geom_id: u32,
+        prim_id: u32,
+        t: f32,
+    ) -> Option<(f32, f32)> {
+        let back = t - crate::ray::TRACE_T_MIN - t.abs().max(1.0) * 1e-4;
+        let r = Ray::new(ray.at(back), ray.direction())
+            .with_time(ray.time())
+            .with_mask(ray.mask())
+            .with_curve_exits_ignored(ray.rt().ignore_curve_exits);
+        let h = self
+            .scene
+            .intersect(r.rt(), crate::ray::TRACE_T_MIN, f32::INFINITY)?;
+        (h.geom_id == geom_id && h.prim_id == prim_id).then_some((h.u, h.v))
+    }
+
+    /// Whether any geometry carries a primvar table.
+    pub fn has_primvars(&self) -> bool {
+        !self.primvars.is_empty()
+    }
+
+    /// Heap bytes of the primvar tables, each distinct table once.
+    pub fn primvar_table_bytes(&self) -> usize {
+        let mut seen: Vec<*const PrimvarTable> = Vec::new();
+        let mut bytes = 0;
+        for (_, t, _) in &self.primvars {
+            let ptr = Arc::as_ptr(t);
+            if !seen.contains(&ptr) {
+                seen.push(ptr);
+                bytes += t.bytes();
+            }
+        }
+        bytes
+    }
+
+    /// The world-space displacement over the whole shutter of the point hit
+    /// at `p` on `geom_id` by a ray at shutter time `time` — the motion the
+    /// kernel blurs it by — or zero when the geometry does not move, or moves
+    /// in a way the record cannot attribute (see
+    /// [`WorldBuilder::unresolved_motion`]). Derived at attach time from the
+    /// same transform pair the kernel interpolates, so the `motionvector` AOV
+    /// and the beauty's blur never disagree.
+    pub fn motion(&self, geom_id: u32, p: Vec3A, time: f32) -> Vec3A {
+        let i = self.motion.partition_point(|(lo, ..)| *lo <= geom_id);
+        match i.checked_sub(1).map(|i| &self.motion[i]) {
+            Some((_, hi, m)) if geom_id <= *hi => m.velocity(p, time),
+            _ => Vec3A::ZERO,
         }
     }
 
@@ -1074,7 +1356,7 @@ impl World {
         });
         let (uv, tangent) = match &tables.uv {
             Some(m) => {
-                let verts = self.world_vertices(h.geom_id, h.prim_id, tables);
+                let verts = self.world_vertices(h.geom_id, h.prim_id, tables, ray.time());
                 match m.resolve(h.prim_id, h.u, h.v, tables.swapped, verts) {
                     Some((uv, tangent)) => (Some(uv), tangent),
                     None => (None, Vec3A::ZERO),
@@ -1164,13 +1446,15 @@ impl World {
 
     /// The world-space vertices of the triangle a hit landed on, in the
     /// kernel's vertex order: read from the top-level scene for a baked
-    /// mesh, or through the placement of a direct instance. `None` where
-    /// neither applies — see [`VertexSource`].
+    /// mesh, or through the placement of a direct instance — a moving one's
+    /// at `time`, the shutter time the ray was intersected at. `None` where
+    /// none applies — see [`VertexSource`].
     fn world_vertices(
         &self,
         geom_id: u32,
         prim_id: u32,
         tables: &SideTables,
+        time: f32,
     ) -> Option<[Vec3A; 3]> {
         match &tables.vertices {
             VertexSource::Unresolved => None,
@@ -1178,6 +1462,12 @@ impl World {
             VertexSource::Placed(scene, l2w) => scene
                 .triangle_vertices(0, prim_id)
                 .map(|vs| vs.map(|v| l2w.transform_point3a(v))),
+            VertexSource::Moving(scene, ends) => {
+                let l2w = lerp_affine(&ends[0], &ends[1], time);
+                scene
+                    .triangle_vertices(0, prim_id)
+                    .map(|vs| vs.map(|v| l2w.transform_point3a(v)))
+            }
         }
     }
 
@@ -1623,6 +1913,37 @@ mod tests {
 
     /// A `prim_id` past the table cannot panic: it is reachable from the
     /// integrator, where a panic kills a render thread.
+    /// A primvar table is read by the AOV first hit alone: the geometry
+    /// stays on `intersect`'s plain path, and a mirrored placement's table
+    /// undoes the swapped barycentrics.
+    #[test]
+    fn a_primvar_table_leaves_the_geometry_plain() {
+        let mut b = WorldBuilder::new();
+        let id = b.attach(
+            Geometry::TriangleMesh {
+                vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                indices: vec![[0, 1, 2]],
+                normals: None,
+            },
+            Arc::new(crate::material::OpenPBR::diffuse(Vec3A::splat(0.5))),
+        );
+        let corners = PrimvarChannel::Corners {
+            values: vec![[0.0; 4], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            corners: vec![[0, 1, 2]],
+        };
+        assert_eq!(corners.at(0, 0.25, 0.5, false), Some([0.25, 0.5, 0.0, 0.0]));
+        assert_eq!(corners.at(0, 0.25, 0.5, true), Some([0.5, 0.25, 0.0, 0.0]));
+        assert_eq!(corners.at(1, 0.25, 0.5, false), None);
+        let table = Arc::new(PrimvarTable {
+            channels: vec![Some(corners), None],
+        });
+        b.set_primvars(id, table.clone(), false);
+        assert!(b.faces[id as usize].plain);
+        let world = b.commit();
+        assert!(world.has_primvars());
+        assert_eq!(world.primvar_table_bytes(), table.bytes());
+    }
+
     #[test]
     fn out_of_range_prim_id_declines() {
         assert_eq!(quad().resolve(99, 0.0, 0.0, false), None);

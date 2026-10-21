@@ -24,6 +24,11 @@
 //! are snapped to the limit, so a texel stays on the limit-surface point its
 //! vertex was snapped to.
 //!
+//! Any other primvar a render var asks for ([`PrimvarChannel`], four lanes)
+//! is refined by the same code: the chart is widened into one more such
+//! channel, and every lane is refined independently, so the chart's two lanes
+//! come out bit-identical to a two-lane refinement.
+//!
 //! [`opensubdiv-rs`]: https://github.com/doubleailes/OpenSubdiv-rs
 //! [`FVarLinearInterpolation`]: sdc::FVarLinearInterpolation
 
@@ -74,14 +79,30 @@ pub(crate) struct SubdivRequest<'a> {
     pub want_face_uvs: bool,
     /// The authored texture chart to refine, when the material reads one.
     pub uvs: Option<UvChannel<'a>>,
+    /// Primvars a render var asks for, refined like the chart and returned
+    /// in the same order (`vertex` / `varying` ones like the points).
+    pub extra: &'a [PrimvarChannel<'a>],
+    /// Report each refined face's (or triangle's) cage face, whatever its
+    /// valence — what a `uniform` primvar is looked up by.
+    pub want_base_face: bool,
 }
 
-/// An authored texture-coordinate primvar, as the importer read it. The
-/// caller checks it with [`UvChannel::is_well_formed`] first — a refiner
-/// cannot skip a bad value the way a triangle lookup can.
+/// The lanes a [`PrimvarChannel`] carries: up to four components, unused
+/// ones zero.
+pub(crate) type Lanes = [f32; 4];
+
+/// An authored texture-coordinate primvar, as the importer read it.
+pub(crate) type UvChannel<'a> = Channel<'a, [f32; 2]>;
+
+/// Any other primvar to refine with the surface.
+pub(crate) type PrimvarChannel<'a> = Channel<'a, Lanes>;
+
+/// An authored primvar to refine. The caller checks it with
+/// [`Channel::is_well_formed`] first — a refiner cannot skip a bad value the
+/// way a triangle lookup can.
 #[derive(Clone, Copy)]
-pub(crate) struct UvChannel<'a> {
-    pub values: &'a [[f32; 2]],
+pub(crate) struct Channel<'a, T> {
+    pub values: &'a [T],
     /// The primvar's `:indices` into `values`, or `None` for direct
     /// addressing.
     pub indices: Option<&'a [i32]>,
@@ -93,7 +114,7 @@ pub(crate) struct UvChannel<'a> {
     pub linear: sdc::FVarLinearInterpolation,
 }
 
-impl UvChannel<'_> {
+impl<T> Channel<'_, T> {
     /// Whether every entry the cage addresses resolves to a value:
     /// `n_entries` is the face-vertex count for a `faceVarying` chart, the
     /// point count for a `vertex` one.
@@ -118,12 +139,37 @@ impl UvChannel<'_> {
     }
 }
 
+impl UvChannel<'_> {
+    /// The chart's values, widened to [`Lanes`] (the last two zero).
+    pub(super) fn widened(&self) -> Vec<Lanes> {
+        self.values.iter().map(|v| [v[0], v[1], 0.0, 0.0]).collect()
+    }
+}
+
 /// The refined chart, in the shape the importer's `UvSource` holds.
-pub(crate) struct RefinedUvs {
-    pub values: Vec<[f32; 2]>,
+pub(crate) type RefinedUvs = Refined<[f32; 2]>;
+
+/// A refined [`PrimvarChannel`].
+pub(crate) type RefinedChannel = Refined<Lanes>;
+
+/// A refined channel: values, and for a face-varying one its per-face-vertex
+/// (or per-triangle-corner) indices into them.
+pub(crate) struct Refined<T> {
+    pub values: Vec<T>,
     /// Per refined face-vertex, into `values` — `Some` iff `face_varying`.
     pub indices: Option<Vec<i32>>,
     pub face_varying: bool,
+}
+
+impl RefinedChannel {
+    /// The chart's two lanes back out of the shared four-lane refinement.
+    pub(super) fn narrowed(self) -> RefinedUvs {
+        Refined {
+            values: self.values.iter().map(|v| [v[0], v[1]]).collect(),
+            indices: self.indices,
+            face_varying: self.face_varying,
+        }
+    }
 }
 
 /// Per refined face: the base-cage face it descends from and its corner UVs
@@ -151,6 +197,11 @@ pub(crate) struct SubdividedMesh {
     pub faces: Option<SubdivFaces>,
     /// `Some` iff the request carried a texture chart.
     pub uvs: Option<RefinedUvs>,
+    /// The request's `extra` channels, refined, in order.
+    pub extra: Vec<RefinedChannel>,
+    /// Per refined face, its cage face — `Some` iff the request set
+    /// `want_base_face`.
+    pub base_face: Option<Vec<u32>>,
 }
 
 #[derive(Debug)]

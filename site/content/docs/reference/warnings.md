@@ -70,6 +70,7 @@ plain text and are not counted.
 | `settings.invalid_value` | refused | A crust:* render setting has a value outside its domain; its default is used. | Fix the value on the RenderSettings prim; the message names the attribute and the default used. |
 | `settings.light_samples_clamped` | approximated | A light-sample count is above the most crust takes; the maximum is used. | Author at most the maximum the message names. |
 | `time.outside_range` | approximated | The frame lies outside the stage's time range; animated attributes hold their nearest sample. | Render a frame inside the stage's startTimeCode..endTimeCode, or extend the range. |
+| `time.motion_needs_frame` | skipped | The camera's shutter opens but no frame was given; time-sampled transforms are not evaluated over it. | Render a frame with `-f`; the shutter is measured from it. |
 
 ## Colour
 
@@ -88,6 +89,9 @@ plain text and are not counted.
 | `camera.missing` | skipped | The stage authors no camera; the procedural default camera is used. | Author a `Camera` prim. |
 | `camera.invalid_exposure` | refused | The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled. | Check `exposure:fStop` (not 0) and that `exposure:time`, `exposure:iso` and `exposure:responsivity` are positive. |
 | `camera.unreadable` | skipped | A camera prim could not be built into a camera. | Check the camera's attributes (focal length, aperture, clipping). |
+| `camera.invalid_meters_per_unit` | refused | The stage's metersPerUnit is not finite, not positive, or so small that the lens diameter overflows; the lens reads it as 0.01, a centimetre. | Author the stage's `metersPerUnit` as a positive length in metres (0.01 for centimetres, 1 for metres). |
+| `camera.shutter_instantaneous` | approximated | A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero. | Author `shutter:open` / `shutter:close` on the render camera (with `disableMotionBlur` for a sharp beauty). |
+| `camera.shutter_mismatch` | approximated | The render goes through another camera than the one whose shutter motion was measured over. | Name the render camera with `--camera` or `RenderSettings.camera`. |
 
 ## Products and AOVs
 
@@ -97,6 +101,7 @@ plain text and are not counted.
 | `product.unsupported_type` | skipped | A RenderProduct's productType is not raster; no file is written for it. | Use `productType = "raster"`, or remove the product. |
 | `product.camera_mismatch` | skipped | A product renders through another camera or resolution than the first; no file is written for it. | Render the other camera or resolution as a separate render. |
 | `product.motion_blur_mismatch` | approximated | A product asks for other motion blur than the first; its file is written with the first's. | Give every product the same motion-blur setting. |
+| `product.depth_of_field_mismatch` | approximated | A product asks for other depth of field than the first; its file is written with the first's. | Give every product the same `disableDepthOfField`. |
 | `product.region_mismatch` | approximated | A product asks for another dataWindowNDC than the first; its file is written over the first's. | Give every product the same `dataWindowNDC`. |
 | `product.no_name` | skipped | A RenderProduct authors no productName; nothing is written for it. | Author `productName`, the file the product writes. |
 | `product.no_writable_vars` | skipped | A RenderProduct has no RenderVar crust can write; nothing is written for it. | Point `orderedVars` at RenderVars whose source crust produces; their own warnings say why each was dropped. |
@@ -107,7 +112,7 @@ plain text and are not counted.
 | `product.invalid_data_window` | refused | dataWindowNDC is not finite or selects no pixel; the full frame is rendered. | Author a finite window that covers at least one pixel. |
 | `product.data_window_clipped` | approximated | dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped. | Keep `dataWindowNDC` inside 0..1. |
 | `aov.not_a_render_var` | skipped | orderedVars targets a prim that is not a RenderVar. | Point `orderedVars` at `RenderVar` prims. |
-| `aov.unsupported_source` | skipped | A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written. | Remove the var; the [AOV page](@/docs/usd/aovs.md) lists the sources crust writes. |
+| `aov.unsupported_source` | skipped | A RenderVar's source is one crust does not produce yet (planned, intrinsic); no channel is written. | Remove the var; the [AOV page](@/docs/usd/aovs.md) lists the sources crust writes. |
 | `aov.unknown_source` | skipped | A RenderVar names an unknown source or sourceType; no channel is written. | Use a source name from the [AOV page](@/docs/usd/aovs.md). |
 | `aov.type_mismatch` | skipped | A RenderVar's data type is not numeric or cannot hold its source; no channel is written. | Author a numeric `dataType` with enough components for the source. |
 | `aov.unknown_accumulation` | refused | A RenderVar's accumulation token is not supported; the source's default is used. | Use `zmin` or leave the accumulation unauthored. |
@@ -115,6 +120,10 @@ plain text and are not counted.
 | `aov.invalid_variance` | skipped | crust:aov:variance is authored where it cannot apply; no channel is written. | Use `crust:aov:variance` only on an `lpe` var with a float type and filtered accumulation. |
 | `aov.raw_ignored` | approximated | crust:aov:raw is authored on a source that is not a light path expression; it is ignored. | Remove `crust:aov:raw`, or use it on an `lpe` var. |
 | `aov.invalid_raw` | skipped | crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written. | Start the expression with a diffuse reflection (`C<RD>…`). |
+| `aov.primvar_no_name` | skipped | A primvar RenderVar authors no sourceName; no channel is written. | Author `sourceName` with the primvar's name (`rest` or `primvars:rest`). |
+| `aov.primvar_four_components` | skipped | A primvar RenderVar's data type has four components, which are not supported yet; no channel is written. | Ask for one, two or three components (`color3f`, not `color4f`). |
+| `primvar.mismatch` | skipped | A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value. | Author the var's `dataType` with the primvar's component count. |
+| `primvar.not_inherited` | skipped | A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value. | Author the primvar on each mesh or curves prim itself. |
 | `lpe.invalid` | skipped | A light path expression does not parse or compile; no channel is written. | Fix the expression; the message gives the parser's error. |
 
 ## Transforms
@@ -124,7 +133,8 @@ plain text and are not counted.
 | `xform.unknown_op` | approximated | xformOpOrder lists an op that is not a UsdGeomXformOp kind; it reads as identity. | Use the UsdGeomXformOp kinds only. |
 | `xform.uncomposable` | refused | An xformOp stack could not be composed; the local transform is identity. | Fix the xformOp stack; the message gives the reason. |
 | `xform.unknown_type` | skipped | A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored. | Author the transform on an `Xform` above the prim, or use a stock USD type; a plugin or studio schema is not known to Crust Render. |
-| `xform.motion_vector_unsupported` | approximated | Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero. | Expect a zero motion vector on rotating or scaling geometry. |
+| `xform.motion_vector_unsupported` | approximated | Geometry moves in a way the vector cannot attribute to one placement; it is motion blurred but the motionvector AOV reads zero. | Expect a zero motion vector on motion inside a nested instancer or a prototype. |
+| `xform.motion_ignored` | skipped | A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders without motion. | Expect these prims sharp; animate the instance or mesh that places them instead. |
 
 ## Geometry types
 

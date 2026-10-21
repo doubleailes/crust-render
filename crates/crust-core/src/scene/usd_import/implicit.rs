@@ -780,6 +780,8 @@ impl ImplicitPolicy {
             normals: t.normals,
             subdiv_faces: None,
             uvs: None,
+            // An implicit shape authors no primvar a var can read here.
+            primvars: Vec::new(),
             refined: false,
         }
     }

@@ -17,7 +17,6 @@ def Xform "World"
         float focalLength = 24
         float horizontalAperture = 36
         float verticalAperture = 36
-        float fStop = 1000
         float focusDistance = 3.7
         token projection = "perspective"
     }

@@ -28,6 +28,13 @@ composition arc is a sublayer on `input`:
 )
 ```
 
+When the input authors a `metersPerUnit` or an `upAxis`, the layer copies them, since
+a stage reads its units and up axis from its root layer: without the copy the session
+would render a camera's [depth of field](@/docs/usd/render-settings.md#camera-depth-of-field),
+or a dome's `poleAxis = "scene"`, unlike `crust render` of the input. Resuming a layer that
+lacks them adds them. A layer keeps the value it copied even if the input's changes later:
+edit it in the layer to follow.
+
 Every edit the agent makes is an opinion in that layer, as an `over` where the prim
 is defined elsewhere, and the layer is saved after every edit. What is rendered is
 always the saved file, imported exactly as `crust render <output>` imports it. So:
@@ -352,8 +359,12 @@ and any USD tool opens it.
 - **Most structural edits import the whole stage again.** A `full` edit takes seconds on
   a medium stage; each result says how long. Only the edits in the table above are
   applied in place. Decoded textures the scene no longer uses are let go at the next
-  `full` edit. A session holds the stage it authors and the scene it renders at once,
-  about twice the memory of a render's import, which puts Moana-scale stages out of reach.
+  `full` edit.
+- **A large stage costs more memory than its render.** Between edits the session holds
+  the scene it renders, its authoring stage (payloads unloaded) and the textures it
+  decoded. A `full` edit builds the new scene before letting the old one go, so its peak
+  is about two scenes; an in-place edit's is not. In-place edits make look-dev cheap, not
+  the stage smaller: Moana-scale stages are still out of reach.
 - **`probe` names the prim the import recorded, not the one you may expect.** It names
   the first surface the camera ray through the pixel's centre meets, before any opacity,
   so a cutout's hole names the surface it cuts. A hit inside a native instance or a

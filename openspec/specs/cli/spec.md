@@ -36,6 +36,7 @@ defaults:
   `--light-samples-indirect`;
 - `--indirect-clamp`, `--filter`, `--filter-radius`, `--sampler`;
 - `--subdiv-level`, `--subdiv-edge-length`, `--auto-tx`.
+- `--variance-threshold`, `--min-samples`, `--neighbour-tolerance`.
 
 `light-paths` SHALL also accept `render`'s `-s`, so that it reproduces a render
 made at that sample count.
@@ -100,6 +101,13 @@ where it could take a subcommand's name or a positional as that directory.
 
 - **WHEN** the user runs `crust light-paths -i scene.usda --region 0,0,5,5 -o out.exr`
 - **THEN** the arguments are refused as a usage error and nothing is loaded
+
+#### Scenario: The adaptive flags are shared
+
+- **WHEN** the user runs
+  `crust diagnostic -i scene.usda --variance-threshold 0.02 --min-samples 16`
+- **THEN** the report's effective settings show `variance_threshold = 0.02` and
+  `min_samples_per_pixel = 16`, as a render with the same flags would use
 
 ### Requirement: Listing what a stage holds
 
@@ -548,3 +556,28 @@ file SHALL be written before the render ends.
 
 - **WHEN** the stage's first product has no beauty var and `--checkpoint` is passed
 - **THEN** a warning says no preview will be written, and the render proceeds
+
+### Requirement: Adaptive sampling flags
+
+`crust render` SHALL accept `--variance-threshold <t>` (a number ≥ 0; 0 turns
+adaptive sampling off), `--min-samples <n>` (an integer ≥ 1) and
+`--neighbour-tolerance <t>` (any number; negative turns the neighbour comparison
+off). They SHALL override `crust:varianceThreshold`, `crust:minSamplesPerPixel`
+and `crust:adaptiveNeighbourTolerance` for this render only.
+
+#### Scenario: Overriding the adaptive settings
+
+- **WHEN** the stage authors `crust:varianceThreshold = 0.05` and the user runs
+  `crust render -i scene.usda --variance-threshold 0.02`
+- **THEN** the render stops pixels at a relative error of 0.02, and the stage
+  is unchanged
+
+#### Scenario: Turning adaptive sampling off
+
+- **WHEN** the user runs `crust render -i scene.usda --variance-threshold 0 -s 64`
+- **THEN** every pixel takes exactly 64 samples
+
+#### Scenario: A negative threshold is refused
+
+- **WHEN** the user runs `crust render -i scene.usda --variance-threshold -1`
+- **THEN** the arguments are refused as a usage error and nothing is loaded

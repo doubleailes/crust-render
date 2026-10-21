@@ -69,27 +69,36 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 | `float4 dataWindowNDC` | `(0, 0, 1, 1)` | the part of the frame to render. The first render product's own value overrides it. See [below](#datawindowndc). |
 | `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
-| `bool disableMotionBlur` | `false` | render moving geometry sharp, at its shutter-open position. The first render product's own value overrides it. See [below](#disablemotionblur). |
+| `bool disableMotionBlur` | `false` | render moving geometry sharp, where it is at the frame. The first render product's own value overrides it. See [below](#disablemotionblur). |
 | `bool instantaneousShutter` | `false` | the same switch under its older `UsdRender` name. Either one set to `true` turns the blur off. |
+| `bool disableDepthOfField` | `false` | render through a pinhole, sharp at every depth, whatever the camera's `fStop`. The first render product's own value overrides it. See [below](#disabledepthoffield). |
 | `token renderingColorSpace` | `lin_rec709` | the working colour space. See [below](#renderingcolorspace). |
 
 ### disableMotionBlur
 
 `uniform bool disableMotionBlur = 1`
 
-Turns off motion blur for the whole render. Every camera ray is traced at shutter open, so
-geometry that authors
-[`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) renders sharp
-at its authored position, in the beauty and in every AOV. The motion itself stays in the
-scene: the [`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, so
-the blur can be added in compositing from a sharp beauty.
+Turns off motion blur for the whole render. `UsdRender` defines it as a `[0, 0]` shutter:
+one sample at the current time code. Moving geometry therefore renders sharp where it is
+at the frame, in the beauty and in every AOV: at its authored position for
+[`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), and at its
+transform at the frame for a time-sampled one, whatever the camera's
+[shutter](#camera-shutter). The motion itself stays in the scene: the
+[`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, measuring the
+shutter's motion from that sharp position, so the blur can be added in compositing from a
+sharp beauty.
 
-`instantaneousShutter` is the attribute's older name in `UsdRender`, and means the same.
-Either one set to `true` turns the blur off; both are resolved like the render's camera and
-resolution, from the first `RenderProduct` when it authors them, else from this prim. A
-product that authors only one of the two inherits the other from this prim. A later
-product that asks for the other setting is still written, with the first product's, and a
-warning says so: one render has one shutter, as it has one camera.
+`instantaneousShutter` is the attribute's older, deprecated name in `UsdRender`, which
+closes the shutter where it opens. It also turns the blur off, but the sharp image is at
+shutter open, `frame + shutter:open`. The two agree unless the shutter opens before or
+after the frame: with a `-0.25 .. 0.25` shutter, `instantaneousShutter` renders a quarter
+frame before the frame. When both are set, `disableMotionBlur` wins.
+
+Both are resolved like the render's camera and resolution, from the first `RenderProduct`
+when it authors them, else from this prim. A product that authors only one of the two
+inherits the other from this prim. A later product that asks for another setting is still
+written, with the first product's, and a warning says so: one render has one shutter, as
+it has one camera.
 
 ```usda
 def RenderSettings "settings"
@@ -99,6 +108,29 @@ def RenderSettings "settings"
 ```
 
 `samples/motionvector.usda` renders moving geometry this way.
+
+### disableDepthOfField
+
+`uniform bool disableDepthOfField = 1`
+
+Turns off the camera's [depth of field](#camera-depth-of-field) for the whole render.
+Every camera ray starts at the camera's position, as with a camera that authors no
+`fStop`: the image is sharp at every depth. The field of view and the framing do not
+change, and neither does anything else the camera authors. A stage with no camera
+renders through crust's built-in fallback camera, and this closes its lens too.
+
+It is resolved like `disableMotionBlur`: from the first `RenderProduct` when it
+authors it, else from this prim. A later product that asks for the other setting is
+still written, with the first product's, and a
+[`product.depth_of_field_mismatch`](@/docs/reference/warnings.md) warning says so: one
+render has one camera.
+
+```usda
+def RenderSettings "settings"
+{
+    uniform bool disableDepthOfField = 1
+}
+```
 
 ### dataWindowNDC
 
@@ -433,6 +465,105 @@ def RenderSettings "settings"
 
 `samples/subdivision_adaptive.usda` places one cube five times at growing distances,
 refined to levels 3, 3, 2, 1 and 0.
+
+## Camera depth of field
+
+A render camera that authors an `fStop` greater than 0 has a lens, and renders sharp
+only at its `focusDistance`. The lens is a disk whose diameter, in scene units, is
+
+```text
+diameter = focalLength / fStop × 0.001 / metersPerUnit
+```
+
+`focalLength` is read in millimetres, as a camera's lens is specified, and the stage's
+`metersPerUnit` converts it into scene units. A 50 mm lens at f/2 is 25 mm across: 2.5
+units on a centimetre stage (`metersPerUnit = 0.01`), 0.025 units on a metre stage
+(`metersPerUnit = 1`). `focusDistance` is in scene units. Unauthored, `focalLength` is
+50, `focusDistance` 10 and `metersPerUnit` 0.01, USD's fallback. An `fStop` of 0, or
+none, is a pinhole: no blur at all.
+
+The field of view depends only on `focalLength` and the apertures, so neither `fStop`,
+`focusDistance` nor `metersPerUnit` reframes the image.
+
+A `metersPerUnit` that is not a positive number (0, say), or one so small that the lens
+would be wider than a float can hold (`1e-42`), is refused with a
+[`camera.invalid_meters_per_unit`](@/docs/reference/warnings.md) warning and read as
+0.01. Only a camera with a lens checks it, so a pinhole render says nothing about it.
+[`disableDepthOfField`](#disabledepthoffield) on the render settings turns the lens off
+without editing the camera.
+
+```usda
+#usda 1.0
+(
+    metersPerUnit = 1
+)
+
+def Camera "cam"
+{
+    float focalLength = 50
+    float fStop = 2.8
+    float focusDistance = 4
+}
+```
+
+**Stages written for older versions.** Crust Render used to take `focalLength / fStop`
+as a diameter in scene units directly, which made the blur 10 times too strong on a
+centimetre stage (and on one that authors no `metersPerUnit`) and 1000 times too strong
+on a metre stage. Such a stage now renders much sharper. To keep an old look, divide its
+`fStop` by the same factor: 10 on a centimetre stage, 1000 on a metre stage.
+
+**Hydra.** OpenUSD's own camera (`GfCamera`, which usdview and hdEmbree use) reads lens
+lengths in tenths of a scene unit whatever `metersPerUnit` says. That agrees with
+millimetres only at `metersPerUnit = 0.01`. On a centimetre stage, or one that authors no
+units, Crust Render's depth of field matches Hydra's. On any other stage it does not. A
+metre stage exported in Hydra's convention, with `focalLength = 0.5` for a 50 mm lens,
+gets a lens 100 times smaller than intended. Its framing is unaffected, because the
+apertures are in the same units as the focal length.
+
+## Camera shutter
+
+The render camera's `shutter:open` and `shutter:close` say over which interval motion is
+measured. They are offsets in time codes from the frame given by `-f`, and each defaults
+to `0`, as USD defines it. With frame `f`, motion runs from `f + shutter:open` (shutter
+open) to `f + shutter:close` (shutter close):
+
+```usda
+def Camera "cam"
+{
+    double shutter:open = 0
+    double shutter:close = 0.5   # half a frame after the frame
+}
+```
+
+Over that interval, every mesh, sphere, implicit shape, native instance and
+`PointInstancer` placement whose transform is time-sampled (its own `xformOp`s or an
+ancestor's) moves from its transform at shutter open to its transform at shutter close.
+The beauty is blurred along that path, unless [`disableMotionBlur`](#disablemotionblur)
+is set (the prim is then sharp where it is at the frame), and the
+[`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV measures the same motion. Only the
+transform is read at the two ends: every other attribute, points included, is read at the
+frame, and prims that get no motion (curves, lights, volumes) sit where they are at the
+frame.
+
+The shutter is **instantaneous**, and nothing time-sampled moves, when:
+
+- neither attribute is authored, or `shutter:close` is not after `shutter:open`. This
+  is the default, so a stage that authors no shutter renders exactly as before;
+- no frame is given. Time samples are then not evaluated, and a
+  [`time.motion_needs_frame`](@/docs/reference/warnings.md) warning says so if the
+  stage has any.
+
+The shutter is read before the stage is walked, from the camera the render goes
+through: the one named by `--camera` or `RenderSettings.camera`, even inside a payload,
+else the first camera on the stage. If the render ends up going through another camera
+whose shutter differs (for example, the first camera sits in an unloaded payload), a
+[`camera.shutter_mismatch`](@/docs/reference/warnings.md) warning names both. Naming the
+camera avoids it.
+
+Only the shutter's two ends are read. A path that curves or turns back inside the
+interval is rendered as the straight chord between them, and a rotation is interpolated
+the same way, so a large turn within one shutter shrinks the object in the middle of the
+blur. See [limitations](@/docs/architecture/limitations.md#geometry).
 
 ## Camera exposure
 

@@ -250,18 +250,19 @@ fn motion_records_follow_the_kernels_end_transforms() {
     assert_eq!(b.unresolved_motion(), 0);
     let world = b.commit();
     assert!(world.has_motion());
-    assert_eq!(world.motion(sphere), v_sphere);
-    assert_eq!(world.motion(mesh), v_mesh);
-    assert_eq!(world.motion(placed), Vec3A::ZERO);
-    assert_eq!(world.motion(baked), Vec3A::ZERO);
+    assert_eq!(world.motion(sphere, Vec3A::ZERO, 0.0), v_sphere);
+    assert_eq!(world.motion(mesh, Vec3A::ZERO, 0.0), v_mesh);
+    assert_eq!(world.motion(placed, Vec3A::ZERO, 0.0), Vec3A::ZERO);
+    assert_eq!(world.motion(baked, Vec3A::ZERO, 0.0), Vec3A::ZERO);
     // An id no geometry has is zero too, never a panic.
-    assert_eq!(world.motion(99), Vec3A::ZERO);
+    assert_eq!(world.motion(99, Vec3A::ZERO, 0.0), Vec3A::ZERO);
 }
 
-/// Motion the record cannot express blurs in the kernel and reads zero: an
-/// end transform whose linear part differs from the start's, a forwarded
-/// label (two placements share the id), and an instance over a scene that
-/// itself moves. Each is counted, and the commit warns once for all of them.
+/// Motion the record cannot attribute to one placement blurs in the kernel
+/// and reads zero: a forwarded label (two placements share the id), and an
+/// instance over a scene that itself moves. Each is counted, and the commit
+/// warns once for all of them. A rotating or scaling end transform is not
+/// among them: it records the affine pair.
 #[test]
 fn motion_the_record_cannot_express_is_counted_and_reads_zero() {
     let mut nested = SceneBuilder::new();
@@ -274,22 +275,6 @@ fn motion_the_record_cannot_express_is_counted_and_reads_zero() {
     assert!(nested.has_motion());
 
     let mut b = WorldBuilder::new();
-    let rotating = b.attach(
-        instance(
-            ball(),
-            Affine3A::IDENTITY,
-            Some(Affine3A::from_rotation_y(0.5)),
-        ),
-        grey(),
-    );
-    let scaling = b.attach(
-        instance(
-            ball(),
-            Affine3A::IDENTITY,
-            Some(Affine3A::from_scale(Vec3::splat(2.0))),
-        ),
-        grey(),
-    );
     let forwarded = b.attach_labelled(
         instance(
             ball(),
@@ -318,7 +303,7 @@ fn motion_the_record_cannot_express_is_counted_and_reads_zero() {
         ),
         grey(),
     );
-    assert_eq!(b.unresolved_motion(), 5);
+    assert_eq!(b.unresolved_motion(), 3);
 
     let warnings = Arc::new(AtomicUsize::new(0));
     let world = tracing::subscriber::with_default(CountWarnings(warnings.clone()), || b.commit());
@@ -327,16 +312,14 @@ fn motion_the_record_cannot_express_is_counted_and_reads_zero() {
         1,
         "one summarised warning"
     );
-    for id in [
-        rotating,
-        scaling,
-        forwarded,
-        over_moving,
-        over_moving_and_moving,
-    ] {
-        assert_eq!(world.motion(id), Vec3A::ZERO, "geometry {id}");
+    for id in [forwarded, over_moving, over_moving_and_moving] {
+        assert_eq!(
+            world.motion(id, Vec3A::ZERO, 0.0),
+            Vec3A::ZERO,
+            "geometry {id}"
+        );
     }
-    assert_eq!(world.motion(moving), Vec3A::Y);
+    assert_eq!(world.motion(moving, Vec3A::ZERO, 0.0), Vec3A::Y);
 
     // A world without any of them commits silently.
     let mut quiet = WorldBuilder::new();
@@ -375,9 +358,9 @@ fn a_reserved_slot_records_the_motion_of_the_geometry_it_is_given() {
     // Given again, the earlier record goes.
     b.set_geometry(d, instance(ball(), Affine3A::IDENTITY, None));
     let world = b.commit();
-    assert_eq!(world.motion(a), Vec3A::X);
-    assert_eq!(world.motion(c), Vec3A::ZERO);
-    assert_eq!(world.motion(d), Vec3A::ZERO);
+    assert_eq!(world.motion(a, Vec3A::ZERO, 0.0), Vec3A::X);
+    assert_eq!(world.motion(c, Vec3A::ZERO, 0.0), Vec3A::ZERO);
+    assert_eq!(world.motion(d, Vec3A::ZERO, 0.0), Vec3A::ZERO);
 }
 
 /// Through the importer: a moving sphere and a moving mesh carry their
@@ -441,10 +424,16 @@ def Xform "World"
             .unwrap_or_else(|| panic!("nothing at x = {x}"))
             .geom_id
     };
-    assert_eq!(scene.world.motion(hit(-3.0)), Vec3A::new(0.7, 0.0, 0.0));
-    assert_eq!(scene.world.motion(hit(0.0)), Vec3A::new(0.0, 0.5, 0.25));
-    assert_eq!(scene.world.motion(hit(3.0)), Vec3A::ZERO);
-    assert_eq!(scene.world.motion(hit(6.0)), Vec3A::ZERO);
+    assert_eq!(
+        scene.world.motion(hit(-3.0), Vec3A::ZERO, 0.0),
+        Vec3A::new(0.7, 0.0, 0.0)
+    );
+    assert_eq!(
+        scene.world.motion(hit(0.0), Vec3A::ZERO, 0.0),
+        Vec3A::new(0.0, 0.5, 0.25)
+    );
+    assert_eq!(scene.world.motion(hit(3.0), Vec3A::ZERO, 0.0), Vec3A::ZERO);
+    assert_eq!(scene.world.motion(hit(6.0), Vec3A::ZERO, 0.0), Vec3A::ZERO);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,15 +582,15 @@ fn an_id_a_forwarding_instance_shares_gets_no_motion_record() {
     let group = b.attach_labelled(placed(5.0), grey(), MASK_ALL, InstanceHitId::As(owner));
     assert_eq!(b.unresolved_motion(), 1);
     let world = b.commit();
-    assert_eq!(world.motion(owner), Vec3A::ZERO);
-    assert_eq!(world.motion(group), Vec3A::ZERO);
+    assert_eq!(world.motion(owner, Vec3A::ZERO, 0.0), Vec3A::ZERO);
+    assert_eq!(world.motion(group, Vec3A::ZERO, 0.0), Vec3A::ZERO);
     // A hit through the forwarding placement carries the owner's id...
     let hit = world
         .intersect(&Ray::new(Vec3A::new(5.0, 0.0, 5.0), -Vec3A::Z), 1e-3, 100.0)
         .expect("the placed ball");
     assert_eq!(hit.geom_id, owner);
     // ...and reads zero, not the owner's translation.
-    assert_eq!(world.motion(hit.geom_id), Vec3A::ZERO);
+    assert_eq!(world.motion(hit.geom_id, Vec3A::ZERO, 0.0), Vec3A::ZERO);
 
     // The forwarding instance first: the range is remembered, and a moving
     // geometry attached inside it later gets no record either.
@@ -610,7 +599,7 @@ fn an_id_a_forwarding_instance_shares_gets_no_motion_record() {
     let owner = b.attach(moving(), grey());
     assert_eq!(owner, 1);
     assert_eq!(b.unresolved_motion(), 1);
-    assert_eq!(b.commit().motion(owner), Vec3A::ZERO);
+    assert_eq!(b.commit().motion(owner, Vec3A::ZERO, 0.0), Vec3A::ZERO);
 
     // `Offset(base)` covers `base ..= base + inner.max_hit_id()`: a ball
     // scene reports id 0, so an offset of 3 forwards id 3 and nothing else.
@@ -621,25 +610,26 @@ fn an_id_a_forwarding_instance_shares_gets_no_motion_record() {
     let inside = b.attach(moving(), grey()); // id 3
     assert_eq!((outside, inside), (1, 3));
     let world = b.commit();
-    assert_eq!(world.motion(outside), Vec3A::X);
-    assert_eq!(world.motion(inside), Vec3A::ZERO);
+    assert_eq!(world.motion(outside, Vec3A::ZERO, 0.0), Vec3A::X);
+    assert_eq!(world.motion(inside, Vec3A::ZERO, 0.0), Vec3A::ZERO);
 }
 
-/// The unresolved set is the slots' current state: a reserved slot given a
-/// rotating instance and then a static or translating geometry is not
-/// unresolved any more, and the commit stays silent.
+/// The unresolved set is the slots' current state: a reserved slot given an
+/// instance over a moving scene and then a static or translating geometry is
+/// not unresolved any more, and the commit stays silent.
 #[test]
 fn replacing_an_unresolved_geometry_clears_its_warning() {
+    let mut nested = SceneBuilder::new();
+    nested.attach(instance(
+        ball(),
+        Affine3A::IDENTITY,
+        Some(Affine3A::from_translation(Vec3::X)),
+    ));
+    let nested = Arc::new(nested.commit());
     let mut b = WorldBuilder::new();
     let a = b.reserve_slot(grey(), MASK_ALL);
     let c = b.reserve_slot(grey(), MASK_ALL);
-    let rotating = || {
-        instance(
-            ball(),
-            Affine3A::IDENTITY,
-            Some(Affine3A::from_rotation_y(0.5)),
-        )
-    };
+    let rotating = || instance(nested.clone(), Affine3A::IDENTITY, None);
     b.set_geometry(a, rotating());
     b.set_geometry(c, rotating());
     assert_eq!(b.unresolved_motion(), 2);
@@ -659,6 +649,116 @@ fn replacing_an_unresolved_geometry_clears_its_warning() {
     let warnings = Arc::new(AtomicUsize::new(0));
     let world = tracing::subscriber::with_default(CountWarnings(warnings.clone()), || b.commit());
     assert_eq!(warnings.load(Ordering::Relaxed), 0);
-    assert_eq!(world.motion(a), Vec3A::ZERO);
-    assert_eq!(world.motion(c), Vec3A::Z);
+    assert_eq!(world.motion(a, Vec3A::ZERO, 0.0), Vec3A::ZERO);
+    assert_eq!(world.motion(c, Vec3A::ZERO, 0.0), Vec3A::Z);
+}
+
+/// A rotating or scaling end transform records the affine pair, and a
+/// pure translation still records the translation: the velocity at a hit
+/// is the chord its point travels, so rebasing by it lands on the same
+/// shutter-open point whatever the shutter time.
+#[test]
+fn an_affine_end_transform_gives_each_point_its_chord() {
+    let mut b = WorldBuilder::new();
+    let start = Affine3A::from_translation(Vec3::new(1.0, 0.0, 0.0));
+    let end = Affine3A::from_translation(Vec3::new(1.0, 0.5, 0.0)) * Affine3A::from_rotation_z(0.8);
+    let rotating = b.attach(instance(ball(), start, Some(end)), grey());
+    let translating = b.attach(
+        instance(
+            ball(),
+            start,
+            Some(Affine3A::from_translation(Vec3::Z) * start),
+        ),
+        grey(),
+    );
+    assert_eq!(b.unresolved_motion(), 0);
+    let world = b.commit();
+    // Exactly the translation, wherever the hit is.
+    for p in [Vec3A::ZERO, Vec3A::new(3.0, -2.0, 1.0)] {
+        assert_eq!(world.motion(translating, p, 0.3), Vec3A::Z);
+    }
+    let local = Vec3A::new(0.0, 1.0, 0.0);
+    let p0 = start.transform_point3a(local);
+    let chord = end.transform_point3a(local) - p0;
+    for t in [0.0f32, 0.7] {
+        // Where the kernel's interpolation puts the point at time `t`.
+        let m = Affine3A {
+            matrix3: glam::Mat3A::from_cols(
+                start.matrix3.x_axis.lerp(end.matrix3.x_axis, t),
+                start.matrix3.y_axis.lerp(end.matrix3.y_axis, t),
+                start.matrix3.z_axis.lerp(end.matrix3.z_axis, t),
+            ),
+            translation: start.translation.lerp(end.translation, t),
+        };
+        let p = m.transform_point3a(local);
+        let v = world.motion(rotating, p, t);
+        assert!((v - chord).length() < 1e-5, "t = {t}: {v} vs {chord}");
+        assert!((p - t * v - p0).length() < 1e-5, "t = {t} rebases to P0");
+    }
+}
+
+/// A scale through zero is singular at its midpoint: no inverse, so the
+/// record answers zero there rather than a non-finite vector.
+#[test]
+fn a_singular_midpoint_reads_zero() {
+    let mut b = WorldBuilder::new();
+    let id = b.attach(
+        instance(
+            ball(),
+            Affine3A::IDENTITY,
+            Some(Affine3A::from_scale(Vec3::splat(-1.0))),
+        ),
+        grey(),
+    );
+    let world = b.commit();
+    assert_eq!(world.motion(id, Vec3A::ZERO, 0.5), Vec3A::ZERO);
+    let v = world.motion(id, Vec3A::X, 0.0);
+    assert!((v - Vec3A::new(-2.0, 0.0, 0.0)).length() < 1e-6, "{v}");
+}
+
+/// A moving multi-part instance labelled `Offset` at its own id: every id
+/// its slots take resolves to its record — through a real hit too — and
+/// the neighbouring geometry's id does not.
+#[test]
+fn every_id_of_a_moving_multi_part_instance_resolves_to_its_record() {
+    let mut inner = SceneBuilder::new();
+    inner.attach(Geometry::Sphere {
+        center: Vec3A::new(-2.0, 0.0, 0.0),
+        radius: 0.5,
+    });
+    inner.attach(Geometry::Sphere {
+        center: Vec3A::new(2.0, 0.0, 0.0),
+        radius: 0.5,
+    });
+    let inner = Arc::new(inner.commit());
+    assert_eq!(inner.max_hit_id(), 1);
+
+    let mut b = WorldBuilder::new();
+    let before = b.attach(quad(), grey());
+    let base = before + 1;
+    let group = b.attach_labelled(
+        instance(
+            inner,
+            Affine3A::IDENTITY,
+            Some(Affine3A::from_translation(Vec3::Y)),
+        ),
+        grey(),
+        MASK_ALL,
+        InstanceHitId::Offset(base),
+    );
+    assert_eq!(group, base);
+    b.reserve_slot(grey(), MASK_ALL);
+    let after = b.attach(quad(), grey());
+    assert_eq!(after, base + 2);
+    assert_eq!(b.unresolved_motion(), 0);
+    let world = b.commit();
+    assert_eq!(world.motion(base, Vec3A::ZERO, 0.0), Vec3A::Y);
+    assert_eq!(world.motion(base + 1, Vec3A::ZERO, 0.0), Vec3A::Y);
+    assert_eq!(world.motion(before, Vec3A::ZERO, 0.0), Vec3A::ZERO);
+    assert_eq!(world.motion(after, Vec3A::ZERO, 0.0), Vec3A::ZERO);
+    let hit = world
+        .intersect(&Ray::new(Vec3A::new(2.0, 0.0, 5.0), -Vec3A::Z), 1e-3, 100.0)
+        .expect("the second sphere");
+    assert_eq!(hit.geom_id, base + 1);
+    assert_eq!(world.motion(hit.geom_id, hit.rec.p, 0.0), Vec3A::Y);
 }

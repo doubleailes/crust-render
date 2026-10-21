@@ -4,7 +4,8 @@
 //! and agreement with `openusd_schemas::render::compute_render_spec`.
 
 use crust_core::{
-    Accumulation, AovRequest, AovSource, NoAssets, PixelRect, Precision, Scene, UsdImportOptions,
+    Accumulation, AovRequest, AovSource, ChannelKind, NoAssets, PixelRect, Precision, PrimvarRole,
+    PrimvarSource, Scene, UsdImportOptions, WarningCode,
 };
 use std::path::PathBuf;
 
@@ -298,7 +299,7 @@ fn unsupported_products_and_vars_are_refused() {
     {
         token productName = "flat.exr"
         rel orderedVars = [</Render/intrinsic>, </Render/unknown>, </Render/lpe>,
-                           </Render/primvar>, </Render/int_color>, </Render/float_normal>,
+                           </Render/int_color>, </Render/float_normal>,
                            </Render/later>, </Render/depth>, </Render/notavar>]
     }
     def Scope "notaproduct"
@@ -318,11 +319,6 @@ fn unsupported_products_and_vars_are_refused() {
     {
         uniform string sourceName = "C<RD>?L"
         uniform token sourceType = "lpe"
-    }
-    def RenderVar "primvar"
-    {
-        uniform string sourceName = "displayColor"
-        uniform token sourceType = "primvar"
     }
     def RenderVar "int_color"
     {
@@ -990,19 +986,153 @@ fn the_motion_blur_flags_are_no_longer_warned_about() {
         ),
     );
     assert!(!scene.settings.motion_blur());
-    let unhonoured: Vec<&String> = warnings
-        .iter()
-        .filter(|w| w.contains("not honoured"))
-        .collect();
-    assert_eq!(unhonoured.len(), 1, "{warnings:?}");
+    assert!(!scene.settings.depth_of_field());
     assert!(
-        unhonoured[0].contains("disableDepthOfField = true"),
+        warnings.iter().all(|w| !w.contains("not honoured")),
         "{warnings:?}"
     );
     assert!(
-        warnings
-            .iter()
-            .all(|w| !w.contains("disableMotionBlur") && !w.contains("instantaneousShutter")),
+        warnings.iter().all(|w| !w.contains("disableMotionBlur")
+            && !w.contains("instantaneousShutter")
+            && !w.contains("disableDepthOfField")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn depth_of_field_is_on_unless_disabled_and_the_product_wins() {
+    let scene = load(
+        "dof_default",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform int2 resolution = (64, 36)
+    }
+"#,
+    );
+    assert!(scene.settings.depth_of_field());
+
+    // Settings only, no products: the settings prim decides.
+    let scene = load(
+        "dof_settings_only",
+        r#"
+    def RenderSettings "settings"
+    {
+        uniform bool disableDepthOfField = 1
+    }
+"#,
+    );
+    assert!(!scene.settings.depth_of_field());
+
+    // The settings disable it, the first product re-enables it.
+    let scene = load(
+        "dof_product_on",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        uniform bool disableDepthOfField = 1
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        )
+        .replace(
+            "token productName",
+            "uniform bool disableDepthOfField = 0\n        token productName",
+        ),
+    );
+    assert!(scene.settings.depth_of_field());
+
+    // The product disables it, the settings say nothing.
+    let scene = load(
+        "dof_product_off",
+        &format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/p>]
+    }}
+{FORWARD_PRODUCT}"#
+        )
+        .replace(
+            "token productName",
+            "uniform bool disableDepthOfField = 1\n        token productName",
+        ),
+    );
+    assert!(!scene.settings.depth_of_field());
+}
+
+#[test]
+fn products_that_disagree_on_depth_of_field_render_with_the_first() {
+    let products = |first: &str, second: &str| {
+        format!(
+            r#"
+    def RenderSettings "settings"
+    {{
+        rel products = [</Render/a>, </Render/b>]
+    }}
+    def RenderProduct "a"
+    {{
+        {first}
+        token productName = "a.exr"
+        rel orderedVars = [</Render/beauty>]
+    }}
+    def RenderProduct "b"
+    {{
+        {second}
+        token productName = "b.exr"
+        rel orderedVars = [</Render/beauty>]
+    }}
+    def RenderVar "beauty"
+    {{
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }}
+"#
+        )
+    };
+    let (scene, warnings) = load_warnings(
+        "dof_products_differ",
+        &products(
+            "uniform bool disableDepthOfField = 1",
+            "uniform bool disableDepthOfField = 0",
+        ),
+    );
+    let names: Vec<&str> = scene
+        .aovs
+        .products
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["a.exr", "b.exr"]);
+    assert!(!scene.settings.depth_of_field());
+    let dof: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("depth of field"))
+        .collect();
+    assert_eq!(dof.len(), 1, "{warnings:?}");
+    assert!(dof[0].contains("/Render/b") && dof[0].contains("asks for depth of field on"));
+    assert!(
+        warnings.iter().all(|w| !w.contains("no file is written")),
+        "{warnings:?}"
+    );
+    let codes: Vec<_> = scene
+        .warnings
+        .iter()
+        .filter(|w| w.code == crust_core::WarningCode::ProductDepthOfFieldMismatch)
+        .collect();
+    assert_eq!(codes.len(), 1, "{codes:?}");
+
+    // The same setting, once inherited: nothing to say.
+    let (_, warnings) = load_warnings(
+        "dof_products_agree",
+        &products("uniform bool disableDepthOfField = 1", "").replace(
+            "rel products",
+            "uniform bool disableDepthOfField = 1\n        rel products",
+        ),
+    );
+    assert!(
+        warnings.iter().all(|w| !w.contains("depth of field")),
         "{warnings:?}"
     );
 }
@@ -1202,11 +1332,35 @@ fn a_product_differing_only_in_motion_blur_is_kept_and_warned_about() {
         "{warnings:?}"
     );
 
-    // The same setting under its two names: both written, nothing to say.
+    // The two names are no longer one setting: `disableMotionBlur` is sharp at
+    // the frame, `instantaneousShutter` at shutter open. Both written, blur
+    // off, and the second named with the pose the render keeps.
     let (scene, warnings) = load_warnings(
-        "blur_products_synonyms",
+        "blur_products_spellings",
         &products(
             "uniform bool disableMotionBlur = 1",
+            "uniform bool instantaneousShutter = 1",
+        ),
+    );
+    assert_eq!(scene.aovs.products.len(), 2);
+    assert!(!scene.settings.motion_blur());
+    let blur: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("motion blur"))
+        .collect();
+    assert_eq!(blur.len(), 1, "{warnings:?}");
+    assert!(
+        blur[0].contains("/Render/b")
+            && blur[0].contains("off (sharp at shutter open)")
+            && blur[0].contains("off (sharp at the frame)"),
+        "{blur:?}"
+    );
+
+    // The same setting twice: both written, nothing to say.
+    let (scene, warnings) = load_warnings(
+        "blur_products_same",
+        &products(
+            "uniform bool instantaneousShutter = 1",
             "uniform bool instantaneousShutter = 1",
         ),
     );
@@ -1562,4 +1716,194 @@ fn a_window_is_no_longer_listed_as_not_honoured() {
         !warnings.iter().any(|w| w.contains("not honoured")),
         "{warnings:?}"
     );
+}
+
+/// The codes the import recorded, in first-fire order.
+fn codes(scene: &Scene) -> Vec<WarningCode> {
+    scene.warnings.iter().map(|w| w.code).collect()
+}
+
+const PRIMVAR_VARS: &str = r#"
+    def RenderSettings "settings"
+    {
+        rel camera = </World/cam>
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/Pref>, </Render/rest2>, </Render/uv2>, </Render/Cd>,
+                           </Render/objectId>, </Render/nameless>, </Render/rgba>]
+    }
+    def RenderVar "Pref"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "rest2"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "primvars:rest"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "uv2"
+    {
+        uniform token dataType = "texCoord2f"
+        uniform string sourceName = "uv2"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "Cd"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "displayColor"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "objectId"
+    {
+        uniform token dataType = "int"
+        uniform string sourceName = "objectId"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "nameless"
+    {
+        uniform token dataType = "float"
+        uniform token sourceType = "primvar"
+    }
+    def RenderVar "rgba"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "displayColor"
+        uniform token sourceType = "primvar"
+    }
+"#;
+
+/// "Primvar var accepted", "Primvar var without a name refused" and "Four
+/// components refused": each accepted var reads its keep-set entry, with
+/// the role, width and default accumulation its `dataType` gives; the
+/// prefix does not make a second entry.
+#[test]
+fn primvar_vars_resolve_by_data_type() {
+    let scene = load("primvar_vars", PRIMVAR_VARS);
+    let vars = &scene.aovs.products[0].vars;
+    let got: Vec<_> = vars
+        .iter()
+        .map(|v| {
+            (
+                v.name.as_str(),
+                v.source,
+                v.components,
+                v.accumulation,
+                v.precision,
+            )
+        })
+        .collect();
+    let pv = |index, components, role| {
+        AovSource::Primvar(PrimvarSource {
+            index,
+            components,
+            role,
+        })
+    };
+    use Accumulation::{Closest, Filtered};
+    assert_eq!(
+        got,
+        [
+            (
+                "Pref",
+                pv(0, 3, PrimvarRole::Vector),
+                3,
+                Closest,
+                Precision::Float
+            ),
+            (
+                "rest2",
+                pv(0, 3, PrimvarRole::Vector),
+                3,
+                Closest,
+                Precision::Float
+            ),
+            (
+                "uv2",
+                pv(1, 2, PrimvarRole::TexCoord),
+                2,
+                Filtered,
+                Precision::Float
+            ),
+            (
+                "Cd",
+                pv(2, 3, PrimvarRole::Color),
+                3,
+                Filtered,
+                Precision::Float
+            ),
+            (
+                "objectId",
+                pv(3, 1, PrimvarRole::Integer),
+                1,
+                Closest,
+                Precision::Uint
+            ),
+        ]
+    );
+    let kinds: Vec<_> = vars.iter().map(|v| v.channel_kind()).collect();
+    assert_eq!(
+        kinds,
+        [
+            ChannelKind::Vector,
+            ChannelKind::Vector,
+            ChannelKind::Uv,
+            ChannelKind::Color,
+            ChannelKind::Scalar
+        ]
+    );
+    assert_eq!(
+        codes(&scene),
+        [
+            WarningCode::AovPrimvarNoName,
+            WarningCode::AovPrimvarFourComponents
+        ]
+    );
+    let four = scene
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::AovPrimvarFourComponents)
+        .unwrap();
+    assert_eq!(four.prims, ["/Render/rgba"]);
+    assert!(
+        four.message.contains("not supported yet"),
+        "{}",
+        four.message
+    );
+}
+
+/// The accumulation overrides still apply to a primvar var.
+#[test]
+fn a_primvar_var_takes_an_authored_accumulation() {
+    let scene = load(
+        "primvar_multisampled",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/Pref>]
+    }
+    def RenderVar "Pref"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+        bool driver:parameters:aov:multiSampled = 1
+        float driver:parameters:aov:clearValue = -1
+    }
+"#,
+    );
+    let var = &scene.aovs.products[0].vars[0];
+    assert_eq!(var.accumulation, Accumulation::Filtered);
+    assert_eq!(var.clear, -1.0);
+    assert!(scene.warnings.is_empty(), "{:#?}", scene.warnings);
 }

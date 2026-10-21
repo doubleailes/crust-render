@@ -154,6 +154,8 @@ warning_codes! {
         "A light-sample count is above the most crust takes; the maximum is used.";
     TimeOutsideRange => "time.outside_range", Approximated, Each,
         "The frame lies outside the stage's time range; animated attributes hold their nearest sample.";
+    TimeMotionNeedsFrame => "time.motion_needs_frame", Skipped, Each,
+        "The camera's shutter opens but no frame was given; time-sampled transforms are not evaluated over it.";
     ColorWorkingSpaceRefused => "color.working_space_refused", Refused, Each,
         "renderingColorSpace names no usable working space; the render is in lin_rec709.";
     ColorUnknownSpace => "color.unknown_space", Refused, Each,
@@ -172,6 +174,12 @@ warning_codes! {
         "The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled.";
     CameraUnreadable => "camera.unreadable", Skipped, Each,
         "A camera prim could not be built into a camera.";
+    CameraInvalidMetersPerUnit => "camera.invalid_meters_per_unit", Refused, Each,
+        "The stage's metersPerUnit is not finite or not positive; the lens reads it as 0.01, a centimetre.";
+    CameraShutterInstantaneous => "camera.shutter_instantaneous", Approximated, Each,
+        "A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero.";
+    CameraShutterMismatch => "camera.shutter_mismatch", Approximated, Each,
+        "The render goes through another camera than the one whose shutter motion was measured over.";
 
     // Products, AOVs and light path expressions
     ProductNotARenderProduct => "product.not_a_render_product", Skipped, Each,
@@ -182,6 +190,8 @@ warning_codes! {
         "A product renders through another camera or resolution than the first; no file is written for it.";
     ProductMotionBlurMismatch => "product.motion_blur_mismatch", Approximated, Each,
         "A product asks for other motion blur than the first; its file is written with the first's.";
+    ProductDepthOfFieldMismatch => "product.depth_of_field_mismatch", Approximated, Each,
+        "A product asks for other depth of field than the first; its file is written with the first's.";
     ProductRegionMismatch => "product.region_mismatch", Approximated, Each,
         "A product asks for another dataWindowNDC than the first; its file is written over the first's.";
     ProductUnhonouredAttribute => "product.unhonoured_attribute", Approximated, Each,
@@ -203,7 +213,7 @@ warning_codes! {
     AovNotARenderVar => "aov.not_a_render_var", Skipped, Each,
         "orderedVars targets a prim that is not a RenderVar.";
     AovUnsupportedSource => "aov.unsupported_source", Skipped, Each,
-        "A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written.";
+        "A RenderVar's source is one crust does not produce yet (planned, intrinsic); no channel is written.";
     AovUnknownSource => "aov.unknown_source", Skipped, Each,
         "A RenderVar names an unknown source or sourceType; no channel is written.";
     AovTypeMismatch => "aov.type_mismatch", Skipped, Each,
@@ -218,6 +228,14 @@ warning_codes! {
         "crust:aov:raw is authored on a source that is not a light path expression; it is ignored.";
     AovInvalidRaw => "aov.invalid_raw", Skipped, Each,
         "crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written.";
+    AovPrimvarNoName => "aov.primvar_no_name", Skipped, Each,
+        "A primvar RenderVar authors no sourceName; no channel is written.";
+    AovPrimvarFourComponents => "aov.primvar_four_components", Skipped, Each,
+        "A primvar RenderVar's data type has four components, which are not supported yet; no channel is written.";
+    PrimvarMismatch => "primvar.mismatch", Skipped, Each,
+        "A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value.";
+    PrimvarNotInherited => "primvar.not_inherited", Skipped, Each,
+        "A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value.";
     LpeInvalid => "lpe.invalid", Skipped, Each,
         "A light path expression does not parse or compile; no channel is written.";
 
@@ -229,7 +247,9 @@ warning_codes! {
     XformUnknownType => "xform.unknown_type", Skipped, Once,
         "A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored.";
     XformMotionVectorUnsupported => "xform.motion_vector_unsupported", Approximated, Each,
-        "Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero.";
+        "Geometry moves in a way the vector cannot attribute to one placement; it is motion blurred but the motionvector AOV reads zero.";
+    XformMotionIgnored => "xform.motion_ignored", Skipped, Each,
+        "A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders without motion.";
 
     // Meshes, subdivision, displacement
     MeshNonInvertibleTransform => "mesh.non_invertible_transform", Approximated, Each,

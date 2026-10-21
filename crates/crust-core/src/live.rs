@@ -108,6 +108,32 @@ pub(crate) struct StageFacts {
     /// Whether an unshared curved implicit shape took the fixed radial count
     /// because no camera was named: naming one then moves geometry.
     pub(crate) unsized_shapes: bool,
+    /// The primvars the geometry kept for the render's primvar vars, as
+    /// `(name, components)`: a product that asks for others needs geometry
+    /// read again.
+    pub(crate) primvars: Vec<(String, u8)>,
+    /// The shutter motion was measured over: geometry was placed at its
+    /// ends, so another shutter is another scene.
+    pub(crate) shutter: ShutterKey,
+}
+
+/// The shutter an import measured motion over, as bits: the camera it was
+/// read from, its offsets as authored, the interval in time codes (`None`
+/// when instantaneous), and whether prims were asked whether their transform
+/// varies. The last two decide warnings as well as geometry
+/// (`time.motion_needs_frame`, `camera.shutter_instantaneous`), so a change to
+/// any part re-imports. `frame_pose` is whether moving placements were posed
+/// at the frame (`disableMotionBlur` over a shutter that does not open at
+/// the frame), which moves geometry, so turning that flag on or off
+/// re-imports too where it matters, and stays an in-place settings edit
+/// elsewhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ShutterKey {
+    pub(crate) camera: Option<String>,
+    pub(crate) offsets: [u64; 2],
+    pub(crate) interval: Option<[u64; 2]>,
+    pub(crate) query: bool,
+    pub(crate) frame_pose: bool,
 }
 
 /// A value the import's tessellation read from the render camera, as the
