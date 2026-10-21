@@ -20,9 +20,8 @@ use rayon::prelude::*;
 use tracing::debug;
 
 use crate::material::{Displacement, Material};
-use crate::rt_world::{
-    FaceMap, FanSlice, PrimvarChannel, PrimvarTable, SubFace, UvMap, WorldBuilder,
-};
+use crate::primvars::{PrimvarChannel, PrimvarTable};
+use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
 use crate::scene::displace::{self, VertexChart};
 use crate::scene::subdiv;
 

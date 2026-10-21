@@ -43,6 +43,7 @@ mod medium;
 pub mod names;
 mod pdf;
 pub mod place;
+mod primvars;
 /// The opt-in render profile (`--profile`): per-section thread time inside
 /// the render, after Guerilla Render's "Render Profile".
 pub mod profile;
@@ -121,13 +122,11 @@ pub use lux::{
 pub use material::*;
 pub use medium::Medium;
 pub use pdf::{InvPdfArea, PdfSolidAngle};
+pub use primvars::{MeshHit, PrimvarChannel, PrimvarTable};
 pub use ray::{
     MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask, TRACE_T_MIN,
 };
-pub use rt_world::{
-    FaceMap, FanSlice, MeshHit, PrimvarChannel, PrimvarTable, SubFace, UvMap, World, WorldBuilder,
-    WorldHit, tangent_of,
-};
+pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
 pub use sampler::SamplerKind;
 pub use scene::Scene;
 pub use strands::{CurveHit, StrandSpan, StrandTable, StrandValues};

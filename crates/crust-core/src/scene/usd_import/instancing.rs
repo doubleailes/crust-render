@@ -36,7 +36,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
 use crate::material::Material;
-use crate::rt_world::{FaceMap, PrimvarTable, UvMap, WorldBuilder};
+use crate::primvars::PrimvarTable;
+use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
 use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_motion_translate,

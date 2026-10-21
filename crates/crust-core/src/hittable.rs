@@ -1,5 +1,5 @@
+use crate::primvars::MeshHit;
 use crate::ray::Ray;
-use crate::rt_world::MeshHit;
 use crate::strands::CurveHit;
 use glam::Vec3A;
 
