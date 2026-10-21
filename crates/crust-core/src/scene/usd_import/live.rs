@@ -295,6 +295,7 @@ fn scratch_ctx<'a>(r: &'a Rebuilding<'a>, world: WorldBuilder) -> ImportCtx<'a> 
         links: LightLinks::default(),
         light_origins: Vec::new(),
         settings: crate::tracer::RenderSettings::default(),
+        framing: Default::default(),
         stage_path: r.layer,
         index: None,
         assets: r.assets,
@@ -390,9 +391,10 @@ fn refresh_settings(
         let stage = open_stage(layer, path_str, Some(cam_path.clone()))
             .map_err(|e| Structural(format!("cannot open the stage: {e}")))?;
         let prim: Prim = prim_at(&stage, cam_path.clone());
-        let rc = build_camera(&stage, &prim, &read.settings)
+        let rc = build_camera(&stage, &prim, &read.settings, read.products.framing)
             .ok_or_else(|| Structural(format!("{camera} is no longer a camera")))?;
         rc.warn_lens_units(Some(camera));
+        rc.warn_framing(Some(camera));
         let settings = apply_exposure(
             read.settings,
             read.exposure_compensation,

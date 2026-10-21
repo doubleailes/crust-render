@@ -67,6 +67,7 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 |-----------|---------|---------|
 | `int2 resolution` | `(640, 360)` | image width and height in pixels. The first render product's own `resolution` overrides it. |
 | `float4 dataWindowNDC` | `(0, 0, 1, 1)` | the part of the frame to render. The first render product's own value overrides it. See [below](#datawindowndc). |
+| `token aspectRatioConformPolicy` | `expandAperture` | how the camera's aperture is fitted to the image when their aspect ratios differ. The first render product's own value overrides it. See [below](#aspectratioconformpolicy). |
 | `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
 | `bool disableMotionBlur` | `false` | render moving geometry sharp, where it is at the frame. The first render product's own value overrides it. See [below](#disablemotionblur). |
@@ -166,6 +167,58 @@ def RenderSettings "settings"
     uniform float4 dataWindowNDC = (0.25, 0.25, 0.75, 0.75)
 }
 ```
+
+### aspectRatioConformPolicy
+
+`uniform token aspectRatioConformPolicy = "adjustApertureHeight"`
+
+Decides what the render frames when the camera's aperture (`horizontalAperture` ×
+`verticalAperture`) has another aspect ratio than the image (`resolution`). The aperture is
+conformed to the image before the field of view is derived, as OpenUSD's
+`CameraUtilConformWindow` does; the camera prim itself is not changed. For a 36 × 24 mm
+aperture (3:2):
+
+| policy | keeps | on a square image | on a 2:1 image |
+|--------|-------|-------------------|----------------|
+| `expandAperture` (default) | the whole aperture: one side grows | 36 × 36 | 48 × 24 |
+| `cropAperture` | the aperture's middle: one side shrinks | 24 × 24 | 36 × 18 |
+| `adjustApertureWidth` | the vertical aperture | 24 × 24 | 48 × 24 |
+| `adjustApertureHeight` | the horizontal aperture | 36 × 36 | 36 × 18 |
+| `adjustPixelAspectRatio` | the aperture, with non-square pixels | not supported: as `expandAperture` | not supported: as `expandAperture` |
+
+`adjustApertureHeight` is the horizontal fit Maya and Nuke use; `adjustApertureWidth` is
+a vertical fit. An aperture that already has the image's aspect, and a camera that authors
+no `verticalAperture` (it follows the image's aspect), frame the same under every policy.
+
+The policy is a render-settings attribute, read from the first `RenderProduct` when it
+authors one, else from this prim, like the resolution. Authored on the **camera** prim it
+is not read, as in OpenUSD. A later product that asks for another policy is still written,
+with the first product's framing, and a warning says so. A token that is none of the five
+is refused with a warning and read as `expandAperture`.
+
+Crust renders square pixels only, so `adjustPixelAspectRatio`, which keeps the aperture
+and changes the pixels' shape instead, frames as `expandAperture` and warns with the
+`pixelAspectRatio` it would have needed (none when the aperture already fits).
+`crust ls camera --json` reports each camera's authored `aperture_mm` and the
+`conformed_aperture_mm` the render frames.
+
+```usda
+def RenderSettings "settings"
+{
+    uniform int2 resolution = (2048, 858)
+    uniform token aspectRatioConformPolicy = "adjustApertureHeight"
+}
+```
+
+#### Stages written for older versions
+
+Before Crust Render read this attribute it always kept the vertical aperture, as
+`adjustApertureWidth` does, whatever the stage asked for. Under the default
+`expandAperture`, a camera whose aperture is **wider** than the image (a 36 × 24 mm
+aperture on a square image, say) now shows its whole authored width instead of being
+cropped at the sides. To keep the old framing, author
+`aspectRatioConformPolicy = "adjustApertureWidth"` on the render settings. Cameras whose
+aperture is narrower than the image, or as wide, frame as before.
 
 ### renderingColorSpace
 

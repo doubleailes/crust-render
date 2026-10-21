@@ -626,3 +626,127 @@ fn a_primvar_warning_does_not_block_a_settings_edit() {
         Ok(())
     );
 }
+
+/// A stage rendering a sphere under a dome through `/W/Cam`, a 36 × 24
+/// aperture on a 2:1 image, its settings authoring `extra`; a Catmull-Clark
+/// cube refined adaptively when `adaptive`.
+fn framing_stage(name: &str, extra: &str, adaptive: bool) -> PathBuf {
+    let dir = std::env::temp_dir().join("crust_live_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(format!("{name}.usda"));
+    let (cage, edge) = if adaptive {
+        (
+            r#"
+    def Mesh "Cage"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, 1), (-1, 1, -1), (1, 1, -1), (-1, -1, -1), (1, -1, -1)]
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
+            "float crust:subdivisionEdgeLength = 2",
+        )
+    } else {
+        ("", "")
+    };
+    std::fs::write(
+        &path,
+        format!(
+            r#"#usda 1.0
+def Xform "W"
+{{
+    def Camera "Cam"
+    {{
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Sphere "Ball" {{}}
+    def DomeLight "Sky" {{}}{cage}
+}}
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </W/Cam>
+        uniform int2 resolution = (64, 32)
+        {edge}
+        {extra}
+    }}
+}}
+"#
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+fn beauty_bits(scene: Scene) -> Vec<[u32; 3]> {
+    let settings = scene.settings.with_samples_per_pixel(16).with_max_depth(3);
+    let buffer =
+        crust_core::Renderer::new(scene.camera, scene.world, scene.lights, settings).render();
+    let (w, h) = buffer.size();
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| buffer.get_pixel(x, y).to_array().map(f32::to_bits))
+        .collect()
+}
+
+const HEIGHT_FIT: &str = "uniform token aspectRatioConformPolicy = \"adjustApertureHeight\"";
+
+/// An edit of `aspectRatioConformPolicy` alone re-frames the camera in
+/// place when no geometry read the camera, and renders bit for bit what a
+/// fresh import of the edited layer renders.
+#[test]
+fn a_conform_policy_edit_applies_in_place_as_a_reimport_would() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = framing_stage("live_framing", "", false);
+    let before = beauty_bits(Scene::from_usd(&path).expect("load"));
+    let mut scene = Scene::from_usd(&path).expect("load");
+    framing_stage("live_framing", HEIGHT_FIT, false);
+    let update = scene
+        .provenance
+        .as_ref()
+        .expect("provenance")
+        .rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+        .expect("a policy edit applies in place");
+    assert!(update.has_settings());
+    update.apply(&mut scene).expect("applies");
+    let fresh = Scene::from_usd(&path).expect("load the edited layer");
+    assert_eq!(format!("{:?}", scene.camera), format!("{:?}", fresh.camera));
+    let after = beauty_bits(scene);
+    assert_eq!(after, beauty_bits(fresh));
+    assert_ne!(after, before, "the edit re-framed the render");
+}
+
+/// Adaptive subdivision tessellated for the old frame, so a policy edit that
+/// moves the conformed aperture re-imports.
+#[test]
+fn a_conform_policy_edit_reimports_adaptive_subdivision() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = framing_stage("live_framing_adaptive", "", true);
+    let scene = Scene::from_usd(&path).expect("load");
+    assert!(scene.stats.subdivision.adaptive.is_some(), "adaptive");
+    let prov = scene.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+    framing_stage("live_framing_adaptive", HEIGHT_FIT, true);
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => {
+            assert!(why.contains("another camera projection"), "{why}")
+        }
+        Ok(_) => panic!("adaptive subdivision for another frame was updated in place"),
+    }
+}

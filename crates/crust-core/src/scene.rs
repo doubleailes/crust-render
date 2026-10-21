@@ -245,6 +245,10 @@ pub struct CameraRecord {
     /// Horizontal, vertical; the vertical defaults to the horizontal over
     /// the image's aspect ratio, as the render reads it.
     pub aperture_mm: [f32; 2],
+    /// `aperture_mm` conformed to the image's aspect by the render's
+    /// `aspectRatioConformPolicy`: the aperture the render frames through
+    /// this camera.
+    pub conformed_aperture_mm: [f32; 2],
     /// `0` is a pinhole.
     #[serde(serialize_with = "crate::report::finite_or_null")]
     pub f_stop: f32,
