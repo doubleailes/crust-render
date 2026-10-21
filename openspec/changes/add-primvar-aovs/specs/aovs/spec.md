@@ -86,7 +86,9 @@ SHALL fit an `int` or `float` var.
 A requested primvar SHALL be refined with its mesh, at every subdivision
 level, uniform or adaptive. A `vertex` or `varying` primvar SHALL be refined
 like the points, and a `faceVarying` one under the mesh's
-`faceVaryingLinearInterpolation`, as the chart is. Displacement SHALL NOT
+`faceVaryingLinearInterpolation`, as the chart is. A `varying` primvar is
+therefore smoothed, not interpolated bilinearly over each face as USD defines
+it; the chart already follows this rule. Displacement SHALL NOT
 change a primvar's value: a displaced point reads the primvar of the
 undisplaced point it came from.
 
@@ -130,8 +132,11 @@ SHALL read the clear value.
 ### Requirement: Primvar sources cost nothing unless asked for
 
 A render whose RenderVars name no primvar SHALL read, store and evaluate no
-primvar beyond what its materials read. Its memory and instruction count
-SHALL match the same render without this capability.
+primvar beyond what its materials read. Its scene's memory and its render's
+instruction count SHALL match the same render without this capability. The
+one cost allowed at import: a subdivided mesh's UV chart is refined at four
+lanes and narrowed back to two, so the import's transient memory and
+instruction count grow slightly.
 
 #### Scenario: No primvar var
 
