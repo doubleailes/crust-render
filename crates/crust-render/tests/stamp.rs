@@ -270,3 +270,25 @@ fn the_lens_the_layer_stack_and_the_overrides_are_recorded() {
         "{stderr}"
     );
 }
+
+/// The same stage typed relative to the working directory stamps the same
+/// absolute layer path, so `diff` sees one layer, not two.
+#[test]
+fn a_relative_stage_path_stamps_the_absolute_layer() {
+    let dir = work_dir("relative");
+    let shot = sample("cornellbox.usda");
+    let samples = shot.parent().expect("samples dir");
+    let out = dir.join("rel.exr");
+    let out = out.to_str().expect("utf-8 temp path");
+    render(
+        samples,
+        Path::new("cornellbox.usda"),
+        &["-o", out, "-s", "1", "--region", "0,0,8,8"],
+    );
+    let s = stamp(&dir.join("rel.exr"));
+    let hash = crust_core::stamp::content_hash(&std::fs::read(&shot).expect("read the shot"));
+    assert_eq!(
+        s["crust:layerStack"],
+        text(&format!("{hash:016x} {}", shot.display()))
+    );
+}

@@ -54,35 +54,107 @@ pub struct StampedLayer {
     pub hash: Option<u64>,
 }
 
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+fn fnv1a(h: u64, bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(h, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
+}
+
 /// FNV-1a over `bytes`: a hash with no seed, the same across runs, builds
 /// and platforms, so two files stamped years apart compare. Not a
 /// cryptographic hash: it tells an edited layer from the one rendered, not a
 /// forged one.
 pub fn content_hash(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
-    })
+    fnv1a(FNV_OFFSET, bytes)
+}
+
+/// [`content_hash`] of everything `reader` yields, folded a buffer at a
+/// time, so a host hashes a large package without holding it in memory.
+pub fn content_hash_read(mut reader: impl std::io::Read) -> std::io::Result<u64> {
+    let mut h = FNV_OFFSET;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return Ok(h),
+            Ok(n) => h = fnv1a(h, &buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `path` as `crust:layerStack` writes it: printable ASCII as is, every
+/// other byte of its UTF-8 (and `%` itself) as `%XX`. An EXR text holds
+/// only Latin-1, and one character outside it would cost the whole
+/// attribute; ASCII keeps every line one layer.
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        if (0x20..0x7f).contains(&b) && b != b'%' {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The inverse of [`encode_path`]; a `%` not followed by two hex digits is
+/// kept as written.
+fn decode_path(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The `crust:layerStack` text: one layer per line, strongest first, its
-/// hash in hex (`-` when its bytes could not be read), a space, its path.
+/// hash in hex (`-` when its bytes could not be read), a space, its path
+/// (non-ASCII bytes percent-encoded).
 pub fn layer_stack_text(layers: &[StampedLayer]) -> String {
     layers
         .iter()
-        .map(|l| match l.hash {
-            Some(h) => format!("{h:016x} {}", l.path),
-            None => format!("- {}", l.path),
+        .map(|l| {
+            let path = encode_path(&l.path);
+            match l.hash {
+                Some(h) => format!("{h:016x} {path}"),
+                None => format!("- {path}"),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// The layers of a `crust:layerStack` text, read back: `(hash, path)` per
-/// line, the hash as written (`-` when it was not read).
-pub fn parse_layer_stack(text: &str) -> Vec<(&str, &str)> {
+/// line, the hash as written (`-` when it was not read), the path decoded.
+/// The line splits at its first space, which ends the hash: a path keeps
+/// any space of its own.
+pub fn parse_layer_stack(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter(|l| !l.is_empty())
-        .map(|l| l.split_once(' ').unwrap_or(("-", l)))
+        .map(|l| {
+            let (hash, path) = l.split_once(' ').unwrap_or(("-", l));
+            (hash.to_owned(), decode_path(path))
+        })
         .collect()
 }
 
@@ -170,11 +242,12 @@ impl SamplingStamp {
         }
     }
 
-    /// This stamp with what the import recorded of `source`; `read` returns
-    /// a layer file's bytes, `None` when it cannot (the host reads them:
-    /// crust-core opens no file of its own here). Read after the render, so
-    /// a layer edited while it rendered is hashed as edited.
-    pub fn with_source(mut self, source: &Source, read: impl Fn(&Path) -> Option<Vec<u8>>) -> Self {
+    /// This stamp with what the import recorded of `source`; `hash` returns
+    /// a layer file's [`content_hash`], `None` when it could not be read (the
+    /// host reads the files: crust-core opens none here). The host hashes
+    /// them as the scene is loaded, before tracing, so a layer edited during
+    /// the render is not credited with pixels it did not make.
+    pub fn with_source(mut self, source: &Source, hash: impl Fn(&Path) -> Option<u64>) -> Self {
         self.lens = source.lens.clone();
         self.depth_of_field = source.depth_of_field;
         self.motion_blur = source.motion_blur;
@@ -183,7 +256,7 @@ impl SamplingStamp {
             .iter()
             .map(|path| StampedLayer {
                 path: path.to_string_lossy().into_owned(),
-                hash: read(path).map(|bytes| content_hash(&bytes)),
+                hash: hash(path),
             })
             .collect();
         self.invisible_overrides = source.invisible_overrides;
@@ -431,9 +504,10 @@ mod tests {
     /// the hash of the bytes the host read, `-` where it read none.
     #[test]
     fn the_lens_and_the_layer_stack_are_stamped() {
-        let read = |p: &Path| (p == Path::new("/s/shot.usda")).then(|| b"#usda 1.0\n".to_vec());
+        let hash =
+            |p: &Path| (p == Path::new("/s/shot.usda")).then(|| content_hash(b"#usda 1.0\n"));
         let s = SamplingStamp::new(&settings(), &RayStats::default(), Some("/cam"), None)
-            .with_source(&source(), read);
+            .with_source(&source(), hash);
         let attrs = s.attributes();
         assert_eq!(get(&attrs, "crust:fStop"), Some(&StampValue::Float(0.02)));
         assert_eq!(
@@ -463,20 +537,54 @@ mod tests {
         assert_eq!(
             parse_layer_stack(&text),
             vec![
-                ("-", "/s/session.usda"),
-                (format!("{hash:016x}").as_str(), "/s/shot.usda")
+                ("-".to_owned(), "/s/session.usda".to_owned()),
+                (format!("{hash:016x}"), "/s/shot.usda".to_owned())
             ]
         );
         // The version stays last.
         assert_eq!(attrs.last().map(|(n, _)| *n), Some("crust:version"));
     }
 
-    /// FNV-1a's published values: the hash must not change between builds.
+    /// FNV-1a's published values: the hash must not change between builds;
+    /// streamed in buffers, it is the same.
     #[test]
     fn the_content_hash_is_fnv1a() {
         assert_eq!(content_hash(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(content_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(content_hash(b"foobar"), 0x8594_4171_f739_67e8);
+        let big: Vec<u8> = (0..200_000u32).map(|i| (i * 31 % 251) as u8).collect();
+        assert_eq!(
+            content_hash_read(big.as_slice()).expect("read"),
+            content_hash(&big)
+        );
+    }
+
+    /// A path keeps its spaces, and one outside Latin-1 (or with a `%`)
+    /// round-trips through ASCII, so the EXR can hold the attribute.
+    #[test]
+    fn layer_paths_round_trip() {
+        let layers = [
+            StampedLayer {
+                path: "/shots/my shot/lighting override.usda".into(),
+                hash: Some(1),
+            },
+            StampedLayer {
+                path: "/プロジェクト/100%/shot.usda".into(),
+                hash: None,
+            },
+        ];
+        let text = layer_stack_text(&layers);
+        assert!(text.is_ascii(), "{text}");
+        assert_eq!(
+            parse_layer_stack(&text),
+            vec![
+                (
+                    "0000000000000001".to_owned(),
+                    "/shots/my shot/lighting override.usda".to_owned()
+                ),
+                ("-".to_owned(), "/プロジェクト/100%/shot.usda".to_owned()),
+            ]
+        );
     }
 
     #[test]

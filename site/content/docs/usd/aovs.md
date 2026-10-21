@@ -752,7 +752,7 @@ it mirrors:
 | `crust:focusDistance` | `float` | the focus distance | `focusDistance` |
 | `crust:depthOfField` | `int` | `1` when the lens was open (an `fStop` above 0, depth of field not disabled), else `0` | `fStop`, `disableDepthOfField` |
 | `crust:motionBlur` | `int` | `1` when moving geometry was blurred (motion blur on, over a shutter that opens an interval), else `0` | `disableMotionBlur`, `shutter:open` / `shutter:close` |
-| `crust:layerStack` | `string` | the stage's root layer stack, strongest first (session layer, root layer, sublayers): one line per file, the 16-digit hex FNV-1a hash of its bytes (`-` if unreadable), a space, its path; absent when no layer is known | — |
+| `crust:layerStack` | `string` | the stage's root layer stack, strongest first (session layer, root layer, sublayers): one line per file, the 16-digit hex FNV-1a hash of its bytes as the scene was loaded (`-` if unreadable), a space, its absolute path (characters outside printable ASCII, and `%`, written as `%XX` UTF-8 bytes); absent when no layer is known | — |
 | `crust:invisibleOverrides` | `int` | the prims the strongest layer of that stack hides with an `over` authoring `visibility = "invisible"` — what a session or override layer hid of the scene beneath it | — |
 | `crust:version` | `string` | the crust version | — |
 

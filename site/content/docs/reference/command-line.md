@@ -949,7 +949,8 @@ override layer on one side), and another count of prims hidden by visibility ove
 Every stamped value that differs is also listed, with or without a note, under `stamp
 differences:` (`comparability.differences` in the JSON): the version, an `fStop` on two
 pinholes, and the layer stack layer by layer — a layer in one file only, a layer whose
-content changed, shared layers in another order. A layer whose content alone changed has
+content changed (or could not be compared, when one render could not read it), shared
+layers in another order. A layer whose content alone changed has
 no note, since an edited layer is often the change under test.
 
 In text mode the differences and the notes go to stderr, so stdout reads the same either way. Comparability

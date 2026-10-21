@@ -224,13 +224,24 @@ impl Comparability {
             };
             let (ta, tb) = (text(&d.a), text(&d.b));
             let (la, lb) = (parse_layer_stack(&ta), parse_layer_stack(&tb));
-            fn find<'a>(stack: &[(&'a str, &str)], path: &str) -> Option<&'a str> {
-                stack.iter().find(|(_, p)| *p == path).map(|(h, _)| *h)
+            fn find<'a>(stack: &'a [(String, String)], path: &str) -> Option<&'a str> {
+                stack
+                    .iter()
+                    .find(|(_, p)| p == path)
+                    .map(|(h, _)| h.as_str())
             }
             for (hash, path) in &la {
                 match find(&lb, path) {
                     None => out.push(format!("crust:layerStack: {path} only in a")),
-                    Some(other) if other != *hash => {
+                    // `-`: the bytes were not read, so nothing says the
+                    // content changed.
+                    Some(other) if other != hash && (other == "-" || hash == "-") => {
+                        let side = if hash == "-" { "a" } else { "b" };
+                        out.push(format!(
+                            "crust:layerStack: {path} content not compared (unread in {side})"
+                        ))
+                    }
+                    Some(other) if other != hash => {
                         out.push(format!("crust:layerStack: {path} content differs"))
                     }
                     Some(_) => {}
@@ -241,10 +252,10 @@ impl Comparability {
                     out.push(format!("crust:layerStack: {path} only in b"));
                 }
             }
-            let order = |s: &[(&str, &str)], other: &[(&str, &str)]| -> Vec<String> {
+            let order = |s: &[(String, String)], other: &[(String, String)]| -> Vec<String> {
                 s.iter()
                     .filter(|(_, p)| find(other, p).is_some())
-                    .map(|(_, p)| (*p).to_owned())
+                    .map(|(_, p)| p.clone())
                     .collect()
             };
             if order(&la, &lb) != order(&lb, &la) {
@@ -766,12 +777,8 @@ fn layer_notes(a: &Stamp, b: &Stamp, notes: &mut Vec<String>) {
         _ => None,
     };
     if let (Some(ta), Some(tb)) = (text(a), text(b)) {
-        let paths = |t: &str| -> Vec<String> {
-            parse_layer_stack(t)
-                .into_iter()
-                .map(|(_, p)| p.to_owned())
-                .collect()
-        };
+        let paths =
+            |t: &str| -> Vec<String> { parse_layer_stack(t).into_iter().map(|(_, p)| p).collect() };
         let (pa, pb) = (paths(&ta), paths(&tb));
         let only = |x: &[String], y: &[String]| -> Vec<String> {
             x.iter().filter(|p| !y.contains(p)).cloned().collect()
@@ -1220,6 +1227,13 @@ mod tests {
         assert_eq!(
             c.differences_text(),
             ["crust:layerStack: /s/shot.usda content differs"]
+        );
+        // A layer unread on one side is not called edited.
+        let unread = with(shot(), "crust:layerStack", Text("- /s/shot.usda".into()));
+        let c = comparability(&base, &unread);
+        assert_eq!(
+            c.differences_text(),
+            ["crust:layerStack: /s/shot.usda content not compared (unread in b)"]
         );
         let hidden = with(shot(), "crust:invisibleOverrides", Int(4));
         let c = comparability(&base, &hidden);

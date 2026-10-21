@@ -1895,6 +1895,20 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         }
     };
     debug!("Scene built in {:?}", load_start.elapsed());
+    // The layers are hashed now, as loaded, not after the render: a layer
+    // edited while it renders must not stamp pixels it did not make.
+    // Streamed, so a large package is never held in memory.
+    let layer_hashes: std::collections::HashMap<PathBuf, Option<u64>> = scene
+        .source
+        .layer_stack
+        .iter()
+        .map(|layer| {
+            let hash = std::fs::File::open(layer).ok().and_then(|f| {
+                crust_core::stamp::content_hash_read(std::io::BufReader::new(f)).ok()
+            });
+            (layer.clone(), hash)
+        })
+        .collect();
     let output_color = match OutputColor::new(scene.working_space, &cli.display, &cli.view) {
         Ok(c) => c,
         Err(e) => {
@@ -2111,7 +2125,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     // How the pixels were sampled, recorded in every EXR written.
     let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time)
         .for_outcome(rendered.outcome, &ray_stats)
-        .with_source(&source, |layer| std::fs::read(layer).ok());
+        .with_source(&source, |layer| layer_hashes.get(layer).copied().flatten());
     let output_start = Instant::now();
     let mut files = Vec::new();
     if let Some(film) = &film {

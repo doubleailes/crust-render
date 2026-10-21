@@ -121,6 +121,12 @@ impl Camera {
         }
     }
 
+    /// Whether the lens is open: rays leave a disk rather than the eye, and
+    /// out-of-focus depths blur.
+    pub fn has_depth_of_field(&self) -> bool {
+        self.lens_radius > 0.0
+    }
+
     /// The world-space width one pixel spans at ray parameter `t = 1`.
     ///
     /// This is the numerator of a primary ray's cone spread. `get_ray` builds
@@ -137,12 +143,6 @@ impl Camera {
     /// what the unit test pins. The division is the caller's, per ray, because
     /// the direction is longer towards the frame edge and that pixel really
     /// does subtend a smaller angle.
-    /// Whether the lens is open: rays leave a disk rather than the eye, and
-    /// out-of-focus depths blur.
-    pub fn has_depth_of_field(&self) -> bool {
-        self.lens_radius > 0.0
-    }
-
     /// The camera position at shutter open.
     pub(crate) fn origin(&self) -> Vec3A {
         self.origin
