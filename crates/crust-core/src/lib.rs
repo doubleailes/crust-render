@@ -125,8 +125,8 @@ pub use ray::{
     MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask, TRACE_T_MIN,
 };
 pub use rt_world::{
-    FaceMap, FanSlice, PrimvarChannel, PrimvarTable, SubFace, UvMap, World, WorldBuilder, WorldHit,
-    tangent_of,
+    FaceMap, FanSlice, MeshHit, PrimvarChannel, PrimvarTable, SubFace, UvMap, World, WorldBuilder,
+    WorldHit, tangent_of,
 };
 pub use sampler::SamplerKind;
 pub use scene::Scene;

@@ -260,6 +260,16 @@ pub trait Material: Send + Sync {
         }
     }
 
+    /// The primvars this material reads by name, in the order its program
+    /// numbers them ([`crust_mtlx::Program::primvars`]) — on a mesh, what the
+    /// import decodes into the mesh's [`crate::PrimvarTable::shading`] and a
+    /// hit carries as a [`crate::MeshHit`]; a curve reads the same list
+    /// through [`Material::curve_needs`]. Empty by default: a material that
+    /// reads none takes no mesh off `World::intersect`'s plain path.
+    fn primvars(&self) -> &[String] {
+        &[]
+    }
+
     /// The primvar holding the chart this material reads, when it names one
     /// other than the conventional `st`.
     ///

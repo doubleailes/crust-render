@@ -26,6 +26,7 @@ fn run(doc_text: &str, node: &str) -> Val {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            primvars: &[],
         },
         &mut slots,
     );
@@ -298,6 +299,7 @@ fn height_to_normal_at(slope_u: f32, slope_v: f32, uv_width: f32, node: &str) ->
         position: Vec3A::ZERO,
         uv_width,
         curve: None,
+        primvars: &[],
     };
     c.program.eval(&ctx, &mut slots);
     slots[slot as usize].rgb()
@@ -356,6 +358,7 @@ fn eval_with(
         position: Vec3A::ZERO,
         uv_width,
         curve: None,
+        primvars: &[],
     };
     c.program.eval(&ctx, &mut slots);
     (slots[slot as usize], c.program)

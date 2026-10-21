@@ -103,6 +103,7 @@ impl<'a> Compiler<'a> {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            primvars: &[],
         };
         Some(apply(op, &slots, &ctx))
     }

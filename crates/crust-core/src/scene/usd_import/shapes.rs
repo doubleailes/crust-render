@@ -45,7 +45,10 @@ pub(super) fn emit_sphere(
     sphere: &UsdSphere,
     span: Span,
     material: Arc<dyn Material>,
+    working: crate::color::Space,
 ) {
+    // The constant primvars its material reads, the only kind a sphere has.
+    let primvars = super::mesh::constant_table(prim, &*material, working).map(Arc::new);
     let radius = sphere_radius(sphere);
     let center_world = span.open.transform_point3(Vec3::ZERO);
     let center = Vec3A::new(center_world.x, center_world.y, center_world.z);
@@ -73,7 +76,7 @@ pub(super) fn emit_sphere(
         Some(end) => {
             let mut b = RtSceneBuilder::new();
             b.attach(Geometry::Sphere { center, radius });
-            world.attach_masked(
+            let id = world.attach_masked(
                 Geometry::Instance {
                     scene: Arc::new(b.commit_with(crate::commit_options())),
                     transform: Affine3A::IDENTITY,
@@ -82,9 +85,15 @@ pub(super) fn emit_sphere(
                 material,
                 mask,
             );
+            if let Some(table) = primvars {
+                world.set_primvars(id, table, false);
+            }
         }
         None => {
-            world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
+            let id = world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
+            if let Some(table) = primvars {
+                world.set_primvars(id, table, false);
+            }
         }
     }
 }

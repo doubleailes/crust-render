@@ -27,7 +27,7 @@
 //! [`crate::AssetLoader`] seam and comes back as a [`crate::Texture2D`]
 //! sampler.
 
-use crate::hittable::HitRecord;
+use crate::hittable::{HitPart, HitRecord};
 use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure, volume_medium};
 use crate::material::{BsdfDraw, Material, Resolution, ScatterSample};
 use crate::ray::Ray;
@@ -113,6 +113,7 @@ impl MtlxDisplacement {
             position: ctx.position,
             uv_width: ctx.uv_width,
             curve: None,
+            primvars: &[],
         };
         let _ = use_jit;
         SLOTS.with(|cell| {
@@ -278,37 +279,42 @@ fn run<R>(
     rec: &HitRecord,
     f: impl FnOnce(&[Val]) -> R,
 ) -> R {
-    let strand = |c: &crate::CurveHit, primvars| CurveCtx {
+    let strand = |c: &crate::CurveHit| CurveCtx {
         v: c.v(),
         index: c.index(),
         random: c.random(),
-        primvars,
     };
-    match rec.curve() {
-        None => run_at(program, jit, r_in, rec, None, f),
-        Some(c) if program.primvars.is_empty() || !c.has_primvars() => {
-            run_at(program, jit, r_in, rec, Some(strand(c, &[])), f)
-        }
-        // The hit's primvars, looked up into a buffer reused per thread —
-        // taken rather than borrowed, so a program run from inside `f`
-        // cannot find it borrowed.
-        Some(c) => {
-            let mut primvars = PRIMVARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-            c.primvars_into(&mut primvars);
-            let out = run_at(program, jit, r_in, rec, Some(strand(c, &primvars)), f);
-            PRIMVARS.with(|cell| *cell.borrow_mut() = primvars);
-            out
-        }
+    let curve = rec.curve().map(strand);
+    // Only a program that reads a primvar, on a hit that carries some, looks
+    // them up: into a buffer reused per thread — taken rather than
+    // borrowed, so a program run from inside `f` cannot find it borrowed.
+    let carries = match &rec.part {
+        HitPart::Curve(c) => c.has_primvars(),
+        HitPart::Mesh(_) => true,
+        HitPart::None | HitPart::Face(_) => false,
+    };
+    if program.primvars.is_empty() || !carries {
+        return run_at(program, jit, r_in, rec, curve, &[], f);
     }
+    let mut primvars = PRIMVARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    match &rec.part {
+        HitPart::Curve(c) => c.primvars_into(&mut primvars),
+        HitPart::Mesh(m) => m.primvars_into(&mut primvars),
+        HitPart::None | HitPart::Face(_) => {}
+    }
+    let out = run_at(program, jit, r_in, rec, curve, &primvars, f);
+    PRIMVARS.with(|cell| *cell.borrow_mut() = primvars);
+    out
 }
 
-/// [`run`] with the curve record already looked up.
+/// [`run`] with the strand and the primvars already looked up.
 fn run_at<R>(
     program: &Program,
     jit: Option<&Jit>,
     r_in: &Ray,
     rec: &HitRecord,
-    curve: Option<CurveCtx<'_>>,
+    curve: Option<CurveCtx>,
+    primvars: &[Option<Val>],
     f: impl FnOnce(&[Val]) -> R,
 ) -> R {
     let ctx = ShadeCtx {
@@ -321,6 +327,7 @@ fn run_at<R>(
         position: rec.p,
         uv_width: rec.uv_width,
         curve,
+        primvars,
     };
     SLOTS.with(|cell| {
         let mut slots = cell.borrow_mut();
@@ -465,6 +472,10 @@ impl Material for MtlxMaterial {
     /// Exactly what the program reads: on a curve, `uses_uv`'s blanket
     /// answer would build a chart table for every groom bound to any
     /// MaterialX material.
+    fn primvars(&self) -> &[String] {
+        &self.program.primvars
+    }
+
     fn curve_needs(&self) -> crate::material::CurveNeeds<'_> {
         crate::material::CurveNeeds {
             chart: self.program.reads_chart(),

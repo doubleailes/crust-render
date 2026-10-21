@@ -110,6 +110,7 @@ pub(crate) use live::{prim_frames, rebuild};
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{
     MeshArena, MeshPlace, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes, place_mesh_source,
+    with_constant_primvars,
 };
 use products::import_render_products;
 use settings::{
@@ -413,7 +414,14 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             ctx.caches.motion.drawn(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            emit_sphere(&mut ctx.world, &prim, &sphere, span, mat);
+            emit_sphere(
+                &mut ctx.world,
+                &prim,
+                &sphere,
+                span,
+                mat,
+                ctx.caches.working,
+            );
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             ctx.caches.motion.unmoved(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
@@ -433,6 +441,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 .caches
                 .implicit
                 .source(prim.path(), &shape, MeshPlace::World(&span.open));
+            let src = with_constant_primvars(src, &prim, &*bound.material, ctx.caches.working);
             let baked_moving = place_mesh_source(
                 &mut ctx.world,
                 &prim,
@@ -1902,7 +1911,10 @@ impl<'a> ImportCaches<'a> {
     ) -> Self {
         ImportCaches {
             materials: MaterialCache::default(),
-            meshes: MeshArena::new(subdiv),
+            meshes: MeshArena {
+                working,
+                ..MeshArena::new(subdiv)
+            },
             protos: HashMap::new(),
             groups: HashMap::new(),
             placements: HashMap::new(),

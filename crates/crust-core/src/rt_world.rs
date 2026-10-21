@@ -432,18 +432,25 @@ impl UvMap {
     }
 }
 
-/// A mesh's primvars that render vars ask for, per triangle: one channel per
-/// entry of the render's primvar keep set, `None` where the mesh does not
-/// author it (or authors it with a type the var cannot read). Values are four
-/// lanes, the unused ones zero.
+/// A mesh's primvars, per triangle, in two lists: the ones render vars ask
+/// for (`channels`, one per entry of the render's primvar keep set) and the
+/// ones its material reads (`shading`, one per name of the material's
+/// [`Material::primvars`], in that order). `None` where the mesh does not
+/// author one (or authors it with a type that cannot be read). Values are
+/// four lanes, the unused ones zero.
 ///
-/// Read only by the AOV first hit ([`World::primvars_at`]), never by
-/// [`World::intersect`]: a geometry carrying one keeps the `plain` fast path,
-/// so the beauty pays nothing per hit. Shared by `Arc` across the placements
-/// of one distinct mesh, like [`UvMap`].
-#[derive(Debug, Clone, PartialEq)]
+/// `channels` is read only by the AOV first hit ([`World::primvars_at`]),
+/// never by [`World::intersect`]: a geometry carrying only those keeps the
+/// `plain` fast path, so the beauty pays nothing per hit. A geometry whose
+/// table holds a `shading` channel leaves it, and its hits carry a
+/// [`MeshHit`] for the material to read. Shared by `Arc` across the
+/// placements of one distinct mesh, like [`UvMap`].
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PrimvarTable {
     pub channels: Vec<Option<PrimvarChannel>>,
+    /// Each with its authored component count, which `geompropvalue`
+    /// converts from as MaterialX's `convert` does.
+    pub shading: Vec<Option<(PrimvarChannel, u8)>>,
 }
 
 /// One primvar of a [`PrimvarTable`], in the shape its interpolation needs.
@@ -498,16 +505,74 @@ impl PrimvarChannel {
 impl PrimvarTable {
     /// Whether no channel holds anything: such a table is never attached.
     pub fn is_empty(&self) -> bool {
-        self.channels.iter().all(Option::is_none)
+        self.channels.iter().all(Option::is_none) && !self.shades()
+    }
+
+    /// Whether the material reads any of its channels: what takes the
+    /// geometry off [`World::intersect`]'s plain path.
+    pub fn shades(&self) -> bool {
+        self.shading.iter().any(Option::is_some)
     }
 
     /// Heap bytes of the values and indices, for `--stats`.
     pub fn bytes(&self) -> usize {
+        let shading = self.shading.iter().flatten().map(|(c, _)| c);
         self.channels
             .iter()
             .flatten()
+            .chain(shading)
             .map(PrimvarChannel::bytes)
             .sum()
+    }
+}
+
+/// Where a hit lies on a mesh whose material reads primvars
+/// ([`PrimvarTable::shading`]): the table, the kernel's triangle and its
+/// barycentrics, the winding already undone. What a hit on any geometry
+/// that is neither a Ptex-mapped mesh nor a curve carries when its material
+/// reads one, an analytic sphere's constant primvars included.
+///
+/// Twenty bytes, packed to four-byte alignment: aligned to eight it would
+/// pad to 24, leave [`HitPart`](crate::HitPart)'s tag no room beside it, and
+/// grow the record past 96 bytes (`a_world_hit_stays_an_inline_copy`). The
+/// fields are only ever read by value, which packing allows.
+#[derive(Clone, Copy)]
+#[repr(C, packed(4))]
+pub struct MeshHit<'w> {
+    table: &'w PrimvarTable,
+    prim_id: u32,
+    u: f32,
+    v: f32,
+}
+
+impl<'w> MeshHit<'w> {
+    /// The hit at barycentrics `(u, v)` of triangle `prim_id` (in the
+    /// kernel's vertex order, which `swapped` undoes).
+    pub fn new(table: &'w PrimvarTable, prim_id: u32, u: f32, v: f32, swapped: bool) -> Self {
+        let (u, v) = if swapped { (v, u) } else { (u, v) };
+        MeshHit {
+            table,
+            prim_id,
+            u,
+            v,
+        }
+    }
+
+    /// The value of each primvar the material reads, in its program's order,
+    /// into `out` (cleared first): `None` for one the mesh does not carry.
+    pub fn primvars_into(&self, out: &mut Vec<Option<crust_mtlx::Val>>) {
+        out.clear();
+        let MeshHit {
+            table,
+            prim_id,
+            u,
+            v,
+        } = *self;
+        out.extend(table.shading.iter().map(|c| {
+            let (c, arity) = c.as_ref()?;
+            let v = c.at(prim_id, u, v, false)?;
+            Some(crust_mtlx::Val { v, arity: *arity })
+        }));
     }
 }
 
@@ -689,14 +754,17 @@ struct SideTables {
     /// A curves geometry's span → strand map, when its material reads a
     /// curve property, primvar or chart ([`crate::StrandTable`]).
     strands: Option<Arc<StrandTable>>,
+    /// A mesh's primvar table, when its material reads one of its channels
+    /// ([`PrimvarTable::shades`]); the AOVs' own are in `World::primvars`.
+    shading: Option<Arc<PrimvarTable>>,
     /// Whether the geometry is curves, table or not: what a material swapped
     /// into its slot must then agree on is also what the import decoded for
     /// it ([`Signature`]).
     curves: bool,
-    /// None of `map`, `uv` and `strands` is set: a hit is only its surface.
-    /// One flag for the three, kept by their setters, so the overwhelming
-    /// majority of hits ([`World::intersect`]) test one byte, not three
-    /// pointers.
+    /// None of `map`, `uv`, `strands` and `shading` is set: a hit is only
+    /// its surface. One flag for the four, kept by their setters, so the
+    /// overwhelming majority of hits ([`World::intersect`]) test one byte,
+    /// not four pointers.
     plain: bool,
     swapped: bool,
     /// Where a hit's triangle vertices may be read from, decided when the
@@ -724,6 +792,7 @@ impl Default for SideTables {
             map: None,
             uv: None,
             strands: None,
+            shading: None,
             curves: false,
             plain: true,
             swapped: false,
@@ -968,8 +1037,10 @@ impl WorldBuilder {
     }
 
     /// Records the primvar table of a mesh geometry, which the primvar AOVs
-    /// read at the camera's first hit. Unlike the other tables it leaves the
-    /// geometry `plain`: [`World::intersect`] never reads it.
+    /// read at the camera's first hit and its material at every hit. A table
+    /// only the AOVs read leaves the geometry `plain`: [`World::intersect`]
+    /// never reads their channels. One the material reads takes it off, and
+    /// its hits carry a [`MeshHit`].
     ///
     /// `swapped` when the placement mirrored the triangle winding, as for
     /// [`WorldBuilder::set_uv_map`].
@@ -981,6 +1052,15 @@ impl WorldBuilder {
             (id as usize) < self.count(),
             "geometry {id} was never attached"
         );
+        if table.shades() {
+            let t = &mut self.faces[id as usize];
+            t.shading = Some(table.clone());
+            t.swapped = swapped;
+            t.plain = false;
+        }
+        if table.channels.iter().all(Option::is_none) {
+            return;
+        }
         match self.primvars.binary_search_by_key(&id, |(i, ..)| *i) {
             Ok(i) => self.primvars[i] = (id, table, swapped),
             Err(i) => self.primvars.insert(i, (id, table, swapped)),
@@ -1278,18 +1358,19 @@ impl World {
         !self.primvars.is_empty()
     }
 
-    /// Heap bytes of the primvar tables, each distinct table once.
+    /// Heap bytes of the primvar tables, each distinct table once: the
+    /// AOVs' and the materials' alike.
     pub fn primvar_table_bytes(&self) -> usize {
-        let mut seen: Vec<*const PrimvarTable> = Vec::new();
-        let mut bytes = 0;
-        for (_, t, _) in &self.primvars {
-            let ptr = Arc::as_ptr(t);
-            if !seen.contains(&ptr) {
-                seen.push(ptr);
-                bytes += t.bytes();
-            }
-        }
-        bytes
+        // A set: every geometry of a large stage may carry its own table.
+        let mut seen = std::collections::HashSet::new();
+        let shading = self.faces.iter().filter_map(|t| t.shading.as_ref());
+        self.primvars
+            .iter()
+            .map(|(_, t, _)| t)
+            .chain(shading)
+            .filter(|t| seen.insert(Arc::as_ptr(t)))
+            .map(|t| t.bytes())
+            .sum()
     }
 
     /// The world-space displacement over the whole shutter of the point hit
@@ -1379,6 +1460,11 @@ impl World {
             Some(c) => c.chart(),
             None => uv,
         };
+        // A mesh's primvars, where its material reads one.
+        let mesh = tables
+            .shading
+            .as_deref()
+            .map(|t| MeshHit::new(t, h.prim_id, h.u, h.v, tables.swapped));
         // The ray's texture footprint, converted into each parameterisation
         // the shader might index. Zero unless the ray carries a cone *and*
         // this geometry carries the density to convert it with, and zero
@@ -1424,14 +1510,17 @@ impl World {
                 normal: h.normal,
                 t: h.t,
                 front_face: h.front_face,
-                part: match (face, curve) {
-                    (Some((id, uv)), _) => HitPart::Face(FaceHit {
+                // At most one: a mesh read through Ptex keeps its face, and
+                // its primvars read their defaults (a known gap).
+                part: match (face, curve, mesh) {
+                    (Some((id, uv)), ..) => HitPart::Face(FaceHit {
                         id,
                         uv,
                         width: face_width,
                     }),
-                    (None, Some(c)) => HitPart::Curve(c),
-                    (None, None) => HitPart::None,
+                    (None, Some(c), _) => HitPart::Curve(c),
+                    (None, None, Some(m)) => HitPart::Mesh(m),
+                    (None, None, None) => HitPart::None,
                 },
                 uv,
                 tangent,
@@ -1718,6 +1807,9 @@ pub(crate) struct Signature {
     /// strand table was decoded for. `None` elsewhere, so a mesh material's
     /// edit is never refused over what only a curve would read.
     curve: Option<(bool, bool, Vec<String>)>,
+    /// Elsewhere (a mesh, an implicit shape): the primvars by name its
+    /// primvar table was decoded for ([`PrimvarTable::shading`]).
+    primvars: Option<Vec<String>>,
 }
 
 impl Signature {
@@ -1728,6 +1820,7 @@ impl Signature {
         });
         Signature {
             curve,
+            primvars: (!curves).then(|| m.primvars().to_vec()),
             kind: m.kind(),
             cutout: m.has_cutout(),
             straight: m.has_straight_transmission(),
@@ -1936,6 +2029,7 @@ mod tests {
         assert_eq!(corners.at(1, 0.25, 0.5, false), None);
         let table = Arc::new(PrimvarTable {
             channels: vec![Some(corners), None],
+            ..PrimvarTable::default()
         });
         b.set_primvars(id, table.clone(), false);
         assert!(b.faces[id as usize].plain);

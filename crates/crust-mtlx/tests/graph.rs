@@ -28,6 +28,7 @@ fn ctx() -> ShadeCtx<'static> {
         position: Vec3A::new(1.0, 2.0, 3.0),
         uv_width: 0.0,
         curve: None,
+        primvars: &[],
     }
 }
 
@@ -2396,14 +2397,24 @@ fn cellnoise2d_unauthored_reads_the_chart() {
 // geompropvalue: curve properties and primvars
 // ---------------------------------------------------------------------------
 
-/// Compiles `name` of `doc` and evaluates it with `curve` as the strand.
-fn run_on_curve(doc: &str, name: &str, curve: Option<crust_mtlx::CurveCtx<'_>>) -> (Val, Program) {
+/// A hit's strand (`None` off a curve) and its primvar values.
+type Hit<'a> = (Option<crust_mtlx::CurveCtx>, &'a [Option<Val>]);
+
+/// Compiles `name` of `doc` and evaluates it at `hit`.
+fn run_on_curve(doc: &str, name: &str, (curve, primvars): Hit<'_>) -> (Val, Program) {
     let d = Doc::parse(doc).expect("document parses");
     let mut c = Compiler::new(&d, &Host::new(&decline));
     let slot = c.compile_named("", name, None);
     assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
     let mut slots = Vec::new();
-    c.program.eval(&ShadeCtx { curve, ..ctx() }, &mut slots);
+    c.program.eval(
+        &ShadeCtx {
+            curve,
+            primvars,
+            ..ctx()
+        },
+        &mut slots,
+    );
     (slots[slot as usize], c.program)
 }
 
@@ -2423,13 +2434,18 @@ fn lanes(v: Val) -> (Vec<f32>, u8) {
     (v.v[..v.arity as usize].to_vec(), v.arity)
 }
 
-fn strand(primvars: &[Option<Val>]) -> Option<crust_mtlx::CurveCtx<'_>> {
-    Some(crust_mtlx::CurveCtx {
+fn strand(primvars: &[Option<Val>]) -> Hit<'_> {
+    let curve = crust_mtlx::CurveCtx {
         v: 0.625,
         index: 7,
         random: 0.3,
-        primvars,
-    })
+    };
+    (Some(curve), primvars)
+}
+
+/// A mesh hit: no strand, only primvars.
+fn mesh(primvars: &[Option<Val>]) -> Hit<'_> {
+    (None, primvars)
 }
 
 #[test]
@@ -2450,12 +2466,12 @@ fn curve_properties_read_the_strand() {
 
 #[test]
 fn curve_properties_off_a_curve_read_the_default() {
-    let (v, _) = run_on_curve(&geomprop("float", "curve:v", "0.5"), "g", None);
+    let (v, _) = run_on_curve(&geomprop("float", "curve:v", "0.5"), "g", mesh(&[]));
     assert_eq!(lanes(v), lanes(Val::float(0.5)));
     let (v, _) = run_on_curve(
         &geomprop("color3", "curve:random", "0.1, 0.2, 0.3"),
         "g",
-        None,
+        mesh(&[]),
     );
     assert_eq!(lanes(v), lanes(Val::vec3(0.1, 0.2, 0.3)));
 }
@@ -2479,11 +2495,14 @@ fn primvars_are_read_by_name_in_program_order() {
     let (v, p) = run_on_curve(doc, "sum", strand(&values));
     assert_eq!(p.primvars, ["hairColor", "melanin"]);
     assert_eq!(lanes(v), lanes(Val::vec3(1.1, 1.2, 1.3)));
-    // Absent on this curve, or off a curve: the default (and the colour's
-    // unauthored default, zero).
+    // A mesh hit reads them the same way, with no strand.
+    let (v, _) = run_on_curve(doc, "sum", mesh(&values));
+    assert_eq!(lanes(v), lanes(Val::vec3(1.1, 1.2, 1.3)));
+    // Absent on this curve, or a hit with none: the default (and the
+    // colour's unauthored default, zero).
     let (v, _) = run_on_curve(doc, "sum", strand(&[Some(Val::vec3(0.1, 0.2, 0.3)), None]));
     assert_eq!(lanes(v), lanes(Val::vec3(0.35, 0.45, 0.55)));
-    let (v, _) = run_on_curve(doc, "sum", None);
+    let (v, _) = run_on_curve(doc, "sum", mesh(&[]));
     assert_eq!(lanes(v), lanes(Val::vec3(0.25, 0.25, 0.25)));
 }
 
@@ -2504,7 +2523,7 @@ fn a_float_primvar_into_a_colour_broadcasts() {
 
 #[test]
 fn geompropvalue_st_reads_the_chart() {
-    let (v, p) = run_on_curve(&geomprop("vector2", "st", "0, 0"), "g", None);
+    let (v, p) = run_on_curve(&geomprop("vector2", "st", "0, 0"), "g", mesh(&[]));
     assert_eq!(lanes(v), lanes(Val::vec2(0.25, 0.75)));
     assert!(p.reads_chart() && !p.reads_curve());
 }
