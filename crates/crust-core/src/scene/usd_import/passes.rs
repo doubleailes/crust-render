@@ -15,8 +15,10 @@
 //! traversal starts, so it is decided at dispatch: each chunk's queries are
 //! built from that chunk's stage ([`ActivePass::begin_chunk`]), which has its
 //! payloads loaded, so a `membershipExpression` predicate sees the prims it
-//! asks about. The streaming import masks every chunk to the pass prim too
-//! ([`ActivePass::path`]).
+//! asks about, and opinions the pass itself takes from a payload count. Which
+//! collections restrict anything is decided there too, never on the
+//! payload-free index stage. The streaming import masks every chunk to the
+//! pass prim too ([`ActivePass::path`]).
 //!
 //! Each answer is written straight into the world: a holdout flag
 //! ([`WorldBuilder::set_holdout`]), and the camera bit cleared from the mask
@@ -89,11 +91,10 @@ impl Which {
 /// The active pass, through the traversal.
 pub(super) struct ActivePass {
     path: sdf::Path,
-    /// Whether `matte` / `cameraVisibility` restrict anything, as the index
-    /// stage reads the pass: a collection that does not is never queried.
-    reads: [bool; 2],
     /// The chunk being walked's queries; `None` for a collection that
-    /// restricts nothing.
+    /// restricts nothing there. Decided per chunk, not on the index stage:
+    /// a pass can take its collections' opinions from a payload, which only
+    /// a chunk's stage loads.
     queries: [Option<MembershipQuery>; 2],
     /// Per collection, whether a target inside an instance / a nested
     /// collection a chunk does not compose was warned about already.
@@ -129,19 +130,8 @@ impl ActivePass {
                 );
             }
         }
-        let reads = [Which::Matte, Which::Camera].map(|w| w.restricts(&opinions(&prim, w.name())));
-        debug!(
-            "Render pass {path}: matte {}, cameraVisibility {}",
-            if reads[0] {
-                "read"
-            } else {
-                "holds out nothing"
-            },
-            if reads[1] { "read" } else { "hides nothing" }
-        );
         ActivePass {
             path: path.clone(),
-            reads,
             queries: [None, None],
             warned_instance: [false; 2],
             warned_nested: [false; 2],
@@ -156,17 +146,10 @@ impl ActivePass {
         &self.path
     }
 
-    /// Whether the pass changes anything about the geometry or the lights.
-    fn active(&self) -> bool {
-        self.reads.iter().any(|&r| r)
-    }
-
-    /// Builds the queries for the chunk `stage` is about to be walked from.
+    /// Builds the queries for the chunk `stage` is about to be walked from,
+    /// for each collection that restricts anything on that stage.
     pub(super) fn begin_chunk(&mut self, stage: &Stage) {
         self.queries = [None, None];
-        if !self.active() {
-            return;
-        }
         let prim = prim_at(stage, self.path.clone());
         if !prim.is_valid().unwrap_or(false) {
             debug!(
@@ -176,7 +159,7 @@ impl ActivePass {
             return;
         }
         for (k, which) in [Which::Matte, Which::Camera].into_iter().enumerate() {
-            if self.reads[k] {
+            if which.restricts(&opinions(&prim, which.name())) {
                 self.queries[k] = self.query(stage, &prim, which, k);
             }
         }

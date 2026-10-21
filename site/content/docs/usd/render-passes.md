@@ -60,7 +60,9 @@ nothing on `matte` holds out nothing.
 Holdouts resolve per sample, not per pixel: where a held-out crate and the character
 interpenetrate, each sample shows whichever surface its camera ray reaches first, and
 partly covered pixels get the matching fraction of alpha. A holdout with a cutout opacity
-holds out with that opacity's probability.
+holds out with that opacity's probability. Its material's transmission does not count: a
+glass matte is a hole, not a window onto what is behind it. A volume between the camera
+and a holdout renders as it does without the pass, its glow included.
 
 ## cameraVisibility
 

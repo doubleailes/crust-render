@@ -386,3 +386,96 @@ fn aovs_see_a_holdout_sample_as_an_escape() {
         }
     }
 }
+
+/// A glowing, absorbing box between z = −3.5 and −0.5 (no scattering), in
+/// front of where the holdout wall stands.
+fn glow() -> Volumes {
+    Volumes::new(vec![VolumeRegion::new(
+        glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -2.0)),
+        Vec3A::new(3.0, 3.0, 1.5),
+        Vec3A::ZERO,
+        Vec3A::splat(0.5),
+        0.0,
+        Vec3A::ONE,
+        1.0,
+        DensityField::Homogeneous,
+    )])
+}
+
+/// A holdout wall at z = −4 behind the glowing box, or nothing there.
+fn glow_world(holdout: bool) -> World {
+    let mut b = WorldBuilder::new();
+    if holdout {
+        let id = b.attach(wall(-4.0, -50.0, 50.0, 50.0), grey());
+        b.set_holdout(id, true);
+    }
+    b.commit()
+}
+
+/// The render-passes spec's "volumes render as without the pass": what a
+/// glowing volume emits in front of a holdout stays, as it does in front of
+/// an escape. The camera segment ends at the holdout with its emission, not
+/// with nothing.
+#[test]
+fn a_glowing_volume_in_front_of_a_holdout_keeps_its_emission() {
+    let ray = Ray::new(Vec3A::ZERO, -Vec3A::Z).with_mask(MASK_CAMERA);
+    let lights = LightList::new();
+    let held = mean(&trace(&glow_world(true), &lights, &glow(), &ray, 256));
+    let open = mean(&trace(&glow_world(false), &lights, &glow(), &ray, 256));
+    assert!(open > 0.1, "the box glows: {open}");
+    assert!(
+        (held / open - 1.0).abs() < 0.02,
+        "held out {held}, escaped {open}"
+    );
+
+    // And light path expressions still route it: `C.*[LO]` in front of the
+    // holdout carries what it carries in front of an escape.
+    let all = lpe("C.*[LO]");
+    let lpe_mean = |holdout: bool| {
+        let r = renderer(glow_world(holdout), LightList::new(), 4, 3, 20.0, 64)
+            .with_volumes(glow().into_regions());
+        let (beauty, film) = render(&r, std::slice::from_ref(&all));
+        let mut sum = 0.0;
+        for y in 0..3 {
+            for x in 0..4 {
+                sum += film.var_pixel(&beauty, &all, x, y)[0];
+            }
+        }
+        sum / 12.0
+    };
+    let (held, open) = (lpe_mean(true), lpe_mean(false));
+    assert!(open > 0.1, "{open}");
+    assert!(
+        (held / open - 1.0).abs() < 0.03,
+        "held out {held}, escaped {open}"
+    );
+}
+
+/// A holdout's presence is its opacity, not its material: a thin-walled glass
+/// matte in front of the glowing wall is a hole, alpha and beauty 0, never a
+/// window onto the wall behind it.
+#[test]
+fn a_glass_holdout_is_a_hole_not_a_window() {
+    let mut b = WorldBuilder::new();
+    b.attach(wall(-10.0, -100.0, 100.0, 100.0), glowing());
+    let id = b.attach(
+        wall(-2.0, -50.0, 50.0, 50.0),
+        Arc::new(OpenPBR {
+            geometry_thin_walled: true,
+            ..OpenPBR::glass(1.5)
+        }),
+    );
+    b.set_holdout(id, true);
+    let world = b.commit();
+    assert!(world.has_straight_transmission());
+    let r = renderer(world, LightList::new(), 4, 3, 30.0, 64);
+    let alpha = var("alpha", AovSource::Alpha);
+    let (beauty, film) = render(&r, std::slice::from_ref(&alpha));
+    let a = film.var_channels(&beauty, &alpha).remove(0);
+    for y in 0..3 {
+        for x in 0..4 {
+            assert_eq!(beauty.get_pixel(x, y), Vec3A::ZERO, "({x}, {y})");
+        }
+    }
+    assert!(a.iter().all(|&v| v == 0.0), "{a:?}");
+}
