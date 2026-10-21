@@ -26,11 +26,11 @@ use crate::scene::displace::{self, VertexChart};
 use crate::scene::subdiv;
 
 use super::adaptive::{self, Aabb, Cull, ScreenRate};
+use super::attrs::{attr_color_space, decode_text};
 use super::attrs::{
     custom_f32, custom_i32, custom_i32_array, decode_f32_array, decode_i32_array,
     decode_vec3f_array, prim_motion_translate, prim_ray_mask, prim_value, value_at,
 };
-use super::attrs::{decode_text, in_working};
 use super::materials::BoundMaterial;
 use super::products::{KeptPrimvar, PrimvarKeep};
 use super::time::eval_time;
@@ -2034,19 +2034,22 @@ fn shading_primvar(
     working: Option<crate::color::Space>,
     counts: (usize, usize, usize),
 ) -> Option<PrimvarData> {
-    match decode_mesh_primvar(prim, name, working, counts) {
-        Ok(p) => p,
-        Err((type_name, why)) => {
-            warning!(
-                MeshUnsupportedPrimvar,
-                at = prim.path(),
-                "{}: primvars:{name} is a {type_name} ({why}) — the material reads its \
-                 geompropvalue's default there",
-                prim.path(),
-            );
-            None
+    let (type_name, why) = match decode_mesh_primvar(prim, name, working, counts) {
+        // Authored empty: as on curves, a material reading it is told.
+        Ok(None) if prim_value(prim, &format!("primvars:{name}")).is_some() => {
+            (type_of(prim, name), "authored empty".to_string())
         }
-    }
+        Ok(p) => return p,
+        Err(e) => e,
+    };
+    warning!(
+        MeshUnsupportedPrimvar,
+        at = prim.path(),
+        "{}: primvars:{name} is a {type_name} ({why}) — the material reads its \
+         geompropvalue's default there",
+        prim.path(),
+    );
+    None
 }
 
 /// The constant primvars `material` reads on an implicit shape `prim`, after
@@ -2104,8 +2107,8 @@ fn constant_primvar(prim: &Prim, name: &str, working: crate::color::Space) -> Op
 /// `primvars:<name>` on `prim`, decoded — colours into `working` when one is
 /// given, as authored otherwise — and checked against the mesh's points,
 /// faces and face-vertices: `Ok(None)` for one that is not authored (or is
-/// authored empty), `Err` with its type and the reason for one that cannot
-/// be read.
+/// authored empty, which the AOVs read as unauthored and a material is warned
+/// of), `Err` with its type and the reason for one that cannot be read.
 fn decode_mesh_primvar(
     prim: &Prim,
     name: &str,
@@ -2139,11 +2142,13 @@ fn decode_mesh_primvar(
     let Some(arity) = values.first().map(|v| v.arity) else {
         return Ok(None); // authored empty: nothing to read
     };
+    // One attribute, one colour space: resolved once, not per value.
     if let Some(working) = working
         && type_name.starts_with("color3")
+        && let Some(space) = attr_color_space(&attr)
     {
         for v in &mut values {
-            let rgb = in_working(&attr, Vec3A::new(v.v[0], v.v[1], v.v[2]), working);
+            let rgb = crate::color::convert(Vec3A::new(v.v[0], v.v[1], v.v[2]), space, working);
             *v = rgb.into();
         }
     }
@@ -2166,7 +2171,15 @@ fn decode_mesh_primvar(
         PrimvarInterp::Vertex => n_points,
         PrimvarInterp::FaceVarying => n_face_vertices,
     };
-    let indices = custom_i32_array(prim, &format!("{attr_name}:indices"));
+    // Authored indices that are not an `int[]` are refused, never read as
+    // absent: the values would then be read unindexed.
+    let indices = match prim_value(prim, &format!("{attr_name}:indices")) {
+        None => None,
+        Some(v) => match decode_i32_array(v) {
+            Some(indices) => Some(indices),
+            None => return refuse("indices that are not an int[]".into()),
+        },
+    };
     let addressed = indices.as_ref().map_or(values.len(), Vec::len);
     if addressed < needed {
         return refuse(format!(

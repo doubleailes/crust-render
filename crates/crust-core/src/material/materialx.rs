@@ -588,6 +588,13 @@ pub fn from_compiled(mut c: crust_mtlx::Compiled, luma: utils::Luma) -> Result<L
         .displace
         .then(|| c.displacement_program(optimize_enabled()))
         .flatten();
+    // A displacement runs at the import's vertices, which supply no primvars
+    // (`MtlxDisplacement::eval_with`): a `geompropvalue` there reads its
+    // default. Asked of the sliced program, whatever the optimiser setting,
+    // so the surface's own reads do not count.
+    let displacement_reads_primvar = displacement.is_some()
+        && c.displacement_program(true)
+            .is_some_and(|(p, _)| p.reads_primvar());
     if optimize_enabled() {
         c.optimize();
     }
@@ -629,7 +636,14 @@ pub fn from_compiled(mut c: crust_mtlx::Compiled, luma: utils::Luma) -> Result<L
             roots,
         })
     });
-    let reported: Vec<String> = c.closures.reported.iter().cloned().collect();
+    let mut reported: Vec<String> = c.closures.reported.iter().cloned().collect();
+    if displacement_reads_primvar {
+        reported.push(
+            "a geompropvalue in its displacement (displacement reads no primvar; it reads \
+             the default)"
+                .into(),
+        );
+    }
     let material = MtlxMaterial {
         #[cfg(feature = "jit")]
         jit,

@@ -474,6 +474,11 @@ impl Program {
             .any(|op| matches!(op, Op::Curve { .. } | Op::Primvar { .. }))
     }
 
+    /// Whether an evaluation reads a primvar ([`ShadeCtx::primvars`]).
+    pub fn reads_primvar(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, Op::Primvar { .. }))
+    }
+
     /// Whether every operand refers to a slot strictly before its user's —
     /// what the compiler always emits, and what anything that runs a program
     /// by other means than [`Program::eval`]'s bounds-checked reads relies on.

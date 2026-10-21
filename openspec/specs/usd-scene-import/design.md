@@ -503,9 +503,13 @@ Schema mapping:
   `::shading`; every placement path (baked, mirrored, instanced, prototype parts)
   already calls `set_primvars`, which takes a geometry off the plain path only
   when `shading` holds a channel. The material's reader (`shading_primvar`)
-  converts a `color3` into the working space and accepts any arity, where the AOV
-  reader keeps colours as authored and checks the var's component count; both are
-  `decode_mesh_primvar`. Implicit shapes have no authored topology, so they read
+  converts a `color3` into the working space (its colour space resolved once per
+  attribute, not per value) and accepts any arity, where the AOV reader keeps
+  colours as authored and checks the var's component count; both are
+  `decode_mesh_primvar`. Authored `:indices` that are not an `int[]` are refused,
+  never read as absent (the values would be read unindexed). An authored empty
+  array is unauthored to the AOVs, as before, but warned to a material, as on
+  curves. Implicit shapes have no authored topology, so they read
   `constant` ones only (`with_constant_primvars`; `constant_table` for the
   analytic sphere, direct or in a prototype). A material that reads a Ptex texture
   reads none (`mesh.unsupported_primvar`): a hit carries the face instead.
