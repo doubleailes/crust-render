@@ -23,7 +23,10 @@
   with a test in `crust-core/tests/render_passes.rs` on a pass whose
   `renderSource` targets it, and repeat with `references` and `specializes`. A
   failure is an openusd gap: report it upstream and record it as a known gap
-  rather than working around it.
+  rather than working around it. (A manual run before this change found all
+  three arcs compose camera, resolution and `crust:samplesPerPixel` in
+  `crust check`, and the inherited `disableDepthOfField` stamps
+  `crust:depthOfField = 0`. The test pins that.)
 
 ## 2. Mask rewrite in crust-rt
 
