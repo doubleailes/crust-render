@@ -312,6 +312,8 @@ pub struct SettingsUpdate {
 pub(crate) struct LightUpdate {
     pub(crate) index: usize,
     pub(crate) light: LightKind,
+    /// Its per-lobe multipliers, which the light list keeps beside it.
+    pub(crate) gains: crate::LobeGains,
     pub(crate) emitters: Vec<(u32, Arc<dyn Material>)>,
 }
 
@@ -364,6 +366,7 @@ impl Update {
         scene.world.replace_materials(&self.swaps());
         for l in self.lights {
             scene.lights.replace(l.index, l.light);
+            scene.lights.set_lobe_gains(l.index, l.gains);
         }
         if let Some(s) = self.settings {
             scene.settings = s.settings;

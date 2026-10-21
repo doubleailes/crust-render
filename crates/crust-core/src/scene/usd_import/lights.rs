@@ -18,7 +18,8 @@ use tracing::debug;
 use crate::color::Space;
 use crate::light::{
     AffineShape, AreaLight, AreaShape, DistantLight as CoreDistantLight,
-    DomeLight as CoreDomeLight, LightList, LightShape, RectShape, SphereShape, UnitShape,
+    DomeLight as CoreDomeLight, LightList, LightShape, LobeGains, RectShape, SphereShape,
+    UnitShape,
 };
 use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::Emissive;
@@ -39,6 +40,8 @@ struct LuxParams {
     pub(super) emission: Vec3A,
     /// `inputs:normalize` — divide by the light's size (see each light).
     pub(super) normalize: bool,
+    /// `inputs:diffuse` / `inputs:specular`, the per-lobe multipliers.
+    pub(super) gains: LobeGains,
 }
 
 /// The `LightAPI` inputs as authored — before any colour space conversion,
@@ -50,6 +53,9 @@ pub(super) struct LightInputs {
     pub(super) exposure: f32,
     pub(super) color: Vec3A,
     pub(super) normalize: bool,
+    /// `inputs:diffuse` / `inputs:specular`, the per-lobe multipliers. Any
+    /// finite value, negative included (as the colour may be).
+    pub(super) gains: LobeGains,
 }
 
 /// Reads [`LightInputs`], warning about a non-finite value.
@@ -88,19 +94,21 @@ pub(super) fn light_inputs(prim: &Prim, light: &LightAPI) -> LightInputs {
         exposure,
         color,
         normalize: attr_bool(&light.normalize_attr()).unwrap_or(false),
+        gains: LobeGains {
+            diffuse: finite("diffuse", attr_f32(&light.diffuse_attr()), 1.0),
+            specular: finite("specular", attr_f32(&light.specular_attr()), 1.0),
+        },
     }
 }
 
-/// Reads the shared `LightAPI` inputs. Warns about the ones crust reads but
-/// cannot honour, since each makes the image differ from what was authored:
-/// `diffuse` / `specular` are per-lobe multipliers, and crust's light
-/// transport does not split a light's contribution by lobe.
+/// Reads the shared `LightAPI` inputs.
 fn lux_params(prim: &Prim, light: &LightAPI, working: Space) -> LuxParams {
     let LightInputs {
         intensity,
         exposure,
         color,
         normalize,
+        gains,
     } = light_inputs(prim, light);
     let color = in_working(&light.color_attr(), color, working);
     let gain = intensity * 2f32.powf(exposure);
@@ -117,26 +125,10 @@ fn lux_params(prim: &Prim, light: &LightAPI, working: Space) -> LuxParams {
         emission = (emission * tint).max(Vec3A::ZERO);
     }
 
-    for (name, attr) in [
-        ("diffuse", light.diffuse_attr()),
-        ("specular", light.specular_attr()),
-    ] {
-        if let Some(v) = attr_f32(&attr)
-            && v != 1.0
-        {
-            warning!(
-                LightUnsupportedMultiplier,
-                at = prim.path(),
-                "{}: inputs:{name} = {v} is a per-lobe multiplier crust does not \
-                 support — ignored (the light contributes at 1.0)",
-                prim.path()
-            );
-        }
-    }
-
     LuxParams {
         emission,
         normalize,
+        gains,
     }
 }
 
@@ -415,7 +407,7 @@ fn emit_round_light(
         None => affine.into(),
     };
     lights.add(AreaLight::new(shape, material, geom_id));
-    tag_last(lights, prim);
+    tag_last(lights, prim, params.gains);
     debug!(
         "{:?} light {}: area={} normalize={} radiance={:?} ({})",
         unit,
@@ -669,7 +661,7 @@ pub(super) fn emit_rect_light(
         material,
         geom_id,
     ));
-    tag_last(&mut ctx.lights, prim);
+    tag_last(&mut ctx.lights, prim, params.gains);
     debug!(
         "RectLight: origin={:?} edge_u={:?} edge_v={:?} normalize={} radiance={:?}",
         origin, edge_u, edge_v, params.normalize, radiance
@@ -743,7 +735,7 @@ pub(super) fn emit_distant_light(
         mask.sees(crate::ray::MASK_CAMERA)
     );
     lights.add_masked(light, mask);
-    tag_last(lights, prim);
+    tag_last(lights, prim, params.gains);
 }
 
 /// What [`emit_dome_light`] reads from either dome schema. `DomeLight_1`
@@ -830,7 +822,11 @@ pub(super) fn emit_dome_light(
     // separate "decoding a 14k HDRI" from the rest of the traversal.
     let asset_time = &mut ctx.caches.asset_time;
     // `normalize` does not apply to a dome (its sizeFactor is 1).
-    let tint = lux_params(prim, &dome.light_api, working).emission;
+    let LuxParams {
+        emission: tint,
+        gains,
+        ..
+    } = lux_params(prim, &dome.light_api, working);
 
     let format = value_at(&dome.texture_format).and_then(decode_text);
     // The authoring layer anchors the path, not the root layer: the Moana
@@ -899,16 +895,26 @@ pub(super) fn emit_dome_light(
         mask.sees(crate::ray::MASK_CAMERA)
     );
     lights.add_masked(CoreDomeLight::new(tint, map, rotation), mask);
-    tag_last(lights, prim);
+    tag_last(lights, prim, gains);
 }
 
-/// Gives the light just added its name, the prim path, and its
-/// light-path-expression tag, `token crust:light:lpeTag` — the label a light
-/// group `<L.'tag'>` selects. Other renderers' tag attributes are not read
-/// yet: their exact names are still to be checked against real exports.
-fn tag_last(lights: &mut LightList, prim: &Prim) {
+/// Gives the light just added its name, the prim path, its per-lobe
+/// multipliers, and its light-path-expression tag, `token crust:light:lpeTag`
+/// — the label a light group `<L.'tag'>` selects. Other renderers' tag
+/// attributes are not read yet: their exact names are still to be checked
+/// against real exports.
+fn tag_last(lights: &mut LightList, prim: &Prim, gains: LobeGains) {
     let index = lights.count() - 1;
     lights.set_name(index, &prim.path().to_string());
+    if gains != LobeGains::ONE {
+        debug!(
+            "{}: diffuse ×{}, specular ×{}",
+            prim.path(),
+            gains.diffuse,
+            gains.specular
+        );
+        lights.set_lobe_gains(index, gains);
+    }
     if let Some(tag) = custom_token(prim, "crust:light:lpeTag") {
         debug!("{}: LPE tag {tag:?}", prim.path());
         lights.set_lpe_tag(index, Some(&tag));

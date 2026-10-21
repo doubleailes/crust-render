@@ -20,7 +20,7 @@ use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{EVERY_CLASS, Light, LightList, Receiver, profile};
+use crate::{EVERY_CLASS, Light, LightList, LobeGains, Receiver, profile};
 use openqmc::{Sampler, SamplerImpl};
 
 use super::GuidingContext;
@@ -310,7 +310,7 @@ pub(super) fn ray_cones_enabled() -> bool {
 // profiler switch LLVM stopped inlining them into either copy — +1.1%
 // instructions on cornellbox with profiling off.
 #[inline(always)]
-fn sample_bounce_direction<S: SamplerImpl, const AOV: bool>(
+fn sample_bounce_direction<S: SamplerImpl>(
     r: &Ray,
     rec: &HitRecord,
     sp: &ShadingPoint,
@@ -319,9 +319,9 @@ fn sample_bounce_direction<S: SamplerImpl, const AOV: bool>(
     split: Option<&mut LobeSplit>,
 ) -> Option<ScatterSample> {
     // The material's own sample — split by lobe at the direction it drew
-    // (see `ShadingPoint::scatter_split`) when light path expressions want
-    // the split, which only the AOV instantiation can ask for.
-    let mut split = if AOV { split } else { None };
+    // (see `ShadingPoint::scatter_split`) when light path expressions or a
+    // light's per-lobe multipliers want the split.
+    let mut split = split;
     // Distinct sub-domains: the BSDF scatter block, and the guide block whose
     // first dimension is the α-coin and whose incidental stream drives the
     // quadtree descent. The material is handed the numbers, not the domain:
@@ -345,7 +345,7 @@ fn sample_bounce_direction<S: SamplerImpl, const AOV: bool>(
         if let Some((wi, p_guide)) = g.field.sample(rec.p, &mut guide_dom.rng())
             && let Some((value, p_bsdf)) = sp.eval(r, wi)
         {
-            if AOV && let Some(out) = split {
+            if let Some(out) = split {
                 // `value` is `eval` toward `wi`, so the split is `eval`'s.
                 sp.eval_lobes(r, wi, out);
             }
@@ -608,6 +608,11 @@ pub(super) struct PrevBounce<'a> {
     pub(super) from: Receiver,
     pub(super) pdf: PdfSolidAngle,
     pub(super) delta: bool,
+    /// The share of the bounce's value, per channel, that a light's
+    /// `inputs:specular` scales, the rest answering to its `inputs:diffuse`
+    /// ([`bounce_gain`]). Zero, and unread, unless a light has
+    /// [`LobeGains`].
+    pub(super) specular: Vec3A,
     /// The light-link class of the surface this bounce left: the receiver
     /// whose links decide what the bounce may collect.
     pub(super) class: u16,
@@ -840,9 +845,12 @@ fn escaped_split(
         if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
             continue;
         }
-        let Some((emitted, pdf)) = light.escaped(from.p, direction) else {
+        let Some((mut emitted, pdf)) = light.escaped(from.p, direction) else {
             continue;
         };
+        if lights.has_lobe_gains() {
+            emitted *= bounce_gain(prev.as_ref(), lights, index);
+        }
         let weight = match (competing, pdf) {
             (Some((_, bounce_pdf, count)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
                 let light_pdf = lights.density(pdf, pmf, count).max(1e-6);
@@ -1932,7 +1940,10 @@ fn collect_crossings(
         if c.emitted == Vec3A::ZERO {
             continue;
         }
-        let e = reach * scale(c.t) * c.emitted;
+        let mut e = reach * scale(c.t) * c.emitted;
+        if lights.has_lobe_gains() {
+            e *= bounce_gain_of_geom(prev.as_ref(), lights, c.geom_id);
+        }
         let w = prev.as_ref().map_or(1.0, |p| {
             bounce_emission_weight_at(p, lights, c.geom_id, c.p, strategy)
         });
@@ -1982,6 +1993,7 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     receiver: Receiver,
     dir: Vec3A,
     bounce_pdf: PdfSolidAngle,
+    specular: Option<Vec3A>,
     class: u16,
     nee_count: u32,
     inside: Option<&Enclosure>,
@@ -2013,6 +2025,9 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         }
         bounce_weighs_from(Some(receiver), false);
         let pmf = lights.pmf_at(receiver, index);
+        // The bounce's `bounce_gain`, from the vertex the twin stands in for
+        // (`None` at a phase scatter, whose light is whole).
+        let gain = specular.map_or(Vec3A::ONE, |s| lights.lobe_gains(index).blend(s));
         let domain = vertex.new_domain(K_LINK_TWIN).new_domain(index as i32);
         light.found_along(from, dir, |found| {
             // `bounce_emission_weight_at`'s weight, for this point.
@@ -2044,7 +2059,7 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
             if tr == Vec3A::ZERO {
                 return;
             }
-            let e = found.radiance * tr;
+            let e = found.radiance * tr * gain;
             weighted += e * weight;
             raw += e;
             if let Some(ctx) = routing {
@@ -2318,14 +2333,32 @@ fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
             // continuous transmission lobe can see a light behind the
             // ray-facing normal). Applying it again here is what used
             // to make this an integral of `brdf · cos²`.
-            nee = match &mixed {
-                None => ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get(),
-                Some(m) => ls.radiance * m.shaded * weight / light_pdf.get(),
+            // A light that scales the diffuse and specular responses apart
+            // (`LobeGains`) is connected share by share, each share scaled
+            // by its own gain: the split is then the beauty's expression.
+            let gains = lights.lobe_gains(light_index);
+            let gained = lights.has_lobe_gains() && gains != LobeGains::ONE;
+            nee = if gained {
+                gained_split(sp, ray, light_dir_unit, gains, split);
+                let f = split
+                    .iter()
+                    .enumerate()
+                    .fold(Vec3A::ZERO, |acc, (i, (_, f))| {
+                        acc + f * mixed.as_ref().map_or(shadow_tr, |m| m.tr(i))
+                    });
+                ls.radiance * f * weight / light_pdf.get()
+            } else {
+                match &mixed {
+                    None => ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get(),
+                    Some(m) => ls.radiance * m.shaded * weight / light_pdf.get(),
+                }
             };
             if let Some(ctx) = routing {
                 // Each lobe's share, in the beauty's own expression. A
                 // walk's exit is part of the walk's event: no event here.
-                sp.eval_lobes(ray, light_dir_unit, split);
+                if !gained {
+                    sp.eval_lobes(ray, light_dir_unit, split);
+                }
                 let light_pdf = light_pdf.get();
                 route.nee(
                     ctx.light(light_index),
@@ -2342,6 +2375,73 @@ fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         }
     }
     nee
+}
+
+/// `split` set to the shares of `sp`'s value toward `wi`
+/// ([`ShadingPoint::eval_lobes`]), each scaled by the gain `gains` gives it
+/// ([`ShadingPoint::specular_fraction`]): a light's per-lobe multipliers on
+/// NEE's side. Out of line: only a scene whose lights author them comes here.
+#[cold]
+#[inline(never)]
+fn gained_split(sp: &ShadingPoint, ray: &Ray, wi: Vec3A, gains: LobeGains, split: &mut LobeSplit) {
+    sp.eval_lobes(ray, wi, split);
+    let mut k = [Vec3A::ONE; crate::material::lobe::MAX_SPLIT];
+    for (i, (e, _)) in split.iter().enumerate() {
+        k[i] = gains.blend(sp.specular_fraction(i, e, wi));
+    }
+    split.scale_by(|i| k[i]);
+}
+
+/// The share of a surface bounce's value that answers to a light's
+/// `inputs:specular` ([`PrevBounce::specular`]): a delta sample's by its
+/// event, a continuous one's by the lobe split `split` made at the direction
+/// sampled, per channel. Out of line, for the reason [`gained_split`] is.
+#[cold]
+#[inline(never)]
+fn bounce_specular(sp: &ShadingPoint, sample: &ScatterSample, split: &LobeSplit) -> Vec3A {
+    if sample.delta {
+        return if sp.delta_event(sample).label.is_specular() {
+            Vec3A::ONE
+        } else {
+            Vec3A::ZERO
+        };
+    }
+    let wi = sample.ray.direction();
+    let (mut specular, mut total) = (Vec3A::ZERO, Vec3A::ZERO);
+    for (i, (e, f)) in split.iter().enumerate() {
+        specular += f * sp.specular_fraction(i, e, wi);
+        total += f;
+    }
+    Vec3A::select(
+        total.cmpgt(Vec3A::ZERO),
+        (specular / total).clamp(Vec3A::ZERO, Vec3A::ONE),
+        Vec3A::ZERO,
+    )
+}
+
+/// What light `index`'s emission, reached by the bounce `prev` left by, is
+/// scaled by: its [`LobeGains`] blended over that bounce's lobes
+/// ([`PrevBounce::specular`]) — NEE's [`gained_split`], on the bounce side.
+/// Whole after a phase scatter: volume scattering is not a surface's
+/// diffuse or specular response. Only asked when
+/// [`LightList::has_lobe_gains`].
+#[cold]
+#[inline(never)]
+fn bounce_gain(prev: Option<&PrevVertex>, lights: &LightList, index: usize) -> Vec3A {
+    match prev {
+        Some(PrevVertex::Surface(p)) => lights.lobe_gains(index).blend(p.specular),
+        _ => Vec3A::ONE,
+    }
+}
+
+/// [`bounce_gain`] for the emitter `geom_id`: one only a light is.
+#[cold]
+#[inline(never)]
+fn bounce_gain_of_geom(prev: Option<&PrevVertex>, lights: &LightList, geom_id: u32) -> Vec3A {
+    match lights.index_of_geom(geom_id) {
+        Some(index) => bounce_gain(prev, lights, index),
+        None => Vec3A::ONE,
+    }
 }
 
 /// Light samples 1 … `count − 1` of a surface vertex, each from its own
@@ -2743,6 +2843,9 @@ pub(super) fn trace_path<
                         if walls {
                             emitted *= thin.before(hit.rec.t) * thin.meet;
                         }
+                        if lights.has_lobe_gains() {
+                            emitted *= bounce_gain_of_geom(Some(p), lights, hit.geom_id);
+                        }
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
                         last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
@@ -2939,6 +3042,7 @@ pub(super) fn trace_path<
                         Receiver::at(p),
                         dir,
                         phase_pdf,
+                        None,
                         class,
                         nee_count,
                         enclosure.as_ref(),
@@ -3101,6 +3205,7 @@ pub(super) fn trace_path<
                     Receiver::at(pos),
                     dir,
                     phase_pdf,
+                    None,
                     e.class,
                     nee_count,
                     Some(e),
@@ -3318,6 +3423,9 @@ pub(super) fn trace_path<
                 if emitted.length_squared() > 0.0 {
                     let last = records.last_mut().expect("prev implies a record");
                     last.next_emit = atten * emitted;
+                    if lights.has_lobe_gains() {
+                        last.next_emit *= bounce_gain_of_geom(Some(p), lights, hit.geom_id);
+                    }
                     last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
                     if let Some(ctx) = routing {
                         let (sym, light) = ctx.emitter(lights, hit.geom_id);
@@ -3437,13 +3545,15 @@ pub(super) fn trace_path<
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         let mut bounce = {
             let _p = profile::scope_if::<PROFILE>(Section::Bounce);
-            sample_bounce_direction::<S, AOV>(
+            sample_bounce_direction::<S>(
                 &ray,
                 &rec,
                 &sp,
                 guiding_here,
                 v,
-                routing.is_some().then_some(&mut *bounce_split),
+                // A light's per-lobe multipliers read the split too
+                // (`bounce_specular`).
+                (routing.is_some() || lights.has_lobe_gains()).then_some(&mut *bounce_split),
             )
         };
         // A subsurface leaf was selected: walk the interior now. The walk is
@@ -3558,11 +3668,17 @@ pub(super) fn trace_path<
                 }
                 // A BSDF (or guide-mixture) pdf, in solid angle.
                 let bounce_pdf = PdfSolidAngle::from_measure(sample.pdf);
+                let specular = if lights.has_lobe_gains() {
+                    bounce_specular(&sp, &sample, bounce_split)
+                } else {
+                    Vec3A::ZERO
+                };
                 if TWINS && !sample.delta {
                     let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
                         Receiver::surface(rec.p, rec.normal, opaque_here),
                         dir,
                         bounce_pdf,
+                        Some(specular),
                         class_here,
                         nee_count,
                         enclosure.as_ref(),
@@ -3589,6 +3705,7 @@ pub(super) fn trace_path<
                     from: receiver,
                     pdf: bounce_pdf,
                     delta: sample.delta,
+                    specular,
                     class: class_here,
                     nee_count,
                     #[cfg(debug_assertions)]

@@ -340,8 +340,6 @@ warning_codes! {
     // Lights and light linking
     LightNonFiniteInput => "light.non_finite_input", Refused, Each,
         "A light input is not finite; its fallback is used.";
-    LightUnsupportedMultiplier => "light.unsupported_multiplier", Approximated, Each,
-        "A per-lobe light multiplier (diffuse, specular) is not supported; the light contributes at 1.0.";
     LightDegenerateShape => "light.degenerate_shape", Skipped, Each,
         "A light's size or transform collapses its shape; the light is skipped.";
     LightUnsupportedTextureFormat => "light.unsupported_texture_format", Skipped, Each,

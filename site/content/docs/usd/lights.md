@@ -80,8 +80,40 @@ Light linking and shadow linking use the standard `collection:lightLink` and
 `collection:shadowLink` collections. See `samples/light_linking.usda`.
 
 Not supported: mesh lights (`MeshLightAPI`), portal lights, light filters, and shaping on
-distant and dome lights. `inputs:diffuse` and `inputs:specular` are ignored with a
-warning.
+distant and dome lights.
+
+## Diffuse and specular multipliers
+
+`inputs:diffuse` and `inputs:specular` (`float`, 1 by default) scale a light's
+contribution to the diffuse and the specular response of the surfaces it lights. Every
+light type reads them.
+
+| multiplier | scales |
+|------------|--------|
+| `inputs:specular` | specular, coat and transmission lobes; a hair fibre's primary reflection (R) |
+| `inputs:diffuse` | diffuse, sheen, subsurface and translucent lobes; a hair fibre's other terms (TT, TRT and beyond) |
+
+A light with `inputs:diffuse = 0` is a specular-only "kicker", the usual way to put
+highlights in hair without washing out its colour; a fill light with
+`inputs:specular = 0` lights without a highlight:
+
+```usda
+def SphereLight "HairKicker"
+{
+    float inputs:intensity = 40
+    float inputs:diffuse = 0
+}
+```
+
+The multipliers are non-physical, and any finite value is taken, negative or above 1. A
+non-finite one falls back to 1 with the warning `light.non_finite_input`. Light that a
+volume scatters is not scaled: the multipliers apply to surfaces only.
+
+In [light path expression AOVs](@/docs/usd/aovs.md), the light a multiplied light sends
+straight to a surface is split by lobe exactly. The part a surface receives through a
+reflected or refracted ray is shared between that surface's lobes at the multipliers'
+average for that ray. The AOVs still add up to the beauty, but `C<RD>L` can hold some of
+a specular-only light's reflection.
 
 ## Camera visibility
 

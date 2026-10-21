@@ -85,6 +85,18 @@ impl LobeLabel {
             LobeLabel::Translucent => "translucent",
         }
     }
+
+    /// Whether a light's `inputs:specular` multiplier scales this lobe
+    /// rather than its `inputs:diffuse` one: the microfacet lobes (specular,
+    /// coat, transmission). Diffuse, sheen, subsurface and translucency are
+    /// the diffuse response. A fibre's leaf is split further, by its terms
+    /// (`ShadingPoint::specular_fraction`).
+    pub fn is_specular(self) -> bool {
+        matches!(
+            self,
+            LobeLabel::Specular | LobeLabel::Coat | LobeLabel::Transmission
+        )
+    }
 }
 
 /// What a surface lobe contributes as an event: `R`/`T`, its scatter kind
@@ -191,6 +203,13 @@ impl LobeSplit {
 
     /// Share `i` multiplied by `k(i)`, for every share.
     pub fn scale_each(&mut self, k: impl Fn(usize) -> f32) {
+        for (i, v) in self.values[..self.len].iter_mut().enumerate() {
+            *v *= k(i);
+        }
+    }
+
+    /// Share `i` multiplied by `k(i)`, per channel, for every share.
+    pub fn scale_by(&mut self, k: impl Fn(usize) -> glam::Vec3A) {
         for (i, v) in self.values[..self.len].iter_mut().enumerate() {
             *v *= k(i);
         }
