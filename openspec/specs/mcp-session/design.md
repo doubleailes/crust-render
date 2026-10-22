@@ -371,20 +371,20 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   scene tessellated from the camera) still re-imports when it moves, and so does an
   edit to one of the camera's ancestors.
 - **A camera move re-opens the stage.** The settings rebuild opens the index stage and
-  a stage masked to the camera per move: 7.5 / 9.7 ms (min / mean of 10 alternating
-  translates) on the Cornell box at 640×480 against 15.0 / 16.2 ms as `full`
-  (`CRUST_SCENE_DELTAS=0`), and 31.7 / 32.7 ms on ALab (`entry.usda`, whose
+  a stage masked to the camera per move. On the Cornell box at 640×480 it costs
+  6.64 / 8.31 ms (min / mean of 20) against 12.53 / 17.34 ms as `full`, measured by
+  `camera_move_latency` (`mcp/tests.rs`, `#[ignore]`: `cargo test --release -p
+  crust-render --bin crust camera_move_latency -- --ignored --nocapture`). It opens two
+  sessions on the stage, the second without kept assets (what `CRUST_SCENE_DELTAS=0`
+  gives a session), and interleaves their translates of the render camera so load lands
+  on both, as `scripts/bench_ab.sh` does for renders; `bench_ab.sh` itself times renders
+  of two binaries, not edits inside a session. On ALab (`entry.usda`, whose
   `startTimeCode` is 1004, `crust:subdivisionEdgeLength = 2`, `learned` light
-  selection, a free `/freecam` rendering and the shot camera dicing), whose session
-  took 215 s to open. Release build, 16 threads, one machine. Driver: a throwaway
-  `#[ignore]` test in `mcp/tests.rs` that opens a session on the stage and authors 10
-  `xformOp:translate` values on the render camera, alternating two, reading each edit's
-  `import_s`; the `full` column is the same test under `CRUST_SCENE_DELTAS=0`. Not
-  `scripts/bench_ab.sh`, which times renders of two binaries, not edits inside one
-  session; the two cornellbox runs were sequential, minutes apart, so their 2× ratio
-  stands only because it is far above the 15% run-to-run spread. Enough to restart a
-  progressive render per drag event; a camera-only path that skips the stage is a
-  follow-up if a Hydra tumble shows it is the bottleneck.
+  selection, a free `/freecam` rendering and the shot camera dicing) a move costs
+  31.7 / 32.7 ms (min / mean of 10, one session, no `full` side: a full import is the
+  215 s the session took to open). Release build, 16 threads, one machine. Enough to
+  restart a progressive render per drag event; a camera-only path that skips the stage
+  is a follow-up if a Hydra tumble shows it is the bottleneck.
 - **On a production shot, only confined edits are cheap.** ALab frame 1004
   (`in-place-edits-on-production-shots` `notes.md`): an exposure, a light's intensity and
   a payload-delivered shader's roughness apply in place in 18–60 ms. Any transform,
