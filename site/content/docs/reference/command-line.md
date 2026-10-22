@@ -332,10 +332,12 @@ differ there import apart. Passes sharing an import render together, in `ls pass
 the imports in the order of their first pass. The log says how many passes each import
 served.
 
-Before anything is imported, it works out every file each pass would write. When two
-passes would write the same file (two passes reading settings with no `RenderProduct`
-both write `output.exr`), it stops with an error naming them and the file, and renders
-nothing. A stage with no `RenderPass` is an error too.
+Before anything is imported, it works out every file each pass would write: its
+products and the PNG preview beside its beauty, each path resolved against the working
+directory, so `./x.exr` and `x.exr` are one file. When two passes would write the same
+file (two passes reading settings with no `RenderProduct` both write `output.exr`), it
+stops with an error naming them and the file, and renders nothing. A stage with no
+`RenderPass` is an error too.
 
 A Ctrl-C stops at the pass it reaches: that pass writes what it traced, as an
 interrupted render does, the passes before it keep their files, and the passes after it
@@ -343,7 +345,9 @@ are not rendered.
 
 It needs [`-i`](#input), and is refused with [`--pass`](#pass), [`-o`](#output) (each
 pass writes its own products) and [`--stats-json`](#stats-json). [`--stats`](#stats)
-prints each import's phases once, and each pass's render.
+prints each import's phases once, and each pass's render; a pass's texture and Ptex
+counters count what that pass read (the first of an import's with the import), as
+`--pass` alone reports them.
 
 ```bash
 crust render -i samples/render_passes.usda --all-passes -s 16
@@ -941,7 +945,9 @@ and reports:
   and with `--all-passes`, `passes_share_output`: two passes that would write one file —
   with the same ids, evidence and actions;
 - **warnings**: what the import refused, approximated or skipped, one record per
-  [warning code](@/docs/reference/warnings.md) with its count and first prims.
+  [warning code](@/docs/reference/warnings.md) with its count and first prims. With
+  `--all-passes`, they add what only rendering a pass would raise (reading it, choosing
+  its products), on the prims the render described above does not name.
 
 It writes **no image** and no file beside the stage, except the `.tx` files `--auto-tx`
 creates, as a render would. The text report goes to stdout and the log to stderr.

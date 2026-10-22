@@ -221,9 +221,11 @@ A pass whose settings dice differently (another `crust:subdivisionLevel`, say), 
 motion over another shutter, or render in another colour space gets an import of its own;
 the log says how many passes each import served.
 
-Before importing anything, `--all-passes` works out every file each pass would write, and
-refuses a stage where two passes would write the same one. That is what happens to two
-passes whose settings have no `RenderProduct`: both would write `output.exr`.
+Before importing anything, `--all-passes` works out every file each pass would write (its
+products and the PNG preview beside its beauty), and refuses a stage where two passes
+would write the same one, however its path is spelled (`./x.exr` and `x.exr` are one
+file). That is what happens to two passes whose settings have no `RenderProduct`: both
+would write `output.exr`.
 
 ## Checking every pass
 

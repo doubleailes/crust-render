@@ -96,6 +96,9 @@ pub(crate) struct StageFacts {
     pub(crate) render_settings: Option<String>,
     /// The camera rendered through, `None` for the procedural one.
     pub(crate) camera: Option<String>,
+    /// The camera the settings named before the traversal, `None` when they
+    /// named none (the first camera met was rendered).
+    pub(crate) named_camera: Option<String>,
     /// Everything the import built into the scene from the settings.
     pub(crate) key: ImportKey,
     /// How the import's implicit shapes used the camera projection.

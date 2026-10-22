@@ -583,6 +583,24 @@ impl PtexCacheStats {
         self.micro_hits + self.reader_lookups
     }
 
+    /// What the textures did since `earlier`, a snapshot of the same loader
+    /// (the counters subtract; what is opened, resident or budgeted stays as
+    /// it is now): one render's share when several renders share a loader,
+    /// as the passes of `crust render --all-passes` do.
+    pub fn since(mut self, earlier: &Self) -> Self {
+        for (now, then) in [
+            (&mut self.micro_hits, earlier.micro_hits),
+            (&mut self.reader_lookups, earlier.reader_lookups),
+            (&mut self.cache_hits, earlier.cache_hits),
+            (&mut self.cache_misses, earlier.cache_misses),
+            (&mut self.evictions, earlier.evictions),
+            (&mut self.derives, earlier.derives),
+        ] {
+            *now = now.saturating_sub(then);
+        }
+        self
+    }
+
     /// Share of texel fetches answered without touching the reader's mutex.
     pub fn micro_rate(&self) -> f64 {
         match self.lookups() {
@@ -654,6 +672,29 @@ pub struct TextureCacheStats {
 impl TextureCacheStats {
     pub fn lookups(&self) -> u64 {
         self.micro_hits + self.hits + self.misses
+    }
+
+    /// What the cache did since `earlier`, a snapshot of the same cache (the
+    /// counters subtract; sizes, peaks and budgets stay as they are now):
+    /// one render's share when several renders share a cache, as the passes
+    /// of `crust render --all-passes` do.
+    pub fn since(mut self, earlier: &Self) -> Self {
+        for (now, then) in [
+            (&mut self.micro_hits, earlier.micro_hits),
+            (&mut self.hits, earlier.hits),
+            (&mut self.misses, earlier.misses),
+            (&mut self.redundant, earlier.redundant),
+            (&mut self.raced, earlier.raced),
+            (&mut self.evictions, earlier.evictions),
+            (&mut self.bytes_read, earlier.bytes_read),
+            (&mut self.errors, earlier.errors),
+            (&mut self.opens, earlier.opens),
+            (&mut self.reopens, earlier.reopens),
+            (&mut self.loaded_tiles, earlier.loaded_tiles),
+        ] {
+            *now = now.saturating_sub(then);
+        }
+        self
     }
 
     /// Fraction of lookups answered without touching the disk.
@@ -1900,6 +1941,58 @@ impl fmt::Display for RenderStats {
 
 #[cfg(test)]
 mod tests {
+
+    /// One pass's share of counters several renders share: what happened
+    /// since the snapshot subtracts, what the cache holds or is allowed stays.
+    #[test]
+    fn counters_since_a_snapshot_are_one_render_s_share() {
+        let before = TextureCacheStats {
+            hits: 10,
+            misses: 4,
+            errors: 1,
+            bytes_read: 100,
+            peak_bytes: 50,
+            budget_bytes: 1000,
+            files: 3,
+            ..Default::default()
+        };
+        let now = TextureCacheStats {
+            hits: 25,
+            misses: 6,
+            errors: 1,
+            bytes_read: 180,
+            peak_bytes: 70,
+            budget_bytes: 1000,
+            files: 3,
+            ..Default::default()
+        };
+        let share = now.since(&before);
+        assert_eq!(
+            (share.hits, share.misses, share.errors, share.bytes_read),
+            (15, 2, 0, 80)
+        );
+        assert_eq!(
+            (share.peak_bytes, share.budget_bytes, share.files),
+            (70, 1000, 3)
+        );
+        let before = PtexCacheStats {
+            textures: 2,
+            cache_hits: 7,
+            cache_misses: 3,
+            resident_bytes: 64,
+            ..Default::default()
+        };
+        let now = PtexCacheStats {
+            textures: 2,
+            cache_hits: 9,
+            cache_misses: 3,
+            resident_bytes: 80,
+            ..Default::default()
+        };
+        let share = now.since(&before);
+        assert_eq!((share.cache_hits, share.cache_misses), (2, 0));
+        assert_eq!((share.textures, share.resident_bytes), (2, 80));
+    }
     use super::*;
 
     #[test]

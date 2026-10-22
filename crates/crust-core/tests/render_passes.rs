@@ -1471,6 +1471,55 @@ fn each_pass_of_a_group_reads_as_it_does_alone() {
     assert_eq!(g.scene.settings_prim, first.settings_prim);
 }
 
+/// A group's scene is its first pass's: a live settings rebuild re-reads that
+/// pass's `renderSource`, as for the pass imported alone, not the stage's
+/// settings. Once another pass is applied, the provenance (which names the
+/// first pass's settings and light indices) is dropped, so a live edit
+/// imports again rather than rebuild for the wrong pass.
+#[test]
+fn a_group_scene_rebuilds_only_as_its_first_pass() {
+    let path = passes_sample();
+    let g = group(&path, &["/Render/Passes/char", "/Render/Passes/props"]);
+    let mut scene = g.scene;
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let update = scene
+        .provenance
+        .as_ref()
+        .expect("the first pass's provenance")
+        .rebuild(&path, &NoAssets, &scene.warnings, &change)
+        .expect("a settings rebuild in place");
+    update.apply(&mut scene).expect("applies");
+    let names: Vec<&str> = scene
+        .aovs
+        .products
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["char.exr"], "the char pass's settings, re-read");
+    scene.apply_pass(&g.passes[0]);
+    assert!(scene.provenance.is_some(), "still the first pass");
+    scene.apply_pass(&g.passes[1]);
+    assert!(scene.provenance.is_none(), "another pass: re-import");
+}
+
+/// An empty group is an error, not a panic.
+#[test]
+fn an_empty_group_is_an_error() {
+    match Scene::from_usd_passes(
+        &passes_sample(),
+        &NoAssets,
+        &UsdImportOptions::default(),
+        &[],
+    ) {
+        Err(Error::NoPasses) => {}
+        Err(e) => panic!("another error: {e}"),
+        Ok(_) => panic!("an empty group imported"),
+    }
+}
+
 /// render-visibility-and-all-passes task 3.3: a world committed for one pass,
 /// then given another pass's flags, renders that pass bit for bit as an
 /// import of it alone does — beauty, alpha and a light path expression — and

@@ -1843,6 +1843,14 @@ impl Signature {
     }
 }
 
+/// Zeroes the kernel's BVH traversal counters, which are process-wide, so
+/// that the next [`traversal_report`] counts one render: the passes of
+/// `crust render --all-passes` render one after another in one process.
+#[cfg(feature = "traversal-stats")]
+pub fn reset_traversal_stats() {
+    crate::rt::traversal_stats::reset();
+}
+
 /// The kernel's BVH traversal counters, per camera ray, as the `--stats`
 /// section a `traversal-stats` build adds: queries, nodes, leaves and packets
 /// per tree level, then which top-level instances the descents went into.

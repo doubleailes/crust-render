@@ -1091,7 +1091,9 @@ pub(crate) fn load_passes(
     options: &crate::UsdImportOptions,
     passes: &[String],
 ) -> Result<crate::PassGroup, crate::Error> {
-    assert!(!passes.is_empty(), "a group of passes holds one at least");
+    if passes.is_empty() {
+        return Err(crate::Error::NoPasses);
+    }
     import(path, assets, options, Some(passes))
 }
 
@@ -1387,6 +1389,16 @@ fn import(
         fixed_count: ctx.caches.implicit.fixed_unshared,
     };
     let key = reads[0].key.clone();
+    // The first pass, whose scene this is, and the camera its settings name
+    // before the traversal: what a live settings refresh re-reads and
+    // compares (the key leaves the camera out, so that passes through
+    // different cameras can share an import).
+    let first_pass = reads[0].path.as_ref().map(ToString::to_string);
+    let named_camera = reads[0]
+        .read
+        .wanted_camera
+        .as_ref()
+        .map(|c| c.path().to_string());
     let mut k = 1;
     while k < reads.len() {
         if key.refusal(used, &reads[k].key).is_some() {
@@ -1610,9 +1622,14 @@ fn import(
         lights: ctx.light_origins.into_iter().collect(),
         geometry: geometry_runs,
         stage: StageFacts {
-            options: options.clone(),
+            // A group's scene is its first pass's: re-read as that pass.
+            options: crate::UsdImportOptions {
+                pass: first_pass,
+                ..options.clone()
+            },
             render_settings: first.render_settings.clone(),
             camera: scene.camera_path.clone(),
+            named_camera,
             key,
             used,
         },

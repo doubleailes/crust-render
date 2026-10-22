@@ -667,9 +667,12 @@ pass rendered alone.
 ### Requirement: Passes that would write the same file
 
 Before it renders any pixel, `crust render --all-passes` SHALL compute the file
-of every product of every pass for the frame being rendered. When two passes
-would write the same file, it SHALL stop with an error naming both passes and the
-file, write nothing, and exit non-zero.
+of every product of every pass for the frame being rendered, and the PNG preview
+each pass writes beside its beauty. Two names SHALL be the same file when they
+are once resolved against the working directory, `.` and `..` included. When
+two passes would write the same file, it SHALL stop with an error naming both
+passes and the file, write nothing, and exit non-zero. A preview shared only
+because its beauty is, by the same passes, SHALL not be named apart.
 
 #### Scenario: Two passes with no products
 
@@ -677,6 +680,17 @@ file, write nothing, and exit non-zero.
   write the default beauty image
 - **THEN** the render stops before rendering, naming both passes and the default
   file
+
+#### Scenario: Two spellings of one file
+
+- **WHEN** one pass writes `./x.exr` and another `x.exr`
+- **THEN** the render stops before rendering, naming both passes and `./x.exr`
+
+#### Scenario: A product on another pass's preview
+
+- **WHEN** one pass writes the beauty product `x.exr`, so its preview is `x.png`,
+  and another pass writes a product `x.png`
+- **THEN** the render stops before rendering, naming both passes and `x.png`
 
 ### Requirement: Interrupting all passes
 

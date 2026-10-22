@@ -1364,12 +1364,14 @@ fn check_passes(
         }
         let (w, h) = settings.get_dimensions();
         let mut aovs = pass.aovs.clone();
-        {
-            // Said by the render of the pass, not by its description.
+        // Logged by the render of the pass, not by its description, but
+        // reported (and denied) as the render with no pass reports its own.
+        let selected = {
             let _quiet = crust_core::QuietWarnings::enter();
-            let _scope = WarningScope::enter();
+            let scope = WarningScope::enter();
             let _ = select_products(&mut aovs, None, frame);
-        }
+            scope.finish()
+        };
         let products: Vec<ProductInfo> = if aovs.products.is_empty() {
             vec![ProductInfo {
                 prim: None,
@@ -1435,19 +1437,40 @@ fn check_passes(
             differs: differences(rows),
         });
         // What reading this pass raised that the render described did not.
-        let new: Vec<crust_core::Warning> = pass
-            .warnings
-            .iter()
-            .filter(|w| !report.warnings.iter().any(|r| r.code == w.code))
-            .cloned()
-            .collect();
-        crust_core::merge_warnings(&mut warnings, new);
+        let raised = pass.warnings.iter().cloned().chain(selected).collect();
+        crust_core::merge_warnings(&mut warnings, pass_only(&report.warnings, raised));
     }
     crust_core::merge_warnings(&mut report.warnings, warnings);
     let kinds: Vec<WarningKind> = args.deny.iter().flat_map(|d| d.kinds()).copied().collect();
     report.denied = crust_core::check::denied(&report.warnings, &kinds);
     report.passes = Some(entries);
     Ok(())
+}
+
+/// The occurrences of `raised` (one pass's warnings) that `base` (the render
+/// with no pass) does not hold: a code `base` has too keeps only the prims it
+/// does not name, its count lowered by those it does, and a stage-level one
+/// (no prim) is dropped. `base` names at most `MAX_PRIMS` prims per code, so
+/// a pass's occurrence on a prim beyond those is kept, and counted again.
+fn pass_only(
+    base: &[crust_core::Warning],
+    raised: Vec<crust_core::Warning>,
+) -> Vec<crust_core::Warning> {
+    raised
+        .into_iter()
+        .filter_map(|mut w| {
+            let Some(b) = base.iter().find(|b| b.code == w.code) else {
+                return Some(w);
+            };
+            let before = w.prims.len();
+            w.prims.retain(|p| !b.prims.contains(p));
+            if w.prims.is_empty() {
+                return None;
+            }
+            w.count = w.count.saturating_sub((before - w.prims.len()) as u64);
+            Some(w)
+        })
+        .collect()
 }
 
 /// A stage imported as `crust render` would import it, with what `crust
@@ -2111,7 +2134,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     debug!("Scene built in {:?}", load_start.elapsed());
     let layer_hashes = hash_layers(&scene);
     report_auto_tx(&assets);
-    write_scene(cli, run, &assets, &mut scene, &layer_hashes)
+    write_scene(cli, run, &assets, &mut scene, &layer_hashes, None)
 }
 
 /// The import options of the stage `cli` names, as `crust render` takes them
@@ -2148,38 +2171,87 @@ fn plan_passes(
 /// The files `plans`' passes write at `frame` that more than one of them
 /// does, each with those passes in order: the products a render of each
 /// would write, frame variables expanded, or the default beauty image for a
-/// pass with none. What `crust render --all-passes` refuses before it renders
-/// and `crust check --all-passes` reports as `passes_share_output`.
+/// pass with none, and the PNG preview beside its beauty. What
+/// `crust render --all-passes` refuses before it renders and
+/// `crust check --all-passes` reports as `passes_share_output`.
 fn shared_pass_outputs(plans: &[crust_core::PassPlan], frame: f64) -> Vec<(String, Vec<String>)> {
     // The render says these paths' warnings, when it chooses its products.
     let _quiet = crust_core::QuietWarnings::enter();
     let _scope = WarningScope::enter();
-    let mut files: Vec<(PathBuf, String, Vec<String>)> = Vec::new();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    // Each destination: its first spelling, the passes writing it, and, for
+    // a preview, the beauty it is the preview of.
+    let mut files: Vec<(PathBuf, String, Vec<String>, Option<PathBuf>)> = Vec::new();
     for plan in plans {
         let mut aovs = plan.aovs.clone();
         let expanded = select_products(&mut aovs, None, frame);
-        let written: Vec<String> = if aovs.products.is_empty() {
-            vec![expanded.unwrap_or_else(|| beauty_output(None, frame))]
+        // What `write_scene` writes: the products, then the PNG preview of
+        // the first one's beauty (or of the beauty image without products).
+        let mut written: Vec<(String, Option<String>)> = if aovs.products.is_empty() {
+            vec![(expanded.unwrap_or_else(|| beauty_output(None, frame)), None)]
         } else {
-            aovs.products.into_iter().map(|p| p.name).collect()
+            aovs.products
+                .iter()
+                .map(|p| (p.name.clone(), None))
+                .collect()
         };
-        for name in written {
-            // Compared as paths, as the products of one render are.
-            let path: PathBuf = Path::new(&name).components().collect();
-            match files.iter_mut().find(|(p, _, _)| *p == path) {
-                Some((_, _, passes)) if !passes.contains(&plan.path) => {
+        if aovs.products.first().is_none_or(|p| p.beauty().is_some()) {
+            let beauty = written[0].0.clone();
+            let preview = preview_png(&beauty).to_string_lossy().into_owned();
+            written.push((preview, Some(beauty)));
+        }
+        for (name, preview_of) in written {
+            let path = output_destination(&cwd, &name);
+            match files.iter_mut().find(|(p, ..)| *p == path) {
+                Some((_, _, passes, _)) if !passes.contains(&plan.path) => {
                     passes.push(plan.path.clone())
                 }
                 Some(_) => {}
-                None => files.push((path, name, vec![plan.path.clone()])),
+                None => files.push((
+                    path,
+                    name,
+                    vec![plan.path.clone()],
+                    preview_of.map(|b| output_destination(&cwd, &b)),
+                )),
             }
         }
     }
+    // A preview shared because its beauty is, by the same passes, says
+    // nothing the beauty's entry does not.
+    let shared_beauty = |beauty: &PathBuf, passes: &[String]| {
+        files
+            .iter()
+            .any(|(p, _, by, _)| p == beauty && by.as_slice() == passes)
+    };
     files
-        .into_iter()
-        .filter(|(_, _, passes)| passes.len() > 1)
-        .map(|(_, name, passes)| (name, passes))
+        .iter()
+        .filter(|(_, _, passes, preview_of)| {
+            passes.len() > 1
+                && !preview_of
+                    .as_ref()
+                    .is_some_and(|b| shared_beauty(b, passes))
+        })
+        .map(|(_, name, passes, _)| (name.clone(), passes.clone()))
         .collect()
+}
+
+/// Where a render writes `name`, for comparing two spellings of one file:
+/// against `cwd` when relative, with `.` and `..` resolved by name (the
+/// files need not exist yet, so the filesystem is not asked, and symbolic
+/// links are not followed).
+fn output_destination(cwd: &Path, name: &str) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in cwd.join(name).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `crust render --all-passes`: every `RenderPass` of the stage, one after
@@ -2238,6 +2310,9 @@ fn render_passes(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Writt
         let group = groups[next].clone();
         next += 1;
         let load_start = Instant::now();
+        // The asset counters are the process's: each pass reports its own
+        // share, the group's first with its import, as alone.
+        let group_start = texture_counters(&assets);
         let imported = match Scene::from_usd_passes(path, &assets, &options, &group) {
             Ok(imported) => imported,
             Err(e) => {
@@ -2271,7 +2346,15 @@ fn render_passes(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Writt
                 // The import's phases are reported with the group's first pass.
                 scene.stats.phases.clear();
             }
-            let pass_written = write_scene(cli, run, &assets, &mut scene, &layer_hashes)?;
+            let since = if k == 0 {
+                group_start
+            } else {
+                texture_counters(&assets)
+            };
+            #[cfg(feature = "traversal-stats")]
+            crust_core::reset_traversal_stats();
+            let pass_written =
+                write_scene(cli, run, &assets, &mut scene, &layer_hashes, Some(&since))?;
             written.files.extend(pass_written.files);
             if pass_written.interrupted || pass_written.stopped {
                 written.interrupted |= pass_written.interrupted;
@@ -2285,6 +2368,14 @@ fn render_passes(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Writt
         }
     }
     Ok(written)
+}
+
+/// The texture and Ptex counters of `assets` now, which are the process's:
+/// what [`write_scene`] subtracts to report one pass of several.
+type TextureCounters = (crust_core::TextureCacheStats, crust_core::PtexCacheStats);
+
+fn texture_counters(assets: &FileAssets) -> TextureCounters {
+    (assets.texture_cache_stats(), assets.ptex_stats())
 }
 
 /// The asset loader a render's imports read through, once `--ocio-config`
@@ -2347,13 +2438,16 @@ fn report_auto_tx(assets: &FileAssets) {
 /// and reports the statistics: `crust render` once its scene is imported.
 /// The scene's world, lights and volumes are lent to the renderer and given
 /// back, so the scene can render again — another pass of the same import
-/// (`--all-passes`). `layer_hashes` are its layers' ([`hash_layers`]).
+/// (`--all-passes`). `layer_hashes` are its layers' ([`hash_layers`]);
+/// `since`, for one pass of several, the asset counters to report the share
+/// of ([`texture_counters`]).
 fn write_scene(
     cli: &RenderArgs,
     run: &RenderRun,
     assets: &FileAssets,
     scene: &mut Scene,
     layer_hashes: &std::collections::HashMap<PathBuf, Option<u64>>,
+    since: Option<&TextureCounters>,
 ) -> std::result::Result<Written, ExitCode> {
     let output = cli.output.clone();
     let output_color = match OutputColor::new(scene.working_space, &cli.display, &cli.view) {
@@ -2535,6 +2629,10 @@ fn write_scene(
     // once the last one has stopped.
     stats.textures = assets.texture_cache_stats();
     stats.ptex = assets.ptex_stats();
+    if let Some((textures, ptex)) = since {
+        stats.textures = stats.textures.since(textures);
+        stats.ptex = stats.ptex.since(ptex);
+    }
     renderer.inventory_into(&mut stats);
     if cli.profile {
         stats.profile = crust_core::profile::take();

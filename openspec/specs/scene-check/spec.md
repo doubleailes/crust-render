@@ -264,7 +264,10 @@ then each pass in `crust ls pass` order. Each pass SHALL give its path, settings
 prim, holdout, camera-hidden and render-hidden counts, whether it renders depth
 of field and motion blur, and its products with their files. It SHALL also list
 each quantity that differs from the no-pass render (camera, resolution, depth of
-field, motion blur, each effective setting) with both values.
+field, motion blur, each effective setting) with both values. The warnings SHALL
+add what rendering each pass would raise that the no-pass render does not:
+reading the pass and choosing its products, each code's occurrences on the prims
+the no-pass record does not name, and denied as its own.
 
 #### Scenario: A depth of field that leaks into a pass
 
@@ -280,6 +283,14 @@ field, motion blur, each effective setting) with both values.
 - **THEN** the util pass lists depth of field as on in the no-pass render and off
   in the pass
 
+#### Scenario: A product only a pass refuses
+
+- **WHEN** the no-pass render refuses its product `/Render/P/unnamed_base` (no
+  `productName`), and a pass's settings name another such product,
+  `/Render/P/unnamed_a`
+- **THEN** the `product.no_name` record names both prims with a count of 2, and
+  `--deny skipped` denies it
+
 #### Scenario: A stage with no passes
 
 - **WHEN** the user runs `crust check -i samples/cornellbox.usda --all-passes`
@@ -288,13 +299,20 @@ field, motion blur, each effective setting) with both values.
 
 ### Requirement: Passes that write the same file are a finding
 
-With `--all-passes`, two passes whose products would write the same file for the
-checked frame SHALL be reported as the `passes_share_output` finding. Its
-evidence SHALL name the file and both passes. The finding SHALL not change the
-exit status.
+With `--all-passes`, two passes that would write the same file for the checked
+frame, as `crust render --all-passes` compares them (products and PNG previews,
+paths resolved against the working directory), SHALL be reported as the
+`passes_share_output` finding. Its evidence SHALL name the file and both passes.
+The finding SHALL not change the exit status.
 
 #### Scenario: Two passes on the default path
 
 - **WHEN** two passes read settings that author no `RenderProduct`
 - **THEN** the report has one `passes_share_output` finding naming the default
   beauty file and both passes
+
+#### Scenario: Two spellings of one file
+
+- **WHEN** one pass writes `./x.exr` and another `x.exr`
+- **THEN** the report has a `passes_share_output` finding naming `./x.exr` and
+  both passes

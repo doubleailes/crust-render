@@ -289,10 +289,8 @@ impl Scene {
     /// The `RenderPass` prims at `passes` imported together, in one
     /// traversal: every pass whose settings agree with the first's on
     /// everything the import builds into the scene ([`PassGroup`]). The
-    /// options' own `pass` is ignored.
-    ///
-    /// # Panics
-    /// If `passes` is empty.
+    /// options' own `pass` is ignored. An empty `passes` is an error
+    /// ([`crate::Error::NoPasses`]).
     pub fn from_usd_passes(
         path: &std::path::Path,
         assets: &dyn AssetLoader,
@@ -325,8 +323,19 @@ impl Scene {
     /// light classes and transparent emitters, the volumes' masks, the light
     /// list, and the settings, camera, products, warnings and source become
     /// that pass's. The scene is then the one an import of that pass alone
-    /// builds, apart from its provenance, which stays the first pass's.
+    /// builds, apart from its provenance: that describes the group's first
+    /// pass, so it is dropped for any other (the light list's indices, the
+    /// settings prim it re-reads are that pass's), and a live edit of the
+    /// scene then imports again.
     pub fn apply_pass(&mut self, pass: &PassScene) {
+        let path = pass.summary.as_ref().map(|s| s.path.as_str());
+        if self
+            .provenance
+            .as_ref()
+            .is_some_and(|p| p.stage.options.pass.as_deref() != path)
+        {
+            self.provenance = None;
+        }
         self.world.apply_pass(&pass.table);
         crate::volume::set_volume_flags(&mut self.volumes, &pass.table.volumes);
         self.lights = pass.lights.clone();

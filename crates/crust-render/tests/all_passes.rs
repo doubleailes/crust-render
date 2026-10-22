@@ -155,3 +155,23 @@ fn a_pass_that_dices_differently_imports_twice() {
     assert_eq!(imports(&out), 2, "{}", log(&out));
     assert!(dir.join("char.exr").exists() && dir.join("props.exr").exists());
 }
+
+/// Two spellings of one file are one file: a pass writing `./char.exr`
+/// beside one writing `char.exr` stops the render before it imports.
+#[test]
+fn two_spellings_of_one_file_fail_before_rendering() {
+    let dir = work_dir("spelling");
+    let stage = stage_with(
+        &dir,
+        &[(
+            "token productName = \"props.exr\"",
+            "token productName = \"./char.exr\"",
+        )],
+    );
+    let out = render(&dir, &stage, &["--all-passes"]);
+    assert!(!out.status.success());
+    let text = log(&out);
+    assert!(text.contains("would all write"), "{text}");
+    assert_eq!(imports(&out), 0, "{text}");
+    assert!(!dir.join("char.exr").exists());
+}

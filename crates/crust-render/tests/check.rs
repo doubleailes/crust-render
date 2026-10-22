@@ -1124,3 +1124,188 @@ fn passes_that_share_an_output_are_a_finding() {
         serde_json::json!(["/Render/a", "/Render/b"])
     );
 }
+
+/// `/Render/settings` writing the products `base`, and one `RenderPass` per
+/// `(name, products)`, each through its own settings: every product named
+/// in the lists is defined, a name starting with `unnamed` without a
+/// `productName`, any other writing the colour to `<name>`.
+fn pass_stage(dir: &Path, base: &[&str], passes: &[(&str, &[&str])]) -> PathBuf {
+    let rel = |names: &[&str]| {
+        let targets: Vec<String> = names
+            .iter()
+            .map(|n| format!("</Render/P/{}>", key(n)))
+            .collect();
+        format!("rel products = [{}]", targets.join(", "))
+    };
+    fn key(name: &str) -> String {
+        name.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+    let mut root = format!(
+        "def Scope \"Render\"\n{{\n    def RenderSettings \"settings\"\n    {{\n        rel camera = </World/cam>\n        {}\n    }}\n",
+        rel(base)
+    );
+    let mut products: Vec<&str> = base.to_vec();
+    for (name, names) in passes {
+        root += &format!(
+            "    def RenderSettings \"s_{name}\" ( inherits = </Render/settings> )\n    {{\n        {}\n    }}\n    def RenderPass \"{name}\"\n    {{\n        rel renderSource = </Render/s_{name}>\n    }}\n",
+            rel(names)
+        );
+        products.extend(names.iter());
+    }
+    products.sort();
+    products.dedup();
+    root += "    def Scope \"P\"\n    {\n";
+    for p in products {
+        let name = if p.starts_with("unnamed") {
+            String::new()
+        } else {
+            format!("token productName = \"{p}\" ")
+        };
+        root += &format!(
+            "        def RenderProduct \"{}\" {{ {name}rel orderedVars = </Render/color> }}\n",
+            key(p)
+        );
+    }
+    root += "    }\n    def RenderVar \"color\"\n    {\n        uniform token dataType = \"color4f\"\n        uniform string sourceName = \"color\"\n    }\n}\n";
+    stage(dir, "", &root)
+}
+
+/// `crust check --all-passes --json -` on `input`, its report and exit code.
+fn check_all_passes(dir: &Path, input: &Path, extra: &[&str]) -> (i32, serde_json::Value) {
+    let args: Vec<&str> = [
+        "check",
+        "-i",
+        input.to_str().unwrap(),
+        "--all-passes",
+        "--json",
+        "-",
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    .collect();
+    let out = crust(dir, &args);
+    (code(&out), parse(&out.stdout))
+}
+
+/// The `passes_share_output` findings of `v`, as `(file, passes)`.
+fn shared_outputs(v: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+    v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["id"] == "passes_share_output")
+        .map(|f| {
+            (
+                f["evidence"]["file"].as_str().unwrap().to_owned(),
+                f["evidence"]["passes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_owned())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Two spellings of one file — `./x.exr` and `x.exr`, `sub/../y.exr` and
+/// `y.exr` — are one destination: the second pass would overwrite the
+/// first's file, so the check reports it, under the first spelling.
+#[test]
+fn two_spellings_of_one_file_are_a_shared_output() {
+    let dir = work_dir("passes_share_spelling");
+    let input = pass_stage(
+        &dir,
+        &["base.exr"],
+        &[
+            ("a", &["./x.exr"]),
+            ("b", &["x.exr"]),
+            ("c", &["sub/../y.exr"]),
+            ("d", &["y.exr"]),
+        ],
+    );
+    let (code, v) = check_all_passes(&dir, &input, &[]);
+    assert_eq!(code, 0, "{v}");
+    let shared = shared_outputs(&v);
+    let pair = |a: &str, b: &str| vec![format!("/Render/{a}"), format!("/Render/{b}")];
+    assert!(
+        shared.contains(&("./x.exr".into(), pair("a", "b"))),
+        "{shared:?}"
+    );
+    assert!(
+        shared.contains(&("sub/../y.exr".into(), pair("c", "d"))),
+        "{shared:?}"
+    );
+}
+
+/// A pass writes the PNG preview of its first product's beauty beside it:
+/// another pass's product at that path would overwrite it (or be
+/// overwritten), so the check reports it.
+#[test]
+fn a_pass_s_preview_is_one_of_its_outputs() {
+    let dir = work_dir("passes_share_preview");
+    let input = pass_stage(&dir, &["base.exr"], &[("a", &["x.exr"]), ("b", &["x.png"])]);
+    let (code, v) = check_all_passes(&dir, &input, &[]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        shared_outputs(&v),
+        [(
+            "x.png".to_owned(),
+            vec!["/Render/a".to_owned(), "/Render/b".to_owned()]
+        )]
+    );
+}
+
+/// The record of `code` in `v`'s warnings, if any.
+fn warning<'a>(v: &'a serde_json::Value, code: &str) -> Option<&'a serde_json::Value> {
+    v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == code)
+}
+
+/// A product only a pass's settings name, and that its render would refuse,
+/// is reported like the render with no pass reports its own, and denied.
+#[test]
+fn a_pass_s_refused_product_is_reported_and_denied() {
+    let dir = work_dir("pass_refused_product");
+    let input = pass_stage(&dir, &["base.exr"], &[("a", &["a.exr", "unnamed_a"])]);
+    let (code, v) = check_all_passes(&dir, &input, &["--deny", "skipped"]);
+    assert_eq!(code, 3, "{v}");
+    let record = warning(&v, "product.no_name").unwrap_or_else(|| panic!("{v:#}"));
+    assert_eq!(record["prims"], serde_json::json!(["/Render/P/unnamed_a"]));
+    assert!(
+        v["denied"]
+            .as_array()
+            .unwrap()
+            .contains(&"product.no_name".into()),
+        "{v}"
+    );
+}
+
+/// A warning the render with no pass raised too keeps the occurrences only a
+/// pass raises, on other prims; the ones it shares with that render are not
+/// counted twice.
+#[test]
+fn a_pass_keeps_its_own_occurrences_of_a_code_already_raised() {
+    let dir = work_dir("pass_own_occurrences");
+    let input = pass_stage(
+        &dir,
+        &["base.exr", "unnamed_base"],
+        &[
+            ("a", &["a.exr", "unnamed_a"]),
+            ("b", &["b.exr", "unnamed_base"]),
+        ],
+    );
+    let (code, v) = check_all_passes(&dir, &input, &[]);
+    assert_eq!(code, 0, "{v}");
+    let record = warning(&v, "product.no_name").unwrap_or_else(|| panic!("{v:#}"));
+    assert_eq!(
+        record["prims"],
+        serde_json::json!(["/Render/P/unnamed_base", "/Render/P/unnamed_a"])
+    );
+    assert_eq!(record["count"], 2, "{record}");
+}

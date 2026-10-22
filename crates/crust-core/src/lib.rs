@@ -139,7 +139,7 @@ pub mod implicit_shapes {
     };
 }
 #[cfg(feature = "traversal-stats")]
-pub use rt_world::traversal_report;
+pub use rt_world::{reset_traversal_stats, traversal_report};
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
     MaterialRecord, NoAssets, PassGroup, PassPlan, PassRecord, PassScene, PassSummary,

@@ -364,10 +364,14 @@ fn refresh_settings(
         if let Some(why) = facts.key.refusal(facts.used, &ImportKey::of(&read)) {
             return Err(Structural(why.into()));
         }
-        if read
-            .wanted_camera
-            .as_ref()
-            .is_some_and(|c| c.path() != &cam_path)
+        // Named, unnamed or renamed: a fresh import would choose its camera
+        // again, the first one met when none is named.
+        let named = read.wanted_camera.as_ref().map(|c| c.path().to_string());
+        if named != facts.named_camera
+            || read
+                .wanted_camera
+                .as_ref()
+                .is_some_and(|c| c.path() != &cam_path)
         {
             return Err(Structural("the render camera changed".into()));
         }
