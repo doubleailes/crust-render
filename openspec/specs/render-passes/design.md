@@ -1,10 +1,12 @@
 # render-passes — design record
 
-> Design record for the **render-passes** capability (`--pass`, `UsdRenderPass`'s
-> `renderSource`, `matte` and `cameraVisibility`): the reasoning, measurements and
-> history behind the behaviour `spec.md` states. Introduced by the
-> `render-pass-matte-and-camera-visibility` change (issue #340); its design is
-> carried here with what implementation found. `docs/architecture.md` is the map;
+> Design record for the **render-passes** capability (`--pass`, `--all-passes`,
+> `UsdRenderPass`'s `renderSource`, `matte`, `cameraVisibility` and
+> `renderVisibility`): the reasoning, measurements and history behind the
+> behaviour `spec.md` states. Introduced by the
+> `render-pass-matte-and-camera-visibility` change (issue #340) and extended by
+> `render-visibility-and-all-passes` (issue #348); their design is carried here
+> with what implementation found. `docs/architecture.md` is the map;
 > the user's view is `site/content/docs/usd/render-passes.md`. What a holdout does
 > at the camera vertex, and its cost, is in `openspec/specs/rendering/design.md`
 > § Holdouts at the camera vertex.
@@ -166,12 +168,14 @@ re-import. A test pins that.
 New `WarningCode`s, one per cause, listed in
 `site/content/docs/reference/warnings.md`:
 
-- `render_pass.collection_not_read`: `prune` or `renderVisibility` restricts
-  something.
+- `render_pass.collection_not_read`: `prune` restricts something.
+  (`renderVisibility` raised it too until #348 read it.)
 - `render_pass.render_source_invalid`
 - `render_pass.target_in_instance`
 - `render_pass.volume_ignored`: a volume region in `matte` or excluded from
-  `cameraVisibility`.
+  `cameraVisibility` or `renderVisibility`.
+- `render_pass.nested_not_composed`: a pass collection includes a collection
+  that a streamed chunk does not compose.
 
 A missing or non-pass `--pass` is an error, not a warning.
 
@@ -257,9 +261,9 @@ process of a `--pass` render past its import.
 
 ## Known gaps
 
-- `prune` and `renderVisibility` are not read: they warn
-  `render_pass.collection_not_read` and render as unauthored. They change what
-  the traversal emits (streaming, instancing, placement count).
+- `prune` is not read: it warns `render_pass.collection_not_read` and renders
+  as unauthored. It changes what the traversal emits (streaming, instancing,
+  placement count), which passes sharing one import cannot each change.
 - Volume regions are neither held out nor hidden by a pass
   (`render_pass.volume_ignored`): a camera ray inside a held-out volume needs its
   own transport rule.
@@ -267,7 +271,9 @@ process of a `--pass` render past its import.
   IOR 1) renders black with the wall's alpha of 1, not as a hole (D5).
 - No shadow catcher: a holdout records no shadow or reflection of the other
   objects into alpha (the RenderMan `holdouts` LPE prefix stays refused).
-- One render renders one pass; several passes import the stage once each.
+- Geometry a pass hides from every ray stays in the acceleration structure the
+  passes of an import share: rays skip it, but the pass still pays to traverse
+  it, and rendering that pass alone with `--pass` imports no less.
 - `over` is exact at an edge only where the background behind it does not depend
   on coverage (see the measurements above).
 - In a streamed import, a pass collection that includes another collection
