@@ -738,8 +738,9 @@ filter). It SHALL still count toward the pixel's sample count and filter weight.
 
 #### Scenario: Passes that hold each other out add up
 
-- **WHEN** a character pass holds out the props, and a props pass holds out the
-  character and the dome, both rendered from the same stage and camera at `-s 16`
+- **WHEN** a character pass holds out the props, the set and the dome, and a props
+  pass holds out the character, both rendered from the same stage and camera at
+  `-s 16`
 - **THEN** the sum of the two passes' beauty, alpha and LPE channels matches the
   render with no pass active, to float rounding, edge pixels included
 
