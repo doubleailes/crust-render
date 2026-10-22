@@ -137,6 +137,18 @@ impl StreamingTexture {
         // Settled by the first chart, which is also the first file opened.
         let space = settle(&charts[0].file);
         let linear = charts[0].file.is_linear();
+        // One sampler serves every chart, so every chart must hold the same
+        // payload: a set whose 8-bit and 16-bit tiles became `u8` and `half`
+        // `.tx` (both kept at their source depth) declines and preloads.
+        if let Some(c) = charts.iter().find(|c| c.file.is_linear() != linear) {
+            tracing::debug!(
+                "{}: tile {} stores another sample type than tile {} — preloaded instead",
+                path.display(),
+                c.number,
+                charts[0].number
+            );
+            return None;
+        }
         let alpha = charts.iter().any(|c| c.alpha);
         Some(StreamingTexture {
             charts,
@@ -749,6 +761,45 @@ mod tests {
     /// A UDIM set converted tile by tile, where one tile's alpha cuts and
     /// another's is opaque: the opaque one is written RGB, so the charts
     /// differ, and the streamed set reads what the preloaded one does.
+    /// A UDIM set of an 8-bit and a 16-bit tile, bound raw, converts to a `u8`
+    /// and a `half` `.tx` (each kept at its source depth). One sampler cannot
+    /// read both, so the set declines to stream and preloads.
+    #[test]
+    fn a_udim_set_of_mixed_depths_preloads() {
+        let dir = std::env::temp_dir().join("crust_stream_mixed_depth_udim");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        image::RgbImage::from_pixel(64, 64, image::Rgb([200, 100, 50]))
+            .save(dir.join("t.1001.png"))
+            .expect("8-bit png");
+        image::ImageBuffer::<image::Rgb<u16>, _>::from_pixel(
+            64,
+            64,
+            image::Rgb([9000, 30000, 60000]),
+        )
+        .save(dir.join("t.1002.png"))
+        .expect("16-bit png");
+        for tile in ["t.1001.png", "t.1002.png"] {
+            crate::tiled::make_tx_atomic(&dir.join(tile), crust_core::ColorSpace::RAW, acescg())
+                .expect("convert");
+        }
+        let depth = |tile: &str| TiledFile::open(&dir.join(tile)).expect("open").is_linear();
+        assert_eq!(
+            [depth("t.1001_raw.png.tx"), depth("t.1002_raw.png.tx")],
+            [false, true],
+            "the fixture is one u8 and one half .tx"
+        );
+        assert!(
+            StreamingTexture::open(
+                &dir.join("t.<UDIM>_raw.png.tx"),
+                crust_core::ColorSpace::RAW,
+                cache(8),
+            )
+            .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_udim_set_streams_alpha_per_chart() {
         let dir = std::env::temp_dir().join("crust_stream_alpha_udim");

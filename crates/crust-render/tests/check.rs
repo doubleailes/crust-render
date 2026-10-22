@@ -303,6 +303,55 @@ fn an_unknown_tx_target_space_is_a_usage_error() {
     assert!(files(&dir).is_empty(), "{:?}", files(&dir));
 }
 
+/// A config without `ACEScg` (it needs only crust's five well-known spaces)
+/// still renders when no `--tx-color-space` is given: the default target falls
+/// back to the data space. Only a target the user names is checked.
+#[test]
+fn a_config_without_the_default_tx_target_still_renders() {
+    let dir = work_dir("tx_color_space_no_acescg");
+    let config = dir.join("no_acescg.ocio");
+    std::fs::write(
+        &config,
+        "ocio_profile_version: 2\n\
+         roles:\n  default: lin_rec709\n  scene_linear: lin_rec709\n  data: raw\n\
+         displays:\n  sRGB:\n    - !<View> {name: Raw, colorspace: raw}\n\
+         colorspaces:\n\
+         \x20 - !<ColorSpace>\n    name: lin_rec709\n\
+         \x20 - !<ColorSpace>\n    name: raw\n    isdata: true\n\
+         \x20 - !<ColorSpace>\n    name: srgb_texture\n    from_scene_reference: \
+         !<ExponentWithLinearTransform> {gamma: 2.4, offset: 0.055, direction: inverse}\n\
+         \x20 - !<ColorSpace>\n    name: g22_rec709\n    from_scene_reference: \
+         !<ExponentTransform> {value: 2.2, direction: inverse}\n\
+         \x20 - !<ColorSpace>\n    name: g18_rec709\n    from_scene_reference: \
+         !<ExponentTransform> {value: 1.8, direction: inverse}\n",
+    )
+    .expect("write the config");
+    let input = cornellbox();
+    let render = |extra: &[&str]| {
+        let mut args = vec![
+            "render",
+            "-i",
+            input.to_str().unwrap(),
+            "-s",
+            "1",
+            "--ocio-config",
+            config.to_str().unwrap(),
+            "--display",
+            "sRGB",
+            "--view",
+            "Raw",
+            "-o",
+            "out.exr",
+        ];
+        args.extend_from_slice(extra);
+        crust(&dir, &args)
+    };
+    let out = render(&[]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let out = render(&["--tx-color-space", "ACEScg"]);
+    assert_eq!(code(&out), 2, "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 /// A texture with no `.tx` is a finding, not a warning: `--deny all` passes.
 #[test]
 fn findings_alone_do_not_deny() {
