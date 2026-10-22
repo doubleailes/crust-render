@@ -1,0 +1,96 @@
+{
+ "arnold": "7.5.0.0",
+ "cases": [
+  {
+   "case": "srgb_canon",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 2.37e-07,
+   "max_abs": 0.000997
+  },
+  {
+   "case": "tile_srgb",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 3.44e-07,
+   "max_abs": 0.0018
+  },
+  {
+   "case": "lin709",
+   "color_space": "Linear Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 0.0,
+   "max_abs": 0.0
+  },
+  {
+   "case": "ocio_Raw",
+   "color_space": "Raw",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 0.0,
+   "max_abs": 0.0
+  },
+  {
+   "case": "word_raw",
+   "color_space": "raw",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 8.87e-08,
+   "max_abs": 0.00188
+  },
+  {
+   "case": "empty",
+   "color_space": "",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 0.0,
+   "max_abs": 0.0
+  },
+  {
+   "case": "auto_rgb",
+   "color_space": "auto",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 2.37e-07,
+   "max_abs": 0.000997
+  },
+  {
+   "case": "cut_srgb",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 1.51e-07,
+   "max_abs": 0.00113
+  },
+  {
+   "case": "grey_srgb",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 8.41e-10,
+   "max_abs": 0.000102
+  },
+  {
+   "case": "const_big_srgb",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 1.2e-10,
+   "max_abs": 3.99e-06
+  },
+  {
+   "case": "deep_srgb",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 1.26e-10,
+   "max_abs": 1.48e-05
+  },
+  {
+   "case": "hdr_srgb",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 2.05e-10,
+   "max_abs": 0.00204
+  },
+  {
+   "case": "half_empty",
+   "color_space": "",
+   "arnold_regenerated_crusts_file": false,
+   "relmse": 0.0,
+   "max_abs": 0.0
+  }
+ ]
+}

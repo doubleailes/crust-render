@@ -1,0 +1,5012 @@
+{
+ "arnold": "7.5.0.0",
+ "ocio_config": "ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5",
+ "target": "ACEScg",
+ "sources": [
+  "const.png",
+  "const_big.png",
+  "cut.png",
+  "deep.png",
+  "deep_rgb.png",
+  "grad.png",
+  "grey.png",
+  "grey1.png",
+  "half.exr",
+  "hdr.exr",
+  "nan.exr",
+  "opaque.png",
+  "tile.png"
+ ],
+ "image": [
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "srgb_canon",
+   "source": "srgb_canon.png",
+   "tx": [
+    {
+     "tx": "srgb_canon_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/srgb_canon.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/srgb_canon_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "srgb_tx",
+   "case": "srgb_alias",
+   "source": "srgb_alias.png",
+   "tx": [
+    {
+     "tx": "srgb_alias_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/srgb_alias.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/srgb_alias_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB",
+   "case": "srgb_word",
+   "source": "srgb_word.png",
+   "tx": [
+    {
+     "tx": "srgb_word_sRGB_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       -0.0,
+       -0.0,
+       -1e-06
+      ],
+      "max": [
+       1.006836,
+       1.0,
+       0.996582
+      ],
+      "avg": [
+       0.496141,
+       0.496853,
+       0.472816
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/srgb_word.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert sRGB ACEScg --attrib autotx 1 -o \"<dir>/srgb_word_sRGB_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "srgb_texture",
+   "case": "srgb_texture",
+   "source": "srgb_texture.png",
+   "tx": [
+    {
+     "tx": "srgb_texture_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/srgb_texture.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/srgb_texture_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "auto_rgb",
+   "source": "auto_rgb.png",
+   "tx": [
+    {
+     "tx": "auto_rgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/auto_rgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/auto_rgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "auto_grey1",
+   "source": "auto_grey1.png",
+   "tx": [
+    {
+     "tx": "auto_grey1_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       1.0
+      ],
+      "avg": [
+       0.307661
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.21121\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"7575AC639640A8BD13C7BC730E534EAE26DBEA1A\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/auto_grey1.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/auto_grey1_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "Linear Rec.709 (sRGB)",
+   "case": "lin709",
+   "source": "lin709.png",
+   "tx": [
+    {
+     "tx": "lin709_Linear Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       2.0,
+       1.0,
+       8.0
+      ],
+      "max": [
+       242.0,
+       251.0,
+       249.0
+      ],
+      "avg": [
+       126.31,
+       126.63,
+       121.39
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.495302,0.496554,0.476094\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"6041133B66260ABA1775199325461BDCBAD73D7F\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/lin709.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"Linear Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/lin709_Linear Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "Raw",
+   "case": "ocio_Raw",
+   "source": "ocio_Raw.png",
+   "tx": [
+    {
+     "tx": "ocio_Raw_Raw_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.0
+      ],
+      "max": [
+       255.0,
+       255.0,
+       255.0
+      ],
+      "avg": [
+       126.51,
+       126.72,
+       120.61
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/ocio_Raw.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert Raw ACEScg --attrib autotx 1 -o \"<dir>/ocio_Raw_Raw_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "raw",
+   "case": "word_raw",
+   "source": "word_raw.png",
+   "tx": [
+    {
+     "tx": "word_raw_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       -0.0,
+       -0.0,
+       -1e-06
+      ],
+      "max": [
+       1.006836,
+       1.0,
+       0.996582
+      ],
+      "avg": [
+       0.496141,
+       0.496853,
+       0.472816
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/word_raw.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --attrib autotx 1 -o \"<dir>/word_raw_raw.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "ACEScg",
+   "case": "target",
+   "source": "target.png",
+   "tx": [
+    {
+     "tx": "target_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.0
+      ],
+      "max": [
+       255.0,
+       255.0,
+       255.0
+      ],
+      "avg": [
+       126.51,
+       126.72,
+       120.61
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/target.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/target_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "empty",
+   "source": "empty.png",
+   "tx": [
+    {
+     "tx": "empty_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.0
+      ],
+      "max": [
+       255.0,
+       255.0,
+       255.0
+      ],
+      "avg": [
+       126.51,
+       126.72,
+       120.61
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/empty.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/empty_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "tile_srgb",
+   "source": "tile_srgb.png",
+   "tx": [
+    {
+     "tx": "tile_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      64,
+      64
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       64,
+       64
+      ],
+      [
+       32,
+       32
+      ],
+      [
+       16,
+       16
+      ],
+      [
+       8,
+       8
+      ],
+      [
+       4,
+       4
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.002542,
+       0.001077,
+       0.001372
+      ],
+      "max": [
+       0.956543,
+       0.98291,
+       0.958496
+      ],
+      "avg": [
+       0.31069,
+       0.310445,
+       0.312049
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.214057,0.213857,0.215793\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"CE1C629A6E9276C8D9E35AB999A6EEC48FAB9E41\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/tile_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/tile_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "cut_srgb",
+   "source": "cut_srgb.png",
+   "tx": [
+    {
+     "tx": "cut_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 4,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B",
+      "A"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       -6e-06,
+       -5e-06,
+       -1.2e-05,
+       0.0
+      ],
+      "max": [
+       0.914062,
+       0.933594,
+       0.866699,
+       1.0
+      ],
+      "avg": [
+       0.212102,
+       0.177773,
+       0.169327,
+       0.563109
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.151738,0.122857,0.115429,0.563102\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"76251D88858E1C1C3E1FBC9A4B5F21CBB8D033AE\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/cut_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/cut_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "Linear Rec.709 (sRGB)",
+   "case": "cut_lin709",
+   "source": "cut_lin709.png",
+   "tx": [
+    {
+     "tx": "cut_lin709_Linear Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 4,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B",
+      "A"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      "max": [
+       241.0,
+       247.0,
+       234.0,
+       255.0
+      ],
+      "avg": [
+       79.48,
+       72.34,
+       70.32,
+       143.59
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.31168,0.283654,0.275811,0.563102\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"0EE76CF5D67AD6CB89F67709BF9DD0CD3B96F47B\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/cut_lin709.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"Linear Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/cut_lin709_Linear Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "cut_empty",
+   "source": "cut_empty.png",
+   "tx": [
+    {
+     "tx": "cut_empty_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 4,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B",
+      "A"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      "max": [
+       255.0,
+       253.0,
+       254.0,
+       255.0
+      ],
+      "avg": [
+       84.68,
+       71.42,
+       69.85,
+       143.59
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.332094,0.280086,0.273938,0.563102\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"5C42FE9BAE5D717CD6A84D7C775B7F4F8D38BE41\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/cut_empty.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/cut_empty_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "opaque_srgb",
+   "source": "opaque_srgb.png",
+   "tx": [
+    {
+     "tx": "opaque_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/opaque_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/opaque_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "const_srgb",
+   "source": "const_srgb.png",
+   "tx": [
+    {
+     "tx": "const_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.415527,
+       0.164185,
+       0.03595
+      ],
+      "max": [
+       0.415527,
+       0.164185,
+       0.03595
+      ],
+      "avg": [
+       0.415527,
+       0.164185,
+       0.03595
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.41581,0.164281,0.0359922\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:ConstantColor": "\"0.41581,0.164281,0.0359922\"",
+      "oiio:SHA-1": "\"5445D84E02D01E60EA0AF5C804521CFEABFC4D00\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/const_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/const_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "const_big_srgb",
+   "source": "const_big_srgb.png",
+   "tx": [
+    {
+     "tx": "const_big_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      64,
+      64
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       64,
+       64
+      ],
+      [
+       32,
+       32
+      ],
+      [
+       16,
+       16
+      ],
+      [
+       8,
+       8
+      ],
+      [
+       4,
+       4
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.415527,
+       0.164185,
+       0.03595
+      ],
+      "max": [
+       0.415527,
+       0.164185,
+       0.03595
+      ],
+      "avg": [
+       0.415527,
+       0.164185,
+       0.03595
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.41581,0.164281,0.0359922\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:ConstantColor": "\"0.41581,0.164281,0.0359922\"",
+      "oiio:SHA-1": "\"26DBC89996AE5D5F86C2BE46418AFD5D6D9ABAC2\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/const_big_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/const_big_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "const_big_empty",
+   "source": "const_big_empty.png",
+   "tx": [
+    {
+     "tx": "const_big_empty_raw.png.tx",
+     "size": [
+      64,
+      64
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       64,
+       64
+      ],
+      [
+       32,
+       32
+      ],
+      [
+       16,
+       16
+      ],
+      [
+       8,
+       8
+      ],
+      [
+       4,
+       4
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       204.0,
+       102.0,
+       26.0
+      ],
+      "max": [
+       204.0,
+       102.0,
+       26.0
+      ],
+      "avg": [
+       204.0,
+       102.0,
+       26.0
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.8,0.4,0.101961\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:ConstantColor": "\"0.8,0.4,0.101961\"",
+      "oiio:SHA-1": "\"B132F4EE93FB3A00826897B73D8F10A49321B25E\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/const_big_empty.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/const_big_empty_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "grey_srgb",
+   "source": "grey_srgb.png",
+   "tx": [
+    {
+     "tx": "grey_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       1.0
+      ],
+      "avg": [
+       0.308137
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.210465\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"AF79689BA1389D08F11422AC75E41324ED7382F0\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/grey_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/grey_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "grey_empty",
+   "source": "grey_empty.png",
+   "tx": [
+    {
+     "tx": "grey_empty_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       255.0
+      ],
+      "avg": [
+       126.51
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.496122\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"3AF21408A31C8B7D00B6B5E9FC4A1EA351C7B131\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "1",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/grey_empty.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/grey_empty_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "grey1_srgb",
+   "source": "grey1_srgb.png",
+   "tx": [
+    {
+     "tx": "grey1_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       1.0
+      ],
+      "avg": [
+       0.307661
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.21121\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"7575AC639640A8BD13C7BC730E534EAE26DBEA1A\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/grey1_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/grey1_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "grey_auto",
+   "source": "grey_auto.png",
+   "tx": [
+    {
+     "tx": "grey_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       1.0
+      ],
+      "avg": [
+       0.308137
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.210465\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"AF79689BA1389D08F11422AC75E41324ED7382F0\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/grey_auto.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/grey_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "cut_auto",
+   "source": "cut_auto.png",
+   "tx": [
+    {
+     "tx": "cut_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 4,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B",
+      "A"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       -6e-06,
+       -5e-06,
+       -1.2e-05,
+       0.0
+      ],
+      "max": [
+       0.914062,
+       0.933594,
+       0.866699,
+       1.0
+      ],
+      "avg": [
+       0.212102,
+       0.177773,
+       0.169327,
+       0.563109
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.151738,0.122857,0.115429,0.563102\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"76251D88858E1C1C3E1FBC9A4B5F21CBB8D033AE\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/cut_auto.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/cut_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "deep_auto",
+   "source": "deep_auto.png",
+   "tx": [
+    {
+     "tx": "deep_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "uint16",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       65032.0
+      ],
+      "avg": [
+       19905.69
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.206432\"",
+      "oiio:BitsPerSample": "16",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"D6AC6EA373D9F34A8447D618E0C1007E629F81CC\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "1",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/deep_auto.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/deep_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "deep_rgb_auto",
+   "source": "deep_rgb_auto.png",
+   "tx": [
+    {
+     "tx": "deep_rgb_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint16",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       66.0,
+       19.0,
+       324.0
+      ],
+      "max": [
+       60023.0,
+       63462.0,
+       62330.0
+      ],
+      "avg": [
+       19903.66,
+       20066.62,
+       18662.42
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.206954,0.20982,0.191804\"",
+      "oiio:BitsPerSample": "16",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"B327277403AA1C647DA2AD351370F39CE6F199B3\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/deep_rgb_auto.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/deep_rgb_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "half_auto",
+   "source": "half_auto.exr",
+   "tx": [
+    {
+     "tx": "half_auto_raw.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.25,
+       0.125,
+       0.5
+      ],
+      "max": [
+       9.25,
+       2.875,
+       8.0
+      ],
+      "avg": [
+       4.75,
+       1.5,
+       4.254406
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"4.75,1.5,4.25441\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"AB6A5BA1859035162C99C074160E830ED6158856\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/half_auto.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 --format exr -o \"<dir>/half_auto_raw.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "Linear Rec.709 (sRGB)",
+   "case": "deep_lin709",
+   "source": "deep_lin709.png",
+   "tx": [
+    {
+     "tx": "deep_lin709_Linear Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "uint16",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       65313.0
+      ],
+      "avg": [
+       32223.33
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.491696\"",
+      "oiio:BitsPerSample": "16",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"B0882704FD263A8D589968F023591B005C5F1D90\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "1",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/deep_lin709.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"Linear Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/deep_lin709_Linear Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "deep_srgb",
+   "source": "deep_srgb.png",
+   "tx": [
+    {
+     "tx": "deep_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "uint16",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       65032.0
+      ],
+      "avg": [
+       19905.69
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.206432\"",
+      "oiio:BitsPerSample": "16",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"D6AC6EA373D9F34A8447D618E0C1007E629F81CC\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "1",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/deep_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/deep_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "deep_empty",
+   "source": "deep_empty.png",
+   "tx": [
+    {
+     "tx": "deep_empty_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "uint16",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       65313.0
+      ],
+      "avg": [
+       32223.33
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.491696\"",
+      "oiio:BitsPerSample": "16",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"797394A2F515E6CE7CF11080593909D8CB27ACCC\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "1",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/deep_empty.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/deep_empty_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "deep_rgb_srgb",
+   "source": "deep_rgb_srgb.png",
+   "tx": [
+    {
+     "tx": "deep_rgb_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint16",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       66.0,
+       19.0,
+       324.0
+      ],
+      "max": [
+       60023.0,
+       63462.0,
+       62330.0
+      ],
+      "avg": [
+       19903.66,
+       20066.62,
+       18662.42
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.206954,0.20982,0.191804\"",
+      "oiio:BitsPerSample": "16",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"B327277403AA1C647DA2AD351370F39CE6F199B3\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/deep_rgb_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/deep_rgb_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "deep_rgb_empty",
+   "source": "deep_rgb_empty.png",
+   "tx": [
+    {
+     "tx": "deep_rgb_empty_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint16",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       22.0
+      ],
+      "max": [
+       65313.0,
+       65298.0,
+       65313.0
+      ],
+      "avg": [
+       32223.33,
+       32507.51,
+       30938.63
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.491696,0.496033,0.472093\"",
+      "oiio:BitsPerSample": "16",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"8D6595AF872D68703CFC889B5A8E031C3576C12A\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/deep_rgb_empty.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/deep_rgb_empty_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "half_empty",
+   "source": "half_empty.exr",
+   "tx": [
+    {
+     "tx": "half_empty_raw.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.25,
+       0.125,
+       0.5
+      ],
+      "max": [
+       9.25,
+       2.875,
+       8.0
+      ],
+      "avg": [
+       4.75,
+       1.5,
+       4.254406
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"4.75,1.5,4.25441\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"AB6A5BA1859035162C99C074160E830ED6158856\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/half_empty.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 --format exr -o \"<dir>/half_empty_raw.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "half_srgb",
+   "source": "half_srgb.exr",
+   "tx": [
+    {
+     "tx": "half_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.058594,
+       0.031052,
+       0.192139
+      ],
+      "max": [
+       124.125,
+       25.453125,
+       119.4375
+      ],
+      "avg": [
+       39.655529,
+       8.347065,
+       58.921558
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"25.5727,5.38927,26.5435\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"8BF8536951F48D45FC7380E9F117E3443642B85A\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/half_srgb.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 --format exr -o \"<dir>/half_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "hdr_empty",
+   "source": "hdr_empty.exr",
+   "tx": [
+    {
+     "tx": "hdr_empty_raw.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "float",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.25,
+       0.125,
+       0.5
+      ],
+      "max": [
+       9.25,
+       2.875,
+       8.0
+      ],
+      "avg": [
+       4.75,
+       1.5,
+       4.254406
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"4.75,1.5,4.25441\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"AB6A5BA1859035162C99C074160E830ED6158856\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/hdr_empty.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 --format exr -o \"<dir>/hdr_empty_raw.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "Linear Rec.709 (sRGB)",
+   "case": "hdr_lin709",
+   "source": "hdr_lin709.exr",
+   "tx": [
+    {
+     "tx": "hdr_lin709_Linear Rec.709 (sRGB)_ACEScg.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "float",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.261845,
+       0.156367,
+       0.458911
+      ],
+      "max": [
+       7.026316,
+       3.391429,
+       7.464224
+      ],
+      "avg": [
+       3.623069,
+       1.765183,
+       3.962824
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"3.62307,1.76518,3.96282\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"A38E4A478B32ACBA48E982C4DE97023B2E16B072\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/hdr_lin709.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"Linear Rec.709 (sRGB)\" ACEScg --attrib autotx 1 --format exr -o \"<dir>/hdr_lin709_Linear Rec.709 (sRGB)_ACEScg.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "case": "hdr_srgb",
+   "source": "hdr_srgb.exr",
+   "tx": [
+    {
+     "tx": "hdr_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "float",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.058607,
+       0.031053,
+       0.192157
+      ],
+      "max": [
+       124.097992,
+       25.447039,
+       119.434967
+      ],
+      "avg": [
+       39.655285,
+       8.346945,
+       58.921413
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"25.5727,5.38927,26.5435\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"8BF8536951F48D45FC7380E9F117E3443642B85A\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/hdr_srgb.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 --format exr -o \"<dir>/hdr_srgb_sRGB Encoded Rec.709 (sRGB)_ACEScg.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "auto",
+   "case": "hdr_auto",
+   "source": "hdr_auto.exr",
+   "tx": [
+    {
+     "tx": "hdr_auto_raw.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "float",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.25,
+       0.125,
+       0.5
+      ],
+      "max": [
+       9.25,
+       2.875,
+       8.0
+      ],
+      "avg": [
+       4.75,
+       1.5,
+       4.254406
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"4.75,1.5,4.25441\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"AB6A5BA1859035162C99C074160E830ED6158856\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/hdr_auto.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 --format exr -o \"<dir>/hdr_auto_raw.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "raw",
+   "case": "hdr_raw",
+   "source": "hdr_raw.exr",
+   "tx": [
+    {
+     "tx": "hdr_raw_raw.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "float",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.25,
+       0.125,
+       0.5
+      ],
+      "max": [
+       9.25,
+       2.875,
+       8.0
+      ],
+      "avg": [
+       4.75,
+       1.5,
+       4.254406
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"4.75,1.5,4.25441\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"AB6A5BA1859035162C99C074160E830ED6158856\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/hdr_raw.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 --format exr -o \"<dir>/hdr_raw_raw.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "",
+   "case": "nan_empty",
+   "source": "nan_empty.exr",
+   "tx": [
+    {
+     "tx": "nan_empty_raw.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "float",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.25
+      ],
+      "max": [
+       0.972973,
+       0.956522,
+       0.25
+      ],
+      "avg": [
+       0.486486,
+       0.478261,
+       0.25
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.4869,0.478465,0.25\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"9AE6BC74A3352DB714AFE99BC3DA4646C1A3FC35\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/nan_empty.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 --format exr -o \"<dir>/nan_empty_raw.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "color_space": "Linear Rec.709 (sRGB)",
+   "case": "nan_lin709",
+   "source": "nan_lin709.exr",
+   "tx": [
+    {
+     "tx": "nan_lin709_Linear Rec.709 (sRGB)_ACEScg.exr.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "float",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.011845,
+       0.003363,
+       0.217454
+      ],
+      "max": [
+       0.933133,
+       0.948172,
+       0.342318
+      ],
+      "avg": [
+       0.472489,
+       0.475768,
+       0.279886
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.472812,0.475984,0.279917\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"0B3D0A4FC02F4C1F5D4C29D0F8B31B0828F72273\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/nan_lin709.exr\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"Linear Rec.709 (sRGB)\" ACEScg --attrib autotx 1 --format exr -o \"<dir>/nan_lin709_Linear Rec.709 (sRGB)_ACEScg.exr.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  }
+ ],
+ "usd": [
+  {
+   "shader": "UsdUVTexture",
+   "color_space": "sRGB",
+   "authored_as": "input",
+   "case": "usd_uv_srgb",
+   "source": "usd_uv_srgb.png",
+   "tx": [
+    {
+     "tx": "usd_uv_srgb_sRGB_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       -0.0,
+       -0.0,
+       -1e-06
+      ],
+      "max": [
+       1.006836,
+       1.0,
+       0.996582
+      ],
+      "avg": [
+       0.496141,
+       0.496853,
+       0.472816
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_uv_srgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert sRGB ACEScg --attrib autotx 1 -o \"<dir>/usd_uv_srgb_sRGB_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "UsdUVTexture",
+   "color_space": "raw",
+   "authored_as": "input",
+   "case": "usd_uv_raw",
+   "source": "usd_uv_raw.png",
+   "tx": [
+    {
+     "tx": "usd_uv_raw_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       -0.0,
+       -0.0,
+       -1e-06
+      ],
+      "max": [
+       1.006836,
+       1.0,
+       0.996582
+      ],
+      "avg": [
+       0.496141,
+       0.496853,
+       0.472816
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_uv_raw.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --attrib autotx 1 -o \"<dir>/usd_uv_raw_raw.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "UsdUVTexture",
+   "color_space": "auto",
+   "authored_as": "input",
+   "case": "usd_uv_auto",
+   "source": "usd_uv_auto.png",
+   "tx": [
+    {
+     "tx": "usd_uv_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_uv_auto.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_uv_auto_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "UsdUVTexture",
+   "color_space": null,
+   "authored_as": "input",
+   "case": "usd_uv_unset",
+   "source": "usd_uv_unset.png",
+   "tx": [
+    {
+     "tx": "usd_uv_unset_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_uv_unset.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_uv_unset_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "UsdUVTexture",
+   "color_space": "auto",
+   "authored_as": "input",
+   "case": "usd_uv_auto_grey1",
+   "source": "usd_uv_auto_grey1.png",
+   "tx": [
+    {
+     "tx": "usd_uv_auto_grey1_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       1.0
+      ],
+      "avg": [
+       0.307661
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.21121\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"7575AC639640A8BD13C7BC730E534EAE26DBEA1A\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_uv_auto_grey1.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_uv_auto_grey1_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "UsdUVTexture",
+   "color_space": "srgb_texture",
+   "authored_as": "meta",
+   "case": "usd_uv_meta_srgb_texture",
+   "source": "usd_uv_meta_srgb_texture.png",
+   "tx": [
+    {
+     "tx": "usd_uv_meta_srgb_texture_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_uv_meta_srgb_texture.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_uv_meta_srgb_texture_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "UsdUVTexture",
+   "color_space": "sRGB Encoded Rec.709 (sRGB)",
+   "authored_as": "meta",
+   "case": "usd_uv_meta_canon",
+   "source": "usd_uv_meta_canon.png",
+   "tx": [
+    {
+     "tx": "usd_uv_meta_canon_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_uv_meta_canon.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_uv_meta_canon_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "ND_image_color3",
+   "color_space": "srgb_texture",
+   "authored_as": "meta",
+   "case": "usd_mx_srgb_texture",
+   "source": "usd_mx_srgb_texture.png",
+   "tx": [
+    {
+     "tx": "usd_mx_srgb_texture_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_mx_srgb_texture.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_mx_srgb_texture_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "ND_image_color3",
+   "color_space": "lin_rec709",
+   "authored_as": "meta",
+   "case": "usd_mx_lin_rec709",
+   "source": "usd_mx_lin_rec709.png",
+   "tx": [
+    {
+     "tx": "usd_mx_lin_rec709_Linear Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       2.0,
+       1.0,
+       8.0
+      ],
+      "max": [
+       242.0,
+       251.0,
+       249.0
+      ],
+      "avg": [
+       126.31,
+       126.63,
+       121.39
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.495302,0.496554,0.476094\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"6041133B66260ABA1775199325461BDCBAD73D7F\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_mx_lin_rec709.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --colorconvert \"Linear Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_mx_lin_rec709_Linear Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "ND_image_color3",
+   "color_space": null,
+   "authored_as": "meta",
+   "case": "usd_mx_unset",
+   "source": "usd_mx_unset.png",
+   "tx": [
+    {
+     "tx": "usd_mx_unset_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.000976,
+       0.000288,
+       0.005577
+      ],
+      "max": [
+       0.910156,
+       0.962891,
+       0.935547
+      ],
+      "avg": [
+       0.306797,
+       0.307267,
+       0.285606
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"dwaa\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.209743,0.210871,0.192653\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"6E66EAF760F97AED24ECFC4DB0166993B1E64D2D\"",
+      "oiio:subimages": "1",
+      "openexr:dwaCompressionLevel": "45",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_mx_unset.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_mx_unset_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "ND_image_color3",
+   "color_space": null,
+   "authored_as": "meta",
+   "case": "usd_mx_unset_grey1",
+   "source": "usd_mx_unset_grey1.png",
+   "tx": [
+    {
+     "tx": "usd_mx_unset_grey1_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "half",
+     "format": "openexr",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       1.0
+      ],
+      "avg": [
+       0.307661
+      ]
+     },
+     "attributes": {
+      "autotx": "1",
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "PixelAspectRatio": "1",
+      "screenWindowCenter": "0, 0",
+      "screenWindowWidth": "1",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "oiio:AverageColor": "\"0.21121\"",
+      "oiio:ColorSpace": "\"Linear\"",
+      "oiio:SHA-1": "\"7575AC639640A8BD13C7BC730E534EAE26DBEA1A\"",
+      "oiio:subimages": "1",
+      "openexr:roundingmode": "0"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_mx_unset_grey1.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"<dir>/usd_mx_unset_grey1_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx\"",
+     "image_history_equals_software": true,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "ND_image_float",
+   "color_space": null,
+   "authored_as": "meta",
+   "case": "usd_mx_float_unset",
+   "source": "usd_mx_float_unset.png",
+   "tx": [
+    {
+     "tx": "usd_mx_float_unset_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 1,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "Y"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0
+      ],
+      "max": [
+       255.0
+      ],
+      "avg": [
+       126.72
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.496933\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"B8D696D154FA1E1F20F9964367B3E106FDBC8A60\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "1",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_mx_float_unset.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/usd_mx_float_unset_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "ND_image_float",
+   "color_space": null,
+   "authored_as": "meta",
+   "case": "usd_mx_float_unset_rgb",
+   "source": "usd_mx_float_unset_rgb.png",
+   "tx": [
+    {
+     "tx": "usd_mx_float_unset_rgb_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.0
+      ],
+      "max": [
+       255.0,
+       255.0,
+       255.0
+      ],
+      "avg": [
+       126.51,
+       126.72,
+       120.61
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_mx_float_unset_rgb.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/usd_mx_float_unset_rgb_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  },
+  {
+   "shader": "ND_image_vector3",
+   "color_space": null,
+   "authored_as": "meta",
+   "case": "usd_mx_vector3_unset",
+   "source": "usd_mx_vector3_unset.png",
+   "tx": [
+    {
+     "tx": "usd_mx_vector3_unset_raw.png.tx",
+     "size": [
+      37,
+      23
+     ],
+     "channel_count": 3,
+     "type": "uint8",
+     "format": "tiff",
+     "levels": [
+      [
+       37,
+       23
+      ],
+      [
+       18,
+       11
+      ],
+      [
+       9,
+       5
+      ],
+      [
+       4,
+       2
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       1,
+       1
+      ]
+     ],
+     "channels": [
+      "R",
+      "G",
+      "B"
+     ],
+     "tile": [
+      64,
+      64
+     ],
+     "level0_stats": {
+      "min": [
+       0.0,
+       0.0,
+       0.0
+      ],
+      "max": [
+       255.0,
+       255.0,
+       255.0
+      ],
+      "avg": [
+       126.51,
+       126.72,
+       120.61
+      ]
+     },
+     "attributes": {
+      "compression": "\"zip\"",
+      "fovcot": "1.6087",
+      "Orientation": "1 (normal)",
+      "planarconfig": "\"contig\"",
+      "textureformat": "\"Plain Texture\"",
+      "wrapmodes": "\"black,black\"",
+      "Exif:ColorSpace": "1",
+      "oiio:AverageColor": "\"0.496122,0.496933,0.472994\"",
+      "oiio:BitsPerSample": "8",
+      "oiio:ColorSpace": "\"sRGB\"",
+      "oiio:SHA-1": "\"3ABBE786BF8A68850E85328DC2522F0004F34A74\"",
+      "tiff:Compression": "8",
+      "tiff:PhotometricInterpretation": "2",
+      "tiff:PlanarConfiguration": "1"
+     },
+     "software": "OpenImageIO-Arnold 2.6.3.0dev : maketx \"<dir>/usd_mx_vector3_unset.png\" --opaque-detect --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib tiff:half 1 --unpremult -u --attrib autotx 1 -o \"<dir>/usd_mx_vector3_unset_raw.png.tx\"",
+     "image_history_equals_software": false,
+     "mtime_equals_source_seconds": true,
+     "mtime_whole_seconds": true
+    }
+   ]
+  }
+ ],
+ "rebuild": [
+  {
+   "case": "u_exr",
+   "probe": "unchanged",
+   "regenerated": false
+  },
+  {
+   "case": "u_exr",
+   "probe": "prefix crust-render",
+   "regenerated": true
+  },
+  {
+   "case": "u_exr",
+   "probe": "prefix OpenImageIO-Arnold again",
+   "regenerated": false
+  },
+  {
+   "case": "u_exr",
+   "probe": "command line changed",
+   "regenerated": false
+  },
+  {
+   "case": "u_exr",
+   "probe": "one second newer than source",
+   "regenerated": false
+  },
+  {
+   "case": "u_exr",
+   "probe": "one second older than source",
+   "regenerated": false
+  },
+  {
+   "case": "u_exr",
+   "probe": "no Software",
+   "regenerated": false
+  },
+  {
+   "case": "u_tiff",
+   "probe": "unchanged",
+   "regenerated": false
+  },
+  {
+   "case": "u_tiff",
+   "probe": "prefix crust-render",
+   "regenerated": true
+  },
+  {
+   "case": "u_tiff",
+   "probe": "prefix OpenImageIO-Arnold again",
+   "regenerated": false
+  },
+  {
+   "case": "u_tiff",
+   "probe": "command line changed",
+   "regenerated": false
+  },
+  {
+   "case": "u_tiff",
+   "probe": "one second newer than source",
+   "regenerated": false
+  },
+  {
+   "case": "u_tiff",
+   "probe": "one second older than source",
+   "regenerated": false
+  },
+  {
+   "case": "u_tiff",
+   "probe": "no Software",
+   "regenerated": false
+  }
+ ],
+ "direct_binding": [
+  {
+   "binding": "source, sRGB",
+   "value": [
+    0.4158,
+    0.1643,
+    0.036
+   ]
+  },
+  {
+   "binding": "converted .tx, bound sRGB",
+   "value": [
+    0.0964,
+    0.0313,
+    0.0079
+   ]
+  },
+  {
+   "binding": "converted .tx, bound \"\"",
+   "value": [
+    0.4158,
+    0.1643,
+    0.036
+   ]
+  },
+  {
+   "binding": "converted .tx, bound auto",
+   "value": [
+    0.4158,
+    0.1643,
+    0.036
+   ]
+  },
+  {
+   "binding": "converted .tx, bound ACEScg",
+   "value": [
+    0.4158,
+    0.1643,
+    0.036
+   ]
+  },
+  {
+   "binding": "converted .tx renamed, bound sRGB",
+   "value": [
+    0.0964,
+    0.0313,
+    0.0079
+   ]
+  },
+  {
+   "binding": "u8 .tx unconverted, bound sRGB",
+   "value": [
+    0.4158,
+    0.1643,
+    0.036
+   ]
+  },
+  {
+   "binding": "u8 .tx unconverted, bound \"\"",
+   "value": [
+    0.8,
+    0.4,
+    0.102
+   ]
+  },
+  {
+   "binding": "u8 .tx unconverted, bound auto",
+   "value": [
+    0.4158,
+    0.1643,
+    0.036
+   ]
+  }
+ ]
+}

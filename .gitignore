@@ -13,6 +13,9 @@ samples/ALab
 # build artefact of a texture, not a texture: it is reproducible from the PNG
 # next to it, and checking one in would mean checking in the mip filter too.
 *.tx
+# ...except Arnold's own, which the tests compare crust's writer against
+# (written by scripts/arnold_tx_oracle.py; not reproducible without Arnold).
+!/crates/crust-assets/tests/data/arnold_tx/*.tx
 .fidelity/
 __pycache__/
 

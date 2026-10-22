@@ -29,7 +29,7 @@ impl Texture for Procedural {
     }
 }
 
-fn procedural(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn procedural(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     Some(TextureRef(Arc::new(Procedural)))
 }
 
@@ -123,7 +123,7 @@ fn the_jit_matches_the_interpreter_on_the_dpel_assets() {
 #[test]
 fn every_inlined_op_matches_across_widths_and_edge_values() {
     let tex = |arity: u8| Op::Texture {
-        tex: procedural("", None),
+        tex: procedural("", crust_mtlx::TexelSpace::Data),
         fallback: Val::float(0.5),
         scale: [1.0, 1.0],
         offset: [0.0, 0.0],
@@ -231,7 +231,7 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
     // A `heighttonormal` tap: a shifted lookup is the interpreter's, and so
     // are the HSV and height-to-normal ops it and `colorcorrect` compile to.
     let shifted = push(Op::Texture {
-        tex: procedural("", None),
+        tex: procedural("", crust_mtlx::TexelSpace::Data),
         fallback: Val::float(0.5),
         scale: [2.0, 1.0],
         offset: [0.0, 0.0],
@@ -241,7 +241,7 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
     });
     // And one at an authored coordinate, read from a slot.
     push(Op::Texture {
-        tex: procedural("", None),
+        tex: procedural("", crust_mtlx::TexelSpace::Data),
         fallback: Val::float(0.5),
         scale: [1.0, 2.0],
         offset: [0.25, 0.0],
@@ -271,7 +271,7 @@ fn the_hsv_conditional_and_noise_ops_match_across_widths() {
     // All interpreter calls: what must hold is the width the generated code
     // assumes for each, which the inlined consumers below read.
     let tex = |arity: u8| Op::Texture {
-        tex: procedural("", None),
+        tex: procedural("", crust_mtlx::TexelSpace::Data),
         fallback: Val::float(0.5),
         scale: [3.0, 2.0],
         offset: [0.0, 0.0],

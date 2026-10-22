@@ -111,11 +111,9 @@ pub(super) fn weighted(row: &Tap, col: &Tap, total: f32, at: impl Fn(usize, usiz
 /// channels' arithmetic is the same either way, so an RGB chain is
 /// bit-identical to what it was before alpha was carried.
 ///
-/// Shared by the in-memory pyramid ([`Tile::build_pyramid`](super::tile::Tile::build_pyramid)) and the `.tx`
-/// writer ([`crate::tiled::write_tx`]) **on purpose**. A streamed render and a
-/// preloaded one are supposed to agree texel for texel, and the only way to be
-/// sure of that is for the two paths to run the same code rather than two
-/// copies of the same intent.
+/// The in-memory pyramid's ([`Tile::build_pyramid`](super::tile::Tile::build_pyramid)). A `.tx`
+/// is reduced as OIIO's `maketx` reduces (`crate::tiled::maketx`), so a
+/// streamed texture agrees with this one within a tolerance.
 ///
 /// Averaging in linear and not in the file's encoding is the point: summing
 /// display-encoded values is not summing light, and a chain built that way

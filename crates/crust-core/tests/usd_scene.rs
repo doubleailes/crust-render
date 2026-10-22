@@ -1941,7 +1941,8 @@ fn a_materialx_lacquer_keeps_each_interface_as_its_own_leaf() {
     use crust_core::closure::{Lobe, mx::FresnelModel};
     use crust_core::materialx;
 
-    let decline = |_: &str, _: Option<&str>| -> Option<crust_core::TextureRef> { None };
+    let decline =
+        |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<crust_core::TextureRef> { None };
     let loaded = materialx::load(
         &sample("materialx_basic.mtlx"),
         Some("mtlx_lacquer"),
@@ -1987,7 +1988,8 @@ fn a_materialx_layer_attenuates_its_base_by_the_tops_throughput_only() {
     use crust_core::closure::dielectric_refl_filter;
     use crust_core::materialx;
 
-    let decline = |_: &str, _: Option<&str>| -> Option<crust_core::TextureRef> { None };
+    let decline =
+        |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<crust_core::TextureRef> { None };
     let loaded = materialx::load(
         &sample("materialx_basic.mtlx"),
         Some("mtlx_lacquer"),
@@ -2492,8 +2494,10 @@ fn preview_textures_reach_the_host_with_their_source_color_space() {
         got,
         vec![
             ("mtlx_base.<UDIM>.png".to_owned(), ColorSpace::SRGB),
-            ("mtlx_mask.png".to_owned(), ColorSpace::RAW),
-            ("mtlx_normal.<UDIM>.png".to_owned(), ColorSpace::RAW),
+            // Authored `"raw"`: the keyword, which names its `.tx` apart
+            // from the config's `Raw` space.
+            ("mtlx_mask.png".to_owned(), ColorSpace::RAW_KEYWORD),
+            ("mtlx_normal.<UDIM>.png".to_owned(), ColorSpace::RAW_KEYWORD),
             // Unauthored and `"auto"` alike.
             ("usdpreview_albedo.exr".to_owned(), ColorSpace::AUTO),
             ("usdpreview_rough.png".to_owned(), ColorSpace::AUTO),

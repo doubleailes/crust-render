@@ -24,19 +24,17 @@ use super::tile::Tile;
 /// RGB otherwise (see [`crate::drop_opaque_alpha`]); its colour is the same
 /// bytes either way.
 ///
-/// Also returns the source's pixel format as `(eight_bit, channels)` — what
-/// [`crust_core::ColorSpace::resolve_auto`] asks about, and gone once `to_rgb8` has run.
+/// Also returns whether the source's samples are integers (8- or 16-bit) —
+/// what [`crust_core::ColorSpace::resolve_auto`] asks about, and gone once
+/// `to_rgb8` has run — and whether its alpha is associated (the colour
+/// already premultiplied), which decides whether the caller premultiplies.
 pub(super) fn decode_tile(
     path: &Path,
     number: u32,
     max_edge: NonZeroUsize,
-) -> Result<(Tile<u8>, (bool, u8)), AssetError> {
-    let (decoded, authored_alpha) = crate::image_file::decode_with_alpha(path)?;
-    let color = decoded.color();
-    let format = (
-        color.bytes_per_pixel() == color.channel_count(),
-        color.channel_count(),
-    );
+) -> Result<(Tile<u8>, bool, bool), AssetError> {
+    let (decoded, authored_alpha, associated) = crate::image_file::decode_with_alpha_kind(path)?;
+    let format = crate::image_file::is_integer(decoded.color());
     let (sw, sh) = (decoded.width() as usize, decoded.height() as usize);
     if sw == 0 || sh == 0 {
         return Err(AssetError::unusable(path, "zero-sized image"));
@@ -51,7 +49,11 @@ pub(super) fn decode_tile(
     let max_edge = max_edge.get();
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {
-        return Ok((Tile::unmipped(number, src, sw, sh, alpha), format));
+        return Ok((
+            Tile::unmipped(number, src, sw, sh, alpha),
+            format,
+            associated,
+        ));
     }
     let n = channels(alpha);
     let (w, h) = ((sw / factor).max(1), (sh / factor).max(1));
@@ -88,7 +90,11 @@ pub(super) fn decode_tile(
             }
         }
     }
-    Ok((Tile::unmipped(number, pixels, w, h, alpha), format))
+    Ok((
+        Tile::unmipped(number, pixels, w, h, alpha),
+        format,
+        associated,
+    ))
 }
 
 /// [`decode_tile`] for an EXR: linear `f32` RGB, or RGBA when the file's `A`

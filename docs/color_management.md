@@ -71,7 +71,9 @@ from one OpenColorIO config, through [`ocio`](https://crates.io/crates/ocio)
 
 > A value that **names** its colour space is converted from it into the
 > working space. A value that names **none** is taken as already in the
-> working space. **Data** (the config's `Raw`) is never converted.
+> working space — except a colour *texture*, whose file decides (`auto`, as
+> Arnold decides it: an integer image is `srgb_texture`, a float one is as
+> stored). **Data** (the config's `Raw`) is never converted.
 
 That is what MaterialX specifies for a document with no `colorspace`, what
 UsdLux says of `inputs:color` ("in the rendering color space"), and what Karma
@@ -79,10 +81,10 @@ and other OCIO renderers do. The places a value names its space:
 
 | Source | Named by |
 | --- | --- |
-| MaterialX `color3` / `color4` literal, and an `image` with a colour output | the effective `colorspace`: input, else node, else node graph, else document (crust-mtlx, `Doc::colorspace_of`); a data image (`float`, `vector*`) is never converted |
+| MaterialX `color3` / `color4` literal, and an `image` with a colour output | the effective `colorspace`: input, else node, else node graph, else document (crust-mtlx, `Doc::colorspace_of`); a colour image no scope names is `auto` (`ColorSpace::from_mtlx_image`), an explicit `colorspace=""` converts nothing, and a data image (`float`, `vector*`) is never converted |
 | USD colour attribute (light `inputs:color`, `focusTint`, preview `diffuseColor` / `emissiveColor`, `crust:openpbr` colours, `crust:volume:*`) | as `UsdColorSpaceAPI::ComputeColorSpaceName` resolves it: the attribute's `colorSpace` metadatum, else `colorSpace:name` on its prim, else on the nearest ancestor that authors one (`usd_import/attrs.rs`, `attr_color_space` / `in_working`) |
-| `UsdUVTexture` | `inputs:file`'s colour space resolved as above, else `sourceColorSpace` (`sRGB` → `srgb_texture`, `auto` → the format rule) |
-| Dome / `RectLight` image | `texture:file`'s colour space resolved as above, else `auto`: an 8-bit image is `srgb_texture`, a float one already in the working space |
+| `UsdUVTexture` | `inputs:file`'s colour space resolved as above, else `sourceColorSpace` (`sRGB` → `srgb_texture`, `auto` → the file's sample type) |
+| Dome / `RectLight` image | `texture:file`'s colour space resolved as above, else `auto`: an integer image is `srgb_texture`, a float one already in the working space |
 | `PxrDisneyBsdf.baseColor`, colour Ptex | `g22_rec709`, the island convention (below), unless metadata says otherwise |
 | Colour temperature | the Planckian locus's XYZ, straight into the working space (`lux::blackbody_in`) |
 
@@ -113,7 +115,8 @@ the same light in any working space. So:
 | Payload | Curve | Matrix |
 | --- | --- | --- |
 | preloaded `u8` UV texture | decode table | per lookup (`UvTexture::gamut`) |
-| streamed `.tx`, TIFF (`u8`) or EXR (`half`) backing | table / at conversion | per lookup (`StreamingTexture::gamut`) |
+| streamed `.tx`, TIFF (`u8`) | the decode table of the space it is read in | per lookup (`StreamingTexture::gamut`) |
+| streamed `.tx`, `half` (EXR, or a 16-bit TIFF) | at conversion; or, read in a curved space, once as a tile pages in | per lookup (`StreamingTexture::gamut`) |
 | preloaded float UV texture (EXR) | at load | at load — stored in the working space |
 | Ptex, preloaded | at load | at load, per texel |
 | Ptex, streamed | table (`u8`) / per texel | per texel |
@@ -122,11 +125,20 @@ the same light in any working space. So:
 
 Every path applies the matrix through one function,
 `color::apply_gamut` (`crust_assets::to_working` for an RGBA lookup), so the
-pinned equalities hold off the working primaries too: streamed and preloaded
-`.tx` agree bit for bit in ACEScg (`a_streamed_tx_matches_the_preloaded_texture_in_acescg`),
-and so do streamed and preloaded Ptex (`streamed_and_preloaded_agree_in_acescg`).
-A `.tx` records only its *source* space (`crust:mipspace=`), since its levels
-depend on the curve and not on the working space it is later bound into.
+equalities hold off the working primaries too: a streamed `.tx` agrees with the
+preloaded texture in ACEScg within tolerance
+(`a_streamed_tx_agrees_with_the_preloaded_texture_in_acescg`), and streamed and
+preloaded Ptex agree bit for bit (`streamed_and_preloaded_agree_in_acescg`).
+
+**A `.tx` is read in the space its name or its binding gives** (the
+`tx-arnold-convention` change, Arnold 7.5's convention). One found beside its
+source as `<stem>_<C>_<T>.<ext>.tx` holds values already converted to `T`, the
+`--tx-color-space` (ACEScg by default), and is read as linear `T`: no curve, the
+`T` → working matrix after filtering. A `_raw` one holds the source's values
+and is read in the binding's space. A `.tx` bound directly is read in the
+binding's space whatever it holds, as Arnold reads it — an already-converted
+file bound as sRGB is decoded twice and reads about four times too dark, in
+both renderers.
 
 **Byte textures never run a processor per texel.** Besides the decode table,
 the mip re-encode is a table too: the 255 code steps (`TransferCurve`, in
@@ -290,11 +302,12 @@ conversion" is the rule's answer for an attribute that names no space.
 An `edf`'s colour is light leaving the surface, not a reflectance swatch, so the
 curve question is answered entirely by whatever feeds it: a literal is authored
 in the working space, and an `image` node carries its own `colorspace`
-attribute through `ColorSpace::from_mtlx` exactly as `base_color`'s does — with
-an absent tag meaning **already in the working space**, which is the right
-answer for the scene-linear float file an emission texture usually is. `samples/materialx_emissive.mtlx`
-leaves it absent on purpose; tagging a Radiance `.hdr` `srgb_texture` would put
-a transfer curve on light. The evaluation itself adds nothing: `MtlxMaterial`
+attribute through `ColorSpace::from_mtlx_image` exactly as `base_color`'s does —
+with an absent tag meaning `auto`, which leaves the scene-linear float file an
+emission texture usually is as stored (an 8-bit one is decoded as sRGB, as
+Arnold decodes it). `samples/materialx_emissive.mtlx` leaves it absent on
+purpose; tagging a Radiance `.hdr` `srgb_texture` would put a transfer curve on
+light. The evaluation itself adds nothing: `MtlxMaterial`
 sums the weighted terms (each factor sanitised per channel, a
 `generalized_schlick_edf` falloff applied per channel), all in the one working
 space, so it cannot introduce a colour error. Note this is also the **first input whose range is
@@ -358,23 +371,26 @@ working primaries, so there is no matrix.
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture/` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture/` | flat 1.8 | ✅ correct per MaterialX |
 | UV texture tagged any other OCIO space (`acescg`, `g22_ap1`, `lin_rec2020`, `srgb_displayp3`, …) | `crust-assets/src/uv_texture/` | that space's curve, then its primaries → working | ✅ correct per MaterialX |
-| UV texture, untagged, or a MaterialX data image (`float`, `vector*`) | `crust-assets/src/uv_texture/` | none (pass-through) | ✅ correct — already in the working space, or data (normals, roughness, masks) |
+| MaterialX colour image, untagged at every scope | `ColorSpace::from_mtlx_image` → `uv_texture/` | `auto`: piecewise sRGB for an integer image, none for a float one | ✅ Arnold's reading (measured, `tx-arnold-convention` decision 8) — MaterialX itself says "already in the working space" |
+| MaterialX colour image with an explicit `colorspace=""`, or a MaterialX data image (`float`, `vector*`) | `crust-assets/src/uv_texture/` | none (pass-through) | ✅ correct — declared unconverted, or data (normals, roughness, masks) |
 | `UsdUVTexture` whose `inputs:file` carries `colorSpace` metadata | `usd_import/preview.rs` (`preview_uv_input`) | that space, over `sourceColorSpace` | ✅ the file names its space outright |
 | `UsdUVTexture`, `sourceColorSpace = "sRGB"` | `usd_import/preview.rs` (`preview_uv_input`) → `uv_texture/` | piecewise sRGB | ✅ correct per the node set |
 | `UsdUVTexture`, `sourceColorSpace = "raw"` | same | none (pass-through) | ✅ correct per the node set |
-| `UsdUVTexture`, `auto` or unauthored | same, resolved by `ColorSpace::resolve_auto` at open | piecewise sRGB for 8-bit RGB/RGBA, none otherwise | ✅ the UsdUVTexture rule (Hydra's) — note the default is `auto`, **not** raw as in MaterialX |
-| `UsdUVTexture` feeding `UsdPreviewSurface.inputs:displacement`, `auto` or unauthored | `usd_import/preview.rs` (`preview_displacement` → `preview_uv_input` with `data`) | none (requested `Raw`) | ✅ a height is data, so the 8-bit-RGB-is-sRGB rule does not apply; an explicit `sRGB` still wins |
+| `UsdUVTexture`, `auto` or unauthored | same, resolved by `ColorSpace::resolve_auto` at open | piecewise sRGB for any integer image (8- or 16-bit, greyscale included), none for a float one | ✅ Arnold's rule (measured, `tx-arnold-convention` decision 8); Hydra's rule decoded 8-bit RGB/RGBA only, so a greyscale roughness PNG now decodes |
+| `UsdUVTexture` feeding `UsdPreviewSurface.inputs:displacement`, `auto` or unauthored | `usd_import/preview.rs` (`preview_displacement` → `preview_uv_input` with `data`) | none (requested `Raw`) | ✅ a height is data, so the integer-is-sRGB rule does not apply; an explicit `sRGB` still wins |
 | Preloaded `.exr` UV texture | `crust-assets/src/uv_texture/` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit space is converted once, curve and primaries, in `f32`, at load | ✅ stored as working-space `f32` — no table, no clip |
-| MaterialX emission `image`, untagged | `crust-assets/src/uv_texture/` / `tiled/` | none (pass-through) | ✅ correct — an EDF's colour is radiance, and a float file is scene-linear |
+| MaterialX emission `image`, untagged | `crust-assets/src/uv_texture/` / `tiled/` | `auto`: none for a float file, sRGB for an integer one | ✅ an EDF's colour is radiance, and a float file is scene-linear |
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` (`decode_pixels`) | piecewise sRGB (`auto`) | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
 | any env / `RectLight` image whose `texture:file` carries `colorSpace` metadata | `usd_import/lights.rs` (`texture_color_space`) → `decode_pixels` | that space | ✅ |
 | LDR `RectLight` `texture:file` (PNG/JPG/…) | `crust-assets/src/lib.rs` (`load_light_texture` → `read_rgb_image`) | piecewise sRGB | ✅ same decoder as an LDR env image |
 | `.hdr` / `.exr` `RectLight` `texture:file` | same | none (pass-through) | ✅ correct — kept as authored, never narrowed to 8 bits |
-| Streamed `.tx`, TIFF backing (`u8` tiles) | `crust-assets/src/tiled/cache.rs` (`Tile::rgb`) | the tagged curve, per lookup | ✅ same table as the preload path, by construction |
-| Streamed `.tx`, EXR backing (`half` tiles) | — | none (the curve was applied once at conversion; the primaries are the source's, converted per lookup) | ✅ correct — the file stores linear samples and records which space they came from |
+| Streamed `.tx` found beside its source, `_<C>_<T>` | `crust-assets/src/tiled/stream.rs`, read as `TxName::read_as` | none — the values are linear `T`; `T` → working per lookup | ✅ Arnold's reading of its own file |
+| Streamed `.tx`, `_raw`, or bound directly, `u8` tiles | `tiled/cache.rs` (`Tile::rgb_u8`) | the binding's curve, per lookup through the table | ✅ as Arnold reads it |
+| Streamed `.tx`, `_raw` or bound directly, `half` tiles in a curved space | `tiled/mod.rs` (`TiledFile::decoding`) | the binding's curve, once as each tile pages in | ✅ as Arnold reads it; never per lookup |
 | A UV texture's **alpha** (PNG/TIFF alpha, EXR `A`, a `.tx`'s fourth sample) | `crust-assets/src/uv_texture/` (`Texel::alpha`), `tiled/cache.rs` (`Tile::rgba_u8`) | **none, whatever the tag** — `a / 255` for a byte (`ALPHA_U8`), the value for a float | ✅ correct — alpha is coverage, not colour; a GPU's `SRGB8_ALPHA8` leaves it linear too |
+| A UV texture's **colour where it has alpha** | `crust-assets/src/lib.rs` (`premultiply_u8`), at preload (`uv_texture/`) or page-in (`TiledFile::decoding`) | premultiplied by alpha **in linear light**, once: a straight source (PNG; a TIFF with `ExtraSamples` 2) is decoded, scaled by `a / 255` and re-encoded; an associated one (EXR, an OIIO or crust `.tx`) is read as stored | ✅ every lookup returns premultiplied colour, as Arnold's do (`tx-arnold-convention` decision 9): a cut texel reads black, a partly transparent one darker |
 
 The `is_hdr` flag in `decode_image_pixels` exists because `image`'s `to_rgb32f`
 rescales integer formats into `0..1` *without* removing their transfer curve,
@@ -398,27 +414,24 @@ plausible-looking bug rather than an obvious one.
 | **Mip levels** | `uv_texture/`, `Tile::build_pyramid` | **linear**, re-encoded through the colour space's inverse curve | It *is* a filter — it stands in for integrating light over a pixel's footprint — and summing display-encoded values is not summing light. |
 | **Ptex mip levels (preloaded)** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since the base is decoded to linear `f32` at load and reduced from there. |
 | **Ptex mip levels (`.ptx` on disk)** | the file's writer, read back by `ptex_stream.rs` | the file's own encoding | Not crust's choice — the levels were reduced before crust ever saw the file, and crust decodes Ptex by 2.2 afterwards. So it is the mismatch the row below refuses, and streaming such a texture is declined by default (`CRUST_PTEX_STREAM_MIPSPACE`). |
-| **`.tx` mip levels (TIFF backing)** | `crust-assets/src/tiled/write.rs` | **linear**, re-encoded | The same `reduce_half` as the in-memory pyramid — literally the same function, so a streamed render and a preloaded one cannot drift apart. |
-| **Alpha, in any of the above** | `reduce_half` / `reduce_half_linear`, `decode_tile` | coverage (`a / 255`), on its own | Alpha has no encoding, so its linear average and its encoded one are the same; it is averaged apart from the colour, which is not premultiplied. |
-| **`.tx` mip levels (EXR backing)** | `crust-assets/src/tiled/exr_write.rs` | **linear**, not re-encoded | The samples are already light: a float file has no transfer curve, so the decode happened once at conversion and the reduction is a plain average (`reduce_half_linear`, written next to `reduce_half` so the two cannot drift on anything but the curve). |
+| **`.tx` mip levels** | `crust-assets/src/tiled/maketx.rs` (`mip_chain`) | the values as stored, in `f32`, each level from the previous one | OIIO's `maketx` reduction, so the file is the one Arnold writes: a bilinear sample at each destination texel's centre, sizes rounded down. A converted file stores linear light, so that is a linear average; an 8-bit file in a linear space likewise. |
+| **Alpha, in any of the above** | `reduce_half` / `reduce_half_linear`, `decode_tile`, `mip_chain` | coverage (`a / 255`), with the colour premultiplied | Alpha has no encoding, so its linear average and its encoded one are the same. The colour is premultiplied by it (the convention every lookup returns, in linear light), so a level averages premultiplied light. |
 
 There are therefore **three** decode points, not two, and which one applies is
 decided by a tile's payload rather than by its file:
 
 | Payload | Stored as | Decoded | Where |
 | --- | --- | --- | --- |
-| `TileData::U8` (8-/16-bit TIFF) | the file's own encoding | per lookup, through the 256-entry table | `Tile::rgb` |
-| `TileData::Half` (EXR, float TIFF) | **linear** | never — it is already light | — |
+| `TileData::U8` (8-bit TIFF) | the encoding of the space it is read in | per lookup, through the 256-entry table | `Tile::rgb_u8` |
+| `TileData::Half` (EXR, 16-bit or float TIFF) | linear, or decoded once at page-in when read in a curved space | never per lookup | `TiledFile::decoding` |
 | preloaded `UvTexture` | the file's own encoding | per lookup, through the same table | `UvTexture::sample_level` |
 
-Because a TIFF-backed `.tx` stores display-encoded texels but reduces in linear
-light, the colour space is **baked into every level above 0** and cannot be
-reinterpreted afterwards. Read a chain built for sRGB as raw and level 0 stays
-perfectly correct while every coarser level is wrong — an error that appears
-only under minification and looks exactly like a filtering bug. An EXR-backed
-`.tx` gets there from the other side: its texels were decoded once, at
-conversion, so binding it under a different space would apply a curve to data
-that has already had one removed.
+An 8-bit `.tx` stores display-encoded texels only when it is bound directly
+in a curved space: Arnold converts an 8-bit source in a curved space to a
+`half` EXR of linear light, precisely so its levels are averaged as light. A
+`.tx` that OIIO's `maketx` reduced in the file's encoding and that is then bound
+in a curved space is darker under minification than the preloaded pyramid — in
+Arnold as in crust, which reads it as Arnold does.
 
 **Ptex arrives at the same rule from the other end, and gets the same answer.**
 A `.ptx` carries no marker and needs none: crust binds Ptex colour as
@@ -433,13 +446,10 @@ texture reads the file's levels, which the preload does not hold at all.
 preloads it; `=file` accepts the file's whole chain, at a measured 0.147 of
 darkening on the tiled fixture. `docs/ptex_streaming.md` has the details.
 
-So the space is written into the file — `crust:mipspace=` in
-`ImageDescription` for TIFF (following OIIO's own `oiio:SHA-1=` convention) and
-as a header attribute for EXR, where custom attributes are first-class — and it
-means "the space this file is to be bound with" for both. A mismatch makes the
-streaming path decline, falling back to preloading. A file with no marker —
-anything `maketx` wrote — is accepted, since its chain came from a different
-filter and there is nothing to match against.
+Crust's earlier `.tx` convention recorded the space its chain was reduced in
+(`crust:mipspace`) and refused a mismatch. Arnold's convention records the
+conversion in the file name instead, and reads a directly bound file in its
+binding's space with no check, so the marker is gone (`tx-arnold-convention`).
 
 The difference is not academic. A black/white checkerboard averaged in
 sRGB-encoded bytes gives `127/255 ≈ 0.5` *encoded*, which decodes to **0.21
@@ -543,11 +553,12 @@ used as stored, with one warning per pair. Every texture space of the ACES
 configs has the supported shape; a custom config with LUT-based input
 transforms does not.
 
-**5. A `.tx` is matched to its binding by source space name.** A `.tx`
-converted under `raw` and one converted under `lin_rec709` hold identical
-levels — neither has a curve — but their `crust:mipspace` markers differ, so
-binding one under the other's space declines streaming and preloads instead.
-Safe, not optimal.
+**5. A `.tx` is found by the name its binding gives.** Two bindings that
+convert alike but are spelled apart — the keyword `raw` and the OCIO `Raw`
+space, or UsdUVTexture's `sRGB` token, which crust reads as sRGB and Arnold, with
+this config, as an unknown name — look for different files, so a file converted
+under one is not found under the other and the texture preloads (or
+`--auto-tx` converts it again). Safe, not optimal.
 
 ## Diagnosing a suspected colour-space bug
 

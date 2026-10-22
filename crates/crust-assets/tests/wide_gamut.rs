@@ -4,7 +4,7 @@
 //! an environment map — landing on the same numbers.
 
 use crust_assets::FileAssets;
-use crust_assets::{TxFormat, make_tx};
+use crust_assets::make_tx_atomic;
 use crust_core::color::{Space, convert, working_space};
 use crust_core::{AssetLoader, ColorSpace, Vec3A};
 use std::path::{Path, PathBuf};
@@ -112,11 +112,12 @@ fn a_colour_outside_the_working_gamut_clamps_at_zero() {
     assert_eq!((got.y, got.z), (0.0, 0.0), "negatives clamp");
 }
 
-/// The bit-identity the `.tx` path promises — a streamed render equals a
-/// preloaded one — holds off the working primaries too: both store bytes
-/// in the file's encoding and apply the same matrix after filtering.
+/// A streamed `.tx` agrees with the preloaded texture off the working
+/// primaries too: an sRGB albedo in an ACEScg render, converted as
+/// `--auto-tx` converts it (to linear ACEScg, so no matrix remains), reads
+/// the preloaded source's colour within design decision 7's tolerance.
 #[test]
-fn a_streamed_tx_matches_the_preloaded_texture_in_acescg() {
+fn a_streamed_tx_agrees_with_the_preloaded_texture_in_acescg() {
     let dir = scratch("tx");
     let src = dir.join("albedo.png");
     let img = image::RgbImage::from_fn(64, 64, |x, y| {
@@ -124,25 +125,27 @@ fn a_streamed_tx_matches_the_preloaded_texture_in_acescg() {
     });
     img.save(&src).expect("png");
     let space = ColorSpace::new(Space::SRGB_TEXTURE, acescg());
-    let tx = dir.join("albedo.tx");
-    make_tx(&src, &tx, space, TxFormat::Tiff).expect("convert");
+    make_tx_atomic(&src, space, acescg()).expect("convert");
 
     let preload = FileAssets::with_config(crust_core::Config {
         tex_stream: false,
         ..Default::default()
     });
     let preloaded = preload.load_texture(&src, space).expect("preloads");
-    let streamed = FileAssets::new()
-        .load_texture(&src, space)
-        .expect("streams");
-    for (u, v, w) in [(0.3, 0.7, 0.0), (0.51, 0.12, 0.02), (0.9, 0.9, 0.2)] {
-        let (a, b) = (preloaded.eval(u, v, w), streamed.eval(u, v, w));
-        assert_eq!(
-            a.map(f32::to_bits),
-            b.map(f32::to_bits),
-            "({u}, {v}, {w}): {a:?} {b:?}"
-        );
+    let streaming = FileAssets::new();
+    let streamed = streaming.load_texture(&src, space).expect("streams");
+    assert_eq!(streaming.texture_cache_stats().files, 1, "the .tx streamed");
+    let mut worst = 0.0f32;
+    for y in 0..64 {
+        for x in 0..64 {
+            let (u, v) = ((x as f32 + 0.5) / 64.0, 1.0 - (y as f32 + 0.5) / 64.0);
+            let (a, b) = (preloaded.eval(u, v, 0.0), streamed.eval(u, v, 0.0));
+            for k in 0..3 {
+                worst = worst.max((a[k] - b[k]).abs());
+            }
+        }
     }
+    assert!(worst <= 0.02, "worst texel differs by {worst}");
 }
 
 #[test]

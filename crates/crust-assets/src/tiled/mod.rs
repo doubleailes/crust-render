@@ -23,94 +23,156 @@
 //! 64x64-tiled, full-MIPMAP, zipped `half`), V-Ray's native streaming format
 //! *is* tiled mip EXR, and Karma recommends the same. So [`TiledFile`] is a
 //! facade over two [`Backend`]s and picks between them by **magic number**
-//! rather than by extension — which is what makes a `maketx --format exr -o
-//! foo.tx`, an EXR inside a file named `.tx`, simply work.
+//! rather than by extension — which is what makes Arnold's `x_….png.tx`, an
+//! EXR inside a file named `.tx`, simply work.
 //!
-//! The split is by *sample type*, not by container: an 8-bit source keeps the
-//! TIFF path and its `u8` tiles byte for byte, and a float source takes EXR and
-//! `half` tiles that are already linear. See [`cache::TileData`].
+//! The split is by *sample type*, not by container: 8-bit samples page in as
+//! `u8` tiles, 16-bit and float ones as `half`. See [`cache::TileData`].
 //!
-//! **The one thing crust does not delegate is the mip filter.** `maketx` has
-//! its own, and `docs/color_management.md` records why this codebase reduces in
-//! linear light: averaging display-encoded bytes is not averaging light, and a
-//! chain built that way drifts darker at every level. So the writers here
-//! reduce exactly as the in-memory pyramid does, which is what lets a streamed
-//! render and a preloaded one agree texel for texel.
+//! **The files are Arnold's.** Crust writes and reads `.tx` files as Arnold
+//! 7.5's auto-tx does — its names, its conversion to the target space, its
+//! file types, `maketx`'s reduction and metadata (`make.rs`, `maketx.rs`) —
+//! so the two renderers share them. A streamed texture therefore agrees with
+//! its preloaded source within a tolerance, not texel for texel (the
+//! `tx-arnold-convention` change, decision 7).
 
+#[cfg(test)]
+mod arnold;
 mod cache;
 mod exr_read;
 mod exr_write;
 mod make;
+mod maketx;
 mod read;
+mod sha1;
 mod stream;
 mod write;
 
 pub use cache::{StripedCounter, TileCache, TileData};
-pub(crate) use exr_read::{exr_declares_alpha, exr_mip_space};
-pub use exr_write::{write_tx_exr, write_tx_exr_rgba};
 pub use make::{
-    MadeTx, TxFormat, TxStaleness, is_ptex, make_tx, make_tx_atomic, tx_sibling, tx_staleness,
+    MadeTx, TxName, TxStaleness, is_ptex, make_tx, make_tx_atomic, stamp_as_source, tx_name,
+    tx_staleness,
 };
 pub use stream::StreamingTexture;
-pub(crate) use write::space_name;
-pub use write::{TILE_EDGE, write_tx, write_tx_rgba};
+#[cfg(test)]
+pub(crate) use testing::{write_tx, write_tx_exr, write_tx_exr_rgba, write_tx_rgba};
+pub use write::TILE_EDGE;
+
+/// Synthetic `.tx` files for the tests of this module and its neighbours,
+/// written by the writers a conversion uses: the samples as given (no colour
+/// conversion), levels reduced as `maketx` reduces them, alpha associated.
+/// Each returns its levels' sizes.
+#[cfg(test)]
+mod testing {
+    use super::maketx::{self, Image, SampleType};
+    use super::write::TxMeta;
+    use std::io;
+    use std::path::Path;
+
+    fn meta() -> TxMeta {
+        TxMeta {
+            software: "crust-render test".into(),
+            sha1: "0".into(),
+            average: "0".into(),
+            constant: None,
+            date: "2026:01:01 00:00:00".into(),
+        }
+    }
+
+    fn levels(pixels: Vec<f32>, w: usize, h: usize, alpha: bool) -> Vec<Image> {
+        let channels = if alpha {
+            vec!["R", "G", "B", "A"]
+        } else {
+            vec!["R", "G", "B"]
+        };
+        maketx::mip_chain(Image {
+            width: w,
+            height: h,
+            channels,
+            pixels,
+        })
+    }
+
+    fn sizes(levels: &[Image]) -> Vec<(usize, usize)> {
+        levels.iter().map(|l| (l.width, l.height)).collect()
+    }
+
+    fn tiff(
+        path: &Path,
+        src: &[u8],
+        w: usize,
+        h: usize,
+        alpha: bool,
+    ) -> io::Result<Vec<(usize, usize)>> {
+        let n = if alpha { 4 } else { 3 };
+        let pixels = src[..w * h * n]
+            .iter()
+            .map(|&b| f32::from(b) / 255.0)
+            .collect();
+        let levels = levels(pixels, w, h, alpha);
+        super::write::write_tiff(path, &levels, SampleType::U8, &meta())?;
+        Ok(sizes(&levels))
+    }
+
+    fn exr(
+        path: &Path,
+        src: &[f32],
+        w: usize,
+        h: usize,
+        alpha: bool,
+    ) -> io::Result<Vec<(usize, usize)>> {
+        let n = if alpha { 4 } else { 3 };
+        let levels = levels(src[..w * h * n].to_vec(), w, h, alpha);
+        super::exr_write::write_exr(path, &levels, SampleType::Half, false, &meta())?;
+        Ok(sizes(&levels))
+    }
+
+    /// An 8-bit RGB `.tx` (a TIFF) of `src`.
+    pub fn write_tx(
+        path: &Path,
+        src: &[u8],
+        w: usize,
+        h: usize,
+    ) -> io::Result<Vec<(usize, usize)>> {
+        tiff(path, src, w, h, false)
+    }
+
+    /// An 8-bit RGBA `.tx` of `src`, its colour taken as premultiplied.
+    pub fn write_tx_rgba(
+        path: &Path,
+        src: &[u8],
+        w: usize,
+        h: usize,
+    ) -> io::Result<Vec<(usize, usize)>> {
+        tiff(path, src, w, h, true)
+    }
+
+    /// A `half` RGB `.tx` (an EXR) of `src`.
+    pub fn write_tx_exr(
+        path: &Path,
+        src: &[f32],
+        w: usize,
+        h: usize,
+    ) -> io::Result<Vec<(usize, usize)>> {
+        exr(path, src, w, h, false)
+    }
+
+    /// A `half` RGBA `.tx` of `src`.
+    pub fn write_tx_exr_rgba(
+        path: &Path,
+        src: &[f32],
+        w: usize,
+        h: usize,
+    ) -> io::Result<Vec<(usize, usize)>> {
+        exr(path, src, w, h, true)
+    }
+}
 
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
-
-/// The version of crust's `.tx` conversion, recorded in every `.tx` crust
-/// writes beside `crust:mipspace` (`crust:txversion=2`), so a file an older
-/// conversion wrote can be told apart from a current one.
-///
-/// - **1** (no `crust:txversion`): before texture alpha was carried. A source
-///   with alpha was converted to RGB, so its cutout reads opaque.
-/// - **2**: a source's alpha is written when it cuts (`decode-texture-alpha`).
-///
-/// Only a crust-written file — one with a `crust:mipspace` marker — has a
-/// version; an OIIO `maketx` file is whatever OIIO made of its source.
-pub(crate) const TX_VERSION: u32 = 2;
-
-/// The key [`TX_VERSION`] is recorded under, in `ImageDescription` (TIFF) or
-/// as a header attribute (EXR).
-pub(crate) const TX_VERSION_KEY: &str = "crust:txversion";
-
-/// The conversion version a crust-written `.tx` records ([`TX_VERSION`]),
-/// read from its header alone: `Some(1)` for a crust file that predates the
-/// marker, `None` for a file crust did not write (no `crust:mipspace`) or
-/// cannot read.
-pub(crate) fn crust_tx_version(path: &Path) -> Option<u32> {
-    let mut magic = [0u8; 4];
-    BufReader::new(File::open(path).ok()?)
-        .read_exact(&mut magic)
-        .ok()?;
-    let (mip_space, version) = match magic {
-        [b'I', b'I', 42, 0] | [b'M', b'M', 0, 42] => {
-            let mut dec =
-                tiff::decoder::Decoder::new(BufReader::new(File::open(path).ok()?)).ok()?;
-            let description = dec
-                .get_tag_ascii_string(tiff::tags::Tag::ImageDescription)
-                .ok()?;
-            let field = |key: &str| {
-                description
-                    .split_whitespace()
-                    .find_map(|f| f.strip_prefix(key)?.strip_prefix('=').map(str::to_owned))
-            };
-            (field("crust:mipspace"), field(TX_VERSION_KEY))
-        }
-        [0x76, 0x2f, 0x31, 0x01] => {
-            let mut found =
-                exr_read::exr_text_attributes(path, &[exr_read::MIP_SPACE_KEY, TX_VERSION_KEY]);
-            let version = found.pop().flatten();
-            (found.pop().flatten(), version)
-        }
-        _ => return None,
-    };
-    mip_space?;
-    Some(version.and_then(|v| v.parse().ok()).unwrap_or(1))
-}
 
 /// One mip level's geometry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,12 +233,15 @@ pub(crate) trait Backend: Debug + Send + Sync {
     fn levels(&self) -> &[LevelInfo];
     fn tile_edge(&self) -> usize;
     fn path(&self) -> &Path;
-    /// The colour space this file is meant to be bound with, if it says.
-    fn mip_space(&self) -> Option<&str>;
-    /// Whether this backing's texels arrive already linear.
+    /// Whether this backing's tiles are `half` rather than `u8`.
     fn linear(&self) -> bool;
+    /// Whether its samples are integers (8- or 16-bit), which `auto`
+    /// resolves to sRGB.
+    fn integer(&self) -> bool;
     /// Whether its texels carry alpha, so a tile is RGBA rather than RGB.
     fn alpha(&self) -> bool;
+    /// Whether that alpha is associated: the colour stored premultiplied.
+    fn associated(&self) -> bool;
     fn reader(&self) -> io::Result<TileReader>;
     fn read_tile(&self, r: &mut TileReader, level: usize, index: u32) -> io::Result<TileData>;
 }
@@ -200,10 +265,26 @@ pub struct TiledFile {
     /// copies a pointer instead of a dozen `LevelInfo`s.
     levels: Arc<[LevelInfo]>,
     tile_edge: usize,
-    mip_space: Option<Arc<str>>,
     linear: bool,
+    integer: bool,
     alpha: bool,
     path: Arc<Path>,
+    /// The curve a `half` tile is decoded through as it pages in, when the
+    /// space it is read in has one (see [`TiledFile::decoding`]).
+    curve: Option<crust_core::ResolvedColorSpace>,
+    /// Whether the file's alpha is associated (see [`Backend::associated`]).
+    associated: bool,
+    /// For a file whose alpha is straight, the tables its tiles are
+    /// premultiplied through as they page in (see [`TiledFile::decoding`]).
+    straight: Option<Arc<Straight>>,
+}
+
+/// The tables a straight-alpha `u8` tile is premultiplied through, in linear
+/// light: its space's decode table and re-encode boundaries.
+#[derive(Debug)]
+struct Straight {
+    to_linear: [f32; 256],
+    steps: [f32; 255],
 }
 
 impl TiledFile {
@@ -238,10 +319,13 @@ impl TiledFile {
         Ok(TiledFile {
             levels: inner.levels().into(),
             tile_edge: inner.tile_edge(),
-            mip_space: inner.mip_space().map(Arc::from),
             linear: inner.linear(),
+            integer: inner.integer(),
             alpha: inner.alpha(),
             path: Arc::from(inner.path()),
+            curve: None,
+            associated: inner.associated(),
+            straight: None,
             inner,
         })
     }
@@ -269,39 +353,39 @@ impl TiledFile {
         &self.path
     }
 
-    /// Whether this file is the one to bind in `space`.
-    ///
-    /// The marker means the same thing for both backings, but the two reach it
-    /// differently. A `.tx` stores display-encoded texels and reduces its levels
-    /// in linear light, so the space is baked into every level above 0 and
-    /// cannot be reinterpreted afterwards: reading an sRGB-reduced chain as raw
-    /// leaves level 0 perfectly correct and every coarser level wrong — a
-    /// discrepancy that appears only under minification and reads exactly like a
-    /// filtering bug. An EXR-backed file stores *linear* texels, decoded once at
-    /// conversion, so the marker records which source encoding they came from
-    /// and reading it under another space would apply a curve to data that has
-    /// already had one removed. Either way it is checked rather than trusted.
-    ///
-    /// A file with no marker (anything `maketx` wrote) is accepted: its chain
-    /// came from a different filter anyway, so there is nothing crust could
-    /// usefully match against, and refusing it would rule out every
-    /// pre-existing production asset.
-    pub fn mip_space_matches(&self, space: &str) -> bool {
-        match &self.mip_space {
-            Some(recorded) => &**recorded == space,
-            None => true,
-        }
-    }
-
-    /// The recorded space, for reporting a mismatch.
-    pub fn mip_space(&self) -> Option<&str> {
-        self.mip_space.as_deref()
-    }
-
-    /// Whether this file's texels arrive already linear — reported at load, and
-    /// the difference between a `u8` tile and a `half` one.
+    /// Whether this file's tiles are `half` rather than `u8` — reported at
+    /// load, and the difference between a tile costing 12 KiB and 24 KiB. A
+    /// `half` tile reads linear: a curve its space has is decoded at page-in.
     pub fn is_linear(&self) -> bool {
         self.linear
+    }
+
+    /// Whether the file's samples are integers (8- or 16-bit), which `auto`
+    /// resolves to sRGB.
+    pub fn is_integer(&self) -> bool {
+        self.integer
+    }
+
+    /// This file read in `space`: a `half` tile's colour goes through
+    /// `space`'s curve as it pages in, once, so a lookup reads it linear
+    /// whatever the file holds. Only a `.tx` read in a curved space needs it
+    /// (design decision 2 of `tx-arnold-convention`); a `u8` file keeps its
+    /// decode table instead, and a space without a curve changes nothing.
+    ///
+    /// A file whose alpha is straight is premultiplied as each tile pages
+    /// in, in linear light, since every lookup returns premultiplied colour
+    /// (design decision 9). An associated file — anything OIIO or Arnold
+    /// wrote, and every EXR — is read as stored.
+    pub fn decoding(mut self, space: crust_core::ResolvedColorSpace) -> TiledFile {
+        use crate::TransferCurve;
+        self.curve = (self.linear && space.has_curve()).then_some(space);
+        self.straight = (self.alpha && !self.associated).then(|| {
+            Arc::new(Straight {
+                to_linear: space.to_linear_table(),
+                steps: space.code_steps(),
+            })
+        });
+        self
     }
 
     /// Whether this file's texels carry alpha: four components a texel, the
@@ -330,9 +414,18 @@ impl TiledFile {
     /// Whether a file's alpha is opaque throughout cannot be known at open
     /// without reading every tile, so it is decided tile by tile here.
     pub fn read_tile(&self, r: &mut TileReader, level: usize, index: u32) -> io::Result<TileData> {
-        self.inner
+        let tile = self
+            .inner
             .read_tile(r, level, index)
-            .map(TileData::without_opaque_alpha)
+            .map(TileData::without_opaque_alpha)?;
+        let tile = match self.curve {
+            Some(space) => tile.decoded(space),
+            None => tile,
+        };
+        Ok(match &self.straight {
+            Some(s) => tile.premultiplied(&s.to_linear, &s.steps),
+            None => tile,
+        })
     }
 }
 
@@ -384,10 +477,10 @@ mod tests {
             })
             .collect();
 
-        let levels =
-            write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::SRGB).expect("write .tx");
-        // 150x100 -> 75x50 -> 38x25 -> 19x13 -> 10x7 -> 5x4 -> 3x2 -> 2x1 -> 1x1
-        assert_eq!(levels.len(), 9, "{levels:?}");
+        let levels = write_tx(&path, &src, w, h).expect("write .tx");
+        // Rounded down, as `maketx` rounds:
+        // 150x100 -> 75x50 -> 37x25 -> 18x12 -> 9x6 -> 4x3 -> 2x1 -> 1x1
+        assert_eq!(levels.len(), 8, "{levels:?}");
         assert_eq!(levels[0], (w, h));
         assert_eq!(*levels.last().unwrap(), (1, 1));
 
@@ -484,8 +577,7 @@ mod tests {
                 ]
             })
             .collect();
-        let levels =
-            write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+        let levels = write_tx(&path, &src, w, h).expect("write");
 
         let tf = TiledFile::open(&path).expect("open");
         assert_eq!(tf.tile_edge(), TILE_EDGE);
@@ -588,10 +680,9 @@ mod tests {
             })
             .collect();
 
-        let levels = write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW)
-            .expect("write exr");
-        // Same `div_ceil` chain as the TIFF writer: 150x100 down to 1x1.
-        assert_eq!(levels.len(), 9, "{levels:?}");
+        let levels = write_tx_exr(&path, &src, w, h).expect("write exr");
+        // The same rounded-down chain as the TIFF writer: 150x100 down to 1x1.
+        assert_eq!(levels.len(), 8, "{levels:?}");
         assert_eq!(levels[0], (w, h));
         assert_eq!(*levels.last().unwrap(), (1, 1));
 
@@ -671,8 +762,7 @@ mod tests {
             6.0, 6.0, 6.0, //
             8.0, 8.0, 8.0,
         ];
-        let levels =
-            write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+        let levels = write_tx_exr(&path, &src, w, h).expect("write");
         assert_eq!(levels, vec![(2, 2), (1, 1)]);
 
         let tf = TiledFile::open(&path).expect("open");
@@ -706,8 +796,7 @@ mod tests {
                 ]
             })
             .collect();
-        let levels =
-            write_tx_rgba(&path, &src, w, h, crust_core::ResolvedColorSpace::SRGB).expect("write");
+        let levels = write_tx_rgba(&path, &src, w, h).expect("write");
 
         let mut dec =
             tiff::decoder::Decoder::new(BufReader::new(std::fs::File::open(&path).expect("open")))
@@ -741,26 +830,19 @@ mod tests {
             assert_eq!(tile.len(), tw * th * 4, "level {n}");
         }
 
-        // The same file with its extra sample declared unspecified is not
-        // alpha: it reads as the RGB it carries.
+        // The same file with its extra sample declared unspecified declines:
+        // `tiff` would undo its predictor with the wrong stride.
         let mut bytes = std::fs::read(&path).expect("read");
         assert!(unspecify_first_extra_sample(&mut bytes));
         let unspecified = dir.join("unspecified.tx");
         std::fs::write(&unspecified, bytes).expect("write");
-        let tf = TiledFile::open(&unspecified).expect("open");
-        assert!(!tf.has_alpha());
-        let mut r = tf.reader().expect("reader");
-        let tile = tf.read_tile(&mut r, 0, 0).expect("tile");
-        assert_eq!(
-            &tile.expect_u8()[..6],
-            &[src[0], src[1], src[2], src[4], src[5], src[6]]
-        );
+        let err = TiledFile::open(&unspecified).expect_err("declines");
+        assert!(err.to_string().contains("predictor"), "{err}");
 
         // An RGBA EXR backing carries an `A` channel, read fourth.
         let exr = dir.join("rgba_exr.tx");
         let floats: Vec<f32> = src.iter().map(|&b| b as f32 / 255.0).collect();
-        write_tx_exr_rgba(&exr, &floats, w, h, crust_core::ResolvedColorSpace::RAW)
-            .expect("write exr");
+        write_tx_exr_rgba(&exr, &floats, w, h).expect("write exr");
         let tf = TiledFile::open(&exr).expect("open");
         assert!(tf.has_alpha() && tf.is_linear());
         let mut r = tf.reader().expect("reader");
