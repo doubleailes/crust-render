@@ -141,10 +141,10 @@ cheapest class that can follow all of them:
 
 | change | class |
 |---|---|
-| attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera (not `xformOp:*` / `xformOpOrder`) | `settings` |
+| attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera, its `xformOp:*` / `xformOpOrder` included unless an imported prim lies below it (`Provenance::any_below`) | `settings` |
 | `inputs:*` value on a light the scene has, other than `width`, `height`, `radius`, `length`, `treatAsPoint`, `treatAsLine` (the BVH holds its shape) | `lights` |
 | `inputs:*` value on a `Shader` under a material the scene uses, or on that `Material`, when no other material reads it | `materials` |
-| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
+| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform other than the render camera's own, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
 
 A batch is applied as its most expensive class, `settings` < `materials` < `lights` <
 `full`, and rebuilds every part it names. Namespace bookkeeping is not a change: an
@@ -167,6 +167,21 @@ type under a material the scene uses still classifies `materials`, and is listed
 payload-loaded stage, and anything else (a `NodeGraph`, a typo) falls back to `full`
 (`a_shader_behind_a_payload_edits_in_place`). A prim whose type the authoring stage
 does read and is not `Shader` is `full` at once, as before.
+
+*Render camera transforms* (`live-camera-update`). The settings rebuild already re-reads
+the camera through `build_camera`, which composes its ancestors, so a camera move needed
+only the classifier to admit it. Two guards keep it honest. An imported prim below the
+camera (a mesh parented to it) would move with it, and the rebuild re-reads only the
+camera, so `any_below` sends that to `full`; it scans the provenance's materials, lights
+and geometry runs once per classification. Tessellation that read the camera is guarded
+by the rebuild, not the classifier: it compares the dicing camera's keys
+(`crust:dicingCamera`, else the render camera), so a move is in place exactly when the
+render camera does not dice, or nothing is tessellated from a camera. An edit on an
+ancestor of the camera, and `!resetXformStack!`, stay `full`.
+
+*Alternative rejected:* trying every transform in place and falling back on refusal. The
+rebuild re-reads only the camera, so a mesh's transform would be silently ignored, not
+refused.
 
 *Alternative rejected:* classifying the parsed `Snippet`. An undo has no snippet, and
 merging can turn an authored spec into no change at all.
@@ -343,10 +358,22 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   into the engine) would reuse the provenance and the `live` entry points, which take
   paths and built values for that reason. It adds Pixar's C++ USD as a build dependency
   and `unsafe` FFI, which `CLAUDE.md` makes a project decision.
-- **Transforms, topology and namespace edits re-import.** Re-traversing only the
-  changed subtree, and BVH refit, are not done: a refit tree is not the tree a fresh
-  build gives. A light with no geometry (distant, dome) could move without touching the
-  BVH; it is `full` until the simpler classes have proved themselves.
+- **Transforms, topology and namespace edits re-import**, except the render camera's
+  own transform. Re-traversing only the changed subtree, and BVH refit, are not done: a
+  refit tree is not the tree a fresh build gives. A light with no geometry (distant,
+  dome) could move without touching the BVH; it is `full` until the simpler classes
+  have proved themselves. A render camera that dices (no `crust:dicingCamera`, on a
+  scene tessellated from the camera) still re-imports when it moves, and so does an
+  edit to one of the camera's ancestors.
+- **A camera move re-opens the stage.** The settings rebuild opens the index stage and
+  a stage masked to the camera per move: 7.5 / 9.7 ms (min / mean of 10 alternating
+  translates) on the Cornell box at 640×480 against 15.0 / 16.2 ms as `full`
+  (`CRUST_SCENE_DELTAS=0`), and 31.7 / 32.7 ms on ALab (`entry.usda`, whose
+  `startTimeCode` is 1004, `crust:subdivisionEdgeLength = 2`, `learned` light
+  selection, a free `/freecam` rendering and the shot camera dicing), whose session
+  took 215 s to open. Release build, 16 threads, one machine. Enough to restart a
+  progressive render per drag event; a camera-only path that skips the stage is a
+  follow-up if a Hydra tumble shows it is the bottleneck.
 - **On a production shot, only confined edits are cheap.** ALab frame 1004
   (`in-place-edits-on-production-shots` `notes.md`): an exposure, a light's intensity and
   a payload-delivered shader's roughness apply in place in 18–60 ms. Any transform,

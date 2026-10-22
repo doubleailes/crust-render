@@ -295,6 +295,24 @@ Schema mapping:
       per-face Render 3.631 / 3.736 s (min / mean) against per-mesh 3.752 / 3.789 s.
       Stitched triangles are shaped like the interior grids' (1.2% below a quality of
       0.1 against 0.8%), so the BVH sees no sliver population.
+  - **The dicing camera** (`live-camera-update`): `rel crust:dicingCamera` on the
+    `RenderSettings` prim (`render_settings_dicing_camera`, same pass resolution as
+    `crust:subdivisionEdgeLength`) names the camera tessellation reads — adaptive
+    levels, per-face rates and their frustum, and implicit shapes' radial counts.
+    `read_camera_ahead` returns a `Dicer` (the dicing camera's projection) beside the
+    render camera's `Shutter`: the shutter never comes from the dicing camera.
+    Unauthored, or a target that is not a camera (`camera.dicing_not_a_camera`), the
+    render camera dices, so unauthored stages import exactly as before. A product's
+    `camera` overrides the render camera only. `subdiv.adaptive_needs_camera` fires
+    only when neither camera is named. A relationship rather than an import option,
+    so the session's layer records it and an MCP session dices as `crust render` does.
+    - **Trap: the import asserted the adaptive eye is the render camera's.** The
+      debug check in `record_geometry_counters` (one `CameraFrame` read off two
+      stages must agree) runs only when the render camera dices; with a dicing
+      camera the two eyes differ by design.
+    - `StageFacts::dicing` records the target; the in-place settings rebuild refuses
+      when it changes, and otherwise compares the dicing camera's keys as before, so
+      moving a render camera that does not dice stays in place.
   - The per-prim `crust:subdivisionLevel` this replaced is read only to warn — once per
     load (`SubdivPolicy::legacy_warned`), since a per-prim warning would scale with
     the scene.
@@ -1423,8 +1441,8 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
   extraordinary vertices (within 0.9% of an edge on the worst-case cube).
 - **Cracks between meshes.** Two separate meshes meeting at a boundary can be refined
   differently, exactly as two separately refined meshes always could.
-- **Level popping across frames.** Each frame imports at its own camera; there is no
-  dicing reference camera.
+- **Level popping across frames.** Each frame imports at its own camera unless
+  `crust:dicingCamera` names a static one; a dicing camera that moves still pops.
 - **The rate ignores motion.** It is chosen at the camera's and the placement's
   shutter-open transforms.
 

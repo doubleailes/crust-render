@@ -180,6 +180,8 @@ warning_codes! {
         "A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero.";
     CameraShutterMismatch => "camera.shutter_mismatch", Approximated, Each,
         "The render goes through another camera than the one whose shutter motion was measured over.";
+    CameraDicingNotCamera => "camera.dicing_not_a_camera", Approximated, Each,
+        "crust:dicingCamera targets no camera; tessellation reads the render camera.";
 
     // Products, AOVs and light path expressions
     ProductNotARenderProduct => "product.not_a_render_product", Skipped, Each,

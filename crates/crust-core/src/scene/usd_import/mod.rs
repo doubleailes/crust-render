@@ -120,7 +120,8 @@ use products::import_render_products;
 use settings::{
     CameraChoice, CameraPick, check_time_range, dome_light_camera_visibility,
     enable_exposure_compensation, import_render_settings, pick_camera, render_settings_color_space,
-    render_settings_subdiv_edge_length, render_settings_subdiv_level,
+    render_settings_dicing_camera, render_settings_subdiv_edge_length,
+    render_settings_subdiv_level,
 };
 use shapes::{curve_segments, emit_curves, emit_sphere, nurbs_curve_segments};
 use strands::StrandRequest;
@@ -980,8 +981,9 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
 }
 
 /// The subdivision and displacement counters the traversal accumulated, into
-/// `--stats`.
-fn record_geometry_counters(meshes: &MeshArena, camera: &Camera, stats: &mut RenderStats) {
+/// `--stats`. `dicer` is the render camera when it is the camera adaptive
+/// subdivision read, `None` when a `crust:dicingCamera` dices.
+fn record_geometry_counters(meshes: &MeshArena, dicer: Option<&Camera>, stats: &mut RenderStats) {
     if meshes.subdiv.adaptive.is_some() {
         let [interior, stitched] = meshes.subdiv.quality;
         debug!(
@@ -994,12 +996,15 @@ fn record_geometry_counters(meshes: &MeshArena, camera: &Camera, stats: &mut Ren
         // may read it off a different stage (the unloaded index while
         // streaming); the two must still agree, or every level was chosen for
         // a viewpoint the render does not use.
-        debug_assert!(
-            (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
-            "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
-            rate.eye,
-            camera.origin()
-        );
+        if let Some(camera) = dicer {
+            debug_assert!(
+                (Vec3::from(camera.origin()) - rate.eye).length()
+                    <= 1e-4 * rate.eye.length().max(1.0),
+                "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
+                rate.eye,
+                camera.origin()
+            );
+        }
         stats.subdivision = SubdivisionCounters {
             adaptive: Some((rate.target, rate.max)),
             levels: meshes.subdiv.levels.clone(),
@@ -1064,6 +1069,7 @@ pub(crate) fn load_scene(
         wanted_camera,
         subdiv,
         projection,
+        dicing,
         shutter,
     } = read_index(&index, path, path_str, options, &valid)?;
     let pass = valid.pass.as_ref();
@@ -1209,7 +1215,8 @@ pub(crate) fn load_scene(
         ctx.lights.hide_infinite_from_camera();
     }
 
-    record_geometry_counters(&ctx.caches.meshes, &camera, &mut stats);
+    let dicer = dicing.is_none().then_some(&camera);
+    record_geometry_counters(&ctx.caches.meshes, dicer, &mut stats);
     let implicit = &ctx.caches.implicit;
     if implicit.shapes > 0 {
         debug!(
@@ -1293,6 +1300,7 @@ pub(crate) fn load_scene(
             domes_seen_by_camera,
             working: Some(working),
             camera: scene.camera_path.clone(),
+            dicing: dicing.map(|p| p.to_string()),
             on_screen_shapes: ctx
                 .caches
                 .implicit
@@ -1402,8 +1410,11 @@ struct IndexRead {
     working: crate::color::Space,
     wanted_camera: Option<CameraChoice>,
     subdiv: SubdivPolicy,
-    /// The render camera's projection, when it was named (see [`subdiv_policy`]).
+    /// The projection tessellation reads — the dicing camera's — when a
+    /// camera was named (see [`subdiv_policy`]).
     projection: Option<ScreenProjection>,
+    /// `crust:dicingCamera`'s target, when it is a camera ([`Dicer`]).
+    dicing: Option<sdf::Path>,
     /// The interval motion is measured over ([`read_camera_ahead`]).
     shutter: Shutter,
 }
@@ -1470,11 +1481,14 @@ fn read_index(
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
     }
-    let (camera, shutter) = read_camera_ahead(
+    // The camera tessellation reads: `crust:dicingCamera` when it names one,
+    // else the render camera. Products do not override it.
+    let (dicer, shutter) = read_camera_ahead(
         index,
         path,
         path_str,
         wanted_camera.as_ref(),
+        render_settings_dicing_camera(index, pass).as_ref(),
         &settings,
         products.framing,
         valid.time,
@@ -1482,14 +1496,8 @@ fn read_index(
     if let Some((open, close)) = shutter.interval {
         debug!("Motion is measured over time codes {open} .. {close}");
     }
-    let (subdiv, projection) = subdiv_policy(
-        index,
-        options,
-        pass,
-        subdiv_level,
-        wanted_camera.as_ref(),
-        camera,
-    );
+    let dicing = dicer.authored.then(|| dicer.path.clone()).flatten();
+    let (subdiv, projection) = subdiv_policy(index, options, pass, subdiv_level, dicer);
     if let Some(t) = valid.time {
         // The sampler's frame seed follows the frame being rendered, so an
         // image sequence gets independent noise per frame instead of one
@@ -1508,6 +1516,7 @@ fn read_index(
         wanted_camera,
         subdiv,
         projection,
+        dicing,
         shutter,
     })
 }
@@ -1540,38 +1549,53 @@ fn apply_exposure(
     }
 }
 
-/// The render camera as the import reads it before the traversal: its screen
-/// projection when it is named, and its shutter.
+/// The camera tessellation reads, as [`read_camera_ahead`] read it: the
+/// dicing camera.
+struct Dicer {
+    /// `crust:dicingCamera`'s target when it is a camera, else the render
+    /// camera's path when one is named; `None` when neither is.
+    path: Option<sdf::Path>,
+    /// Its screen projection; `None` when `path` is not a camera on the stage.
+    projection: Option<camera::ScreenProjection>,
+    /// Whether `path` is `crust:dicingCamera`'s target.
+    authored: bool,
+}
+
+/// The cameras as the import reads them before the traversal: the dicing
+/// camera's screen projection ([`Dicer`]), and the render camera's shutter.
 ///
-/// A named camera is read from the index stage when it is composed there,
-/// else from a stage population-masked to its path with payloads loaded (a
-/// shot camera under a payload is the production case). With no camera named,
-/// or a named path that is not a camera, the shutter comes from the first
-/// camera of a walk over the index stage ([`first_camera`]) and there is no
-/// projection; the traversal may still settle on another camera, which
-/// [`check_shutter_camera`] reports.
+/// A named camera — the render camera, or the `dicing` target — is read from
+/// the index stage when it is composed there, else from a stage
+/// population-masked to its path with payloads loaded (a shot camera under a
+/// payload is the production case). A `dicing` target that is not a camera
+/// warns, and the render camera dices. With no render camera named, or a named
+/// path that is not a camera, the shutter comes from the first camera of a
+/// walk over the index stage ([`first_camera`]), and without a dicing camera
+/// there is no projection; the traversal may still settle on another camera,
+/// which [`check_shutter_camera`] reports.
+#[allow(clippy::too_many_arguments)]
 fn read_camera_ahead(
     index: &Stage,
     path: &Path,
     path_str: &str,
     wanted_camera: Option<&CameraChoice>,
+    dicing: Option<&sdf::Path>,
     settings: &RenderSettings,
     framing: products::Framing,
     frame: Option<f64>,
-) -> Result<(Option<camera::ScreenProjection>, Shutter), crate::Error> {
-    let read = |stage: &Stage, at: &sdf::Path| {
+) -> Result<(Dicer, Shutter), crate::Error> {
+    let read_on = |stage: &Stage, at: &sdf::Path| {
         let prim = prim_at(stage, at.clone());
         shutter_offsets(stage, &prim)
             .map(|s| (screen_projection(stage, &prim, settings, framing), s))
     };
-    if let Some(choice) = wanted_camera {
-        let camera_path = choice.path().clone();
-        let named = match read(index, &camera_path) {
+    let read = |camera_path: &sdf::Path| -> Result<_, crate::Error> {
+        Ok(match read_on(index, camera_path) {
             Some(r) => Some(r),
             None => {
                 let started = Instant::now();
                 let stage = open_stage(path, path_str, Some(camera_path.clone()))?;
-                let r = read(&stage, &camera_path);
+                let r = read_on(&stage, camera_path);
                 release_stage(stage, false);
                 debug!(
                     "Read {camera_path} ahead of the traversal from a stage masked to it in {:?}",
@@ -1579,17 +1603,50 @@ fn read_camera_ahead(
                 );
                 r
             }
-        };
-        if let Some((projection, offsets)) = named {
-            return Ok((projection, Shutter::new(Some(camera_path), offsets, frame)));
+        })
+    };
+    let named = match wanted_camera {
+        Some(choice) => read(choice.path())?.map(|r| (choice.path().clone(), r)),
+        None => None,
+    };
+    let diced = match dicing {
+        Some(target) => match read(target)? {
+            Some((projection, _)) => Some(Dicer {
+                path: Some(target.clone()),
+                projection,
+                authored: true,
+            }),
+            None => {
+                warning!(
+                    CameraDicingNotCamera,
+                    at = target,
+                    "crust:dicingCamera targets {target}, which is not a camera on this stage — \
+                     tessellation reads the render camera"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    let shutter = match &named {
+        Some((camera_path, (_, offsets))) => {
+            Shutter::new(Some(camera_path.clone()), *offsets, frame)
         }
-    }
-    let first = first_camera(index);
-    let offsets = first
-        .as_ref()
-        .and_then(|p| shutter_offsets(index, &prim_at(index, p.clone())))
-        .unwrap_or_default();
-    Ok((None, Shutter::new(first, offsets, frame)))
+        None => {
+            let first = first_camera(index);
+            let offsets = first
+                .as_ref()
+                .and_then(|p| shutter_offsets(index, &prim_at(index, p.clone())))
+                .unwrap_or_default();
+            Shutter::new(first, offsets, frame)
+        }
+    };
+    let dicer = diced.unwrap_or_else(|| Dicer {
+        path: wanted_camera.map(|c| c.path().clone()),
+        projection: named.and_then(|(_, (projection, _))| projection),
+        authored: false,
+    });
+    Ok((dicer, shutter))
 }
 
 /// The first camera the traversal would meet, on the payload-free `index`:
@@ -1732,41 +1789,40 @@ fn check_shutter_camera(
 }
 
 /// How this load refines subdivision surfaces — one `subdiv_level` for every
-/// mesh, or, when a target edge length is set, adaptively from the render
-/// camera — and the camera's [`ScreenProjection`], which also sizes implicit
+/// mesh, or, when a target edge length is set, adaptively from the dicing
+/// camera — and that camera's [`ScreenProjection`], which also sizes implicit
 /// shapes ([`implicit::ImplicitPolicy`]).
 ///
-/// `camera` is the named camera's projection as [`read_camera_ahead`] read
-/// it. Without a named camera, or when the path is not a camera, there is
-/// none: adaptive mode then warns once and the uniform level applies, and
-/// implicit shapes take their fixed count, silently. Finding the first
-/// camera's projection would take a traversal of its own.
+/// `dicer` is the dicing camera as [`read_camera_ahead`] read it. With no
+/// camera named, neither a dicing nor a render camera, or when the path is
+/// not a camera, there is no projection: adaptive mode then warns once and the
+/// uniform level applies, and implicit shapes take their fixed count,
+/// silently. Finding the first camera's projection would take a traversal of
+/// its own.
 fn subdiv_policy(
     index: &Stage,
     options: &crate::UsdImportOptions,
     pass: Option<&sdf::Path>,
     subdiv_level: u32,
-    wanted_camera: Option<&CameraChoice>,
-    camera: Option<camera::ScreenProjection>,
+    dicer: Dicer,
 ) -> (SubdivPolicy, Option<ScreenProjection>) {
     let target = resolve_subdiv_edge_length(
         options.subdivision_edge_length,
         render_settings_subdiv_edge_length(index, pass),
     )
     .filter(|_| crate::config().subdiv);
-    let Some(choice) = wanted_camera else {
+    let Some(camera_path) = dicer.path else {
         if let Some(target) = target {
             warning!(
                 SubdivAdaptiveNeedsCamera,
                 "Adaptive subdivision ({target} px) needs the render camera before the stage \
-                 is read — name it with --camera or RenderSettings.camera. Using the uniform \
-                 level {subdiv_level}"
+                 is read — name it with --camera or RenderSettings.camera, or a dicing camera \
+                 with crust:dicingCamera. Using the uniform level {subdiv_level}"
             );
         }
         return (SubdivPolicy::new(subdiv_level), None);
     };
-    let camera_path = choice.path().clone();
-    let projection = camera.map(|p| ScreenProjection {
+    let projection = dicer.projection.map(|p| ScreenProjection {
         eye: p.eye,
         f_px: p.f_px,
         frustum: crate::config()
