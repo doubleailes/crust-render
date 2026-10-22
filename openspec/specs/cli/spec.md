@@ -35,7 +35,7 @@ defaults:
 - `--strategy`, `--light-selection`, `--light-samples`,
   `--light-samples-indirect`;
 - `--indirect-clamp`, `--filter`, `--filter-radius`, `--sampler`;
-- `--subdiv-level`, `--subdiv-edge-length`, `--auto-tx`.
+- `--subdiv-level`, `--subdiv-edge-length`, `--auto-tx`, `--tx-color-space`;
 - `--variance-threshold`, `--min-samples`, `--neighbour-tolerance`.
 
 `light-paths` SHALL also accept `render`'s `-s`, so that it reproduces a render
@@ -108,6 +108,20 @@ where it could take a subcommand's name or a positional as that directory.
   `crust diagnostic -i scene.usda --variance-threshold 0.02 --min-samples 16`
 - **THEN** the report's effective settings show `variance_threshold = 0.02` and
   `min_samples_per_pixel = 16`, as a render with the same flags would use
+
+
+#### Scenario: The .tx target space is a shared flag
+
+- **WHEN** the user runs `crust check -i scene.usda --tx-color-space "Linear Rec.709 (sRGB)"`
+- **THEN** the `.tx` files the check looks for, and those `--auto-tx` would write, are
+  named for `Linear Rec.709 (sRGB)` as the target space, as a render with the same
+  flag would name them
+
+#### Scenario: An unknown .tx target space
+
+- **WHEN** the user runs `crust render -i scene.usda --tx-color-space nonsense`
+- **THEN** the arguments are refused with an error saying the OCIO config defines no
+  such colour space, and nothing is loaded
 
 ### Requirement: Listing what a stage holds
 
