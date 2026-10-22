@@ -2965,3 +2965,55 @@ fn a_session_renders_its_pass() {
     assert_eq!(applied, "full", "a collection edit re-imports");
     assert_eq!(pass(&mut state).holdouts, 4, "the hero is held out too");
 }
+
+/// The latency of a render camera move, in place against `full`, measured as
+/// the `mcp-session` design record reports it: two sessions on the Cornell box
+/// at 640×480, the second without kept assets (`CRUST_SCENE_DELTAS=0`'s
+/// session), their translates interleaved so load lands on both. Prints each
+/// side's `import_s` min / mean. A measurement, not a check:
+/// `cargo test --release -p crust-render --bin crust camera_move_latency -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn camera_move_latency() {
+    let s = samples();
+    let stage = format!(
+        r#"#usda 1.0
+(
+    subLayers = [@{}/cornellbox.usda@]
+)
+
+def Scope "Render" {{ def RenderSettings "settings" {{ uniform int2 resolution = (640, 480) }} }}
+"#,
+        s.display()
+    );
+    let (mut in_place, _) = session_on("latency_in_place", &stage);
+    let (mut full, _) = session_on("latency_full", &stage);
+    full.session().unwrap().assets = None;
+    let moves = [
+        r#"over "scene" { over "camera1" { double3 xformOp:translate = (0.0074, 1.99, 4.01) } }"#,
+        r#"over "scene" { over "camera1" { double3 xformOp:translate = (0.2, 2.1, 4.3) } }"#,
+    ];
+    let mut times = [Vec::new(), Vec::new()];
+    for round in 0..20 {
+        for (side, (state, class)) in [(&mut in_place, "settings"), (&mut full, "full")]
+            .into_iter()
+            .enumerate()
+        {
+            let result = state
+                .session()
+                .unwrap()
+                .author_usda(moves[round % 2])
+                .expect("authored");
+            assert_eq!(result["applied"], class);
+            times[side].push(result["import_s"].as_f64().unwrap() * 1e3);
+        }
+    }
+    for (side, t) in ["in place", "full"].iter().zip(&times) {
+        let min = t.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mean = t.iter().sum::<f64>() / t.len() as f64;
+        eprintln!(
+            "{side}: {min:.2} / {mean:.2} ms (min / mean of {})",
+            t.len()
+        );
+    }
+}
