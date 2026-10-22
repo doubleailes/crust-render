@@ -725,6 +725,23 @@
     0.1, grazing); a `conty_kulla` sheen layers with MaterialX's rational fit,
     off by up to 0.035 at low roughness and grazing, where the layer then
     loses energy rather than creating it.
+  - **Cost of the BSDL leaves, measured** (callgrind, `-s 2`, one thread,
+    before → after the port): `cornellbox` 4 279 082 833 → 4 275 967 240
+    (−0.07%, codegen in `advance_pixel`; it renders bit-identically);
+    `materialx_basic` 2 719 059 626 → 2 763 360 610 (+1.63%);
+    `materialx_surfaces` 5 329 130 786 → 5 441 103 373 (+2.10%). The cost is
+    table reads: a reflection-only interface reads two curves per vertex
+    (Turquin's GGX `E_ms` and its `ReflFront` filter) where the GLSL leaf read
+    one table and one rational fit. The first cut was +2.4% / +4.3%:
+    `Emiss_eval`'s linear scan over 16 cosines and `interpolate_emiss`
+    recomputing its rows per call cost more than the reads themselves, and a
+    refracting leaf read `ReflFront` for a selection albedo BSDL sets to 1.
+    `scripts/bench_ab.sh -n 7`, min / mean seconds: `cornellbox` 8.470 / 10.289
+    → 8.568 / 10.658 (+1.2% / +3.6%), `materialx_basic` 2.132 / 2.336 → 2.147 /
+    2.433 (+0.7% / +4.2%), `materialx_surfaces` 4.753 / 5.120 → 4.896 / 5.268
+    (+3.0% / +2.9%). The machine was loaded (a download ran beside it), and
+    `cornellbox`, whose instructions did not move, sets the noise floor: the
+    MaterialX scenes are inside it.
   - **The BSDL oracle.** `scripts/bsdl_oracle.py` bakes the tables as above,
     compiles `scripts/bsdl_oracle/probe.cpp` against the pinned `libbsdl` and
     Imath (no OSL runtime: each lobe is built as testrender's `BSDL_WRAP`
