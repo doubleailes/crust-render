@@ -67,11 +67,6 @@ impl Case<'_> {
         self.leaf() == leaf
     }
 
-    /// A microfacet leaf whose scatter mode refracts.
-    fn refracts(&self) -> bool {
-        (self.is("dielectric") || self.is("schlick")) && self.input("mode") != Some("R")
-    }
-
     fn back(&self) -> bool {
         self.input("back") == Some("1")
     }
@@ -371,12 +366,6 @@ const DEVIATIONS: &[Deviation] = &[
         gap: "a thin film colours crust's dielectric and conductor (MaterialX's GLSL Airy film); BSDL ignores it",
         applies: |c| c.has_film(),
         bound: 0.611,
-    },
-    Deviation {
-        name: "refracting-selection",
-        gap: "a refracting leaf is selected by refl_tint·E_R + refr_tint·(1 − E_R), where BSDL's albedo_impl is 1",
-        applies: |c| c.refracts(),
-        bound: 0.83,
     },
     Deviation {
         name: "conductor-selection",

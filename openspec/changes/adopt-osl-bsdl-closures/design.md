@@ -95,10 +95,16 @@ so each one can be diffed against its source. Specific points:
   dielectric or Schlick. Refracting lobes are renormalised by
   `1 / max(0.01, 1 − E_ms)` from `DielectricBothFront` / `BothBack`, chosen by
   face.
-- **Sheen.** `conty_kulla` uses BSDL's `ContyKullaSheen` table. `zeltner` uses
-  BSDL's `ZeltnerBurleySheen`, which uses the same LTC fit as crust's current
-  table (`ltc_sheen_table.rs`). If the two match bit for bit, crust keeps one
-  table; if not, BSDL's replaces it (open question 1).
+- **Sheen.** `mtx::SheenLobe` reads neither baked sheen table. In
+  `conty_kulla` mode its albedo is MaterialX's rational fit
+  (`ContyKullaSheenMTX`) at roughness floored at 0.06, with the non-legacy
+  visibility term. In `zeltner` mode it is the LTC table's `R`, read at
+  `max(√roughness, 0.02)`; that table (`bsdf_zeltnersheen_param.h`) is crust's
+  `ltc_sheen_table.rs` value for value, so crust keeps one table (open
+  question 1). The √ moves the MaterialX sheen off the native fuzz's index:
+  the user chose BSDL's, and the spec's "Both Zeltner sheens agree" scenario
+  now compares at `max(√r, 0.02)`. A sheen's filter is
+  `1 − min(E · max(color), 1)`, and a back face is not shaded.
 - **Diffuse.** BSDL's Oren–Nayar lobe contains the EON energy compensation
   behind its `energy_compensation` flag, and Burley is BSDL's.
 - **Where `mx.rs` remains.** It keeps the Airy thin film (BSDL's `mtx::`
@@ -118,8 +124,9 @@ gives up the oracle's point.
 - It fetches OSL at the pinned commit instead of reading Typhoon's copy.
 - It runs `genluts`.
 - It converts every table the ported leaves use, not only `ReflFront`: `MTX/`
-  dielectric reflfront, bothfront and bothback, contysheen and zeltnersheen,
-  and `SPI/` microfacet_tools.
+  dielectric reflfront, bothfront and bothback, and `SPI/` microfacet_tools
+  (GGX). The two sheen tables `genluts` also bakes are not converted: no
+  `mtx::` lobe reads them.
 
 The first gate in the task list is that the regenerated `ReflFront` equals
 today's `bsdl_tables.rs`. If the files differ, the diff is explained before
@@ -169,7 +176,22 @@ uses `1 − E_ms` times the Fresnel average from its own albedo grid; it is used
 for selection only. Because selection and pdf come from the same `select`, the
 NEE ↔ bounce MIS pair does not change shape.
 
-### 7. No environment switch
+### 7. BSDL's default build, energy gain included
+
+BSDL bakes `DielectricBothFront` / `BothBack` by averaging its *sampler's*
+weights, and its default configuration (`use_bvn_refraction = true`) samples
+refraction with bounded VNDF, which skips micro-normals that cannot reflect
+but could refract. The renormalisation therefore conserves energy for BSDL's
+own estimator, not for the lobe's value. Integrated exactly (400² grid), the
+BSDL value of a clear IOR-1.5 `RT` dielectric is 1.005 at roughness 0.3, 1.04
+at 0.5, 1.16 at 0.7 and 1.75 at 1, head on; with BVN off it is 1 within 0.3%
+everywhere (the reflection-only tables are identical either way). crust's
+VNDF sampler converges to the value, so it inherits the gain. Asked, the
+user chose to match default BSDL: crust's tables and the oracle's probe are
+built with BSDL's defaults, the gain is recorded as a known gap, and the
+spec's "rough clear dielectric" scenario pins BSDL's albedo instead of 1.
+
+### 8. No environment switch
 
 CLAUDE.md reserves `CRUST_*` switches for A/B-ing an optimisation against the
 behaviour it replaced. This change alters what the image *should* be, so the
@@ -220,9 +242,9 @@ Rollback means reverting the change. No scene format or CLI flag changes.
 
 ## Open Questions
 
-1. Is BSDL's `ZeltnerBurleySheen` table the same data as crust's Disney table?
-   The answer only decides whether one table file or two ship. The behaviour
-   follows BSDL either way.
-2. What tolerance does the oracle use? `adobe_oracle`'s 2e-3 is the starting
-   point. Table-interpolated values in f32 may need a looser bound per leaf,
-   set from the first measured worst case and recorded with it.
+1. *Answered.* BSDL's LTC parameter table (the one its zeltner lobe reads) is
+   crust's Disney table, all 3072 values; one table ships. `genluts`'s
+   `ZeltnerBurleySheen` energy table is unused by the lobe.
+2. *Answered.* 2e-3 holds with room to spare: every case outside the named
+   deviations matches to 0.00000 (four decimals), since crust transcribes
+   BSDL's arithmetic and reads the same tables.

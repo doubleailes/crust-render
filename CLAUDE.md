@@ -67,6 +67,8 @@ cargo test -p crust-mtlx --test osl_oracle          # MaterialX nodes vs Materia
 scripts/osl_oracle.py                               # regenerate those values (needs materialx + exact-math OSL)
 cargo test -p crust-core --test adobe_oracle        # native OpenPBR vs Adobe's openpbr-bsdf, gap by gap
 scripts/adobe_oracle.py                             # regenerate those values (needs a C++17 compiler + network)
+cargo test -p crust-core --test bsdl_oracle         # MaterialX BSDF leaves vs BSDL (OSL testrender's lobes)
+scripts/bsdl_oracle.py                              # regenerate those values (needs cmake, a C++17 compiler + network)
 cargo test -p crust-core --test geomutil_oracle     # implicit shapes vs OpenUSD's GeomUtil meshes, point for point
 scripts/geomutil_oracle.py                          # regenerate them (needs a C++17 compiler + conda.anaconda.org)
 

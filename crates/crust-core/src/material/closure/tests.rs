@@ -1581,3 +1581,37 @@ fn a_zeltner_leaf_samples_with_the_density_it_reports() {
         }
     }
 }
+
+/// The materials spec's "A thin film still interferes": BSDL's lobes ignore
+/// `thinfilm_*`, so the Airy film is MaterialX's GLSL on top of BSDL's
+/// dielectric — its reflection is coloured, where the bare one is grey.
+#[test]
+fn a_thin_film_still_interferes() {
+    let film = |thickness: &str| {
+        doc(&format!(
+            r#"<dielectric_bsdf name="x" type="BSDF">
+                 <input name="roughness" type="vector2" value="0.05, 0.05" />
+                 <input name="thinfilm_thickness" type="float" value="{thickness}" />
+                 <input name="thinfilm_ior" type="float" value="1.3" />
+               </dielectric_bsdf>"#
+        ))
+    };
+    let theta = 0.5f32;
+    let (ray, rec) = (arriving(theta), hit(true));
+    // The mirror direction, where the lobe peaks.
+    let wi = Vec3A::new(-theta.sin(), 0.0, theta.cos());
+    let value = |t: &str| {
+        resolved(&film(t), "x", theta, true)
+            .eval(&ray, &rec, wi)
+            .expect("evaluates")
+            .0
+    };
+    let bare = value("0");
+    let coloured = value("500");
+    assert!(
+        (bare.x - bare.y).abs() < 1e-6 && (bare.y - bare.z).abs() < 1e-6,
+        "{bare}"
+    );
+    let spread = coloured.max_element() - coloured.min_element();
+    assert!(spread > 0.1 * coloured.max_element(), "{coloured}");
+}

@@ -1493,7 +1493,6 @@ fn interface_energy(
     refr_tint: Vec3A,
 ) -> (f32, f32, Vec3A, Vec3A) {
     let fi = bsdl::table_index(eta);
-    let refl = || TabulatedEnergyCurve::new(bsdl::REFL_FRONT, r, fi).emiss_eval(cx.nv);
     if refr_tint.max_element() > 0.0 {
         let both = if cx.back() {
             bsdl::BOTH_BACK
@@ -1507,17 +1506,14 @@ fn interface_energy(
         } else {
             1.0 / (1.0 - TabulatedEnergyCurve::new(both, r, fi).emiss_eval(cx.nv)).max(0.01)
         };
-        // BSDL's `albedo_impl` is 1 for a refracting lobe; split by the
-        // reflected share, so a tint steers the selection.
-        let e_r = 1.0 - refl();
-        let albedo = refl_tint * e_r + refr_tint * (1.0 - e_r);
-        (0.0, renorm, Vec3A::ZERO, albedo)
+        // BSDL's `albedo_impl` for a refracting lobe: 1, whatever its tints.
+        (0.0, renorm, Vec3A::ZERO, Vec3A::ONE)
     } else {
         let e_ms = TabulatedEnergyCurve::new(bsdl::GGX, r, 0.0).emiss_eval(cx.nv);
         // BSDL computes the filter only for a lobe that reflects something:
         // a black one is opaque.
         let filter = if refl_tint.max_element() > 0.0 {
-            refl()
+            TabulatedEnergyCurve::new(bsdl::REFL_FRONT, r, fi).emiss_eval(cx.nv)
         } else {
             0.0
         };
@@ -1562,12 +1558,7 @@ fn prepare_dielectric(
         model: FresnelModel::Dielectric { ior: eta },
         thin_film: cx.film(thin_film),
     };
-    let refr = if mode.transmits() {
-        refr_tint
-    } else {
-        Vec3A::ZERO
-    };
-    let (e_ms, renorm, filter, albedo) = interface_energy(cx, r, eta, refl_tint, refr);
+    let (e_ms, renorm, filter, albedo) = interface_energy(cx, r, eta, refl_tint, refr_tint);
     (
         Lobe::Specular {
             fresnel,

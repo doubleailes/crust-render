@@ -1,5 +1,29 @@
 ## MODIFIED Requirements
 
+### Requirement: Shared microfacet BRDF helpers
+
+`OpenPBR` lobes SHALL share GGX helpers from `material/brdf.rs`: anisotropic
+visible-normal (VNDF) GGX sampling and its PDF, Schlick/F82 Fresnel, EON
+(energy-preserving Oren-Nayar) diffuse, Zeltner LTC sheen, thin-film, and Cauchy
+dispersion. The Zeltner sheen SHALL be the one
+implementation used by both `OpenPBR`'s fuzz and MaterialX's `zeltner` sheen.
+MaterialX's `zeltner` sheen SHALL read it at BSDL's sheen roughness,
+`max(√roughness, 0.02)`; `OpenPBR`'s fuzz reads it at `fuzz_roughness`.
+
+#### Scenario: Microfacet lobe samples a direction
+
+- **WHEN** a GGX-based lobe of `OpenPBR` scatters a ray
+- **THEN** the outgoing direction is drawn via VNDF sampling and weighted by
+  Fresnel and geometry terms
+
+#### Scenario: Both Zeltner sheens agree
+
+- **WHEN** an `OpenPBR` with `fuzz_weight = 1`, `fuzz_color = (1, 1, 1)` and
+  `fuzz_roughness = max(√r, 0.02)` and a MaterialX `sheen_bsdf` in `zeltner`
+  mode with `weight = 1`, `color = (1, 1, 1)` and `roughness = r` are
+  evaluated for the same view and light directions
+- **THEN** their sheen contributions are equal
+
 ### Requirement: MaterialX closure-tree semantics
 
 A MaterialX material SHALL be evaluated as its closure tree with the combinator
@@ -106,9 +130,13 @@ A thin-walled surface SHALL transmit without a medium. A `dielectric_bsdf` in
 `T` mode SHALL weight its transmission by its own `(1 − F)`, as BSDL does: it
 is the reflect-and-refract lobe with its reflection tinted black, so that a
 reflection layer over it attenuates only by the layer's opacity and no surface
-returns more than it receives. A refracting `dielectric_bsdf` SHALL compensate
-its multiple scattering as BSDL does, so that a clear, untinted one in `RT`
-mode loses no energy at any roughness.
+returns more than it receives. A refracting `dielectric_bsdf` SHALL renormalise its single scattering as
+BSDL does, by `1 / max(0.01, 1 − E_ms)` with `E_ms` from BSDL's
+reflect-and-refract tables of its face, baked in BSDL's default configuration.
+Those tables measure BSDL's bounded-VNDF sampler, which skips refracting
+micro-normals, so under crust's unbiased sampling a rough refracting leaf
+returns more than it receives: this is a stated deviation from energy
+conservation, kept to match the reference.
 
 #### Scenario: A glass is bounded in a white furnace
 
@@ -116,12 +144,14 @@ mode loses no energy at any roughness.
   uniform emitter of radiance 1
 - **THEN** no pixel, head-on or at grazing incidence, exceeds 1
 
-#### Scenario: A rough clear dielectric conserves energy
+#### Scenario: A rough clear dielectric matches BSDL's albedo
 
 - **WHEN** a lone `dielectric_bsdf` in `RT` mode, IOR 1.5, untinted, is
-  integrated over all directions at roughness 0.1, 0.5 and 1 and at several ωo
-- **THEN** its reflected plus transmitted albedo is 1 within the oracle's
-  tolerance, where the uncompensated lobe loses energy as roughness grows
+  integrated over all directions at roughness 0.2, 0.5 and 1 and at several ωo,
+  on both faces
+- **THEN** its reflected plus transmitted albedo equals BSDL's within the
+  oracle's tolerance, which is 1 when smooth and exceeds 1 as roughness grows
+  (about 1.04 at roughness 0.5 and 1.75 at roughness 1, head on)
 
 #### Scenario: A standard_surface glass is transparent
 
