@@ -65,7 +65,7 @@
 
 ## 4. Integration checks
 
-- [ ] 4.1 Run `cargo fmt --all -- --check`, `cargo clippy --workspace
+- [x] 4.1 Run `cargo fmt --all -- --check`, `cargo clippy --workspace
       --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast` and
       `cargo deny --locked check`. Done when all four pass.
 - [x] 4.2 Run `scripts/check_images.sh check <dir>` against the 1.1 goldens.
