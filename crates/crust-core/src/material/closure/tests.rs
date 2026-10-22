@@ -311,57 +311,294 @@ fn a_coat_dims_what_lies_beneath_it_at_grazing_angles() {
     );
 }
 
+/// The weight of the first leaf of `category` in `root`'s closure, or 0 when
+/// the walk dropped it.
+fn leaf_weight(body: &str, root: &str, category: &str, theta: f32) -> Vec3A {
+    resolved(body, root, theta, true)
+        .leaves()
+        .iter()
+        .find(|l| l.category == category)
+        .map_or(Vec3A::ZERO, |l| l.weight)
+}
+
 #[test]
-fn an_opaque_top_hides_the_base_entirely() {
-    // MaterialX: a conductor's throughput is 0 whatever its weight.
+fn a_weighted_opaque_top_covers_only_its_weight() {
+    // testrender: an opaque leaf's opacity is its weight, so a diffuse at
+    // 0.3 over a conductor leaves 0.7 of the conductor, at every angle.
     let body = doc(r#"
-      <conductor_bsdf name="c" type="BSDF"><input name="weight" type="float" value="0.5" /></conductor_bsdf>
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF"><input name="weight" type="float" value="0.3" /></oren_nayar_diffuse_bsdf>
+      <conductor_bsdf name="c" type="BSDF" />
+      <layer name="x" type="BSDF">
+        <input name="top" type="BSDF" nodename="d" />
+        <input name="base" type="BSDF" nodename="c" />
+      </layer>"#);
+    for theta in [0.0f32, 0.7, 1.4] {
+        let w = leaf_weight(&body, "x", "conductor_bsdf", theta);
+        assert!(
+            (w - Vec3A::splat(0.7)).abs().max_element() < 1e-6,
+            "θ {theta}: {w}"
+        );
+    }
+}
+
+#[test]
+fn a_multiplied_top_scales_its_opacity() {
+    // `multiply` scales the opacity as it scales the response: a quarter of
+    // an opaque conductor lets three quarters of the base through.
+    let body = doc(r#"
+      <conductor_bsdf name="c" type="BSDF" />
+      <multiply name="q" type="BSDF">
+        <input name="in1" type="BSDF" nodename="c" />
+        <input name="in2" type="float" value="0.25" />
+      </multiply>
       <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
       <layer name="x" type="BSDF">
-        <input name="top" type="BSDF" nodename="c" />
+        <input name="top" type="BSDF" nodename="q" />
+        <input name="base" type="BSDF" nodename="d" />
+      </layer>"#);
+    let c = leaf_weight(&body, "x", "conductor_bsdf", 0.3);
+    let d = leaf_weight(&body, "x", "oren_nayar_diffuse_bsdf", 0.3);
+    assert!((c - Vec3A::splat(0.25)).abs().max_element() < 1e-6, "{c}");
+    assert!((d - Vec3A::splat(0.75)).abs().max_element() < 1e-6, "{d}");
+}
+
+#[test]
+fn a_refracting_top_is_opaque() {
+    // A dielectric that refracts carries the light it transmits itself, so
+    // as a top it hides its base entirely, whatever its Fresnel.
+    let body = doc(r#"
+      <dielectric_bsdf name="g" type="BSDF">
+        <input name="scatter_mode" type="string" value="RT" />
+      </dielectric_bsdf>
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+      <layer name="x" type="BSDF">
+        <input name="top" type="BSDF" nodename="g" />
         <input name="base" type="BSDF" nodename="d" />
       </layer>"#);
     let c = resolved(&body, "x", 0.3, true);
     assert_eq!(
-        c.leaves().len(),
-        1,
-        "the base is invisible under an opaque top"
+        c.leaves().iter().map(|l| l.category).collect::<Vec<_>>(),
+        vec!["dielectric_bsdf"],
+        "the base is invisible under a refracting top"
     );
-    assert_eq!(c.leaves()[0].category, "conductor_bsdf");
+}
+
+/// Two reflection-only dielectrics, `a` over `b`, as the top of a layer over
+/// a diffuse: testrender sums the nested layer's opacities.
+const NESTED: &str = r#"
+  <dielectric_bsdf name="a" type="BSDF">
+    <input name="ior" type="float" value="1.8" />
+    <input name="roughness" type="vector2" value="0.2, 0.2" />
+  </dielectric_bsdf>
+  <dielectric_bsdf name="b" type="BSDF">
+    <input name="ior" type="float" value="2.4" />
+    <input name="roughness" type="vector2" value="0.5, 0.5" />
+  </dielectric_bsdf>
+  <layer name="ab" type="BSDF">
+    <input name="top" type="BSDF" nodename="a" />
+    <input name="base" type="BSDF" nodename="b" />
+  </layer>
+  <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+  <layer name="x" type="BSDF">
+    <input name="top" type="BSDF" nodename="ab" />
+    <input name="base" type="BSDF" nodename="d" />
+  </layer>
+  <layer name="xa" type="BSDF">
+    <input name="top" type="BSDF" nodename="a" />
+    <input name="base" type="BSDF" nodename="d" />
+  </layer>
+  <layer name="xb" type="BSDF">
+    <input name="top" type="BSDF" nodename="b" />
+    <input name="base" type="BSDF" nodename="d" />
+  </layer>"#;
+
+#[test]
+fn a_layer_nested_in_a_top_sums_its_opacities() {
+    let body = doc(NESTED);
+    for theta in [0.0f32, 1.0, 1.45] {
+        let d = "oren_nayar_diffuse_bsdf";
+        // Each dielectric alone over the diffuse leaves it `1 − E`.
+        let e_a = Vec3A::ONE - leaf_weight(&body, "xa", d, theta);
+        let e_b = Vec3A::ONE - leaf_weight(&body, "xb", d, theta);
+        let base = leaf_weight(&body, "x", d, theta);
+        let sum = Vec3A::ONE - (e_a + e_b).clamp(Vec3A::ZERO, Vec3A::ONE);
+        assert!(
+            (base - sum).abs().max_element() < 1e-6,
+            "θ {theta}: {base} vs {sum}"
+        );
+        let product = (Vec3A::ONE - e_a) * (Vec3A::ONE - e_b);
+        assert!(
+            (base - product).abs().max_element() > 1e-4,
+            "θ {theta}: the product rule"
+        );
+    }
+}
+
+/// testrender's `evaluate_layer_opacity` (OSL `src/testrender/shading.cpp`),
+/// transcribed onto crust's closure arena: a walk with an explicit stack in
+/// which a `multiply` scales the branch weight, an `add` and a nested `layer`
+/// push their second branch with the branch's weight, and a leaf adds its
+/// weight times `1 − filter_o` (0 for an opaque leaf, so its weight alone).
+/// crust's `mix` is the `add` of two `multiply`s that MaterialX's genosl
+/// writes it as. The filters are the ones crust's leaves
+/// report, so this pins the combinators, not the leaves.
+fn testrender_opacity(
+    cl: &Closures,
+    slots: &[Val],
+    id: NodeId,
+    filter: &dyn Fn(NodeId) -> Vec3A,
+) -> Vec3A {
+    let mut stack: Vec<(NodeId, Vec3A)> = vec![(id, Vec3A::ONE)];
+    let mut accumulated = Vec3A::ZERO;
+    while let Some((mut node, mut branch)) = stack.pop() {
+        loop {
+            match &cl.nodes[node as usize] {
+                Closure::Multiply { input, weight } => {
+                    branch *= sanitize(slots[*weight as usize].rgb()).min(Vec3A::ONE);
+                    node = *input;
+                }
+                Closure::Add { a, b } => {
+                    stack.push((*b, branch));
+                    node = *a;
+                }
+                Closure::Mix { fg, bg, mix } => {
+                    let m = slots[*mix as usize].x().clamp(0.0, 1.0);
+                    stack.push((*bg, branch * (1.0 - m)));
+                    branch *= m;
+                    node = *fg;
+                }
+                Closure::Layer { top, base } => {
+                    stack.push((*base, branch));
+                    node = *top;
+                }
+                Closure::Leaf(leaf) => {
+                    let w = slots[leaf.weight as usize].x().max(0.0);
+                    branch *= w * (Vec3A::ONE - filter(node));
+                    accumulated += branch;
+                    break;
+                }
+                Closure::Empty => {
+                    // testrender's null closure: transparent.
+                    break;
+                }
+            }
+        }
+    }
+    accumulated
 }
 
 #[test]
-fn a_multiply_scales_response_but_not_throughput() {
-    let body = doc(r#"
-      <dielectric_bsdf name="g" type="BSDF" />
-      <multiply name="half" type="BSDF">
-        <input name="in1" type="BSDF" nodename="g" />
-        <input name="in2" type="float" value="0.5" />
+fn the_opacity_rule_matches_testrender() {
+    // Fixed trees: every combinator in a top, weights in (0, 1), and tops
+    // whose opacities sum above 1. Each base weight must be
+    // `1 − clamp(O)` with `O` from the transcription above.
+    let leaves = r#"
+      <dielectric_bsdf name="g" type="BSDF">
+        <input name="weight" type="float" value="0.8" />
+        <input name="roughness" type="vector2" value="0.3, 0.3" />
+      </dielectric_bsdf>
+      <dielectric_bsdf name="h" type="BSDF">
+        <input name="ior" type="float" value="2.2" />
+        <input name="roughness" type="vector2" value="0.1, 0.1" />
+      </dielectric_bsdf>
+      <dielectric_bsdf name="t" type="BSDF">
+        <input name="scatter_mode" type="string" value="RT" />
+        <input name="weight" type="float" value="0.4" />
+      </dielectric_bsdf>
+      <sheen_bsdf name="s" type="BSDF">
+        <input name="weight" type="float" value="0.6" />
+        <input name="color" type="color3" value="0.9, 0.5, 0.2" />
+      </sheen_bsdf>
+      <conductor_bsdf name="c" type="BSDF"><input name="weight" type="float" value="0.35" /></conductor_bsdf>
+      <oren_nayar_diffuse_bsdf name="o" type="BSDF"><input name="weight" type="float" value="0.45" /></oren_nayar_diffuse_bsdf>
+      <multiply name="mul" type="BSDF">
+        <input name="in1" type="BSDF" nodename="h" />
+        <input name="in2" type="color3" value="0.5, 0.25, 1" />
       </multiply>
-      <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
-      <layer name="x" type="BSDF">
-        <input name="top" type="BSDF" nodename="half" />
-        <input name="base" type="BSDF" nodename="d" />
+      <mix name="mix" type="BSDF">
+        <input name="fg" type="BSDF" nodename="c" />
+        <input name="bg" type="BSDF" nodename="g" />
+        <input name="mix" type="float" value="0.3" />
+      </mix>
+      <add name="add" type="BSDF">
+        <input name="in1" type="BSDF" nodename="s" />
+        <input name="in2" type="BSDF" nodename="o" />
+      </add>
+      <add name="over" type="BSDF">
+        <input name="in1" type="BSDF" nodename="g" />
+        <input name="in2" type="BSDF" nodename="h" />
+      </add>
+      <layer name="nest" type="BSDF">
+        <input name="top" type="BSDF" nodename="s" />
+        <input name="base" type="BSDF" nodename="mix" />
       </layer>
-      <layer name="y" type="BSDF">
-        <input name="top" type="BSDF" nodename="g" />
-        <input name="base" type="BSDF" nodename="d" />
-      </layer>"#);
-    let weight = |root: &str, cat: &str| {
-        resolved(&body, root, 0.3, true)
-            .leaves()
-            .iter()
-            .find(|l| l.category == cat)
-            .unwrap()
-            .weight
-            .x
-    };
-    assert!((weight("x", "dielectric_bsdf") - 0.5).abs() < 1e-6);
-    let (dx, dy) = (
-        weight("x", "oren_nayar_diffuse_bsdf"),
-        weight("y", "oren_nayar_diffuse_bsdf"),
-    );
-    assert!((dx - dy).abs() < 1e-6, "{dx} vs {dy}");
+      <add name="all" type="BSDF">
+        <input name="in1" type="BSDF" nodename="nest" />
+        <input name="in2" type="BSDF" nodename="mul" />
+      </add>
+      <add name="co" type="BSDF">
+        <input name="in1" type="BSDF" nodename="c" />
+        <input name="in2" type="BSDF" nodename="o" />
+      </add>
+      <add name="sum" type="BSDF">
+        <input name="in1" type="BSDF" nodename="co" />
+        <input name="in2" type="BSDF" nodename="t" />
+      </add>
+      <add name="refr" type="BSDF">
+        <input name="in1" type="BSDF" nodename="t" />
+        <input name="in2" type="BSDF" nodename="s" />
+      </add>
+      <burley_diffuse_bsdf name="base" type="BSDF" />"#;
+    let tops = [
+        "g", "t", "s", "c", "mul", "mix", "add", "over", "nest", "all", "refr", "sum",
+    ];
+    let mut checked = 0;
+    for top in tops {
+        let body = doc(&format!(
+            r#"{leaves}<layer name="x" type="BSDF">
+                 <input name="top" type="BSDF" nodename="{top}" />
+                 <input name="base" type="BSDF" nodename="base" />
+               </layer>"#
+        ));
+        let (cl, slots) = tree(&body, "x");
+        let Closure::Layer { top: top_id, .. } = cl.nodes[cl.root.expect("root") as usize] else {
+            panic!("x is a layer");
+        };
+        for theta in [0.2f32, 1.1] {
+            for front in [true, false] {
+                let rec = hit(front);
+                let ray = arriving(theta);
+                let walk = Walk {
+                    slots: &slots,
+                    rec: &rec,
+                    v_world: -ray.direction().normalize(),
+                    thin_walled: false,
+                    luma: utils::Luma::REC709,
+                };
+                // Each leaf's filter as crust prepares it at this vertex.
+                let filter = |id: NodeId| match &cl.nodes[id as usize] {
+                    Closure::Leaf(leaf) => prepare(leaf, DEFAULT_INTERFACE, &walk).1,
+                    _ => unreachable!("filters are asked of leaves"),
+                };
+                let o = testrender_opacity(&cl, &slots, top_id, &filter);
+                let want = Vec3A::ONE - o.clamp(Vec3A::ZERO, Vec3A::ONE);
+                let c = ResolvedClosure::resolve(&cl, &slots, &ray, &rec, utils::Luma::REC709);
+                let got = c
+                    .leaves()
+                    .iter()
+                    .find(|l| l.category == "burley_diffuse_bsdf")
+                    .map_or(Vec3A::ZERO, |l| l.weight);
+                assert!(
+                    (got - want).abs().max_element() < 1e-6,
+                    "top {top} θ {theta} front {front}: base {got} vs testrender {want} (O = {o})"
+                );
+                if o.max_element() > 1.0 {
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "no tree's opacity summed above 1");
 }
 
 /// The DPEL Teapot's dust and stain layers, and the Lion's: an opaque diffuse
@@ -708,13 +945,14 @@ fn the_bsdl_table_tracks_the_leaf_it_stands_for() {
     assert!(worst.0.abs() < 0.025, "table vs leaf: {worst:?}");
 }
 
-/// The same measurement for the throughputs that come from MaterialX's
-/// analytic fits rather than a table — generalized Schlick
-/// (`mx_ggx_dir_albedo` × compensation) and sheen
-/// (`mx_imageworks_sheen_dir_albedo`). The `E` a layer uses is read back as
-/// `1 − weight` of a white diffuse base under the leaf.
+/// The same measurement for the filters BSDL takes from something other than
+/// the leaf's own table — generalized Schlick (the *dielectric* table at the
+/// IOR its F0 implies, which BSDL notes is "a bit off" for a Schlick curve)
+/// and a `conty_kulla` sheen (MaterialX's `mx_imageworks_sheen_dir_albedo`
+/// fit). The `E` a layer uses is read back as `1 − weight` of a white diffuse
+/// base under the leaf.
 #[test]
-fn the_materialx_fits_track_the_leaves_they_stand_for() {
+fn the_layering_filters_track_the_leaves_they_stand_for() {
     let leaves = [
         (
             "schlick",
@@ -722,7 +960,8 @@ fn the_materialx_fits_track_the_leaves_they_stand_for() {
                  <input name="color0" type="color3" value="0.04, 0.04, 0.04" />
                  <input name="roughness" type="vector2" value="{a}, {a}" />
                </generalized_schlick_bsdf>"#,
-            0.015f32,
+            // Worst near-smooth and grazing: +0.033 (r 0.1, cos 0.1).
+            0.035f32,
         ),
         (
             "sheen",
@@ -1256,7 +1495,9 @@ fn zeltner_sheen(r: f32) -> String {
 
 /// The materials spec's "Both Zeltner sheens agree": a MaterialX `zeltner`
 /// sheen and the native `OpenPBR`'s fuzz are one implementation, so a white
-/// one of each at the same roughness shades alike toward every direction.
+/// one of each shades alike toward every direction — the MaterialX leaf at
+/// roughness `r` reading the table at BSDL's `max(√r, 0.02)`, the fuzz at the
+/// roughness it is given.
 /// (The two build different tangent frames; the LTC sheen is isotropic
 /// about the normal, so that cannot show.)
 #[test]
@@ -1272,7 +1513,7 @@ fn both_zeltner_sheens_agree() {
             base_weight: 0.0,
             specular_weight: 0.0,
             fuzz_weight: 1.0,
-            fuzz_roughness: r,
+            fuzz_roughness: r.sqrt().max(0.02),
             ..crate::OpenPBR::default()
         };
         for cos in [0.1f32, 0.5, 1.0] {

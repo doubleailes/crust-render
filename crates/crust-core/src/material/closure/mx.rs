@@ -1,13 +1,14 @@
-//! MaterialX's reference BSDF math, ported from its GLSL library
-//! (`libraries/pbrlib/genglsl/lib/mx_microfacet*.glsl`, MaterialX 1.39,
-//! Apache-2.0 — see `THIRD-PARTY.md`).
+//! MaterialX's GLSL BSDF math that BSDL's lobes do not cover, ported from
+//! its GLSL library (`libraries/pbrlib/genglsl/lib/mx_microfacet*.glsl`,
+//! MaterialX 1.39, Apache-2.0 — see `THIRD-PARTY.md`).
 //!
-//! The closure evaluator uses these where MaterialX's own semantics are the
-//! reference: the Fresnel models a leaf names (dielectric, conductor,
-//! generalized Schlick with F82, Airy thin film), the GGX directional-albedo
-//! fit and Turquin's multiple-scattering compensation built on it, and the
-//! diffuse and sheen lobes with their albedo fits. Function names follow the
-//! GLSL (`mx_` dropped) so each can be checked against its source line by line.
+//! The closure evaluator's leaves are BSDL's (`bsdl`), and BSDL's MaterialX
+//! lobes declare a thin film without applying it and have no F82 tint. Both
+//! stay MaterialX's own: the Airy thin-film Fresnel (with the polarised
+//! dielectric and conductor Fresnel and the phase it is built on) and the
+//! F82-tinted generalized Schlick. A [`Fresnel`] without a film evaluates its
+//! model with BSDL's formulas. Function names follow the GLSL (`mx_`
+//! dropped) so each can be checked against its source line by line.
 //!
 //! The fits' coefficients are copied digit for digit from the GLSL, beyond
 //! `f32` precision in places, so they can be diffed against the source rather
@@ -17,14 +18,10 @@
 use glam::Vec3A;
 use std::f32::consts::PI;
 
-const FLOAT_EPS: f32 = 1e-8;
+use super::bsdl;
 
 fn sq(x: f32) -> f32 {
     x * x
-}
-
-fn pow5(x: f32) -> f32 {
-    sq(sq(x)) * x
 }
 
 fn pow6(x: f32) -> f32 {
@@ -32,59 +29,9 @@ fn pow6(x: f32) -> f32 {
     sq(x2) * x2
 }
 
-// ---------------------------------------------------------------------------
-// GGX albedo and energy compensation
-// ---------------------------------------------------------------------------
-
-/// `mx_ggx_dir_albedo_analytic`: rational quadratic fit to the GGX
-/// directional albedo, split into its `F0` and `F90` terms.
-pub fn ggx_dir_albedo(n_dot_v: f32, alpha: f32, f0: Vec3A, f90: Vec3A) -> Vec3A {
-    let x = n_dot_v;
-    let y = alpha;
-    let x2 = sq(x);
-    let y2 = sq(y);
-    let c = |k: [f32; 9]| {
-        k[0] + k[1] * x
-            + k[2] * y
-            + k[3] * x * y
-            + k[4] * x2
-            + k[5] * y2
-            + k[6] * x2 * y
-            + k[7] * x * y2
-            + k[8] * x2 * y2
-    };
-    let r0 = c([
-        0.1003, -0.6303, 9.748, -2.038, 29.34, -8.245, -26.44, 19.99, -5.448,
-    ]);
-    let r1 = c([
-        0.9345, -2.323, 2.229, -3.748, 1.424, -0.7684, 1.436, 0.2913, 0.6286,
-    ]);
-    let r2 = c([
-        1.0, -1.765, 8.263, 11.53, 28.96, -7.507, -36.11, 15.86, 33.37,
-    ]);
-    let r3 = c([
-        1.0, 0.2281, 15.94, -55.83, 13.08, 41.26, 54.9, 300.2, -285.1,
-    ]);
-    let a = (r0 / r2).clamp(0.0, 1.0);
-    let b = (r1 / r3).clamp(0.0, 1.0);
-    f0 * a + f90 * b
-}
-
-/// `mx_ggx_energy_compensation`: Turquin's multiple-scattering scale for a
-/// single-scatter Fresnel `fss`.
-pub fn ggx_energy_compensation(n_dot_v: f32, alpha: f32, fss: Vec3A) -> Vec3A {
-    let ess = ggx_dir_albedo(n_dot_v, alpha, Vec3A::ONE, Vec3A::ONE).x;
-    Vec3A::ONE + fss * (1.0 - ess) / ess.max(FLOAT_EPS)
-}
-
 /// `mx_average_alpha`.
 pub fn average_alpha(ax: f32, ay: f32) -> f32 {
     (ax * ay).sqrt()
-}
-
-/// `mx_ior_to_f0`.
-pub fn ior_to_f0(ior: f32) -> f32 {
-    sq((ior - 1.0) / (ior + 1.0))
 }
 
 /// `mx_f0_to_ior`, per channel.
@@ -96,17 +43,6 @@ pub fn f0_to_ior(f0: Vec3A) -> Vec3A {
 // ---------------------------------------------------------------------------
 // Fresnel
 // ---------------------------------------------------------------------------
-
-/// `mx_fresnel_dielectric` (Lagarde), `1` under total internal reflection.
-pub fn fresnel_dielectric(cos_theta: f32, ior: f32) -> f32 {
-    let c = cos_theta;
-    let g2 = ior * ior + c * c - 1.0;
-    if g2 < 0.0 {
-        return 1.0;
-    }
-    let g = g2.sqrt();
-    0.5 * sq((g - c) / (g + c)) * (1.0 + sq(((g + c) * c - 1.0) / ((g - c) * c + 1.0)))
-}
 
 /// `mx_fresnel_dielectric_polarized`: `(Rp, Rs)`.
 fn fresnel_dielectric_polarized(cos_theta: f32, ior: f32) -> (f32, f32) {
@@ -138,12 +74,6 @@ fn fresnel_conductor_polarized(cos_theta: f32, n: Vec3A, k: Vec3A) -> (Vec3A, Ve
     let t4 = t2 * sin2;
     let rp = rs * (t3 - t4) / (t3 + t4);
     (rp, rs)
-}
-
-/// `mx_fresnel_conductor`.
-pub fn fresnel_conductor(cos_theta: f32, n: Vec3A, k: Vec3A) -> Vec3A {
-    let (rp, rs) = fresnel_conductor_polarized(cos_theta, n, k);
-    0.5 * (rp + rs)
 }
 
 /// `mx_fresnel_hoffman_schlick`: generalized Schlick with an F82 tint.
@@ -181,6 +111,9 @@ pub enum FresnelModel {
         f82: Vec3A,
         f90: Vec3A,
         exponent: f32,
+        /// BSDL's `SchlickFresnel::tir_cos`: the cosine below which a back
+        /// face reflects everything (0 on the front).
+        tir_cos: f32,
     },
 }
 
@@ -193,39 +126,31 @@ pub struct Fresnel {
 }
 
 impl Fresnel {
-    /// `mx_compute_fresnel`.
+    /// `mx_compute_fresnel`: the Airy film where there is one, else BSDL's
+    /// `DielectricFresnel`, `ConductorFresnel` or `SchlickFresnel` — the
+    /// last with MaterialX's F82 tint where `f82` is not white.
     pub fn eval(&self, cos_theta: f32) -> Vec3A {
         if self.thin_film.is_some() {
             return self.airy(cos_theta);
         }
         match self.model {
-            FresnelModel::Dielectric { ior } => Vec3A::splat(fresnel_dielectric(cos_theta, ior)),
-            FresnelModel::Conductor { n, k } => fresnel_conductor(cos_theta, n, k),
+            FresnelModel::Dielectric { ior } => {
+                Vec3A::splat(bsdl::dielectric_fresnel(cos_theta, ior))
+            }
+            FresnelModel::Conductor { n, k } => bsdl::conductor_fresnel(cos_theta, n, k),
             FresnelModel::Schlick {
                 f0,
                 f82,
                 f90,
                 exponent,
-            } => fresnel_hoffman_schlick(cos_theta, f0, f82, f90, exponent),
-        }
-    }
-
-    /// `mx_ggx_dir_albedo(NdotV, alpha, FresnelData)`.
-    pub fn dir_albedo(&self, n_dot_v: f32, alpha: f32) -> Vec3A {
-        if self.thin_film.is_some() {
-            let mirror = self.eval(n_dot_v);
-            let f0 = self.airy(1.0);
-            let rough = ggx_dir_albedo(n_dot_v, alpha, f0, Vec3A::ONE);
-            return mirror.lerp(rough, alpha.sqrt());
-        }
-        match self.model {
-            FresnelModel::Dielectric { ior } => {
-                ggx_dir_albedo(n_dot_v, alpha, Vec3A::splat(ior_to_f0(ior)), Vec3A::ONE)
+                tir_cos,
+            } => {
+                if f82 == Vec3A::ONE || cos_theta.clamp(0.0, 1.0) < tir_cos {
+                    bsdl::schlick_fresnel(cos_theta, f0, f90, exponent, tir_cos)
+                } else {
+                    fresnel_hoffman_schlick(cos_theta, f0, f82, f90, exponent)
+                }
             }
-            FresnelModel::Conductor { n, k } => {
-                ggx_dir_albedo(n_dot_v, alpha, fresnel_conductor(1.0, n, k), Vec3A::ONE)
-            }
-            FresnelModel::Schlick { f0, f90, .. } => ggx_dir_albedo(n_dot_v, alpha, f0, f90),
         }
     }
 
@@ -253,6 +178,7 @@ impl Fresnel {
                 f82,
                 f90,
                 exponent,
+                ..
             } = self.model
             else {
                 unreachable!()
@@ -355,148 +281,9 @@ fn eval_sensitivity(opd: f32, shift: Vec3A) -> Vec3A {
     xyz / 1.0685e-7
 }
 
-// ---------------------------------------------------------------------------
-// Diffuse
-// ---------------------------------------------------------------------------
-
-const FUJII_1: f32 = 0.5 - 2.0 / (3.0 * PI);
-const FUJII_2: f32 = 2.0 / 3.0 - 28.0 / (15.0 * PI);
-
-/// `mx_oren_nayar_diffuse`: the qualitative Oren–Nayar factor.
-pub fn oren_nayar(n_dot_v: f32, n_dot_l: f32, l_dot_v: f32, roughness: f32) -> f32 {
-    let s = l_dot_v - n_dot_l * n_dot_v;
-    let stinv = if s > 0.0 {
-        s / n_dot_l.max(n_dot_v)
-    } else {
-        0.0
-    };
-    let sigma2 = sq(roughness);
-    let a = 1.0 - 0.5 * (sigma2 / (sigma2 + 0.33));
-    let b = 0.45 * sigma2 / (sigma2 + 0.09);
-    a + b * stinv
-}
-
-/// `mx_oren_nayar_diffuse_dir_albedo_analytic`.
-pub fn oren_nayar_dir_albedo(n_dot_v: f32, roughness: f32) -> f32 {
-    let x = 1.0 - 0.4297 * roughness - 0.7632 * n_dot_v * roughness + 1.4385 * sq(roughness);
-    let y = 1.0 - 0.6076 * roughness - 0.4993 * n_dot_v * roughness + 2.0315 * sq(roughness);
-    (x / y).clamp(0.0, 1.0)
-}
-
-/// `mx_oren_nayar_fujii_diffuse_dir_albedo`.
-fn fujii_dir_albedo(cos_theta: f32, roughness: f32) -> f32 {
-    let a = 1.0 / (1.0 + FUJII_1 * roughness);
-    let b = roughness * a;
-    let si = (1.0 - sq(cos_theta)).max(0.0).sqrt();
-    let c = cos_theta.max(FLOAT_EPS);
-    let g = si * (cos_theta.clamp(-1.0, 1.0).acos() - si * cos_theta)
-        + 2.0 * ((si / c) * (1.0 - si * si * si) - si) / 3.0;
-    a + b * g / PI
-}
-
-/// `mx_oren_nayar_fujii_diffuse_avg_albedo`.
-fn fujii_avg_albedo(roughness: f32) -> f32 {
-    let a = 1.0 / (1.0 + FUJII_1 * roughness);
-    a * (1.0 + FUJII_2 * roughness)
-}
-
-/// `mx_oren_nayar_compensated_diffuse` (EON), *without* the `1/π` the GLSL
-/// applies at the call site.
-pub fn eon(n_dot_v: f32, n_dot_l: f32, l_dot_v: f32, roughness: f32, color: Vec3A) -> Vec3A {
-    let s = l_dot_v - n_dot_l * n_dot_v;
-    let stinv = if s > 0.0 { s / n_dot_l.max(n_dot_v) } else { s };
-    let a = 1.0 / (1.0 + FUJII_1 * roughness);
-    let single = color * a * (1.0 + roughness * stinv);
-    let ev = fujii_dir_albedo(n_dot_v, roughness);
-    let el = fujii_dir_albedo(n_dot_l, roughness);
-    let avg = fujii_avg_albedo(roughness);
-    let ms_color = color * color * avg / (Vec3A::ONE - color * (1.0 - avg).max(0.0));
-    let multi = ms_color * (1.0 - ev).max(FLOAT_EPS) * (1.0 - el).max(FLOAT_EPS)
-        / (1.0 - avg).max(FLOAT_EPS);
-    single + multi
-}
-
-/// `mx_oren_nayar_compensated_diffuse_dir_albedo`.
-pub fn eon_dir_albedo(cos_theta: f32, roughness: f32, color: Vec3A) -> Vec3A {
-    let e = fujii_dir_albedo(cos_theta, roughness);
-    let avg = fujii_avg_albedo(roughness);
-    let ms_color = color * color * avg / (Vec3A::ONE - color * (1.0 - avg).max(0.0));
-    ms_color.lerp(color, e)
-}
-
-/// `mx_burley_diffuse`.
-pub fn burley(n_dot_v: f32, n_dot_l: f32, l_dot_h: f32, roughness: f32) -> f32 {
-    let f90 = 0.5 + 2.0 * roughness * sq(l_dot_h);
-    let schlick = |c: f32| 1.0 + (f90 - 1.0) * pow5((1.0 - c).clamp(0.0, 1.0));
-    schlick(n_dot_l) * schlick(n_dot_v)
-}
-
-/// `mx_burley_diffuse_dir_albedo` (Stephen Hill's fit).
-pub fn burley_dir_albedo(n_dot_v: f32, roughness: f32) -> f32 {
-    let x = n_dot_v;
-    let fit0 = 0.97619 - 0.488095 * pow5(1.0 - x);
-    let fit1 = 1.55754 + (-2.02221 + (2.56283 - 1.06244 * x) * x) * x;
-    fit0 + (fit1 - fit0) * roughness
-}
-
-// ---------------------------------------------------------------------------
-// Sheen
-// ---------------------------------------------------------------------------
-
-/// `mx_imageworks_sheen_brdf`: the Conty–Kulla Charlie sheen with Neubelt's
-/// smoother denominator (Fresnel and geometry terms are 1).
-pub fn imageworks_sheen(n_dot_l: f32, n_dot_v: f32, n_dot_h: f32, roughness: f32) -> f32 {
-    let inv_r = 1.0 / roughness.max(0.005);
-    let sin2 = 1.0 - n_dot_h * n_dot_h;
-    let d = (2.0 + inv_r) * sin2.max(0.0).powf(inv_r * 0.5) / (2.0 * PI);
-    d / (4.0 * (n_dot_l + n_dot_v - n_dot_l * n_dot_v))
-}
-
-/// `mx_imageworks_sheen_dir_albedo_analytic`, clamped to [0, 1].
-pub fn imageworks_sheen_dir_albedo(n_dot_v: f32, roughness: f32) -> f32 {
-    let x = 13.67300 - 68.78018 * n_dot_v + 799.08825 * roughness - 905.00061 * n_dot_v * roughness
-        + 60.28956 * sq(n_dot_v)
-        + 1086.96473 * sq(roughness);
-    let y = 1.0
-        + 61.57746 * n_dot_v
-        + 442.78211 * roughness
-        + 2597.49308 * n_dot_v * roughness
-        + 121.81241 * sq(n_dot_v)
-        + 3045.55075 * sq(roughness);
-    (x / y).clamp(0.0, 1.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_ggx_albedo_fit_matches_its_known_endpoints() {
-        // A smooth white mirror reflects everything; F0 = 0, F90 = 0 nothing.
-        let e = ggx_dir_albedo(1.0, 1e-4, Vec3A::ONE, Vec3A::ONE).x;
-        assert!((e - 1.0).abs() < 0.02, "{e}");
-        assert_eq!(
-            ggx_dir_albedo(0.5, 0.5, Vec3A::ZERO, Vec3A::ZERO),
-            Vec3A::ZERO
-        );
-        // Roughness loses single-scatter energy, which compensation restores.
-        let rough = ggx_dir_albedo(0.5, 1.0, Vec3A::ONE, Vec3A::ONE).x;
-        assert!(rough < 0.8, "{rough}");
-        let comp = ggx_energy_compensation(0.5, 1.0, Vec3A::ONE).x;
-        assert!((rough * comp - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn dielectric_fresnel_has_the_textbook_normal_incidence_value() {
-        assert!((fresnel_dielectric(1.0, 1.5) - 0.04).abs() < 1e-6);
-        assert_eq!(fresnel_dielectric(0.1, 1.0 / 1.5), 1.0, "TIR");
-    }
-
-    #[test]
-    fn a_conductor_with_no_extinction_is_a_dielectric() {
-        let c = fresnel_conductor(0.7, Vec3A::splat(1.5), Vec3A::ZERO);
-        assert!((c.x - fresnel_dielectric(0.7, 1.5)).abs() < 1e-5);
-    }
 
     #[test]
     fn hoffman_schlick_hits_f0_at_normal_incidence_and_f90_at_grazing() {
@@ -506,6 +293,28 @@ mod tests {
         assert!(
             fresnel_hoffman_schlick(0.0, f0, f82, Vec3A::ONE, 5.0).abs_diff_eq(Vec3A::ONE, 1e-6)
         );
+    }
+
+    #[test]
+    fn a_white_f82_is_bsdl_s_schlick() {
+        let f0 = Vec3A::new(0.9, 0.6, 0.2);
+        let schlick = |f82| Fresnel {
+            model: FresnelModel::Schlick {
+                f0,
+                f82,
+                f90: Vec3A::ONE,
+                exponent: 5.0,
+                tir_cos: 0.0,
+            },
+            thin_film: None,
+        };
+        for c in [0.1f32, 0.5, 0.9] {
+            let plain = bsdl::schlick_fresnel(c, f0, Vec3A::ONE, 5.0, 0.0);
+            assert_eq!(schlick(Vec3A::ONE).eval(c), plain);
+            let tinted = fresnel_hoffman_schlick(c, f0, Vec3A::ONE, Vec3A::ONE, 5.0);
+            assert!(tinted.abs_diff_eq(plain, 1e-6), "{tinted} vs {plain}");
+            assert_ne!(schlick(Vec3A::splat(0.5)).eval(c), plain);
+        }
     }
 
     #[test]
@@ -520,14 +329,5 @@ mod tests {
         };
         let (a, b) = (bare.eval(0.8), film.eval(0.8));
         assert!((a - b).abs().max_element() < 0.02, "{a} vs {b}");
-    }
-
-    #[test]
-    fn eon_conserves_energy_on_white() {
-        // A white EON surface's directional albedo is 1 at every angle.
-        for mu in [0.2f32, 0.5, 0.9] {
-            let e = eon_dir_albedo(mu, 0.7, Vec3A::ONE).x;
-            assert!((e - 1.0).abs() < 1e-3, "{mu}: {e}");
-        }
     }
 }
