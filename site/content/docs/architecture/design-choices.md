@@ -90,7 +90,7 @@ material format maps onto it:
 | `crust:openpbr` | OpenPBR, parameter for parameter |
 | `UsdPreviewSurface` | OpenPBR, with its inputs mapped (`diffuseColor` → `baseColor`, …) |
 | `PxrDisneyBsdf` | OpenPBR, mapped |
-| MaterialX graphs | a closure tree that collapses, at each hit, into at most eight weighted OpenPBR-style lobes |
+| MaterialX graphs | a closure tree that collapses, at each hit, into at most eight weighted lobes, each BSDL's (OSL's reference) |
 
 **Why.** One BSDF means one implementation of sampling, evaluation and MIS to get right,
 and one set of formulas to check against the reference (the MaterialX node graph and

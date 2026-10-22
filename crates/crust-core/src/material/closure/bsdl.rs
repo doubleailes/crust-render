@@ -166,19 +166,38 @@ impl Table {
 }
 
 /// `TabulatedEnergyCurve`: a table read at one roughness and Fresnel index.
+///
+/// The four rows the bilinear interpolation reads and its two weights are
+/// found once, when the curve is made, rather than per cosine as BSDL's
+/// `interpolate_emiss` recomputes them; the arithmetic per value is BSDL's.
 #[derive(Clone, Copy, Debug)]
 pub struct TabulatedEnergyCurve {
     table: Table,
-    roughness: f32,
-    fresnel_index: f32,
+    /// Row offsets `(fa, ra)`, `(fa, rb)`, `(fb, ra)`, `(fb, rb)`.
+    rows: [usize; 4],
+    rf: f32,
+    ff: f32,
 }
 
 impl TabulatedEnergyCurve {
     pub fn new(table: Table, roughness: f32, fresnel_index: f32) -> Self {
+        let rf = roughness.clamp(0.0, 1.0) * (NR - 1) as f32;
+        let ra = rf as usize;
+        let rb = (ra + 1).min(NR - 1);
+        let rf = rf - ra as f32;
+        let (fa, fb, ff) = if table.nf == 1 {
+            (0, 0, 0.0)
+        } else {
+            let ff = fresnel_index.clamp(0.0, 1.0) * (table.nf - 1) as f32;
+            let fa = ff as usize;
+            (fa, (fa + 1).min(table.nf - 1), ff - fa as f32)
+        };
+        let row = |f: usize, r: usize| (f * NR + r) * NC;
         TabulatedEnergyCurve {
             table,
-            roughness: roughness.clamp(0.0, 1.0),
-            fresnel_index: fresnel_index.clamp(0.0, 1.0),
+            rows: [row(fa, ra), row(fa, rb), row(fb, ra), row(fb, rb)],
+            rf,
+            ff,
         }
     }
 
@@ -186,40 +205,37 @@ impl TabulatedEnergyCurve {
     /// cosine `i`.
     fn interpolate_emiss(&self, i: usize) -> f32 {
         let t = self.table.data;
-        let rf = self.roughness * (NR - 1) as f32;
-        let ra = rf as usize;
-        let rb = (ra + 1).min(NR - 1);
-        let rf = rf - ra as f32;
+        let [aa, ab, ba, bb] = self.rows;
+        let a = lerp(self.rf, t[aa + i], t[ab + i]);
         if self.table.nf == 1 {
-            return lerp(rf, t[ra * NC + i], t[rb * NC + i]);
+            return a;
         }
-        let nf = self.table.nf;
-        let ff = self.fresnel_index * (nf - 1) as f32;
-        let fa = ff as usize;
-        let fb = (fa + 1).min(nf - 1);
-        let ff = ff - fa as f32;
-        lerp(
-            ff,
-            lerp(rf, t[(fa * NR + ra) * NC + i], t[(fa * NR + rb) * NC + i]),
-            lerp(rf, t[(fb * NR + ra) * NC + i], t[(fb * NR + rb) * NC + i]),
-        )
+        lerp(self.ff, a, lerp(self.rf, t[ba + i], t[bb + i]))
     }
 
-    /// `Emiss_eval(c)`: piecewise linear in the cosine.
+    /// `Emiss_eval(c)`: piecewise linear in the cosine. The bin is found
+    /// from the spacing (`c·15`, or `√c·15` for squared cosines) and then
+    /// nudged against the stored cosines, so it is the bin BSDL's scan finds.
     pub fn emiss_eval(&self, c: f32) -> f32 {
-        let mut cos0 = self.table.cosine(0);
-        if c <= cos0 {
+        let cos = |i: usize| self.table.cosine(i);
+        if c <= cos(0) {
             return self.interpolate_emiss(0);
         }
-        for i in 1..NC {
-            let cos1 = self.table.cosine(i);
-            if c < cos1 {
-                let q = (c - cos0) / (cos1 - cos0);
-                return lerp(q, self.interpolate_emiss(i - 1), self.interpolate_emiss(i));
-            }
-            cos0 = cos1;
+        let x = if self.table.squared { c.sqrt() } else { c };
+        // The first `i ≥ 1` with `c < cos(i)`, as BSDL's loop picks it.
+        let mut i = ((x * (NC - 1) as f32) as usize + 1).clamp(1, NC);
+        while i > 1 && c < cos(i - 1) {
+            i -= 1;
         }
-        self.interpolate_emiss(NC - 1)
+        while i < NC && c >= cos(i) {
+            i += 1;
+        }
+        if i == NC {
+            return self.interpolate_emiss(NC - 1);
+        }
+        let (cos0, cos1) = (cos(i - 1), cos(i));
+        let q = (c - cos0) / (cos1 - cos0);
+        lerp(q, self.interpolate_emiss(i - 1), self.interpolate_emiss(i))
     }
 }
 
@@ -561,6 +577,49 @@ mod tests {
         // The GGX table's cosines are squared: (i/15)².
         let g = TabulatedEnergyCurve::new(GGX, r, 0.0);
         assert!((g.emiss_eval(sq(9.0 / 15.0)) - GGX_TABLE[5 * NC + 9]).abs() < 1e-6);
+    }
+
+    /// BSDL's `Emiss_eval`, its linear scan, verbatim.
+    fn scanned(curve: &TabulatedEnergyCurve, c: f32) -> f32 {
+        let mut cos0 = curve.table.cosine(0);
+        if c <= cos0 {
+            return curve.interpolate_emiss(0);
+        }
+        for i in 1..NC {
+            let cos1 = curve.table.cosine(i);
+            if c < cos1 {
+                let q = (c - cos0) / (cos1 - cos0);
+                return lerp(
+                    q,
+                    curve.interpolate_emiss(i - 1),
+                    curve.interpolate_emiss(i),
+                );
+            }
+            cos0 = cos1;
+        }
+        curve.interpolate_emiss(NC - 1)
+    }
+
+    #[test]
+    fn the_direct_bin_is_the_scanned_one() {
+        // Every cosine on a fine grid, the grid points themselves and their
+        // neighbouring floats, for both spacings.
+        for table in [GGX, REFL_FRONT, BOTH_BACK] {
+            let curve = TabulatedEnergyCurve::new(table, 0.37, 0.61);
+            let mut cs: Vec<f32> = (0..=20_000).map(|i| i as f32 / 20_000.0).collect();
+            for i in 0..NC {
+                let c = table.cosine(i);
+                cs.extend([
+                    c,
+                    f32::from_bits(c.to_bits() - 1),
+                    f32::from_bits(c.to_bits() + 1),
+                ]);
+            }
+            cs.push(1.5);
+            for c in cs {
+                assert_eq!(curve.emiss_eval(c), scanned(&curve, c), "cos {c}");
+            }
+        }
     }
 
     #[test]
