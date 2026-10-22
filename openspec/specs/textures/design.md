@@ -521,7 +521,10 @@ the finest level held at every footprint). See
     1.0e-3 and 1.3e-4 (as noise does, by about the block's pixel count), while
     two seeds of one render differ by 0.27, then 0.016. Crust also reads 11
     textures Arnold never converts (the `wings`, `OJ*` and `walls_Normal`
-    families among them), which preload on Arnold's set.
+    families among them), which preload on Arnold's set. Rerun at `a1640dca`
+    (paths without the verbatim prefix, mixed-depth sets declined), from a fresh
+    conversion: the same 9 generated and every crust file kept, Arnold relMSE
+    1.4e-5, crust 0.089 at full resolution and 2.1e-4 over 16x16 blocks.
   - **The A/B is a tolerance, not bit identity** (`tx-arnold-convention`
     decision 7). A streamed `.tx` is Arnold's file — converted to the target
     space, reduced as `maketx` reduces, DWAA-compressed — so it agrees with the
@@ -958,6 +961,12 @@ the finest level held at every footprint). See
 
 ## Known gaps: Arnold's `.tx` convention
 
+- **A source already tiled and mip-mapped is never converted**, by decision: a tiled
+  mip EXR (every ALab texture is one) streams as it is, and `--auto-tx` writes nothing
+  beside it (`auto_tx_leaves_a_source_that_already_streams_alone`). Arnold's auto-tx
+  converts it anyway, to `<stem>_raw.exr.tx` for a float source under `auto`; crust
+  neither writes nor reads that copy. For a raw float EXR the values are the same; the
+  two renderers differ only in which file's mip chain they filter.
 - **Only Arnold 7.5 is matched.** The `Software` string is OIIO 2.6.3's
   (`OpenImageIO-Arnold 2.6.3.0dev : maketx …`, one constant in `tiled/make.rs`), and
   Arnold's update check compares the whole string. Another Arnold version, or another
