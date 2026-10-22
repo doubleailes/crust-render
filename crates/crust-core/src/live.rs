@@ -62,6 +62,9 @@ pub struct Provenance {
     /// run as owning every id up to the next run's, as light linking does;
     /// [`Provenance::geometry_of`] reads the ids the prim emitted.
     pub(crate) geometry: Vec<(Range<u32>, String)>,
+    /// The prims that emitted a volume region, in traversal order. Volumes
+    /// are not geometry runs, but they are placed by their prim's transform.
+    pub(crate) volumes: Vec<String>,
     /// What the import decided once for the whole stage.
     pub(crate) stage: StageFacts,
 }
@@ -214,9 +217,10 @@ impl Provenance {
     }
 
     /// Whether a prim the scene imported — a material, a light, or a prim
-    /// that emitted geometry — lies strictly below `path`, matched by whole
-    /// path components: a transform edit at `path` then moves what the scene
-    /// holds. A scan of every material, light and geometry run.
+    /// that emitted geometry or a volume region — lies strictly below `path`,
+    /// matched by whole path components: a transform edit at `path` then
+    /// moves what the scene holds. A scan of every material, light, geometry
+    /// run and volume.
     pub fn any_below(&self, path: &str) -> bool {
         let path = path.trim_end_matches('/');
         let below = |prim: &str| {
@@ -226,6 +230,7 @@ impl Provenance {
         self.materials.keys().any(|p| below(p))
             || self.lights.keys().any(|p| below(p))
             || self.geometry.iter().any(|(_, p)| below(p))
+            || self.volumes.iter().any(|p| below(p))
     }
 
     /// The `RenderSettings` prim the import read, when one.
@@ -441,5 +446,15 @@ mod tests {
         assert!(lit.any_below("/World/cam"));
         assert!(lit.any_below("/World/other"));
         assert!(!lit.any_below("/World/cam/key"));
+
+        let fog = Provenance {
+            volumes: vec!["/World/cam/fog".into()],
+            ..Default::default()
+        };
+        assert!(
+            fog.any_below("/World/cam"),
+            "a volume region is imported too"
+        );
+        assert!(!fog.any_below("/World/cam/fog"));
     }
 }
