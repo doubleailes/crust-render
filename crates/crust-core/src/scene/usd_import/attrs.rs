@@ -67,6 +67,23 @@ pub(super) fn light_ray_mask(prim: &Prim) -> (RayMask, bool) {
     }
 }
 
+/// Ray mask for a `MeshLightAPI` mesh's geometry: solid and visible to every
+/// ray by default, being scene geometry. An authored `crust:rayMask` wins
+/// outright, as on any geometry; otherwise the light's camera visibility
+/// ([`light_ray_mask`]'s attributes) can hide it from the camera only. Never a
+/// transparent emitter: that path intersects an analytic shape, which a mesh
+/// has not, so a hidden mesh light still occludes.
+pub(super) fn mesh_light_ray_mask(prim: &Prim) -> RayMask {
+    if let Some(m) = custom_i32(prim, "crust:rayMask") {
+        return RayMask(m as u32);
+    }
+    if authored_camera_visibility(prim).unwrap_or(true) {
+        MASK_ALL
+    } else {
+        RayMask(MASK_ALL.0 & !MASK_CAMERA.0)
+    }
+}
+
 /// Which escaping rays see a light at infinity: every category, unless the
 /// camera is told not to (same attributes and precedence as
 /// [`light_ray_mask`], but visible by default — a dome is the sky behind

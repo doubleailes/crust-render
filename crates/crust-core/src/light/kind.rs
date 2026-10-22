@@ -98,8 +98,8 @@ impl Light for LightKind {
     }
 
     #[inline(always)]
-    fn pdf_at_point(&self, from: Vec3A, light_point: Vec3A) -> Option<PdfSolidAngle> {
-        dispatch!(self, l => l.pdf_at_point(from, light_point))
+    fn pdf_at_point(&self, from: Vec3A, light_point: Vec3A, prim: u32) -> Option<PdfSolidAngle> {
+        dispatch!(self, l => l.pdf_at_point(from, light_point, prim))
     }
 
     #[inline(always)]

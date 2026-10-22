@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use crust_core::preview_surface::{Target, TexOutput, UvInput, Wrap};
 use crust_core::{
-    BsdfDraw, Emissive, HitRecord, Material, OpenPBR, PathSampler, PreviewSurface, PtexRef,
-    PtexTexture, Ray, ShadingPoint, Texture2D, TextureRef, Vec3A, materialx,
+    AreaLight, BsdfDraw, Emissive, HitRecord, Light, Material, MeshLightMaterial, MeshShape,
+    OpenPBR, PathSampler, PreviewSurface, PtexRef, PtexTexture, Ray, ShadingPoint, Texture2D,
+    TextureRef, Vec3A, materialx,
 };
 
 fn sample(name: &str) -> PathBuf {
@@ -223,6 +224,41 @@ fn materials() -> Vec<(String, Arc<dyn Material>)> {
             Arc::new(Emissive::new(Vec3A::splat(3.0))),
         ),
         (
+            "OpenPBR emitter + Ptex".into(),
+            Arc::new(OpenPBR {
+                base_color_ptex: ptex.clone(),
+                emission_luminance: 4.0,
+                emission_color: Vec3A::new(1.0, 0.5, 0.25),
+                ..OpenPBR::default()
+            }),
+        ),
+        (
+            "PreviewSurface (textured diffuse, constant emission)".into(),
+            Arc::new(PreviewSurface::new(
+                "e".into(),
+                OpenPBR {
+                    emission_luminance: 1.0,
+                    emission_color: Vec3A::new(2.0, 1.0, 0.5),
+                    ..OpenPBR::default()
+                },
+                vec![(Target::DiffuseColor, uv_input(TexOutput::Rgb))],
+                Some(uv_input(TexOutput::Rgb)),
+            )),
+        ),
+        (
+            "PreviewSurface (constant emission, textured clearcoat)".into(),
+            Arc::new(PreviewSurface::new(
+                "c".into(),
+                OpenPBR {
+                    emission_luminance: 1.0,
+                    emission_color: Vec3A::new(2.0, 1.0, 0.5),
+                    ..OpenPBR::default()
+                },
+                vec![(Target::Clearcoat, uv_input(TexOutput::R))],
+                None,
+            )),
+        ),
+        (
             "PreviewSurface (textured, emissive, normal-mapped, Ptex)".into(),
             Arc::new(PreviewSurface::new(
                 "p".into(),
@@ -282,6 +318,30 @@ fn materials() -> Vec<(String, Arc<dyn Material>)> {
         .unwrap_or_else(|e| panic!("{node} compiles: {e:?}"));
         materials.push((format!("MaterialX {node}"), loaded.material));
     }
+    // A mesh light's wrapper over one of each: everything but emission is
+    // the inner material's, emission the light's.
+    let glow = Arc::new(Emissive::new(Vec3A::new(6.0, 3.0, 1.5)));
+    let wrapped: Vec<(String, Arc<dyn Material>)> = materials
+        .iter()
+        .filter(|(name, _)| {
+            [
+                "OpenPBR",
+                "OpenPBR thin glass + Ptex",
+                "OpenPBR + Ptex under an emissive coat",
+                "PreviewSurface (textured, emissive, normal-mapped, Ptex)",
+                "MaterialX mtlx_emitter_constant",
+                "MaterialX mtlx_openpbr_coated",
+            ]
+            .contains(&name.as_str())
+        })
+        .map(|(name, inner)| {
+            let m: Arc<dyn Material> =
+                Arc::new(MeshLightMaterial::new(inner.clone(), glow.clone()));
+            (format!("MeshLightMaterial over {name}"), m)
+        })
+        .collect();
+    assert_eq!(wrapped.len(), 6);
+    materials.extend(wrapped);
     materials
 }
 
@@ -289,6 +349,76 @@ fn materials() -> Vec<(String, Arc<dyn Material>)> {
 fn resolve_matches_per_query_shading_for_every_material() {
     for (name, mat) in &materials() {
         assert_resolve_matches(name, mat.as_ref());
+    }
+}
+
+/// `Material::uniform_emission` is a promise about every hit: where a
+/// material answers `Some(c)`, `emitted_at` — and the resolution a vertex
+/// shades with — is `c` bit for bit at every point, normal, chart position,
+/// face and angle. A mesh light's NEE reads the constant and its bounce side
+/// the hit, so a drift would be an MIS pair that disagrees. Run with and
+/// without `--features jit`: the MaterialX constant must equal both.
+#[test]
+fn uniform_emission_is_what_every_hit_emits() {
+    let mut answered = Vec::new();
+    for (name, mat) in &materials() {
+        let Some(c) = mat.uniform_emission() else {
+            continue;
+        };
+        answered.push(name.clone());
+        for k in 0..64u32 {
+            let u = PathSampler::new(1, 2, 3, k as i32).draw_sample_f32::<4>();
+            let normal = Vec3A::new(u[0] - 0.5, u[1] - 0.5, 0.2 + u[2]).normalize();
+            let rec = HitRecord {
+                p: Vec3A::new(4.0 * u[0] - 2.0, 3.0 * u[1], -u[3]),
+                normal,
+                tangent: normal.any_orthonormal_vector(),
+                front_face: k % 3 != 0,
+                part: crust_core::HitPart::Face(crust_core::FaceHit {
+                    id: k % 16,
+                    uv: (u[2], u[3]),
+                    width: 0.0,
+                }),
+                uv: Some((u[1], u[0])),
+                ..hit()
+            };
+            let dir = Vec3A::new(u[3] - 0.5, u[0] - 0.5, -0.05 - u[1]).normalize();
+            let r_in = Ray::new(rec.p - dir, dir);
+            let cos = dir.dot(rec.normal).abs();
+            assert_eq!(
+                bits(mat.emitted_at(&r_in, &rec, cos)),
+                bits(c),
+                "{name}: emitted_at at sample {k}"
+            );
+            assert_eq!(
+                bits(ShadingPoint::new(mat.as_ref(), &r_in, &rec, cos).emitted()),
+                bits(c),
+                "{name}: the resolution's emission at sample {k}"
+            );
+        }
+    }
+    for expected in [
+        "MeshLightMaterial over OpenPBR + Ptex under an emissive coat",
+        "OpenPBR",
+        "Emissive",
+        "OpenPBR emitter + Ptex",
+        "PreviewSurface (textured diffuse, constant emission)",
+        "MaterialX mtlx_emitter_constant",
+    ] {
+        assert!(
+            answered.iter().any(|n| n == expected),
+            "{expected} answers a uniform emission (answered: {answered:?})"
+        );
+    }
+    for refused in [
+        "OpenPBR + Ptex under an emissive coat",
+        "PreviewSurface (textured, emissive, normal-mapped, Ptex)",
+        "PreviewSurface (constant emission, textured clearcoat)",
+    ] {
+        assert!(
+            !answered.iter().any(|n| n == refused),
+            "{refused} must not answer a uniform emission"
+        );
     }
 }
 
@@ -352,7 +482,8 @@ fn straight_transmission_is_declared_and_split_from_the_resolution() {
             }
         }
     }
-    assert_eq!(thin, 2 * 5, "every thin-walled material, both directions");
+    // Five, and the mesh-light wrapper over thin glass.
+    assert_eq!(thin, 2 * 6, "every thin-walled material, both directions");
 }
 
 /// On a curve hit, a material reading the strand and a primvar resolves to
@@ -416,5 +547,47 @@ fn a_curve_reading_material_resolves_as_it_shades() {
         };
         assert!(rec.curve().is_some());
         assert_resolve_matches_at(&format!("curve span {prim}"), loaded.material.as_ref(), rec);
+    }
+}
+
+/// A mesh light's wrapper emits what its light's NEE samples: the shared
+/// `Emissive`'s `radiance_toward`, from either side of the surface, at any
+/// point — whatever the inner material's own glow.
+#[test]
+fn a_mesh_light_material_emits_its_lights_radiance() {
+    let emitter = Arc::new(Emissive::new(Vec3A::new(6.0, 3.0, 1.5)));
+    let inner: Arc<dyn Material> = Arc::new(OpenPBR {
+        emission_luminance: 9.0,
+        coat_weight: 0.5,
+        ..OpenPBR::default()
+    });
+    let wrapper = MeshLightMaterial::new(inner, emitter.clone());
+    let shape = MeshShape::new(vec![[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
+        .expect("a triangle");
+    let light = AreaLight::new(shape, emitter.clone(), 0);
+    for (from, front) in [
+        (Vec3A::new(0.2, 0.2, 2.0), true),
+        (Vec3A::new(0.2, 0.2, -2.0), false),
+    ] {
+        let s = light.sample_li(from, 0.3, 0.6).expect("sampled");
+        let p = from + s.direction * s.distance;
+        let rec = HitRecord {
+            p,
+            normal: if front { Vec3A::Z } else { -Vec3A::Z },
+            front_face: front,
+            ..hit()
+        };
+        let r_in = Ray::new(from, s.direction);
+        let cos = s.direction.dot(rec.normal).abs();
+        assert_eq!(bits(wrapper.emitted_at(&r_in, &rec, cos)), bits(s.radiance));
+        assert_eq!(
+            bits(s.radiance),
+            bits(emitter.radiance_toward(p, -s.direction, front)),
+            "front {front}"
+        );
+        assert_eq!(
+            bits(ShadingPoint::new(&wrapper, &r_in, &rec, cos).emitted()),
+            bits(s.radiance)
+        );
     }
 }

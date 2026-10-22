@@ -234,6 +234,8 @@ fn record(
                 read("dome", prim)
             } else if let Ok(Some(_)) = DomeLight_1::get(stage, p()) {
                 read("dome", prim)
+            } else if is_mesh_light(stage, prim) {
+                read("mesh", prim)
             } else {
                 return None;
             };
@@ -439,8 +441,16 @@ fn visit(stage: &Stage, prim: &Prim, kind: ListKind, parent_hidden: bool) -> Vis
     }
 }
 
+/// Whether `prim` is a `Mesh` applying `MeshLightAPI`: a light the import
+/// reads, though the import may still refuse it (`light.mesh_light_*`).
+fn is_mesh_light(stage: &Stage, prim: &Prim) -> bool {
+    matches!(UsdMesh::get(stage, prim.path().clone()), Ok(Some(_)))
+        && super::mesh_light::applies(prim)
+}
+
 /// Whether `prim` is of `kind`: a `UsdGeomCamera`; one of the six UsdLux
-/// lights the import reads; a `UsdShadeMaterial`; a `RenderPass`.
+/// lights the import reads, or a `MeshLightAPI` mesh; a `UsdShadeMaterial`; a
+/// `RenderPass`.
 fn is_kind(stage: &Stage, prim: &Prim, kind: ListKind) -> bool {
     let path = || prim.path().clone();
     match kind {
@@ -453,6 +463,7 @@ fn is_kind(stage: &Stage, prim: &Prim, kind: ListKind) -> bool {
                 || matches!(DistantLight::get(stage, path()), Ok(Some(_)))
                 || matches!(DomeLight::get(stage, path()), Ok(Some(_)))
                 || matches!(DomeLight_1::get(stage, path()), Ok(Some(_)))
+                || is_mesh_light(stage, prim)
         }
         ListKind::Material => matches!(UsdMaterial::get(stage, path()), Ok(Some(_))),
         ListKind::Pass => matches!(UsdRenderPass::get(stage, path()), Ok(Some(_))),

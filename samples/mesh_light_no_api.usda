@@ -1,0 +1,22 @@
+#usda 1.0
+(
+    doc = """`mesh_light.usda` with `MeshLightAPI` deleted from its card: the same
+    emissive geometry, found only by BSDF-sampled rays. The A/B for what the
+    API buys — the same picture, at a higher noise (see `mesh_light.usda`).
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    subLayers = [
+        @mesh_light.usda@
+    ]
+)
+
+over "World"
+{
+    over "Card" (
+        delete apiSchemas = ["MeshLightAPI"]
+    )
+    {
+    }
+}

@@ -998,6 +998,16 @@ impl WorldBuilder {
         self.attach_masked(SceneBuilder::empty_geometry(), material, mask)
     }
 
+    /// Rebinds the material of an attached or reserved `id`: what a mesh
+    /// light does once its triangles, and so its radiance under `normalize`,
+    /// are known.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_material(&mut self, id: u32, material: Arc<dyn Material>) {
+        self.materials[id as usize] = material;
+    }
+
     /// Fills in a slot from [`WorldBuilder::reserve_slot`].
     ///
     /// # Panics

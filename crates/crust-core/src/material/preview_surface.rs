@@ -479,6 +479,14 @@ impl PatternMaterial for PreviewSurface {
         (!self.emission_textured).then_some(&self.base)
     }
 
+    /// The constants, unless a texture drives the clearcoat, whose weight
+    /// fades the emission toward the viewer: the constant `coat_weight` the
+    /// uniform test reads is then not the one a hit shades with.
+    fn uniform_emission_params(&self) -> Option<&OpenPBR> {
+        let coat_textured = self.inputs.iter().any(|(t, _)| *t == Target::Clearcoat);
+        self.constant_emission().filter(|_| !coat_textured)
+    }
+
     /// A thin-walled base: its transmission may be textured (a translucent
     /// `opacity`), so whether it is non-zero is only known per hit.
     fn pattern_has_straight_transmission(&self) -> bool {

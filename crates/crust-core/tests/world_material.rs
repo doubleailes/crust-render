@@ -1317,12 +1317,13 @@ fn an_hdr_texture_drives_emission_above_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `emitted()` stays hit-free and stays zero: it is what the **light list**
-/// reads, and a MaterialX emitter is deliberately not a light-list entry. If
-/// it were, NEE would sample it at zero radiance while the bounce side saw
-/// the real value, and the MIS pair would stop describing one emitter.
+/// A MaterialX emitter whose emission folds to a constant reports it
+/// hit-free — `emitted()` and `uniform_emission()` — bit for bit what every
+/// hit emits (the `materials` spec, "MaterialX constant emission is known
+/// without a hit"). That alone makes it no light-list entry: only a mesh that
+/// applies `MeshLightAPI` is one.
 #[test]
-fn a_materialx_emitter_is_not_a_light_list_radiance() {
+fn a_materialx_constant_emitter_reports_its_emission_hit_free() {
     let dir = scratch("crust_mtlx_emissive_lightlist");
     let path = emissive_mtlx(
         &dir,
@@ -1340,8 +1341,10 @@ fn a_materialx_emitter_is_not_a_light_list_radiance() {
     )
     .expect("loads");
     let (r_in, rec) = upward_hit();
-    assert_eq!(loaded.material.emitted(), Vec3A::ZERO);
-    assert!((loaded.material.emitted_at(&r_in, &rec, 1.0) - Vec3A::splat(5.0)).length() < 1e-5);
+    let at = loaded.material.emitted_at(&r_in, &rec, 1.0);
+    assert_eq!(at, Vec3A::splat(5.0));
+    assert_eq!(loaded.material.emitted(), at);
+    assert_eq!(loaded.material.uniform_emission(), Some(at));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

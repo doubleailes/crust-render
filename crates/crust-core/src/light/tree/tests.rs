@@ -172,7 +172,7 @@ fn bounds_contain_every_point_and_direction_a_light_emits() {
                 b.max
             );
             // A spread of directions from this point.
-            let n = l.shape().normal_at(p);
+            let n = l.shape().normal_at(p, 0);
             for j in 0..32 {
                 let z = 1.0 - 2.0 * (j as f32 + 0.5) / 32.0;
                 let r = (1.0 - z * z).sqrt();

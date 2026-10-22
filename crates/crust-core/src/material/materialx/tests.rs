@@ -111,8 +111,8 @@ fn a_pure_edf_surface_does_not_also_reflect() {
         loaded.material.eval(&r, &rec, Vec3A::Z).is_none(),
         "no BSDF leaf"
     );
-    // And never a light-list entry: the hit-free emission stays zero.
-    assert_eq!(loaded.material.emitted(), Vec3A::ZERO);
+    // A literal EDF folds: the hit-free emission is the constant.
+    assert_eq!(loaded.material.emitted(), Vec3A::splat(2.0));
 }
 
 #[test]

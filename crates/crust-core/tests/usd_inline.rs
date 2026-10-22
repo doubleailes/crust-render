@@ -4,8 +4,8 @@
 //! `usd_scene.rs`, which loads the checked-in sample files.
 
 use crust_core::{
-    Light, MASK_CAMERA, NoAssets, PathSampler, Ray, SamplingStrategy, Scene, UsdImportOptions,
-    Vec3A, Volumes, ray_color,
+    Light, LightShape, MASK_CAMERA, NoAssets, PathSampler, Ray, SamplingStrategy, Scene,
+    UsdImportOptions, Vec3A, Volumes, ray_color,
 };
 use std::path::PathBuf;
 
@@ -1661,7 +1661,9 @@ fn assert_mis_sides_agree(scene: &Scene, from: Vec3A) -> usize {
         );
         if s.radiance.max_element() > 0.0 {
             lit += 1;
-            let pdf = light.pdf_at_point(from, hit.rec.p).map_or(0.0, |p| p.get());
+            let pdf = light
+                .pdf_at_point(from, hit.rec.p, hit.prim_id)
+                .map_or(0.0, |p| p.get());
             assert!(
                 (pdf - s.pdf.get()).abs() <= 2e-3 * s.pdf.get(),
                 "bounce pdf {pdf} vs NEE pdf {}",
@@ -3680,4 +3682,526 @@ fn instanced_curves_shade_along_each_placement() {
     // Unrotated: along +x. A quarter turn about z: along +y.
     assert!(tangent_at(-2.2, 0.0).abs_diff_eq(Vec3A::X, 1e-4));
     assert!(tangent_at(2.0, 0.2).abs_diff_eq(Vec3A::Y, 1e-4));
+}
+
+// ---------------------------------------------------------------------------
+// MeshLightAPI: emissive meshes as sampled lights
+// ---------------------------------------------------------------------------
+
+/// A `crust:openpbr` material `/World/<name>` with `inputs`.
+fn openpbr_material(name: &str, inputs: &str) -> String {
+    format!(
+        r#"
+    def Material "{name}"
+    {{
+        token outputs:surface.connect = </World/{name}/S.outputs:surface>
+        def Shader "S"
+        {{
+            uniform token info:id = "crust:openpbr"
+            {inputs}
+            token outputs:surface
+        }}
+    }}"#
+    )
+}
+
+/// A unit quad in the XY plane at `z` (four corners `size` apart), bound to
+/// `/World/<material>`, applying `MeshLightAPI` when `api`, with `extra`
+/// attributes.
+fn card(name: &str, material: &str, api: bool, z: f32, size: f32, extra: &str) -> String {
+    let schemas = if api {
+        r#"["MaterialBindingAPI", "MeshLightAPI"]"#
+    } else {
+        r#"["MaterialBindingAPI"]"#
+    };
+    let s = size;
+    format!(
+        r#"
+    def Mesh "{name}" (prepend apiSchemas = {schemas})
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, {z}), ({s}, 0, {z}), ({s}, {s}, {z}), (0, {s}, {z})]
+        rel material:binding = </World/{material}>
+        {extra}
+    }}"#
+    )
+}
+
+/// The codes of `scene`'s light warnings (`light.*`): an inline stage has
+/// no camera, which warns too.
+fn warning_codes(scene: &Scene) -> Vec<crust_core::WarningCode> {
+    scene
+        .warnings
+        .iter()
+        .map(|w| w.code)
+        .filter(|c| c.as_str().starts_with("light."))
+        .collect()
+}
+
+/// What a camera ray straight down at `(x, y)` from above sees emitted.
+fn camera_sees(scene: &Scene, x: f32, y: f32) -> Option<Vec3A> {
+    let ray = Ray::new(Vec3A::new(x, y, 10.0), -Vec3A::Z).with_mask(MASK_CAMERA);
+    let hit = scene.world.intersect(&ray, 1e-3, 100.0)?;
+    Some(hit.mat.emitted_at(&ray, &hit.rec, 1.0))
+}
+
+/// "Unauthored light inputs keep the material's brightness": the mesh is a
+/// light of kind `mesh`, the camera, a bounce and NEE all see the glow, and
+/// both MIS halves agree on every sample.
+#[test]
+fn a_mesh_light_with_unauthored_inputs_emits_its_glow() {
+    let body = openpbr_material(
+        "Glow",
+        "float inputs:emissionLuminance = 2\n            color3f inputs:emissionColor = (1, 1, 1)",
+    ) + &card("Card", "Glow", true, 0.0, 1.0, "");
+    let scene = load("mesh_light_glow", &body);
+    assert_eq!(scene.lights.count(), 1);
+    let light = &scene.lights.lights()[0];
+    assert_eq!(light.kind(), "mesh");
+    assert_eq!(scene.lights.name(0), Some("/World/Card"));
+    assert_eq!(camera_sees(&scene, 0.5, 0.5), Some(Vec3A::splat(2.0)));
+    let from = Vec3A::new(0.3, 0.4, 2.0);
+    assert!(assert_mis_sides_agree(&scene, from) > 0);
+    assert_eq!(radiance_toward(&scene, from), Vec3A::splat(2.0));
+    // Seen from behind as well: two-sided, as material emission is.
+    assert_eq!(
+        radiance_toward(&scene, Vec3A::new(0.3, 0.4, -2.0)),
+        Vec3A::splat(2.0)
+    );
+    assert!(
+        warning_codes(&scene).is_empty(),
+        "{:?}",
+        warning_codes(&scene)
+    );
+}
+
+/// "The light tints the glow": glow (2, 2, 2) under `color = (1, 0.5, 0.25)`
+/// and `intensity = 3` is (6, 3, 1.5) to camera rays, bounces and NEE.
+#[test]
+fn a_mesh_lights_inputs_tint_its_glow() {
+    let body = openpbr_material(
+        "Glow",
+        "float inputs:emissionLuminance = 2\n            color3f inputs:emissionColor = (1, 1, 1)",
+    ) + &card(
+        "Card",
+        "Glow",
+        true,
+        0.0,
+        1.0,
+        "color3f inputs:color = (1, 0.5, 0.25)\n        float inputs:intensity = 3",
+    );
+    let scene = load("mesh_light_tint", &body);
+    let want = Vec3A::new(6.0, 3.0, 1.5);
+    assert_eq!(camera_sees(&scene, 0.5, 0.5), Some(want));
+    assert_eq!(radiance_toward(&scene, Vec3A::new(0.3, 0.4, 2.0)), want);
+    assert!(assert_mis_sides_agree(&scene, Vec3A::new(0.3, 0.4, 2.0)) > 0);
+}
+
+/// "Independent ignores the glow": the light's inputs alone, and the
+/// material still reflects.
+#[test]
+fn an_independent_mesh_light_emits_its_inputs_and_still_reflects() {
+    let body = openpbr_material(
+        "Red",
+        "float inputs:emissionLuminance = 1\n            color3f inputs:emissionColor = (1, 0, 0)",
+    ) + &card(
+        "Card",
+        "Red",
+        true,
+        0.0,
+        1.0,
+        "uniform token light:materialSyncMode = \"independent\"\n        color3f inputs:color = (0, 0, 1)",
+    );
+    let scene = load("mesh_light_independent", &body);
+    assert_eq!(
+        camera_sees(&scene, 0.5, 0.5),
+        Some(Vec3A::new(0.0, 0.0, 1.0))
+    );
+    assert_eq!(
+        radiance_toward(&scene, Vec3A::new(0.3, 0.4, 2.0)),
+        Vec3A::new(0.0, 0.0, 1.0)
+    );
+    let ray = Ray::new(Vec3A::new(0.5, 0.5, 10.0), -Vec3A::Z);
+    let hit = scene.world.intersect(&ray, 1e-3, 100.0).expect("the card");
+    let (value, _) = hit
+        .mat
+        .eval(&ray, &hit.rec, Vec3A::new(0.2, 0.1, 1.0).normalize())
+        .expect("the material reflects");
+    assert!(value.max_element() > 0.0);
+}
+
+/// "No material response": it emits `L` and scatters nothing; a textured or
+/// coated glow is no obstacle, since the glow is not read.
+#[test]
+fn a_no_material_response_mesh_light_only_emits() {
+    let body = openpbr_material(
+        "Coated",
+        "float inputs:emissionLuminance = 1\n            float inputs:coatWeight = 1",
+    ) + &card(
+        "Card",
+        "Coated",
+        true,
+        0.0,
+        1.0,
+        "uniform token light:materialSyncMode = \"noMaterialResponse\"\n        float inputs:intensity = 4",
+    );
+    let scene = load("mesh_light_no_response", &body);
+    assert_eq!(scene.lights.count(), 1);
+    assert_eq!(camera_sees(&scene, 0.5, 0.5), Some(Vec3A::splat(4.0)));
+    let ray = Ray::new(Vec3A::new(0.5, 0.5, 10.0), -Vec3A::Z);
+    let hit = scene.world.intersect(&ray, 1e-3, 100.0).expect("the card");
+    assert!(hit.mat.eval(&ray, &hit.rec, Vec3A::Z).is_none());
+    assert!(
+        warning_codes(&scene).is_empty(),
+        "{:?}",
+        warning_codes(&scene)
+    );
+}
+
+/// "Normalized mesh light": twice the world area halves the radiance and
+/// leaves the power unchanged.
+#[test]
+fn a_normalized_mesh_light_keeps_its_power_as_it_grows() {
+    let light = |name: &str, size: f32| {
+        let body = openpbr_material(
+            "Glow",
+            "float inputs:emissionLuminance = 1\n            color3f inputs:emissionColor = (1, 1, 1)",
+        ) + &card(
+            "Card",
+            "Glow",
+            true,
+            0.0,
+            size,
+            "bool inputs:normalize = 1\n        float inputs:intensity = 8",
+        );
+        load(name, &body)
+    };
+    let small = light("mesh_light_normalize_small", 1.0);
+    let large = light("mesh_light_normalize_large", std::f32::consts::SQRT_2);
+    let (a, b) = (
+        camera_sees(&small, 0.5, 0.5).unwrap(),
+        camera_sees(&large, 0.5, 0.5).unwrap(),
+    );
+    assert!((a.x - 8.0).abs() < 1e-5, "{a}");
+    assert!((b.x / a.x - 0.5).abs() < 1e-5, "{b} vs {a}");
+    let power = |s: &Scene| {
+        s.lights.lights()[0]
+            .power(crust_core::Luma::REC709)
+            .unwrap()
+    };
+    assert!((power(&large) / power(&small) - 1.0).abs() < 1e-5);
+}
+
+/// "A subdivided mesh light": NEE samples the refined surface the rays hit,
+/// not the cage. Every sampled point is where a ray from beyond it, along
+/// the line from the shading point, first meets the light.
+#[test]
+fn a_subdivided_mesh_light_samples_its_refined_surface() {
+    let body = openpbr_material(
+        "Glow",
+        "float inputs:emissionLuminance = 1\n            color3f inputs:emissionColor = (1, 1, 1)",
+    ) + r#"
+    def Mesh "Cube" (prepend apiSchemas = ["MaterialBindingAPI", "MeshLightAPI"])
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, 1), (-1, 1, -1), (1, 1, -1), (-1, -1, -1), (1, -1, -1)]
+        rel material:binding = </World/Glow>
+    }"#;
+    let scene = load_at_level("mesh_light_subdivided", &body, 2);
+    assert_eq!(scene.lights.count(), 1);
+    let light = &scene.lights.lights()[0];
+    let crust_core::LightKind::Area(area) = light else {
+        panic!("an area light");
+    };
+    // The refined surface lies inside the cage: less area than its 24.
+    assert!(area.shape().area() < 23.0, "{}", area.shape().area());
+    let from = Vec3A::new(0.3, 0.2, 4.0);
+    let mut rng = openqmc::pcg::Rng::new(5);
+    for _ in 0..64 {
+        let Some(s) = light.sample_li(from, rng.next_f32(), rng.next_f32()) else {
+            continue;
+        };
+        // A point on the closed surface is the first hit from one side or
+        // the other along the line; a cage point is neither.
+        let p = from + s.direction * s.distance;
+        let near = Ray::new(from, s.direction);
+        let far = Ray::new(p + s.direction * 10.0, -s.direction);
+        let t_near = scene
+            .world
+            .intersect(&near, 1e-3, 100.0)
+            .expect("the light")
+            .rec
+            .t;
+        let t_far = scene
+            .world
+            .intersect(&far, 1e-3, 100.0)
+            .expect("the light")
+            .rec
+            .t;
+        assert!(
+            (t_near - s.distance).abs() < 1e-3 || (t_far - 10.0).abs() < 1e-3,
+            "a sample off the surface: {t_near} / {} or {t_far} / 10",
+            s.distance
+        );
+    }
+    assert!(assert_mis_sides_agree(&scene, from) > 0);
+}
+
+/// "Emissive geometry without the API" stays out of the light list.
+#[test]
+fn an_emissive_mesh_without_the_api_is_not_a_light() {
+    let body = openpbr_material(
+        "Glow",
+        "float inputs:emissionLuminance = 2\n            color3f inputs:emissionColor = (1, 1, 1)",
+    ) + &card("Card", "Glow", false, 0.0, 1.0, "");
+    let scene = load("mesh_light_no_api", &body);
+    assert_eq!(scene.lights.count(), 0);
+    assert_eq!(camera_sees(&scene, 0.5, 0.5), Some(Vec3A::splat(2.0)));
+}
+
+/// One refusal per cause: each warns, names the prim, and leaves the mesh as
+/// it would be without the API — out of the light list, still emitting.
+#[test]
+fn mesh_lights_that_cannot_be_sampled_warn_and_stay_geometry() {
+    use crust_core::WarningCode as W;
+    let glow =
+        "float inputs:emissionLuminance = 2\n            color3f inputs:emissionColor = (1, 1, 1)";
+    let cases: Vec<(&str, String, W)> = vec![
+        (
+            "coated",
+            openpbr_material(
+                "M",
+                &format!("{glow}\n            float inputs:coatWeight = 1"),
+            ) + &card("Card", "M", true, 0.0, 1.0, ""),
+            W::LightMeshLightVaryingEmission,
+        ),
+        (
+            "primvar_glow",
+            r#"
+    def Material "M"
+    {
+        token outputs:mtlx:surface.connect = </World/M/Surface.outputs:out>
+        def Shader "Surface"
+        {
+            uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+            float inputs:emission_luminance = 2
+            color3f inputs:emission_color.connect = </World/M/Glow.outputs:out>
+            token outputs:out
+        }
+        def Shader "Glow"
+        {
+            uniform token info:id = "ND_geompropvalue_color3"
+            string inputs:geomprop = "glow"
+            color3f inputs:default = (1, 1, 1)
+            color3f outputs:out
+        }
+    }"#
+            .to_string()
+                + &card("Card", "M", true, 0.0, 1.0, ""),
+            W::LightMeshLightVaryingEmission,
+        ),
+        (
+            "cutout",
+            openpbr_material(
+                "M",
+                &format!("{glow}\n            float inputs:geometryOpacity = 0.5"),
+            ) + &card("Card", "M", true, 0.0, 1.0, ""),
+            W::LightMeshLightCutout,
+        ),
+        (
+            "moving",
+            openpbr_material("M", glow)
+                + &card(
+                    "Card",
+                    "M",
+                    true,
+                    0.0,
+                    1.0,
+                    "float3 crust:motion:translate = (1, 0, 0)",
+                ),
+            W::LightMeshLightMoving,
+        ),
+        (
+            "dark",
+            openpbr_material("M", "float inputs:emissionLuminance = 0")
+                + &card("Card", "M", true, 0.0, 1.0, ""),
+            W::LightMeshLightNoEmission,
+        ),
+        (
+            "sphere",
+            openpbr_material("M", glow)
+                + r#"
+    def Sphere "Card" (prepend apiSchemas = ["MaterialBindingAPI", "MeshLightAPI"])
+    {
+        rel material:binding = </World/M>
+    }"#,
+            W::LightMeshLightNotAMesh,
+        ),
+    ];
+    for (name, body, code) in cases {
+        let scene = load(&format!("mesh_light_refused_{name}"), &body);
+        assert_eq!(scene.lights.count(), 0, "{name}: not a light");
+        let w = scene
+            .warnings
+            .iter()
+            .find(|w| w.code == code)
+            .unwrap_or_else(|| panic!("{name}: no {code:?} in {:?}", warning_codes(&scene)));
+        assert_eq!(w.prims, ["/World/Card"], "{name}");
+        assert!(
+            camera_sees(&scene, 0.5, 0.5).is_some_and(|e| e.max_element() > 0.0) || name == "dark",
+            "{name}: still emissive geometry"
+        );
+    }
+}
+
+/// "A textured glow under independent" (here a coated one) is a light: the
+/// glow is not read, so it need not be uniform.
+#[test]
+fn a_varying_glow_under_independent_is_a_light() {
+    let body = openpbr_material(
+        "M",
+        "float inputs:emissionLuminance = 2\n            float inputs:coatWeight = 1",
+    ) + &card(
+        "Card",
+        "M",
+        true,
+        0.0,
+        1.0,
+        "uniform token light:materialSyncMode = \"independent\"",
+    );
+    let scene = load("mesh_light_independent_coated", &body);
+    assert_eq!(scene.lights.count(), 1);
+    assert!(
+        warning_codes(&scene).is_empty(),
+        "{:?}",
+        warning_codes(&scene)
+    );
+    assert_eq!(camera_sees(&scene, 0.5, 0.5), Some(Vec3A::ONE));
+}
+
+/// "An instanced mesh light": inside a native instance's prototype, every
+/// placement renders as without the API, with one warning.
+#[test]
+fn a_mesh_light_in_a_prototype_warns_and_is_not_a_light() {
+    let body = r#"
+    def Xform "Proto"
+    {
+        def Material "M"
+        {
+            token outputs:surface.connect = </World/Proto/M/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "crust:openpbr"
+                float inputs:emissionLuminance = 2
+                color3f inputs:emissionColor = (1, 1, 1)
+                token outputs:surface
+            }
+        }
+        def Mesh "Card" (prepend apiSchemas = ["MaterialBindingAPI", "MeshLightAPI"])
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+            rel material:binding = </World/Proto/M>
+        }
+    }
+    def Xform "A" (instanceable = true prepend references = </World/Proto>)
+    {
+        double3 xformOp:translate = (3, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "B" (instanceable = true prepend references = </World/Proto>)
+    {
+        double3 xformOp:translate = (6, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#;
+    let scene = load("mesh_light_instanced", body);
+    assert!(
+        warning_codes(&scene).contains(&crust_core::WarningCode::LightMeshLightInstanced),
+        "{:?}",
+        warning_codes(&scene)
+    );
+    // `/World/Proto/Card` itself is a direct placement and a light; the
+    // instances' placements are not.
+    assert_eq!(scene.lights.count(), 1, "only the direct mesh");
+    assert_eq!(scene.lights.name(0), Some("/World/Proto/Card"));
+    assert_eq!(camera_sees(&scene, 3.5, 0.5), Some(Vec3A::splat(2.0)));
+    assert_eq!(camera_sees(&scene, 6.5, 0.5), Some(Vec3A::splat(2.0)));
+}
+
+/// "A mesh light in frame" is seen and solid; "a hidden mesh light" is not
+/// seen by the camera, still lights, and still shadows another light.
+#[test]
+fn a_mesh_light_is_solid_and_hides_from_the_camera_only() {
+    let glow = openpbr_material(
+        "Glow",
+        "float inputs:emissionLuminance = 2\n            color3f inputs:emissionColor = (1, 1, 1)",
+    );
+    let seen = load(
+        "mesh_light_seen",
+        &(glow.clone() + &card("Card", "Glow", true, 0.0, 1.0, "")),
+    );
+    assert!(camera_sees(&seen, 0.5, 0.5).is_some());
+    let hidden = load(
+        "mesh_light_hidden",
+        &(glow
+            + &card(
+                "Card",
+                "Glow",
+                true,
+                0.0,
+                1.0,
+                "bool crust:light:cameraVisible = 0",
+            )
+            + r#"
+    def SphereLight "Key"
+    {
+        float inputs:radius = 0.1
+        double3 xformOp:translate = (0.5, 0.5, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#),
+    );
+    assert_eq!(
+        camera_sees(&hidden, 0.5, 0.5),
+        None,
+        "hidden from the camera"
+    );
+    assert_eq!(hidden.lights.count(), 2, "still a light");
+    let shadow = Ray::new(Vec3A::new(0.5, 0.5, -1.0), Vec3A::Z).with_mask(crust_core::MASK_SHADOW);
+    let hit = hidden
+        .world
+        .intersect(&shadow, 1e-3, 5.0)
+        .expect("the card shadows the key");
+    assert!((hit.rec.t - 1.0).abs() < 1e-4);
+    let bounce =
+        Ray::new(Vec3A::new(0.5, 0.5, -1.0), Vec3A::Z).with_mask(crust_core::MASK_INDIRECT);
+    assert!(
+        hidden.world.intersect(&bounce, 1e-3, 5.0).is_some(),
+        "bounces see it"
+    );
+    assert!(!hidden.world.is_transparent_emitter(hit.geom_id));
+}
+
+/// An unknown `light:materialSyncMode` is refused and read as the fallback.
+#[test]
+fn an_unknown_sync_mode_falls_back_with_a_warning() {
+    let body = openpbr_material(
+        "Glow",
+        "float inputs:emissionLuminance = 2\n            color3f inputs:emissionColor = (1, 1, 1)",
+    ) + &card(
+        "Card",
+        "Glow",
+        true,
+        0.0,
+        1.0,
+        "uniform token light:materialSyncMode = \"sometimes\"\n        float inputs:intensity = 2",
+    );
+    let scene = load("mesh_light_unknown_sync", &body);
+    assert!(warning_codes(&scene).contains(&crust_core::WarningCode::LightUnknownToken));
+    assert_eq!(camera_sees(&scene, 0.5, 0.5), Some(Vec3A::splat(4.0)));
 }

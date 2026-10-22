@@ -140,6 +140,11 @@ impl Material for Emissive {
         self.color
     }
 
+    /// The colour, when nothing shapes, textures or sides it.
+    fn uniform_emission(&self) -> Option<Vec3A> {
+        self.is_uniform().then_some(self.color)
+    }
+
     /// The hit-aware entry point, so a bounce ray sees exactly what NEE
     /// sampled: the ray arrives travelling *toward* the surface, so the
     /// emission it collects leaves along the reverse of its direction, and

@@ -884,6 +884,12 @@ impl Material for OpenPBR {
         self.emission_color * self.emission_luminance
     }
 
+    /// The uncoated emission, when no coat or fuzz fades it toward the viewer
+    /// — `emitted_directional`'s own early return.
+    fn uniform_emission(&self) -> Option<Vec3A> {
+        (self.coat_weight <= 0.0 && self.fuzz_weight <= 0.0).then(|| self.emitted())
+    }
+
     /// Emission seen through the coat and the fuzz: one outbound passage of
     /// the Adobe reference's layers (`openpbr_compute_emission` scales
     /// emission by each layer's view-side base-layer factor). Through the coat,

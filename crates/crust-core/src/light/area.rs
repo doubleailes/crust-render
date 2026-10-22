@@ -8,6 +8,7 @@ use glam::Vec3A;
 use crate::material::Emissive;
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
+use super::mesh::MeshShape;
 use super::rect::RectShape;
 use super::shape::{
     AffineShape, LightShape, ShapeExtent, ShapeHits, SolidAngleSampler, SphereShape,
@@ -18,7 +19,8 @@ use super::{FoundAlong, Light, LightBounds, LightSample};
 /// [`LightShape`]s, dispatched by `match` rather than through a
 /// `Box<dyn LightShape>`.
 ///
-/// The set is closed — one variant per supported UsdLux shape — and NEE asks
+/// The set is closed — one variant per supported UsdLux shape, and the mesh of
+/// a `MeshLightAPI` prim — and NEE asks
 /// the shape three or four questions per sample (`sample_solid_angle`,
 /// `sample_point`, `normal_at`, `inv_pdf_area`). As an enum each is a jump
 /// the optimiser can inline into [`AreaLight::sample_li`] instead of a vtable
@@ -30,6 +32,7 @@ pub enum AreaShape {
     Sphere(SphereShape),
     Affine(AffineShape),
     Rect(RectShape),
+    Mesh(MeshShape),
 }
 
 impl From<SphereShape> for AreaShape {
@@ -50,6 +53,12 @@ impl From<RectShape> for AreaShape {
     }
 }
 
+impl From<MeshShape> for AreaShape {
+    fn from(s: MeshShape) -> Self {
+        AreaShape::Mesh(s)
+    }
+}
+
 /// Forwards one [`LightShape`] method to the variant.
 macro_rules! dispatch {
     ($self:ident, $s:ident => $call:expr) => {
@@ -57,6 +66,7 @@ macro_rules! dispatch {
             AreaShape::Sphere($s) => $call,
             AreaShape::Affine($s) => $call,
             AreaShape::Rect($s) => $call,
+            AreaShape::Mesh($s) => $call,
         }
     };
 }
@@ -73,8 +83,13 @@ impl LightShape for AreaShape {
     }
 
     #[inline]
-    fn normal_at(&self, p: Vec3A) -> Vec3A {
-        dispatch!(self, s => s.normal_at(p))
+    fn sample_point_on(&self, u: f32, v: f32) -> (Vec3A, u32) {
+        dispatch!(self, s => s.sample_point_on(u, v))
+    }
+
+    #[inline]
+    fn normal_at(&self, p: Vec3A, prim: u32) -> Vec3A {
+        dispatch!(self, s => s.normal_at(p, prim))
     }
 
     #[inline]
@@ -140,7 +155,8 @@ impl AreaLight {
     }
 
     /// Solid-angle pdf, as seen from `from`, of the strategy
-    /// [`Light::sample_li`] used to reach `light_point`: the shape's own
+    /// [`Light::sample_li`] used to reach `light_point`, on primitive `prim`
+    /// ([`LightShape::normal_at`]): the shape's own
     /// solid-angle density where it has a strategy from `from`, otherwise
     /// that of sampling uniformly by area, `dist² / (cos(θ_light) · area)`,
     /// where θ_light is the angle between the light's surface normal at
@@ -152,13 +168,18 @@ impl AreaLight {
     /// and the bounce side must keep its emission whole. A strategy's `None`
     /// is final — falling through to the area density would weigh a bounce
     /// hit against samples NEE never draws.
-    pub(super) fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> Option<PdfSolidAngle> {
+    pub(super) fn solid_angle_pdf(
+        &self,
+        from: Vec3A,
+        light_point: Vec3A,
+        prim: u32,
+    ) -> Option<PdfSolidAngle> {
         if let Some(sampler) = self.shape.solid_angle_sampler(from) {
             return sampler.pdf(light_point);
         }
         let direction = light_point - from;
         let dir_to_light = direction.normalize();
-        let light_normal = self.shape.normal_at(light_point);
+        let light_normal = self.shape.normal_at(light_point, prim);
         self.pdf_toward(direction, dir_to_light, light_normal, light_point)
     }
 
@@ -200,9 +221,9 @@ impl AreaLight {
     /// ([`Emissive::radiance_toward`], [`Light::pdf_at_point`]). Points that
     /// emit nothing toward `from` (a one-sided light's back) are skipped.
     pub(super) fn found_along(&self, from: Vec3A, dir: Vec3A, mut f: impl FnMut(FoundAlong)) {
-        for t in self.shape.hits(from, dir).iter() {
+        for (t, prim) in self.shape.hits(from, dir).iter_on() {
             let point = from + t * dir;
-            let front = self.shape.normal_at(point).dot(-dir) > 0.0;
+            let front = self.shape.normal_at(point, prim).dot(-dir) > 0.0;
             let radiance = self.material.radiance_toward(point, -dir, front);
             if radiance == Vec3A::ZERO {
                 continue;
@@ -210,9 +231,42 @@ impl AreaLight {
             f(FoundAlong {
                 distance: t,
                 radiance,
-                pdf: self.pdf_at_point(from, point),
+                pdf: self.pdf_at_point(from, point, prim),
             });
         }
+    }
+}
+
+impl AreaLight {
+    /// [`Light::sample_li`] on a mesh light: [`Light::sample_li`]'s area
+    /// branch, with the triangle the point lies on handed to its normal.
+    ///
+    /// Apart and out of line so the analytic shapes' sample keeps its own
+    /// code: carrying the triangle through it (a `(point, prim)` from the
+    /// shape, a fourth arm in each dispatch) cost `veach_mis`, which has no
+    /// mesh light, 2.3% of `sample_li`'s instructions (callgrind).
+    #[inline(never)]
+    fn sample_mesh(&self, mesh: &MeshShape, from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
+        let (light_point, prim) = mesh.sample_point_on(u, v);
+        let to_light = light_point - from;
+        let distance = to_light.length();
+        if distance < 1e-6 {
+            return None;
+        }
+        let direction = to_light / distance;
+        // As in `sample_li`: `normalize`, so the pdf is the bounce side's.
+        let dir_to_light = to_light.normalize();
+        let light_normal = mesh.normal_at(light_point, prim);
+        let front = light_normal.dot(-dir_to_light) > 0.0;
+        let pdf = self.pdf_toward(to_light, dir_to_light, light_normal, light_point)?;
+        Some(LightSample {
+            direction,
+            distance,
+            radiance: self
+                .material
+                .radiance_toward(light_point, -dir_to_light, front),
+            pdf,
+        })
     }
 }
 
@@ -222,6 +276,9 @@ impl Light for AreaLight {
     }
 
     fn sample_li(&self, from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
+        if let AreaShape::Mesh(mesh) = &self.shape {
+            return self.sample_mesh(mesh, from, u, v);
+        }
         // The shape's solid-angle strategy where it has one from here, area
         // sampling otherwise. `pdf_at_point` makes the same choice through
         // `solid_angle_pdf`, which is what keeps the two MIS sides one strategy.
@@ -241,7 +298,7 @@ impl Light for AreaLight {
         // `normalize` rather than `direction`, so the pdf is bit-for-bit what
         // `pdf_at_point` computes for the same point on the bounce side.
         let dir_to_light = to_light.normalize();
-        let light_normal = self.shape.normal_at(light_point);
+        let light_normal = self.shape.normal_at(light_point, 0);
         // Emission leaves the light back toward `from`; whether that is the
         // emitting side is the sign of the cosine the pdf takes unsigned.
         let front = light_normal.dot(-dir_to_light) > 0.0;
@@ -263,8 +320,8 @@ impl Light for AreaLight {
         })
     }
 
-    fn pdf_at_point(&self, from: Vec3A, light_point: Vec3A) -> Option<PdfSolidAngle> {
-        self.solid_angle_pdf(from, light_point)
+    fn pdf_at_point(&self, from: Vec3A, light_point: Vec3A, prim: u32) -> Option<PdfSolidAngle> {
+        self.solid_angle_pdf(from, light_point, prim)
     }
 
     fn geom_id(&self) -> Option<u32> {
@@ -282,8 +339,11 @@ impl Light for AreaLight {
             .map(|k| {
                 let u = ((k / GRID) as f32 + 0.5) / GRID as f32;
                 let v = ((k % GRID) as f32 + 0.5) / GRID as f32;
-                let p = self.shape.sample_point(u, v);
-                (self.shape.normal_at(p), self.shape.inv_pdf_area(p).get())
+                let (p, prim) = self.shape.sample_point_on(u, v);
+                (
+                    self.shape.normal_at(p, prim),
+                    self.shape.inv_pdf_area(p).get(),
+                )
             })
             .collect();
         let projected_area = |w: Vec3A| {

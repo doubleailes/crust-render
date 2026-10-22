@@ -1,0 +1,130 @@
+#usda 1.0
+(
+    doc = """A mesh light: a flat-coloured MaterialX emissive card, made a light by
+    `UsdLuxMeshLightAPI`, over a diffuse floor and a sphere — the production
+    case of an FX or practical card that lights its surroundings.
+
+    With the API, next-event estimation samples the card's triangles and a
+    bounce that hits it is MIS-weighted against that, as for any UsdLux light.
+    Without it (`mesh_light_no_api.usda`, this stage with the API deleted) the
+    card is found only by BSDF-sampled rays that happen to hit it. Its light
+    inputs are unauthored, so under the fallback
+    `light:materialSyncMode = "materialGlowTintsLight"` its radiance is the
+    material's glow and the two stages render the same picture, the first one
+    with far less noise:
+
+      cargo run --release -- render -i samples/mesh_light.usda -s 16 \\
+          --indirect-clamp 0 -o api.exr
+      cargo run --release -- render -i samples/mesh_light_no_api.usda -s 16 \\
+          --indirect-clamp 0 -o no_api.exr
+      cargo run --release -- diff api.exr no_api.exr
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        # The card's look: an uncoated `open_pbr_surface` with a literal
+        # emission, which folds to a constant at load — what lets
+        # `materialGlowTintsLight` read it as the light's radiance.
+        def Material "Glow"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/Glow/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.05, 0.05, 0.05)
+                float inputs:specular_weight = 0
+                float inputs:emission_luminance = 12
+                color3f inputs:emission_color = (1, 0.62, 0.32)
+                token outputs:out
+            }
+        }
+
+        def Material "Grey"
+        {
+            token outputs:surface.connect = </World/Looks/Grey/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.6, 0.6, 0.6)
+                float inputs:specularWeight = 0
+                token outputs:surface
+            }
+        }
+
+        def Material "Glossy"
+        {
+            token outputs:surface.connect = </World/Looks/Glossy/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.25, 0.35, 0.6)
+                float inputs:specularRoughness = 0.3
+                token outputs:surface
+            }
+        }
+    }
+
+    # The emissive card: 1.6 × 0.5, tilted to face the sphere and the floor.
+    def Mesh "Card" (
+        prepend apiSchemas = ["MaterialBindingAPI", "MeshLightAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-0.8, -0.25, 0), (0.8, -0.25, 0), (0.8, 0.25, 0), (-0.8, 0.25, 0)]
+        rel material:binding = </World/Looks/Glow>
+        double3 xformOp:translate = (-0.6, 2.2, -0.8)
+        float xformOp:rotateX = 55
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Sphere "Ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.6
+        rel material:binding = </World/Looks/Glossy>
+        double3 xformOp:translate = (0.4, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, 0, -6), (6, 0, -6), (6, 0, 6), (-6, 0, 6)]
+        rel material:binding = </World/Looks/Grey>
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        double3 xformOp:translate = (0, 1.6, 6)
+        float xformOp:rotateX = -10
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 8
+    }
+}

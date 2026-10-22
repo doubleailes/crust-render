@@ -204,6 +204,13 @@ plain text and are not counted.
 | `light.unsupported_texture_format` | skipped | A DomeLight's texture:format is not latlong; it emits its uniform colour. | Convert the map to lat-long. |
 | `light.map_unreadable` | skipped | A light's or dome's texture could not be loaded; it emits its uniform colour. | Check the file path and format; the message gives the loader's reason. |
 | `ies.unreadable` | skipped | An IES profile could not be loaded; the light renders without it. | Check the IES file path and format. |
+| `light.unknown_token` | refused | A light's token input names no value the schema defines; its fallback is used. | Author one of the schema's tokens; the message names the input and its fallback. |
+| `light.mesh_light_varying_emission` | skipped | A mesh light's glow varies over its surface or with the view under materialGlowTintsLight; the mesh is not a light. | Author `light:materialSyncMode = "independent"` and the light's inputs, or give the material a flat, uncoated emission. |
+| `light.mesh_light_cutout` | skipped | A mesh light's material is a cutout; the mesh is not a light. | Remove the cutout, or model the shape the cutout cuts. |
+| `light.mesh_light_instanced` | skipped | A mesh light lies inside an instance prototype; no placement is a light. | Make the mesh not instanced, or use a UsdLux light. |
+| `light.mesh_light_moving` | skipped | A mesh light moves over the shutter; the mesh is not a light. | Keep the mesh still over the shutter, or accept BSDF-only emission. |
+| `light.mesh_light_not_a_mesh` | skipped | MeshLightAPI is applied to a prim that is not a Mesh; it is not a light. | Apply `MeshLightAPI` to a `Mesh`, or use a UsdLux light. |
+| `light.mesh_light_no_emission` | skipped | A mesh light emits nothing; it is not a light. | Give the material a glow, or author `light:materialSyncMode = "independent"` with the light's inputs. |
 
 ## Light linking
 

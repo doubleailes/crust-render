@@ -64,6 +64,15 @@ pub(crate) trait PatternMaterial: Send + Sync {
         None
     }
 
+    /// The parameters whose emission is the same at every hit and toward
+    /// every viewer ([`Material::uniform_emission`]): the
+    /// [`PatternMaterial::constant_emission`] ones, unless the network can
+    /// change a parameter the emission is faded by. The default trusts the
+    /// constants, which suits a network that drives nothing but emission.
+    fn uniform_emission_params(&self) -> Option<&OpenPBR> {
+        self.constant_emission()
+    }
+
     /// [`Material::has_cutout`].
     fn pattern_has_cutout(&self) -> bool {
         false
@@ -167,6 +176,12 @@ impl<T: PatternMaterial> Material for T {
     fn emitted(&self) -> Vec3A {
         self.constant_emission()
             .map_or(Vec3A::ZERO, |c| c.emitted())
+    }
+
+    /// The constants' uniform emission ([`OpenPBR`]'s: no coat, no fuzz).
+    fn uniform_emission(&self) -> Option<Vec3A> {
+        self.uniform_emission_params()
+            .and_then(|c| c.uniform_emission())
     }
 
     fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {

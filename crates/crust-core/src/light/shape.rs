@@ -26,8 +26,21 @@ pub trait LightShape: Send + Sync {
     /// A point on the surface, uniform by area, from two unit random numbers.
     fn sample_point(&self, u: f32, v: f32) -> Vec3A;
 
-    /// Outward surface normal at a point known to lie on the shape.
-    fn normal_at(&self, p: Vec3A) -> Vec3A;
+    /// [`LightShape::sample_point`], with the primitive the point lies on:
+    /// what [`LightShape::normal_at`] is then asked with. A shape of one
+    /// primitive (every analytic one) answers 0, the default.
+    #[inline(always)]
+    fn sample_point_on(&self, u: f32, v: f32) -> (Vec3A, u32) {
+        (self.sample_point(u, v), 0)
+    }
+
+    /// Outward surface normal at a point known to lie on the shape, on its
+    /// primitive `prim`: for a shape of many primitives (a mesh), the index
+    /// of the triangle the point lies on — the kernel's `prim_id` of a hit
+    /// there, or [`LightShape::sample_point_on`]'s — which a bare point does
+    /// not name on a shared edge. The analytic shapes, of one primitive,
+    /// ignore it.
+    fn normal_at(&self, p: Vec3A, prim: u32) -> Vec3A;
 
     /// Total world-space surface area — what `inputs:normalize` divides by.
     fn area(&self) -> f32;
@@ -104,6 +117,9 @@ impl ShapeExtent {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ShapeHits {
     t: [f32; 2],
+    /// The primitive each hit lies on ([`LightShape::normal_at`]): 0 on a
+    /// shape of one primitive.
+    prim: [u32; 2],
     len: u8,
 }
 
@@ -111,9 +127,15 @@ impl ShapeHits {
     /// Adds `t` when it is ahead of the ray's near bound. Pushed in
     /// increasing order.
     pub(super) fn push(&mut self, t: f32) {
+        self.push_on(t, 0);
+    }
+
+    /// [`ShapeHits::push`] on primitive `prim`.
+    pub(super) fn push_on(&mut self, t: f32, prim: u32) {
         // From below, so a NaN root is rejected too.
         if t > TRACE_T_MIN && t < f32::INFINITY && (self.len as usize) < self.t.len() {
             self.t[self.len as usize] = t;
+            self.prim[self.len as usize] = prim;
             self.len += 1;
         }
     }
@@ -121,6 +143,11 @@ impl ShapeHits {
     /// The distances, nearest first.
     pub fn iter(&self) -> impl Iterator<Item = f32> + '_ {
         self.t[..self.len as usize].iter().copied()
+    }
+
+    /// The distances, nearest first, each with its primitive.
+    pub fn iter_on(&self) -> impl Iterator<Item = (f32, u32)> + '_ {
+        self.iter().zip(self.prim.iter().copied())
     }
 
     /// The nearest distance, if the ray meets the surface at all.
@@ -439,7 +466,7 @@ impl LightShape for SphereShape {
         self.center + self.radius * n
     }
 
-    fn normal_at(&self, p: Vec3A) -> Vec3A {
+    fn normal_at(&self, p: Vec3A, _prim: u32) -> Vec3A {
         (p - self.center).normalize()
     }
 
@@ -759,7 +786,7 @@ impl LightShape for AffineShape {
             .transform_point3a(self.unit.sample(u, v))
     }
 
-    fn normal_at(&self, p: Vec3A) -> Vec3A {
+    fn normal_at(&self, p: Vec3A, _prim: u32) -> Vec3A {
         let local = self.world_to_light.transform_point3a(p);
         (self.normal_mat * self.unit.normal(local)).normalize_or(Vec3A::Z)
     }

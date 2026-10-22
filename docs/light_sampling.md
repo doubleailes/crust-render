@@ -1131,6 +1131,62 @@ ratio over the time ratio, `power` = 1. The pass bar is 0.95 on both measures.
 - **The time cost is 8–28%** where a tree is walked, more on `light_linking`
   (1.57×), whose renders are under 0.1 s and dominated by setup.
 
+### 3.16 Mesh lights (`mesh-light-api`)
+
+A `Mesh` applying `UsdLuxMeshLightAPI` is one light-list entry whose triangles are
+sampled **by area**: a triangle by its share of the area, a uniform point on it
+(lighting design record, "Mesh lights"). Before it, emissive geometry was found only
+by BSDF-sampled bounces. Measured with `--indirect-clamp 0`, a fixed sample count
+(`--min-samples` equal to `-s`), relMSE from `crust diff` against a high-spp reference.
+
+**What the API buys: the production-style card.** `samples/mesh_light.usda`, a flat
+MaterialX emissive card lighting a floor and a glossy sphere, against
+`mesh_light_no_api.usda`, the same stage with the API deleted, both against a
+16384 spp render of the first:
+
+| spp | with `MeshLightAPI` | without |
+|-----|---------------------|---------|
+| 8 | 0.00796 | |
+| 16 | 0.00242 | 0.390 (vs the 4096 spp reference) |
+| 32 | 0.00125 | |
+| 256 | | 0.0107 |
+| 512 | | 0.00430 |
+| 1024 | | 0.00160 |
+| 2048 | | 0.00060 |
+
+5% noise (relMSE 0.0025) takes **≈16 spp with the API and ≈750 without**, about 47×
+fewer samples. A sample costs 1.62× the time with the API (2.71 s against 1.67 s
+at 256 spp, the faster of five runs: NEE's shadow ray and BSDF `eval` at every
+vertex), so about **29× less time** to the same noise. Without
+the API the relMSE against the API's reference keeps falling (0.39, 0.073, 0.011 at
+16, 64, 256 spp), so the two stages render one picture: applying the API with its
+inputs unauthored changes the noise, not the image. `crust diagnostic` agrees: a
+baseline MRSE of 0.0036 with the API against 0.2125 without, at 64 spp, where the
+second reports `unlit_emitters` naming `/World/Card`.
+
+**What area sampling costs: a quad against an equal `RectLight`.** A 1 × 1 panel
+facing a diffuse floor, emitting 5 (the mesh under `noMaterialResponse`, hidden from
+the camera, as the rect is), direct light only, 160 × 160, 512 spp, the faster of
+five runs, against an 8192 spp `RectLight` reference:
+
+| panel height | `RectLight` relMSE | mesh relMSE | render s (rect / mesh) | efficiency, rect ÷ mesh |
+|--------------|--------------------|-------------|------------------------|-------------------------|
+| 0.25 | 2.84e-7 | 8.46e-6 | 1.80 / 1.58 | 26× |
+| 2.0 | 2.57e-9 | 1.88e-8 | 1.87 / 1.84 | 7.2× |
+
+The rect samples its spherical rectangle (§3.9), the mesh its area, whose
+`cos θ_l / r²` varies across a panel close to the receiver — §5.1's whole argument,
+at its worst. Arvo's spherical triangles (§5.2, "Triangles and polygons") are the
+follow-up; until then a large practical light close to the set is better authored
+as a `RectLight`, and a card, a screen or a fire element is what `MeshLightAPI` is
+for.
+
+**Unbiased under every selection.** A half-cylinder strip (eight quads, non-planar)
+over a floor, with a small sphere light beside it, rendered light-only, BSDF-only
+and with power MIS under `power`, `uniform` and `tree` selection: every relMSE
+against an 8192 spp MIS reference keeps falling from 16 to 64 to 256 spp (light-only
+and MIS about 10× per 4× samples, BSDF-only about 6.5×), with no plateau.
+
 ## 4. The anatomy of the direct-lighting estimator
 
 One NEE sample at a shading point *x* estimates
@@ -1250,8 +1306,9 @@ of directions.
   shading at 2 spp. It is heavier than Ureña + Hart. The LTC foundation is
   Heitz, Dupuy, Hill & Neubelt, *Real-Time Polygonal-Light Shading with Linearly
   Transformed Cosines*, SIGGRAPH 2016.
-- Crust has no triangle-mesh lights today (`MeshLightAPI` is not read), so this
-  becomes relevant only with mesh lights.
+- Crust's mesh lights (`MeshLightAPI`, §3.16) sample their triangles by area,
+  so this is the follow-up that closes their gap to a `RectLight`: 7–26× at
+  equal time on a quad (§3.16).
 
 **Disks and cylinders.**
 - Gamito, *Solid Angle Sampling of Disk and Cylinder Lights*, CGF 35(4) (EGSR
@@ -1764,9 +1821,9 @@ setting, applied at depth 0 only, MIS'd as in §7.4. **Done**, with
 pbrt-v4's `BVHLightSampler` in shape, over the finite UsdLux lights, with a
 signed horizon at opaque receivers and a 0.1 defensive share of the power table.
 1.86× lower relMSE on `usdlux` and 11–22× on the 256-light `many_lights`, a tie
-on `veach_mis`. Mesh lights (`MeshLightAPI`), emissive curves and instances
-would make its leaves triangles; the traversal and its MIS contract would not
-change.
+on `veach_mis`. A mesh light (`MeshLightAPI`, §3.16) is one leaf, bounded by
+its box; per-triangle leaves, and emissive curves and instances as lights, would
+make its leaves triangles; the traversal and its MIS contract would not change.
 
 **(n) Visibility-aware selection. ✅ Done as an opt-in mode; measured in
 §3.12.** Learned by its own deterministic pre-pass rather than by guiding's
