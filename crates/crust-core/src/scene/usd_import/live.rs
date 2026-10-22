@@ -344,9 +344,13 @@ fn refresh_settings(
         if read.subdiv.level != facts.subdiv_level {
             return Err(Structural("the subdivision level changed".into()));
         }
-        // Tessellation that reads the camera stands only when what it read is
-        // what it would read now, bit for bit: an exposure keeps it, a move,
-        // a lens or a resolution does not.
+        // Tessellation that reads the dicing camera stands only when it reads
+        // the same camera, and what it read is what it would read now, bit
+        // for bit: an exposure keeps it, a move, a lens or a resolution does
+        // not. Moving a render camera that does not dice keeps it too.
+        if read.dicing.as_ref().map(ToString::to_string) != facts.dicing {
+            return Err(Structural("the dicing camera changed".into()));
+        }
         if read.subdiv.adaptive.map(|r| r.key()) != facts.adaptive {
             return Err(Structural(
                 "adaptive subdivision would read another camera projection".into(),

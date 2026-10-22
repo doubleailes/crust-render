@@ -754,3 +754,80 @@ fn a_conform_policy_edit_reimports_adaptive_subdivision() {
         Ok(_) => panic!("adaptive subdivision for another frame was updated in place"),
     }
 }
+
+/// `framing_stage`'s adaptive stage with a second camera, `/W/Dicer`, which
+/// `crust:dicingCamera` names when `dicing` is given; the render camera at
+/// `cam_z`.
+fn dicing_stage(name: &str, dicing: Option<&str>, cam_z: f32) -> PathBuf {
+    let path = framing_stage(name, "", true);
+    let text = std::fs::read_to_string(&path).expect("read stage");
+    let rel = dicing.map_or(String::new(), |d| format!("rel crust:dicingCamera = <{d}>"));
+    let text = text
+        .replace(
+            "double3 xformOp:translate = (0, 0, 10)",
+            &format!("double3 xformOp:translate = (0, 0, {cam_z})"),
+        )
+        .replace(
+            "    def Sphere \"Ball\" {}",
+            "    def Camera \"Dicer\"\n    {\n        float horizontalAperture = 36\n        \
+             float verticalAperture = 24\n        double3 xformOp:translate = (0, 1, 12)\n        \
+             uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }\n    \
+             def Sphere \"Ball\" {}",
+        )
+        .replace(
+            "rel camera = </W/Cam>",
+            &format!("rel camera = </W/Cam>\n        {rel}"),
+        );
+    std::fs::write(&path, text).expect("write stage");
+    path
+}
+
+/// With a dicing camera, moving the render camera applies in place as a
+/// fresh import would; retargeting `crust:dicingCamera` is structural.
+#[test]
+fn a_dicing_camera_keeps_a_render_camera_move_in_place() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let name = "live_dicing";
+    let path = dicing_stage(name, Some("/W/Dicer"), 10.0);
+    let mut scene = Scene::from_usd(&path).expect("load");
+    assert!(scene.stats.subdivision.adaptive.is_some(), "adaptive");
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
+    let before = format!("{:?}", scene.camera);
+    dicing_stage(name, Some("/W/Dicer"), 7.0);
+    let prov = scene.provenance.clone().expect("provenance");
+    let update = prov
+        .rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+        .expect("a render camera move applies in place");
+    update.apply(&mut scene).expect("applies");
+    assert_ne!(format!("{:?}", scene.camera), before, "the camera moved");
+    let fresh = Scene::from_usd(&path).expect("load the edited layer");
+    assert_eq!(format!("{:?}", scene.camera), format!("{:?}", fresh.camera));
+    assert_eq!(beauty_bits(scene), beauty_bits(fresh));
+
+    // Without a dicing camera the same move re-tessellates.
+    let path = dicing_stage("live_dicing_none", None, 10.0);
+    let scene = Scene::from_usd(&path).expect("load");
+    dicing_stage("live_dicing_none", None, 7.0);
+    let prov = scene.provenance.as_ref().expect("provenance");
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => {
+            assert!(why.contains("another camera projection"), "{why}")
+        }
+        Ok(_) => panic!("a move of the dicing render camera was updated in place"),
+    }
+
+    // Retargeting the relationship moves what tessellation reads.
+    let path = dicing_stage("live_dicing_retarget", Some("/W/Dicer"), 10.0);
+    let scene = Scene::from_usd(&path).expect("load");
+    dicing_stage("live_dicing_retarget", Some("/W/Cam"), 10.0);
+    let prov = scene.provenance.as_ref().expect("provenance");
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => {
+            assert!(why.contains("the dicing camera changed"), "{why}")
+        }
+        Ok(_) => panic!("a retargeted dicing camera was updated in place"),
+    }
+}

@@ -252,6 +252,24 @@ pub(super) fn render_settings_subdiv_edge_length(
     custom_f32(&prim, "crust:subdivisionEdgeLength")
 }
 
+/// The first target of `crust:dicingCamera` on the `RenderSettings` prim: the
+/// camera tessellation reads (adaptive subdivision, implicit shapes sized on
+/// screen) in place of the render camera. A relationship, so composition
+/// remaps it as it remaps `RenderSettings.camera`. `None` when unauthored; the
+/// caller checks the target is a camera. A geometry setting, like
+/// [`render_settings_subdiv_level`].
+pub(super) fn render_settings_dicing_camera(
+    stage: &Stage,
+    pass: Option<&sdf::Path>,
+) -> Option<sdf::Path> {
+    let prim = prim_at(stage, render_settings_path(stage, pass)?);
+    prim.relationship("crust:dicingCamera")
+        .targets()
+        .ok()?
+        .into_iter()
+        .next()
+}
+
 /// The working colour space the stage asks for: `renderingColorSpace` on the
 /// `RenderSettings` prim, resolved through the OCIO config ([`crate::color`]).
 /// Unauthored or empty is `lin_rec709`; a name the config does not know, or a

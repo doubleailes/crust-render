@@ -92,6 +92,7 @@ plain text and are not counted.
 | `camera.invalid_meters_per_unit` | refused | The stage's metersPerUnit is not finite, not positive, or so small that the lens diameter overflows; the lens reads it as 0.01, a centimetre. | Author the stage's `metersPerUnit` as a positive length in metres (0.01 for centimetres, 1 for metres). |
 | `camera.shutter_instantaneous` | approximated | A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero. | Author `shutter:open` / `shutter:close` on the render camera (with `disableMotionBlur` for a sharp beauty). |
 | `camera.shutter_mismatch` | approximated | The render goes through another camera than the one whose shutter motion was measured over. | Name the render camera with `--camera` or `RenderSettings.camera`. |
+| `camera.dicing_not_a_camera` | approximated | `crust:dicingCamera` on the RenderSettings prim targets a prim that is not a camera, or no prim; adaptive subdivision and implicit shapes are diced for the render camera. | Point `crust:dicingCamera` at a camera; `crust ls camera` lists them. |
 
 ## Products and AOVs
 

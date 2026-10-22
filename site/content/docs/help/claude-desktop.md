@@ -150,10 +150,10 @@ these:
 
 | `applied` | what changed | what crust does |
 |-----------|--------------|-----------------|
-| `settings` | an attribute of the `RenderSettings` prim the render uses, or of the render camera (not its transform) | reads the settings and the camera again |
+| `settings` | an attribute of the `RenderSettings` prim the render uses, or of the render camera, its transform included unless a prim the scene renders sits below the camera | reads the settings and the camera again |
 | `materials` | an `inputs:*` value on a shader of a material the scene uses, or one of the material's own inputs | rebuilds those materials |
 | `lights` | an `inputs:*` value on a light (not its `width`, `height`, `radius` or `length`) | rebuilds those lights and the light selection |
-| `full` | anything else: a prim added or removed, a binding, a connection, a transform, visibility, a variant, a light's size | imports the saved file again |
+| `full` | anything else: a prim added or removed, a binding, a connection, any other transform, visibility, a variant, a light's size | imports the saved file again |
 
 An edit with changes of several kinds is applied as the most expensive of them, in the
 order of the table. A change that turns out to need more is applied as `full`: a material
@@ -172,7 +172,10 @@ its own, turns an edit into `full`:
   camera, a camera or settings edit stays in place when the view those shapes were
   tessellated for is unchanged: exposure, f-stop, focus distance, samples, AOVs. Moving
   the camera, changing its focal length or aperture, or changing the resolution
-  re-tessellates, so it is `full`.
+  re-tessellates, so it is `full`. Name another camera with
+  [`crust:dicingCamera`](@/docs/usd/render-settings.md#crust-dicingcamera) and the
+  shapes are tessellated for that one instead: moving the render camera then stays
+  `settings`, and moving the dicing camera is `full`.
 - **Light linking.** On a scene whose lights author `collection:lightLink` or
   `collection:shadowLink`, a light's `inputs:*` edit is still `lights`, and the links stay
   as they were. Editing a link itself is `full`, and so is editing a light whose

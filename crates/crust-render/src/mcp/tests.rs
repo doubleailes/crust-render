@@ -1216,6 +1216,243 @@ def Xform "World"
     }
 }
 
+/// A translate, then a rotate, of the camera at `camera`: each
+/// is `class`, and when in place, the scene is a full import's.
+fn move_camera(state: &mut State, dir: &Path, name: &str, camera: &str, class: &str) {
+    let (parent, cam) = camera.rsplit_once('/').unwrap();
+    let parent = parent.trim_start_matches('/');
+    let moves = [
+        ("translate", "double3 xformOp:translate = (0.3, 0.6, 5.5)"),
+        (
+            "rotate",
+            "float3 xformOp:rotateXYZ = (-4, 6, 0)\n uniform token[] xformOpOrder = \
+             [\"xformOp:translate\", \"xformOp:rotateXYZ\"]",
+        ),
+    ];
+    for (what, op) in moves {
+        let usda = format!(r#"over "{parent}" {{ over "{cam}" {{ {op} }} }}"#);
+        assert_eq!(author(state, &usda), class, "{name} {what}");
+        if class != "full" {
+            same_as_full_import(state, dir, &format!("{name} {what}"));
+        }
+    }
+}
+
+/// A stage of meshes only (nothing tessellated from the camera) seen by
+/// `/World/Cam`; `settings` and `under_camera` are spliced into the settings
+/// prim and the camera prim.
+fn mesh_stage(settings: &str, under_camera: &str) -> String {
+    format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+        {settings}
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+{under_camera}
+    }}
+
+    def DomeLight "Sky"
+    {{
+        color3f inputs:color = (0.4, 0.5, 0.8)
+    }}
+
+    def DistantLight "Sun"
+    {{
+        float inputs:intensity = 3
+    }}
+
+    def Mesh "Floor"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, 0, 4), (4, 0, 4), (4, 0, -4), (-4, 0, -4)]
+    }}
+
+    def Mesh "Card"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)]
+    }}
+}}
+"#
+    )
+}
+
+/// The render camera's transform is a settings edit, in place and a full
+/// import's bit for bit, where nothing tessellated reads it: meshes alone,
+/// the Cornell box (whose camera is the first one met, unnamed), and a dome
+/// the camera does not see.
+#[test]
+fn moving_the_render_camera_is_a_settings_edit() {
+    let (mut state, dir) = session_on("camera_moves", &mesh_stage("", ""));
+    move_camera(&mut state, &dir, "meshes", "/World/Cam", "settings");
+    assert_eq!(undo(&mut state), "settings", "undo the rotate");
+    same_as_full_import(&mut state, &dir, "undo the rotate");
+
+    let hidden = mesh_stage("bool domeLightCameraVisibility = 0", "");
+    let (mut state, dir) = session_on("camera_moves_dome_hidden", &hidden);
+    move_camera(&mut state, &dir, "dome hidden", "/World/Cam", "settings");
+
+    let s = samples();
+    let cornell = format!(
+        r#"#usda 1.0
+(
+    subLayers = [@{}/cornellbox.usda@]
+)
+
+def Scope "Render" {{ def RenderSettings "settings" {{ uniform int2 resolution = (48, 32) }} }}
+"#,
+        s.display()
+    );
+    let (mut state, dir) = session_on("camera_moves_cornell", &cornell);
+    move_camera(&mut state, &dir, "cornellbox", "/scene/camera1", "settings");
+}
+
+/// A camera that carries an imported prim moves it: `full`.
+#[test]
+fn moving_a_camera_with_prims_below_it_is_full() {
+    let carried = r#"
+        def Mesh "Badge"
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(0, 0, -2), (0.2, 0, -2), (0, 0.2, -2)]
+        }"#;
+    let (mut state, dir) = session_on("camera_carries", &mesh_stage("", carried));
+    move_camera(&mut state, &dir, "carried", "/World/Cam", "full");
+    // An exposure still is not a transform.
+    let exposure = r#"over "World" { over "Cam" { float exposure = 1 } }"#;
+    assert_eq!(author(&mut state, exposure), "settings");
+}
+
+/// Tessellation diced for another camera stands when the render camera
+/// moves; moving the dicing camera, or retargeting it, re-imports, and so
+/// does moving a render camera that dices.
+#[test]
+fn a_dicing_camera_keeps_render_camera_moves_in_place() {
+    let s = samples();
+    let s = s.display();
+    let dicer = r#"
+    def Camera "Dicer"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#;
+    let adaptive = |dicing: &str| {
+        format!(
+            r#"#usda 1.0
+(
+    subLayers = [@{s}/subdivision_adaptive.usda@]
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+over "Render" {{ over "settings" {{
+    int2 resolution = (48, 27)
+    {dicing}
+}} }}
+
+over "World" {{ {dicer} }}
+"#
+        )
+    };
+    // No dicing camera: the render camera dices, and moving it moves geometry.
+    let (mut state, dir) = session_on("dicing_none", &adaptive(""));
+    move_camera(&mut state, &dir, "adaptive", "/World/Cam", "full");
+
+    let dicing = "rel crust:dicingCamera = </World/Dicer>";
+    let (mut state, dir) = session_on("dicing_adaptive", &adaptive(dicing));
+    assert!(!has_warning(&mut state, "subdiv.adaptive_needs_camera"));
+    move_camera(&mut state, &dir, "adaptive diced", "/World/Cam", "settings");
+    let moved = r#"over "World" { over "Dicer" { double3 xformOp:translate = (0, 0.5, 4) } }"#;
+    assert_eq!(
+        author(&mut state, moved),
+        "full",
+        "moving the dicing camera"
+    );
+    let retarget = r#"over "Render" { over "settings" { rel crust:dicingCamera = </World/Cam> } }"#;
+    assert_eq!(
+        author(&mut state, retarget),
+        "full",
+        "retargeting the dicing camera"
+    );
+
+    // Implicit shapes sized on screen, diced for another camera.
+    let on_screen = format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        {dicing}
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    {dicer}
+
+    def DistantLight "Sun"
+    {{
+        float inputs:intensity = 3
+    }}
+
+    def Cylinder "Post"
+    {{
+        double radius = 1
+        double height = 2
+    }}
+}}
+"#
+    );
+    let (mut state, dir) = session_on("dicing_on_screen", &on_screen);
+    move_camera(
+        &mut state,
+        &dir,
+        "on-screen diced",
+        "/World/Cam",
+        "settings",
+    );
+}
+
 /// A stage authoring `metadata` whose camera has a lens (`fStop = 2`), for
 /// the depth-of-field edits.
 fn lens_stage(metadata: &str) -> String {

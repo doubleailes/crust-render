@@ -566,6 +566,7 @@ mod tests {
             &path,
             path_str,
             named.as_ref(),
+            None,
             &RenderSettings::default(),
             Framing::default(),
             frame,
