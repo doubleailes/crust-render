@@ -245,6 +245,16 @@ share them:
   (`camera_tessellated_settings_edits_stay_in_place`). The key is what the tessellation
   is handed, not the camera attributes, so it cannot go stale when `CameraFrame::read`
   reads one more.
+  - *Trap:* the `ImportKey` leaves the shutter's camera out, so that passes through
+    different cameras can share an import; the camera the settings name is recorded
+    apart (`StageFacts::named_camera`) and compared on its own. Without it, unnaming
+    the render camera kept the old one in place while a fresh import fell back to
+    another (`unnaming_the_render_camera_reimports`).
+  - A scene imported for a group of passes (`--all-passes`) records its first pass in
+    its options, so a refresh re-reads that pass's `renderSource`; `Scene::apply_pass`
+    to any other pass drops the provenance (its light indices and settings prim are
+    the first pass's), so an edit then re-imports
+    (`a_group_scene_rebuilds_only_as_its_first_pass`).
 
 **Warnings.** The update keeps the scene's warnings list, so it is refused whenever
 that list might not be what a fresh import reports: a material or light rebuild when

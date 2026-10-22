@@ -222,9 +222,9 @@ plain text and are not counted.
 | code | kind | meaning | what to do |
 |------|------|---------|------------|
 | `render_pass.render_source_invalid` | refused | The active render pass's renderSource does not target a RenderSettings prim; the stage's settings are read. | Target a `RenderSettings` prim, or remove `renderSource`. |
-| `render_pass.collection_not_read` | skipped | The active render pass's prune or renderVisibility collection restricts something; it is not read. | Use `matte` / `cameraVisibility`, or deactivate the prims instead of pruning them. |
+| `render_pass.collection_not_read` | skipped | The active render pass's prune collection restricts something; it is not read. | Leave the prims out of `renderVisibility` instead, or deactivate them. |
 | `render_pass.target_in_instance` | approximated | A render pass collection targets a prim inside an instance; membership is judged on the instance. | Target the instance, or make the target not instanced. |
-| `render_pass.volume_ignored` | skipped | A volume region is in the active pass's matte or outside its cameraVisibility; the pass does not apply to it. | Leave volume regions out of the pass's collections. |
+| `render_pass.volume_ignored` | skipped | A volume region is in the active pass's matte or outside its cameraVisibility or renderVisibility; the pass does not apply to it. | Leave volume regions out of the pass's collections. |
 | `render_pass.nested_not_composed` | skipped | A render pass collection includes a collection outside the streamed chunk that reads it; it contributes nothing there. | Author the nested collection on the pass, or set `CRUST_STREAM_IMPORT=0`. |
 
 ## Materials

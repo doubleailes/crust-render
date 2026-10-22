@@ -255,6 +255,34 @@ impl LaneMasks {
         }
     }
 
+    /// Re-reads every active lane's mask from its record in `tris`, and the
+    /// AND / OR with it: the masks [`LaneMasks::new`] would have built had
+    /// the records carried these masks at commit.
+    pub(crate) fn remask(&mut self, tris: &[crate::prim::TriangleRecord]) {
+        self.mask_and = RayMask::ALL;
+        self.mask_or = RayMask::NONE;
+        for lane in 0..4 {
+            if self.active & (1 << lane) != 0 {
+                let mask = tris[self.rec[lane] as usize].mask;
+                self.masks[lane] = mask;
+                self.mask_and &= mask;
+                self.mask_or |= mask;
+            }
+        }
+    }
+
+    /// Every field as words, for the structural comparisons in tests; the
+    /// masks only when `masks` is set.
+    #[cfg(test)]
+    pub(crate) fn layout_words(&self, masks: bool, out: &mut Vec<u32>) {
+        out.extend(self.rec);
+        out.push(self.active);
+        if masks {
+            out.extend([self.mask_and.0, self.mask_or.0]);
+            out.extend(self.masks.map(|m| m.0));
+        }
+    }
+
     /// The lanes this ray's category is allowed to see.
     #[inline]
     fn visible_lanes(&self, ray_mask: RayMask) -> u32 {
@@ -352,6 +380,17 @@ impl Tri4 {
         }
     }
 
+    /// See [`LaneMasks::layout_words`]; the vertices as bits.
+    #[cfg(test)]
+    pub(crate) fn layout_words(&self, masks: bool, out: &mut Vec<u32>) {
+        for vi in &self.v {
+            for axis in vi {
+                out.extend(axis.to_array().map(f32::to_bits));
+            }
+        }
+        self.lanes.layout_words(masks, out);
+    }
+
     /// Intersects all four triangles at once.
     #[inline]
     pub(crate) fn intersect(
@@ -379,6 +418,13 @@ impl Tri4i {
             v,
             lanes: LaneMasks::new(&lanes),
         }
+    }
+
+    /// See [`LaneMasks::layout_words`].
+    #[cfg(test)]
+    pub(crate) fn layout_words(&self, masks: bool, out: &mut Vec<u32>) {
+        out.extend(self.v.as_flattened());
+        self.lanes.layout_words(masks, out);
     }
 
     /// Gathers the lanes from `vertices` and intersects them — the same

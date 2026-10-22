@@ -40,6 +40,10 @@ pub enum Error {
     /// its holdouts writes a plate that looks right and composites wrong.
     /// Carries the path and why.
     PassNotFound { path: String, why: String },
+    /// A group import of passes
+    /// ([`Scene::from_usd_passes`](crate::Scene::from_usd_passes)) was given
+    /// no pass to import.
+    NoPasses,
     /// The host's working colour space
     /// ([`UsdImportOptions::working_space`](crate::UsdImportOptions::working_space),
     /// [`color::working_space`](crate::color::working_space)) is not a
@@ -101,6 +105,7 @@ impl fmt::Display for Error {
             Error::PassNotFound { path, why } => {
                 write!(f, "render pass {path}: {why}")
             }
+            Error::NoPasses => write!(f, "a group import of render passes names none"),
             Error::CameraNotFound { path, available } => {
                 write!(f, "no UsdGeomCamera at {path} on this stage")?;
                 if available.is_empty() {

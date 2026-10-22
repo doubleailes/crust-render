@@ -199,6 +199,7 @@ pub(super) struct MeshArena {
 }
 
 /// The load-wide subdivision choices [`mesh_source`] applies to each mesh.
+#[derive(Clone)]
 pub(super) struct SubdivPolicy {
     /// The one refinement level, resolved by
     /// [`resolve_subdiv_level`](super::attrs::resolve_subdiv_level). In

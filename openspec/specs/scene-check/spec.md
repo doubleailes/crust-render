@@ -46,8 +46,8 @@ The report SHALL give:
 - the camera path, the resolution and the region (`null` for the whole frame);
 - the active pass (`null` with none), the `RenderSettings` prim the render reads
   (`null` when the stage has none and the render uses the defaults), and, with a
-  pass, how many geometries are holdouts and how many are hidden
-  from the camera;
+  pass, how many geometries are holdouts, how many are hidden from the camera,
+  and how many are hidden from every ray;
 - every product, with the file a render would write and the channels in it;
   the file is the path with its frame variables expanded for the checked frame.
 
@@ -76,6 +76,11 @@ A stage with no products SHALL report the single beauty image a render would wri
   three meshes
 - **THEN** the report names the pass, `/Render/charSettings` as the settings, and
   three holdouts
+
+#### Scenario: A pass that hides geometry from every ray
+
+- **WHEN** the active pass's `renderVisibility` leaves out two meshes
+- **THEN** the report gives two geometries hidden from every ray
 
 #### Scenario: No pass
 
@@ -146,11 +151,12 @@ capability defines them, in the order they were raised.
 Without `--json -`, `crust check` SHALL print a text report on stdout, in this order:
 
 1. the render described;
-2. effective settings;
-3. import costs and counts;
-4. findings, one line each with id, kind, summary and action;
-5. warnings, one line each with kind, code, count and first prims;
-6. a closing line that totals the findings and the warnings by kind.
+2. with `--all-passes`, each pass, with what differs from the render described;
+3. effective settings;
+4. import costs and counts;
+5. findings, one line each with id, kind, summary and action;
+6. warnings, one line each with kind, code, count and first prims;
+7. a closing line that totals the findings and the warnings by kind.
 
 The log SHALL go to stderr, so stdout holds only the report.
 
@@ -159,16 +165,25 @@ The log SHALL go to stderr, so stdout holds only the report.
 - **WHEN** a stage raises no warning and no finding
 - **THEN** the closing line says there are no findings and no warnings
 
+#### Scenario: Passes in the text report
+
+- **WHEN** the user runs `crust check -i samples/render_passes.usda --all-passes`
+- **THEN** stdout names `/Render/Passes/char` and `/Render/Passes/props`, each
+  with its settings prim and products, after the render described
+
 ### Requirement: JSON report
 
 `--json PATH|-` SHALL write one JSON object of format `crust-check/2`, following the
 shared report shape, with keys in this fixed order:
 
 - `format`, `crust_version`;
-- `scene`, `products`, `effective_settings`;
+- `scene`, `pass`, `settings`, `passes`, `products`, `effective_settings`;
 - `import`, `counts`;
 - `findings`, `warnings`;
 - `denied`: the codes of the warnings that a `--deny` matched, or an empty array.
+
+`passes` SHALL be `null` without `--all-passes`, and otherwise an array with one
+object per pass, in the order the text report gives them.
 
 With `-`, the JSON SHALL replace the text report on stdout. With a path, the text
 report SHALL still go to stdout.
@@ -183,6 +198,17 @@ report SHALL still go to stdout.
 
 - **WHEN** the user runs `crust check -i scene.usda --json check.json`
 - **THEN** `check.json` holds the report and the text report is on stdout
+
+#### Scenario: Passes in the JSON
+
+- **WHEN** the user runs `crust check -i samples/render_passes.usda --all-passes --json -`
+- **THEN** `passes` holds two objects, the first with `path`
+  `/Render/Passes/char` and `settings` `/Render/charSettings`
+
+#### Scenario: No all-passes
+
+- **WHEN** the user runs `crust check -i samples/render_passes.usda --json -`
+- **THEN** `passes` is `null`
 
 ### Requirement: Denying warning kinds
 
@@ -230,3 +256,63 @@ Findings SHALL NOT affect the exit status.
 - **WHEN** a stage has a `textures_without_tx` finding, no warnings, and `--deny all`
   is given
 - **THEN** the process exits 0
+
+### Requirement: Every pass described
+
+With `--all-passes`, the report SHALL describe the render with no active pass,
+then each pass in `crust ls pass` order. Each pass SHALL give its path, settings
+prim, holdout, camera-hidden and render-hidden counts, whether it renders depth
+of field and motion blur, and its products with their files. It SHALL also list
+each quantity that differs from the no-pass render (camera, resolution, depth of
+field, motion blur, each effective setting) with both values. The warnings SHALL
+add what rendering each pass would raise that the no-pass render does not:
+reading the pass and choosing its products, each code's occurrences on the prims
+the no-pass record does not name, and denied as its own.
+
+#### Scenario: A depth of field that leaks into a pass
+
+- **WHEN** `/Render/settings` renders a camera with depth of field, and the stage's
+  `/Render/Passes/util` reads `/Render/utilSettings`, which inherits
+  `/Render/settings` and changes only the product
+- **THEN** the util pass reports depth of field on, and lists only its product as
+  different from the no-pass render
+
+#### Scenario: An override that applies
+
+- **WHEN** `/Render/utilSettings` also authors `disableDepthOfField = 1`
+- **THEN** the util pass lists depth of field as on in the no-pass render and off
+  in the pass
+
+#### Scenario: A product only a pass refuses
+
+- **WHEN** the no-pass render refuses its product `/Render/P/unnamed_base` (no
+  `productName`), and a pass's settings name another such product,
+  `/Render/P/unnamed_a`
+- **THEN** the `product.no_name` record names both prims with a count of 2, and
+  `--deny skipped` denies it
+
+#### Scenario: A stage with no passes
+
+- **WHEN** the user runs `crust check -i samples/cornellbox.usda --all-passes`
+- **THEN** the report describes the no-pass render and lists no passes, and the
+  exit status is 0
+
+### Requirement: Passes that write the same file are a finding
+
+With `--all-passes`, two passes that would write the same file for the checked
+frame, as `crust render --all-passes` compares them (products and PNG previews,
+paths resolved against the working directory), SHALL be reported as the
+`passes_share_output` finding. Its evidence SHALL name the file and both passes.
+The finding SHALL not change the exit status.
+
+#### Scenario: Two passes on the default path
+
+- **WHEN** two passes read settings that author no `RenderProduct`
+- **THEN** the report has one `passes_share_output` finding naming the default
+  beauty file and both passes
+
+#### Scenario: Two spellings of one file
+
+- **WHEN** one pass writes `./x.exr` and another `x.exr`
+- **THEN** the report has a `passes_share_output` finding naming `./x.exr` and
+  both passes

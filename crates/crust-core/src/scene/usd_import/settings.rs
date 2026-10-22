@@ -28,6 +28,7 @@ const DEFAULT_ENABLE_EXPOSURE_COMPENSATION: bool = true;
 
 /// A camera the render was told to use, and who said so — which decides what
 /// happens if it is not on the stage.
+#[derive(Clone)]
 pub(super) enum CameraChoice {
     /// The host's `UsdImportOptions::camera` (the CLI's `--camera`). Missing
     /// is an error.

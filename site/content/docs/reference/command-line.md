@@ -69,6 +69,7 @@ The flags of `crust render`:
 | [`-f`, `--frame`](#frame) | number | default values | `crust:frame` (seed) |
 | [`--camera`](#camera) | prim path | `RenderSettings.camera` | `rel camera` |
 | [`--pass`](#pass) | prim path | no pass | — |
+| [`--all-passes`](#all-passes) | flag | off | — |
 | [`--subdiv-level`](#subdiv-level) | 0–6 | scene / 0 | `crust:subdivisionLevel` |
 | [`--subdiv-edge-length`](#subdiv-edge-length) | pixels | scene / off | `crust:subdivisionEdgeLength` |
 | [`--strategy`](#strategy) | name | scene / `power` | `crust:samplingStrategy` |
@@ -296,6 +297,8 @@ The render pass to render, as the absolute path of a `RenderPass` prim, for exam
   first, the image has zero colour and zero alpha, while it still casts shadows and shows
   in reflections.
 - What its `collection:cameraVisibility` leaves out is hidden from camera rays only.
+- What its `collection:renderVisibility` leaves out is hidden from every ray, as
+  `crust:rayMask = 0` hides it; a light it leaves out is off. It wins over the other two.
 - When its `renderSource` targets a `RenderSettings` prim, that prim is the settings the
   render reads (resolution, camera, products, every `crust:` setting) instead of the
   stage's.
@@ -311,6 +314,44 @@ crust render -i shot.usda --pass /Render/Passes/bg
 
 [`crust ls pass`](#ls) lists the paths `--pass` accepts. How passes are authored and
 composited, and what they do not read yet: [Render passes](@/docs/usd/render-passes.md).
+
+### all-passes
+
+`--all-passes`
+
+Renders every render pass of the stage, the paths [`crust ls pass`](#ls) lists, one after
+another, each to its own products. Each pass renders exactly as `--pass` renders it alone,
+bit for bit, with every other flag applied to it (`-s 16 -f 12` renders every pass at
+frame 12 and 16 samples).
+
+Passes whose settings agree on everything the import builds into the scene (the
+subdivision and dicing settings, the shutter, the working colour space, the primvars the
+products ask for) share one import: geometry, materials, textures and the acceleration
+structure are built once, and each pass only changes what each ray sees. Passes that
+differ there import apart. Passes sharing an import render together, in `ls pass` order,
+the imports in the order of their first pass. The log says how many passes each import
+served.
+
+Before anything is imported, it works out every file each pass would write: its
+products and the PNG preview beside its beauty, each path resolved against the working
+directory, so `./x.exr` and `x.exr` are one file. When two passes would write the same
+file (two passes reading settings with no `RenderProduct` both write `output.exr`), it
+stops with an error naming them and the file, and renders nothing. A stage with no
+`RenderPass` is an error too.
+
+A Ctrl-C stops at the pass it reaches: that pass writes what it traced, as an
+interrupted render does, the passes before it keep their files, and the passes after it
+are not rendered.
+
+It needs [`-i`](#input), and is refused with [`--pass`](#pass), [`-o`](#output) (each
+pass writes its own products) and [`--stats-json`](#stats-json). [`--stats`](#stats)
+prints each import's phases once, and each pass's render; a pass's texture and Ptex
+counters count what that pass read (the first of an import's with the import), as
+`--pass` alone reports them.
+
+```bash
+crust render -i samples/render_passes.usda --all-passes -s 16
+```
 
 ## Geometry
 
@@ -883,7 +924,8 @@ and reports:
 
 - **the render it describes**: the stage, the frame, the camera the render goes through
   (after any fallback), the resolution, the region, the [`--pass`](#pass) (with how many
-  prims it holds out and hides from the camera; `null` in the JSON without one), the
+  prims it holds out, hides from the camera and hides from every ray; `null` in the JSON
+  without one), the
   `RenderSettings` prim the render reads (`null` in the JSON when the stage has none and
   the render uses the defaults), and every file the render would write
   with its channels. A stage with no `RenderProduct` reports the one beauty EXR a render
@@ -892,11 +934,20 @@ and reports:
   and the `crust:*` attribute that change it, as the diagnostic reports them;
 - **the import**: its phases with their time and peak memory, and the scene counts
   (geometries, primitives, lights, volumes), with the keys `--stats-json` uses;
+- **with `--all-passes`, every pass**: its settings prim, its holdout, camera-hidden and
+  render-hidden counts, whether it renders depth of field and motion blur, its products,
+  and each quantity that differs from the render described above (camera, resolution,
+  depth of field, motion blur, each effective setting, the products) with both values. A
+  depth of field the shot's settings leak into a pass shows as `on` with nothing to say it
+  changed. In the JSON, `passes` (`null` without the flag);
 - **findings**: the [diagnostic](#diagnostic)'s findings that need no render — textures
-  without a `.tx`, many lights picked uniformly, a visualisation strategy, peak memory —
+  without a `.tx`, many lights picked uniformly, a visualisation strategy, peak memory,
+  and with `--all-passes`, `passes_share_output`: two passes that would write one file —
   with the same ids, evidence and actions;
 - **warnings**: what the import refused, approximated or skipped, one record per
-  [warning code](@/docs/reference/warnings.md) with its count and first prims.
+  [warning code](@/docs/reference/warnings.md) with its count and first prims. With
+  `--all-passes`, they add what only rendering a pass would raise (reading it, choosing
+  its products), on the prims the render described above does not name.
 
 It writes **no image** and no file beside the stage, except the `.tx` files `--auto-tx`
 creates, as a render would. The text report goes to stdout and the log to stderr.
@@ -916,10 +967,12 @@ values and defaults: [`-i`](#input) (required), [`-f`](#frame), [`--camera`](#ca
 |------|-------|---------|--------------|
 | `--json` | path or `-` | off | Also write the report as JSON, format `crust-check/2`. With `-`, the JSON replaces the text report on stdout. |
 | `--deny` | kinds | off | Exit `3` when the import raises a warning of one of these kinds: `refused`, `approximated`, `skipped`, or `all`, comma-separated. The reports are still written, and name the matching codes (`denied`). Findings never deny. |
+| `--all-passes` | flag | off | Also describe every render pass, as [`render --all-passes`](#all-passes) would render it. Refused with `--pass`. |
 
 ```bash
 $ crust check -i samples/cornellbox.usda
 $ crust check -i shot.usdc -f 1048 --deny refused,skipped --json check.json
+$ crust check -i samples/render_passes.usda --all-passes
 ```
 
 ## diff

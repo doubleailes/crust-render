@@ -92,6 +92,22 @@ they could be extracted too.
 `--stats` times each of these phases, and `--profile` breaks the rendering phase down
 further. See [Command line](@/docs/reference/command-line.md#stats).
 
+### Several passes from one import
+
+[`--all-passes`](@/docs/reference/command-line.md#all-passes) runs steps 2 and 3 once for
+every group of [render passes](@/docs/usd/render-passes.md) whose settings agree on what
+the import builds (subdivision and dicing, the shutter, the working colour space, the
+primvars the products keep), and steps 4 to 6 once per pass. The traversal judges every
+pass's collections as it meets each prim and records the answers, three bits per prim:
+held out, hidden from the camera, hidden from every ray. After it, each pass's answers
+become its own copy of the per-geometry ray masks, holdout flags and light list, with
+light linking resolved over what that pass keeps. Before each pass renders, those masks
+are written into the built acceleration structure in place: its tree and bounds never
+read a mask, so the result is the structure an import of that pass alone builds, and the
+pass renders bit for bit as `--pass` renders it. That same function decides a single
+`--pass` too. Nothing is consulted per ray: a pass costs the render nothing, but hidden
+geometry is still traversed.
+
 ## Where things plug in
 
 The crates meet at a few interfaces. Each has one contract that both sides keep:

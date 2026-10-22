@@ -715,6 +715,20 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// Replaces the ray mask of every geometry attached to this scene with
+    /// `mask_of(attach id)`, in place: the committed scene is then the one
+    /// [`SceneBuilder::commit`] builds from the same geometries attached
+    /// with those masks, field for field. Construction never reads a mask,
+    /// so only the masks' copies change; the tree, its bounds and every
+    /// instanced scene stay as they are. An instance's own mask is
+    /// rewritten, never its prototype's, so a shared prototype stays shared.
+    ///
+    /// What lets one built scene serve several render passes, each hiding
+    /// different geometry from different rays.
+    pub fn remask(&mut self, mask_of: impl Fn(u32) -> RayMask) {
+        self.bvh.remask(&mask_of);
+    }
+
     /// Closest hit in `(t_min, t_max)`, or `None` (Embree's
     /// `rtcIntersect1`).
     #[must_use]

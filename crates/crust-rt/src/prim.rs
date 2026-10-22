@@ -755,6 +755,16 @@ impl PrimNode {
         }
     }
 
+    /// Replaces the primitive's mask.
+    pub(crate) fn set_mask(&mut self, mask: RayMask) {
+        match self {
+            PrimNode::Sphere(p) => p.mask = mask,
+            PrimNode::Disk(p) => p.mask = mask,
+            PrimNode::Cylinder(p) => p.mask = mask,
+            PrimNode::Curve(p) => p.mask = mask,
+        }
+    }
+
     /// The geometry this primitive was attached as, and its mask.
     pub(crate) fn id_and_mask(&self) -> (u32, RayMask) {
         match self {

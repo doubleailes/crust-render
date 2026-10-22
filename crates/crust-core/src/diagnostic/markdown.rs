@@ -9,7 +9,8 @@ use std::fmt::Write;
 const MAX_FRONT_POINTS: usize = 6;
 
 use super::report::{
-    Action, AdaptivePick, AdaptivePoint, AdaptiveValues, Finding, FindingKind, Num, Report, Verdict,
+    Action, AdaptivePick, AdaptivePoint, AdaptiveValues, Fact, Finding, FindingKind, Num, Report,
+    Verdict,
 };
 
 /// `x` as the JSON writes it (four significant digits), or `–`.
@@ -222,7 +223,11 @@ impl Report {
                 .evidence
                 .0
                 .iter()
-                .map(|(k, v)| format!("{k} {}", n(*v)))
+                .map(|(k, v)| match v {
+                    Fact::Num(x) => format!("{k} {}", n(*x)),
+                    Fact::Text(t) => format!("{k} {t}"),
+                    Fact::Names(names) => format!("{k} {}", names.join(", ")),
+                })
                 .collect();
             let action = match &f.action {
                 Action::Set {

@@ -104,7 +104,17 @@ impl<'de> Deserialize<'de> for Num {
 
 /// Named numbers in a fixed order, written as one JSON object.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Evidence(pub Vec<(String, Num)>);
+pub struct Evidence(pub Vec<(String, Fact)>);
+
+/// One value of a finding's evidence: a number (`null` when not finite), or,
+/// for a finding about the stage itself, a name or a list of names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Fact {
+    Num(Num),
+    Text(String),
+    Names(Vec<String>),
+}
 
 impl Evidence {
     pub fn new() -> Self {
@@ -112,12 +122,28 @@ impl Evidence {
     }
 
     pub fn with(mut self, name: &str, value: f64) -> Self {
-        self.0.push((name.to_owned(), Num(value)));
+        self.0.push((name.to_owned(), Fact::Num(Num(value))));
         self
     }
 
+    /// Adds a name: a file, a prim.
+    pub fn with_text(mut self, name: &str, value: &str) -> Self {
+        self.0.push((name.to_owned(), Fact::Text(value.to_owned())));
+        self
+    }
+
+    /// Adds a list of names.
+    pub fn with_names(mut self, name: &str, values: &[String]) -> Self {
+        self.0.push((name.to_owned(), Fact::Names(values.to_vec())));
+        self
+    }
+
+    /// The number `name` holds, if it holds one.
     pub fn get(&self, name: &str) -> Option<f64> {
-        self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v.0)
+        self.0.iter().find_map(|(n, v)| match v {
+            Fact::Num(x) if n == name => Some(x.0),
+            _ => None,
+        })
     }
 }
 
@@ -138,14 +164,14 @@ impl<'de> Deserialize<'de> for Evidence {
         impl<'de> serde::de::Visitor<'de> for Visit {
             type Value = Evidence;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("an object of numbers")
+                f.write_str("an object of numbers and names")
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(
                 self,
                 mut a: A,
             ) -> Result<Evidence, A::Error> {
                 let mut out = Vec::new();
-                while let Some((k, v)) = a.next_entry::<String, Num>()? {
+                while let Some((k, v)) = a.next_entry::<String, Fact>()? {
                     out.push((k, v));
                 }
                 Ok(Evidence(out))

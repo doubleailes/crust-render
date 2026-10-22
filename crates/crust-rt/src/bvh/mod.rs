@@ -513,6 +513,94 @@ impl Bvh {
         // `input.order` and `input.instance_bounds` drop here: build-only.
     }
 
+    /// Rewrites every copy of every top-level geometry's mask to
+    /// `mask_of(attach id)`: the triangle records, the packets' lanes, the
+    /// analytic primitives, the cubic spans and the instance placements.
+    /// Topology, bounds and the instanced scenes are untouched. A degenerate
+    /// record keeps [`RayMask::NONE`], as at commit.
+    pub(crate) fn remask(&mut self, mask_of: &dyn Fn(u32) -> RayMask) {
+        for rec in self.tris.iter_mut().filter(|r| !r.is_degenerate()) {
+            rec.mask = mask_of(rec.geom_id);
+        }
+        for p in self.packets.iter_mut() {
+            p.lanes.remask(&self.tris);
+        }
+        for p in self.packets_i.iter_mut() {
+            p.lanes.remask(&self.tris);
+        }
+        for p in self.prims.iter_mut() {
+            let (id, _) = p.id_and_mask();
+            p.set_mask(mask_of(id));
+        }
+        for p in self.cubics.iter_mut() {
+            p.mask = mask_of(p.geom_id);
+        }
+        for inst in self.instances.iter_mut() {
+            // The attach id: `geom_id` may be a label (`InstanceHitId::As`).
+            inst.mask = mask_of(inst.placement - 1);
+        }
+    }
+
+    /// The tree, its leaves, packets and records as words, the masks only
+    /// when `masks` is set: what tests compare to show two builds are the
+    /// same structure. An instance contributes its scene's address, not the
+    /// scene, so a shared prototype must be the same one.
+    #[cfg(test)]
+    pub(crate) fn layout_words(&self, masks: bool) -> Vec<u32> {
+        let mut out = Vec::new();
+        let f = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for n in self.wide.iter() {
+            for lanes in [n.bmin_x, n.bmin_y, n.bmin_z, n.bmax_x, n.bmax_y, n.bmax_z] {
+                out.extend((0..LANES).map(|k| lanes[k].to_bits()));
+            }
+            out.extend(n.child);
+            out.push(n.flags);
+        }
+        for l in self.leaves.iter() {
+            out.extend([l.pkt_first, l.pkt_count, l.idx_first, l.idx_count]);
+        }
+        for p in self.packets.iter() {
+            p.layout_words(masks, &mut out);
+        }
+        for p in self.packets_i.iter() {
+            p.layout_words(masks, &mut out);
+        }
+        out.extend(self.indices.iter());
+        for r in self.tris.iter() {
+            out.extend(r.v);
+            out.extend([r.geom_id, r.prim_id]);
+            if masks {
+                out.push(r.mask.0);
+            }
+        }
+        for p in self.prims.iter() {
+            let (id, m) = p.id_and_mask();
+            out.push(id);
+            out.extend(f(&p.bbox().minimum.to_array()));
+            out.extend(f(&p.bbox().maximum.to_array()));
+            if masks {
+                out.push(m.0);
+            }
+        }
+        for p in self.cubics.iter() {
+            out.extend([p.geom_id, p.prim_id]);
+            if masks {
+                out.push(p.mask.0);
+            }
+        }
+        for i in self.instances.iter() {
+            let addr = std::sync::Arc::as_ptr(&i.scene) as usize as u64;
+            out.extend([addr as u32, (addr >> 32) as u32]);
+            out.extend(f(&i.w2l.to_cols_array()));
+            out.extend([i.geom_id, i.placement, i.id_offset]);
+            if masks {
+                out.push(i.mask.0);
+            }
+        }
+        out.push(self.n_degenerate as u32);
+        out
+    }
+
     /// The three vertices of a record, gathered from the shared table.
     #[inline]
     fn tri_verts(&self, rec: &TriangleRecord) -> [Vec3A; 3] {

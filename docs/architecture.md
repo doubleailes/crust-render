@@ -284,14 +284,20 @@ other. The pairs:
   the check or the recording alone and a source disagrees with the beauty
   (`aovs_see_a_holdout_sample_as_an_escape`, `tests/holdouts.rs`). The check
   sits behind `World::has_holdouts`, so a world without one pays one branch.
-- **A pass's camera visibility ↔ light linking.** The active pass clears
-  `MASK_CAMERA` (geometry masks, an infinite light's escape mask) at dispatch,
-  during the traversal (`usd_import/passes.rs`); `LightLinks::resolve` runs after
-  it, and `demote` reads that bit to keep a light linked to nothing as a
-  camera-only backdrop or drop it. Move the pass after the links and a hidden
-  dome comes back as a backdrop (`camera_visibility_is_decided_before_light_linking`,
+- **A pass's visibility ↔ light linking.** The active pass is judged at dispatch,
+  during the traversal, and applied after it by `passes::apply_pass`, the one
+  function that decides a pass's visibility: on a `MaskTable` copied from the world
+  (masks, holdouts, transparent emitters, light classes, volume flags) and the light
+  list, `renderVisibility` first (a zero mask, the light off), then `matte` and
+  `cameraVisibility`, then `LightLinks::resolve` over what the pass keeps. `demote`
+  reads the pass's camera bit to keep a light linked to nothing as a camera-only
+  backdrop or drop it, and a receiver the pass hides from every ray is no receiver.
+  Resolve the links first and a hidden dome comes back as a backdrop
+  (`camera_visibility_is_decided_before_light_linking`), and a light linked only to
+  hidden geometry keeps lighting (`a_light_linked_only_to_hidden_geometry_lights_nothing`,
   `tests/render_passes.rs`). Both judge a prim by the same stage path, at the same
-  dispatch site (`saw` in `usd_import/mod.rs`).
+  dispatch site (`saw` in `usd_import/mod.rs`); `resolve` reads its record without
+  changing it, so it can run once per pass.
 - **The render camera ↔ `ls`'s `is_render_camera`.** Which camera a render goes
   through (`settings::wanted_camera`, then `pick_camera`'s fallback to the first
   camera the import's walk meets) is decided by the same two functions for the
@@ -340,6 +346,27 @@ other. The pairs:
   reduced as OIIO's `maketx` reduces, DWAA-compressed), so the A/B is pinned by the
   bounds of the `textures` design record (`a_converted_tx_streams_what_its_source_preloads`,
   and the image-level check there).
+- **`--pass` ↔ the one-pass case of `--all-passes`.** Both import through
+  `usd_import::import`, judge the pass in the traversal and apply it with the one
+  `passes::apply_pass`; a group import then gives each pass its own copy of the
+  `MaskTable` and light list, and `Scene::apply_pass` writes them into the built world
+  (`World::apply_pass`, through `remask`). Each pass of a group reads its settings,
+  camera and products with the readers a `--pass` import uses
+  (`each_pass_of_a_group_reads_as_it_does_alone`), and a world committed for one pass
+  renders another bit for bit as that pass imported alone
+  (`a_world_reapplied_to_another_pass_renders_as_that_pass_alone`; end to end,
+  `every_pass_renders_as_it_does_alone_from_one_import` in `crust-render`). A pass flag
+  written anywhere but the table — at dispatch, into the builder — breaks it.
+- **`ImportKey` ↔ MCP and `--all-passes`.** "Can these settings share this import?" has
+  one answer, `ImportKey::refusal` (`live.rs`): an MCP settings edit applies in place
+  exactly when the passes of `--all-passes` would share an import. A setting the import
+  starts building into the scene belongs in the key, or both go wrong together.
+- **`Scene::remask` ↔ `SceneBuilder::commit`.** Remasking a committed scene with a
+  mask table must give the scene a commit with that table builds, field for field
+  (`remask_of_a_commit_is_the_commit_of_the_new_masks`). It holds because the build
+  never reads a mask (`a_build_does_not_depend_on_masks`): a build decision that
+  reads one, or a new copy of a mask outside `Bvh::remask`, breaks every pass of a
+  shared import.
 - **Derived, not stored.** A hit's tangent (`tangent_of`) and a subdivided
   mesh's Ptex sub-face corners (`SubFace::corners`) are computed from the
   kernel's shared vertices and a 4-byte cell at the hit; the tests that pin

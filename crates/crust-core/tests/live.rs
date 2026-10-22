@@ -332,6 +332,82 @@ fn naming_the_camera_reimports_shapes_sized_without_one() {
     }
 }
 
+/// A stage with the cameras `/W/A` and `/W/B` whose settings name `named`,
+/// or no camera.
+fn two_camera_stage(name: &str, named: Option<&str>) -> PathBuf {
+    let dir = std::env::temp_dir().join("crust_live_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(format!("{name}.usda"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"#usda 1.0
+(
+    renderSettingsPrimPath = "/Render/settings"
+)
+def Xform "W"
+{{
+    def Camera "A"
+    {{
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Camera "B"
+    {{
+        double3 xformOp:translate = (0, 0, 9)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Cube "C" {{}}
+}}
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        {}
+        uniform int2 resolution = (64, 32)
+    }}
+}}
+"#,
+            named.map_or(String::new(), |c| format!("rel camera = <{c}>"))
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+/// Unnaming the render camera is a camera change: a fresh import renders the
+/// camera it falls back to, so the settings do not update in place over the
+/// one the scene was imported with.
+#[test]
+fn unnaming_the_render_camera_reimports() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    // The camera a fresh import falls back to, and the other one.
+    let path = two_camera_stage("live_unnamed_camera", None);
+    let fallback = Scene::from_usd(&path)
+        .expect("load")
+        .camera_path
+        .expect("a camera");
+    let named = if fallback == "/W/A" { "/W/B" } else { "/W/A" };
+    two_camera_stage("live_unnamed_camera", Some(named));
+    let scene = Scene::from_usd(&path).expect("load");
+    assert_eq!(scene.camera_path.as_deref(), Some(named));
+    let prov = scene.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+    // The edit: the same layer, naming no camera.
+    two_camera_stage("live_unnamed_camera", None);
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => assert!(why.contains("camera"), "{why}"),
+        Ok(_) => panic!("the settings updated in place over a camera no longer named"),
+    }
+}
+
 /// Light links take a light that illuminates nothing out of the list and
 /// renumber the rest: the provenance names each light by its index after
 /// that, and keeps none for the light taken out.
@@ -492,11 +568,12 @@ def Xform "World"
 }
 
 /// A stage with a mesh authoring `primvars:rest`, whose settings target
-/// `products` (one of `</Render/plain>` and `</Render/withRest>`).
-fn primvar_stage(products: &str) -> PathBuf {
+/// `products` (one of `</Render/plain>` and `</Render/withRest>`), written as
+/// `name.usda`: one name per test, since tests run concurrently.
+fn primvar_stage(name: &str, products: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("crust_live_tests");
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("live_primvars.usda");
+    let path = dir.join(format!("{name}.usda"));
     std::fs::write(
         &path,
         format!(
@@ -566,7 +643,7 @@ fn a_settings_change_asking_for_new_primvars_reimports() {
         settings: true,
         ..Default::default()
     };
-    let path = primvar_stage("</Render/plain>");
+    let path = primvar_stage("live_primvars", "</Render/plain>");
     let scene = Scene::from_usd(&path).expect("load");
     assert!(!scene.world.has_primvars());
     let prov = scene.provenance.as_ref().expect("provenance");
@@ -575,7 +652,7 @@ fn a_settings_change_asking_for_new_primvars_reimports() {
             .map(|_| ()),
         Ok(())
     );
-    primvar_stage("</Render/withRest>");
+    primvar_stage("live_primvars", "</Render/withRest>");
     match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
         Err(crust_core::live::Structural(why)) => assert!(why.contains("primvars"), "{why}"),
         Ok(_) => panic!("a product asking for a primvar the geometry never kept updated in place"),
@@ -600,7 +677,7 @@ fn a_primvar_warning_does_not_block_a_settings_edit() {
         settings: true,
         ..Default::default()
     };
-    let path = primvar_stage("</Render/withRest>");
+    let path = primvar_stage("live_primvars_base", "</Render/withRest>");
     let text = std::fs::read_to_string(&path).expect("read stage");
     // `rest` moves to the mesh's parent (not inherited), and a second mesh
     // authors it with two components (a mismatch).

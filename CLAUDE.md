@@ -29,6 +29,7 @@ opened with — `usd_import::stage_builder()`). Do not add loaders for any other
 | lights, light selection (`power` / `uniform` / `learned`), UsdLux units, shaping, IES | `lighting` | `docs/light_sampling.md` |
 | UV / UDIM textures, `.tx` streaming, Ptex (preload and streaming), ray-cone filtering | `textures` | `docs/ptex_streaming.md`, `docs/color_management.md` |
 | AOVs: `RenderProduct` / `RenderVar` resolution, the source vocabulary and its aliases, accumulation modes, light path expressions and their routing, albedo, light groups, the per-product EXR writer | `aovs` | `site/content/docs/usd/aovs.md` |
+| render passes: `--pass`, `UsdRenderPass`'s `renderSource`, `matte` holdouts and `cameraVisibility`, compositing the passes | `render-passes` | `site/content/docs/usd/render-passes.md` |
 | USD import: streaming import, schema mapping, subdivision, displacement, instancing, time, camera, settings, Moana, ALab | `usd-scene-import` | `docs/alab_profile.md`, `docs/moana_profile.md`, `docs/issues/` |
 | `crust diagnostic`: probe conditions, crops, trials and verdicts, the budget, the `crust-diagnostic/1` report, `--baseline`, the clamp counter's cost | `diagnostics` | `site/content/docs/help/diagnosing-a-render.md` |
 | `crust light-paths`: the inspection fold over a path's `Route` (one record per emission-ending term), the inspection alphabet and lights by index, dominant-lobe labels, the per-unit record store and its groups, what reproduces the frame, the `crust-light-paths/1` report and its hints, the MCP `light_paths` tool | `light-path-inspection` | `site/content/docs/help/light-paths.md` |
@@ -158,6 +159,9 @@ without the other (full list: `docs/architecture.md` § Invariants):
   an MCP edit applied in place ↔ a full re-import of the same layer (`crust_core::live`
   rebuilds through the import's own functions; a material property the import bakes
   into geometry or a world flag belongs in `Signature`, in `rt_world.rs`).
+  A pass of a shared import (`--all-passes`: `Scene::apply_pass`, `crust_rt::Scene::remask`)
+  ↔ that pass imported alone (`--pass`): one `passes::apply_pass` decides both, and
+  "may these share an import" is `ImportKey::refusal`, the predicate the MCP edit uses.
 - Anything keyed on a prototype path is scoped by the stage epoch
   (`ImportCaches::epoch`): `/__Prototype_N` is renumbered per masked stage.
 - `Material::resolve` must return exactly what per-query shading would (pinned for every

@@ -16,7 +16,9 @@ use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Prim, Stage};
 
 use crate::light::LightList;
-use crate::live::{LightUpdate, PrimFrame, Provenance, SettingsUpdate, Structural, Update};
+use crate::live::{
+    ImportKey, LightUpdate, PrimFrame, Provenance, SettingsUpdate, ShutterKey, Structural, Update,
+};
 use crate::material::Material;
 use crate::rt_world::WorldBuilder;
 use crate::{AssetLoader, Warning};
@@ -28,8 +30,9 @@ use super::mesh::SubdivPolicy;
 use super::time::EvalTimeScope;
 use super::xform::compose_with_parent;
 use super::{
-    ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, frame_pose,
-    invisible_overrides, open_stage, open_stage_masked, prim_at, read_index, stage_builder,
+    ImportCaches, ImportCtx, IndexRead, ValidOptions, apply_exposure, asks_about_time, emit_light,
+    frame_pose, invisible_overrides, open_stage, open_stage_masked, prim_at, read_index,
+    stage_builder,
 };
 
 /// Warning codes a settings change can move, by family: the settings, the
@@ -59,6 +62,7 @@ pub(crate) fn rebuild(
         .to_str()
         .ok_or_else(|| Structural("the layer path is not UTF-8".into()))?;
     let working = facts
+        .key
         .working
         .ok_or_else(|| Structural("the scene was not imported from a stage".into()))?;
     let _time = EvalTimeScope::enter(facts.options.frame);
@@ -177,7 +181,7 @@ impl Rebuilding<'_> {
         ImportCaches::new(
             self.assets,
             self.layer,
-            SubdivPolicy::new(self.prov.stage.subdiv_level),
+            SubdivPolicy::new(self.prov.stage.key.subdiv_level),
             self.working,
         )
     }
@@ -288,21 +292,40 @@ fn scratch_ctx<'a>(r: &'a Rebuilding<'a>, world: WorldBuilder) -> ImportCtx<'a> 
         world,
         lights,
         volumes: Vec::new(),
-        camera: None,
-        wanted_camera: None,
-        first_camera: None,
+        searches: Vec::new(),
         cameras_seen: Vec::new(),
         caches: r.caches(),
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
-        pass: None,
+        passes: Vec::new(),
         light_origins: Vec::new(),
-        settings: crate::tracer::RenderSettings::default(),
-        framing: Default::default(),
         stage_path: r.layer,
         index: None,
         assets: r.assets,
         layers: Default::default(),
+    }
+}
+
+impl ImportKey {
+    /// The key of the settings `read`: what an import that reads them builds
+    /// into the scene.
+    pub(super) fn of(read: &IndexRead) -> ImportKey {
+        let shutter = read.shutter.key(
+            asks_about_time(&read.shutter, &read.products),
+            frame_pose(&read.shutter, &read.products),
+        );
+        ImportKey {
+            working: Some(read.working),
+            subdiv_level: read.subdiv.level,
+            adaptive: read.subdiv.adaptive.map(|r| r.key()),
+            projection: read.projection.map(|p| p.key()),
+            domes_seen_by_camera: read.domes_seen_by_camera,
+            primvars: read.products.primvars.key(),
+            shutter: ShutterKey {
+                camera: None,
+                ..shutter
+            },
+        }
     }
 }
 
@@ -338,55 +361,17 @@ fn refresh_settings(
             .map_err(|e| Structural(format!("cannot open the stage: {e}")))?;
         let read = read_index(&index, layer, path_str, &facts.options, &options)
             .map_err(|e| Structural(format!("the settings: {e}")))?;
-        if Some(read.working) != facts.working {
-            return Err(Structural("the working colour space changed".into()));
+        if let Some(why) = facts.key.refusal(facts.used, &ImportKey::of(&read)) {
+            return Err(Structural(why.into()));
         }
-        if read.subdiv.level != facts.subdiv_level {
-            return Err(Structural("the subdivision level changed".into()));
-        }
-        // Tessellation that reads the camera stands only when what it read is
-        // what it would read now, bit for bit: an exposure keeps it, a move,
-        // a lens or a resolution does not.
-        if read.subdiv.adaptive.map(|r| r.key()) != facts.adaptive {
-            return Err(Structural(
-                "adaptive subdivision would read another camera projection".into(),
-            ));
-        }
-        if facts.on_screen_shapes.is_some()
-            && read.projection.map(|p| p.key()) != facts.on_screen_shapes
-        {
-            return Err(Structural(
-                "implicit shapes would be sized for another camera projection".into(),
-            ));
-        }
-        if facts.unsized_shapes && read.projection.is_some() {
-            return Err(Structural(
-                "implicit shapes would be sized for the newly named camera".into(),
-            ));
-        }
-        // Geometry was placed at the shutter's ends, so another shutter
-        // re-imports, as a transform edit does.
-        if read.shutter.key(
-            asks_about_time(&read.shutter, &read.products),
-            frame_pose(&read.shutter, &read.products),
-        ) != facts.shutter
-        {
-            return Err(Structural("the camera shutter changed".into()));
-        }
-        if read.domes_seen_by_camera != facts.domes_seen_by_camera {
-            return Err(Structural("the dome's camera visibility changed".into()));
-        }
-        // The geometry kept the primvars the products asked for when it was
-        // read, and nothing else: asking for another needs it read again.
-        if read.products.primvars.key() != facts.primvars {
-            return Err(Structural(
-                "the products ask for other primvars than the geometry kept".into(),
-            ));
-        }
-        if read
-            .wanted_camera
-            .as_ref()
-            .is_some_and(|c| c.path() != &cam_path)
+        // Named, unnamed or renamed: a fresh import would choose its camera
+        // again, the first one met when none is named.
+        let named = read.wanted_camera.as_ref().map(|c| c.path().to_string());
+        if named != facts.named_camera
+            || read
+                .wanted_camera
+                .as_ref()
+                .is_some_and(|c| c.path() != &cam_path)
         {
             return Err(Structural("the render camera changed".into()));
         }

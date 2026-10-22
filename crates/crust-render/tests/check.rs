@@ -895,3 +895,417 @@ fn the_active_pass_and_its_settings_are_reported() {
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(parse(&out.stdout)["settings"].is_null());
 }
+
+/// The `scene-check` spec's "A pass that hides geometry from every ray": the
+/// pass's `renderVisibility` leaves out two meshes, and the report counts
+/// them, in text and JSON.
+#[test]
+fn render_hidden_geometry_is_counted() {
+    let dir = work_dir("render_hidden");
+    let mesh = |name: &str, x: f32| {
+        format!(
+            "    def Mesh \"{name}\"\n    {{\n        int[] faceVertexCounts = [3]\n        \
+             int[] faceVertexIndices = [0, 1, 2]\n        point3f[] points = [({x}, 0, 0), \
+             ({x}, 1, 0), ({}, 0, 0)]\n    }}\n",
+            x + 1.0
+        )
+    };
+    let body = [mesh("A", 0.0), mesh("B", 2.0), mesh("C", 4.0)].concat();
+    let input = stage(
+        &dir,
+        &body,
+        "def Scope \"Render\"\n{\n    def RenderPass \"pass\"\n    {\n        prepend rel \
+         collection:renderVisibility:excludes = [</World/A>, </World/B>]\n    }\n}\n",
+    );
+    let input = input.to_str().unwrap();
+    let args = ["check", "-i", input, "--pass", "/Render/pass"];
+    let out = crust(&dir, &[&args[..], &["--json", "-"]].concat());
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    assert_eq!(v["pass"]["render_hidden"], 2);
+    assert_eq!(v["pass"]["holdouts"], 0);
+    let out = crust(&dir, &args);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("2 hidden from every ray"), "{text}");
+}
+
+/// A shot whose camera has a lens, and a `util` pass reading `utilSettings`,
+/// which inherits the shot's settings, writes its own product and authors
+/// `extra`.
+fn lens_shot(dir: &Path, extra: &str) -> PathBuf {
+    stage(
+        dir,
+        "    def Camera \"Lens\"\n    {\n        float fStop = 2.8\n        float focusDistance = 5\n    }\n",
+        &format!(
+            r#"def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int2 resolution = (32, 16)
+        rel camera = </World/Lens>
+        rel products = </Render/beauty>
+    }}
+    def RenderSettings "utilSettings" (
+        inherits = </Render/settings>
+    )
+    {{
+        rel products = </Render/util>
+{extra}    }}
+    def RenderProduct "beauty"
+    {{
+        token productName = "beauty.exr"
+        rel orderedVars = </Render/color>
+    }}
+    def RenderProduct "util"
+    {{
+        token productName = "util.exr"
+        rel orderedVars = </Render/color>
+    }}
+    def RenderVar "color"
+    {{
+        string sourceName = "color"
+    }}
+    def Scope "Passes"
+    {{
+        def RenderPass "util"
+        {{
+            rel renderSource = </Render/utilSettings>
+        }}
+    }}
+}}
+"#
+        ),
+    )
+}
+
+/// The `scene-check` spec's "A depth of field that leaks into a pass" and "An
+/// override that applies".
+#[test]
+fn a_pass_s_depth_of_field_is_described_against_the_shot() {
+    let dir = work_dir("passes_lens");
+    let leaked = lens_shot(&dir, "");
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            leaked.to_str().unwrap(),
+            "--all-passes",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    let util = &v["passes"][0];
+    assert_eq!(util["path"], "/Render/Passes/util");
+    assert_eq!(util["depth_of_field"], true, "the lens leaks into the pass");
+    let differs: Vec<&str> = util["differs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(differs, ["products"], "{util}");
+
+    let sharp = lens_shot(&dir, "        uniform bool disableDepthOfField = 1\n");
+    let out = crust(
+        &dir,
+        &["check", "-i", sharp.to_str().unwrap(), "--all-passes"],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("    lens        depth of field off, motion blur off"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    differs     depth_of_field: on -> off"),
+        "{text}"
+    );
+}
+
+/// The `scene-check` spec's "Passes in the text report", "Passes in the
+/// JSON", "No all-passes" and "A stage with no passes".
+#[test]
+fn every_pass_of_the_sample_is_described() {
+    let dir = work_dir("passes_sample");
+    let input = render_passes();
+    let input = input.to_str().unwrap();
+    let out = crust(&dir, &["check", "-i", input, "--all-passes"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("no {s:?} in {text}"));
+    assert!(at("Render\n") < at("Passes\n"));
+    assert!(at("  /Render/Passes/char (") < at("  /Render/Passes/props ("));
+    assert!(
+        text.contains("    settings    /Render/charSettings"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    writes      char.exr (/Render/Products/char)"),
+        "{text}"
+    );
+
+    let out = crust(&dir, &["check", "-i", input, "--all-passes", "--json", "-"]);
+    let v = parse(&out.stdout);
+    let passes = v["passes"].as_array().unwrap();
+    assert_eq!(passes.len(), 4);
+    assert_eq!(passes[0]["path"], "/Render/Passes/char");
+    assert_eq!(passes[0]["settings"], "/Render/charSettings");
+    assert_eq!(
+        passes[2]["render_hidden"], 4,
+        "all but the floor, the key's bulb too"
+    );
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["id"] != "passes_share_output")
+    );
+
+    let out = crust(&dir, &["check", "-i", input, "--json", "-"]);
+    assert!(parse(&out.stdout)["passes"].is_null());
+
+    let cornell = cornellbox();
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            cornell.to_str().unwrap(),
+            "--all-passes",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(parse(&out.stdout)["passes"], serde_json::json!([]));
+    assert!(files(&dir).is_empty(), "{:?}", files(&dir));
+}
+
+/// The `scene-check` spec's "Two passes on the default path": one
+/// `passes_share_output` finding naming the default beauty file and both
+/// passes, and the check still exits 0.
+#[test]
+fn passes_that_share_an_output_are_a_finding() {
+    let dir = work_dir("passes_share");
+    let input = stage(
+        &dir,
+        "",
+        "def Scope \"Render\"\n{\n    def RenderPass \"a\"\n    {\n    }\n    def RenderPass \
+         \"b\"\n    {\n    }\n}\n",
+    );
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            input.to_str().unwrap(),
+            "--all-passes",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    let shared: Vec<&serde_json::Value> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["id"] == "passes_share_output")
+        .collect();
+    assert_eq!(shared.len(), 1, "{v}");
+    assert_eq!(shared[0]["kind"], "correctness");
+    assert_eq!(shared[0]["evidence"]["file"], "output.exr");
+    assert_eq!(
+        shared[0]["evidence"]["passes"],
+        serde_json::json!(["/Render/a", "/Render/b"])
+    );
+}
+
+/// `/Render/settings` writing the products `base`, and one `RenderPass` per
+/// `(name, products)`, each through its own settings: every product named
+/// in the lists is defined, a name starting with `unnamed` without a
+/// `productName`, any other writing the colour to `<name>`.
+fn pass_stage(dir: &Path, base: &[&str], passes: &[(&str, &[&str])]) -> PathBuf {
+    let rel = |names: &[&str]| {
+        let targets: Vec<String> = names
+            .iter()
+            .map(|n| format!("</Render/P/{}>", key(n)))
+            .collect();
+        format!("rel products = [{}]", targets.join(", "))
+    };
+    fn key(name: &str) -> String {
+        name.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+    let mut root = format!(
+        "def Scope \"Render\"\n{{\n    def RenderSettings \"settings\"\n    {{\n        rel camera = </World/cam>\n        {}\n    }}\n",
+        rel(base)
+    );
+    let mut products: Vec<&str> = base.to_vec();
+    for (name, names) in passes {
+        root += &format!(
+            "    def RenderSettings \"s_{name}\" ( inherits = </Render/settings> )\n    {{\n        {}\n    }}\n    def RenderPass \"{name}\"\n    {{\n        rel renderSource = </Render/s_{name}>\n    }}\n",
+            rel(names)
+        );
+        products.extend(names.iter());
+    }
+    products.sort();
+    products.dedup();
+    root += "    def Scope \"P\"\n    {\n";
+    for p in products {
+        let name = if p.starts_with("unnamed") {
+            String::new()
+        } else {
+            format!("token productName = \"{p}\" ")
+        };
+        root += &format!(
+            "        def RenderProduct \"{}\" {{ {name}rel orderedVars = </Render/color> }}\n",
+            key(p)
+        );
+    }
+    root += "    }\n    def RenderVar \"color\"\n    {\n        uniform token dataType = \"color4f\"\n        uniform string sourceName = \"color\"\n    }\n}\n";
+    stage(dir, "", &root)
+}
+
+/// `crust check --all-passes --json -` on `input`, its report and exit code.
+fn check_all_passes(dir: &Path, input: &Path, extra: &[&str]) -> (i32, serde_json::Value) {
+    let args: Vec<&str> = [
+        "check",
+        "-i",
+        input.to_str().unwrap(),
+        "--all-passes",
+        "--json",
+        "-",
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    .collect();
+    let out = crust(dir, &args);
+    (code(&out), parse(&out.stdout))
+}
+
+/// The `passes_share_output` findings of `v`, as `(file, passes)`.
+fn shared_outputs(v: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+    v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["id"] == "passes_share_output")
+        .map(|f| {
+            (
+                f["evidence"]["file"].as_str().unwrap().to_owned(),
+                f["evidence"]["passes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_owned())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Two spellings of one file — `./x.exr` and `x.exr`, `sub/../y.exr` and
+/// `y.exr` — are one destination: the second pass would overwrite the
+/// first's file, so the check reports it, under the first spelling.
+#[test]
+fn two_spellings_of_one_file_are_a_shared_output() {
+    let dir = work_dir("passes_share_spelling");
+    let input = pass_stage(
+        &dir,
+        &["base.exr"],
+        &[
+            ("a", &["./x.exr"]),
+            ("b", &["x.exr"]),
+            ("c", &["sub/../y.exr"]),
+            ("d", &["y.exr"]),
+        ],
+    );
+    let (code, v) = check_all_passes(&dir, &input, &[]);
+    assert_eq!(code, 0, "{v}");
+    let shared = shared_outputs(&v);
+    let pair = |a: &str, b: &str| vec![format!("/Render/{a}"), format!("/Render/{b}")];
+    assert!(
+        shared.contains(&("./x.exr".into(), pair("a", "b"))),
+        "{shared:?}"
+    );
+    assert!(
+        shared.contains(&("sub/../y.exr".into(), pair("c", "d"))),
+        "{shared:?}"
+    );
+}
+
+/// A pass writes the PNG preview of its first product's beauty beside it:
+/// another pass's product at that path would overwrite it (or be
+/// overwritten), so the check reports it.
+#[test]
+fn a_pass_s_preview_is_one_of_its_outputs() {
+    let dir = work_dir("passes_share_preview");
+    let input = pass_stage(&dir, &["base.exr"], &[("a", &["x.exr"]), ("b", &["x.png"])]);
+    let (code, v) = check_all_passes(&dir, &input, &[]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        shared_outputs(&v),
+        [(
+            "x.png".to_owned(),
+            vec!["/Render/a".to_owned(), "/Render/b".to_owned()]
+        )]
+    );
+}
+
+/// The record of `code` in `v`'s warnings, if any.
+fn warning<'a>(v: &'a serde_json::Value, code: &str) -> Option<&'a serde_json::Value> {
+    v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == code)
+}
+
+/// A product only a pass's settings name, and that its render would refuse,
+/// is reported like the render with no pass reports its own, and denied.
+#[test]
+fn a_pass_s_refused_product_is_reported_and_denied() {
+    let dir = work_dir("pass_refused_product");
+    let input = pass_stage(&dir, &["base.exr"], &[("a", &["a.exr", "unnamed_a"])]);
+    let (code, v) = check_all_passes(&dir, &input, &["--deny", "skipped"]);
+    assert_eq!(code, 3, "{v}");
+    let record = warning(&v, "product.no_name").unwrap_or_else(|| panic!("{v:#}"));
+    assert_eq!(record["prims"], serde_json::json!(["/Render/P/unnamed_a"]));
+    assert!(
+        v["denied"]
+            .as_array()
+            .unwrap()
+            .contains(&"product.no_name".into()),
+        "{v}"
+    );
+}
+
+/// A warning the render with no pass raised too keeps the occurrences only a
+/// pass raises, on other prims; the ones it shares with that render are not
+/// counted twice.
+#[test]
+fn a_pass_keeps_its_own_occurrences_of_a_code_already_raised() {
+    let dir = work_dir("pass_own_occurrences");
+    let input = pass_stage(
+        &dir,
+        &["base.exr", "unnamed_base"],
+        &[
+            ("a", &["a.exr", "unnamed_a"]),
+            ("b", &["b.exr", "unnamed_base"]),
+        ],
+    );
+    let (code, v) = check_all_passes(&dir, &input, &[]);
+    assert_eq!(code, 0, "{v}");
+    let record = warning(&v, "product.no_name").unwrap_or_else(|| panic!("{v:#}"));
+    assert_eq!(
+        record["prims"],
+        serde_json::json!(["/Render/P/unnamed_base", "/Render/P/unnamed_a"])
+    );
+    assert_eq!(record["count"], 2, "{record}");
+}

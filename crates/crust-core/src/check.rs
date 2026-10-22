@@ -39,6 +39,8 @@ pub struct PassInfo {
     pub holdouts: usize,
     /// How many are hidden from the camera (outside its `cameraVisibility`).
     pub camera_hidden: usize,
+    /// How many are hidden from every ray (outside its `renderVisibility`).
+    pub render_hidden: usize,
 }
 
 impl From<&crate::PassSummary> for PassInfo {
@@ -47,8 +49,73 @@ impl From<&crate::PassSummary> for PassInfo {
             path: p.path.clone(),
             holdouts: p.holdouts,
             camera_hidden: p.camera_hidden,
+            render_hidden: p.render_hidden,
         }
     }
+}
+
+impl PassInfo {
+    /// `3 holdouts, 1 hidden from the camera, 0 hidden from every ray`.
+    fn counts(&self) -> String {
+        format!(
+            "{} holdout{}, {} hidden from the camera, {} hidden from every ray",
+            self.holdouts,
+            if self.holdouts == 1 { "" } else { "s" },
+            self.camera_hidden,
+            self.render_hidden
+        )
+    }
+}
+
+/// One pass of `--all-passes`, and how it differs from the render with no
+/// pass.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PassEntry {
+    /// The `RenderPass` prim, and what it held out and hid.
+    #[serde(flatten)]
+    pub pass: PassInfo,
+    /// The `RenderSettings` prim it reads.
+    pub settings: Option<String>,
+    /// Whether it renders through an open lens (an `fStop` above 0, depth of
+    /// field not disabled).
+    pub depth_of_field: bool,
+    /// Whether it blurs motion (motion blur on, a shutter that opens).
+    pub motion_blur: bool,
+    pub products: Vec<ProductInfo>,
+    /// What differs from the render with no pass, in a fixed order: the
+    /// camera, the resolution, depth of field, motion blur, each effective
+    /// setting, the products.
+    pub differs: Vec<Difference>,
+}
+
+/// One quantity a pass changes, with both values.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Difference {
+    pub name: String,
+    /// Its value in the render with no pass.
+    pub base: String,
+    /// Its value in the pass.
+    pub pass: String,
+}
+
+/// What `pass` changes from `base`: each of `(name, base value, pass value)`
+/// whose values differ, in order.
+pub fn differences<'a>(
+    rows: impl IntoIterator<Item = (&'a str, String, String)>,
+) -> Vec<Difference> {
+    rows.into_iter()
+        .filter(|(_, base, pass)| base != pass)
+        .map(|(name, base, pass)| Difference {
+            name: name.to_owned(),
+            base,
+            pass,
+        })
+        .collect()
+}
+
+/// `on` or `off`.
+pub fn on_off(on: bool) -> String {
+    if on { "on" } else { "off" }.to_owned()
 }
 
 /// The `crust-check/2` report, keys in the order the `scene-check` spec
@@ -61,6 +128,9 @@ pub struct CheckReport {
     /// The `RenderSettings` prim the render reads (the pass's `renderSource`,
     /// else the stage's); `null` for a scene not imported from a stage.
     pub settings: Option<String>,
+    /// With `--all-passes`, every pass in `crust ls pass` order; `null`
+    /// without it.
+    pub passes: Option<Vec<PassEntry>>,
     pub products: Vec<ProductInfo>,
     pub effective_settings: Vec<Setting>,
     /// The import's phases, as `crust-stats/1` writes them.
@@ -79,9 +149,9 @@ impl CheckReport {
         crate::report::Report::new(FORMAT, self).to_json()
     }
 
-    /// The text report, in the spec's order: the render described, effective
-    /// settings, import costs and counts, findings, warnings, then one
-    /// closing line of totals.
+    /// The text report, in the spec's order: the render described, with
+    /// `--all-passes` each pass, effective settings, import costs and counts,
+    /// findings, warnings, then one closing line of totals.
     pub fn to_text(&self) -> String {
         to_text(self)
     }
@@ -118,14 +188,7 @@ fn to_text(r: &CheckReport) -> String {
     let _ = writeln!(o, "  region      {region}");
     match &r.pass {
         Some(p) => {
-            let _ = writeln!(
-                o,
-                "  pass        {} ({} holdout{}, {} hidden from the camera)",
-                p.path,
-                p.holdouts,
-                if p.holdouts == 1 { "" } else { "s" },
-                p.camera_hidden
-            );
+            let _ = writeln!(o, "  pass        {} ({})", p.path, p.counts());
         }
         None => {
             let _ = writeln!(o, "  pass        none");
@@ -133,19 +196,34 @@ fn to_text(r: &CheckReport) -> String {
     }
     let settings = r.settings.as_deref().unwrap_or("none");
     let _ = writeln!(o, "  settings    {settings}");
-    for p in &r.products {
-        let from = p
-            .prim
-            .as_deref()
-            .map_or(String::new(), |p| format!(" ({p})"));
-        let _ = writeln!(
-            o,
-            "  writes      {}{from}: {}",
-            p.file,
-            p.channels.join(" ")
-        );
-    }
+    write_products(&mut o, &r.products, "  ");
     let _ = writeln!(o);
+
+    if let Some(passes) = &r.passes {
+        let _ = writeln!(o, "Passes");
+        if passes.is_empty() {
+            let _ = writeln!(o, "  no passes");
+        }
+        for e in passes {
+            let _ = writeln!(o, "  {} ({})", e.pass.path, e.pass.counts());
+            let settings = e.settings.as_deref().unwrap_or("none");
+            let _ = writeln!(o, "    settings    {settings}");
+            let _ = writeln!(
+                o,
+                "    lens        depth of field {}, motion blur {}",
+                on_off(e.depth_of_field),
+                on_off(e.motion_blur)
+            );
+            write_products(&mut o, &e.products, "    ");
+            if e.differs.is_empty() {
+                let _ = writeln!(o, "    differs     nothing from the render above");
+            }
+            for d in &e.differs {
+                let _ = writeln!(o, "    differs     {}: {} -> {}", d.name, d.base, d.pass);
+            }
+        }
+        let _ = writeln!(o);
+    }
 
     let _ = writeln!(o, "Effective settings");
     let width = r
@@ -248,6 +326,22 @@ fn to_text(r: &CheckReport) -> String {
     o
 }
 
+/// One `writes` line per product, indented by `indent`.
+fn write_products(o: &mut String, products: &[ProductInfo], indent: &str) {
+    for p in products {
+        let from = p
+            .prim
+            .as_deref()
+            .map_or(String::new(), |p| format!(" ({p})"));
+        let _ = writeln!(
+            o,
+            "{indent}writes      {}{from}: {}",
+            p.file,
+            p.channels.join(" ")
+        );
+    }
+}
+
 /// The closing line: the findings, and the warnings by kind.
 fn totals(r: &CheckReport) -> String {
     let findings = match r.findings.len() {
@@ -306,8 +400,10 @@ mod tests {
                 path: "/Render/Passes/char".into(),
                 holdouts: 3,
                 camera_hidden: 1,
+                render_hidden: 2,
             }),
             settings: Some("/Render/charSettings".into()),
+            passes: None,
             products: vec![ProductInfo {
                 prim: None,
                 file: "output.exr".into(),
@@ -381,6 +477,7 @@ mod tests {
                 "scene",
                 "pass",
                 "settings",
+                "passes",
                 "products",
                 "effective_settings",
                 "import",
@@ -403,6 +500,7 @@ mod tests {
             "pass.path",
             "pass.holdouts",
             "pass.camera_hidden",
+            "pass.render_hidden",
             "products[].prim",
             "products[].file",
             "products[].channels",
@@ -441,7 +539,8 @@ mod tests {
         let text = r.to_text();
         assert!(
             text.contains(
-                "  pass        /Render/Passes/char (3 holdouts, 1 hidden from the camera)"
+                "  pass        /Render/Passes/char (3 holdouts, 1 hidden from the camera, 2 \
+                 hidden from every ray)"
             ),
             "{text}"
         );
@@ -451,7 +550,10 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
         assert_eq!(value["pass"]["holdouts"], 3);
+        assert_eq!(value["pass"]["render_hidden"], 2);
         assert_eq!(value["settings"], "/Render/charSettings");
+        assert!(value["passes"].is_null(), "no --all-passes");
+        assert!(!text.contains("Passes\n"), "{text}");
 
         let mut none = report();
         none.pass = None;
@@ -460,6 +562,67 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&none.to_json()).unwrap();
         assert!(value["pass"].is_null());
         assert_eq!(value["settings"], "/Render/settings");
+    }
+
+    /// scene-check spec, "Every pass described": each pass with its counts,
+    /// settings, lens, products and differences, after the render described;
+    /// `passes` keeps the entries in order.
+    #[test]
+    fn every_pass_is_described_with_what_differs() {
+        let mut r = report();
+        r.pass = None;
+        let entry = |path: &str, differs| PassEntry {
+            pass: PassInfo {
+                path: path.into(),
+                holdouts: 1,
+                camera_hidden: 0,
+                render_hidden: 2,
+            },
+            settings: Some("/Render/sharp".into()),
+            depth_of_field: false,
+            motion_blur: false,
+            products: vec![ProductInfo {
+                prim: Some("/Render/Products/util".into()),
+                file: "util.exr".into(),
+                channels: vec!["R".into()],
+            }],
+            differs,
+        };
+        r.passes = Some(vec![
+            entry(
+                "/Render/Passes/util",
+                differences([
+                    ("depth_of_field", on_off(true), on_off(false)),
+                    ("resolution", "8x8".into(), "8x8".into()),
+                ]),
+            ),
+            entry("/Render/Passes/same", Vec::new()),
+        ]);
+        let text = r.to_text();
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("no {s:?} in {text}"));
+        assert!(at("Render\n") < at("Passes\n") && at("Passes\n") < at("Effective settings"));
+        assert!(text.contains(
+            "  /Render/Passes/util (1 holdout, 0 hidden from the camera, 2 hidden from every ray)"
+        ));
+        assert!(
+            text.contains("    differs     depth_of_field: on -> off\n"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("differs     resolution"),
+            "equal values do not differ"
+        );
+        assert!(text.contains("    differs     nothing from the render above"));
+        let value: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
+        let passes = value["passes"].as_array().unwrap();
+        assert_eq!(passes[0]["path"], "/Render/Passes/util");
+        assert_eq!(passes[0]["settings"], "/Render/sharp");
+        assert_eq!(passes[0]["render_hidden"], 2);
+        assert_eq!(passes[0]["differs"][0]["base"], "on");
+        assert_eq!(passes[1]["differs"], serde_json::json!([]));
+
+        r.passes = Some(Vec::new());
+        assert!(r.to_text().contains("Passes\n  no passes\n"));
     }
 
     /// A number that is not finite, or not measured, is `null`.

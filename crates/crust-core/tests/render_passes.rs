@@ -249,6 +249,100 @@ fn the_render_source_chooses_the_settings() {
     }
 }
 
+/// render-passes spec, "The render source is read as composed": a pass's
+/// `renderSource` that `inherits`, `references` or `specializes` the shot's
+/// settings and authors only `disableDepthOfField` renders the base's camera,
+/// resolution, products and `crust:` settings through a pinhole.
+#[test]
+fn a_render_source_composes_its_base_settings() {
+    for (arc, metadata) in [
+        ("inherits", "inherits = </Render/settings>"),
+        ("references", "references = </Render/settings>"),
+        ("specializes", "specializes = </Render/settings>"),
+    ] {
+        let path = dir().join(format!("composed_{arc}.usda"));
+        let text = format!(
+            r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{{
+    def Camera "Other"
+    {{
+        double3 xformOp:translate = (5, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Camera "Cam"
+    {{
+        float fStop = 2.8
+        float focusDistance = 10
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+}}
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int2 resolution = (12, 6)
+        int crust:samplesPerPixel = 5
+        rel camera = </World/Cam>
+        rel products = [</Render/baseProduct>]
+    }}
+    def RenderSettings "sharp" (
+        {metadata}
+    )
+    {{
+        uniform bool disableDepthOfField = 1
+    }}
+    def RenderProduct "baseProduct"
+    {{
+        token productName = "base.exr"
+        rel orderedVars = [</Render/color>]
+    }}
+    def RenderVar "color"
+    {{
+        string sourceName = "color"
+    }}
+    def Scope "Passes"
+    {{
+        def RenderPass "util"
+        {{
+            rel renderSource = </Render/sharp>
+        }}
+    }}
+}}
+"#
+        );
+        std::fs::write(&path, text).expect("write stage");
+        let base = load(&path, None);
+        let util = load(&path, Some("/Render/Passes/util"));
+        assert!(
+            base.camera.has_depth_of_field(),
+            "{arc}: the base has a lens"
+        );
+        assert!(
+            !util.camera.has_depth_of_field(),
+            "{arc}: the pass is sharp"
+        );
+        assert!(!util.settings.depth_of_field(), "{arc}");
+        for scene in [&base, &util] {
+            assert_eq!(scene.settings.get_dimensions(), (12, 6), "{arc}");
+            assert_eq!(scene.settings.samples_per_pixel(), 5, "{arc}");
+            assert_eq!(scene.camera_path.as_deref(), Some("/World/Cam"), "{arc}");
+            assert_eq!(scene.aovs.products.len(), 1, "{arc}");
+            assert_eq!(scene.aovs.products[0].name, "base.exr", "{arc}");
+        }
+        let prov = util.provenance.as_ref().expect("imported");
+        assert_eq!(prov.render_settings(), Some("/Render/sharp"), "{arc}");
+        assert_eq!(count(&util, WarningCode::RenderPassRenderSourceInvalid), 0);
+    }
+}
+
 /// render-passes spec, "A render source that is not settings": a warning
 /// names the pass and the target, and the stage's settings are read.
 #[test]
@@ -278,10 +372,10 @@ fn a_render_source_that_is_not_settings_warns() {
 // Collections not read
 // ---------------------------------------------------------------------------
 
-/// render-passes spec, "A pass that prunes": one warning per collection, and
-/// what it names still renders.
+/// render-passes spec, "A pass that prunes": one warning, and what it names
+/// still renders.
 #[test]
-fn prune_and_render_visibility_warn_and_are_not_read() {
+fn prune_warns_and_is_not_read() {
     let path = stage(
         "prune",
         &ball("Set", 0.0),
@@ -291,21 +385,15 @@ fn prune_and_render_visibility_warn_and_are_not_read() {
                 "            prepend rel collection:prune:includes = </World/Set>",
             ),
             pass(
-                "invisible",
-                "            prepend rel collection:renderVisibility:excludes = </World/Set>",
-            ),
-            pass(
                 "quiet",
-                // Excluding from prune, including in renderVisibility:
-                // neither restricts anything.
-                "            prepend rel collection:prune:excludes = </World/Set>\n\
-                             prepend rel collection:renderVisibility:includes = </World/Set>",
+                // Excluding from prune restricts nothing.
+                "            prepend rel collection:prune:excludes = </World/Set>",
             ),
         ]
         .concat(),
         "",
     );
-    for (name, warned) in [("pruning", 1), ("invisible", 1), ("quiet", 0)] {
+    for (name, warned) in [("pruning", 1), ("quiet", 0)] {
         let scene = load(&path, Some(&format!("/Render/Passes/{name}")));
         assert_eq!(
             count(&scene, WarningCode::RenderPassCollectionNotRead),
@@ -318,6 +406,251 @@ fn prune_and_render_visibility_warn_and_are_not_read() {
             "{name}: the set renders"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// renderVisibility
+// ---------------------------------------------------------------------------
+
+/// Whether a ray of `mask` down −Z at `x` meets anything.
+fn any_hit(scene: &Scene, x: f32, mask: crust_core::RayMask) -> bool {
+    let ray = Ray::new(Vec3A::new(x, 0.0, 10.0), -Vec3A::Z).with_mask(mask);
+    scene.world.intersect(&ray, 1e-3, 1e4).is_some()
+}
+
+/// render-passes spec, "A background plate alone": what the pass leaves out
+/// of `renderVisibility` is seen by no ray — camera, shadow or indirect — and
+/// what it keeps renders as before.
+#[test]
+fn a_plate_alone_hides_the_rest_from_every_ray() {
+    use crust_core::MASK_INDIRECT;
+    let path = stage(
+        "plate_alone",
+        &[ball("PlateA", -2.0), ball("Hero", 2.0)].concat(),
+        &pass(
+            "plate",
+            "            uniform bool collection:renderVisibility:includeRoot = 0\n\
+                         prepend rel collection:renderVisibility:includes = </World/PlateA>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/plate"));
+    for mask in [MASK_CAMERA, MASK_SHADOW, MASK_INDIRECT] {
+        assert!(
+            any_hit(&plain, 2.0, mask),
+            "{mask:?}: seen without the pass"
+        );
+        assert!(!any_hit(&scene, 2.0, mask), "{mask:?}: hidden by the pass");
+        assert!(any_hit(&scene, -2.0, mask), "{mask:?}: the plate stays");
+    }
+    assert_eq!(camera_hit(&scene, -2.0), Some(false), "not a holdout");
+    let summary = scene.pass.as_ref().unwrap();
+    assert_eq!(
+        (
+            summary.render_hidden,
+            summary.holdouts,
+            summary.camera_hidden
+        ),
+        (1, 0, 0)
+    );
+    assert_eq!(count(&scene, WarningCode::RenderPassCollectionNotRead), 0);
+}
+
+/// render-passes spec, "Plates with the lights off": a pass that leaves the
+/// lights out of `renderVisibility` is lit by nothing, and escaping camera
+/// rays see no dome.
+#[test]
+fn lights_outside_render_visibility_are_off() {
+    let body = format!(
+        r#"{FLOOR}    def Xform "Lights"
+    {{
+        def RectLight "Key"
+        {{
+            float inputs:width = 2
+            float inputs:height = 2
+            float inputs:intensity = 10
+            double3 xformOp:translate = (0, 3, 0)
+            float xformOp:rotateX = -90
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+        }}
+        def DomeLight "Sky"
+        {{
+            float inputs:intensity = 2
+        }}
+    }}
+"#
+    );
+    let path = stage(
+        "lights_off",
+        &body,
+        &pass(
+            "dark",
+            "            prepend rel collection:renderVisibility:excludes = </World/Lights>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/dark"));
+    assert_eq!(plain.lights.count(), 2);
+    assert_eq!(scene.lights.count(), 0, "both lights are off");
+    assert!(scene.lights.backdrops().is_empty(), "no camera-only dome");
+    let up = Ray::new(Vec3A::ZERO, Vec3A::Y).with_mask(MASK_CAMERA);
+    let down = Ray::new(Vec3A::ZERO, -Vec3A::Y).with_mask(MASK_CAMERA);
+    assert!(radiance(&plain, &up, 4).iter().any(|c| *c != [0; 3]));
+    assert!(radiance(&plain, &down, 16).iter().any(|c| *c != [0; 3]));
+    assert!(
+        radiance(&scene, &up, 4).iter().all(|c| *c == [0; 3]),
+        "no dome"
+    );
+    assert!(
+        radiance(&scene, &down, 16).iter().all(|c| *c == [0; 3]),
+        "unlit"
+    );
+}
+
+/// render-passes spec, "A hidden area light no longer occludes": a
+/// camera-visible `RectLight` outside `renderVisibility` is met by no ray,
+/// shadow rays toward other lights included.
+#[test]
+fn a_render_hidden_area_light_does_not_occlude() {
+    let body = r#"    def RectLight "Panel"
+    {
+        bool crust:light:cameraVisible = true
+        float inputs:width = 1
+        float inputs:height = 1
+    }
+"#;
+    let path = stage(
+        "hidden_panel",
+        body,
+        &pass(
+            "pass",
+            "            prepend rel collection:renderVisibility:excludes = </World/Panel>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/pass"));
+    assert!(shadow_hit(&plain, 0.0) && camera_hit(&plain, 0.0).is_some());
+    assert!(!shadow_hit(&scene, 0.0), "no shadow ray hits it");
+    assert_eq!(camera_hit(&scene, 0.0), None, "nor any camera ray");
+    assert_eq!(
+        scene.lights.count(),
+        plain.lights.count() - 1,
+        "and it is off"
+    );
+    assert!(!scene.world.has_transparent_emitters());
+}
+
+/// render-passes spec, "Held out and render-hidden": `renderVisibility` wins;
+/// the prim is absent, not a holdout, and counts as neither held out nor
+/// camera-hidden.
+#[test]
+fn render_visibility_takes_precedence_over_matte() {
+    let path = stage(
+        "matte_and_hidden",
+        &ball("Crate", 0.0),
+        &pass(
+            "pass",
+            "            prepend rel collection:matte:includes = </World/Crate>\n\
+                         prepend rel collection:cameraVisibility:excludes = </World/Crate>\n\
+                         prepend rel collection:renderVisibility:excludes = </World/Crate>",
+        ),
+        "",
+    );
+    let scene = load(&path, Some("/Render/Passes/pass"));
+    assert_eq!(camera_hit(&scene, 0.0), None, "absent, not a holdout");
+    assert!(!shadow_hit(&scene, 0.0), "and casts no shadow");
+    assert!(!scene.world.has_holdouts());
+    let summary = scene.pass.as_ref().unwrap();
+    assert_eq!(
+        (
+            summary.render_hidden,
+            summary.holdouts,
+            summary.camera_hidden
+        ),
+        (1, 0, 0)
+    );
+}
+
+/// render-passes spec, "A light whose only target is hidden": linked only to
+/// geometry the pass hides from every ray, a light lights nothing — it leaves
+/// the list as a light linked to nothing does.
+#[test]
+fn a_light_linked_only_to_hidden_geometry_lights_nothing() {
+    let body = format!(
+        r#"{FLOOR}{hero}    def SphereLight "Bulb"
+    {{
+        float inputs:radius = 0.2
+        float inputs:intensity = 50
+        double3 xformOp:translate = (0, 3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        uniform bool collection:lightLink:includeRoot = 0
+        prepend rel collection:lightLink:includes = </World/Hero>
+    }}
+"#,
+        hero = ball("Hero", 2.0)
+    );
+    let path = stage(
+        "linked_to_hidden",
+        &body,
+        &pass(
+            "pass",
+            "            prepend rel collection:renderVisibility:excludes = </World/Hero>",
+        ),
+        "",
+    );
+    let plain = load(&path, None);
+    let scene = load(&path, Some("/Render/Passes/pass"));
+    assert_eq!(plain.lights.count(), 1, "it lights the hero");
+    assert_eq!(scene.lights.count(), 0, "it lights nothing");
+}
+
+/// render-passes spec, "A pass that authors no render visibility": a
+/// `renderVisibility` that restricts nothing leaves the pass exactly as
+/// without it — the same world answers and the same radiance, bit for bit.
+#[test]
+fn an_unrestricted_render_visibility_changes_nothing() {
+    let body = format!(
+        r#"{FLOOR}{a}{b}    def SphereLight "Bulb"
+    {{
+        float inputs:radius = 0.2
+        float inputs:intensity = 50
+        double3 xformOp:translate = (0, 3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+"#,
+        a = ball("A", -2.0),
+        b = ball("B", 2.0)
+    );
+    let matte = "            prepend rel collection:matte:includes = </World/A>";
+    let path = stage(
+        "unrestricted",
+        &body,
+        &[
+            pass("without", matte),
+            pass(
+                "with",
+                &format!(
+                    "{matte}\n            prepend rel collection:renderVisibility:includes = </World/B>"
+                ),
+            ),
+        ]
+        .concat(),
+        "",
+    );
+    let without = load(&path, Some("/Render/Passes/without"));
+    let with = load(&path, Some("/Render/Passes/with"));
+    for x in [-2.0, 0.0, 2.0] {
+        assert_eq!(camera_hit(&with, x), camera_hit(&without, x));
+        assert_eq!(shadow_hit(&with, x), shadow_hit(&without, x));
+    }
+    for dir in [Vec3A::Y, -Vec3A::Y, Vec3A::new(0.3, -1.0, 0.2).normalize()] {
+        let ray = Ray::new(Vec3A::new(0.0, 0.5, 0.0), dir).with_mask(MASK_CAMERA);
+        assert!(radiance(&with, &ray, 16) == radiance(&without, &ray, 16));
+    }
+    assert_eq!(with.pass.as_ref().unwrap().render_hidden, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -600,8 +933,8 @@ fn instances_are_judged_on_the_instance_prim() {
     assert_eq!(scene.pass.as_ref().unwrap().holdouts, 1, "one prim");
 }
 
-/// render-passes spec, "A held-out volume": one warning naming it, and the
-/// region as without the pass.
+/// render-passes spec, "A held-out volume" and "A render-hidden volume": one
+/// warning naming it, and the region as without the pass.
 #[test]
 fn a_held_out_volume_warns_and_is_unchanged() {
     let body = r#"    def Cube "Fog"
@@ -621,12 +954,16 @@ fn a_held_out_volume_warns_and_is_unchanged() {
                 "hidden",
                 "            prepend rel collection:cameraVisibility:excludes = </World/Fog>",
             ),
+            pass(
+                "invisible",
+                "            prepend rel collection:renderVisibility:excludes = </World/Fog>",
+            ),
         ]
         .concat(),
         "",
     );
     let plain = load(&path, None);
-    for name in ["matte", "hidden"] {
+    for name in ["matte", "hidden", "invisible"] {
         let scene = load(&path, Some(&format!("/Render/Passes/{name}")));
         let w = scene
             .warnings
@@ -835,15 +1172,20 @@ fn passes_sample() -> PathBuf {
 
 /// `samples/render_passes.usda` with `passes` added beside its own.
 fn passes_sample_with(name: &str, passes: &str) -> PathBuf {
-    let text = std::fs::read_to_string(passes_sample()).expect("read sample");
     let anchor = "        def RenderPass \"props\"";
-    assert!(text.contains(anchor), "the sample's props pass moved");
+    sample_with(name, &[(anchor, &format!("{passes}{anchor}"))])
+}
+
+/// `samples/render_passes.usda` with each `(from, to)` replaced, written
+/// beside the other test stages as `name.usda`.
+fn sample_with(name: &str, edits: &[(&str, &str)]) -> PathBuf {
+    let mut text = std::fs::read_to_string(passes_sample()).expect("read sample");
+    for (from, to) in edits {
+        assert!(text.contains(from), "the sample holds no {from:?}");
+        text = text.replacen(from, to, 1);
+    }
     let path = dir().join(format!("{name}.usda"));
-    std::fs::write(
-        &path,
-        text.replacen(anchor, &format!("{passes}{anchor}"), 1),
-    )
-    .expect("write stage");
+    std::fs::write(&path, text).expect("write stage");
     path
 }
 
@@ -862,8 +1204,12 @@ fn render_sample(pass: Option<&str>, spp: u32) -> Vec<Px> {
 /// `path` rendered with `pass` (or none) at `spp`, small, unclamped and
 /// without adaptive sampling, top-down as a product writes it.
 fn render_stage(path: &Path, pass: Option<&str>, spp: u32) -> Vec<Px> {
+    render_scene(load(path, pass), spp)
+}
+
+/// [`render_stage`] of a scene already imported.
+fn render_scene(scene: Scene, spp: u32) -> Vec<Px> {
     use crust_core::{AovProduct, AovRequest, AovSource, AovVar, Precision, Renderer};
-    let scene = load(path, pass);
     let (w, h) = (48, 27);
     let settings = scene
         .settings
@@ -1055,4 +1401,184 @@ fn a_back_pass_that_hides_the_character_goes_under_it() {
         b16 > 1e-3 && b256 > 0.5 * b16,
         "floor edges: {b16} then {b256}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Passes imported together
+// ---------------------------------------------------------------------------
+
+fn group(path: &Path, passes: &[&str]) -> crust_core::PassGroup {
+    let passes: Vec<String> = passes.iter().map(|p| p.to_string()).collect();
+    Scene::from_usd_passes(path, &NoAssets, &UsdImportOptions::default(), &passes)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The render_pass warnings of `warnings`, as `(code, count, prims)`.
+fn pass_warnings(warnings: &[crust_core::Warning]) -> Vec<(WarningCode, u64, Vec<String>)> {
+    warnings
+        .iter()
+        .filter(|w| w.code.as_str().starts_with("render_pass."))
+        .map(|w| (w.code, w.count, w.prims.clone()))
+        .collect()
+}
+
+/// render-visibility-and-all-passes task 4.2: each pass of a group import
+/// reads what an import of that pass alone reads — settings, camera,
+/// products, settings prim, what it held out and hid, the warnings reading it
+/// raised — and the scene is the first pass's.
+#[test]
+fn each_pass_of_a_group_reads_as_it_does_alone() {
+    let path = sample_with(
+        "group_reads",
+        &[(
+            "            prepend rel collection:matte:includes = </World/Chars>",
+            "            prepend rel collection:matte:includes = </World/Chars>\n\
+                         prepend rel collection:renderVisibility:excludes = </World/Props/Crate>\n\
+                         prepend rel collection:prune:includes = </World/Set>",
+        )],
+    );
+    let names = ["/Render/Passes/char", "/Render/Passes/props"];
+    let g = group(&path, &names);
+    assert!(g.unserved.is_empty(), "{:?}", g.unserved);
+    assert_eq!(g.passes.len(), 2);
+    for (pass, name) in g.passes.iter().zip(names) {
+        let alone = load(&path, Some(name));
+        assert_eq!(pass.settings, alone.settings, "{name}");
+        assert_eq!(format!("{:?}", pass.camera), format!("{:?}", alone.camera));
+        assert_eq!(pass.camera_path, alone.camera_path, "{name}");
+        assert_eq!(pass.aovs, alone.aovs, "{name}");
+        assert_eq!(pass.settings_prim, alone.settings_prim, "{name}");
+        assert_eq!(pass.summary, alone.pass, "{name}");
+        assert_eq!(pass.depth_of_field, alone.source.depth_of_field, "{name}");
+        assert_eq!(pass.motion_blur, alone.source.motion_blur, "{name}");
+        assert_eq!(pass.lights.count(), alone.lights.count(), "{name}");
+        assert_eq!(
+            pass_warnings(&pass.warnings),
+            pass_warnings(&alone.warnings),
+            "{name}"
+        );
+    }
+    // Only the props pass prunes, so only it warns.
+    assert!(pass_warnings(&g.passes[0].warnings).is_empty());
+    assert_eq!(pass_warnings(&g.passes[1].warnings).len(), 1);
+    let first = load(&path, Some(names[0]));
+    assert_eq!(
+        pass_warnings(&g.scene.warnings),
+        pass_warnings(&first.warnings)
+    );
+    assert_eq!(g.scene.settings, first.settings);
+    assert_eq!(g.scene.pass, first.pass);
+    assert_eq!(g.scene.settings_prim, first.settings_prim);
+}
+
+/// A group's scene is its first pass's: a live settings rebuild re-reads that
+/// pass's `renderSource`, as for the pass imported alone, not the stage's
+/// settings. Once another pass is applied, the provenance (which names the
+/// first pass's settings and light indices) is dropped, so a live edit
+/// imports again rather than rebuild for the wrong pass.
+#[test]
+fn a_group_scene_rebuilds_only_as_its_first_pass() {
+    let path = passes_sample();
+    let g = group(&path, &["/Render/Passes/char", "/Render/Passes/props"]);
+    let mut scene = g.scene;
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let update = scene
+        .provenance
+        .as_ref()
+        .expect("the first pass's provenance")
+        .rebuild(&path, &NoAssets, &scene.warnings, &change)
+        .expect("a settings rebuild in place");
+    update.apply(&mut scene).expect("applies");
+    let names: Vec<&str> = scene
+        .aovs
+        .products
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["char.exr"], "the char pass's settings, re-read");
+    scene.apply_pass(&g.passes[0]);
+    assert!(scene.provenance.is_some(), "still the first pass");
+    scene.apply_pass(&g.passes[1]);
+    assert!(scene.provenance.is_none(), "another pass: re-import");
+}
+
+/// An empty group is an error, not a panic.
+#[test]
+fn an_empty_group_is_an_error() {
+    match Scene::from_usd_passes(
+        &passes_sample(),
+        &NoAssets,
+        &UsdImportOptions::default(),
+        &[],
+    ) {
+        Err(Error::NoPasses) => {}
+        Err(e) => panic!("another error: {e}"),
+        Ok(_) => panic!("an empty group imported"),
+    }
+}
+
+/// render-visibility-and-all-passes task 3.3: a world committed for one pass,
+/// then given another pass's flags, renders that pass bit for bit as an
+/// import of it alone does — beauty, alpha and a light path expression — and
+/// back again.
+#[test]
+fn a_world_reapplied_to_another_pass_renders_as_that_pass_alone() {
+    let path = sample_with(
+        "group_reapplied",
+        &[(
+            "            prepend rel collection:matte:includes = </World/Chars>",
+            "            prepend rel collection:matte:includes = </World/Chars>\n\
+                         prepend rel collection:renderVisibility:excludes = </World/Props/Crate>",
+        )],
+    );
+    let names = ["/Render/Passes/char", "/Render/Passes/props"];
+    let alone: Vec<Vec<Px>> = names
+        .iter()
+        .map(|n| render_stage(&path, Some(n), 4))
+        .collect();
+    let bits = |img: &[Px]| -> Vec<u32> { img.iter().flatten().map(|v| v.to_bits()).collect() };
+    // The group's scene is committed for its first pass; each order.
+    for order in [[0, 1], [1, 0]] {
+        let g = group(&path, &[names[order[0]], names[order[1]]]);
+        for k in [1, 0] {
+            let mut scene = group(&path, &[names[order[0]], names[order[1]]]).scene;
+            scene.apply_pass(&g.passes[k]);
+            assert!(
+                bits(&render_scene(scene, 4)) == bits(&alone[order[k]]),
+                "{} after committing for {}",
+                names[order[k]],
+                names[order[0]]
+            );
+        }
+    }
+}
+
+/// render-visibility-and-all-passes task 4.1 and the render-passes spec's
+/// "One import for two passes" and "A pass that dices differently": passes
+/// that differ only in products share an import; one whose settings author
+/// another `crust:subdivisionLevel` does not.
+#[test]
+fn passes_share_an_import_unless_the_import_differs() {
+    let g = group(
+        &passes_sample(),
+        &["/Render/Passes/char", "/Render/Passes/props"],
+    );
+    assert!(g.unserved.is_empty());
+    assert_eq!(g.passes.len(), 2);
+
+    let path = sample_with(
+        "group_dicing",
+        &[(
+            "        int crust:maxDepth = 4\n        rel camera = </World/Cam>\n        rel products = </Render/Products/char>",
+            "        int crust:maxDepth = 4\n        int crust:subdivisionLevel = 3\n        rel camera = </World/Cam>\n        rel products = </Render/Products/char>",
+        )],
+    );
+    let g = group(&path, &["/Render/Passes/char", "/Render/Passes/props"]);
+    assert_eq!(g.passes.len(), 1);
+    assert_eq!(g.unserved, ["/Render/Passes/props"]);
+    let g = group(&path, &["/Render/Passes/props", "/Render/Passes/char"]);
+    assert_eq!(g.unserved, ["/Render/Passes/char"]);
 }

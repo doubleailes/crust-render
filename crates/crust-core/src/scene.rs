@@ -49,6 +49,65 @@ pub struct Source {
     pub invisible_overrides: Option<u32>,
 }
 
+/// The passes of a stage imported together ([`Scene::from_usd_passes`]): the
+/// one traversal's scene, and what each pass makes of it.
+pub struct PassGroup {
+    /// The scene, as an import of the first pass alone builds it.
+    pub scene: Scene,
+    /// Each pass served, in the order asked for, the first included: give one
+    /// to [`Scene::apply_pass`] to render it.
+    pub passes: Vec<PassScene>,
+    /// The passes asked for that this import could not serve, in the order
+    /// asked for: their settings build another scene (another subdivision,
+    /// another shutter, implicit shapes sized for another camera). Each needs
+    /// an import of its own, or a group of its own.
+    pub unserved: Vec<String>,
+}
+
+/// One pass as [`Scene::plan_usd_passes`] reads it ahead of any import.
+#[derive(Clone, Debug)]
+pub struct PassPlan {
+    /// The `RenderPass` prim.
+    pub path: String,
+    /// The products it writes, `productName` as authored.
+    pub aovs: crate::AovRequest,
+    /// Which import it can share: passes with the same number agree on
+    /// everything the import builds into the scene, numbered in the order of
+    /// their first pass. (An import can still find it cannot serve one of
+    /// them, when implicit shapes are sized for another camera:
+    /// [`PassGroup::unserved`].)
+    pub group: usize,
+}
+
+/// One pass of a [`PassGroup`]: everything its render reads that the passes
+/// do not share.
+#[derive(Clone)]
+pub struct PassScene {
+    /// The pass and what it held out and hid.
+    pub summary: Option<PassSummary>,
+    pub settings: RenderSettings,
+    pub camera: Camera,
+    /// The camera prim, `None` for the procedural camera.
+    pub camera_path: Option<String>,
+    pub aovs: crate::AovRequest,
+    /// The `RenderSettings` prim its settings come from.
+    pub settings_prim: Option<String>,
+    /// The settings prim its render settings path resolves to (for the MCP
+    /// provenance of a pass imported alone).
+    pub(crate) render_settings: Option<String>,
+    pub lens: Option<Lens>,
+    pub depth_of_field: bool,
+    pub motion_blur: bool,
+    /// The warnings reading this pass raised; the import's own are on the
+    /// group's scene.
+    pub warnings: Vec<crate::Warning>,
+    /// The scene's warnings with this pass's: what [`Scene::warnings`] holds
+    /// once it renders this pass.
+    pub(crate) all_warnings: Vec<crate::Warning>,
+    pub lights: LightList,
+    pub(crate) table: crate::rt_world::MaskTable,
+}
+
 /// The renderer's runtime scene, produced from a USD stage
 /// (`Scene::from_usd`) or assembled by hand (`Scene::new`, e.g. from the
 /// procedural `world::simple_scene`). Its camera, world, lights and settings
@@ -225,6 +284,78 @@ impl Scene {
         options: &UsdImportOptions,
     ) -> Result<Scene, crate::Error> {
         usd_import::load_scene(path, assets, options)
+    }
+
+    /// The `RenderPass` prims at `passes` imported together, in one
+    /// traversal: every pass whose settings agree with the first's on
+    /// everything the import builds into the scene ([`PassGroup`]). The
+    /// options' own `pass` is ignored. An empty `passes` is an error
+    /// ([`crate::Error::NoPasses`]).
+    pub fn from_usd_passes(
+        path: &std::path::Path,
+        assets: &dyn AssetLoader,
+        options: &UsdImportOptions,
+        passes: &[String],
+    ) -> Result<PassGroup, crate::Error> {
+        let options = UsdImportOptions {
+            pass: None,
+            ..options.clone()
+        };
+        usd_import::load_passes(path, assets, &options, passes)
+    }
+
+    /// What rendering each of `passes` would write, and which of them can
+    /// share an import, read off the stage without its payloads and without
+    /// logging (the import that follows reads them again, and reports): the
+    /// plan of `crust render --all-passes`, which refuses two passes writing
+    /// one file before it imports anything. The options' own `pass` is
+    /// ignored.
+    pub fn plan_usd_passes(
+        path: &std::path::Path,
+        options: &UsdImportOptions,
+        passes: &[String],
+    ) -> Result<Vec<PassPlan>, crate::Error> {
+        usd_import::plan_passes(path, options, passes)
+    }
+
+    /// Makes this scene render `pass`, one of the passes of the
+    /// [`PassGroup`] it was imported with: the world's ray masks, holdouts,
+    /// light classes and transparent emitters, the volumes' masks, the light
+    /// list, and the settings, camera, products, warnings and source become
+    /// that pass's. The scene is then the one an import of that pass alone
+    /// builds, apart from its provenance: that describes the group's first
+    /// pass, so it is dropped for any other (the light list's indices, the
+    /// settings prim it re-reads are that pass's), and a live edit of the
+    /// scene then imports again.
+    pub fn apply_pass(&mut self, pass: &PassScene) {
+        let path = pass.summary.as_ref().map(|s| s.path.as_str());
+        if self
+            .provenance
+            .as_ref()
+            .is_some_and(|p| p.stage.options.pass.as_deref() != path)
+        {
+            self.provenance = None;
+        }
+        self.world.apply_pass(&pass.table);
+        crate::volume::set_volume_flags(&mut self.volumes, &pass.table.volumes);
+        self.lights = pass.lights.clone();
+        self.stats.scene.lights = self.lights.count();
+        self.apply_pass_settings(pass);
+    }
+
+    /// The part of [`Scene::apply_pass`] that is not geometry or lights.
+    pub(crate) fn apply_pass_settings(&mut self, pass: &PassScene) {
+        self.settings = pass.settings;
+        self.stats.image = (&self.settings).into();
+        self.camera = pass.camera;
+        self.camera_path = pass.camera_path.clone();
+        self.aovs = pass.aovs.clone();
+        self.settings_prim = pass.settings_prim.clone();
+        self.pass = pass.summary.clone();
+        self.warnings = pass.all_warnings.clone();
+        self.source.lens = pass.lens.clone();
+        self.source.depth_of_field = pass.depth_of_field;
+        self.source.motion_blur = pass.motion_blur;
     }
 
     /// The `kind` prims of the USD stage at `path` — cameras, lights or

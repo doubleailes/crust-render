@@ -9,7 +9,9 @@ and writes the output image (`crust render`), lists what a stage holds
 capability), serves an editing session to an MCP client (`crust mcp`, the
 `mcp-session` capability), or diagnoses how to render it faster or cleaner (`crust diagnostic`,
 the `diagnostics` capability). Each can also write a machine-readable JSON report. This is the only user-facing surface of the tool.
+
 ## Requirements
+
 ### Requirement: Subcommands
 
 The CLI SHALL require a subcommand:
@@ -637,3 +639,69 @@ procedural fallback scene (no `-i`) it SHALL warn that it has no effect, as
 
 - **WHEN** the user runs `crust render --pass /Render/Passes/char` with no `-i`
 - **THEN** a warning says `--pass` has no effect, and the procedural scene renders
+
+### Requirement: All-passes flag
+
+`crust render` and `crust check` SHALL accept `--all-passes`, which selects every
+`RenderPass` of the stage as the `render-passes` capability defines.
+`--all-passes` SHALL be a usage error with `--pass`, with `render`'s `-o` or
+`--stats-json`, or without `-i`. `--stats` SHALL print the import's phases once
+per import and each pass's render table. Every other flag SHALL apply to every pass, as it would to that
+pass rendered alone.
+
+#### Scenario: All passes and one pass
+
+- **WHEN** the user runs `crust render -i shot.usda --all-passes --pass /Render/Passes/char`
+- **THEN** the arguments are refused as a usage error and nothing is loaded
+
+#### Scenario: All passes and an output path
+
+- **WHEN** the user runs `crust render -i shot.usda --all-passes -o out.exr`
+- **THEN** the arguments are refused as a usage error naming `-o`
+
+#### Scenario: A flag shared by every pass
+
+- **WHEN** the user runs `crust render -i shot.usda --all-passes -s 16 -f 12`
+- **THEN** every pass renders frame 12 at 16 samples per pixel
+
+### Requirement: Passes that would write the same file
+
+Before it renders any pixel, `crust render --all-passes` SHALL compute the file
+of every product of every pass for the frame being rendered, and the PNG preview
+each pass writes beside its beauty. Two names SHALL be the same file when they
+are once resolved against the working directory, `.` and `..` included. When
+two passes would write the same file, it SHALL stop with an error naming both
+passes and the file, write nothing, and exit non-zero. A preview shared only
+because its beauty is, by the same passes, SHALL not be named apart.
+
+#### Scenario: Two passes with no products
+
+- **WHEN** two passes read settings that author no `RenderProduct`, so both would
+  write the default beauty image
+- **THEN** the render stops before rendering, naming both passes and the default
+  file
+
+#### Scenario: Two spellings of one file
+
+- **WHEN** one pass writes `./x.exr` and another `x.exr`
+- **THEN** the render stops before rendering, naming both passes and `./x.exr`
+
+#### Scenario: A product on another pass's preview
+
+- **WHEN** one pass writes the beauty product `x.exr`, so its preview is `x.png`,
+  and another pass writes a product `x.png`
+- **THEN** the render stops before rendering, naming both passes and `x.png`
+
+### Requirement: Interrupting all passes
+
+An interrupt during `--all-passes` SHALL stop at the pass it reaches. That pass
+SHALL keep its work as an interrupted single render does. Passes not yet started
+SHALL not be rendered. Passes already finished SHALL keep their files. The exit
+status SHALL be that of an interrupted render.
+
+#### Scenario: Interrupted in the second pass
+
+- **WHEN** the user interrupts `crust render --all-passes` during the second of
+  three passes
+- **THEN** the first pass's files are complete, the second's hold the samples
+  taken so far, and the third pass's files are not written
