@@ -172,12 +172,17 @@ does read and is not `Shader` is `full` at once, as before.
 the camera through `build_camera`, which composes its ancestors, so a camera move needed
 only the classifier to admit it. Two guards keep it honest. An imported prim below the
 camera (a mesh parented to it) would move with it, and the rebuild re-reads only the
-camera, so `any_below` sends that to `full`; it scans the provenance's materials, lights
-and geometry runs once per classification. Tessellation that read the camera is guarded
+camera, so `any_below` sends that to `full`; it scans the provenance's materials, lights,
+geometry runs and volume-region prims once per classification.
+*Trap:* a volume region is not a geometry run, so a scan of the runs alone missed a
+`crust:volume:type` prim parented to the camera, and the move applied in place left it
+behind (`moving_a_camera_with_prims_below_it_is_full`). Tessellation that read the camera is guarded
 by the rebuild, not the classifier: it compares the dicing camera's keys
 (`crust:dicingCamera`, else the render camera), so a move is in place exactly when the
 render camera does not dice, or nothing is tessellated from a camera. An edit on an
-ancestor of the camera, and `!resetXformStack!`, stay `full`.
+ancestor of the camera stays `full`. `!resetXformStack!` in the camera's own
+`xformOpOrder` is `settings`: `build_camera` composes through `local_to_world`, which
+honours it (`resetting_the_render_camera_s_transform_stack_is_a_settings_edit`).
 
 *Alternative rejected:* trying every transform in place and falling back on refusal. The
 rebuild re-reads only the camera, so a mesh's transform would be silently ignored, not
@@ -371,7 +376,13 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   (`CRUST_SCENE_DELTAS=0`), and 31.7 / 32.7 ms on ALab (`entry.usda`, whose
   `startTimeCode` is 1004, `crust:subdivisionEdgeLength = 2`, `learned` light
   selection, a free `/freecam` rendering and the shot camera dicing), whose session
-  took 215 s to open. Release build, 16 threads, one machine. Enough to restart a
+  took 215 s to open. Release build, 16 threads, one machine. Driver: a throwaway
+  `#[ignore]` test in `mcp/tests.rs` that opens a session on the stage and authors 10
+  `xformOp:translate` values on the render camera, alternating two, reading each edit's
+  `import_s`; the `full` column is the same test under `CRUST_SCENE_DELTAS=0`. Not
+  `scripts/bench_ab.sh`, which times renders of two binaries, not edits inside one
+  session; the two cornellbox runs were sequential, minutes apart, so their 2× ratio
+  stands only because it is far above the 15% run-to-run spread. Enough to restart a
   progressive render per drag event; a camera-only path that skips the stage is a
   follow-up if a Hydra tumble shows it is the bottleneck.
 - **On a production shot, only confined edits are cheap.** ALab frame 1004

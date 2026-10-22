@@ -195,6 +195,21 @@ impl LightLinks {
             .collect()
     }
 
+    /// The path of each prim that emitted a volume region, once each, in
+    /// traversal order: kept for [`crate::live::Provenance`].
+    pub(super) fn volume_paths(&self) -> Vec<String> {
+        let mut by_id: Vec<Option<&sdf::Path>> = vec![None; self.paths.len()];
+        for (p, &id) in &self.paths {
+            by_id[id as usize] = Some(p);
+        }
+        let mut seen = vec![false; self.paths.len()];
+        self.volumes
+            .iter()
+            .filter(|&&(_, id)| !std::mem::replace(&mut seen[id as usize], true))
+            .filter_map(|&(_, id)| Some(by_id[id as usize]?.to_string()))
+            .collect()
+    }
+
     fn intern(&mut self, path: &sdf::Path) -> u32 {
         if let Some(&id) = self.paths.get(path) {
             return id;

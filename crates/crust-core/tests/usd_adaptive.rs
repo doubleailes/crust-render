@@ -1028,14 +1028,15 @@ fn a_dicing_camera_alone_enables_adaptive_tessellation() {
     assert_eq!(tessellation(&diced), tessellation(&through_near));
 }
 
-/// A target that is not a camera, or no prim, warns once naming it, and the
-/// render camera dices.
+/// A target that is not a camera — another prim, no prim, or a property —
+/// warns once naming it, and the render camera dices.
 #[test]
 fn a_dicing_target_that_is_not_a_camera_warns() {
     let through_cam = dicing_scene("dicing_ref", "rel camera = </W/Cam>");
     for (name, target) in [
         ("dicing_xform", "/W/NotACamera"),
         ("dicing_nothing", "/W/Nope"),
+        ("dicing_property", "/W/Near.focalLength"),
     ] {
         let scene = dicing_scene(
             name,
