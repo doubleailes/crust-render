@@ -483,6 +483,64 @@ def RenderPass "Pass"
     }
 }
 
+/// render-passes spec, "An included collection outside the streamed chunk":
+/// with enough top-level subtrees to stream, each chunk's stage is masked to
+/// that subtree and the pass, so a collection the pass includes from another
+/// subtree is not composed while the hero's chunk is imported. One included
+/// from the hero's own subtree is.
+#[test]
+fn an_included_collection_outside_the_streamed_chunk_contributes_nothing() {
+    let roots = r#"
+def Scope "Sets" (
+    prepend apiSchemas = ["CollectionAPI:hero"]
+)
+{
+    prepend rel collection:hero:includes = </Chars/Hero>
+}
+
+def Xform "Chars" (
+    prepend apiSchemas = ["CollectionAPI:local"]
+)
+{
+    prepend rel collection:local:includes = </Chars/Sidekick>
+    def Sphere "Hero"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (-2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Sphere "Sidekick"
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+def Scope "A"
+{
+}
+
+def Scope "B"
+{
+}
+"#;
+    let path = stage(
+        "nested_not_composed",
+        &ball("Prop", 0.0),
+        &pass(
+            "char",
+            "            prepend rel collection:matte:includes = [</Sets.collection:hero>, </Chars.collection:local>]",
+        ),
+        roots,
+    );
+    let scene = load(&path, Some("/Render/Passes/char"));
+    assert_eq!(count(&scene, WarningCode::RenderPassNestedNotComposed), 1);
+    assert_eq!(camera_hit(&scene, -2.0), Some(false), "hero");
+    assert_eq!(camera_hit(&scene, 2.0), Some(true), "sidekick");
+    assert_eq!(camera_hit(&scene, 0.0), Some(false), "prop");
+}
+
 /// render-passes spec, "A target inside an instance", and a `PointInstancer`
 /// judged on the instancer.
 #[test]

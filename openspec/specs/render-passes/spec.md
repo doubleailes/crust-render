@@ -143,7 +143,10 @@ semantics: nearest include or exclude wins, `expansionRule`, included collection
 and `membershipExpression`. Membership SHALL be judged on the stage path of the
 prim that brings the geometry in. For native and PointInstancer instances that
 is the instance or instancer prim, and a target inside a prototype SHALL warn
-once per collection.
+once per collection. In a streamed import, an included collection authored in a
+different top-level subtree from the chunk being imported is not composed there:
+it SHALL contribute nothing to that chunk's membership and SHALL warn once per
+collection (`render_pass.nested_not_composed`).
 
 #### Scenario: A membership expression
 
@@ -155,6 +158,13 @@ once per collection.
 
 - **WHEN** `matte` includes `/World/Props` and excludes `/World/Props/Hero`
 - **THEN** `/World/Props/Hero/Body` is not a holdout and `/World/Props/Crate` is
+
+#### Scenario: An included collection outside the streamed chunk
+
+- **WHEN** a streamed import reads a pass whose `matte` includes
+  `</World/Sets.collection:hero>`, and the hero's geometry is under `/World/Chars`
+- **THEN** one `render_pass.nested_not_composed` warning names the collection, and
+  the hero is not a holdout
 
 #### Scenario: A target inside an instance
 
@@ -203,6 +213,9 @@ The following SHALL be documented as not supported:
 - There is no shadow catcher: a holdout records no shadow or reflection of the
   other objects into alpha.
 - One render renders one pass; several passes re-import the stage.
+- In a streamed import, a pass collection that includes another collection
+  authored in a different top-level subtree cannot read it while that subtree's
+  chunk is imported; it contributes nothing there.
 
 #### Scenario: Gaps are documented
 
