@@ -100,14 +100,16 @@ special-case "is the render camera also the dicing camera".
 In `classify`, the condition `provenance.camera() == Some(prim) && !is_xform`
 drops `!is_xform`, with one guard: an imported prim must not lie below the
 camera. `Provenance` already lists materials and lights by path and geometry
-by `prim_of_geometry`. The guard is a prefix walk over those
+by `prim_of_geometry`; it gains the prims that emitted a volume region, which
+are not geometry runs. The guard is a prefix walk over those
 (`Provenance::any_below(path)`, new), computed once per classification.
 
 An edit to an ancestor of the camera stays `full`, since the ancestor may
-carry geometry, and so does `!resetXformStack!` authored through
-`xformOpOrder`. Both reach the rebuild and are re-read correctly, but
+carry geometry. It would reach the rebuild and be re-read correctly, but
 classifying an ancestor needs the same prefix walk in reverse. That is left
-for when someone needs it.
+for when someone needs it. `!resetXformStack!` authored through the camera's
+own `xformOpOrder` is an edit on the camera, so it is `settings`: `build_camera`
+composes through `local_to_world`, which honours the reset.
 
 **Alternative considered:** treating any transform edit as "try in place, fall
 back on refusal". That is wrong because the settings rebuild re-reads only

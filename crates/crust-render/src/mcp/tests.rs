@@ -1330,6 +1330,26 @@ def Scope "Render" {{ def RenderSettings "settings" {{ uniform int2 resolution =
     move_camera(&mut state, &dir, "cornellbox", "/scene/camera1", "settings");
 }
 
+/// A `!resetXformStack!` on the render camera drops its parent's transform:
+/// in place, as the rebuild re-reads the camera through the import's own
+/// composition, and the render is a full import's.
+#[test]
+fn resetting_the_render_camera_s_transform_stack_is_a_settings_edit() {
+    let stage = mesh_stage("", "").replace(
+        "def Xform \"World\"\n{\n",
+        "def Xform \"World\"\n{\n    double3 xformOp:translate = (0.5, 0.4, 0)\n    \
+         uniform token[] xformOpOrder = [\"xformOp:translate\"]\n",
+    );
+    assert!(stage.contains("(0.5, 0.4, 0)"), "the parent is transformed");
+    let (mut state, dir) = session_on("camera_reset", &stage);
+    let reset = r#"over "World" { over "Cam" {
+        uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"] } }"#;
+    assert_eq!(author(&mut state, reset), "settings");
+    same_as_full_import(&mut state, &dir, "reset the camera's transform stack");
+    assert_eq!(undo(&mut state), "settings");
+    same_as_full_import(&mut state, &dir, "undo the reset");
+}
+
 /// A camera that carries an imported prim moves it: `full`.
 #[test]
 fn moving_a_camera_with_prims_below_it_is_full() {
@@ -1346,6 +1366,21 @@ fn moving_a_camera_with_prims_below_it_is_full() {
     // An exposure still is not a transform.
     let exposure = r#"over "World" { over "Cam" { float exposure = 1 } }"#;
     assert_eq!(author(&mut state, exposure), "settings");
+
+    // A volume region carried by the camera moves with it too.
+    let fog = r#"
+        def Cube "Fog"
+        {
+            double size = 1
+            token crust:volume:type = "homogeneous"
+            color3f crust:volume:sigmaS = (0.4, 0.4, 0.4)
+            color3f crust:volume:sigmaA = (0.05, 0.05, 0.05)
+            double3 xformOp:translate = (0, 0, -3)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }"#;
+    let (mut state, dir) = session_on("camera_carries_fog", &mesh_stage("", fog));
+    move_camera(&mut state, &dir, "carried fog", "/World/Cam", "full");
+    same_as_full_import(&mut state, &dir, "carried fog");
 }
 
 /// Tessellation diced for another camera stands when the render camera

@@ -1191,6 +1191,7 @@ pub(crate) fn load_scene(
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
     let geometry_runs = ctx.links.geometry_runs();
+    let volume_paths = ctx.links.volume_paths();
     let remap =
         std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
     // The provenance names each light by its place in the list as the links
@@ -1292,6 +1293,7 @@ pub(crate) fn load_scene(
         material_reads: ctx.caches.materials.reads(),
         lights: ctx.light_origins.into_iter().collect(),
         geometry: geometry_runs,
+        volumes: volume_paths,
         stage: StageFacts {
             options: options.clone(),
             render_settings,
@@ -1609,8 +1611,15 @@ fn read_camera_ahead(
         Some(choice) => read(choice.path())?.map(|r| (choice.path().clone(), r)),
         None => None,
     };
+    // Only a prim path names a camera: a property path would be read as its
+    // prim (the schema lookup takes the prim part) and cannot be masked to.
     let diced = match dicing {
-        Some(target) => match read(target)? {
+        Some(target) => match target
+            .is_prim()
+            .then(|| read(target))
+            .transpose()?
+            .flatten()
+        {
             Some((projection, _)) => Some(Dicer {
                 path: Some(target.clone()),
                 projection,
