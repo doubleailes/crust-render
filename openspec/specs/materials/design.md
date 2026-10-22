@@ -162,10 +162,15 @@
   group. openusd-schemas' `bound_material` answers with the
   `Material` prim (since upstream `c3af19e`), so `None` when the winning target is not
   one *on this stage* — every material outside the chunk on a streamed import's masked
-  stage. Then the binding is read as the nearest direct binding's target path instead
-  (`direct_binding_target`; no strength or collection bindings), so the prim keeps its
+  stage. Then the binding is read as the *winning* binding's target path instead
+  (`winning_binding_target`, the same walk — strength and collection bindings
+  included — answering the path rather than the prim), so the prim keeps its
   provenance and the material still falls back to default grey with
-  `material.fallback_default`, as before. `preview` bindings are never used. Prims under a `proxy` or `guide` purpose are
+  `material.fallback_default`, as before. The trap: the nearest *direct* binding is not
+  the winner — under a `strongerThanDescendants` ancestor bound off-chunk it names the
+  mesh's own material, which resolves and renders silently, and a collection binding
+  has no direct one at all (pinned by
+  `an_unresolvable_winning_binding_falls_back_at_its_own_path`). `preview` bindings are never used. Prims under a `proxy` or `guide` purpose are
   pruned with their subtree, like `active = false`, and so is a `visibility =
   "invisible"` subtree (read at the evaluated time, lights included — ALab parks four
   lights that way), except that the top-level walk still descends it **for cameras
