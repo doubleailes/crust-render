@@ -159,11 +159,15 @@ impl Kept {
 }
 
 /// The files a UV texture's decode may have read: each tile (or the one
-/// image), and the `.tx` sibling the streaming path looks for beside each.
+/// image), and the `.tx` the streaming path looks for beside each, which
+/// `sibling` names (Arnold's name for the binding).
 /// A `<UDIM>` / `<UVTILE>` set also stamps its directory, whose modification
 /// time moves when a tile is added or removed: the set is the tiles on disk,
 /// and one that appears later must be read.
-pub(crate) fn texture_stamp_files(path: &Path) -> Vec<PathBuf> {
+pub(crate) fn texture_stamp_files(
+    path: &Path,
+    sibling: impl Fn(&Path) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut files = crate::texture_files(path);
     if files.is_empty() {
         files.push(path.to_path_buf());
@@ -174,7 +178,7 @@ pub(crate) fn texture_stamp_files(path: &Path) -> Vec<PathBuf> {
     {
         files.push(dir.to_path_buf());
     }
-    let siblings: Vec<PathBuf> = files.iter().map(|f| f.with_extension("tx")).collect();
+    let siblings: Vec<PathBuf> = files.iter().filter_map(|f| sibling(f)).collect();
     files.extend(siblings);
     files.sort();
     files.dedup();

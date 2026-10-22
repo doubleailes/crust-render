@@ -2,13 +2,13 @@
 //! [`crate::UvTexture`].
 //!
 //! The two are meant to be interchangeable and are checked against each other:
-//! for any texture whose level 0 is the same in both (that is, anything at or
-//! below the `CRUST_TEX_MAX` cap the preload path applies) they must agree
-//! texel for texel. That is why the level selection here is the same arithmetic
-//! in the same order — `log2(width · texels)`, the magnification
-//! short-circuit, floor and lerp — and why both build their mip chains with the
-//! same `reduce_half`. The only thing that differs is where the texels come
-//! from.
+//! a `.tx` converted from a source, as Arnold's auto-tx converts it, streams
+//! what the source preloads within the tolerance of design decision 7 of
+//! `tx-arnold-convention`. Level selection is the same arithmetic in the same
+//! order — `log2(width · texels)`, the magnification short-circuit, floor and
+//! lerp, the one [`trilinear`] — but the levels themselves are the file's,
+//! reduced as `maketx` reduces them, so the two agree exactly only where the
+//! file holds the source's own samples.
 //!
 //! What genuinely differs is the *ceiling*: preloading caps level 0 to keep it
 //! resident, and streaming does not, so above the cap the streamed image is the
@@ -71,28 +71,23 @@ pub struct StreamingTexture {
     fallback: [f32; 4],
 }
 
-/// What UsdUVTexture's `sourceColorSpace = "auto"` means for one `.tx`.
-///
-/// A recorded `crust:mipspace` marker wins: it names the space the file was
-/// converted under, which is the decision `auto` would have made about the
-/// *source* — the `.tx` itself is always 8-bit RGB(A) or half, so its own
-/// format no longer says whether the source was a greyscale mask. Without a
-/// marker (an OIIO `maketx` file) the format decides, by the same rule the
-/// preload path applies: half is linear, 8-bit RGB or RGBA is sRGB.
+/// What `auto` means for one `.tx` bound directly: its own samples decide,
+/// by the rule the preload path applies — an integer file is sRGB, a float one
+/// is as stored.
 fn resolve_auto_space(f: &TiledFile, working: crust_core::color::Space) -> ResolvedColorSpace {
-    let named = f
-        .mip_space()
-        .and_then(crust_core::color::Space::named)
-        .map(|s| ResolvedColorSpace::new(s, working));
-    named.unwrap_or_else(|| {
-        ColorSpace::AUTO
-            .into_working(working)
-            .resolve_auto(!f.is_linear(), 3)
-    })
+    ColorSpace::AUTO
+        .into_working(working)
+        .resolve_auto(f.is_integer())
 }
 
 impl StreamingTexture {
-    /// Opens a `.tx` (or a `<UDIM>` / `<UVTILE>` set of them) against `cache`.
+    /// Opens a `.tx` (or a `<UDIM>` / `<UVTILE>` set of them) against `cache`,
+    /// reading its values in `space`: its curve decoded (through the `u8`
+    /// table, or once at page-in for a `half` tile) and its primaries changed
+    /// to the working space's after filtering. That is the binding's space
+    /// for a `.tx` bound directly, whatever the file holds, and the space the
+    /// file's name says it was converted to for one found beside its source
+    /// ([`super::TxName::read_as`]).
     ///
     /// Returns `None` when nothing could be opened, so the caller can fall
     /// back to the preload path rather than render an untextured surface.
@@ -119,22 +114,10 @@ impl StreamingTexture {
         };
         let mut charts = Vec::new();
         for (number, p) in files {
-            let opened = TiledFile::open(&p).map(|f| {
-                let want = crate::tiled::space_name(settle(&f));
-                (f, want)
-            });
-            match opened {
-                Ok((f, want_space)) if !f.mip_space_matches(want_space) => {
-                    crust_core::warning!(
-                        TextureStreamFallback,
-                        "{}: mip chain was reduced in {:?}, not {want_space} — \
-                         falling back to the preloaded texture",
-                        p.display(),
-                        f.mip_space()
-                    );
-                    return None;
-                }
-                Ok((f, _)) => {
+            match TiledFile::open(&p) {
+                Ok(f) => {
+                    let read_as = settle(&f);
+                    let f = f.decoding(read_as);
                     if let Some(id) = cache.intern(f.clone()) {
                         charts.push(Chart {
                             number,
@@ -461,21 +444,28 @@ mod tests {
     use super::*;
     use crate::UvTexture;
     use crate::tiled::{TILE_EDGE, write_tx};
+    use crust_core::Texture2D;
 
-    /// Writes a `.tx` and the equivalent PNG, so the two paths can be pointed
-    /// at the same image.
-    fn pair(
-        name: &str,
-        w: usize,
-        h: usize,
-        space: crust_core::ResolvedColorSpace,
-    ) -> (std::path::PathBuf, std::path::PathBuf) {
+    /// The space conversions go to, as `--auto-tx` writes by default.
+    fn acescg() -> crust_core::color::Space {
+        crust_core::color::Space::named("ACEScg").expect("ACEScg")
+    }
+
+    fn cache(mib: usize) -> Arc<TileCache> {
+        Arc::new(TileCache::new(
+            (mib * 1024 * 1024) as u64,
+            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
+        ))
+    }
+
+    /// A noisy checker as a PNG in a fresh directory named for the test.
+    /// High-frequency on purpose: a smooth ramp would agree under almost any
+    /// filtering bug, while a checker with noise disagrees on a half-texel
+    /// shift or a wrong mip level.
+    fn checker_png(name: &str, w: usize, h: usize) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("crust_stream_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
-        // High-frequency on purpose: a smooth ramp would agree under almost
-        // any filtering bug, while a checker with noise disagrees on a
-        // half-texel shift or a wrong mip level.
         let src: Vec<u8> = (0..w * h)
             .flat_map(|i| {
                 let (x, y) = (i % w, i / w);
@@ -484,79 +474,87 @@ mod tests {
             })
             .collect();
         let png = dir.join("src.png");
-        image::RgbImage::from_raw(w as u32, h as u32, src.clone())
+        image::RgbImage::from_raw(w as u32, h as u32, src)
             .expect("image")
             .save(&png)
             .expect("write png");
-        let tx = dir.join("src.tx");
-        write_tx(&tx, &src, w, h, space).expect("write tx");
-        (png, tx)
+        png
     }
 
-    /// **The invariant the whole change rests on.**
-    ///
-    /// For a texture at or below the preload path's resolution cap, streaming
-    /// and preloading see the same level 0, build their mip chains with the
-    /// same `reduce_half`, and select levels with the same arithmetic — so
-    /// every lookup must return exactly the same bits. If this drifts, the
-    /// golden-image check across the whole sample set drifts with it, and the
-    /// two paths stop being comparable at all.
-    #[test]
-    fn streaming_and_preloading_agree_bit_for_bit() {
-        let (png, tx) = pair("agree", 256, 192, crust_core::ResolvedColorSpace::SRGB);
-        let pre = UvTexture::open_with(&png, crust_core::ColorSpace::SRGB, true).expect("preload");
-        let cache = Arc::new(TileCache::new(
-            64 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-        let stream =
-            StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache).expect("stream");
+    /// `src` converted as `--auto-tx` converts it for `space`, and opened
+    /// streamed as the lookup opens it: in the space its name says.
+    fn converted(
+        src: &std::path::Path,
+        space: ColorSpace,
+        cache: Arc<TileCache>,
+    ) -> StreamingTexture {
+        let made = crate::tiled::make_tx_atomic(src, space, acescg()).expect("convert");
+        let name = crate::tiled::tx_name(src, space, acescg()).expect("named");
+        assert_eq!(made.dst, name.path);
+        StreamingTexture::open(&made.dst, name.read_as, cache).expect("stream")
+    }
 
-        assert_eq!(stream.level_count(), pre.level_count());
-        assert_eq!(stream.size(), pre.tile_size());
-
-        // Across the footprint range that selects every level, including the
-        // magnification short-circuit (width 0) and past the coarsest.
-        for &width in &[0.0f32, 0.001, 0.004, 0.02, 0.09, 0.3, 0.7, 2.0, 9.0] {
-            for i in 0..23 {
-                for j in 0..17 {
-                    let (u, v) = (i as f32 / 22.0, j as f32 / 16.0);
-                    assert_eq!(
-                        stream.eval(u, v, width),
-                        pre.eval(u, v, width),
-                        "at ({u}, {v}) width {width}"
+    /// Level 0 at every texel centre, all four components, within design
+    /// decision 7's bounds: per channel a mean absolute difference of at most
+    /// 0.005 and a 99th percentile of at most 0.02.
+    fn assert_level0_agrees(a: &dyn Texture2D, b: &dyn Texture2D, w: usize, h: usize) {
+        for k in 0..4 {
+            let mut diffs: Vec<f32> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let (u, v) = (
+                        (x as f32 + 0.5) / w as f32,
+                        1.0 - (y as f32 + 0.5) / h as f32,
                     );
-                }
-            }
+                    (a.eval(u, v, 0.0)[k] - b.eval(u, v, 0.0)[k]).abs()
+                })
+                .collect();
+            diffs.sort_by(f32::total_cmp);
+            let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+            let p99 = diffs[diffs.len() * 99 / 100];
+            assert!(
+                mean <= 0.005 && p99 <= 0.02,
+                "channel {k}: mean {mean}, p99 {p99}"
+            );
         }
-        let _ = std::fs::remove_dir_all(png.parent().unwrap());
     }
 
-    /// The agreement must hold when the image is *not* a multiple of the tile
-    /// edge, which is where the clipped-edge-tile stride would show up.
+    /// **The A/B the streaming path rests on.** A source converted as
+    /// `--auto-tx` converts it streams what the same source preloads, within
+    /// tolerance: an sRGB albedo through a `half` EXR of linear ACEScg, a raw
+    /// one through an 8-bit TIFF of its own bytes.
     #[test]
-    fn agreement_holds_across_clipped_edge_tiles() {
-        let (png, tx) = pair("clipped", 150, 100, crust_core::ResolvedColorSpace::RAW);
-        let pre = UvTexture::open_with(&png, crust_core::ColorSpace::RAW, true).expect("preload");
-        let cache = Arc::new(TileCache::new(
-            16 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-        let stream =
-            StreamingTexture::open(&tx, crust_core::ColorSpace::RAW, cache).expect("stream");
+    fn a_converted_tx_streams_what_its_source_preloads() {
+        for (name, space, (w, h)) in [
+            ("agree_srgb", crust_core::ColorSpace::SRGB, (256, 192)),
+            ("agree_raw", crust_core::ColorSpace::RAW, (150, 100)),
+        ] {
+            let png = checker_png(name, w, h);
+            let pre = UvTexture::open_with(&png, space, true).expect("preload");
+            let stream = converted(&png, space, cache(64));
+            assert_eq!(stream.size(), pre.tile_size());
+            assert_level0_agrees(&stream, &pre, w, h);
+            let _ = std::fs::remove_dir_all(png.parent().unwrap());
+        }
+    }
 
-        // Sampled hard against the right and bottom edges, where the last tile
-        // column is 22 texels wide against a nominal 64.
-        for &width in &[0.0f32, 0.01, 0.2] {
-            for k in 0..40 {
-                let t = k as f32 / 39.0;
-                for &(u, v) in &[(t, 0.999), (0.999, t), (t, 0.001), (0.001, t)] {
-                    assert_eq!(
-                        stream.eval(u, v, width),
-                        pre.eval(u, v, width),
-                        "edge ({u}, {v}) width {width}"
-                    );
-                }
+    /// Where the file holds the source's own bytes — a raw 8-bit source —
+    /// level 0 agrees exactly, hard against the right and bottom edges too,
+    /// where the last tile column is 22 texels wide against a nominal 64 and
+    /// a wrong stride would shear it.
+    #[test]
+    fn a_raw_tx_reads_its_source_s_texels_across_clipped_edge_tiles() {
+        let png = checker_png("clipped", 150, 100);
+        let pre = UvTexture::open_with(&png, crust_core::ColorSpace::RAW, true).expect("preload");
+        let stream = converted(&png, crust_core::ColorSpace::RAW, cache(16));
+        for k in 0..40 {
+            let t = k as f32 / 39.0;
+            for &(u, v) in &[(t, 0.999), (0.999, t), (t, 0.001), (0.001, t)] {
+                assert_eq!(
+                    stream.eval(u, v, 0.0),
+                    pre.eval(u, v, 0.0),
+                    "edge ({u}, {v})"
+                );
             }
         }
         let _ = std::fs::remove_dir_all(png.parent().unwrap());
@@ -568,19 +566,21 @@ mod tests {
     fn a_thrashing_budget_changes_timing_not_pixels() {
         // Big enough that level 0 alone (3.1 MB of tiles) is several times
         // the cache's 1 MiB floor, so the sweep really runs.
-        let (png, tx) = pair("thrash", 1024, 1024, crust_core::ResolvedColorSpace::SRGB);
-        let pre = UvTexture::open_with(&png, crust_core::ColorSpace::SRGB, true).expect("preload");
-        let cache = Arc::new(TileCache::new(1, crust_core::DEFAULT_TEX_MAX_OPEN_FILES));
-        let stream = StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache.clone())
-            .expect("stream");
-
+        let png = checker_png("thrash", 1024, 1024);
+        let roomy = converted(&png, crust_core::ColorSpace::RAW, cache(64));
+        let tiny = Arc::new(TileCache::new(1, crust_core::DEFAULT_TEX_MAX_OPEN_FILES));
+        let tx = crate::tiled::tx_name(&png, crust_core::ColorSpace::RAW, acescg())
+            .expect("named")
+            .path;
+        let stream =
+            StreamingTexture::open(&tx, crust_core::ColorSpace::RAW, tiny.clone()).expect("stream");
         for i in 0..31 {
             for j in 0..31 {
                 let (u, v) = (i as f32 / 30.0, j as f32 / 30.0);
-                assert_eq!(stream.eval(u, v, 0.0), pre.eval(u, v, 0.0), "({u}, {v})");
+                assert_eq!(stream.eval(u, v, 0.0), roomy.eval(u, v, 0.0), "({u}, {v})");
             }
         }
-        let c = cache.counters();
+        let c = tiny.counters();
         assert!(c.evictions > 0, "the budget should have forced evictions");
         assert!(
             c.redundant > 0,
@@ -644,8 +644,7 @@ mod tests {
             .into_raw();
 
         let tx = dir.join("src.tx");
-        crate::tiled::write_tx_exr(&tx, &decoded, w, h, crust_core::ResolvedColorSpace::RAW)
-            .expect("write tx");
+        crate::tiled::write_tx_exr(&tx, &decoded, w, h).expect("write tx");
 
         let pre = UvTexture::open_with(&hdr, crust_core::ColorSpace::RAW, true).expect("preload");
         let cache = Arc::new(TileCache::new(
@@ -703,154 +702,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The colour-space marker discriminates on the EXR backing too, where it
-    /// means something slightly different — "the space this file's linear
-    /// samples were decoded from" rather than "the space its levels were
-    /// averaged in". Binding it under another space would put a transfer curve
-    /// on data that has already had one removed.
-    #[test]
-    fn an_exr_backing_also_refuses_the_wrong_colour_space() {
-        let dir = std::env::temp_dir().join("crust_stream_exrspace");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let tx = dir.join("s.tx");
-        let (w, h) = (32usize, 32usize);
-        let src: Vec<f32> = (0..w * h * 3).map(|i| (i % 17) as f32 / 16.0).collect();
-        crate::tiled::write_tx_exr(&tx, &src, w, h, crust_core::ResolvedColorSpace::SRGB)
-            .expect("write");
-
-        let cache = Arc::new(TileCache::new(
-            4 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-        assert_eq!(
-            TiledFile::open(&tx).expect("open").mip_space(),
-            Some("srgb_texture")
-        );
-        assert!(StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache.clone()).is_some());
-        assert!(StreamingTexture::open(&tx, crust_core::ColorSpace::RAW, cache).is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A marked tiled EXR binds the same preloaded as streamed: under `auto`
-    /// both read its `crust:mipspace` marker, take its values as already
-    /// linear on that space's primaries, and apply the change into the working
-    /// space after filtering. Off Rec.709 a preload that ignored the marker
-    /// would leave the values on the wrong primaries.
-    #[test]
-    fn a_marked_exr_binds_the_same_preloaded_and_streamed() {
-        let dir = std::env::temp_dir().join("crust_stream_exr_marked");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let exr = dir.join("marked.exr");
-        let (w, h) = (32usize, 32usize);
-        let src: Vec<f32> = (0..w * h)
-            .flat_map(|i| [(i % 7) as f32 / 6.0, (i % 5) as f32 / 4.0, 0.25])
-            .collect();
-        crate::tiled::write_tx_exr(&exr, &src, w, h, crust_core::ResolvedColorSpace::SRGB)
-            .expect("write");
-
-        let acescg = crust_core::color::working_space("acescg").expect("acescg");
-        let auto = crust_core::ColorSpace::AUTO.into_working(acescg);
-        let pre = UvTexture::open_with(&exr, auto, false).expect("preload");
-        let cache = Arc::new(TileCache::new(
-            4 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-        let stream = StreamingTexture::open(&exr, auto, cache).expect("stream");
-        let gamut =
-            crust_core::ResolvedColorSpace::new(crust_core::color::Space::SRGB_TEXTURE, acescg)
-                .gamut()
-                .expect("Rec.709 to ACEScg is a change of primaries");
-
-        for &(u, v) in &[(0.1, 0.2), (0.5, 0.5), (0.73, 0.31), (0.9, 0.95)] {
-            let p = pre.eval(u, v, 0.0);
-            let s = stream.eval(u, v, 0.0);
-            for k in 0..3 {
-                assert!(
-                    (p[k] - s[k]).abs() <= 1e-5,
-                    "({u}, {v}) channel {k}: preloaded {p:?} against streamed {s:?}"
-                );
-            }
-            // And the matrix really was applied: the stored value is on
-            // Rec.709 primaries.
-            let raw = UvTexture::open_with(&exr, crust_core::ColorSpace::RAW, false)
-                .expect("raw")
-                .eval(u, v, 0.0);
-            let want = crust_core::color::apply_gamut(
-                Some(&gamut),
-                crust_core::Vec3A::new(raw[0], raw[1], raw[2]),
-            );
-            assert!(
-                (crust_core::Vec3A::new(p[0], p[1], p[2]) - want)
-                    .abs()
-                    .max_element()
-                    <= 1e-5,
-                "({u}, {v}): {p:?} against {want}"
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A `.tx` whose mip chain was reduced in one colour space must not be
-    /// read as another.
-    ///
-    /// This is the bug the agreement test above found. A `.tx` stores
-    /// display-encoded texels but averages its levels in linear light, so the
-    /// space is baked into every level above 0. Read it as something else and
-    /// level 0 stays perfectly correct while every coarser level is wrong —
-    /// visible only under minification, and indistinguishable by eye from a
-    /// filtering bug. Declining is better than being subtly wrong: the caller
-    /// falls back to preloading, which is slower and right.
-    #[test]
-    fn a_mismatched_mip_space_declines_instead_of_reading_the_wrong_levels() {
-        let (png, tx) = pair("space", 128, 128, crust_core::ResolvedColorSpace::SRGB);
-        let cache = Arc::new(TileCache::new(
-            4 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-
-        // Same space: opens.
-        assert!(StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache.clone()).is_some());
-        // Different space: declines rather than serving a chain reduced for
-        // the other one.
-        assert!(StreamingTexture::open(&tx, crust_core::ColorSpace::RAW, cache.clone()).is_none());
-        assert!(StreamingTexture::open(&tx, crust_core::ColorSpace::GAMMA22, cache).is_none());
-
-        // And the guard really is load-bearing: had it not fired, the levels
-        // would have differed from what a raw-decoded preload builds.
-        let pre_raw = UvTexture::open_with(&png, crust_core::ColorSpace::RAW, true).expect("pre");
-        let pre_srgb = UvTexture::open_with(&png, crust_core::ColorSpace::SRGB, true).expect("pre");
-        assert_ne!(
-            pre_raw.eval(0.5, 0.5, 0.2),
-            pre_srgb.eval(0.5, 0.5, 0.2),
-            "the two spaces must actually produce different mip levels, or \
-             this test proves nothing"
-        );
-
-        let _ = std::fs::remove_dir_all(png.parent().unwrap());
-    }
-
-    /// The marker crust writes is readable, and discriminates.
-    ///
-    /// A file with no marker at all — anything `maketx` wrote — is accepted
-    /// instead: its chain came from OIIO's filter rather than crust's, so
-    /// there is nothing to match against, and refusing it would rule out every
-    /// pre-existing production asset, which is the interop this format was
-    /// chosen for. That arm is `TiledFile::mip_space_matches`'s `None` case.
-    #[test]
-    fn the_mip_space_marker_round_trips_and_discriminates() {
-        let (png, tx) = pair("unmarked", 96, 96, crust_core::ResolvedColorSpace::SRGB);
-        let tf = TiledFile::open(&tx).expect("open");
-        assert_eq!(tf.mip_space(), Some("srgb_texture"));
-        assert!(tf.mip_space_matches("srgb_texture"));
-        assert!(!tf.mip_space_matches("raw"));
-
-        let _ = std::fs::remove_dir_all(png.parent().unwrap());
-    }
-
     /// An RGBA PNG whose colour is a noisy checker and whose alpha is a
     /// diagonal cut with a soft band, so both the colour and every level of
     /// the alpha disagree under a filtering bug.
@@ -872,54 +723,22 @@ mod tests {
         png
     }
 
-    /// **The invariant, with alpha.** A `.tx` converted from an RGBA source
-    /// — what `--auto-tx` and `maketx` write — streams exactly what the
-    /// source preloads, alpha included, at every level: the same decode
-    /// (`ALPHA_U8`), the same reduction, the same blends. Odd sizes, so the
-    /// clipped edge tiles and the area-weighted odd levels are covered.
+    /// **The A/B, with alpha.** An RGBA source whose alpha cuts, converted
+    /// as `--auto-tx` converts it — premultiplied, in a `half` EXR — streams
+    /// what it preloads within tolerance, alpha included. Odd sizes, so the
+    /// clipped edge tiles are covered.
     #[test]
-    fn streamed_alpha_agrees_bit_for_bit_with_preloaded() {
+    fn a_converted_cutout_streams_what_its_source_preloads() {
         let dir = std::env::temp_dir().join("crust_stream_alpha");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         for (w, h) in [(256usize, 192usize), (150, 100)] {
             let png = rgba_png(&dir, &format!("leaf_{w}.png"), w, h);
-            let tx = dir.join(format!("leaf_{w}.tx"));
-            let made = crate::tiled::make_tx(
-                &png,
-                &tx,
-                crust_core::ColorSpace::AUTO,
-                crate::tiled::TxFormat::Tiff,
-            )
-            .expect("convert");
-            assert!(made.alpha, "an RGBA source keeps its alpha");
             let space = crust_core::ColorSpace::SRGB;
             let pre = UvTexture::open_with(&png, space, true).expect("preload");
-            let cache = Arc::new(TileCache::new(
-                64 * 1024 * 1024,
-                crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-            ));
-            let stream = StreamingTexture::open(&tx, space, cache).expect("stream");
+            let stream = converted(&png, space, cache(64));
             assert!(stream.has_alpha() && pre.has_alpha());
-            assert_eq!(stream.level_count(), pre.level_count());
-            for &width in &[0.0f32, 0.001, 0.004, 0.02, 0.09, 0.3, 0.7, 2.0, 9.0] {
-                for i in 0..23 {
-                    for j in 0..17 {
-                        let (u, v) = (i as f32 / 22.0, j as f32 / 16.0);
-                        assert_eq!(
-                            stream.eval(u, v, width),
-                            pre.eval(u, v, width),
-                            "{w}x{h} at ({u}, {v}) width {width}"
-                        );
-                    }
-                }
-                for k in 0..40 {
-                    let t = k as f32 / 39.0;
-                    for &(u, v) in &[(t, 0.999), (0.999, t)] {
-                        assert_eq!(stream.eval(u, v, width), pre.eval(u, v, width));
-                    }
-                }
-            }
+            assert_level0_agrees(&stream, &pre, w, h);
             // Not vacuous: the alpha really varies across the image.
             assert_eq!(pre.eval(0.01, 0.99, 0.0)[3], 0.0);
             assert!(pre.eval(0.99, 0.01, 0.0)[3] > 0.95);
@@ -927,49 +746,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The EXR backing carries the alpha as an `A` channel: a `half` of
-    /// `a / 255`, so it agrees with the preloaded byte to `half` precision,
-    /// and is never put through the colour space's curve.
-    #[test]
-    fn an_exr_backing_streams_the_alpha_too() {
-        let dir = std::env::temp_dir().join("crust_stream_alpha_exr");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let png = rgba_png(&dir, "leaf.png", 64, 64);
-        let tx = dir.join("leaf.tx");
-        let made = crate::tiled::make_tx(
-            &png,
-            &tx,
-            crust_core::ColorSpace::SRGB,
-            crate::tiled::TxFormat::Exr,
-        )
-        .expect("convert");
-        assert_eq!(made.kind, "half, exr");
-        assert!(made.alpha);
-        let space = crust_core::ColorSpace::SRGB;
-        let pre = UvTexture::open_with(&png, space, true).expect("preload");
-        let cache = Arc::new(TileCache::new(
-            8 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-        let stream = StreamingTexture::open(&tx, space, cache).expect("stream");
-        assert!(stream.is_linear() && stream.has_alpha());
-        for (x, y) in [(1usize, 62usize), (40, 40), (63, 0), (20, 30)] {
-            let (u, v) = ((x as f32 + 0.5) / 64.0, 1.0 - (y as f32 + 0.5) / 64.0);
-            let (s, p) = (stream.eval(u, v, 0.0), pre.eval(u, v, 0.0));
-            for k in 0..4 {
-                assert!(
-                    (s[k] - p[k]).abs() <= 1e-3,
-                    "texel ({x}, {y}) channel {k}: streamed {s:?} against preloaded {p:?}"
-                );
-            }
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// A UDIM set converted tile by tile, where one tile's alpha cuts and
     /// another's is opaque: the opaque one is written RGB, so the charts
-    /// differ, and the streamed set still agrees with the preloaded one.
+    /// differ, and the streamed set reads what the preloaded one does.
     #[test]
     fn a_udim_set_streams_alpha_per_chart() {
         let dir = std::env::temp_dir().join("crust_stream_alpha_udim");
@@ -981,33 +760,28 @@ mod tests {
             .expect("png");
         let mut kept = Vec::new();
         for src in [dir.join("t.1001.png"), cut] {
-            let made = crate::tiled::make_tx_atomic(
-                &src,
-                crust_core::ColorSpace::RAW,
-                crate::tiled::TxFormat::FromSampleType,
-            )
-            .expect("convert");
+            let made = crate::tiled::make_tx_atomic(&src, crust_core::ColorSpace::RAW, acescg())
+                .expect("convert");
             kept.push(made.alpha);
         }
         assert_eq!(kept, [false, true], "an opaque alpha is not written");
         let set = dir.join("t.<UDIM>.png");
         let pre = UvTexture::open_with(&set, crust_core::ColorSpace::RAW, true).expect("preload");
-        let cache = Arc::new(TileCache::new(
-            8 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-        let stream =
-            StreamingTexture::open(&dir.join("t.<UDIM>.tx"), crust_core::ColorSpace::RAW, cache)
-                .expect("stream");
+        let stream = StreamingTexture::open(
+            &dir.join("t.<UDIM>_raw.png.tx"),
+            crust_core::ColorSpace::RAW,
+            cache(8),
+        )
+        .expect("stream");
         assert_eq!(stream.chart_count(), 2);
-        for &width in &[0.0f32, 0.05, 0.5] {
-            for i in 0..20 {
-                let u = i as f32 / 10.0 + 0.01;
-                for &v in &[0.1f32, 0.5, 0.9] {
-                    assert_eq!(
-                        stream.eval(u, v, width),
-                        pre.eval(u, v, width),
-                        "({u}, {v})"
+        for i in 0..20 {
+            let u = i as f32 / 10.0 + 0.01;
+            for &v in &[0.1f32, 0.5, 0.9] {
+                let (s, p) = (stream.eval(u, v, 0.0), pre.eval(u, v, 0.0));
+                for k in 0..4 {
+                    assert!(
+                        (s[k] - p[k]).abs() <= 2.0 / 255.0,
+                        "({u}, {v}): {s:?} against {p:?}"
                     );
                 }
             }
@@ -1042,10 +816,10 @@ mod tests {
             (dir.join("rgba.tx"), dir.join("rgb.tx"), false),
             (dir.join("rgba_exr.tx"), dir.join("rgb_exr.tx"), true),
         ];
-        crate::tiled::write_tx_rgba(&pairs[0].0, &rgba, w, h, space).expect("rgba");
-        write_tx(&pairs[0].1, &rgb, w, h, space).expect("rgb");
-        crate::tiled::write_tx_exr_rgba(&pairs[1].0, &floats(&rgba), w, h, space).expect("rgba");
-        crate::tiled::write_tx_exr(&pairs[1].1, &floats(&rgb), w, h, space).expect("rgb");
+        crate::tiled::write_tx_rgba(&pairs[0].0, &rgba, w, h).expect("rgba");
+        write_tx(&pairs[0].1, &rgb, w, h).expect("rgb");
+        crate::tiled::write_tx_exr_rgba(&pairs[1].0, &floats(&rgba), w, h).expect("rgba");
+        crate::tiled::write_tx_exr(&pairs[1].1, &floats(&rgb), w, h).expect("rgb");
 
         for (with, without, exr) in &pairs {
             let file = TiledFile::open(with).expect("open");
@@ -1086,10 +860,10 @@ mod tests {
     }
 
     /// A cutting `.tx` whose opaque tiles are cached as RGB still streams
-    /// exactly what its source preloads: the RGB tiles read 1.0, as
-    /// `ALPHA_U8[255]` does.
+    /// what its source preloads: the RGB tiles read 1.0, as `ALPHA_U8[255]`
+    /// does.
     #[test]
-    fn a_cutout_with_opaque_tiles_agrees_bit_for_bit_with_preloaded() {
+    fn a_cutout_with_opaque_tiles_streams_what_its_source_preloads() {
         let dir = std::env::temp_dir().join("crust_stream_mixed_tiles");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -1108,16 +882,10 @@ mod tests {
         })
         .save(&png)
         .expect("png");
-        let tx = dir.join("card.tx");
-        let made = crate::tiled::make_tx(
-            &png,
-            &tx,
-            crust_core::ColorSpace::SRGB,
-            crate::tiled::TxFormat::Tiff,
-        )
-        .expect("convert");
+        let space = crust_core::ColorSpace::SRGB;
+        let made = crate::tiled::make_tx_atomic(&png, space, acescg()).expect("convert");
         assert!(made.alpha);
-        let file = TiledFile::open(&tx).expect("open");
+        let file = TiledFile::open(&made.dst).expect("open");
         let mut r = file.reader().expect("reader");
         assert!(
             file.read_tile(&mut r, 0, 0).expect("tile").alpha,
@@ -1128,25 +896,9 @@ mod tests {
             "tile 1 is opaque"
         );
 
-        let pre = UvTexture::open_with(&png, crust_core::ColorSpace::SRGB, true).expect("preload");
-        let cache = Arc::new(TileCache::new(
-            16 * 1024 * 1024,
-            crust_core::DEFAULT_TEX_MAX_OPEN_FILES,
-        ));
-        let stream =
-            StreamingTexture::open(&tx, crust_core::ColorSpace::SRGB, cache).expect("stream");
-        for &width in &[0.0f32, 0.001, 0.004, 0.02, 0.09, 0.3, 0.7, 2.0, 9.0] {
-            for i in 0..23 {
-                for j in 0..17 {
-                    let (u, v) = (i as f32 / 22.0, j as f32 / 16.0);
-                    assert_eq!(
-                        stream.eval(u, v, width),
-                        pre.eval(u, v, width),
-                        "at ({u}, {v}) width {width}"
-                    );
-                }
-            }
-        }
+        let pre = UvTexture::open_with(&png, space, true).expect("preload");
+        let stream = converted(&png, space, cache(16));
+        assert_level0_agrees(&stream, &pre, w as usize, h as usize);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -347,13 +347,44 @@ struct SceneArgs {
     /// `crust:adaptiveNeighbourTolerance`.
     #[arg(long, value_name = "T", allow_negative_numbers = true, value_parser = parse_tolerance)]
     neighbour_tolerance: Option<f32>,
-    /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
-    /// (same path, extension `.tx`) on first use, when the `.tx` is missing,
-    /// older than its source, or written by an older crust without the alpha
-    /// its source has. A `.tx` beside a texture is always streamed when
+    /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original on
+    /// first use, as Arnold's auto-tx does, when the `.tx` is missing or its
+    /// modification time is not its source's. The file is named and written
+    /// as Arnold 7.5 names and writes it (`<stem>_raw.<ext>.tx`, or
+    /// `<stem>_<source space>_<--tx-color-space>.<ext>.tx`), so the two
+    /// renderers share it. A `.tx` beside a texture is always streamed when
     /// present; this only creates the missing ones.
     #[arg(long, default_value_t = false)]
     auto_tx: bool,
+    /// The colour space a `.tx` converts to, which its name records, by any
+    /// name or alias of the OCIO config. Defaults to `ACEScg`, Arnold's
+    /// rendering space, so crust finds and writes the files Arnold uses;
+    /// independent of `--working-space`.
+    #[arg(long, value_name = "SPACE", default_value = crust_assets::DEFAULT_TX_COLOR_SPACE)]
+    tx_color_space: String,
+}
+
+/// The asset loader a command's scene flags ask for: `--auto-tx`, converting
+/// to the `.tx` target `--tx-color-space` names, resolved in the OCIO config
+/// now installed (so after `--ocio-config` / `$OCIO`). A space the config
+/// does not define is a usage error, and nothing is loaded.
+fn scene_assets(scene: &SceneArgs) -> FileAssets {
+    let Some(target) = crust_core::color::Space::named(&scene.tx_color_space) else {
+        use clap::CommandFactory;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::InvalidValue,
+                format!(
+                    "--tx-color-space {}: the OCIO config ({}) defines no such colour space",
+                    scene.tx_color_space,
+                    crust_core::color::config_source()
+                ),
+            )
+            .exit();
+    };
+    FileAssets::new()
+        .with_auto_tx(scene.auto_tx)
+        .with_tx_color_space(target)
 }
 
 #[derive(Args)]
@@ -1202,7 +1233,7 @@ fn check(args: &CheckArgs) -> ExitCode {
         error!("$OCIO: {e}");
         return ExitCode::FAILURE;
     }
-    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let assets = scene_assets(&args.scene);
     let checked = match import_checked(args, true, &assets) {
         Ok(checked) => checked,
         Err(e) => {
@@ -1411,7 +1442,7 @@ fn diagnostic(args: &DiagnosticArgs) -> ExitCode {
         error!("$OCIO: {e}");
         return ExitCode::FAILURE;
     }
-    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let assets = scene_assets(&args.scene);
     let import_start = Instant::now();
     let mut scene = match load_scene(&args.scene, None, &assets, true) {
         Ok(scene) => scene,
@@ -1542,7 +1573,7 @@ fn light_paths(args: &LightPathsArgs) -> ExitCode {
         error!("$OCIO: {e}");
         return ExitCode::FAILURE;
     }
-    let assets = FileAssets::new().with_auto_tx(args.scene.auto_tx);
+    let assets = scene_assets(&args.scene);
     let scene = match load_scene(&args.scene, None, &assets, true) {
         Ok(scene) => scene,
         Err(e) => {
@@ -1905,7 +1936,7 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
             return Err(ExitCode::FAILURE);
         }
     }
-    let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
+    let assets = scene_assets(cli);
     let load_start = Instant::now();
     let scene = match load_scene(cli, cli.working_space.as_ref(), &assets, true) {
         Ok(scene) => scene,

@@ -27,17 +27,19 @@ pub struct TiffFile {
     path: PathBuf,
     levels: Vec<LevelInfo>,
     tile_edge: usize,
-    /// The colour space this file's mip chain was reduced in, as the writer
-    /// recorded it, or `None` for a file that did not say (anything `maketx`
-    /// produced).
-    mip_space: Option<String>,
-    /// Whether the samples are IEEE floats, and therefore already linear.
-    /// Read once from `SampleFormat` rather than inferred per tile, because the
-    /// load report wants it before any tile has been touched.
+    /// Whether the samples are IEEE floats. Read once from `SampleFormat`
+    /// rather than inferred per tile, because the load report wants it before
+    /// any tile has been touched.
     float: bool,
+    /// Whether the samples are 16 bits wide or more: paged in as `half`
+    /// rather than narrowed to a byte.
+    wide: bool,
     /// Which sample of a texel holds alpha — 1 after a grey sample, 3 after
     /// RGB — or `None` for a file without one. See [`alpha_sample`].
     alpha_at: Option<usize>,
+    /// Whether that alpha is associated (`ExtraSamples = 1`): the colour
+    /// stored premultiplied, as OIIO and Arnold write it.
+    associated: bool,
 }
 
 impl TiffFile {
@@ -68,15 +70,27 @@ impl TiffFile {
             ));
         }
 
-        // Read before seeking anywhere: this is level 0's IFD, which is where
-        // the writer puts the provenance.
-        let mip_space = dec
-            .get_tag_ascii_string(Tag::ImageDescription)
-            .ok()
-            .and_then(|d| {
-                d.split_whitespace()
-                    .find_map(|f| f.strip_prefix("crust:mipspace=").map(str::to_owned))
-            });
+        // An unspecified extra sample under the horizontal predictor decodes
+        // with the wrong stride in this version of `tiff` (the speckle the
+        // OpenPBR playground's walls rendered as): every other texel's last
+        // colour sample is wrong, and nothing errors. The preload path patches
+        // it (`image_file::decode_with_alpha`); a tile reader cannot, so the
+        // file declines here and preloads. Neither OIIO nor crust writes one.
+        let u16s = |dec: &mut TiffReader, tag: Tag| {
+            dec.find_tag(tag)
+                .ok()
+                .flatten()
+                .and_then(|v| v.into_u16_vec().ok())
+                .unwrap_or_default()
+        };
+        if u16s(&mut dec, Tag::Predictor).first() == Some(&2)
+            && u16s(&mut dec, Tag::ExtraSamples).contains(&0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "an unspecified extra sample under the horizontal predictor decodes wrong                  in `tiff` 0.11.3 — preloaded instead",
+            ));
+        }
 
         // SampleFormat 3 is IEEE float. Absent means unsigned integer, which is
         // the TIFF6 default and what every 8-bit texture is.
@@ -88,6 +102,18 @@ impl TiffFile {
             .is_some_and(|v| v.first() == Some(&3));
 
         let alpha_at = alpha_sample(&mut dec);
+        let associated = dec
+            .find_tag(Tag::ExtraSamples)
+            .ok()
+            .flatten()
+            .and_then(|v| v.into_u16_vec().ok())
+            .is_some_and(|v| v.first() == Some(&1));
+        let wide = dec
+            .find_tag(Tag::BitsPerSample)
+            .ok()
+            .flatten()
+            .and_then(|v| v.into_u16_vec().ok())
+            .is_some_and(|v| v.first().is_some_and(|&b| b > 8));
 
         let (tw, th) = dec.chunk_dimensions();
         if tw == 0 || th == 0 || tw != th {
@@ -136,9 +162,10 @@ impl TiffFile {
             path: path.to_path_buf(),
             levels,
             tile_edge,
-            mip_space,
             float,
+            wide,
             alpha_at,
+            associated,
         })
     }
 
@@ -167,17 +194,18 @@ impl TiffFile {
             DecodingResult::U8(v) => {
                 Ok(TileData::u8(to_texels(&v, texels, index, alpha_at)?, alpha))
             }
-            // 16-bit integer samples are narrowed to 8, matching what the
-            // preload path does with them: the renderer converts `u8` through a
-            // 256-entry table, and widening the payload to keep two more bits
-            // of an LDR texture would halve how much texture the cache's byte
-            // budget holds. Float samples are a different matter — they carry
-            // values a `u8` cannot represent at all, which is the whole reason
-            // `TileData` has a second variant.
+            // 16-bit integer samples become `half`, `s / 65535`, not a byte:
+            // Arnold writes a 16-bit source's `.tx` at 16 bits, converted to
+            // linear light whatever the source's curve, and linear values
+            // narrowed to eight bits band in the shadows. A curve the file's
+            // space still has is decoded at page-in (`TiledFile::read_tile`).
             DecodingResult::U16(v) => {
-                let narrowed: Vec<u8> = v.iter().map(|&s| (s >> 8) as u8).collect();
-                Ok(TileData::u8(
-                    to_texels(&narrowed, texels, index, alpha_at)?,
+                let wide: Vec<f16> = v
+                    .iter()
+                    .map(|&s| f16::from_f32(s as f32 / 65535.0))
+                    .collect();
+                Ok(TileData::half(
+                    &to_texels(&wide, texels, index, alpha_at)?,
                     alpha,
                 ))
             }
@@ -213,12 +241,16 @@ impl Backend for TiffFile {
         &self.path
     }
 
-    fn mip_space(&self) -> Option<&str> {
-        self.mip_space.as_deref()
+    fn linear(&self) -> bool {
+        self.float || self.wide
     }
 
-    fn linear(&self) -> bool {
-        self.float
+    fn integer(&self) -> bool {
+        !self.float
+    }
+
+    fn associated(&self) -> bool {
+        self.associated
     }
 
     fn alpha(&self) -> bool {

@@ -326,8 +326,7 @@ other. The pairs:
   different media.
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
-  `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔
-  preloaded `u8` textures; streamed `capped` Ptex ↔ preloaded Ptex at and
+  `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed `capped` Ptex ↔ preloaded Ptex at and
   below the cap, for every sample type (`capped_streaming_and_the_preload_*`:
   both run `decode_face` and `reduce_level`, and a footprint is selected
   against the cap level on both sides); tiles ↔ scanlines; a staged first sweep ↔ one
@@ -336,6 +335,11 @@ other. The pairs:
   pixels ↔ the same pixels of the full frame (with no neighbour hold). Each is pinned by
   a test that compares bits, not tolerances. A render with a `RenderControl` that
   completes is the render without one, bit for bit (`the_last_snapshot_is_the_returned_image`).
+- **Tolerance pairs.** A streamed `.tx` and the source it was converted from agree within
+  a tolerance, not bit for bit: the file is Arnold's (converted to its target space,
+  reduced as OIIO's `maketx` reduces, DWAA-compressed), so the A/B is pinned by the
+  bounds of the `textures` design record (`a_converted_tx_streams_what_its_source_preloads`,
+  and the image-level check there).
 - **Derived, not stored.** A hit's tangent (`tangent_of`) and a subdivided
   mesh's Ptex sub-face corners (`SubFace::corners`) are computed from the
   kernel's shared vertices and a 4-byte cell at the hit; the tests that pin

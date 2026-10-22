@@ -30,7 +30,7 @@ use super::{Backend, LevelInfo, TileReader};
 use exr::block::UncompressedBlock;
 use exr::block::chunk::Chunk;
 use exr::meta::BlockDescription;
-use exr::meta::attribute::{AttributeValue, LevelMode, SampleType};
+use exr::meta::attribute::{LevelMode, SampleType};
 use exr::meta::header::Header;
 use exr::meta::{MetaData, mip_map_levels};
 use half::f16;
@@ -44,7 +44,6 @@ pub struct ExrFile {
     path: PathBuf,
     levels: Vec<LevelInfo>,
     tile_edge: usize,
-    mip_space: Option<String>,
     /// Read once; every tile read needs it to size and decompress its block.
     meta: MetaData,
     /// Chunk index → byte offset, as the file's own offset table gives it.
@@ -163,22 +162,10 @@ impl ExrFile {
             return Err(invalid("the tile grid has holes — truncated or malformed"));
         }
 
-        let mip_space = header
-            .own_attributes
-            .other
-            .iter()
-            .chain(header.shared_attributes.other.iter())
-            .find(|(k, _)| *k == MIP_SPACE_KEY)
-            .and_then(|(_, v)| match v {
-                AttributeValue::Text(t) => Some(t.to_string()),
-                _ => None,
-            });
-
         Ok(ExrFile {
             path: path.to_path_buf(),
             levels,
             tile_edge,
-            mip_space,
             meta,
             offsets,
             chunk_of,
@@ -292,11 +279,16 @@ impl Backend for ExrFile {
         &self.path
     }
 
-    fn mip_space(&self) -> Option<&str> {
-        self.mip_space.as_deref()
+    fn linear(&self) -> bool {
+        true
     }
 
-    fn linear(&self) -> bool {
+    fn integer(&self) -> bool {
+        false
+    }
+
+    /// OpenEXR stores colour premultiplied by alpha, by its specification.
+    fn associated(&self) -> bool {
         true
     }
 
@@ -317,56 +309,6 @@ impl Backend for ExrFile {
             )),
         }
     }
-}
-
-/// The attribute naming the colour space a file is meant to be bound with.
-///
-/// EXR takes arbitrary typed header attributes, so this is a first-class field
-/// rather than a string smuggled through `ImageDescription` the way the TIFF
-/// backing has to do it.
-pub(crate) const MIP_SPACE_KEY: &str = "crust:mipspace";
-
-/// The space an EXR's `crust:mipspace` attribute records, read from its header
-/// alone — for the preload path, which must bind a marked file exactly as the
-/// streaming path does (see `resolve_auto_space`). `None` when the file has
-/// no marker or its header cannot be read; the pixel read then reports why.
-pub(crate) fn exr_mip_space(path: &Path) -> Option<String> {
-    exr_text_attributes(path, &[MIP_SPACE_KEY]).pop().flatten()
-}
-
-/// The text attributes `keys` name, read from an EXR's header alone, in the
-/// order asked — each `None` when absent, and all of them when the header
-/// cannot be read.
-pub(crate) fn exr_text_attributes(path: &Path, keys: &[&str]) -> Vec<Option<String>> {
-    let header = File::open(path).ok().and_then(|f| {
-        let meta = MetaData::read_from_buffered(&mut BufReader::new(f), false).ok()?;
-        meta.headers.into_iter().next()
-    });
-    keys.iter()
-        .map(|key| {
-            let header = header.as_ref()?;
-            header
-                .own_attributes
-                .other
-                .iter()
-                .chain(header.shared_attributes.other.iter())
-                .find(|(k, _)| *k == *key)
-                .and_then(|(_, v)| match v {
-                    AttributeValue::Text(t) => Some(t.to_string()),
-                    _ => None,
-                })
-        })
-        .collect()
-}
-
-/// Whether an EXR's header lists a channel whose base name is `A` — the one
-/// [`resolve_alpha`] and the preload reader read as alpha. Header only.
-pub(crate) fn exr_declares_alpha(path: &Path) -> bool {
-    File::open(path)
-        .ok()
-        .and_then(|f| MetaData::read_from_buffered(&mut BufReader::new(f), false).ok())
-        .and_then(|meta| meta.headers.into_iter().next())
-        .is_some_and(|h| resolve_alpha(&h).is_some())
 }
 
 /// Which entries of the channel list carry R, G and B.
@@ -486,7 +428,7 @@ mod tests {
                 [x * 0.5, y * 0.25, 3.0]
             })
             .collect();
-        write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+        write_tx_exr(&path, &src, w, h).expect("write");
         path
     }
 
@@ -609,6 +551,71 @@ mod tests {
         assert_eq!((r0, g0, b0), (0.25, 0.5, 0.75));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every DWAA `.tx` Arnold 7.5 wrote (`scripts/arnold_tx_oracle.py`)
+    /// decodes through `exr`'s DWA path tile by tile, every level, and its
+    /// level 0 has the minimum, maximum and mean OpenEXR's own decoder gives
+    /// (`oiiotool --printstats`). DWA is lossy and its decoder is the least
+    /// exercised in `exr`, so this is checked against OpenEXR's numbers rather
+    /// than assumed. (Not against `oiio:AverageColor`: that is the *source's*
+    /// mean put through the colour conversion, not the stored texels' mean.)
+    #[test]
+    fn arnold_dwaa_tiles_decode() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/arnold_tx");
+        let cases: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("cases.json")).expect("read"))
+                .expect("json");
+        let unquote = |v: &serde_json::Value| v.as_str().map(|s| s.trim_matches('"').to_owned());
+        let mut seen = 0;
+        for tx in ["image", "usd"]
+            .iter()
+            .flat_map(|s| cases[s].as_array().expect("cases"))
+            .flat_map(|c| c["tx"].as_array().expect("tx"))
+            .filter(|t| unquote(&t["attributes"]["compression"]).as_deref() == Some("dwaa"))
+        {
+            let name = tx["tx"].as_str().expect("name");
+            let f = ExrFile::open(&dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut r = f.reader().expect("reader");
+            let n = crate::uv_texture::channels(f.alpha.is_some());
+            for (level, li) in f.levels().iter().enumerate() {
+                for index in 0..(li.across * li.down) as u32 {
+                    let tile = f.read_tile(&mut r, level, index);
+                    let tile = tile.unwrap_or_else(|e| panic!("{name} level {level}: {e}"));
+                    let (tw, th) = li.tile_size(index, f.tile_edge);
+                    assert_eq!(tile.len(), tw * th * n, "{name} level {level} tile {index}");
+                }
+            }
+            let l0 = f.levels()[0];
+            assert_eq!((l0.across, l0.down), (1, 1), "{name}: one tile at level 0");
+            let texels = f
+                .read_tile(&mut r, 0, 0)
+                .expect("tile")
+                .expect_half()
+                .to_vec();
+            let stats = &tx["level0_stats"];
+            let want = |key: &str, k: usize| stats[key][k].as_f64().expect("stat") as f32;
+            for k in 0..n {
+                let channel = || texels.iter().skip(k).step_by(n).map(|v| v.to_f32());
+                let mean = channel().sum::<f32>() / (l0.width * l0.height) as f32;
+                let (min, max) = (
+                    channel().fold(f32::MAX, f32::min),
+                    channel().fold(0.0, f32::max),
+                );
+                for (what, got, want) in [
+                    ("mean", mean, want("avg", k)),
+                    ("min", min, want("min", k)),
+                    ("max", max, want("max", k)),
+                ] {
+                    assert!(
+                        (got - want).abs() <= 1e-5 + 1e-5 * want.abs(),
+                        "{name} channel {k}: {what} {got} against OpenEXR's {want}"
+                    );
+                }
+            }
+            seen += 1;
+        }
+        assert!(seen >= 10, "only {seen} DWAA fixtures");
     }
 
     /// A single-channel file replicates, matching what the TIFF backing does

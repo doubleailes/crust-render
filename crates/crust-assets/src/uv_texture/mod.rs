@@ -78,7 +78,7 @@ pub(crate) use udim::udim_number;
 
 use crate::mip_filter::{MipSource, Taps, lerp_rgba, lerp_rgba_alpha, trilinear};
 
-pub(crate) use mip::{channels, reduce_half, reduce_half_linear};
+pub(crate) use mip::channels;
 pub(crate) use udim::existing_tiles;
 
 /// The decoded tiles, in whichever sample type the file warranted.
@@ -103,9 +103,7 @@ pub struct UvTexture {
     /// The change of primaries into the working space, applied once per
     /// lookup after filtering. Bytes keep the file's own primaries — the
     /// decode table is the curve alone — so a `u8` texture carries the matrix;
-    /// an `f32` one was converted whole at load and carries `None`, except a
-    /// marked `.tx` EXR, whose values are already linear on the source's
-    /// primaries and which carries the matrix as its streamed twin does.
+    /// an `f32` one was converted whole at load and carries `None`.
     gamut: Option<crust_core::Mat3A>,
     /// Representative tile size, for the load message.
     width: usize,
@@ -207,13 +205,19 @@ impl UvTexture {
             return UvTexture::open_exr(path, token, space, mip, max_edge);
         }
         let mut tiles = Vec::new();
-        // `Auto` is resolved from the first tile that decodes: the pixel
-        // format is what the UsdUVTexture rule asks about, and `decode_tile`
-        // is the last place that still knows it.
+        // `Auto` is resolved from the first tile that decodes: the sample
+        // type is what Arnold's rule asks about, and `decode_tile` is the
+        // last place that still knows it.
         let mut resolved = None;
+        // The tiles whose colour is straight, to premultiply once the space
+        // is known (see `crate::premultiply_u8`).
+        let mut straight = Vec::new();
         let mut decode = |p: &Path, number: u32| {
-            let (tile, format) = decode_tile(p, number, max_edge)?;
-            resolved.get_or_insert_with(|| space.resolve_auto(format.0, format.1));
+            let (tile, integer, associated) = decode_tile(p, number, max_edge)?;
+            resolved.get_or_insert_with(|| space.resolve_auto(integer));
+            if tile.alpha && !associated {
+                straight.push(number);
+            }
             Ok::<_, AssetError>(tile)
         };
         if let Some(token) = token {
@@ -236,11 +240,17 @@ impl UvTexture {
             tiles.push(decode(path, udim_number(0, 0))?);
         }
         // Some whenever a tile decoded, and one always has by here.
-        let space = resolved.unwrap_or_else(|| space.resolve_auto(false, 0));
+        let space = resolved.unwrap_or_else(|| space.resolve_auto(false));
 
         let to_linear = space.to_linear_table();
+        let steps = space.code_steps();
+        // Premultiplied colour is the texture convention, preloaded and
+        // streamed alike, so a straight source is premultiplied here, in
+        // linear light, and its pyramid then averages premultiplied light.
+        for t in tiles.iter_mut().filter(|t| straight.contains(&t.number)) {
+            crate::premultiply_u8(&mut t.levels[0].pixels, &to_linear, &steps);
+        }
         if mip {
-            let steps = space.code_steps();
             for t in &mut tiles {
                 t.build_pyramid(&to_linear, &steps);
             }
@@ -262,13 +272,8 @@ impl UvTexture {
     /// The EXR half of [`UvTexture::open_with`]: the same sweep, into `f32`
     /// tiles.
     ///
-    /// `Auto` resolves as the streaming path resolves it, so a file binds the
-    /// same whether it is streamed or preloaded: a `crust:mipspace` marker (a
-    /// `.tx` EXR crust converted) names the source's space, and its values are
-    /// already linear on that space's primaries, so only the change of
-    /// primaries remains — applied per lookup, after filtering, as streaming
-    /// applies it. Unmarked, `auto` is raw: an EXR is float, and the
-    /// UsdUVTexture rule marks only 8-bit images as sRGB. An *explicit* curve
+    /// `Auto` is raw: an EXR is float, and `auto` decodes only integer images
+    /// as sRGB. An *explicit* curve
     /// is still honoured (a float file of display-encoded values is unusual,
     /// not invalid), and applied here in `f32`, so a stored tile is linear
     /// whatever was asked for and the lookup needs no table.
@@ -280,26 +285,8 @@ impl UvTexture {
         max_edge: NonZeroUsize,
     ) -> Result<UvTexture, AssetError> {
         let found = existing_tiles(&path.to_string_lossy());
-        // Settled by the first file, as `StreamingTexture::open` settles it.
-        let first = match token {
-            Some(_) => found.first().map(|t| t.path.clone()),
-            None => Some(path.to_path_buf()),
-        };
-        let marked = match space.resolved() {
-            Some(_) => None,
-            None => first
-                .as_deref()
-                .and_then(crate::tiled::exr_mip_space)
-                .and_then(|m| crust_core::color::Space::named(&m))
-                .map(|s| ResolvedColorSpace::new(s, space.working())),
-        };
-        let (space, decode, gamut) = match marked {
-            Some(marked) => (marked, ResolvedColorSpace::RAW, marked.gamut()),
-            None => {
-                let space = space.resolve_auto(false, 3);
-                (space, space, None)
-            }
-        };
+        let space = space.resolve_auto(false);
+        let (decode, gamut) = (space, None);
         let mut tiles = Vec::new();
         if let Some(token) = token {
             for tile in &found {

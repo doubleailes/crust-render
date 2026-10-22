@@ -151,7 +151,7 @@ without the other (full list: `docs/architecture.md` § Invariants):
   `C.*[LO]` is pinned bitwise to the
   beauty, and the zero-AOV render to its instruction count (`docs/architecture.md`).
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
-  JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; streamed `capped` Ptex ↔
+  JIT ↔ interpreter; streamed `capped` Ptex ↔
   preloaded Ptex at and below the cap (one `decode_face`, one `reduce_level`); tiles ↔
   scanlines (a render mode is scheduling only); the staged first sweep ↔ one unstaged
   sweep (so is staging); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`);

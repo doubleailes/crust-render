@@ -1110,11 +1110,11 @@ fn compile_mtlx(
     // while `caches` would otherwise be mutably borrowed by the outer call.
     let (working, luma) = (caches.working, caches.luma);
     let cell = std::cell::RefCell::new(&mut *caches);
-    let loader = |asset: &str, space: Option<&str>| -> Option<crate::TextureRef> {
+    let loader = |asset: &str, space: crust_mtlx::TexelSpace<'_>| -> Option<crate::TextureRef> {
         let mut c = cell.borrow_mut();
         load_uv_texture(
             &dir.join(asset),
-            crate::ColorSpace::from_mtlx(space, working),
+            crate::ColorSpace::from_mtlx_image(space, working),
             mat_path,
             &mut c,
         )

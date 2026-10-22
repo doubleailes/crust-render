@@ -26,7 +26,7 @@ impl Texture for Procedural {
     }
 }
 
-fn procedural(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn procedural(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     Some(TextureRef(Arc::new(Procedural)))
 }
 

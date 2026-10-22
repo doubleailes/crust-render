@@ -591,6 +591,7 @@ dependencies = [
  "image",
  "ptex-rust",
  "rayon",
+ "serde_json",
  "tiff",
  "tracing",
 ]

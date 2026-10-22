@@ -29,7 +29,7 @@ fn pair(draw: impl Fn() -> [f32; 4]) -> impl FnOnce() -> [f32; 2] {
 /// Compiles `root` of an inline document and evaluates its program.
 fn tree(doc: &str, root: &str) -> (Closures, Vec<Val>) {
     let d = Doc::parse(doc).expect("document parses");
-    let loader = |_: &str, _: Option<&str>| None;
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| None;
     let mut c = Compiler::new(&d, &crust_mtlx::Host::new(&loader));
     let node = d.find("", root).expect("root").clone();
     let mut out = Closures::default();

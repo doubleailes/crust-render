@@ -205,14 +205,9 @@ fn denying_skipped_warnings_exits_3_with_the_codes() {
     );
 }
 
-/// A texture with no `.tx` is a finding, not a warning: `--deny all` passes.
-#[test]
-fn findings_alone_do_not_deny() {
-    let dir = work_dir("findings_only");
-    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]))
-        .save(dir.join("albedo.png"))
-        .expect("png");
-    let body = r#"    def Scope "Looks"
+/// A sphere whose material reads `albedo.png` through a UsdUVTexture with no
+/// `sourceColorSpace` (so `auto`, sRGB for a PNG).
+const ALBEDO_LOOK: &str = r#"    def Scope "Looks"
     {
         def Material "M"
         {
@@ -236,6 +231,86 @@ fn findings_alone_do_not_deny() {
         rel material:binding = </World/Looks/M>
     }
 "#;
+
+/// The `crust-check/2` finding ids for `args` on a stage that binds
+/// `albedo.png`.
+fn finding_ids(dir: &Path, args: &[&str]) -> Vec<String> {
+    let path = stage(dir, ALBEDO_LOOK, "");
+    let mut all = vec!["check", "-i", path.to_str().unwrap(), "--json", "-"];
+    all.extend_from_slice(args);
+    let out = crust(dir, &all);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    parse(&out.stdout)["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// `--tx-color-space` names the `.tx` a check looks for, as it names the one
+/// `--auto-tx` writes: a file named for `Linear Rec.709 (sRGB)` streams the
+/// texture under that target (spelled by any alias) and is not looked for
+/// under the default ACEScg, where the texture has no `.tx`.
+#[test]
+fn the_tx_target_space_is_a_shared_flag() {
+    let dir = work_dir("tx_color_space");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]))
+        .save(dir.join("albedo.png"))
+        .expect("png");
+    // Any readable `.tx` will do: an Arnold-written one, under the name a
+    // Linear Rec.709 target gives this binding.
+    let arnold = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../crust-assets/tests/data/arnold_tx/srgb_canon_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+    );
+    std::fs::copy(
+        arnold,
+        dir.join("albedo_sRGB Encoded Rec.709 (sRGB)_Linear Rec.709 (sRGB).png.tx"),
+    )
+    .expect("copy the .tx");
+    let without = "textures_without_tx".to_string();
+    assert!(finding_ids(&dir, &[]).contains(&without));
+    for target in ["Linear Rec.709 (sRGB)", "lin_rec709"] {
+        let ids = finding_ids(&dir, &["--tx-color-space", target]);
+        assert!(!ids.contains(&without), "{target}: {ids:?}");
+    }
+}
+
+/// A `.tx` target the OCIO config does not define is a usage error, for
+/// `render` as for `check`, and nothing is loaded or written.
+#[test]
+fn an_unknown_tx_target_space_is_a_usage_error() {
+    let dir = work_dir("tx_color_space_unknown");
+    let input = cornellbox();
+    for command in ["render", "check"] {
+        let out = crust(
+            &dir,
+            &[
+                command,
+                "-i",
+                input.to_str().unwrap(),
+                "--tx-color-space",
+                "nonsense",
+            ],
+        );
+        assert_eq!(code(&out), 2, "{command}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("defines no such colour space"),
+            "{command}: {err}"
+        );
+    }
+    assert!(files(&dir).is_empty(), "{:?}", files(&dir));
+}
+
+/// A texture with no `.tx` is a finding, not a warning: `--deny all` passes.
+#[test]
+fn findings_alone_do_not_deny() {
+    let dir = work_dir("findings_only");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]))
+        .save(dir.join("albedo.png"))
+        .expect("png");
+    let body = ALBEDO_LOOK;
     let path = stage(&dir, body, "");
     let out = crust(
         &dir,
@@ -260,7 +335,11 @@ fn findings_alone_do_not_deny() {
         .collect();
     assert_eq!(ids, ["textures_without_tx"]);
     assert_eq!(v["findings"][0]["action"]["flag"], "--auto-tx");
-    assert!(!dir.join("albedo.tx").exists(), "check converts nothing");
+    assert!(
+        !files(&dir).iter().any(|f| f.ends_with(".tx")),
+        "check converts nothing: {:?}",
+        files(&dir)
+    );
 }
 
 #[test]

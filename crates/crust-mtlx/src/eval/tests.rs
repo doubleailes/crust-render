@@ -7,7 +7,7 @@ use crate::parse::Doc;
 use crate::texture::TextureRef;
 use crate::value::Val;
 
-fn no_textures(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn no_textures(_: &str, _: crate::TexelSpace<'_>) -> Option<TextureRef> {
     None
 }
 
@@ -285,7 +285,7 @@ const HEIGHT_DOC: &str = r#"<materialx>
 
 fn height_to_normal_at(slope_u: f32, slope_v: f32, uv_width: f32, node: &str) -> Vec3A {
     let doc = Doc::parse(HEIGHT_DOC).unwrap();
-    let loader = move |_: &str, _: Option<&str>| {
+    let loader = move |_: &str, _: crate::TexelSpace<'_>| {
         Some(TextureRef(std::sync::Arc::new(Ramp { slope_u, slope_v })))
     };
     let mut c = Compiler::new(&doc, &Host::new(&loader));
@@ -346,7 +346,8 @@ fn eval_with(
     uv_width: f32,
 ) -> (Val, Program) {
     let doc = Doc::parse(doc).unwrap();
-    let loader = move |_: &str, _: Option<&str>| Some(TextureRef(std::sync::Arc::new(tex.clone())));
+    let loader =
+        move |_: &str, _: crate::TexelSpace<'_>| Some(TextureRef(std::sync::Arc::new(tex.clone())));
     let mut c = Compiler::new(&doc, &Host::new(&loader));
     let slot = c.compile_named("", node, None);
     let mut slots = Vec::new();
@@ -500,7 +501,7 @@ fn heighttonormal_asks_the_host_for_its_image_once() {
     // and residency are per file, not per tap.
     let doc = Doc::parse(HEIGHT_DOC).unwrap();
     let calls = std::cell::Cell::new(0);
-    let loader = |_: &str, _: Option<&str>| {
+    let loader = |_: &str, _: crate::TexelSpace<'_>| {
         calls.set(calls.get() + 1);
         Some(TextureRef(std::sync::Arc::new(Ramp {
             slope_u: 1.0,
