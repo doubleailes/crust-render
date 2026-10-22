@@ -582,6 +582,14 @@ pub fn apply_gamut(gamut: Option<&Mat3A>, rgb: Vec3A) -> Vec3A {
     }
 }
 
+/// OCIO's default optimisation without `FAST_LOG_EXP_POW`: ocio follows
+/// OCIO's SSE2 builds, whose fast power is good to about 15 bits and sends
+/// `1` to `1.0000116`, while the decoders here are pinned bit for bit to
+/// `powf` (and the streamed / preloaded texture pairs with them).
+fn exact_flags() -> ocio::OptimizationFlags {
+    ocio::OptimizationFlags::DEFAULT & !ocio::OptimizationFlags::FAST_LOG_EXP_POW
+}
+
 /// Splits the optimised processor `src -> dst` into a per-channel curve and a
 /// trailing matrix; `Err` with the reason when it has another shape.
 fn build(src: Space, dst: Space) -> Result<Conversion, String> {
@@ -592,7 +600,7 @@ fn build(src: Space, dst: Space) -> Result<Conversion, String> {
     let p = cfg
         .get_processor(src.name(), dst.name())
         .map_err(|e| e.to_string())?
-        .optimized(ocio::OptimizationFlags::DEFAULT);
+        .optimized(exact_flags());
     if p.is_no_op() {
         return Ok(Conversion::IDENTITY);
     }
@@ -630,7 +638,7 @@ fn build(src: Space, dst: Space) -> Result<Conversion, String> {
                 ocio::TransformDirection::Forward,
             )
             .map_err(|e| e.to_string())?
-            .default_cpu_processor();
+            .optimized_cpu_processor(exact_flags());
         if cpu.has_channel_crosstalk() {
             return Err("its transfer curve mixes channels".into());
         }
@@ -988,7 +996,7 @@ pub fn encode_preview(
             let cpu = config()
                 .get_display_view_processor(working.name(), display, view)
                 .map_err(|e| format!("OCIO display `{display}` / view `{view}`: {e}"))?
-                .default_cpu_processor();
+                .optimized_cpu_processor(exact_flags());
             let cpu = Arc::new(cpu);
             cache
                 .lock()
@@ -1236,7 +1244,7 @@ mod tests {
                 let full = config()
                     .get_processor(src.name(), work.name())
                     .unwrap()
-                    .default_cpu_processor();
+                    .optimized_cpu_processor(exact_flags());
                 for k in 0..200 {
                     let x = [
                         (k * 37 % 101) as f32 / 100.0,
