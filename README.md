@@ -47,7 +47,7 @@ attribute and `CRUST_*` environment variable.
 |---|---|
 | 🎨 **Materials** | One OpenPBR übershader. `UsdPreviewSurface` is mapped into it, and `crust:openpbr` exposes every OpenPBR input. |
 | 🧩 **MaterialX** | Reads `.mtlx` graphs directly, either referenced or inline in USD. Supports BSDF closure trees with MaterialX's layering, `open_pbr_surface` / `standard_surface` / `gltf_pbr`, Chiang hair, UV and UDIM textures, and volume materials. |
-| 📐 **Geometry** | Watertight ray/triangle test, an SBVH built into 4-wide SIMD BVH nodes, and instancing nested to any depth (including `PointInstancer`). Also handles subdivision, displacement, curves, implicit shapes and transform motion blur. |
+| 📐 **Geometry** | Watertight ray/triangle test, an SBVH built into 4-wide SIMD BVH nodes (8-wide for trees too large for the cache), and instancing nested to any depth (including `PointInstancer`). Also handles subdivision, displacement, curves, implicit shapes and transform motion blur. |
 | 💡 **Lights** | UsdLux sphere, rect, disk, cylinder, distant and dome lights, with IES profiles, light linking and learned light selection for scenes with many lights. |
 | 🎯 **Sampling** | Next-event estimation combined with BSDF sampling through multiple importance sampling, Owen-scrambled Sobol sequences, adaptive sampling and importance-sampled pixel filters. |
 | 🧭 **Path guiding** | An opt-in Rust implementation of Practical Path Guiding (SD-tree), refraction included. |
@@ -106,7 +106,7 @@ See [`docs/alab_profile.md`](docs/alab_profile.md) for the measurements.
 
 | crate | role |
 |---|---|
-| `crust-rt` | Intersection kernel: SBVH → BVH4, watertight `Tri4` packets, instancing |
+| `crust-rt` | Intersection kernel: SBVH → BVH4 / BVH8, watertight `Tri4` packets, instancing |
 | `crust-mtlx` | MaterialX reader and compiler |
 | `crust-jit` | Optional Cranelift JIT for MaterialX programs |
 | `crust-nn` | Small deterministic neural networks for light selection |

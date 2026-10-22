@@ -23,7 +23,8 @@
   many parts as one instance and still tell the parts apart. The importer relies on it
   (`docs/moana_profile.md`). The offset sits in `InstancePrim`'s alignment padding (pinned
   at 96 bytes). Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
-  parallel deterministic SBVH build collapsed to BVH4 (details below). Depends only on
+  parallel deterministic SBVH build collapsed to BVH4, or BVH8 for a tree too large for
+  the cache (details below). Depends only on
   glam + rayon; deliberately swappable for Embree bindings behind the same seam.
 
 ## Geometry and intersection
@@ -48,7 +49,8 @@
   SAH + spatial splits gated by the α-overlap test, references clipped via exact
   Sutherland-Hodgman for triangles and duplicated across children), runs subtrees in
   parallel via `rayon::join` above 4096 refs, is **deterministic** (input-only
-  decisions, pinned by a build-twice test), and is then **collapsed to BVH4**: 128-byte
+  decisions, pinned by a build-twice test), and is then **collapsed to BVH4** (or to
+  BVH8 for a large tree — "BVH8 per tree" below): 128-byte
   4-wide SoA nodes whose slab tests run on `Vec4` lanes (`safe_inv3` keeps
   zero-direction components NaN-free; closest-hit traversal orders lanes near-to-far,
   occlusion traversal early-exits). Traversal is mask-driven: `RaySlab` pre-splats the
@@ -174,7 +176,7 @@
   `MIN_LEAF_PACKED` (4) is the leaf floor for all-triangle ranges so packets fill,
   while non-packable prims keep `MIN_LEAF` (2) — see `docs/simd.md` for the audit,
   the measurements, and why `std::simd` is not used by default (nightly-only; the
-  opt-in `bvh8` experiment below is the one place it is).
+  opt-in `bvh8` feature below is the one place it is).
 
 ## Analytic sphere and cylinder precision
 
@@ -299,6 +301,42 @@ model).
   `scripts/test_simd_matrix.sh -p crust-rt` passes under every codegen, and every
   sample scene renders bit-identically.
 
+## BVH8 per tree
+
+- **Both widths compiled in, chosen at commit.** `WideNode<W>`, `collapse::<W>` and
+  both traversals are generic over a `Width` trait with two instances, `W4`
+  (`bvh/lanes4.rs`) and `W8` (`bvh/lanes8.rs`). A finished tree stores
+  `enum Tree { Four, Eight }`, and `Bvh::hit` / `hit_any` match on it once per query.
+  The binary SBVH, the leaves and the `Tri4` packets are the same at either width;
+  only the collapse differs, and every query answers bit-identically
+  (`eight_wide_hits_are_bitwise_the_four_wide_hits`) **except exact ties**. **Trap:**
+  two different primitives hit at bitwise-equal `t` (coplanar contact faces — an object
+  resting on a floor) go to the leaf visited first, and the widths order leaves
+  differently, so forcing `eight` changes a few pixels of `subdivision.usda`,
+  `implicit_shapes.usda` and `hair.usda` at 16 spp. A debug twin tracing every query at
+  both widths found every mismatch at equal `t` between the ground and a mesh on it; the
+  random-ray sweeps never see one. Making ties order-independent would mean an id
+  compare in every primitive test and would move the 4-wide images too, so it is
+  documented rather than done.
+- **8 wide on stable is two `Vec4` halves**: the 4-wide slab test run twice over one
+  256-byte, 32-byte-aligned node, the two verdict nibbles joined into one mask. Out of
+  cache the saving is node fetches, not arithmetic, so wide instructions are not needed
+  for it. The nightly `bvh8` feature only swaps the halves for one `std::simd::f32x8`.
+- **`crust_rt::NodeWidth`** (`CommitOptions::width`): `Four`, `Eight`, or `Auto` (the
+  default), 8 wide from `AUTO_EIGHT_FROM` = 2^18 primitives. Each instanced scene is
+  its own tree and chooses for itself, so an instance field's top level goes 8 wide
+  while its small prototypes stay 4 wide. `CRUST_BVH_WIDTH` forces it in the renderer
+  (`four` is the behaviour before).
+- **Measured** (`docs/simd.md`, "BVH8 per tree"; 33 MiB L3, stable, baseline x86-64):
+  8 wide is 6–10% slower on a 250 k-triangle soup (~35 MiB of kernel, about the
+  cache) and 4–21% faster from 500 k to 4 M triangles; on a 250 k–1 M instance field,
+  `auto` (8-wide top, 4-wide prototypes) is 7–14% faster, while making the prototypes
+  8 wide too gives back the closest-hit gain at 1 M (+2%). The threshold sits at the
+  crossover for this cache; a larger last-level cache moves it up, which `auto` does
+  not know. **Trap:** the timing noise on the measuring VM reached 15% between
+  identical runs, so a single round of `ray_throughput --large` cannot resolve this —
+  interleave the widths and take the minimum over several rounds.
+
 ## Known gaps: geometry and acceleration
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*
@@ -361,7 +399,8 @@ model).
   slower because most of its time is in small prototype trees that fit in cache.
   8-wide nodes cost 0.4–3% more kernel memory. So the width wants choosing *per tree
   by size* at `commit()`, which needs both widths compiled in rather than a `cfg`; that
-  is a refactor, not a toolchain question, and crust stays on stable. The feature is
+  is a refactor, not a toolchain question, and crust stays on stable — and it is now
+  done ("BVH8 per tree" above). The feature is
   kept as the record and a starting point, and the parallel nightly workflow
   (`.github/workflows/nightly.yml`) lints and tests it on a pinned and the latest
   nightly, at `x86-64-v3` where an `f32x8` is one AVX register (`docs/simd.md`, "BVH8

@@ -10,11 +10,12 @@
 //! cargo run --release -p crust-rt --example ray_throughput
 //! cargo run --release -p crust-rt --example ray_throughput -- --large [MTRIS]
 //! cargo run --release -p crust-rt --example ray_throughput -- --layout indexed [--large [MTRIS]]
+//! cargo run --release -p crust-rt --example ray_throughput -- --width eight [--large [MTRIS]]
 //! ```
 //!
 //! `--layout gathered|indexed|auto` commits every scene with that triangle
-//! packet layout (default `auto`), which is how the two are A/B'd per tree
-//! size.
+//! packet layout (default `auto`), and `--width four|eight|auto` with that
+//! node width (default `auto`), which is how each is A/B'd per tree size.
 //!
 //! The default scenes are small enough that their whole BVH stays in cache,
 //! so they measure the node test's arithmetic. `--large` adds two scenes
@@ -29,7 +30,7 @@
 #[path = "../fixtures/mod.rs"]
 mod fixtures;
 
-use crust_rt::{CommitOptions, Geometry, PacketLayout, Scene, SceneBuilder};
+use crust_rt::{CommitOptions, Geometry, NodeWidth, PacketLayout, Scene, SceneBuilder};
 use fixtures::{
     T_MIN, in_cube, instance_scene, ray_batch, sphere_grid_scene, triangle_scene, uv_sphere,
 };
@@ -165,29 +166,42 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
     }
 }
 
-/// The packet layout every scene below commits with (`--layout`).
-static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
+/// What every scene below commits with (`--layout`, `--width`).
+static OPTIONS: std::sync::OnceLock<CommitOptions> = std::sync::OnceLock::new();
 
 fn commit(b: SceneBuilder) -> Scene {
-    b.commit_with(CommitOptions {
-        layout: *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
-    })
+    b.commit_with(OPTIONS.get().copied().unwrap_or_default())
 }
 
 fn main() {
-    // `--layout` is read before any scene is built, so the default scenes
-    // commit with it too.
+    // `--layout` and `--width` are read before any scene is built, so the
+    // default scenes commit with them too.
     let mut args = std::env::args().skip(1).peekable();
-    if args.peek().map(String::as_str) == Some("--layout") {
-        args.next();
-        let layout = match args.next().as_deref() {
-            Some("gathered") => PacketLayout::Gathered,
-            Some("indexed") => PacketLayout::Indexed,
-            Some("auto") => PacketLayout::Auto,
-            other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
-        };
-        LAYOUT.set(layout).expect("set once");
+    let mut options = CommitOptions::default();
+    loop {
+        match args.peek().map(String::as_str) {
+            Some("--layout") => {
+                args.next();
+                options.layout = match args.next().as_deref() {
+                    Some("gathered") => PacketLayout::Gathered,
+                    Some("indexed") => PacketLayout::Indexed,
+                    Some("auto") => PacketLayout::Auto,
+                    other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
+                };
+            }
+            Some("--width") => {
+                args.next();
+                options.width = match args.next().as_deref() {
+                    Some("four") => NodeWidth::Four,
+                    Some("eight") => NodeWidth::Eight,
+                    Some("auto") => NodeWidth::Auto,
+                    other => panic!("--width wants four|eight|auto, got {other:?}"),
+                };
+            }
+            _ => break,
+        }
     }
+    OPTIONS.set(options).expect("set once");
 
     let tri = triangle_scene(commit);
     println!("tri_spheres: {} triangles", tri.primitive_count());

@@ -44,7 +44,7 @@ graph TD
 
 | crate | owns | knows nothing about |
 |-------|------|---------------------|
-| `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
+| `crust-rt` | geometry, SBVH build → BVH4 / BVH8 (per tree), `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
 | `crust-nn` | tiny, bit-deterministic networks: the multi-resolution hash grid, dense layers, sigmoid cross-entropy, Adam, gradient checking (what `neural` light selection learns visibility with) | crust types, threads (the caller maps a batch's chunks) and random numbers (the caller draws them) |
@@ -326,7 +326,9 @@ other. The pairs:
   different media.
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
-  `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔
+  `packet_layouts_are_bit_identical`); 8-wide ↔ 4-wide BVH nodes over the same binary
+  tree, up to exact ties, which go to the leaf visited first
+  (`eight_wide_hits_are_bitwise_the_four_wide_hits`); JIT ↔ interpreter; streamed ↔
   preloaded `u8` textures; streamed `capped` Ptex ↔ preloaded Ptex at and
   below the cap, for every sample type (`capped_streaming_and_the_preload_*`:
   both run `decode_face` and `reduce_level`, and a footprint is selected
@@ -472,6 +474,7 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_ADAPTIVE_PER_FACE` | on | `usd_import/mesh.rs` (`mesh_source`) | In adaptive subdivision only. `0`: refine each unshared subdivision mesh to one level instead of tessellating it per face at its edges' own rates |
 | `CRUST_ADAPTIVE_FRUSTUM` | on | `usd_import/adaptive.rs` (`Frustum`) | In adaptive subdivision, and for the radial count of implicit shapes when a camera is named. `0`: rate geometry outside the camera's view by distance like the rest, instead of splitting each of its edges once (an implicit shape: instead of the minimum count) |
 | `CRUST_TRI_PACKETS` | `auto` (= `gathered`) | `lib.rs` (`commit_options`) → every kernel `commit` | `gathered`: 192-byte vertex-carrying packets (the layout before indexed packets); `indexed`: 92-byte index packets, a quarter fewer kernel bytes per triangle for 13–30% slower traversal (8–9% on the Moana island at level 1, where a 3–4% faster import makes the whole run faster) — the opt-in for a scene that otherwise does not fit. Bit-identical |
+| `CRUST_BVH_WIDTH` | `auto` | `lib.rs` (`commit_options`) → every kernel `commit` | `four`: every tree collapsed into 128-byte 4-wide nodes (the behaviour before 8-wide nodes); `eight`: every tree into 256-byte 8-wide nodes; `auto`: 8 wide from 2^18 primitives per tree, 4 wide below. 8 wide is 4–21% faster on trees too large for the cache and a few percent slower on ones that fit (`docs/simd.md`, "BVH8 per tree"). Bit-identical except exact ties (two primitives at the same distance, e.g. coplanar contact faces), which go to whichever leaf is visited first |
 | `CRUST_MTLX_OPT` | on | `material/materialx.rs` | `0`: skip constant folding / hoisting / pruning (bit-identical) |
 | `CRUST_SHADER_JIT` | on | `material/materialx.rs` | `0`: interpret MaterialX programs instead of JIT (bit-identical) |
 | `CRUST_RAY_CONES` | on | `tracer/path.rs` | `0`: zero every texture footprint (finest mip always) |

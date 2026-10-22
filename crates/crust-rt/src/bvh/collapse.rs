@@ -1,10 +1,10 @@
-//! Collapsing the binary build tree into [`LANES`]-wide [`WideNode`]s, packing each
+//! Collapsing the binary build tree into [`Width::LANES`]-wide [`WideNode`]s, packing each
 //! all-triangle leaf into `Tri4` SIMD packets.
 
 use crate::triangle::{PacketTri, Tri4, Tri4i};
 
 use super::build::surface_area;
-use super::{LANES, Layout, Leaf, Node, Primitives, WideNode};
+use super::{Layout, Leaf, Node, Primitives, WideNode, Width};
 
 /// Everything the collapse pass emits besides the nodes themselves: one
 /// [`Leaf`] per leaf lane, the triangle packets those leaves run, and the
@@ -77,25 +77,25 @@ impl LeafData {
     }
 }
 
-/// Collapses the binary tree into [`LANES`]-wide nodes: each wide node adopts its
+/// Collapses the binary tree into [`Width::LANES`]-wide nodes: each wide node adopts its
 /// binary node's two children, then repeatedly replaces the largest-area
 /// internal child with that child's own two children until every lane is
 /// filled (or only leaves remain). Leaf lanes are converted to [`Leaf`]
 /// entries with their triangles packed into SIMD packets as they are
 /// reached. Purely input-driven, so determinism is preserved.
-pub(super) fn collapse(
+pub(super) fn collapse<W: Width>(
     binary: &[Node],
     indices: &[u32],
     prims: &Primitives,
     layout: Layout,
-) -> (Vec<WideNode>, LeafData) {
+) -> (Vec<WideNode<W>>, LeafData) {
     // A binary tree of `n` nodes has `(n + 1) / 2` leaves, and a full
     // `LANES`-wide tree over `L` leaves needs `(L - 1) / (LANES - 1)`
     // internal nodes. Reserving one node per leaf instead (as this once did)
     // held three times the 4-wide tree's nodes and seven times the 8-wide
     // one's; an uneven tree that needs more just grows the vector.
     let leaves = binary.len().div_ceil(2);
-    let mut out = Vec::with_capacity(leaves.saturating_sub(1) / (LANES - 1) + 1);
+    let mut out = Vec::with_capacity(leaves.saturating_sub(1) / (W::LANES - 1) + 1);
     // The leaf tables are sized exactly from the binary leaves before any
     // is emitted: a packet is 192 bytes, and letting the vector double
     // meant up to twice the packets' final size was alive at the build's
@@ -125,7 +125,7 @@ pub(super) fn collapse(
     }
     if binary[0].count > 0 {
         // Single-leaf tree.
-        let mut w = WideNode::empty();
+        let mut w = WideNode::<W>::empty();
         w.set_lane_bounds(0, &binary[0].bbox());
         w.child[0] = data.push_leaf(leaf_range(&binary[0], indices), prims, layout);
         w.mark_leaf(0);
@@ -150,23 +150,24 @@ fn leaf_range<'a>(node: &Node, indices: &'a [u32]) -> &'a [u32] {
     &indices[first..first + node.count as usize]
 }
 
-fn collapse_node(
+fn collapse_node<W: Width>(
     binary: &[Node],
     indices: &[u32],
     prims: &Primitives,
     layout: Layout,
     b_idx: u32,
-    out: &mut Vec<WideNode>,
+    out: &mut Vec<WideNode<W>>,
     data: &mut LeafData,
 ) -> u32 {
     let slot = out.len();
     out.push(WideNode::empty());
 
-    let mut kids = [0u32; LANES];
+    let mut kids = W::children(0);
+    let kids = kids.as_mut();
     kids[0] = b_idx + 1;
     kids[1] = binary[b_idx as usize].first_or_right;
     let mut n_kids = 2;
-    while n_kids < LANES {
+    while n_kids < W::LANES {
         // Expand the internal kid with the largest surface area; ties
         // resolve to the first (deterministic).
         let mut best: Option<(usize, f32)> = None;

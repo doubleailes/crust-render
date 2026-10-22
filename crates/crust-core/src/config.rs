@@ -76,6 +76,54 @@ impl From<TriPackets> for crust_rt::PacketLayout {
     }
 }
 
+/// `CRUST_BVH_WIDTH`: how many children each kernel BVH node tests per
+/// round — see `crust_rt::NodeWidth`. Every width answers every query with
+/// the same bits except exact ties (two primitives at the same distance,
+/// which go to whichever is visited first); `four` is the width before 8-wide nodes existed (the
+/// honest A/B side), `eight` collapses every tree 8 wide, `auto` (the
+/// default) picks per tree by size: 8 wide for a tree too large for the
+/// cache, 4 wide below that.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BvhWidth {
+    Four,
+    Eight,
+    #[default]
+    Auto,
+}
+
+impl FromStr for BvhWidth {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "four" | "4" => Ok(BvhWidth::Four),
+            "eight" | "8" => Ok(BvhWidth::Eight),
+            "auto" => Ok(BvhWidth::Auto),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for BvhWidth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BvhWidth::Four => "four",
+            BvhWidth::Eight => "eight",
+            BvhWidth::Auto => "auto",
+        })
+    }
+}
+
+impl From<BvhWidth> for crust_rt::NodeWidth {
+    fn from(w: BvhWidth) -> Self {
+        match w {
+            BvhWidth::Four => crust_rt::NodeWidth::Four,
+            BvhWidth::Eight => crust_rt::NodeWidth::Eight,
+            BvhWidth::Auto => crust_rt::NodeWidth::Auto,
+        }
+    }
+}
+
 /// Which mip chain a streamed Ptex texture is allowed to read
 /// (`CRUST_PTEX_STREAM_MIPSPACE`).
 ///
@@ -253,6 +301,9 @@ pub struct Config {
     /// `CRUST_TRI_PACKETS`: the kernel's triangle packet layout
     /// (`gathered` | `indexed` | `auto`; bit-identical either way).
     pub tri_packets: TriPackets,
+    /// `CRUST_BVH_WIDTH`: the kernel's BVH node width (`four` | `eight` |
+    /// `auto`; bit-identical either way but for exact ties).
+    pub bvh_width: BvhWidth,
     /// `CRUST_MTLX_OPT`: fold, hoist and prune MaterialX programs (`false`:
     /// run them as compiled; bit-identical).
     pub mtlx_opt: bool,
@@ -345,6 +396,7 @@ impl Default for Config {
             adaptive_per_face: true,
             adaptive_frustum: true,
             tri_packets: TriPackets::Auto,
+            bvh_width: BvhWidth::Auto,
             mtlx_opt: true,
             shader_jit: true,
             ray_cones: true,
@@ -395,6 +447,12 @@ impl Config {
                 "CRUST_TRI_PACKETS",
                 d.tri_packets,
                 "`gathered`, `indexed` or `auto`",
+            ),
+            bvh_width: env_parse(
+                &lookup,
+                "CRUST_BVH_WIDTH",
+                d.bvh_width,
+                "`four`, `eight` or `auto`",
             ),
             mtlx_opt: flag("CRUST_MTLX_OPT", d.mtlx_opt),
             shader_jit: flag("CRUST_SHADER_JIT", d.shader_jit),
@@ -655,6 +713,16 @@ mod tests {
         }
         let bad = Config::from_lookup(|n| (n == "CRUST_TRI_PACKETS").then(|| "fast".to_string()));
         assert_eq!(bad.tri_packets, TriPackets::Auto);
+        for (spelling, want) in [
+            ("four", BvhWidth::Four),
+            ("4", BvhWidth::Four),
+            ("eight", BvhWidth::Eight),
+            ("8", BvhWidth::Eight),
+            ("auto", BvhWidth::Auto),
+        ] {
+            assert_eq!(with(&[("CRUST_BVH_WIDTH", spelling)]).bvh_width, want);
+        }
+        assert_eq!(with(&[("CRUST_BVH_WIDTH", "16")]).bvh_width, BvhWidth::Auto);
         let bad = with(&[("CRUST_PTEX_STREAM_MIPSPACE", "srgb")]);
         assert_eq!(bad.ptex_mip_space, PtexMipSpace::Capped);
         for m in [

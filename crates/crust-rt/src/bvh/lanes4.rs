@@ -1,29 +1,21 @@
-//! The default node width: 4 lanes on `glam`'s `Vec4` (SSE2 / NEON), stable
-//! Rust. The `bvh8` feature swaps this module for [`super::lanes8`]; both
-//! expose the same four items, so the rest of the BVH is width-agnostic.
+//! The 4-wide node: 4 lanes on `glam`'s `Vec4` (SSE2 / NEON), the width of
+//! every tree before [`super::lanes8`] existed and still the width of every
+//! tree that fits the cache.
 
 use glam::Vec4;
 
 use crate::ray::Ray;
 
-use super::{WideNode, safe_inv3};
+use super::{WideNode, Width, safe_inv3};
 
-/// Children per wide node.
-pub(super) const LANES: usize = 4;
-
-/// One slab-bound coordinate for every lane of a node.
-pub(super) type Lanes = Vec4;
-
-#[inline]
-pub(super) fn splat(v: f32) -> Lanes {
-    Vec4::splat(v)
-}
+/// The 4-wide [`Width`].
+pub(super) struct W4;
 
 /// The ray, pre-broadcast into the SoA layout the 4-wide slab test wants.
 /// Built once per traversal: the six splats and the reciprocal used to be
 /// recomputed for every visited node, which is pure overhead in a loop
 /// that visits tens of nodes per ray.
-pub(super) struct RaySlab {
+pub(super) struct RaySlab4 {
     ox: Vec4,
     oy: Vec4,
     oz: Vec4,
@@ -33,12 +25,34 @@ pub(super) struct RaySlab {
     t_min: Vec4,
 }
 
-impl RaySlab {
+impl Width for W4 {
+    const LANES: usize = 4;
+    type Lanes = Vec4;
+    type Children = [u32; 4];
+    type Dist = [f32; 4];
+    type Order = [(f32, usize); 4];
+    type RaySlab = RaySlab4;
+
     #[inline]
-    pub(super) fn new(ray: &Ray, t_min: f32) -> Self {
+    fn splat(v: f32) -> Vec4 {
+        Vec4::splat(v)
+    }
+
+    #[inline]
+    fn children(fill: u32) -> [u32; 4] {
+        [fill; 4]
+    }
+
+    #[inline]
+    fn order() -> [(f32, usize); 4] {
+        [(0.0, 0); 4]
+    }
+
+    #[inline]
+    fn ray_slab(ray: &Ray, t_min: f32) -> RaySlab4 {
         let o = ray.origin;
         let inv = safe_inv3(ray.dir);
-        RaySlab {
+        RaySlab4 {
             ox: Vec4::splat(o.x),
             oy: Vec4::splat(o.y),
             oz: Vec4::splat(o.z),
@@ -56,24 +70,24 @@ impl RaySlab {
     /// movmskps gives all four verdicts; the validity bits drop unused
     /// lanes.
     #[inline]
-    pub(super) fn slab(&self, node: &WideNode, t_max: f32) -> (u32, [f32; LANES]) {
-        let t0x = (node.bmin_x - self.ox) * self.ix;
-        let t1x = (node.bmax_x - self.ox) * self.ix;
-        let t0y = (node.bmin_y - self.oy) * self.iy;
-        let t1y = (node.bmax_y - self.oy) * self.iy;
-        let t0z = (node.bmin_z - self.oz) * self.iz;
-        let t1z = (node.bmax_z - self.oz) * self.iz;
+    fn slab(rs: &RaySlab4, node: &WideNode<W4>, t_max: f32) -> (u32, [f32; 4]) {
+        let t0x = (node.bmin_x - rs.ox) * rs.ix;
+        let t1x = (node.bmax_x - rs.ox) * rs.ix;
+        let t0y = (node.bmin_y - rs.oy) * rs.iy;
+        let t1y = (node.bmax_y - rs.oy) * rs.iy;
+        let t0z = (node.bmin_z - rs.oz) * rs.iz;
+        let t1z = (node.bmax_z - rs.oz) * rs.iz;
         let tnear = t0x
             .min(t1x)
             .max(t0y.min(t1y))
             .max(t0z.min(t1z))
-            .max(self.t_min);
+            .max(rs.t_min);
         let tfar = t0x
             .max(t1x)
             .min(t0y.max(t1y))
             .min(t0z.max(t1z))
             .min(Vec4::splat(t_max));
-        let mask = tnear.cmple(tfar).bitmask() & node.flags & super::VALID_MASK;
+        let mask = tnear.cmple(tfar).bitmask() & node.flags & Self::VALID_MASK;
         (mask, tnear.to_array())
     }
 }
