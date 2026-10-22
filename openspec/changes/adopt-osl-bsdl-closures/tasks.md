@@ -39,7 +39,7 @@
 ## 5. Measurement and goldens
 
 - [x] 5.1 Measure callgrind instructions (`-s 2`) on `cornellbox` (must be unchanged), `materialx_basic` and a `standard_surface` scene, and `scripts/bench_ab.sh -n 7` old vs new binary; record min and mean in `materials/design.md`
-- [ ] 5.2 Re-record MaterialX goldens with `scripts/check_images.sh record` at `-s 16 --indirect-clamp 0`, and verify that non-MaterialX scenes are bit-identical
+- [x] 5.2 Re-record MaterialX goldens with `scripts/check_images.sh record` at `-s 16 --indirect-clamp 0`, and verify that non-MaterialX scenes are bit-identical
 - [ ] 5.3 Re-run the Material Fidelity suite scored against `materialx-osl` and update `docs/material_fidelity.md` with before/after per group; verify that the mean PSNR against `materialx-osl` does not fall for any non-subsurface group, or record why
 - [ ] 5.4 Run the full CI set locally (`cargo fmt --all -- --check`, clippy, `cargo test --workspace --no-fail-fast`, `cargo deny --locked check`) and verify it is green
 
