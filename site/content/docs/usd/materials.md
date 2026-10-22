@@ -610,6 +610,11 @@ image. [`--auto-tx`](@/docs/reference/command-line.md#auto-tx) creates the missi
 and `CRUST_TEX_STREAM=0` turns streaming off (see
 [Environment variables](@/docs/reference/environment-variables.md#crust-tex-stream)).
 
+A texture that is already a tiled, mip-mapped EXR streams from that file as it is: Crust
+Render writes no `.tx` for it, even under `--auto-tx`, and does not look for one. Arnold's
+auto-tx converts such a file too (to `<stem>_raw.exr.tx`); Crust Render leaves that copy
+unread.
+
 ### Names
 
 The name records the conversion, as Arnold's auto-tx names it:

@@ -119,7 +119,7 @@
   `-s 16 --indirect-clamp 0`, rendered with `CRUST_TEX_STREAM=0` and streamed after
   `--auto-tx`, compared with `crust diff --json`. Verify: relMSE ≤ 1e-3, and the
   measured values are written into the textures design record.
-- [ ] 5.3 Run the Arnold-backed tests from groups 1 and 4 on a machine with Arnold, and
+- [x] 5.3 Run the Arnold-backed tests from groups 1 and 4 on a machine with Arnold, and
   confirm they are skipped cleanly without it (unset `ARNOLD_BIN`, rename the default
   path). Verify: `cargo test --workspace --no-fail-fast` passes in both setups.
 
@@ -153,7 +153,7 @@
 
 ## 8. Integration
 
-- [ ] 8.1 Run the CI set locally: `cargo fmt --all -- --check`, `cargo clippy --workspace
+- [x] 8.1 Run the CI set locally: `cargo fmt --all -- --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast` and `cargo deny
   --locked check`. Verify: all four pass.
 - [x] 8.2 End to end on the OpenPBR playground (`D:\samples\OpenPBRShaderPlayground-1.1`):

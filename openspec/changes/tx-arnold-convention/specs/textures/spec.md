@@ -118,6 +118,14 @@ stored premultiplied.
 - **WHEN** the source's three channels are equal at every texel
 - **THEN** the `.tx` holds a single channel, and a lookup reads it as grey
 
+#### Scenario: A source that is already tiled and mip-mapped
+
+- **WHEN** a texture is bound to a tiled, mip-mapped EXR (every ALab texture is one),
+  with or without `--auto-tx`
+- **THEN** it streams from that file as it is, no `.tx` is written beside it, and none
+  is looked for — where Arnold's auto-tx converts it to `<stem>_raw.exr.tx` (or the
+  converted name), which crust leaves unread
+
 ### Requirement: A .tx crust writes is one Arnold keeps
 
 A `.tx` written under `--auto-tx` SHALL carry the OIIO metadata Arnold 7.5 writes for
