@@ -150,12 +150,35 @@ pixel, edges included — composite them with `plus` (additive merge):
 whole = char + props
 ```
 
+This holds only when every sample lands in exactly one pass. Every object the camera
+sees, and the dome, must be visible in exactly one pass and held out of all the others.
+An object or a dome visible in two passes is counted twice: if the char pass above left
+`/World/Sky` out of its `matte`, `char + props` would be the whole render plus the sky
+once more wherever the camera sees it. An object held out of every pass leaves a hole.
+Light paths don't need this split: shadows, reflections and bounce light go through
+held-out objects in every pass, so each pass already carries its own share.
+
 `char over props` (`char + (1 − α_char) · props`) is right only where a pixel is wholly
 one pass or the other. At an edge pixel the props pass's colour already leaves out the
 hero's share of the samples, and `over` takes that share away a second time: the edge
-darkens by `α_char · (1 − α_char)` of what lies behind it. Use `over` for a pass that does
-*not* hold the other out — a background rendered with the character merely hidden from
-the camera (`cameraVisibility`), say.
+darkens by `α_char · (1 − α_char)` of the background around it.
+
+Use `over` for a back pass that does *not* hold the front object out, but hides it from
+the camera with `cameraVisibility`:
+
+```usda
+def RenderPass "propsBack"
+{
+    prepend rel collection:cameraVisibility:excludes = </World/Chars>
+}
+```
+
+`char over propsBack` matches the whole render wherever a pixel is wholly one pass or
+the other. At an edge it is exact against an even background such as the sky. Where the
+background changes under the silhouette, such as the hero's contact shadow on the floor,
+`over` adds a small error at edge pixels that more samples don't remove. The back pass
+fills each edge pixel with the whole background behind the hero, but the camera saw only
+part of it.
 
 ## Collections not read
 

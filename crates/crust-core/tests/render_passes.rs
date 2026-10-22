@@ -770,13 +770,42 @@ fn camera_visibility_is_decided_before_light_linking() {
 // Compositing
 // ---------------------------------------------------------------------------
 
-/// `samples/render_passes.usda` rendered with `pass` (or none) at `spp`,
-/// small, unclamped and without adaptive sampling: the beauty and alpha per
-/// pixel.
-fn render_sample(pass: Option<&str>, spp: u32) -> Vec<[f32; 4]> {
+/// `samples/render_passes.usda`.
+fn passes_sample() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/render_passes.usda")
+}
+
+/// `samples/render_passes.usda` with `passes` added beside its own.
+fn passes_sample_with(name: &str, passes: &str) -> PathBuf {
+    let text = std::fs::read_to_string(passes_sample()).expect("read sample");
+    let anchor = "        def RenderPass \"props\"";
+    assert!(text.contains(anchor), "the sample's props pass moved");
+    let path = dir().join(format!("{name}.usda"));
+    std::fs::write(
+        &path,
+        text.replacen(anchor, &format!("{passes}{anchor}"), 1),
+    )
+    .expect("write stage");
+    path
+}
+
+/// The light path expression `render_stage` writes beside the beauty.
+const DIFFUSE_LPE: &str = "C<RD>.*[LO]";
+
+/// Channels per pixel from `render_stage`: the beauty's colour, its alpha and
+/// the colour of `DIFFUSE_LPE`.
+type Px = [f32; 7];
+
+/// `samples/render_passes.usda` rendered with `pass` (or none) at `spp`.
+fn render_sample(pass: Option<&str>, spp: u32) -> Vec<Px> {
+    render_stage(&passes_sample(), pass, spp)
+}
+
+/// `path` rendered with `pass` (or none) at `spp`, small, unclamped and
+/// without adaptive sampling, top-down as a product writes it.
+fn render_stage(path: &Path, pass: Option<&str>, spp: u32) -> Vec<Px> {
     use crust_core::{AovProduct, AovRequest, AovSource, AovVar, Precision, Renderer};
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/render_passes.usda");
-    let scene = load(&path, pass);
+    let scene = load(path, pass);
     let (w, h) = (48, 27);
     let settings = scene
         .settings
@@ -784,24 +813,26 @@ fn render_sample(pass: Option<&str>, spp: u32) -> Vec<[f32; 4]> {
         .with_samples_per_pixel(spp)
         .with_adaptive_sampling(spp, 0.0)
         .with_indirect_clamp(0.0);
-    let alpha = AovVar {
-        prim_path: "/Render/Vars/a".into(),
-        name: "a".into(),
+    let var = |name: &str, source: AovSource, components, expression: Option<&str>| AovVar {
+        prim_path: format!("/Render/Vars/{name}"),
+        name: name.into(),
         channel_prefix: None,
-        source: AovSource::Alpha,
-        components: 1,
+        source,
+        components,
         precision: Precision::Float,
-        accumulation: AovSource::Alpha.default_accumulation(),
+        accumulation: source.default_accumulation(),
         clear: 0.0,
-        expression: None,
+        expression: expression.map(str::to_owned),
         raw: false,
         variance: false,
     };
+    let alpha = var("a", AovSource::Alpha, 1, None);
+    let diffuse = var("diffuse", AovSource::Lpe, 3, Some(DIFFUSE_LPE));
     let request = AovRequest {
         products: vec![AovProduct {
             prim_path: "/Render/p".into(),
             name: "p.exr".into(),
-            vars: vec![alpha.clone()],
+            vars: vec![alpha.clone(), diffuse.clone()],
             attributes: Vec::new(),
         }],
     };
@@ -809,38 +840,55 @@ fn render_sample(pass: Option<&str>, spp: u32) -> Vec<[f32; 4]> {
         .with_volumes(scene.volumes);
     let (beauty, film, _) = r.render_with_aovs(true, &|_, _| {}, &request);
     let a = film.var_channels(&beauty, &alpha).remove(0);
+    let d = film.var_channels(&beauty, &diffuse);
     (0..h)
         .flat_map(|y| (0..w).map(move |x| (x, y)))
         .map(|(x, y)| {
-            let c = beauty.get_pixel(x, y);
-            [c.x, c.y, c.z, a[y * w + x]]
+            // `get_rgb` and `var_channels` both count rows from the top.
+            let (r, g, b) = beauty.get_rgb(x, y);
+            let q = y * w + x;
+            [r, g, b, a[q], d[0][q], d[1][q], d[2][q]]
         })
         .collect()
 }
 
-/// RMS difference of the composite of `fg` and `bg` from `whole`, over the
-/// colour channels: `plus` adds the passes, `over` is `fg + (1 − αfg)·bg`.
-fn composite_error(fg: &[[f32; 4]], bg: &[[f32; 4]], whole: &[[f32; 4]], over: bool) -> f64 {
-    let sum: f64 = fg
-        .iter()
-        .zip(bg)
-        .zip(whole)
-        .map(|((f, b), w)| {
-            let k = if over { 1.0 - f[3] } else { 1.0 };
-            (0..3)
-                .map(|c| (f[c] + k * b[c] - w[c]) as f64)
-                .map(|d| d * d)
-                .sum::<f64>()
-        })
+/// RMS over pixels and the `channels` of `terms` summed with their signs.
+fn rms_sum(terms: &[(f32, &[Px])], channels: std::ops::Range<usize>) -> f64 {
+    let n = terms[0].1.len();
+    let k = channels.len();
+    let sum: f64 = (0..n)
+        .flat_map(|q| channels.clone().map(move |c| (q, c)))
+        .map(|(q, c)| terms.iter().map(|(s, v)| (s * v[q][c]) as f64).sum::<f64>())
+        .map(|d| d * d)
         .sum();
-    (sum / (fg.len() * 3) as f64).sqrt()
+    (sum / (n * k) as f64).sqrt()
+}
+
+/// Per pixel, the RMS over the colour channels of `fg over bg` against
+/// `whole`: `fg + (1 − αfg)·bg`.
+fn over_error(fg: &[Px], bg: &[Px], whole: &[Px]) -> Vec<f64> {
+    (0..fg.len())
+        .map(|q| {
+            let k = 1.0 - fg[q][3];
+            let e: f64 = (0..3)
+                .map(|c| (fg[q][c] + k * bg[q][c] - whole[q][c]) as f64)
+                .map(|d| d * d)
+                .sum();
+            (e / 3.0).sqrt()
+        })
+        .collect()
+}
+
+fn rms(v: impl Iterator<Item = f64>) -> f64 {
+    let (s, n) = v.fold((0.0, 0), |(s, n), e| (s + e * e, n + 1));
+    (s / n.max(1) as f64).sqrt()
 }
 
 /// Each sample of the frame lands in exactly one of two passes that hold each
-/// other out, so their beauties add up to the render with no pass active,
-/// edge pixels included. `over` does not: at an edge it takes the
-/// foreground's share away from the background a second time, a bias that
-/// does not fall with the sample count.
+/// other out, so their beauty, alpha and light path expressions add up to the
+/// render with no pass active, edge pixels included. `over` does not: at an
+/// edge it takes the foreground's share away from the background a second
+/// time, a bias that does not fall with the sample count.
 #[test]
 fn passes_that_hold_each_other_out_add_up_to_the_whole() {
     let mut over = Vec::new();
@@ -848,10 +896,105 @@ fn passes_that_hold_each_other_out_add_up_to_the_whole() {
         let ch = render_sample(Some("/Render/Passes/char"), spp);
         let props = render_sample(Some("/Render/Passes/props"), spp);
         let whole = render_sample(None, spp);
-        let plus = composite_error(&ch, &props, &whole, false);
-        assert!(plus < 1e-6, "{spp} spp: plus {plus}");
-        over.push(composite_error(&ch, &props, &whole, true));
+        let parts = [(1.0, &ch[..]), (1.0, &props[..]), (-1.0, &whole[..])];
+        for (what, channels) in [("colour", 0..3), ("alpha", 3..4), ("lpe", 4..7)] {
+            let e = rms_sum(&parts, channels);
+            assert!(e < 1e-6, "{spp} spp: {what} plus {e}");
+        }
+        over.push(rms(over_error(&ch, &props, &whole).into_iter()));
     }
+    // The expression is not empty: the sum above compares something.
+    assert!(rms_sum(&[(1.0, &render_sample(None, 16)[..])], 4..7) > 1e-2);
     // Bias, not noise: four times the samples leaves it where it was.
     assert!(over[1] > 0.5 * over[0] && over[0] > 1e-3, "over: {over:?}");
+}
+
+/// A dome visible in both passes is counted twice: the sum of the passes is
+/// the whole render plus the dome once more wherever the camera sees it,
+/// which is the dome alone (every geometry held out) to float rounding.
+#[test]
+fn a_dome_visible_in_both_passes_is_counted_twice() {
+    let path = passes_sample_with(
+        "passes_dome_twice",
+        &[
+            pass(
+                "charDome",
+                "            uniform bool collection:matte:includeRoot = 0\n\
+                 prepend rel collection:matte:includes = [</World/Props>, </World/Set>]",
+            ),
+            pass(
+                "dome",
+                "            uniform bool collection:matte:includeRoot = 0\n\
+                 prepend rel collection:matte:includes = [</World/Props>, </World/Set>, </World/Chars>]",
+            ),
+        ]
+        .concat(),
+    );
+    let ch = render_stage(&path, Some("/Render/Passes/charDome"), 16);
+    let props = render_stage(&path, Some("/Render/Passes/props"), 16);
+    let whole = render_stage(&path, None, 16);
+    let dome = render_stage(&path, Some("/Render/Passes/dome"), 16);
+    let doubled = [(1.0, &ch[..]), (1.0, &props[..]), (-1.0, &whole[..])];
+    assert!(rms_sum(&doubled, 0..3) > 1e-2, "the dome is seen twice");
+    let e = rms_sum(
+        &[doubled[0], doubled[1], doubled[2], (-1.0, &dome[..])],
+        0..3,
+    );
+    assert!(e < 1e-6, "plus the dome once more: {e}");
+    // Escaped samples have no alpha in any pass, so alpha still adds up.
+    assert!(rms_sum(&doubled, 3..4) < 1e-6);
+    assert!(dome.iter().all(|p| p[3] == 0.0));
+}
+
+/// The back pass hides the character from the camera instead of holding it
+/// out, so `char over props` is the right merge: exact wherever a pixel is
+/// wholly one pass or the other. At an edge its error is
+/// `α(1 − α)·(B̄ behind − B̄ beside)` over the background `B` the hero covers
+/// and leaves: zero against the uniform sky, noise that falls as 1/√N where
+/// the background is independent of the silhouette, and a bias that does not
+/// fall where it is not (the floor darkened by the hero's own contact shadow,
+/// the crate's edges).
+#[test]
+fn a_back_pass_that_hides_the_character_goes_under_it() {
+    let path = passes_sample_with(
+        "passes_hidden_in_back",
+        &pass(
+            "propsBack",
+            "            prepend rel collection:cameraVisibility:excludes = </World/Chars>",
+        ),
+    );
+    let render = |spp| {
+        let ch = render_stage(&path, Some("/Render/Passes/char"), spp);
+        let back = render_stage(&path, Some("/Render/Passes/propsBack"), spp);
+        let whole = render_stage(&path, None, spp);
+        let e = over_error(&ch, &back, &whole);
+        (ch, back, e)
+    };
+    let (ch16, back16, e16) = render(16);
+    let (ch256, back256, e256) = render(256);
+    let edge = |ch: &[Px], q: usize| ch[q][3] > 0.0 && ch[q][3] < 1.0;
+    // Away from edges.
+    let interior = (0..e16.len()).filter(|&q| !edge(&ch16, q)).map(|q| e16[q]);
+    assert!(rms(interior) < 1e-6);
+    // Edges against the sky: the background is the one dome colour.
+    let sky: Vec<usize> = (0..e16.len())
+        .filter(|&q| edge(&ch16, q) && back16[q][3] == 0.0)
+        .collect();
+    assert!(!sky.is_empty());
+    assert!(rms(sky.iter().map(|&q| e16[q])) < 1e-5);
+    // Edges against the floor at both sample counts: a bias that sixteen
+    // times the samples barely moves (noise would fall to a quarter).
+    let floor: Vec<usize> = (0..e16.len())
+        .filter(|&q| edge(&ch16, q) && edge(&ch256, q))
+        .filter(|&q| back16[q][3] == 1.0 && back256[q][3] == 1.0)
+        .collect();
+    assert!(floor.len() > 10, "{} floor edge pixels", floor.len());
+    let (b16, b256) = (
+        rms(floor.iter().map(|&q| e16[q])),
+        rms(floor.iter().map(|&q| e256[q])),
+    );
+    assert!(
+        b16 > 1e-3 && b256 > 0.5 * b16,
+        "floor edges: {b16} then {b256}"
+    );
 }

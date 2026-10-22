@@ -72,7 +72,7 @@
   - the zero-AOV instruction-count test passes.
 
   Record the numbers in the rendering design record.
-- [ ] 3.4 Verify the two-pass composites end to end on one sample stage (added
+- [x] 3.4 Verify the two-pass composites end to end on one sample stage (added
   under `samples/`), at `-s 16` and `--indirect-clamp 0`:
   - **holding each other out:** the character pass holds out the props, the
     props pass holds out the character and the dome. The **sum** of their beauty,
@@ -108,7 +108,7 @@
 
 ## 5. User documentation and design records
 
-- [ ] 5.1 Write `site/content/docs/usd/render-passes.md`. It covers choosing a pass,
+- [x] 5.1 Write `site/content/docs/usd/render-passes.md`. It covers choosing a pass,
   `renderSource`, `matte` and `cameraVisibility` with a worked character/background
   example, recombining passes (plus for passes that hold each other out, with the
   rule that every camera-visible object and the dome are visible in exactly one
