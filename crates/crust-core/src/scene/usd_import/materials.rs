@@ -9,10 +9,10 @@ use std::time::Instant;
 
 use glam::Vec3A;
 use openusd::sdf;
-use openusd::usd::{Prim, Stage};
+use openusd::usd::{CollectionAPI, Prim, Stage};
 use openusd_schemas::shade::{
-    Connectable, Material as UsdMaterial, MaterialBindingAPI, ProducerFilter, Shader,
-    TerminalSource,
+    BindingStrength, Connectable, Material as UsdMaterial, MaterialBindingAPI, ProducerFilter,
+    Shader, TerminalSource,
 };
 use tracing::debug;
 
@@ -188,14 +188,16 @@ const RENDER_BINDING_PURPOSE: &str = "full";
 ///   `/scene/Looks/…` from five sibling chunks). That answer would drop the
 ///   binding: no material provenance for `crust mcp`, no
 ///   `material.fallback_default` warning. So when it answers nothing, the
-///   binding is read as the target of the nearest direct binding instead
-///   ([`direct_binding_target`]), which the resolution then reports as
-///   unresolvable, as it always did.
+///   binding is read as the *winning* binding's target instead
+///   ([`winning_binding_target`]), which the resolution then reports as
+///   unresolvable, as it always did. It has to be the winner, strength and
+///   collections included: a weaker binding that does resolve would render
+///   its material where the winner's default grey belongs.
 pub(super) fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
     let api = nearest_binding_api(stage, prim.path().clone())?;
     match api.bound_material(RENDER_BINDING_PURPOSE) {
         Ok(Some(material)) => Some(material.path().clone()),
-        _ => direct_binding_target(stage, api.path().clone()),
+        _ => winning_binding_target(stage, api.path()),
     }
 }
 
@@ -214,26 +216,91 @@ fn nearest_binding_api(stage: &Stage, path: sdf::Path) -> Option<MaterialBinding
     None
 }
 
-/// The target of the nearest direct binding on `path` or an ancestor, for
-/// [`RENDER_BINDING_PURPOSE`] across the whole chain before the all-purpose
-/// binding, as `bound_material` orders them. What a binding whose target is
-/// absent from the stage, or not a `Material`, names; it reads neither
-/// binding strength nor collection bindings, which only choose between
-/// materials that resolve.
-fn direct_binding_target(stage: &Stage, path: sdf::Path) -> Option<sdf::Path> {
+/// The target of the binding that wins for `queried`, as openusd-schemas'
+/// `bound_material` chooses it, but answering the target path whether or not
+/// it is a `Material` on this stage. [`RENDER_BINDING_PURPOSE`] is resolved
+/// across the whole ancestor chain before the all-purpose binding; within a
+/// purpose the closest binding wins unless an ancestor's is
+/// `strongerThanDescendants` (the topmost such then wins); at one prim a
+/// collection binding including `queried` beats the direct one, in native
+/// property order. The walk visits only prims carrying `MaterialBindingAPI`.
+fn winning_binding_target(stage: &Stage, queried: &sdf::Path) -> Option<sdf::Path> {
     [RENDER_BINDING_PURPOSE, ""]
         .into_iter()
         .find_map(|purpose| {
-            let mut at = Some(path.clone());
-            while let Some(p) = at {
-                let api = nearest_binding_api(stage, p)?;
-                if let Ok(Some(target)) = api.direct_binding(purpose) {
-                    return Some(target);
+            let mut winner = None;
+            let mut at = Some(queried.clone());
+            while let Some(api) = at.and_then(|p| nearest_binding_api(stage, p)) {
+                if let Some((target, strength)) = winning_binding_at(stage, &api, queried, purpose)
+                    && (winner.is_none() || strength == BindingStrength::StrongerThanDescendants)
+                {
+                    winner = Some(target);
                 }
                 at = api.path().parent();
             }
-            None
+            winner
         })
+}
+
+/// The binding that wins at `api`'s prim for `queried` and one `purpose`, as
+/// `(target, strength)`: a collection binding whose collection includes
+/// `queried`, in native property order, else the direct binding.
+fn winning_binding_at(
+    stage: &Stage,
+    api: &MaterialBindingAPI,
+    queried: &sdf::Path,
+    purpose: &str,
+) -> Option<(sdf::Path, BindingStrength)> {
+    let prefix = "material:binding:collection:";
+    for name in api.authored_property_names().unwrap_or_default() {
+        let Some(rest) = name.as_str().strip_prefix(prefix) else {
+            continue;
+        };
+        // `<purpose>:<name>` is purpose-restricted; anything else is
+        // all-purpose, as C++ `_GetMaterialPurpose` counts tokens.
+        let (binding_purpose, binding_name) = match rest.split_once(':') {
+            Some((p, n)) if !n.contains(':') => (p, n),
+            _ => ("", rest),
+        };
+        if binding_purpose != purpose {
+            continue;
+        }
+        let Ok(Some((collection, target))) = api.collection_binding(binding_name, purpose) else {
+            continue;
+        };
+        if collection_includes(stage, &collection, queried) {
+            let strength = api
+                .path()
+                .append_property(name.as_str())
+                .ok()
+                .and_then(|rel| stage.field::<sdf::Value>(rel, "bindMaterialAs").ok())
+                .and_then(|v| match v {
+                    Some(sdf::Value::Token(t)) => BindingStrength::from_token(t),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return Some((target, strength));
+        }
+    }
+    let target = api.direct_binding(purpose).ok()??;
+    Some((target, api.binding_strength(purpose).unwrap_or_default()))
+}
+
+/// Whether the collection at `collection` (a `<prim>.collection:<name>`
+/// path) includes `queried`; a path that names no collection includes nothing.
+fn collection_includes(stage: &Stage, collection: &sdf::Path, queried: &sdf::Path) -> bool {
+    let Some((prim, name)) = CollectionAPI::instance_at_path(collection) else {
+        return false;
+    };
+    stage
+        .prim(prim)
+        .ok()
+        .and_then(|prim| {
+            CollectionAPI::from_prim_unchecked(prim, name)
+                .membership_query()
+                .ok()
+        })
+        .is_some_and(|q| q.is_included(queried))
 }
 
 /// The material bound to `prim`, for a prim that cannot be displaced
