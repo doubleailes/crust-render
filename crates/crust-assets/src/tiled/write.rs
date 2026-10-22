@@ -302,3 +302,60 @@ pub(crate) fn now_stamp() -> String {
         rem % 60
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pyramid whose levels store samples of different widths — 16-bit
+    /// level 0, 8-bit level 1 — would be sampled as one payload throughout,
+    /// so the reader declines it and the texture preloads.
+    #[test]
+    fn a_tiff_with_levels_of_mixed_depth_declines() {
+        let dir = std::env::temp_dir().join("crust_tiff_mixed_depth");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("mixed.tx");
+        let level = |edge: usize| Image {
+            width: edge,
+            height: edge,
+            channels: vec!["R", "G", "B"],
+            pixels: vec![0.5; edge * edge * 3],
+        };
+        let meta = TxMeta {
+            software: "crust-render test".into(),
+            sha1: "0".into(),
+            average: "0".into(),
+            constant: None,
+            date: "2026:01:01 00:00:00".into(),
+        };
+        let mut enc = tiff::encoder::TiffEncoder::new(io::BufWriter::new(
+            std::fs::File::create(&path).expect("create"),
+        ))
+        .expect("encoder");
+        let exif = tiff::encoder::Ifd(0);
+        let (l0, l1) = (level(2), level(1));
+        write_level(
+            &mut enc,
+            &l0,
+            &Samples::U16(vec![32768; 12]),
+            true,
+            &meta,
+            &exif,
+        )
+        .expect("level 0");
+        write_level(
+            &mut enc,
+            &l1,
+            &Samples::U8(vec![128; 3]),
+            false,
+            &meta,
+            &exif,
+        )
+        .expect("level 1");
+        drop(enc);
+        let err = super::super::TiledFile::open(&path).expect_err("mixed depths decline");
+        assert!(err.to_string().contains("level 1"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

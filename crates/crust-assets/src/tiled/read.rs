@@ -88,7 +88,7 @@ impl TiffFile {
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "an unspecified extra sample under the horizontal predictor decodes wrong                  in `tiff` 0.11.3 — preloaded instead",
+                "an unspecified extra sample under the horizontal predictor decodes wrong in `tiff` 0.11.3 — preloaded instead",
             ));
         }
 
@@ -115,6 +115,14 @@ impl TiffFile {
             .and_then(|v| v.into_u16_vec().ok())
             .is_some_and(|v| v.first().is_some_and(|&b| b > 8));
 
+        // Every level must store what level 0 does: the payload (`u8`, or
+        // `half` for 16-bit and float samples) is chosen once, for the file,
+        // and a level of another width would be sampled as the wrong type.
+        // Neither OIIO nor crust writes one; such a file declines and preloads.
+        let sample_type =
+            |dec: &mut TiffReader| (u16s(dec, Tag::BitsPerSample), u16s(dec, Tag::SampleFormat));
+        let level0_samples = sample_type(&mut dec);
+
         let (tw, th) = dec.chunk_dimensions();
         if tw == 0 || th == 0 || tw != th {
             return Err(io::Error::new(
@@ -137,6 +145,12 @@ impl TiffFile {
             let (w, h) = (w as usize, h as usize);
             if w == 0 || h == 0 {
                 break;
+            }
+            if n > 0 && sample_type(&mut dec) != level0_samples {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("level {n} stores samples of another type than level 0"),
+                ));
             }
             levels.push(LevelInfo {
                 width: w,

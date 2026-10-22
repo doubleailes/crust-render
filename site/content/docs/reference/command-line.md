@@ -612,8 +612,10 @@ Crust Render finds and writes the files Arnold uses. It is independent of
 [`--working-space`](#working-space): a render in `lin_rec709` still reads the `ACEScg`
 files and converts their values into its working space.
 
-A name the OCIO config does not define is refused before anything is loaded. Set it to
-the rendering space your Arnold scenes use when that is not ACEScg.
+A name you give that the OCIO config does not define is refused before anything is
+loaded. Without the flag, a config that has no `ACEScg` still renders: every `.tx` is
+then looked for and written as `_raw`. Set it to the rendering space your Arnold scenes
+use when that is not ACEScg.
 
 ```bash
 crust render -i scene.usda --auto-tx --tx-color-space "Linear Rec.709 (sRGB)"

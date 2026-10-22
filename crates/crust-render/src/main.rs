@@ -358,25 +358,33 @@ struct SceneArgs {
     auto_tx: bool,
     /// The colour space a `.tx` converts to, which its name records, by any
     /// name or alias of the OCIO config. Defaults to `ACEScg`, Arnold's
-    /// rendering space, so crust finds and writes the files Arnold uses;
-    /// independent of `--working-space`.
-    #[arg(long, value_name = "SPACE", default_value = crust_assets::DEFAULT_TX_COLOR_SPACE)]
-    tx_color_space: String,
+    /// rendering space, so crust finds and writes the files Arnold uses (in a
+    /// config without `ACEScg`, every `.tx` is `_raw`); independent of
+    /// `--working-space`.
+    #[arg(long, value_name = "SPACE")]
+    tx_color_space: Option<String>,
 }
 
 /// The asset loader a command's scene flags ask for: `--auto-tx`, converting
 /// to the `.tx` target `--tx-color-space` names, resolved in the OCIO config
-/// now installed (so after `--ocio-config` / `$OCIO`). A space the config
-/// does not define is a usage error, and nothing is loaded.
+/// now installed (so after `--ocio-config` / `$OCIO`). A space the user names
+/// that the config does not define is a usage error, and nothing is loaded;
+/// the default falls back to the config's data space, so a config without
+/// `ACEScg` still renders.
 fn scene_assets(scene: &SceneArgs) -> FileAssets {
-    let Some(target) = crust_core::color::Space::named(&scene.tx_color_space) else {
+    let Some(name) = &scene.tx_color_space else {
+        return FileAssets::new()
+            .with_auto_tx(scene.auto_tx)
+            .with_tx_color_space(crust_assets::default_tx_color_space());
+    };
+    let Some(target) = crust_core::color::Space::named(name) else {
         use clap::CommandFactory;
         Cli::command()
             .error(
                 clap::error::ErrorKind::InvalidValue,
                 format!(
                     "--tx-color-space {}: the OCIO config ({}) defines no such colour space",
-                    scene.tx_color_space,
+                    name,
                     crust_core::color::config_source()
                 ),
             )

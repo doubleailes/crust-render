@@ -655,28 +655,40 @@ mod tests {
     /// converts to half.
     #[test]
     fn the_software_string_is_arnolds_command_line() {
+        // `C:/…` is absolute only on Windows; elsewhere `std::path::absolute`
+        // would prefix the working directory, so the paths drop the drive.
+        let here = |s: &str| {
+            if cfg!(windows) {
+                s.to_string()
+            } else {
+                s.replace("C:", "")
+            }
+        };
+        let path = |s: &str| std::path::PathBuf::from(here(s));
         let t = acescg();
         let line = command_line(
-            Path::new("C:/tex dir/a.png"),
-            Path::new("C:/tex dir/a_x.png.tx"),
+            &path("C:/tex dir/a.png"),
+            &path("C:/tex dir/a_x.png.tx"),
             true,
             Some((Space::SRGB_TEXTURE, t)),
         );
         assert_eq!(
             line,
-            "OpenImageIO-Arnold 2.6.3.0dev : maketx \"C:/tex dir/a.png\" --opaque-detect \
-             --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib \
-             tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \
-             \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"C:/tex dir/a_x.png.tx\""
+            here(
+                "OpenImageIO-Arnold 2.6.3.0dev : maketx \"C:/tex dir/a.png\" --opaque-detect \
+                 --constant-color-detect --monochrome-detect --fixnan box3 --oiio --attrib \
+                 tiff:half 1 --unpremult -u --format exr -d half --compression dwaa --colorconvert \
+                 \"sRGB Encoded Rec.709 (sRGB)\" ACEScg --attrib autotx 1 -o \"C:/tex dir/a_x.png.tx\""
+            )
         );
-        let line = command_line(Path::new("C:/t/a.png"), Path::new("C:/t/a.tx"), false, None);
+        let line = command_line(&path("C:/t/a.png"), &path("C:/t/a.tx"), false, None);
         assert!(
-            line.ends_with("--unpremult -u --attrib autotx 1 -o C:/t/a.tx"),
+            line.ends_with(&here("--unpremult -u --attrib autotx 1 -o C:/t/a.tx")),
             "{line}"
         );
-        let line = command_line(Path::new("C:/t/a.exr"), Path::new("C:/t/a.tx"), false, None);
+        let line = command_line(&path("C:/t/a.exr"), &path("C:/t/a.tx"), false, None);
         assert!(
-            line.ends_with("--attrib autotx 1 --format exr -o C:/t/a.tx"),
+            line.ends_with(&here("--attrib autotx 1 --format exr -o C:/t/a.tx")),
             "{line}"
         );
     }
