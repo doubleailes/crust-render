@@ -93,6 +93,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_PTEX_STREAM_MIN_MB`](#crust-ptex-stream-min-mb) | 8 | Ptex |
 | [`CRUST_PTEX_STREAM_MIPSPACE`](#crust-ptex-stream-mipspace) | `capped` | Ptex |
 | [`OCIO`](#ocio) | builtin ACES CG config | colour |
+| [`PXR_MTLX_PLUGIN_SEARCH_PATHS`](#pxr-mtlx-plugin-search-paths) | none | MaterialX |
 | [`RAYON_NUM_THREADS`](#rayon-num-threads) | all cores | threads |
 
 ## USD import
@@ -458,6 +459,24 @@ loaded, or lacks a space Crust Render needs, stops the render with an error nami
 
 ```bash
 OCIO=/studio/config.ocio crust render -i scene.usda --working-space acescg
+```
+
+### PXR_MTLX_PLUGIN_SEARCH_PATHS
+
+USD's own variable for custom MaterialX node definitions, as its `usdMtlx` plugin reads
+it: a list of directories, separated by `;` on Windows and `:` elsewhere. Crust Render
+reads every `.mtlx` file under them, subdirectories included, once per import, and
+keeps each file's `<nodedef>`s and the `<nodegraph>`s that implement them. A path or
+file that can't be read logs a
+[`mtlx.library_unreadable`](@/docs/reference/warnings.md#materials) warning naming it,
+and the rest still loads. Unset, nothing is read.
+
+A material that instantiates one of those nodes, in a `.mtlx` or as a USD `Shader` whose
+`info:id` is the nodedef's name, renders as the node's graph. See
+[custom MaterialX nodes](@/docs/usd/materials.md#custom-materialx-nodes).
+
+```bash
+PXR_MTLX_PLUGIN_SEARCH_PATHS=/studio/mtlx crust check -i shot.usda
 ```
 
 ### RAYON_NUM_THREADS

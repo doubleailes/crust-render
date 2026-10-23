@@ -567,7 +567,28 @@ pub fn load_in(
     host: &Host<'_>,
     luma: utils::Luma,
 ) -> Result<Loaded, MtlxError> {
-    from_compiled(crust_mtlx::compile(path, material_node, host)?, luma)
+    load_with(
+        path,
+        material_node,
+        &crust_mtlx::Library::default(),
+        host,
+        luma,
+    )
+}
+
+/// [`load_in`], with the custom nodes the document instantiates expanded
+/// from its own definitions and then `library`'s ([`crust_mtlx::Doc::expand`]).
+pub fn load_with(
+    path: &std::path::Path,
+    material_node: Option<&str>,
+    library: &crust_mtlx::Library,
+    host: &Host<'_>,
+    luma: utils::Luma,
+) -> Result<Loaded, MtlxError> {
+    from_compiled(
+        crust_mtlx::compile_with(path, material_node, library, host)?,
+        luma,
+    )
 }
 
 /// Builds a material from an already-compiled MaterialX graph — a `.mtlx`'s

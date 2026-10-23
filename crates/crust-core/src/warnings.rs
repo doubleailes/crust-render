@@ -386,6 +386,8 @@ warning_codes! {
         "Part of a MaterialX network is not represented; those inputs fall back to their defaults.";
     MtlxUnusable => "mtlx.unusable", Skipped, Each,
         "A MaterialX document or network cannot be used; the material falls back.";
+    MtlxLibraryUnreadable => "mtlx.library_unreadable", Skipped, Each,
+        "A path in PXR_MTLX_PLUGIN_SEARCH_PATHS, or a .mtlx file under it, cannot be read; its node definitions are not loaded.";
     PreviewMultiplePrimvars => "preview.multiple_primvars", Approximated, Each,
         "A UsdPreviewSurface's textures read several primvars; the first is read for all.";
     PreviewUnsupportedConnection => "preview.unsupported_connection", Skipped, Each,

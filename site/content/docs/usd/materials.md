@@ -24,7 +24,7 @@ Crust Render picks the material's surface shader by its `info:id`:
 | `info:id = "crust:openpbr"` | Crust's own shader: every OpenPBR parameter, one to one. [See below](#the-crust-openpbr-shader). |
 | `info:id = "UsdPreviewSurface"` | mapped onto OpenPBR, with `UsdUVTexture` and Ptex texture inputs |
 | `info:id = "PxrDisneyBsdf"` | mapped onto OpenPBR (as authored by the Moana Island) |
-| a reference into a `.mtlx` file | read as a MaterialX graph: standalone BSDF nodes, `open_pbr_surface`, `standard_surface`, `gltf_pbr`, image and UDIM textures, normal maps, [hair](#hair) |
+| a reference into a `.mtlx` file | read as a MaterialX graph: standalone BSDF nodes, `open_pbr_surface`, `standard_surface`, `gltf_pbr`, `UsdPreviewSurface`, image and UDIM textures, normal maps, [hair](#hair) |
 | `info:id = "ND_…"` (a MaterialX nodedef) | an inline MaterialX network, read exactly as the same graph in a `.mtlx`. [See below](#materialx-networks-in-usd). |
 
 A material Crust Render can't read logs a warning and renders as grey diffuse. Look for
@@ -67,6 +67,49 @@ The node's type comes from the nodedef name (`ND_mix_vdf` is a `mix` of VDFs,
 `ND_dielectric_bsdf` a `dielectric_bsdf`). Inputs are read as values, or followed through
 connections, including through `NodeGraph` outputs and `Material` interface inputs.
 `asset` inputs resolve against the layer that authored them.
+
+`ND_UsdPreviewSurface_surfaceshader`, the surface a DCC's MaterialX export often writes, is
+built from MaterialX's own implementation of it, so its inputs can come from any
+MaterialX graph. It differs from the UsdShade `info:id = "UsdPreviewSurface"` in one
+respect: that one is mapped onto OpenPBR, this one is MaterialX's graph of diffuse,
+Schlick specular, metal and clearcoat BSDFs, as a MaterialX renderer shades it.
+`occlusion` and `displacement` are not applied, and say so in a warning.
+
+### Custom MaterialX nodes
+
+A studio node library — a DCC's own nodes, a show's helpers — defines each node
+with a `<nodedef>` and implements it as a `<nodegraph nodedef="…">` of standard nodes.
+Crust Render finds those definitions where USD does, in the `.mtlx` files under
+[`PXR_MTLX_PLUGIN_SEARCH_PATHS`](@/docs/reference/environment-variables.md#pxr-mtlx-plugin-search-paths),
+and also reads the ones a `.mtlx` document declares itself, which take precedence.
+
+```bash
+PXR_MTLX_PLUGIN_SEARCH_PATHS=/studio/mtlx crust render -i shot.usda
+```
+
+An instance of such a node, in a `.mtlx` or as a `Shader` whose `info:id` names the
+nodedef, renders as its graph: each input bound to the graph's interface
+takes the instance's input, or the nodedef's default when the instance leaves it
+unauthored, and an instance's named outputs are the graph's.
+Custom nodes inside custom nodes expand too, up to 16 levels deep. A node inside a graph
+that Crust Render doesn't implement is named in the `mtlx.incomplete` warning, and the
+inputs it drives keep their defaults. A definition never replaces one of Crust Render's
+own nodes: a library's `mix` is ignored in favour of the built-in one.
+
+These standard nodes, which such libraries are built from, evaluate as MaterialX
+defines them:
+
+| node | what it does |
+|------|--------------|
+| `separate2`, `separate3`, `separate4` | one channel per output (`outr`, `outg`, `outb`, `outa`, or `outx`… for vectors) |
+| `switch` | `in1` when `which` is below 1, `in2` below 2, … `in10` below 10, and zero from 10 on |
+| `over`, `in`, `out`, `difference`, `premult` | `color4` compositing, `fg` over (inside, outside, the difference with) `bg`, blended with `bg` by `mix` |
+| `place2d` | moves a texture coordinate: scale, rotate (in degrees) and offset about a pivot, in SRT or TRS order |
+| `transformmatrix` | a vector times a matrix. A `vector3` by a `matrix44` is a point: the matrix's last row translates it, as in MaterialX's GLSL |
+
+`transformmatrix` takes its matrix only as a constant: a value, or a `constant` node's
+value. A matrix computed from anything else is reported, and the vector passes through
+unchanged. `position` reads the world-space position; another `space` is reported.
 
 A universal `outputs:surface` with a decodable shader, such as a `UsdPreviewSurface`, is
 still used first. The `mtlx` terminal is read when the material has nothing else Crust

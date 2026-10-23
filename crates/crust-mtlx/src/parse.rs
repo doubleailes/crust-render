@@ -8,12 +8,15 @@
 //! later in the file.
 //!
 //! Deliberately partial. This reads the subset a look-dev document actually
-//! uses — nodes, their inputs, and nodegraph outputs — and ignores the parts
-//! that describe *code generation* rather than appearance: `<nodedef>` and
-//! `<implementation>` declare custom node signatures for a shader compiler,
-//! and the two teapot/lion documents declare one (an OCIO colour transform)
-//! that they never instantiate. Skipping them is not a gap in the shading.
+//! uses — nodes, their inputs, and nodegraph outputs. A document's own
+//! `<nodedef>`s and the `<nodegraph nodedef=…>` graphs implementing them are
+//! definitions, not material nodes: they go to [`Doc::library`]
+//! ([`crate::library`]), beside the definitions a host loads from a search
+//! path. `<implementation>` elements, which name source code for a shader
+//! generator, are skipped: the two teapot/lion documents declare one (an OCIO
+//! colour transform) that they never instantiate.
 
+use super::library::Library;
 use super::value::{Val, parse_literal};
 use std::collections::HashMap;
 
@@ -47,6 +50,11 @@ pub struct Input {
     /// is a number: `filename` and `string` inputs carry asset paths and
     /// tokens, which [`Source::Value`] has no way to hold.
     pub text: Option<String>,
+    /// The `interfacename` attribute: the input of the enclosing nodegraph
+    /// (or nodedef, for an implementation graph) this input is bound to.
+    /// The [`Input::source`] of such an input is the zero literal, as
+    /// before `interfacename` was read; binding it is the expansion's.
+    pub interface: Option<String>,
 }
 
 /// One node: its category (the XML tag, which *is* the operator), its name,
@@ -80,6 +88,14 @@ impl Node {
 /// A parsed `.mtlx` document.
 pub struct Doc {
     pub nodes: Vec<Node>,
+    /// The node definitions the document declares itself.
+    pub library: Library,
+    /// What [`Doc::expand`] could not do, for the material's warning.
+    pub reported: Vec<String>,
+    /// Each expanded document-scope instance → the node its default output
+    /// now forwards to (itself possibly an instance expanded later), so a
+    /// terminal that named the instance still finds it ([`Doc::find_node`]).
+    pub(crate) expanded: HashMap<String, String>,
     /// The root `<materialx>` element's `colorspace`: the outermost default
     /// of [`Doc::colorspace_of`].
     pub colorspace: Option<String>,
@@ -90,7 +106,7 @@ pub struct Doc {
     index: HashMap<(String, String), usize>,
     /// `(graph, output name) → the connection it forwards to`, from a
     /// `<nodegraph>`'s `<output nodename=…>` children.
-    graph_outputs: HashMap<(String, String), GraphTarget>,
+    pub(crate) graph_outputs: HashMap<(String, String), GraphTarget>,
 }
 
 /// What one `<output>` declaration forwards to: a node by name, plus which of
@@ -98,9 +114,9 @@ pub struct Doc {
 /// graph exposing `artistic_ior`'s `extinction` says so *on the `<output>`*,
 /// and dropping it silently yields the node's first output (`ior`) instead.
 #[derive(Clone, Debug)]
-struct GraphTarget {
-    node: String,
-    output: Option<String>,
+pub(crate) struct GraphTarget {
+    pub(crate) node: String,
+    pub(crate) output: Option<String>,
 }
 
 /// A nodegraph output resolved to the node it forwards to, carrying the
@@ -154,8 +170,13 @@ impl Doc {
     pub fn parse(text: &str) -> Result<Doc, MtlxError> {
         let text = escape_udim_tokens(text);
         let dom = roxmltree::Document::parse(&text).map_err(MtlxError::Xml)?;
+        let mut library = Library::default();
+        library.merge_dom(dom.root_element());
         let mut doc = Doc {
             nodes: Vec::new(),
+            library,
+            reported: Vec::new(),
+            expanded: HashMap::new(),
             colorspace: colorspace_attr(dom.root_element()),
             graph_colorspaces: HashMap::new(),
             index: HashMap::new(),
@@ -163,8 +184,10 @@ impl Doc {
         };
         for child in dom.root_element().children().filter(|n| n.is_element()) {
             match child.tag_name().name() {
-                // Declarations for a shader compiler, not appearance.
+                // Definitions (in `library` above), and declarations for a
+                // shader compiler, not appearance.
                 "nodedef" | "implementation" | "typedef" | "look" | "variantset" => {}
+                "nodegraph" if child.attribute("nodedef").is_some() => {}
                 "nodegraph" => {
                     let g = child.attribute("name").unwrap_or_default().to_string();
                     if let Some(cs) = colorspace_attr(child) {
@@ -219,6 +242,9 @@ impl Doc {
     pub fn from_nodes(nodes: Vec<Node>) -> Doc {
         let mut doc = Doc {
             nodes: Vec::with_capacity(nodes.len()),
+            library: Library::default(),
+            reported: Vec::new(),
+            expanded: HashMap::new(),
             colorspace: None,
             graph_colorspaces: HashMap::new(),
             index: HashMap::new(),
@@ -242,6 +268,16 @@ impl Doc {
         self.nodes.push(node);
     }
 
+    /// Rebuilds the name index after [`Doc::nodes`] changed, with
+    /// [`Doc::push`]'s rule: the first of two equal names wins.
+    pub(crate) fn reindex(&mut self) {
+        self.index.clear();
+        for (i, n) in self.nodes.iter().enumerate() {
+            let key = (n.graph.clone().unwrap_or_default(), n.name.clone());
+            self.index.entry(key).or_insert(i);
+        }
+    }
+
     /// Looks up a node by name within a scope (`graph` empty for document
     /// scope), falling back to document scope so a node inside a graph can
     /// reference one outside it.
@@ -250,6 +286,21 @@ impl Doc {
             .get(&(graph.to_string(), name.to_string()))
             .or_else(|| self.index.get(&(String::new(), name.to_string())))
             .map(|&i| &self.nodes[i])
+    }
+
+    /// The document-scope node called `name`, or — when `name` was a custom
+    /// node [`Doc::expand`] replaced — the node standing for its default
+    /// output: what a terminal naming the instance (a USD material's surface
+    /// shader) compiles from.
+    pub fn find_node(&self, name: &str) -> Option<&Node> {
+        let mut name = name;
+        for _ in 0..=crate::MAX_EXPANSION_DEPTH {
+            if let Some(n) = self.find("", name) {
+                return Some(n);
+            }
+            name = self.expanded.get(name)?;
+        }
+        None
     }
 
     /// Resolves `nodegraph="G" output="o"` to the node the graph's output
@@ -321,7 +372,7 @@ impl Doc {
 /// MaterialX specification defines, which no element in its schema is named,
 /// so this cannot swallow real markup. `roxmltree` decodes the entities back,
 /// leaving the attribute holding exactly `<UDIM>` again.
-fn escape_udim_tokens(text: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn escape_udim_tokens(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains("<UDIM>") && !text.contains("<UVTILE>") {
         return std::borrow::Cow::Borrowed(text);
     }
@@ -331,7 +382,7 @@ fn escape_udim_tokens(text: &str) -> std::borrow::Cow<'_, str> {
     )
 }
 
-fn parse_node(el: roxmltree::Node<'_, '_>, graph: Option<String>) -> Node {
+pub(crate) fn parse_node(el: roxmltree::Node<'_, '_>, graph: Option<String>) -> Node {
     let type_name = el.attribute("type").unwrap_or("float").to_string();
     let mut inputs = Vec::new();
     for i in el.children().filter(|n| n.is_element()) {
@@ -369,6 +420,7 @@ fn parse_node(el: roxmltree::Node<'_, '_>, graph: Option<String>) -> Node {
             source,
             colorspace: colorspace_attr(i),
             text,
+            interface: i.attribute("interfacename").map(str::to_string),
         });
     }
     Node {
@@ -438,9 +490,52 @@ mod tests {
 
     #[test]
     fn nodedefs_are_not_nodes() {
-        // They declare signatures for a shader compiler. Treating one as a
-        // node would put an uninstantiated operator in the graph.
+        // They declare signatures. Treating one as a node would put an
+        // uninstantiated operator in the graph.
         let d = Doc::parse(DOC).unwrap();
         assert!(d.find("", "ND_custom").is_none());
+        assert_eq!(
+            d.library.nodedef("ND_custom").map(|n| n.node.as_str()),
+            Some("custom")
+        );
+    }
+
+    /// An implementation graph is a definition: its nodes are in the
+    /// library, not the document, where a name it shares with a material
+    /// node would otherwise shadow nothing but still be compiled if reached.
+    #[test]
+    fn an_implementation_graph_is_a_definition_not_a_network() {
+        let d = Doc::parse(
+            r#"<materialx version="1.39">
+                 <nodedef name="ND_twice_float" node="twice">
+                   <input name="in" type="float" value="0" />
+                   <output name="out" type="float" />
+                 </nodedef>
+                 <nodegraph name="NG_twice_float" nodedef="ND_twice_float">
+                   <add name="sum" type="float">
+                     <input name="in1" type="float" interfacename="in" />
+                     <input name="in2" type="float" interfacename="in" />
+                   </add>
+                   <output name="out" type="float" nodename="sum" />
+                 </nodegraph>
+                 <twice name="t" type="float"><input name="in" type="float" value="2" /></twice>
+               </materialx>"#,
+        )
+        .unwrap();
+        assert!(d.find("NG_twice_float", "sum").is_none());
+        assert_eq!(d.nodes.len(), 1, "only the instance");
+        let imp = d
+            .library
+            .implementation("ND_twice_float")
+            .expect("its graph");
+        let sum = &imp.nodes[0];
+        assert_eq!(
+            sum.input("in1").and_then(|i| i.interface.as_deref()),
+            Some("in")
+        );
+        assert_eq!(
+            sum.input("in2").and_then(|i| i.interface.as_deref()),
+            Some("in")
+        );
     }
 }

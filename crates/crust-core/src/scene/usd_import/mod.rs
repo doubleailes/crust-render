@@ -909,6 +909,10 @@ fn traverse_stage(
                 ctx.pending_meshes.len()
             );
         }
+        // The materials the chunks bound from outside themselves, dropped
+        // before the top-level commit as every chunk's stage is.
+        let layers = ctx.caches.materials.outside.release();
+        ctx.layers.extend(layers);
     }
     Ok(())
 }
@@ -2029,7 +2033,7 @@ impl<'a> ImportCaches<'a> {
         working: crate::color::Space,
     ) -> Self {
         ImportCaches {
-            materials: MaterialCache::default(),
+            materials: MaterialCache::new(),
             meshes: MeshArena {
                 working,
                 ..MeshArena::new(subdiv)

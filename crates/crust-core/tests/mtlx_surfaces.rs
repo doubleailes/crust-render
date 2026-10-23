@@ -1,5 +1,5 @@
 //! MaterialX surface-shader nodes (`open_pbr_surface`, `standard_surface`,
-//! `gltf_pbr`) expanded into their nodegraphs' closure trees, checked in
+//! `gltf_pbr`, `UsdPreviewSurface`) expanded into their nodegraphs' closure trees, checked in
 //! numbers through the probe — every scenario of the materials spec's
 //! surface-shader requirements.
 
@@ -1513,4 +1513,135 @@ fn an_inactive_dielectric_does_not_set_the_walk_entry() {
     assert!(near(entry_ior(1.0), 2.5, 1e-5), "{}", entry_ior(1.0));
     // Mostly background: the heavier branch sets the interface.
     assert!(near(entry_ior(0.2), 1.3, 1e-5), "{}", entry_ior(0.2));
+}
+
+/// A MaterialX `UsdPreviewSurface` (`ND_UsdPreviewSurface_surfaceshader`, the
+/// id a DCC's MaterialX export gives its surfaces) is its nodegraph: at the
+/// defaults, the metalness workflow's Schlick specular, F0 = ((1 − 1.5) /
+/// (1 + 1.5))² = 0.04 toward a white F90 at α = 0.5², over an Oren–Nayar
+/// diffuse of the authored colour. Nothing else: no coat at clearcoat 0, no
+/// metal at metallic 0, no transmission at opacity 1, and no cutout.
+#[test]
+fn a_usd_preview_surface_is_its_materialx_nodegraph() {
+    let l = load(
+        "preview",
+        r#"<UsdPreviewSurface name="s" type="surfaceshader">
+             <input name="diffuseColor" type="color3" value="0.8, 0.1, 0.1" />
+           </UsdPreviewSurface>"#,
+    );
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    assert!(!l.material.has_cutout());
+    let ls = leaves(&l, 0.5, 0.5);
+    assert_eq!(
+        ls.len(),
+        2,
+        "{:?}",
+        ls.iter().map(|l| l.category).collect::<Vec<_>>()
+    );
+    let d = find(&ls, "oren_nayar_diffuse_bsdf");
+    assert!(
+        d[0].describe().contains("0.8000 0.1000 0.1000"),
+        "{}",
+        d[0].describe()
+    );
+    let s = find(&ls, "generalized_schlick_bsdf");
+    let (f, ax, ay) = specular(s[0]);
+    assert!(near(ax, 0.25, 1e-6) && near(ay, 0.25, 1e-6), "({ax}, {ay})");
+    let FresnelModel::Schlick { f0, f90, .. } = f.model else {
+        panic!("{:?}", f.model)
+    };
+    assert!(f0.abs_diff_eq(Vec3A::splat(0.04), 1e-6), "{f0}");
+    assert!(f90.abs_diff_eq(Vec3A::ONE, 1e-6), "{f90}");
+}
+
+/// `metallic` 1 leaves the conductor alone, its complex IOR from
+/// `artistic_ior(diffuseColor, diffuseColor)`; `useSpecularWorkflow` 1 puts
+/// a Schlick of `specularColor` over a diffuse of full weight instead.
+#[test]
+fn usd_preview_surface_workflows_select_their_branch() {
+    let metal = load(
+        "preview_metal",
+        r#"<UsdPreviewSurface name="s" type="surfaceshader">
+             <input name="diffuseColor" type="color3" value="0.9, 0.6, 0.2" />
+             <input name="metallic" type="float" value="1" />
+           </UsdPreviewSurface>"#,
+    );
+    let ls = leaves(&metal, 0.5, 0.5);
+    assert_eq!(ls.len(), 1);
+    let (f, ..) = specular(find(&ls, "conductor_bsdf")[0]);
+    let FresnelModel::Conductor { n, k } = f.model else {
+        panic!("{:?}", f.model)
+    };
+    let r = crust_core::mtlx::reflectivity_from_ior(n, k);
+    assert!(r.abs_diff_eq(Vec3A::new(0.9, 0.6, 0.2), 1e-3), "{r}");
+
+    let spec = load(
+        "preview_spec",
+        r#"<UsdPreviewSurface name="s" type="surfaceshader">
+             <input name="useSpecularWorkflow" type="integer" value="1" />
+             <input name="specularColor" type="color3" value="0.5, 0.25, 0.125" />
+             <input name="metallic" type="float" value="1" />
+           </UsdPreviewSurface>"#,
+    );
+    let ls = leaves(&spec, 0.5, 0.5);
+    assert_eq!(ls.len(), 2);
+    let (f, ..) = specular(find(&ls, "generalized_schlick_bsdf")[0]);
+    let FresnelModel::Schlick { f0, .. } = f.model else {
+        panic!("{:?}", f.model)
+    };
+    assert!(f0.abs_diff_eq(Vec3A::new(0.5, 0.25, 0.125), 1e-6), "{f0}");
+    // The specular workflow ignores `metallic`: the same leaves, the same
+    // weights, at metallic 0.
+    let plain = load(
+        "preview_spec0",
+        r#"<UsdPreviewSurface name="s" type="surfaceshader">
+             <input name="useSpecularWorkflow" type="integer" value="1" />
+             <input name="specularColor" type="color3" value="0.5, 0.25, 0.125" />
+           </UsdPreviewSurface>"#,
+    );
+    let weights = |ls: &[Prepared]| ls.iter().map(|l| l.weight).collect::<Vec<_>>();
+    assert_eq!(weights(&ls), weights(&leaves(&plain, 0.5, 0.5)));
+}
+
+/// Opacity below 1 refracts (the graph's `transmission_mix`), and is no
+/// cutout; an `opacityThreshold` makes it all-or-nothing presence instead,
+/// and mode 1 (`presence`) cuts out exactly at opacity 0.
+#[test]
+fn usd_preview_surface_opacity_transmits_or_cuts_out() {
+    let doc = |extra: &str| {
+        format!(
+            r#"<texcoord name="tc" type="vector2" />
+               <extract name="u" type="float">
+                 <input name="in" type="vector2" nodename="tc" />
+                 <input name="index" type="integer" value="0" />
+               </extract>
+               <UsdPreviewSurface name="s" type="surfaceshader">
+                 <input name="opacity" type="float" nodename="u" />
+                 {extra}
+               </UsdPreviewSurface>"#
+        )
+    };
+    let opacity = |l: &Loaded, u: f32| l.material.opacity(&straight_down(), &hit(u, 0.5));
+
+    let glass = load("preview_glass", &doc(""));
+    assert!(!glass.material.has_cutout(), "threshold 0: no cutout");
+    let p = glass.material.probe(&straight_down(), &hit(0.25, 0.5));
+    assert!(p.closure.transmits());
+
+    let cut = load(
+        "preview_cut",
+        &doc(r#"<input name="opacityThreshold" type="float" value="0.5" />"#),
+    );
+    assert!(cut.material.has_cutout());
+    assert_eq!(opacity(&cut, 0.25), 0.0);
+    assert_eq!(opacity(&cut, 0.5), 1.0, "inclusive");
+    let p = cut.material.probe(&straight_down(), &hit(0.75, 0.5));
+    assert!(!p.closure.transmits(), "a cutout does not refract");
+
+    let presence = load(
+        "preview_presence",
+        &doc(r#"<input name="opacityMode" type="integer" value="1" />"#),
+    );
+    assert_eq!(opacity(&presence, 0.0), 0.0);
+    assert_eq!(opacity(&presence, 0.25), 1.0);
 }

@@ -383,9 +383,7 @@ fn a_white_surface_inside_the_fog_keeps_the_furnace_at_one() {
     let scene = load(
         "furnace_ball",
         r#"
-    # Three top-level prims: from four on, the importer streams one stage
-    # per prim, masked to it, and a binding into a sibling chunk does not
-    # resolve there.
+    # Three top-level prims: below four, the import is single-stage.
     def Scope "Looks"
     {
         def Material "Fog"

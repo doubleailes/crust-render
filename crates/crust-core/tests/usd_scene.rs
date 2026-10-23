@@ -2724,10 +2724,9 @@ fn a_declined_preview_texture_falls_back_to_its_fallback_then_the_constant() {
     }}"#
         )
     };
-    // Two top-level children, not six: at `MIN_STREAM_CHUNKS` the importer
-    // streams each subtree under its own mask, and a material that is a
-    // sibling chunk of the mesh binding it is not composed while that mesh
-    // is traversed.
+    // Two top-level children, not six, so the import is single-stage (a
+    // streamed one is
+    // `a_streamed_chunk_resolves_a_material_bound_from_a_sibling_subtree`).
     let plain = r#"
     def Material "Plain"
     {
@@ -4108,4 +4107,85 @@ fn implicit_shapes_render_inside_prototypes() {
     }
     assert!(down(1.0, 0.0).is_none(), "nothing between the placements");
     assert!(geom_warnings(&scene).is_empty(), "{:#?}", scene.warnings);
+}
+
+/// A streamed import resolves a material that lives in a sibling top-level
+/// subtree of the geometry bound to it — the layout a DCC's MaterialX export
+/// writes, every material under one `/MaterialX/Materials` scope. Five
+/// top-level prims, so each is its own masked chunk and none of the three
+/// bound quads has `/Looks` on its stage. A binding to a material that
+/// exists nowhere still warns, and only it.
+#[test]
+fn a_streamed_chunk_resolves_a_material_bound_from_a_sibling_subtree() {
+    use crust_core::{MASK_CAMERA, WarningCode};
+
+    let dir = std::env::temp_dir().join("crust_sibling_material");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let quad = |name: &str, x: f32, mat: &str| {
+        format!(
+            r#"
+def Xform "{name}"
+{{
+    def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
+        rel material:binding = </Looks/{mat}>
+    }}
+}}"#,
+            x0 = x,
+            x1 = x + 1.0
+        )
+    };
+    let stage = format!(
+        r#"#usda 1.0
+def Scope "Looks"
+{{
+    def Material "Red"
+    {{
+        token outputs:surface.connect = </Looks/Red/S.outputs:surface>
+        def Shader "S"
+        {{
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.8, 0.1, 0.1)
+            float inputs:roughness = 1
+            token outputs:surface
+        }}
+    }}
+}}{}{}{}{}
+"#,
+        quad("A", -3.0, "Red"),
+        quad("B", -1.0, "Red"),
+        quad("C", 1.0, "Red"),
+        quad("D", 3.0, "Missing"),
+    );
+    let path = dir.join("sibling.usda");
+    std::fs::write(&path, stage).expect("write stage");
+    let scene = Scene::from_usd(&path).expect("stage opens");
+
+    let reflectance = |x: f32| {
+        let r =
+            Ray::new(Vec3A::new(x, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene
+            .world
+            .intersect(&r, 0.001, f32::INFINITY)
+            .expect("hits the quad");
+        hit.mat.eval(&r, &hit.rec, Vec3A::Z).expect("a lobe").0
+    };
+    for x in [-2.5, -0.5, 1.5] {
+        let f = reflectance(x);
+        assert!(f.x > 4.0 * f.y && f.x > 4.0 * f.z, "red at x = {x}: {f}");
+    }
+    let grey = reflectance(3.5);
+    assert!((grey.x - grey.y).abs() < 1e-6, "the default: {grey}");
+
+    let fallbacks: Vec<_> = scene
+        .warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MaterialFallbackDefault)
+        .collect();
+    assert_eq!(fallbacks.len(), 1, "{:#?}", scene.warnings);
+    assert_eq!(fallbacks[0].prims, ["/Looks/Missing"]);
 }

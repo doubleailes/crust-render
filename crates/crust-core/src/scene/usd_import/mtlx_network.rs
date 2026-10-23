@@ -17,11 +17,17 @@
 //! same network in a `.mtlx` does. Connections through `NodeGraph` outputs and
 //! through `Material` / `NodeGraph` interface inputs are followed to the
 //! shader output or the literal they forward.
+//!
+//! A shader id the import's MaterialX node library defines (a studio node
+//! whose nodedef name breaks the `ND_` convention) is read through its
+//! nodedef — category and type — before the name is parsed, and the
+//! translated document is expanded against that library
+//! ([`crust_mtlx::Doc::expand`]), as a `.mtlx` is.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crust_mtlx::{Doc, Input, Node, Source, Val};
+use crust_mtlx::{Doc, Input, Library, Node, Source, Val};
 use openusd::sdf;
 use openusd::usd::{Attribute, Prim, Stage};
 
@@ -43,9 +49,10 @@ pub(super) struct Network {
     pub(super) reported: Vec<String>,
 }
 
-/// Whether a shader id names a MaterialX nodedef.
-pub(super) fn is_mtlx_id(id: &str) -> bool {
-    id.starts_with("ND_")
+/// Whether a shader id names a MaterialX nodedef: a standard one (`ND_…`),
+/// or one `library` defines.
+pub(super) fn is_mtlx_id(id: &str, library: &Library) -> bool {
+    id.starts_with("ND_") || library.nodedef(id).is_some()
 }
 
 /// Translates the networks under the shader prims `surface` and `volume`
@@ -53,12 +60,14 @@ pub(super) fn is_mtlx_id(id: &str) -> bool {
 pub(super) fn translate(
     stage: &Stage,
     stage_path: &Path,
+    library: &Library,
     surface: Option<&Prim>,
     volume: Option<&Prim>,
 ) -> Network {
     let mut b = Builder {
         stage,
         stage_path,
+        library,
         nodes: Vec::new(),
         names: HashMap::new(),
         active: HashSet::new(),
@@ -66,8 +75,10 @@ pub(super) fn translate(
     };
     let surface = surface.and_then(|p| b.node(p));
     let volume = volume.and_then(|p| b.node(p));
+    let mut doc = Doc::from_nodes(b.nodes);
+    doc.expand(library);
     Network {
-        doc: Doc::from_nodes(b.nodes),
+        doc,
         surface,
         volume,
         reported: b.reported,
@@ -77,6 +88,7 @@ pub(super) fn translate(
 struct Builder<'s> {
     stage: &'s Stage,
     stage_path: &'s Path,
+    library: &'s Library,
     nodes: Vec<Node>,
     /// Shader prim path → its node's name (the path itself), once translated.
     names: HashMap<String, String>,
@@ -103,7 +115,7 @@ impl Builder<'_> {
             .ok()
             .flatten();
         let id = shader.as_ref().and_then(shader_info_id);
-        let Some(id) = id.filter(|id| is_mtlx_id(id)) else {
+        let Some(id) = id.filter(|id| is_mtlx_id(id, self.library)) else {
             self.reported.push(format!(
                 "{path}: not a MaterialX shader ({}) — its input falls back to the default",
                 shader
@@ -114,8 +126,14 @@ impl Builder<'_> {
             self.active.remove(&path);
             return None;
         };
-        let (category, nd_type) = nodedef_category(&id);
-        let type_name = node_type(&category, nd_type, prim);
+        let (category, type_name) = match self.library.nodedef(&id) {
+            Some(def) => (def.node.clone(), def.instance_type().to_string()),
+            None => {
+                let (category, nd_type) = nodedef_category(&id);
+                let type_name = node_type(&category, nd_type, prim);
+                (category, type_name)
+            }
+        };
 
         let mut inputs = Vec::new();
         for attr in prim.attributes().unwrap_or_default() {
@@ -164,6 +182,7 @@ impl Builder<'_> {
                     source: Source::Node { name: node, output },
                     colorspace: None,
                     text: None,
+                    interface: None,
                 })
             }
             Resolved::Value(owner) => {
@@ -193,6 +212,7 @@ impl Builder<'_> {
                     source,
                     colorspace,
                     text: Some(text),
+                    interface: None,
                 })
             }
         }
@@ -265,6 +285,10 @@ impl Builder<'_> {
             sdf::Value::Vec3d(v) => join(&[v.x, v.y, v.z]),
             sdf::Value::Vec4f(v) => join(&[v.x as f64, v.y as f64, v.z as f64, v.w as f64]),
             sdf::Value::Vec4d(v) => join(&[v.x, v.y, v.z, v.w]),
+            // Row-major, the translation in the last row: USD's `Gf`
+            // convention and MaterialX's `matrix44` value order alike.
+            sdf::Value::Matrix4d(m) => join(&m.0),
+            sdf::Value::Matrix3d(m) => join(&m.0),
             sdf::Value::String(s) => s.clone(),
             sdf::Value::Token(t) => t.as_str().to_string(),
             sdf::Value::AssetPath(_) if mtype == "filename" => asset_path(attr, self.stage_path)?

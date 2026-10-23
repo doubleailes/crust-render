@@ -239,7 +239,9 @@ subsurface forced on, or Typhoon.
 | `splitlr` | 11 | `colorcorrect_edge_contrast_negative` |
 
    `colorcorrect` (10 materials) and `heighttonormal` (5) have operators now and are
-   no longer on the list. The render log's own count (`report.md`) is lower than the
+   no longer on the list. Nor, since the `mtlx-custom-nodedefs` change, are
+   `separate2`, `separate3`, `separate4` and `switch`; the table is the scan from
+   before them and has not been re-run. The render log's own count (`report.md`) is lower than the
    static scan for the harness nodes (`separate2` 145, `fract` 113, `combine4` 11):
    the compiler stops at the first node it cannot compile, so it never reaches the
    rest of the graph.
