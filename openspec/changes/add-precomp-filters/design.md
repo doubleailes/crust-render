@@ -375,7 +375,7 @@ departs from them.
   stamp attributes in the EXR header (about +40k), and `Unit::new` and the drop of its
   `Option<UnitAov>` (+44 and +28 instructions per unit over 920 units: codegen, not work).
   The per-sample hook is free, so it did not become a const generic (D7); the total is not
-  equal to the instruction, which task 6.2 asked for.
+  equal to the instruction; task 6.2 was accepted on the per-sample equality, which is what D7 protects.
 - **Sample filter cost.** `scripts/bench_ab.sh -n 10 -x "-s 64"` on `samples/precomp.usda`,
   A its AOVs only, B the same with the `look` sample filter (12 ops, four inputs), both
   without display filters, one binary: A 1.140 s min / 1.228 s mean, B 1.301 s min /

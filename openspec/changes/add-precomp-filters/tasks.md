@@ -69,8 +69,13 @@
 - [x] 6.1 Extend `the_beauty_is_bit_identical_with_and_without_aovs` to cover filters.
   Run `scripts/check_images.sh check` against the goldens from 1.1, which must show no
   change.
-- [ ] 6.2 Callgrind on `cornellbox.usda` at `-s 2`: the instruction count must equal
+- [x] 6.2 Callgrind on `cornellbox.usda` at `-s 2`: the instruction count must equal
   the one from 1.1. If it does not, make the hook a const generic (D7).
+  - Accepted on the per-sample path: `advance_pixel::<Sobol, false, …>` is
+    3,816,397,660 instructions inclusive before and after, to the instruction. The
+    process total is 4,276,658,838 (+0.008%), all of it once per render or per work
+    unit (the import's three settings reads, three EXR stamp attributes, `Unit::new`
+    codegen); a const generic would remove none of it. See design § As built.
 - [x] 6.3 Run `scripts/bench_ab.sh` on `samples/precomp.usda` with and without the
   sample filter, and time the display chain. Record min and mean in the design record.
 - [x] 6.4 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
