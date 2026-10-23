@@ -2,14 +2,14 @@
 title = "Render settings"
 description = "The crust:* attributes of the RenderSettings prim."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-14T08:00:00+00:00
+updated = 2026-10-23T08:00:00+00:00
 draft = false
 weight = 20
 sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Sampling, light transport, filtering, path guiding and subdivision, set on the stage’s <code>RenderSettings</code> prim.'
+lead = 'Sampling, light transport, filtering, path guiding, subdivision and the precomp, set on the stage’s <code>RenderSettings</code> prim.'
 toc = true
 top = false
 +++
@@ -726,6 +726,181 @@ def RenderSettings "settings"
     bool enableExposureCompensation = false
 }
 ```
+
+## Precomp
+
+Some looks are built in compositing rather than in the renderer: the surfaces write
+AOVs (lighting splits, mattes, motion vectors) and a comp recombines them. A *precomp*
+puts that recombination in the stage, next to the render settings, so `crust render`'s
+PNG, [`--checkpoint`](@/docs/reference/command-line.md#checkpoint) and an MCP session
+all show the look while the image refines. It is a preview of the look, not a
+replacement for comp: no roto, no tracking, nothing across frames.
+
+It has two stages, both optional:
+
+- **Sample filters** run on every camera sample, from that sample's own AOV values,
+  before it is accumulated. Their outputs are accumulated with the beauty's own
+  pixel-filter weights, so an edge in a recombined matte is antialiased exactly as the
+  beauty is, which a comp of finished pixels cannot do.
+- **Display filters** are image operations on the accumulated image: blurs,
+  convolutions, merges, grades and 2D motion blur.
+
+A filter never changes the beauty: the EXR's beauty channels, the samples each pixel
+takes and where adaptive sampling stops are bit-identical with and without a precomp.
+Filter outputs are new channels, written by a [`crust:filter`
+RenderVar](@/docs/usd/aovs.md#filter-outputs). The settings follow the active
+[render pass](@/docs/usd/render-passes.md#rendersource), so two passes can carry two
+precomps.
+
+```usda
+def RenderSettings "settings"
+{
+    rel products = </Render/Products/beauty>
+    rel crust:sampleFilters = [</Render/Precomp/look>]
+    rel crust:displayFilters = [</Render/Precomp/glow>, </Render/Precomp/speed>]
+    token crust:display = "look_final"
+}
+```
+
+`samples/precomp.usda` is a complete stage: three light groups, a matte and a motion
+vector recombined into a stylised look, then a glow and speed lines.
+
+### crust:sampleFilters
+
+`rel`, ordered, default **none**.
+
+Each target is a MaterialX `NodeGraph` of `ND_*` standard-library `Shader` prims, as
+UsdShade authors any MaterialX network. Its interface inputs are what it reads, per
+camera sample:
+
+- `inputs:<name>` reads the sample's value of the RenderVar whose layer name is
+  `<name>` (its `driver:parameters:aov:name`, else its prim name), in any product of the
+  render. A `closest` var such as `depth` is read as the sample's own value, not the
+  pixel's.
+- `inputs:beauty` reads the sample's beauty radiance (after the firefly clamp, before
+  the camera's exposure), unless a var is named `beauty`.
+- An input named after a var that writes an earlier sample filter's output reads that
+  output, for the same sample.
+- An input that names nothing reads its authored value
+  ([`precomp.unbound_input`](@/docs/reference/warnings.md#precomp)), and one that names
+  a var with no per-sample value, a variance or the sample count, reads it too
+  (`precomp.unbindable_input`).
+
+Every `outputs:<name>` of the graph is an output a `crust:filter` var can write.
+
+```usda
+def NodeGraph "look"
+{
+    color3f inputs:key
+    color3f inputs:fill
+    float inputs:matte = 0
+    color3f outputs:out.connect = </Render/Precomp/look/select.outputs:out>
+
+    def Shader "warm"
+    {
+        uniform token info:id = "ND_multiply_color3"
+        color3f inputs:in1.connect = </Render/Precomp/look.inputs:key>
+        color3f inputs:in2 = (1, 0.72, 0.42)
+        color3f outputs:out
+    }
+
+    def Shader "select"
+    {
+        uniform token info:id = "ND_ifgreater_color3"
+        float inputs:value1.connect = </Render/Precomp/look.inputs:matte>
+        float inputs:value2 = 0.5
+        color3f inputs:in1.connect = </Render/Precomp/look/warm.outputs:out>
+        color3f inputs:in2.connect = </Render/Precomp/look.inputs:fill>
+        color3f outputs:out
+    }
+}
+```
+
+The graph may use the value nodes of the standard library: math (`add`, `multiply`,
+`divide`, `power`, `min`, `max`, …), `mix`, `ifgreater` / `ifgreatereq` / `ifequal`,
+`clamp`, `remap`, `smoothstep`, `contrast`, `invert`, `luminance`, `convert`,
+`extract`, `combine2` / `combine3`, `colorcorrect`, `rgbtohsv` / `hsvtorgb`. A sample
+has no shading point, so a texture (`image`), a `geompropvalue`, a geometry node
+(`position`, `normal`, `texcoord`, …) or a closure (a BSDF) is refused, as is any node
+crust does not implement (`hsvadjust`, for one): the graph's outputs then read 0
+([`precomp.unsupported_node`](@/docs/reference/warnings.md#precomp)) and the render
+proceeds. The graph is compiled once, by the same MaterialX compiler and JIT as
+surfaces.
+
+A sample filter costs one evaluation of its graph per camera sample, on top of the AOVs
+it reads.
+
+### crust:displayFilters
+
+`rel`, ordered, default **none**.
+
+Each target is a `Shader` prim whose `info:id` is one of the operations below. Its image
+inputs are `token`s naming what they read: a RenderVar's layer name, a sample filter's
+output as `<graph>.<output>` (`look.out`), an earlier display filter's prim name, or
+`beauty`. A name matching none of them reads black
+([`precomp.unbound_input`](@/docs/reference/warnings.md#precomp)); a filter that comes
+later in the list cannot be read (`precomp.cycle`).
+
+| `info:id` | inputs | does |
+|-----------|--------|------|
+| `crust:blur` | `in`, `float radius` (pixels, default 1, at most 1024) | a gaussian of standard deviation `radius / 3`, truncated at the radius |
+| `crust:convolve` | `in`, `asset kernel`, `float kernelScale` (default 1), `bool normalize` (default true) | convolves `in` with an image (any format a light texture reads; an EXR's `R`, `G`, `B` matched by base name, so `rgb.R` works), each texel covering `kernelScale` pixels, at most 255 pixels a side; the kernel is normalised to sum 1 per channel unless `normalize` is false |
+| `crust:vectorBlur` | `in`, then one of: `token motion` (a vector var), `float2 direction`, or `float2 center` and `float strength`; `int taps` (default 8) | averages `taps` lookups along each pixel's vector, centred on the pixel: the motion vectors, one direction for every pixel, or a radial blur away from `center` (pixels from the bottom-left of the image, default its centre) of `strength` times the distance to it. A pixel whose vector is zero is unchanged |
+| `crust:merge` | `a`, `b`, `token operation` (`over`, `plus`, `multiply`, `screen`; default `over`), `alpha`, `float mix` (default 1) | per pixel: `over` is `b + a·(1 − alpha)` with `alpha` an image (1 when unconnected), the others as named; `mix` fades from `a` to the result |
+| `crust:grade` | `in`, `color3f lift` (0), `gain` (1), `gamma` (1), `offset` (0) | Nuke's `Grade`: `(gain − lift)·x + offset + lift`, raised to `1/gamma` where positive |
+
+Edges clamp: a blur near the image's border reads the border pixel. A render of a
+[region](@/docs/usd/render-settings.md#datawindowndc) runs the filters on the region,
+clamped at its edges, so a blurred crop differs from the same pixels of a full frame
+near the crop's border.
+
+An unknown `info:id` passes its `in` through
+([`precomp.unknown_operation`](@/docs/reference/warnings.md#precomp)), and so does a
+`crust:convolve` whose kernel cannot be read (`precomp.missing_kernel`), and a blur
+radius or scaled kernel past the limits above (`precomp.invalid_value`). A radial
+`crust:vectorBlur`'s `center` is in the frame's pixels, so a
+[region](@/docs/usd/render-settings.md#datawindowndc) render blurs toward the same point
+as the full frame.
+
+Each operation is one pass over the image, independent of the sample count. The result
+is bitwise the same for any number of threads, and in tiles or scanlines. `--stats`
+reports the chain's time on its `precomp` line.
+
+### crust:display
+
+`token`, default **unauthored** (the beauty).
+
+The output a host shows as *the* image: the name of a RenderVar of one of the products,
+usually one reading a filter. It becomes the tone-mapped PNG (made even when the first
+product has no beauty var), the `--checkpoint` preview and the image of an MCP session's
+`render` and `snapshot`. The EXR's beauty stays the beauty. A one-channel output is shown
+as grey.
+
+With a displayed output, `--checkpoint` and session snapshots show the display filters
+run over the units finished so far: an unfinished unit reads as black, and a blur bleeds
+into it, as a progressive comp would.
+
+A name matching no var shows the beauty
+([`precomp.unknown_display`](@/docs/reference/warnings.md#precomp)).
+
+### Exposure
+
+Sample filters see the sample's values before the camera's
+[exposure](#camera-exposure), and display filters see the exposed image. The exposure
+multiplies a sample filter's output after accumulation, as it multiplies the beauty,
+unless its var authors `bool crust:filter:radiance = 0`, as a matte or a ratio should.
+A recipe moved from a sample filter to a display filter (or back) therefore sees its
+inputs scaled differently: a threshold on `key` compares scene radiance in a sample
+filter and exposed radiance in a display filter.
+
+### A stage without a beauty
+
+Adaptive sampling stops a pixel on the beauty's variance alone. A stage whose surfaces
+write only AOVs, with no light, has a black beauty: every pixel stops at
+`crust:minSamplesPerPixel` whatever its filter outputs look like
+([`precomp.black_beauty`](@/docs/reference/warnings.md#precomp)). Author
+`crust:minSamplesPerPixel` equal to `crust:samplesPerPixel` for such a stage, so every
+pixel takes every sample.
 
 ## Lights
 

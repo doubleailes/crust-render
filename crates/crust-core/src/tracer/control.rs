@@ -34,8 +34,12 @@ use super::PixelRect;
 ///
 /// A control is `Sync`, as is the `Renderer`: run the render on one thread
 /// and read or cancel from another, borrowing both (`std::thread::scope`) or
-/// sharing them through `Arc`s. Only the beauty is published; the AOVs are
-/// gathered once, when the render returns. A host that only ever cancels
+/// sharing them through `Arc`s. Only the beauty is published, and the AOVs
+/// are gathered once, when the render returns — unless the render's precomp
+/// authors a displayed output (`crust:display`): the units then publish their
+/// AOVs too, and a snapshot is that output, the display chain run over the
+/// units finished so far (unfinished ones read their clear value). A host
+/// that only ever cancels
 /// takes [`without_snapshots`](Self::without_snapshots), and its render
 /// pays nothing for publishing.
 pub struct RenderControl {
@@ -51,6 +55,9 @@ pub struct RenderControl {
     /// The latest published beauty, region-sized; `None` before the first
     /// publish. Workers publish under the lock, readers clone under it.
     display: Mutex<Option<Buffer>>,
+    /// With a displayed output, the film the units publish their AOVs into
+    /// and the precomp to show it through. Locked after `display`.
+    precomp: Mutex<Option<crate::precomp::Snapshot>>,
 }
 
 impl Default for RenderControl {
@@ -69,6 +76,7 @@ impl RenderControl {
             reached: AtomicU32::new(0),
             reached_max: AtomicU32::new(0),
             display: Mutex::new(None),
+            precomp: Mutex::new(None),
         }
     }
 
@@ -131,15 +139,47 @@ impl RenderControl {
         self.reached_max.fetch_max(spp, Ordering::Relaxed);
     }
 
-    /// A copy of the latest published beauty, with the generation it
+    /// A copy of the latest published image, with the generation it
     /// belongs to; `None` before the first publish. The image covers the
-    /// render's region, as the [`Buffer`] the render returns does.
+    /// render's region, as the [`Buffer`] the render returns does. It is the
+    /// beauty, or the displayed output when the render's precomp authors one
+    /// — the display chain then runs here, on read, over a copy.
     pub fn snapshot(&self) -> Option<(u64, Buffer)> {
+        let (generation, beauty, precomp) = {
+            let display = self.display.lock().unwrap_or_else(|e| e.into_inner());
+            // Read under the lock the publishes bump it under, so the image
+            // and its generation agree.
+            let generation = self.generation.load(Ordering::Acquire);
+            let beauty = display.as_ref()?.clone();
+            let precomp = self.precomp.lock().unwrap_or_else(|e| e.into_inner());
+            let precomp = precomp.as_ref().map(|s| crate::precomp::Snapshot {
+                film: s.film.clone(),
+                precomp: s.precomp.clone(),
+                exposure: s.exposure,
+            });
+            (generation, beauty, precomp)
+        };
+        // The chain runs outside the locks, so the render is not held up.
+        Some(match precomp {
+            Some(s) => (generation, s.show(&beauty)),
+            None => (generation, beauty),
+        })
+    }
+
+    /// A copy of the latest published beauty, with its generation, whatever
+    /// the precomp displays: what a reader that wants the beauty itself
+    /// (a probe of its values) takes. [`snapshot`](Self::snapshot) without a
+    /// displayed output.
+    pub fn beauty_snapshot(&self) -> Option<(u64, Buffer)> {
         let display = self.display.lock().unwrap_or_else(|e| e.into_inner());
-        // Read under the lock the publishes bump it under, so the image and
-        // its generation agree.
         let generation = self.generation.load(Ordering::Acquire);
         display.as_ref().map(|b| (generation, b.clone()))
+    }
+
+    /// Has the units publish their AOVs into `snapshot`'s film from now on,
+    /// and [`snapshot`](Self::snapshot) show its displayed output.
+    pub(crate) fn attach_precomp(&self, snapshot: crate::precomp::Snapshot) {
+        *self.precomp.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
     }
 
     /// Writes one unit's pixels into the display image through `write` and
@@ -151,10 +191,14 @@ impl RenderControl {
         width: usize,
         height: usize,
         rect: PixelRect,
-        write: impl FnOnce(&mut Buffer),
+        write: impl FnOnce(&mut Buffer, Option<&mut crate::AovFilm>),
     ) {
         let mut display = self.display.lock().unwrap_or_else(|e| e.into_inner());
-        write(display.get_or_insert_with(|| Buffer::for_raster_rect(width, height, rect)));
+        let mut precomp = self.precomp.lock().unwrap_or_else(|e| e.into_inner());
+        write(
+            display.get_or_insert_with(|| Buffer::for_raster_rect(width, height, rect)),
+            precomp.as_mut().map(|s| &mut s.film),
+        );
         self.generation.fetch_add(1, Ordering::Release);
     }
 }

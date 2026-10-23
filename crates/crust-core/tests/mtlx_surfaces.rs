@@ -1236,6 +1236,80 @@ fn every_fixture_material_is_bounded_in_a_white_furnace() {
     }
 }
 
+/// doubleailes/crust-render#378: a rough refracting `dielectric_bsdf` gained
+/// energy under crust's GGX VNDF sampler, because BSDL's renormalisation
+/// tables measure its *bounded* VNDF sampler. Sampled as BSDL samples it, a
+/// clear rough glass sphere in a white furnace returns its environment to
+/// within a few percent: exactly with BSDF sampling alone, and with the small
+/// excess testrender's MIS has too when the emitter is also a light (BSDL's
+/// density answers for refracted directions its sampler never draws). Before
+/// the port this read 2.0 at roughness 1, 1.23 at 0.7.
+#[test]
+fn a_rough_glass_is_bounded_in_a_white_furnace() {
+    for r in [0.5f32, 1.0] {
+        let a = r * r;
+        let glass = load(
+            &format!("rough_glass_{r}"),
+            &format!(
+                r#"<dielectric_bsdf name="g" type="BSDF">
+                     <input name="roughness" type="vector2" value="{a}, {a}" />
+                     <input name="scatter_mode" type="string" value="RT" />
+                   </dielectric_bsdf>
+                   <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="g" /></surface>"#
+            ),
+        );
+        for nee in [false, true] {
+            let mut world = WorldBuilder::new();
+            world.attach(
+                Geometry::Sphere {
+                    center: Vec3A::ZERO,
+                    radius: 1.0,
+                },
+                glass.material.clone(),
+            );
+            let emitter = Arc::new(Emissive::new(Vec3A::ONE));
+            let shape = SphereShape {
+                center: Vec3A::ZERO,
+                radius: 50.0,
+            };
+            let id = world.attach(
+                Geometry::Sphere {
+                    center: shape.center,
+                    radius: shape.radius,
+                },
+                emitter.clone(),
+            );
+            let mut lights = LightList::new();
+            if nee {
+                lights.add(AreaLight::new(shape, emitter, id));
+            }
+            let world = world.commit();
+            for offset in [0.0f32, 0.6] {
+                let ray = Ray::new(Vec3A::new(offset, 0.0, -5.0), Vec3A::Z);
+                let n = 4096;
+                let mut sum = Vec3A::ZERO;
+                for i in 0..n {
+                    sum += ray_color(
+                        &ray,
+                        &world,
+                        &lights,
+                        &Volumes::default(),
+                        24,
+                        SamplingStrategy::PowerMis,
+                        PathSampler::new(5, 11, 0, i),
+                    );
+                }
+                let mean = (sum / n as f32).max_element();
+                let bound = if nee { 1.04 } else { 1.02 };
+                assert!(
+                    mean <= bound,
+                    "roughness {r}, NEE {nee}, offset {offset}: furnace mean {mean}"
+                );
+            }
+        }
+    }
+}
+
 /// The DPEL Teapot's look in miniature, and in white: a dust diffuse and a
 /// stain diffuse, each mixed by its mask against a zero-weight dielectric —
 /// the assets' idiom for turning a mask into a *coverage* — over a smooth

@@ -65,6 +65,28 @@ pub enum AovSource {
     /// interpolated as authored; the clear value where the hit prim does not
     /// author it.
     Primvar(PrimvarSource),
+    /// The output of a precomp filter (`rel crust:filter`,
+    /// [`crate::precomp`]).
+    Filter(FilterSource),
+}
+
+/// Which filter output a [`AovSource::Filter`] var writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FilterSource {
+    /// A display filter's output; a sample filter's otherwise.
+    pub display: bool,
+    /// The filter's index in its list.
+    pub filter: u16,
+    /// The output's index among the filter's (always 0 for a display
+    /// filter, which has one).
+    pub output: u16,
+    /// 1 to 3, the var's `dataType`'s.
+    pub components: u8,
+    /// Whether the camera's exposure scales it: a sample filter's output
+    /// unless the var authors `crust:filter:radiance = 0`. A display
+    /// filter's output is computed from exposed inputs and is never scaled
+    /// again.
+    pub radiance: bool,
 }
 
 /// What a primvar var reads: which kept primvar, and how its `dataType`
@@ -272,6 +294,7 @@ impl AovSource {
             AovSource::DiffuseFilter => "diffuse_albedo",
             AovSource::MotionVector => "motionvector",
             AovSource::Primvar(_) => "primvar",
+            AovSource::Filter(_) => "filter",
         }
     }
 
@@ -294,6 +317,7 @@ impl AovSource {
             | AovSource::SampleCount
             | AovSource::Variance => 1,
             AovSource::Primvar(p) => p.components as usize,
+            AovSource::Filter(f) => f.components as usize,
         }
     }
 
@@ -318,6 +342,8 @@ impl AovSource {
             | AovSource::DiffuseFilter
             | AovSource::MotionVector
             | AovSource::Primvar(_) => 0,
+            // Scaled when read, by the var's own flag (`AovFilm`).
+            AovSource::Filter(_) => 0,
         }
     }
 
@@ -341,6 +367,11 @@ impl AovSource {
                 (2, _) => ChannelKind::Uv,
                 (_, PrimvarRole::Color) => ChannelKind::Color,
                 _ => ChannelKind::Vector,
+            },
+            AovSource::Filter(f) => match f.components {
+                1 => ChannelKind::Scalar,
+                2 => ChannelKind::Uv,
+                _ => ChannelKind::Color,
             },
         }
     }
@@ -369,7 +400,7 @@ impl AovSource {
     pub fn accepts_accumulation(self) -> bool {
         !matches!(
             self,
-            AovSource::Color | AovSource::SampleCount | AovSource::Variance
+            AovSource::Color | AovSource::SampleCount | AovSource::Variance | AovSource::Filter(_)
         )
     }
 
@@ -389,7 +420,7 @@ impl AovSource {
     fn needs_slot(self) -> bool {
         !matches!(
             self,
-            AovSource::Color | AovSource::SampleCount | AovSource::Variance
+            AovSource::Color | AovSource::SampleCount | AovSource::Variance | AovSource::Filter(_)
         )
     }
 }
@@ -523,6 +554,9 @@ impl AovProduct {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AovRequest {
     pub products: Vec<AovProduct>,
+    /// The render settings' precomp ([`crate::precomp`]): `None` when the
+    /// stage authors no filter and no displayed output.
+    pub precomp: Option<std::sync::Arc<crate::precomp::Precomp>>,
 }
 
 impl AovRequest {
@@ -531,6 +565,7 @@ impl AovRequest {
     pub fn needs_film(&self) -> bool {
         self.vars()
             .any(|v| v.source != AovSource::Color || v.with_alpha())
+            || self.precomp.as_ref().is_some_and(|p| p.has_filters())
     }
 
     /// Whether any product writes a var of `source`.
@@ -629,6 +664,10 @@ pub(crate) struct AovLayout {
     /// The light path inspector's configuration: every camera sample's
     /// records are kept per work unit ([`crate::inspect`]).
     pub(crate) inspect: Option<std::sync::Arc<crate::tracer::inspection::Config>>,
+    /// The render's precomp, when the stage authors one: its sample filters
+    /// run at every camera sample, its display chain over the finished film
+    /// and every snapshot.
+    pub(crate) precomp: Option<std::sync::Arc<crate::precomp::Precomp>>,
 }
 
 impl AovLayout {
@@ -672,6 +711,7 @@ impl AovLayout {
             })
             .max()
             .unwrap_or(0);
+        layout.precomp = request.precomp.clone();
         layout
     }
 }
@@ -948,6 +988,10 @@ pub(crate) struct UnitAov {
     pub(crate) pixel: usize,
     planes: Vec<SlotPlanes>,
     luma: utils::Luma,
+    /// The precomp's sample filters, when it has any. Boxed, so a unit
+    /// without them is the size it always was: units are built and moved
+    /// per pass, and callgrind counts the bytes.
+    filters: Option<Box<UnitFilters>>,
 }
 
 impl UnitAov {
@@ -978,12 +1022,19 @@ impl UnitAov {
                 })
                 .collect(),
             luma: layout.luma,
+            filters: layout
+                .precomp
+                .as_ref()
+                .filter(|pc| !pc.sample.is_empty())
+                .map(|pc| Box::new(UnitFilters::new(pc.clone(), &layout.lpes, pixels))),
         }
     }
 
     /// Folds one camera sample into the current pixel. `(fx, fy)` is the
     /// sample's film offset from the pixel's corner (the box is `[0, 1)²`),
-    /// `weight` the beauty's filter weight for it.
+    /// `weight` the beauty's filter weight for it, and `beauty` its radiance
+    /// (after the firefly clamp, before exposure), which only the precomp's
+    /// sample filters read.
     pub(crate) fn add(
         &mut self,
         hit: &FirstHit,
@@ -991,8 +1042,12 @@ impl UnitAov {
         fx: f32,
         fy: f32,
         weight: f32,
+        beauty: Vec3A,
     ) {
         let (p, cam) = (self.pixel, &self.cam);
+        if let Some(filters) = self.filters.as_mut() {
+            filters.add(p, hit, extras, cam, beauty, weight);
+        }
         let in_box = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
         let mut v = [0.0f32; 3];
         for (slot, planes) in self.slots.iter().zip(&mut self.planes) {
@@ -1046,6 +1101,132 @@ impl UnitAov {
     }
 }
 
+/// What a sample-filter channel reads in a unit: the beauty, a slot's
+/// per-sample value, an earlier output of this sample, or nothing.
+enum UnitBind {
+    Beauty,
+    Slot(SlotKey),
+    Sample(usize),
+    Default,
+}
+
+/// A unit's sample filters: the weighted sums of their outputs beside the
+/// slots', and the scratch one evaluation needs, reused by every sample so
+/// none allocates.
+struct UnitFilters {
+    pc: std::sync::Arc<crate::precomp::Precomp>,
+    /// Per filter, per program channel.
+    binds: Vec<Vec<UnitBind>>,
+    /// Per flat output: `pixels × width` filtered sums.
+    planes: Vec<Vec<f32>>,
+    /// This sample's value of every flat output, for the filters after it.
+    current: Vec<Val>,
+    inputs: Vec<Option<Val>>,
+    slots: Vec<Val>,
+}
+
+use crust_mtlx::Val;
+
+impl UnitFilters {
+    fn new(pc: std::sync::Arc<crate::precomp::Precomp>, lpes: &[String], pixels: usize) -> Self {
+        use crate::precomp::Bind;
+        let binds = pc
+            .sample
+            .iter()
+            .map(|f| {
+                f.binds
+                    .iter()
+                    .map(|b| match b {
+                        Bind::Beauty => UnitBind::Beauty,
+                        Bind::Var(v) if v.source == AovSource::Color => UnitBind::Beauty,
+                        Bind::Var(v) => v.slot_key(lpes).map_or(UnitBind::Default, UnitBind::Slot),
+                        Bind::Sample { filter, output } => {
+                            UnitBind::Sample(pc.flat(*filter, *output))
+                        }
+                        Bind::Default => UnitBind::Default,
+                    })
+                    .collect()
+            })
+            .collect();
+        let planes = pc
+            .output_widths()
+            .iter()
+            .map(|w| vec![0.0; pixels * *w as usize])
+            .collect();
+        UnitFilters {
+            binds,
+            planes,
+            current: vec![Val::ZERO; pc.sample_outputs()],
+            inputs: Vec::new(),
+            slots: Vec::new(),
+            pc,
+        }
+    }
+
+    /// Evaluates every sample filter, in list order, on one camera sample,
+    /// and folds its outputs into pixel `p` with the beauty's `weight`. A
+    /// refused filter adds nothing, so its outputs keep their clear value.
+    fn add(
+        &mut self,
+        p: usize,
+        hit: &FirstHit,
+        extras: &SampleExtras,
+        cam: &CameraFrame,
+        beauty: Vec3A,
+        weight: f32,
+    ) {
+        let mut flat = 0;
+        for (f, binds) in self.pc.sample.iter().zip(&self.binds) {
+            self.inputs.clear();
+            for b in binds {
+                self.inputs.push(match b {
+                    UnitBind::Beauty => Some(Val::vec3(beauty.x, beauty.y, beauty.z)),
+                    UnitBind::Slot(key) => {
+                        let mut v = [0.0f32; 3];
+                        sample_value(key, hit, extras, cam, &mut v);
+                        Some(match key.components() {
+                            1 => Val::float(v[0]),
+                            2 => Val::vec2(v[0], v[1]),
+                            _ => Val::vec3(v[0], v[1], v[2]),
+                        })
+                    }
+                    UnitBind::Sample(i) => Some(self.current[*i]),
+                    UnitBind::Default => None,
+                });
+            }
+            let ran = f.eval(&self.inputs, &mut self.slots);
+            for (o, out) in f.outputs.iter().enumerate() {
+                let i = flat + o;
+                if !ran {
+                    self.current[i] = Val::ZERO;
+                    continue;
+                }
+                let v = self
+                    .slots
+                    .get(out.slot as usize)
+                    .copied()
+                    .unwrap_or(Val::ZERO);
+                self.current[i] = v;
+                let w = out.width as usize;
+                let plane = &mut self.planes[i][p * w..(p + 1) * w];
+                for (c, d) in plane.iter_mut().enumerate() {
+                    // A `float` output fills every channel it is read as.
+                    let x = if v.arity == 1 { v.v[0] } else { v.v[c] };
+                    *d += weight * x;
+                }
+            }
+            flat += f.outputs.len();
+        }
+    }
+}
+
+/// One sample-filter output's full-frame plane: `pixels × width` values.
+#[derive(Debug, Clone)]
+struct FilterPlane {
+    width: usize,
+    values: Vec<f32>,
+}
+
 /// One slot's full-frame planes.
 #[derive(Debug, Clone)]
 struct FilmSlot {
@@ -1069,6 +1250,21 @@ pub struct AovFilm {
     /// The render's light path expressions ([`AovLayout::lpes`]), to find
     /// an LPE var's slot.
     lpes: Vec<String>,
+    /// The precomp's sample-filter outputs, in flat order, filtered like a
+    /// filtered slot. Never scaled in place: [`filter_exposure`] is applied
+    /// as a var reads them, by the var's own flag.
+    ///
+    /// [`filter_exposure`]: Self::filter_exposure
+    filters: Vec<FilterPlane>,
+    /// Where each sample filter's outputs start in `filters`.
+    filter_offsets: Vec<usize>,
+    /// The exposure scale [`apply_exposure`](Self::apply_exposure) gave the
+    /// film, which a radiance filter output is read with.
+    filter_exposure: f32,
+    /// The display filters' outputs, once [`crate::precomp::run`] has run.
+    display: Vec<crate::precomp::Plane>,
+    /// Wall-clock seconds the display chain took, the last time it ran.
+    display_s: f64,
 }
 
 impl AovFilm {
@@ -1088,6 +1284,27 @@ impl AovFilm {
             sample_count: layout.sample_count.then(|| vec![0.0; pixels]),
             variance: layout.variance.then(|| vec![0.0; pixels]),
             lpes: layout.lpes.clone(),
+            filters: layout
+                .precomp
+                .as_ref()
+                .map(|pc| {
+                    pc.output_widths()
+                        .iter()
+                        .map(|w| FilterPlane {
+                            width: *w as usize,
+                            values: vec![0.0; pixels * *w as usize],
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            filter_offsets: layout
+                .precomp
+                .as_ref()
+                .map(|pc| (0..pc.sample.len()).map(|f| pc.flat(f as u16, 0)).collect())
+                .unwrap_or_default(),
+            filter_exposure: 1.0,
+            display: Vec::new(),
+            display_s: 0.0,
         }
     }
 
@@ -1123,8 +1340,24 @@ impl AovFilm {
                 let comps = slot.key.components();
                 slot.planes.values[q * comps..(q + 1) * comps].fill(slot.key.clear());
             }
+            for f in &mut self.filters {
+                f.values[q * f.width..(q + 1) * f.width].fill(0.0);
+            }
             // The sample count and the variance planes are created at 0.
             return;
+        }
+        if let Some(filters) = &unit.filters {
+            for (dst, src) in self.filters.iter_mut().zip(&filters.planes) {
+                let w = dst.width;
+                for c in 0..w {
+                    let sum = src[p * w + c];
+                    dst.values[q * w + c] = if weight_sum > 0.0 {
+                        sum / weight_sum
+                    } else {
+                        sum / taken as f32
+                    };
+                }
+            }
         }
         for (slot, src) in self.slots.iter_mut().zip(&unit.planes) {
             let comps = slot.key.components();
@@ -1195,6 +1428,18 @@ impl AovFilm {
             sample_count: first.sample_count.as_ref().map(|n| vec![0.0; n.len()]),
             variance: first.variance.as_ref().map(|v| vec![0.0; v.len()]),
             lpes: first.lpes.clone(),
+            filters: first
+                .filters
+                .iter()
+                .map(|f| FilterPlane {
+                    width: f.width,
+                    values: vec![0.0; f.values.len()],
+                })
+                .collect(),
+            filter_offsets: first.filter_offsets.clone(),
+            filter_exposure: first.filter_exposure,
+            display: Vec::new(),
+            display_s: 0.0,
         };
         for slot in &mut out.slots {
             if slot.key.accumulation == Accumulation::Filtered {
@@ -1267,6 +1512,15 @@ impl AovFilm {
                             }
                         }
                     }
+                }
+            }
+            // The sample filters' outputs blend as a filtered slot does.
+            for (dst, src) in out.filters.iter_mut().zip(&film.filters) {
+                for (d, s) in dst.values.iter_mut().zip(&src.values) {
+                    if share == 0.0 && !s.is_finite() {
+                        continue;
+                    }
+                    *d += s * share as f32;
                 }
             }
             if let (Some(d), Some(s)) = (&mut out.sample_count, &film.sample_count) {
@@ -1342,6 +1596,7 @@ impl AovFilm {
                 let v = self.variance.as_ref().expect("laid out");
                 vec![top_down(&|q| v[q])]
             }
+            AovSource::Filter(f) => self.filter_channels(&f),
             _ => {
                 let key = var.slot_key(&self.lpes).expect("a slotted source");
                 let slot = self.slot(&key);
@@ -1372,6 +1627,11 @@ impl AovFilm {
             }
             AovSource::SampleCount => vec![self.sample_count.as_ref().expect("laid out")[q]],
             AovSource::Variance => vec![self.variance.as_ref().expect("laid out")[q]],
+            AovSource::Filter(f) => self
+                .filter_channels(&f)
+                .iter()
+                .map(|c| c[y * w + x])
+                .collect(),
             _ => {
                 let key = var.slot_key(&self.lpes).expect("a slotted source");
                 let slot = self.slot(&key);
@@ -1385,6 +1645,82 @@ impl AovFilm {
 }
 
 impl AovFilm {
+    /// The channels a filter var writes, top-down: its output's, a `float`
+    /// output repeated into every channel. A sample filter's output is
+    /// scaled by the exposure when the var says it is radiance; an output
+    /// the film does not hold (its filter was refused at import) reads 0.
+    fn filter_channels(&self, f: &FilterSource) -> Vec<Vec<f32>> {
+        let n = f.components as usize;
+        if f.display {
+            let (w, h) = self.dimensions();
+            return match self.display.get(f.filter as usize) {
+                Some(plane) => (0..n)
+                    .map(|c| plane.channels[c.min(plane.channels.len() - 1)].clone())
+                    .collect(),
+                None => vec![vec![0.0; w * h]; n],
+            };
+        }
+        let flat = self
+            .filter_offsets
+            .get(f.filter as usize)
+            .map(|o| o + f.output as usize);
+        let channels = flat.map_or_else(Vec::new, |i| self.sample_output_channels(i, f.radiance));
+        let (w, h) = self.dimensions();
+        (0..n)
+            .map(|c| match channels.len() {
+                0 => vec![0.0; w * h],
+                k => channels[c.min(k - 1)].clone(),
+            })
+            .collect()
+    }
+
+    /// Sample-filter output `flat`'s channels, top-down, times the film's
+    /// exposure when `exposed`.
+    pub(crate) fn sample_output_channels(&self, flat: usize, exposed: bool) -> Vec<Vec<f32>> {
+        let (w, h) = self.dimensions();
+        let Some(plane) = self.filters.get(flat) else {
+            return vec![vec![0.0; w * h]];
+        };
+        let scale = if exposed { self.filter_exposure } else { 1.0 };
+        (0..plane.width)
+            .map(|c| {
+                (0..w * h)
+                    .map(|i| {
+                        let q = (h - 1 - i / w) * w + i % w;
+                        let v = plane.values[q * plane.width + c];
+                        if scale == 1.0 { v } else { v * scale }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Wall-clock seconds the precomp's display chain took over this film
+    /// (0 when it has none): what `--stats` reports.
+    pub fn display_seconds(&self) -> f64 {
+        self.display_s
+    }
+
+    pub(crate) fn set_display_seconds(&mut self, s: f64) {
+        self.display_s = s;
+    }
+
+    /// Forgets the display filters' outputs, before the chain runs again.
+    pub(crate) fn clear_display(&mut self) {
+        self.display.clear();
+    }
+
+    /// Keeps the next display filter's output.
+    pub(crate) fn push_display(&mut self, plane: crate::precomp::Plane) {
+        self.display.push(plane);
+    }
+
+    /// Display filter `i`'s output, which [`crate::precomp::run`] has
+    /// computed (an earlier filter's, when a later one reads it).
+    pub(crate) fn display_plane(&self, i: usize) -> &crate::precomp::Plane {
+        &self.display[i]
+    }
+
     /// Multiplies every plane by the power of `scale` its slot takes
     /// ([`AovSource::exposure_power`]): radiance by `scale`, variances by
     /// its square, the rest not at all. Every value a channel is read from is
@@ -1402,6 +1738,7 @@ impl AovFilm {
             let factor = scale.powi(AovSource::Variance.exposure_power());
             variance.iter_mut().for_each(|v| *v *= factor);
         }
+        self.filter_exposure *= scale;
     }
 
     /// The film of a render that asks for no AOV: no planes at all.
@@ -1476,6 +1813,7 @@ mod tests {
     #[test]
     fn closest_prefers_in_box_samples_then_the_nearest() {
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1490,10 +1828,10 @@ mod tests {
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
         // Outside the box and nearer: ignored once an in-box sample exists.
-        unit.add(&at(1.0), &NONE, -0.2, 0.5, 1.0);
-        unit.add(&at(10.0), &NONE, 0.5, 0.5, 1.0);
-        unit.add(&at(2.0), &NONE, 0.25, 0.75, 1.0);
-        unit.add(&at(5.0), &NONE, 0.75, 0.25, 1.0);
+        unit.add(&at(1.0), &NONE, -0.2, 0.5, 1.0, Vec3A::ZERO);
+        unit.add(&at(10.0), &NONE, 0.5, 0.5, 1.0, Vec3A::ZERO);
+        unit.add(&at(2.0), &NONE, 0.25, 0.75, 1.0, Vec3A::ZERO);
+        unit.add(&at(5.0), &NONE, 0.75, 0.25, 1.0, Vec3A::ZERO);
         let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 4.0, 4, 0.0);
         let depth = film.var_channels(&Buffer::new(1, 1), &request.products[0].vars[0]);
@@ -1505,6 +1843,7 @@ mod tests {
     fn closest_falls_back_to_the_sample_nearest_the_centre() {
         let v = var(AovSource::Depth, Accumulation::Closest);
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1521,8 +1860,8 @@ mod tests {
         let far = FirstHit::Volume {
             p: Vec3A::new(0.0, 0.0, -7.0),
         };
-        unit.add(&near, &NONE, 1.6, 0.5, 1.0);
-        unit.add(&far, &NONE, 1.2, 0.5, 1.0);
+        unit.add(&near, &NONE, 1.6, 0.5, 1.0, Vec3A::ZERO);
+        unit.add(&far, &NONE, 1.2, 0.5, 1.0, Vec3A::ZERO);
         let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 2.0, 2, 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![7.0]]);
@@ -1532,6 +1871,7 @@ mod tests {
     fn filtered_uses_the_beauty_weights_and_escapes_clear() {
         let v = var(AovSource::Alpha, Accumulation::Filtered);
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1549,8 +1889,8 @@ mod tests {
             prim: NO_PRIM,
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
-        unit.add(&surface, &NONE, 0.5, 0.5, 3.0);
-        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.0);
+        unit.add(&surface, &NONE, 0.5, 0.5, 3.0, Vec3A::ZERO);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.0, Vec3A::ZERO);
         let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 4.0, 2, 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![0.75]]);
@@ -1561,6 +1901,7 @@ mod tests {
         let mut v = var(AovSource::Depth, Accumulation::Filtered);
         v.clear = f32::INFINITY;
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1577,12 +1918,12 @@ mod tests {
         // weights, one that misses with weights of both signs.
         let mut unit = UnitAov::new(&layout, cam, 2);
         unit.pixel = 0;
-        unit.add(&at(2.0), &NONE, 0.5, 0.5, 1.5);
-        unit.add(&at(4.0), &NONE, 0.5, 0.5, 0.5);
-        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, -0.25);
+        unit.add(&at(2.0), &NONE, 0.5, 0.5, 1.5, Vec3A::ZERO);
+        unit.add(&at(4.0), &NONE, 0.5, 0.5, 0.5, Vec3A::ZERO);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, -0.25, Vec3A::ZERO);
         unit.pixel = 1;
-        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.2);
-        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, -0.2);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.2, Vec3A::ZERO);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, -0.2, Vec3A::ZERO);
         let mut film = AovFilm::new(&layout, PixelRect::full(2, 1));
         film.store(&unit, 0, 0, 0, 1.75, 3, 0.0);
         film.store(&unit, 1, 1, 0, 1.0, 2, 0.0);
@@ -1604,6 +1945,7 @@ mod tests {
     fn a_zero_weight_pass_leaves_the_variance_finite() {
         let v = var(AovSource::Variance, Accumulation::Filtered);
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1629,6 +1971,7 @@ mod tests {
     fn a_beauty_only_request_needs_no_film() {
         let mut beauty = var(AovSource::Color, Accumulation::Filtered);
         let mut request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1670,6 +2013,7 @@ mod tests {
             assert!(!AovSource::is_planned(name), "{name}");
         }
         let layout = AovLayout::new(&AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1787,6 +2131,7 @@ mod tests {
         v.components = 1;
         v.variance = true;
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/p".into(),
                 name: "a.exr".into(),
@@ -1809,7 +2154,7 @@ mod tests {
                 lpe: std::slice::from_ref(lpe),
                 ..NONE
             };
-            unit.add(&hit, &extras, 0.5, 0.5, 1.0);
+            unit.add(&hit, &extras, 0.5, 0.5, 1.0, Vec3A::ZERO);
         }
         let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 2.0, 2, 0.0);
@@ -1905,6 +2250,7 @@ mod tests {
     fn exposure_leaves_primvar_slots_alone() {
         let v = var(primvar(0, 3, PrimvarRole::Color), Accumulation::Filtered);
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/Render/p".into(),
                 name: "p.exr".into(),
@@ -1927,7 +2273,7 @@ mod tests {
             primvars: &primvars,
             ..NONE
         };
-        unit.add(&hit, &extras, 0.5, 0.5, 1.0);
+        unit.add(&hit, &extras, 0.5, 0.5, 1.0, Vec3A::ZERO);
         let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
         film.store(&unit, 0, 0, 0, 1.0, 1, 0.0);
         film.apply_exposure(4.0);

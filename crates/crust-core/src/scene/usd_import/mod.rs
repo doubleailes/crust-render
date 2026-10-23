@@ -83,6 +83,7 @@ mod materials;
 mod mesh;
 mod mtlx_network;
 mod passes;
+mod precomp;
 mod preview;
 mod products;
 mod settings;
@@ -1275,9 +1276,26 @@ pub(crate) fn load_scene(
     };
     stats.image = (&settings).into();
 
+    let mut request = products.request;
+    if let Some(pc) = request.precomp.as_mut() {
+        if let Some(pc) = std::sync::Arc::get_mut(pc) {
+            pc.load_kernels(|p| assets.load_light_texture(p, crate::ColorSpace::RAW));
+        }
+        // Nothing lights a stage with no light, so its beauty is black and the
+        // stop rule, which reads only the beauty, sees no variance.
+        if ctx.lights.count() == 0 && pc.has_filters() {
+            warning!(
+                PrecompBlackBeauty,
+                "The stage has a precomp but no light, so its beauty is black: adaptive \
+                 sampling stops every pixel at crust:minSamplesPerPixel. Author \
+                 crust:minSamplesPerPixel = crust:samplesPerPixel for the precomp to take every \
+                 sample"
+            );
+        }
+    }
     let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
     scene.stats = stats;
-    scene.aovs = products.request;
+    scene.aovs = request;
     scene.working_space = working;
     scene.camera_path = camera_path;
     scene.time = time;
@@ -1304,6 +1322,7 @@ pub(crate) fn load_scene(
             subdiv_level: ctx.caches.meshes.subdiv.level,
             adaptive: ctx.caches.meshes.subdiv.adaptive.map(|r| r.key()),
             domes_seen_by_camera,
+            precomp: scene.aovs.precomp.is_some(),
             working: Some(working),
             camera: scene.camera_path.clone(),
             dicing: dicing.map(|p| p.to_string()),
@@ -1446,7 +1465,7 @@ fn read_index(
     let mut settings = import_render_settings(index, pass);
     // The products the render writes. The first one's camera and resolution
     // are the render's: the settings' own unless that product overrides them.
-    let products = import_render_products(index, pass);
+    let products = import_render_products(index, Some(path), pass);
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }

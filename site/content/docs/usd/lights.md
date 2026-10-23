@@ -69,7 +69,9 @@ attribute, or a `UsdColorSpaceAPI` `colorSpace:name` on the light or an ancestor
 [Constant colours](@/docs/usd/materials.md#constant-colours)). A colour temperature's tint
 is computed straight into the working space, at unit luminance there. An image file is
 decoded from the colour space authored for it the same way; with none, an 8-bit image is
-sRGB and a float image (EXR, `.hdr`) is taken as already in the working space.
+sRGB and a float image (EXR, `.hdr`) is taken as already in the working space. An EXR's
+colour is its first layer's `R`, `G` and `B` channels, matched by base name, so a
+layer-prefixed `rgb.R` reads too; a single channel, or a `Y` channel, is grey.
 
 Area lights also read `ShapingAPI`: the cone (`inputs:shaping:cone:angle`,
 `inputs:shaping:cone:softness`), focus (`inputs:shaping:focus`,

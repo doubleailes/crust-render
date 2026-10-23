@@ -17,7 +17,10 @@ top = false
 ## How a render asks for AOVs
 
 AOVs (arbitrary output variables, or render passes) are requested only through the
-`UsdRender` schema. There is no `crust:*` attribute and no command-line flag for them.
+`UsdRender` schema. There is no command-line flag for them, and products take no
+`crust:*` attribute. A var takes `crust:*` attributes only to write a
+[filter output](#filter-outputs), or to ask for [raw light](#raw-light) or [the variance of
+an expression](#variance-of-an-expression).
 
 - The `RenderSettings` prim lists its products in `rel products`.
 - Each `RenderProduct` is one output file, named by `productName`. It lists its channels
@@ -102,7 +105,10 @@ what it authors itself, as `UsdRenderComputeSpec` does.
 - **`productType`** must be `raster` (the default). A `deepRaster` product is skipped with
   a warning.
 - **The PNG preview** is made from the first product's beauty var and written beside that
-  product, with a `.png` extension. A first product with no beauty var gets no PNG.
+  product, with a `.png` extension. When the render settings author
+  [`crust:display`](@/docs/usd/render-settings.md#crust-display), it is made from that
+  output instead, and written even if the first product has no beauty var. Otherwise a
+  first product with no beauty var gets no PNG.
 
 Text attributes authored as `driver:parameters:*` on a product are copied into its EXR
 header: `driver:parameters:artist` as `artist`, and `driver:parameters:OpenEXR:<key>` as
@@ -145,9 +151,10 @@ warning.
 | `int` | UINT; `-1` is written as `0xFFFFFFFF` |
 
 The type must fit the source: three or four channels for the beauty, three for positions
-and normals, two for UVs and motion vectors, one for scalars. An integer type is accepted
-only for `sampleCount` and [primvars](#primvars). A var whose type does not fit is
-skipped with a warning.
+and normals, two for UVs and motion vectors, one for scalars, one to three float or half
+channels for a [filter output](#filter-outputs). An integer type is accepted only for
+`sampleCount` and [primvars](#primvars). A var whose type does not fit is skipped with a
+warning.
 
 ### Source types
 
@@ -160,6 +167,34 @@ skipped with a warning.
 
 `sourceType` and `driver:parameters:aov:name` may be authored as a `token` or a
 `string`; both are read.
+
+### Filter outputs
+
+A var that authors `rel crust:filter` writes the output of a filter of the render
+settings' [precomp](@/docs/usd/render-settings.md#precomp), and its `sourceType` and
+`sourceName` are ignored:
+
+```usda
+def RenderVar "look"
+{
+    uniform token dataType = "color3f"
+    rel crust:filter = </Render/Precomp/look>
+}
+```
+
+| attribute | type | default | meaning |
+|-----------|------|---------|---------|
+| `crust:filter` | `rel` | — | the filter: a target of `crust:sampleFilters` or `crust:displayFilters` |
+| `crust:filter:output` | `token` | the filter's only output | a sample filter's output, by its `outputs:<name>`; a display filter has one, `out` |
+| `crust:filter:radiance` | `bool` | `true` | whether the camera's exposure multiplies a sample filter's output; author `false` for a matte or a ratio |
+
+A sample filter's output is accumulated like a filtered var, with the beauty's weights,
+and blended across a guided render's passes as the beauty is. A `float` output fills
+every channel of a wider var. A display filter's output is the operation's image; it
+is computed from exposed inputs and never scaled again. A filter that is in neither list,
+or an output it does not have, writes no channel
+([`precomp.unknown_filter`](@/docs/reference/warnings.md#precomp)), and a filter refused
+at import writes 0.
 
 ## Sources
 
@@ -754,6 +789,9 @@ it mirrors:
 | `crust:motionBlur` | `int` | `1` when moving geometry was blurred (motion blur on, over a shutter that opens an interval), else `0` | `disableMotionBlur`, `shutter:open` / `shutter:close` |
 | `crust:layerStack` | `string` | the stage's root layer stack, strongest first (session layer, root layer, sublayers): one line per file, the 16-digit hex FNV-1a hash of its bytes as the scene was loaded (`-` if unreadable), a space, its absolute path (characters outside printable ASCII, and `%`, written as `%XX` UTF-8 bytes); absent when no layer is known | — |
 | `crust:invisibleOverrides` | `int` | the prims the strongest layer of that stack hides with an `over` authoring `visibility = "invisible"` — what a session or override layer hid of the scene beneath it | — |
+| `crust:sampleFilters` | `string` | the [precomp](@/docs/usd/render-settings.md#precomp)'s sample filters, prim paths in evaluation order, comma-separated; empty without one | `crust:sampleFilters` |
+| `crust:displayFilters` | `string` | its display filters, likewise | `crust:displayFilters` |
+| `crust:display` | `string` | the displayed output's name, `beauty` when none is authored | `crust:display` |
 | `crust:version` | `string` | the crust version | — |
 
 The working space is not repeated: `colorInteropID` already records it. The stamp
@@ -791,7 +829,9 @@ product's region.
 ## Guarantees
 
 - Asking for AOVs never changes the beauty. It is bit-identical to the same render
-  without products.
+  without products, and so is a render with a
+  [precomp](@/docs/usd/render-settings.md#precomp): no filter changes the beauty or the
+  samples a pixel takes.
 - Every channel is bit-identical between the default tiles and
   [`--scanline`](@/docs/reference/command-line.md#scanline).
 - A render whose products ask for nothing beyond a 3-channel beauty does no AOV work at

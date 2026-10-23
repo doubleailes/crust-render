@@ -388,6 +388,7 @@ fn every_expression_routes_its_path() {
     for rec in report.records.iter().take(8) {
         let var = lpe_var(&rec.expression);
         let request = AovRequest {
+            precomp: None,
             products: vec![AovProduct {
                 prim_path: "/Render/p".into(),
                 name: "p.exr".into(),

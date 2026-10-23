@@ -2,7 +2,7 @@
 title = "Limitations"
 description = "What Crust Render does not do, or does only partly."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-21T08:00:00+00:00
+updated = 2026-10-23T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
@@ -101,9 +101,12 @@ render.
   read in the prim's own space, not transformed to world space.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
-  Zeltner sheen uses the table Adobe's reference uses rather than MaterialX's own curve
-  fits, which differ from it by up to 0.08 in reflectance for very smooth sheens seen at
-  grazing angles.
+  MaterialX BSDFs follow BSDL, the library OSL's reference renderer shades with, not
+  MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. A very
+  rough refracting `dielectric_bsdf` lit by a sampled light returns about 2% more light
+  than it receives, as it does in OSL's reference renderer. A coat over glass, seen from
+  inside within a degree or two past the critical angle, returns up to 6% more than it
+  receives.
 - **Texture filtering is isotropic.** Mip levels are chosen from ray cones, but the filter
   has no direction. A texture seen at a grazing angle is blurred more than an anisotropic
   (EWA) filter would blur it.
@@ -182,11 +185,30 @@ render.
   diagnosed ([#244](https://github.com/doubleailes/crust-render/issues/244)).
   `crust diagnostic` reports guiding as `biased` there, and never suggests it. Scenes without strong fireflies (the Cornell box, `veach_mis`) show no shift.
 
+## Precomp
+
+- **Display operations are a fixed set.** Blur, convolve, vector blur, merge and grade;
+  no programmable neighbourhood operation, no roto, nothing across frames.
+- **Sample filters read AOVs only.** A graph holding a texture, a `geompropvalue`, a
+  geometry node or a closure is refused, and so is a node crust's MaterialX compiler does
+  not implement (`hsvadjust`, for one).
+- **Crops clamp at their edges.** A display filter on a
+  [region](@/docs/usd/render-settings.md#datawindowndc) reads the region's border pixel past
+  its edge, so a blurred crop is not the same pixels of a blurred full frame near its
+  border.
+- **Adaptive sampling reads the beauty only.** A stage whose beauty is black stops every
+  pixel at its minimum; see [A stage without a
+  beauty](@/docs/usd/render-settings.md#a-stage-without-a-beauty).
+- **An MCP edit re-imports.** While the settings author a precomp, every edit imports the
+  stage again rather than updating it in place.
+
 ## Watching and stopping a render
 
-- **Only the beauty is previewed.** [`--checkpoint`](@/docs/reference/command-line.md#checkpoint)
-  rewrites the PNG from the image so far; the AOVs are written once, when the render ends
-  or is [interrupted](@/docs/reference/command-line.md#interrupting-a-render).
+- **Only the beauty, or the displayed output, is previewed.**
+  [`--checkpoint`](@/docs/reference/command-line.md#checkpoint) rewrites the PNG from the
+  image so far — the [displayed output](@/docs/usd/render-settings.md#crust-display) when
+  the settings author one; the AOVs are written once, when the render ends or is
+  [interrupted](@/docs/reference/command-line.md#interrupting-a-render).
 - **Loading can't be stopped and kept.** A Ctrl-C while the stage loads (or while the
   `learned` or `neural` light selection trains, before the render starts) quits at once
   and writes nothing.

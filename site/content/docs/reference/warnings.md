@@ -129,6 +129,23 @@ plain text and are not counted.
 | `primvar.not_inherited` | skipped | A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value. | Author the primvar on each mesh or curves prim itself. |
 | `lpe.invalid` | skipped | A light path expression does not parse or compile; no channel is written. | Fix the expression; the message gives the parser's error. |
 
+## Precomp
+
+Sample and display filters ([render settings](@/docs/usd/render-settings.md#precomp)).
+
+| code | kind | meaning | what to do |
+|------|------|---------|------------|
+| `precomp.unsupported_node` | skipped | A sample filter holds a node a camera sample cannot evaluate (a texture, a geometry node, a closure, an unknown node); its outputs read their clear value. | Build the graph from math, `mix`, `ifgreater`, `clamp`, `remap` and colour nodes over its interface inputs; what the surface knew reaches the filter through AOVs. |
+| `precomp.unbound_input` | refused | A filter input names no RenderVar, filter output or earlier display filter of the render; it reads its authored default or its clear value. | Name the input after a RenderVar of one of the settings' products (its layer name), or `beauty`. |
+| `precomp.unbindable_input` | refused | A sample filter input names a RenderVar with no per-sample value (a variance, the sample count); it reads its authored default. | Bind the input to a per-sample source instead. |
+| `precomp.unknown_operation` | skipped | A display filter's info:id is not one of crust's image operations; the filter passes its input through. | Use `crust:convolve`, `crust:blur`, `crust:vectorBlur`, `crust:merge` or `crust:grade`. |
+| `precomp.unknown_filter` | skipped | A RenderVar's crust:filter targets a prim that is not in the settings' filter lists, or names an output it does not have; no channel is written. | Add the filter to `crust:sampleFilters` or `crust:displayFilters`, and check `crust:filter:output`. |
+| `precomp.cycle` | refused | A filter input names a filter that runs after it; the input reads its clear value. | Reorder the filter lists so every filter comes after what it reads. |
+| `precomp.missing_kernel` | skipped | A crust:convolve kernel image could not be read; the filter passes its input through. | Check the `kernel` asset path. |
+| `precomp.invalid_value` | refused | A display filter's blur radius or scaled kernel is past crust's limit (1024 pixels, 255 pixels a side); the filter passes its input through. | Use a smaller `radius` or `kernelScale`; a blur that wide is a constant colour anyway. |
+| `precomp.unknown_display` | refused | crust:display names no RenderVar of the render; the beauty is shown. | Name a RenderVar of one of the settings' products. |
+| `precomp.black_beauty` | approximated | A stage with a precomp has no light, so its beauty is black and adaptive sampling stops every pixel at its minimum. | Author `crust:minSamplesPerPixel` equal to `crust:samplesPerPixel`. |
+
 ## Transforms
 
 | code | kind | meaning | what to do |

@@ -121,11 +121,32 @@ impl Job {
         let _ = tokio::time::timeout(budget, first_image).await;
     }
 
-    /// The image so far: the final beauty once returned, else the latest
-    /// snapshot (`None` before the first).
+    /// The beauty so far: the final beauty once returned, else the latest
+    /// snapshot's (`None` before the first).
     pub fn image(&self) -> Option<Buffer> {
         match self.finished() {
             Some(f) => Some(f.buffer.clone()),
+            None => self.control.beauty_snapshot().map(|(_, b)| b),
+        }
+    }
+
+    /// The image the render shows so far, as `crust render`'s PNG does: the
+    /// displayed output when the stage's precomp authors one
+    /// (`crust:display`), else the beauty.
+    pub fn shown(&self) -> Option<Buffer> {
+        match self.finished() {
+            Some(f) => Some(
+                f.film
+                    .as_ref()
+                    .and_then(|film| {
+                        crust_core::precomp::displayed(
+                            self.aovs.precomp.as_deref(),
+                            &f.buffer,
+                            film,
+                        )
+                    })
+                    .unwrap_or_else(|| f.buffer.clone()),
+            ),
             None => self.control.snapshot().map(|(_, b)| b),
         }
     }
@@ -426,7 +447,7 @@ pub fn answer(job: &Job, extra: Value) -> rmcp::model::CallToolResult {
         r.extend(e);
     }
     let mut content = Vec::new();
-    match job.image().map(|b| png(&b, job.working_space)) {
+    match job.shown().map(|b| png(&b, job.working_space)) {
         Some(Ok(bytes)) => {
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
             content.push(ContentBlock::image(data, "image/png"));

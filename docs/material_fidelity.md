@@ -96,13 +96,16 @@ so the wrapper rewrites each one as a scanline EXR with the same pixels.
 |---|---|
 | camera: vertical FOV 45°, near 0.05, eye (0,0,5) looking at the origin | `focalLength` 50, apertures 41.4214, `translate (0,0,5)` (a USD camera looks down −Z) |
 | `ShaderBall.glb`, centred, bounding-sphere radius 2 | `glb_to_usda.py` converts it once: TRS baked into the points, then normalised, `v = 1 − v` as MaterialX's glTF loader does, `subdivisionScheme = "none"` |
-| IBL from `san_giuseppe_bridge_2k.hdr`, background visible, no direct light | `DomeLight` with the `.hdr`, **`rotateY = 180`** |
+| IBL from `san_giuseppe_bridge_2k.hdr`, background visible, no direct light | `DomeLight` with the `.hdr`, **`rotateY = 0`** (180 until 2026-10-22, below) |
 | no shadows (the Cycles renderer sets `visible_shadow = False`; the rasterisers have no shadow map) | `crust:rayMask = 5` on both meshes (camera + indirect, no shadow rays) |
 | 512², no tone mapping, sRGB | EXR → clamp → sRGB OETF → 8-bit in `run.py` (crust's own PNG is tone-mapped) |
 
 The dome rotation was fitted on the pixels outside the ball, which are pure
-environment. At 180° those pixels score **34.2 dB** against the reference, against
-11.4–11.6 dB at 177° and 183°. The rest of the gap is the reference's softer background
+environment. At 180° those pixels scored **34.2 dB** against the reference, against
+11.4–11.6 dB at 177° and 183°. By 2026-10-22 (crust `f584a2a`) crust's dome had turned
+half way round, and every material scored about 10 dB at 180°; refitted on
+`transmission_rough` at 4 spp, 0° scores 18.6 dB on the whole image, 357° and 3°
+12.0 dB, and 90°, 180° and 270° 10.2–10.7 dB (`suite.ENV_ROTATE`). The rest of the gap is the reference's softer background
 (MaterialXView filters the environment it displays). So MaterialXView's lat-long seam
 is where crust (−Z at `u = 0.5`) puts the image centre. The UV flip was checked on
 `uv_debug_texcoord_rgb`. Crust ran at 64 spp (32 minimum, adaptive),
@@ -206,6 +209,96 @@ known to trace a subsurface random walk, so this score cannot decide which model
 is right. It says only that the walk is not what these references show. What
 would decide it is a random-walk reference: Cycles with its random-walk
 subsurface forced on, or Typhoon.
+
+## BSDL leaves: against `materialx-osl`, before and after
+
+The MaterialX leaves moved from MaterialX's GLSL lobes onto BSDL's (the lobes
+`materialx-osl`'s `testrender` shades with) and `layer` onto testrender's opacity rule
+(`openspec/specs/materials/design.md` § MaterialX). Both binaries ran the full suite
+on 2026-10-22, at the refitted rotation, base `f584a2a` against the change, with
+`run.py --against materialx-osl` (the default) scoring crust against that reference
+as well as the suite's own. Mean PSNR per group, in dB:
+
+| group | n | vs `materialx-osl`, before | after | vs `materialx-glsl`, before | after |
+|---|---|---|---|---|---|
+| **all** | 790 / 767 | 18.60 | 18.58 | 20.02 | 19.95 |
+| nodes | 493 / 478 | 16.22 | 16.22 | 17.55 | 17.55 |
+| showcase/gltf_pbr | 5 | 20.81 | 21.15 | 21.25 | 21.53 |
+| showcase/open_pbr_surface | 8 | 21.07 | 21.69 | 22.39 | 21.77 |
+| showcase/standard_surface | 16 | 21.28 | 21.27 | 21.73 | 21.73 |
+| surfaces/gltf_pbr | 86 / 85 | 23.69 | 23.40 | 24.20 | 23.90 |
+| surfaces/open_pbr_surface | 78 / 77 | 22.43 | 22.42 | 24.70 | 24.42 |
+| surfaces/standard_surface | 104 / 98 | 22.10 | 22.10 | 24.26 | 24.19 |
+
+(`n` is the number of materials with a `materialx-osl` / `materialx-glsl` image.)
+Against `materialx-osl`, the showcases gain and the `open_pbr_surface` and
+`standard_surface` groups hold. The sheen materials gain most: `soapbubble` +5.3 dB,
+`velvet` +1.4, the fuzz and sheen-roughness sweeps up to +1.0. Against `materialx-glsl`
+everything moves slightly away, as expected of a change toward the other reference.
+
+**`surfaces/gltf_pbr` falls 0.29 dB against `materialx-osl`, and stays fallen.** Two
+sets of materials account for it:
+
+- The cutouts: `gltf_pbr_sweep_alpha_*`, `alpha_mode_*`, `input_alpha_*`, −2.0 to
+  −3.4 dB each, brighter than the reference. A cutout ball shows its inner, back-facing
+  walls, and there BSDL's `SchlickLobe` (glTF's reflection is a
+  `generalized_schlick_bsdf`) reflects everything past the critical angle
+  (`SchlickFresnel::tir_cos`), while its layering filter is the front-side
+  `DielectricReflFront`, so the diffuse under it keeps nearly its whole weight. With
+  that total internal reflection switched off in a test build, `gltf_pbr_sweep_alpha_0_75`
+  and `alpha_mode_mask` score 22.29 and 21.23 dB, back to before (22.24 and 21.22).
+  crust matched BSDL's lobe and filter there (the oracle's back-face Schlick cases): a
+  wall that reflects everything while letting its base through returns more than it
+  receives. The back-face reflection filter (below) removed that, and the cutouts
+  recovered.
+- The transmission sweep, `gltf_pbr_sweep_transmission_*`, −1.1 to −1.4 dB, also
+  brighter: the renormalisation of a rough refracting dielectric, which BSDL's default
+  tables make gain energy under crust's unbiased sampler (design record, known gaps).
+
+`pearl` (−1.6 dB, brighter) and `normal_space_tangent` (−0.8) are the largest falls
+outside those sets.
+
+### Back-face reflection filter
+
+Under a back face, BSDL lets a reflection-only `dielectric_bsdf` or
+`generalized_schlick_bsdf` pass its base what it would from the front, though the lobe
+totally reflects there; crust now lets through only what the lobe leaves
+(`openspec/specs/materials/design.md` § Known gaps: MaterialX). A second full run on
+2026-10-23, same settings, base `f584a2a`, the change before the filter (`03052226`)
+and after it. Mean PSNR per group, in dB:
+
+| group | n | vs `materialx-osl`: base | before the filter | after | vs `materialx-glsl`: base | before | after |
+|---|---|---|---|---|---|---|---|
+| **all** | 790 / 767 | 18.59 | 18.62 | 18.70 | 20.01 | 19.95 | 20.02 |
+| nodes | 493 / 478 | 16.22 | 16.22 | 16.22 | 17.54 | 17.54 | 17.54 |
+| showcase/gltf_pbr | 5 | 20.80 | 23.05 | 22.97 | 21.25 | 22.14 | 22.10 |
+| showcase/open_pbr_surface | 8 | 21.06 | 22.66 | 22.69 | 22.36 | 22.09 | 22.22 |
+| showcase/standard_surface | 16 | 21.27 | 21.44 | 21.50 | 21.73 | 21.75 | 21.85 |
+| surfaces/gltf_pbr | 86 / 85 | 23.68 | 23.40 | 23.59 | 24.20 | 23.91 | 24.09 |
+| surfaces/open_pbr_surface | 78 / 77 | 22.42 | 22.65 | 22.83 | 24.69 | 24.44 | 24.62 |
+| surfaces/standard_surface | 104 / 98 | 22.09 | 22.11 | 22.37 | 24.24 | 24.16 | 24.34 |
+
+The cutouts recover what the change had cost them (`gltf_pbr_sweep_alpha_0_50`
+18.44 → 20.93 dB, `feature_opacity` +2.6 to +2.7), and so do the transmission-weight
+sweeps (`open_pbr_surface_sweep_transmission_weight_0_25` +2.85). Glass loses a little
+against `materialx-osl`, −0.3 dB on the showcases, because `testrender` has the flaw
+the filter removes: a rough glass's reflection leaf, under a back face, passed its
+transmission leaf light it was already reflecting.
+
+Score transmission against `materialx-osl` with `run.py --self-shadow`. The suite's
+renderers draw no self-shadows, so by default `run.py` turns crust's off too; inside a
+glass, light samples then reach the dome through the glass's own walls, which magnifies
+whatever a refracting lobe's `eval` claims. That alone moved the largest outlier of this
+run: `input_transmission_extra_roughness` is −1.31 dB without self-shadows and −0.03
+with them (17.71 → 17.68). With self-shadows, against `materialx-osl`:
+
+| material | base | before the filter | after |
+|---|---|---|---|
+| open_pbr `feature_transmission` | 16.45 | 19.15 | 18.29 |
+| standard_surface `feature_transmission` | 16.04 | 18.82 | 18.25 |
+| standard_surface `input_transmission_extra_roughness` | 15.62 | 17.71 | 17.68 |
+| open_pbr `glass` (showcase) | 16.64 | 21.31 | 21.01 |
+| gltf_pbr `glass` (showcase) | 16.04 | 21.64 | 21.41 |
 
 ## What still stands between crust and the reference
 

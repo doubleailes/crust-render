@@ -154,6 +154,14 @@ def render_one(mtlx, args, shots):
             o = suite.renderer_image(mdir, other)
             if o is not None:
                 report.setdefault("others", {})[other] = suite.psnr(suite.load_rgb8(o), ref8)
+    if out_img.exists():
+        # crust scored against other references than the suite's: what
+        # `materialx-osl` (OSL's testrender over BSDL) gives, for one.
+        for name in args.against:
+            o = suite.renderer_image(mdir, name)
+            if o is not None:
+                report.setdefault("against", {})[name] = suite.psnr(suite.load_rgb8(out_img),
+                                                                     suite.load_rgb8(o))
     return report
 
 
@@ -177,6 +185,8 @@ def main():
     ap.add_argument("--compare", action="append",
                     default=["materialx-osl", "blender-new", "blender-nodes", "threejs-new"],
                     help="also score these renderers' published images")
+    ap.add_argument("--against", action="append", default=["materialx-osl"],
+                    help="also score crust against these renderers' published images")
     ap.add_argument("--binary", type=Path, default=suite.REPO / "target/release/crust")
     ap.add_argument("--out", type=Path, default=Path("fidelity-out"), help="shots, shader ball, results.json")
     args = ap.parse_args()

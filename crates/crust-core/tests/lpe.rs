@@ -51,6 +51,7 @@ fn raw(name: &str, source: AovSource) -> AovVar {
 
 fn request(vars: Vec<AovVar>) -> AovRequest {
     AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/Render/p".into(),
             name: "p.exr".into(),

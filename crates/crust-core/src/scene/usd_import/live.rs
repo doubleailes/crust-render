@@ -380,6 +380,11 @@ fn refresh_settings(
         if read.domes_seen_by_camera != facts.domes_seen_by_camera {
             return Err(Structural("the dome's camera visibility changed".into()));
         }
+        // Display filters edited in place are a later change: a precomp,
+        // before or after, re-imports.
+        if facts.precomp || read.products.request.precomp.is_some() {
+            return Err(Structural("the render settings author a precomp".into()));
+        }
         // The geometry kept the primvars the products asked for when it was
         // read, and nothing else: asking for another needs it read again.
         if read.products.primvars.key() != facts.primvars {

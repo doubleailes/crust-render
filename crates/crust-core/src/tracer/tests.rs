@@ -957,6 +957,7 @@ fn every_kind_of_aov() -> crate::AovRequest {
     let mut diffuse = var("diffuse", AovSource::Lpe);
     diffuse.expression = Some("C<RD>[LO]".into());
     AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/Render/p".into(),
             name: "p.exr".into(),
@@ -1561,6 +1562,7 @@ fn count_and_variance() -> crate::AovRequest {
         variance: false,
     };
     AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/Render/p".into(),
             name: "p.exr".into(),

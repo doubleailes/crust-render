@@ -43,6 +43,7 @@ mod medium;
 pub mod names;
 mod pdf;
 pub mod place;
+pub mod precomp;
 mod primvars;
 /// The opt-in render profile (`--profile`): per-section thread time inside
 /// the render, after Guerilla Render's "Render Profile".
@@ -145,8 +146,8 @@ pub use scene::{
     MaterialRecord, NoAssets, PassRecord, PassSummary, UsdImportOptions, usd_schema_registry,
 };
 pub use stats::{
-    DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,
-    RayStats, RenderStats, SceneCounters, SubdivisionCounters, TextureCacheStats,
+    DisplacementCounters, ImageCounters, MemorySample, Phase, PrecompCounters, PrimitiveCounts,
+    PtexCacheStats, RayStats, RenderStats, SceneCounters, SubdivisionCounters, TextureCacheStats,
     current_memory_bytes, machine_memory_bytes, peak_memory_bytes,
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};

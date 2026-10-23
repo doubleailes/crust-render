@@ -238,6 +238,11 @@ scripts/geomutil_oracle.py --keep /tmp/geomutil   # rewrites crust-core/tests/da
 # named point on the chart. See "MaterialX" under USD import.
 cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_basic.mtlx mtlx_ceramic 0.25 0.5
+# ...and from inside the surface (a back face), at 45° from the normal: past
+# the critical angle the glass's reflection leaf lets almost nothing through to
+# its transmission leaf (weight 0.024), as it totally reflects.
+cargo run --release -p crust-render --example mtlx_shade -- \
+    samples/materialx_surfaces.mtlx mtlx_standard_glass --theta 45 --back 0.5 0.5
 
 # ...and across a whole MaterialX corpus: Ben Houston's Material Fidelity suite,
 # 826 materials scored by PSNR against MaterialXView's render (~80 min on 4
@@ -560,7 +565,10 @@ how many prims that bring geometry in the pass holds out and hides from the came
 the stage's — or `null` when no settings prim is there and the render uses the defaults;
 the provenance keeps the fallback path itself, so an edit authoring settings there is
 still classified as a settings edit); `products[]` (`prim` — `null` for
-the default beauty — `file`, `channels`);
+the default beauty — `file`, `channels`); `precomp` (`null` without one, else
+`sample_filters` and `display_filters`, the prim paths in order, `display`, the
+displayed output's name, and `filters`, one line per filter saying what each input
+reads — an added key, so the format stays `crust-check/2`);
 `effective_settings[]` (`name`, `value`, `flag`, `usd_attribute`, from the one
 `diagnostic::effective_settings`); `import[]` (`crust-stats/1`'s phase objects:
 `name`, `depth`, `time_s`, `rss_end_bytes`, `peak_end_bytes`); `counts`
