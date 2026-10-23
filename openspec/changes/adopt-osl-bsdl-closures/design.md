@@ -37,8 +37,6 @@ MaterialX `dcb61fe` (`libraries/pbrlib/genosl`).
 - Matching testrender's images pixel for pixel. Its path-roughness
   regularization, its light sampling and its subsurface Lambertian all differ,
   on purpose.
-- Matching BSDL's sampling densities. crust's pdf only has to agree with
-  crust's sampler, which the existing histogram tests already check.
 - Spectral rendering and `dispersion`: testrender runs BSDL with
   `lambda_0 = 0` (RGB), and so does crust.
 
@@ -153,9 +151,10 @@ and a failure when the rule no longer excuses anything. The rules expected
 from the start are the thin film and the GGX alpha floor (`MIN_ALPHA` 1e-4
 against BSDL's `EPSILON`). Any others are added only with a measurement.
 
-The pdf is not compared. crust keeps its VNDF sampling and its leaf selection,
-and BSDL's dielectric uses bounded-VNDF ("BVN") sampling, so the two densities
-differ by design.
+The pdf is compared too, toward every light: once the leaves sample as BSDL
+does (decision 7), their density is BSDL's everywhere, including toward
+refracted directions BSDL's sampler never reaches. (The first cut kept
+crust's VNDF and compared no pdf.)
 
 ### 5. Layer opacity is pinned without C++
 
@@ -176,7 +175,7 @@ uses `1 − E_ms` times the Fresnel average from its own albedo grid; it is used
 for selection only. Because selection and pdf come from the same `select`, the
 NEE ↔ bounce MIS pair does not change shape.
 
-### 7. BSDL's default build, energy gain included
+### 7. BSDL's default build, and BSDL's sampler with it
 
 BSDL bakes `DielectricBothFront` / `BothBack` by averaging its *sampler's*
 weights, and its default configuration (`use_bvn_refraction = true`) samples
@@ -186,10 +185,20 @@ own estimator, not for the lobe's value. Integrated exactly (400² grid), the
 BSDL value of a clear IOR-1.5 `RT` dielectric is 1.005 at roughness 0.3, 1.04
 at 0.5, 1.16 at 0.7 and 1.75 at 1, head on; with BVN off it is 1 within 0.3%
 everywhere (the reflection-only tables are identical either way). crust's
-VNDF sampler converges to the value, so it inherits the gain. Asked, the
-user chose to match default BSDL: crust's tables and the oracle's probe are
-built with BSDL's defaults, the gain is recorded as a known gap, and the
-spec's "rough clear dielectric" scenario pins BSDL's albedo instead of 1.
+VNDF sampler converged to the value, so it inherited the gain: a rough-1
+clear glass sphere returned 2.0 of a white furnace (doubleailes/crust-render#378).
+Asked, the user chose to match default BSDL — crust's tables and the
+oracle's probe are built with BSDL's defaults, and the spec's "rough clear
+dielectric" scenario pins BSDL's albedo, not 1 — and then to port BSDL's
+sampler too, exactly: bounded VNDF for every microfacet leaf (reflect, or
+reflect with probability `P = avg F` and refract otherwise) with BSDL's
+densities, uniform sampling for the `conty_kulla` sheen, and BSDL's `eval`
+unchanged outside the sampler's cap (the alternative, restricting `eval` to
+the cap, was declined). BSDF sampling then conserves energy (1.004 at
+roughness 1); with NEE, MIS weighs light samples toward the unreachable
+refracted directions against a density that never fires, as testrender does,
+and the same sphere reads 1.012–1.023. A thin-walled leaf that transmits
+keeps crust's VNDF: its straight-through delta has no BSDL counterpart.
 
 ### 8. No environment switch
 

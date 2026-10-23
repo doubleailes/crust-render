@@ -418,8 +418,8 @@
     `TranslucentLobe`, with the helpers they use (`GGXDist`,
     `TabulatedEnergyCurve`, the dielectric, conductor and Schlick Fresnel,
     `eval_turquin_microms_reflection`). The value is BSDL's arithmetic in BSDL's
-    order, as `f` without the cosine; sampling stays crust's (GGX VNDF,
-    cosine, the sheen's LTC). Specific points:
+    order, as `f` without the cosine, and so is the sampling, density
+    included (below). Specific points:
     - **Roughness.** A specular leaf's `roughness` is GGX **alpha**, taken as
       authored (floored at BSDL's `EPSILON`, 1e-4, and capped at 1) — the DPEL
       teapot's `desquare_roughness_*` nodes exist to produce it. BSDL
@@ -462,6 +462,26 @@
       `bsdf_zeltnersheen_param.h`) at `max(√roughness, 0.02)`, BSDL's index —
       so the MaterialX sheen at `r` equals the native fuzz at `√r`. Neither
       shades a back face.
+    - **Sampling is BSDL's** (doubleailes/crust-render#378). A microfacet
+      leaf draws its micro-normal with Eto and Tokuyoshi's bounded VNDF
+      (`GGXDist::sample_for_refl`) and reflects it, or — for a lobe that
+      refracts — reflects it with probability `P = avg F(cos θ_mo)` and
+      refracts it otherwise (`DielectricBSDF::sample`; a `T` leaf draws its
+      black reflection too, as BSDL does). Its density is BSDL's: `D_refl /
+      (4 cos θo)` reflected (times `P` when it refracts), `D_refl · J · (1 −
+      P)` refracted, `D_refl = D_refl_D(ωo) · D(m)`. A `conty_kulla` sheen is
+      sampled uniformly over the hemisphere (`1/2π`, none where the lobe has
+      no value), a `zeltner` one by its LTC, the diffuse and translucent
+      leaves cosine-weighted, all as BSDL. This is what makes the refracting
+      renormalisation right: `BothFront` / `BothBack` are the sampled weights'
+      average under exactly this sampler, so the BSDF-sampled estimator
+      returns what the lobe receives. Under the full GGX VNDF that crust used
+      first, a rough clear glass sphere returned 2.0 of a white furnace at
+      roughness 1 (1.23 at 0.7, 1.06 at 0.5); now 1.004
+      (`a_rough_glass_is_bounded_in_a_white_furnace`). Two things stay crust's:
+      a thin-walled leaf that transmits (its straight-through delta has no
+      BSDL counterpart) samples the full VNDF, and leaf *selection* stays
+      `∝ lum(w)·lum(Ê)`.
     - **Diffuse and translucent.** BSDL's QON (no compensation) and EON
       (compensation, Portsmouth) and Burley are MaterialX's GLSL lobes to
       rounding; translucent is `color/π` below the plane.
@@ -749,7 +769,8 @@
     writes `crates/crust-core/tests/data/bsdl_oracle.txt`: 414 cases, each one
     leaf with every input authored, a view and eight lights, answered with
     the directional albedo over a 32 × 32 cosine-weighted grid on each side,
-    `filter_o`, `albedo_impl` and `f·|cos|` toward each light. The cases cover
+    `filter_o`, `albedo_impl`, and `f·|cos|` and the sampling density toward
+    each light. The cases cover
     every leaf and mode (`dielectric_bsdf` `R` / `T` / `RT` on both faces at
     IOR 1.001–5 and roughness 0–1, anisotropic both ways and tinted;
     `conductor_bsdf` for three metals; `generalized_schlick_bsdf` `R` and `RT`;
@@ -1126,24 +1147,27 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   weight; testrender lets `1 − w` through), in the energy compensation of
   refracting dielectrics, and in a `zeltner` sheen, which BSDL reads at
   `max(√roughness, 0.02)` where GLSL's fits read `roughness`.
-- **A rough refracting dielectric gains energy.** BSDL renormalises a
-  refracting lobe by `DielectricBothFront` / `BothBack`, which `genluts`
-  bakes from BSDL's bounded-VNDF sampler (`use_bvn_refraction`, on by
-  default). That sampler skips micro-normals that cannot reflect but could
-  refract, so the tables measure less energy than the lobe's value holds,
-  and crust's unbiased VNDF sampler converges to the value: a clear IOR-1.5
-  `RT` dielectric returns 1.005 of what it receives at roughness 0.3, 1.04 at
-  0.5, 1.16 at 0.7 and 1.75 at 1, head on (400² grid, matching the BSDL
-  probe's value). Baked with BVN off, the same lobe is 1 within 0.3%; matching
-  default BSDL was chosen over that, so the oracle compares crust with what
-  testrender ships. A `standard_surface` or `open_pbr_surface` glass is smooth
-  by default and stays bounded in the furnace; a rough one is not.
-- **Selection and sampling are crust's.** A leaf's value, albedo and filter are
-  BSDL's; its sampling is not: GGX VNDF rather than BSDL's bounded VNDF,
-  cosine-weighted for diffuse and the Conty–Kulla sheen rather than uniform,
-  and a conductor picked by its compensated albedo rather than BSDL's fit.
-  The pdf is crust's own and agrees with crust's samples
-  (`every_sample_agrees_with_eval`), and the oracle does not compare it.
+- **A rough refracting dielectric's value is not its sampler's.** BSDL
+  renormalises a refracting lobe by `DielectricBothFront` / `BothBack`, baked
+  from its bounded-VNDF sampler (`use_bvn_refraction`, on by default), which
+  never draws a micro-normal that cannot reflect, though it could refract. So
+  the lobe's value integrates above 1 — 1.005 at roughness 0.3, 1.04 at 0.5,
+  1.16 at 0.7 and 1.75 at 1, head on, for a clear IOR-1.5 `RT` dielectric —
+  while its sampled weights average to 1, and BSDL's `eval` still answers,
+  with a density, for the refracted directions its sampler never reaches.
+  crust ports both halves exactly (#378, the user's choice over restricting
+  `eval` to the cap or baking the tables with BVN off). BSDF sampling alone
+  conserves energy; MIS with a light does not quite: light samples reach
+  those directions and are weighted against a BSDF density that never fires,
+  so a rough clear glass sphere in a white furnace whose emitter is also a
+  light returns 1.012–1.023 of it at roughness 1, 1.007–1.017 at 0.5 —
+  testrender's own inconsistency, and down from 2.0 before the port.
+- **Selection is crust's.** A leaf's value, albedo, filter, sampling and
+  density are BSDL's; the choice among leaves is `∝ lum(w)·lum(Ê)` with a
+  0.02 floor rather than testrender's `CompositeBSDF::prepare`, and a
+  conductor is picked by its compensated albedo rather than BSDL's fit. The
+  mixture pdf agrees with the mixture's samples
+  (`every_sample_agrees_with_eval`).
 - **No path regularisation, no visible-normal bending.** testrender widens a
   lobe's roughness after a rough bounce (`regularize_roughness`), which is
   biased; crust does not, so a smooth conductor seen through a diffuse bounce

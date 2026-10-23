@@ -132,17 +132,25 @@ is the reflect-and-refract lobe with its reflection tinted black, so that a
 reflection layer over it attenuates only by the layer's opacity and no surface
 returns more than it receives. A refracting `dielectric_bsdf` SHALL renormalise its single scattering as
 BSDL does, by `1 / max(0.01, 1 − E_ms)` with `E_ms` from BSDL's
-reflect-and-refract tables of its face, baked in BSDL's default configuration.
-Those tables measure BSDL's bounded-VNDF sampler, which skips refracting
-micro-normals, so under crust's unbiased sampling a rough refracting leaf
-returns more than it receives: this is a stated deviation from energy
-conservation, kept to match the reference.
+reflect-and-refract tables of its face, baked in BSDL's default configuration,
+and SHALL be sampled as BSDL samples it (bounded VNDF), the sampler those
+tables measure. Its value then integrates above 1 at high roughness while its
+BSDF-sampled estimate returns what it receives; with light sampling and MIS
+a small excess remains, as in testrender.
 
 #### Scenario: A glass is bounded in a white furnace
 
 - **WHEN** a `standard_surface` glass sphere is rendered unclamped inside a
   uniform emitter of radiance 1
 - **THEN** no pixel, head-on or at grazing incidence, exceeds 1
+
+#### Scenario: A rough glass is bounded in a white furnace
+
+- **WHEN** a clear `dielectric_bsdf` sphere in `RT` mode, IOR 1.5, at
+  roughness 0.5 and 1, is rendered unclamped inside a uniform emitter of
+  radiance 1, with and without that emitter as a light
+- **THEN** its mean is at most 1.02 without light sampling and at most 1.04
+  with it
 
 #### Scenario: A rough clear dielectric matches BSDL's albedo
 
@@ -203,13 +211,27 @@ condition and measured bound.
 - **THEN** the oracle replays the committed fixture without compiling or
   fetching OSL's sources
 
-### Requirement: Sampling and the walk are crust's own, not testrender's
+### Requirement: MaterialX leaves are sampled as BSDL samples them
 
-A MaterialX leaf's importance sampling SHALL be free to differ from BSDL's, as
-long as the leaf's value and opacity match. Shading SHALL NOT roughen a lobe by
-the path's previous roughness, as testrender does. `subsurface_bsdf` SHALL stay
-a random walk, `chiang_hair_bsdf` MaterialX's GLSL fibre BSDF, and a thin film
-on a dielectric or conductor MaterialX's GLSL Airy film, which BSDL ignores.
+A MaterialX leaf SHALL be sampled as BSDL samples it, with BSDL's density
+toward every direction: a microfacet leaf by bounded VNDF (reflected, or
+reflected with probability `P = avg F` and refracted otherwise), a sheen
+uniformly (`conty_kulla`) or by its LTC (`zeltner`), and the diffuse and
+translucent leaves cosine-weighted. A thin-walled leaf that transmits MAY
+sample otherwise, and the choice among leaves SHALL stay crust's.
+
+#### Scenario: Every leaf's density is BSDL's
+
+- **WHEN** the BSDL oracle test runs
+- **THEN** each leaf's density toward each fixture light matches BSDL's
+  `eval_impl` pdf within tolerance, outside the named deviations
+
+### Requirement: The walk is crust's own, not testrender's
+
+Shading SHALL NOT roughen a lobe by the path's previous roughness, as
+testrender does. `subsurface_bsdf` SHALL stay a random walk,
+`chiang_hair_bsdf` MaterialX's GLSL fibre BSDF, and a thin film on a
+dielectric or conductor MaterialX's GLSL Airy film, which BSDL ignores.
 
 #### Scenario: Roughness does not depend on the path
 

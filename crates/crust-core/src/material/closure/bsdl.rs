@@ -117,6 +117,73 @@ impl GGXDist {
     pub fn g2(&self, wi: Vec3A, wo: Vec3A) -> f32 {
         self.g2_g1(wi, wo) * self.g1(wo)
     }
+
+    /// `sample_for_refl`: Eto and Tokuyoshi's bounded VNDF sampling
+    /// ("Bounded VNDF Sampling for Smith–GGX Reflections", listing 1), a
+    /// micro-normal drawn from the spherical cap of visible normals that
+    /// can reflect `wo` above the plane. Its density is
+    /// [`GGXDist::d_refl_d`]` · D(m)`, per reflected solid angle over
+    /// `4 cosθo`. BSDL draws refraction from the same cap.
+    pub fn sample_for_refl(&self, wo: Vec3A, randu: f32, randv: f32) -> Vec3A {
+        let i_std = Vec3A::new(wo.x * self.ax, wo.y * self.ay, wo.z).normalize();
+        let phi = 2.0 * PI * randu;
+        let a = self.ax.min(self.ay).clamp(0.0, 1.0); // Eq. 6
+        let s = 1.0 + (sq(wo.x) + sq(wo.y)).sqrt(); // Omit sgn for a <= 1
+        let a2 = sq(a);
+        let s2 = sq(s);
+        let k = (1.0 - a2) * s2 / (s2 + a2 * sq(wo.z)); // Eq. 5
+        let b = k * i_std.z;
+        let z = (1.0 - randv) * (1.0 + b) - b;
+        let sin_theta = (1.0 - sq(z)).clamp(0.0, 1.0).sqrt();
+        let o_std = Vec3A::new(sin_theta * phi.cos(), sin_theta * phi.sin(), z);
+        let m_std = i_std + o_std;
+        Vec3A::new(m_std.x * self.ax, m_std.y * self.ay, m_std.z).normalize()
+    }
+
+    /// `D_refl_D(wo, m)`: the bounded VNDF density over `D(m)` (listing 2,
+    /// eq. 8), which depends on `wo` alone.
+    pub fn d_refl_d(&self, wo: Vec3A) -> f32 {
+        let len2 = sq(wo.x * self.ax) + sq(wo.y * self.ay);
+        let t = (len2 + sq(wo.z)).sqrt();
+        let a = self.ax.min(self.ay).clamp(0.0, 1.0); // Eq. 6
+        let s = 1.0 + (sq(wo.x) + sq(wo.y)).sqrt(); // Omit sgn for a <= 1
+        let a2 = sq(a);
+        let s2 = sq(s);
+        let k = (1.0 - a2) * s2 / (s2 + a2 * sq(wo.z)); // Eq. 5
+        2.0 * wo.z / (k * wo.z + t) // Eq. 8
+    }
+}
+
+/// BSDL's `reflect(E, N)`.
+pub fn reflect(e: Vec3A, n: Vec3A) -> Vec3A {
+    n * (2.0 * n.dot(e)) - e
+}
+
+/// BSDL's `refract(E, N, eta)`: `E` refracted through the plane of normal
+/// `N` into a medium of relative IOR `eta`, or zero under total internal
+/// reflection.
+pub fn refract(e: Vec3A, n: Vec3A, eta: f32) -> Vec3A {
+    if eta == 0.0 {
+        return Vec3A::ZERO;
+    }
+    let mut cosi = e.dot(n);
+    let (neta, nn) = if cosi > 0.0 {
+        (1.0 / eta, n)
+    } else {
+        cosi = -cosi;
+        (eta, -n)
+    };
+    let arg = 1.0 - neta * neta * (1.0 - cosi * cosi);
+    if arg < 0.0 {
+        return Vec3A::ZERO;
+    }
+    let nk = neta * cosi - arg.sqrt();
+    (e * -neta + nn * nk).normalize()
+}
+
+/// `DielectricBSDF::reflection_probability`: the RGB mean of `F`.
+pub fn reflection_probability(f: Vec3A) -> f32 {
+    (f.x + f.y + f.z) / 3.0
 }
 
 // ---------------------------------------------------------------------------

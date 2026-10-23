@@ -46,3 +46,11 @@
 ## Workflow follow-up
 
 - Sync the delta into `openspec/specs/materials/spec.md` and archive the change after review.
+
+## 6. BSDL's sampler (doubleailes/crust-render#378)
+
+- [x] 6.1 Port `GGXDist::sample_for_refl` / `D_refl_D`, BSDL's `reflect` / `refract`, and `DielectricBSDF::sample` with its densities for every non-thin-walled microfacet leaf; keep BSDL's `eval` outside the cap (user's choice); verify `closure/tests.rs` (sample ↔ eval) passes
+- [x] 6.2 Sample the `conty_kulla` sheen uniformly with BSDL's density, and give a black (back-face) sheen no density; verify the closure tests
+- [x] 6.3 Add the pdf toward each light to the BSDL oracle (probe, script, fixture regenerated with every earlier answer unchanged, replay) and verify every case outside the named deviations matches
+- [x] 6.4 Pin the furnace: a rough clear glass sphere within 1.02 (BSDF sampling) and 1.04 (with NEE) at roughness 0.5 and 1; record before/after in the design record
+- [ ] 6.5 Measure callgrind on `cornellbox`, `materialx_basic` and `materialx_surfaces` against the previous commit, verify non-MaterialX scenes are bit-identical, and run the full CI set

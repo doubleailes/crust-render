@@ -102,9 +102,9 @@ render.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
   MaterialX BSDFs follow BSDL, the library OSL's reference renderer shades with, not
-  MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. A rough
-  refracting `dielectric_bsdf` returns more light than it receives (up to 75% more at
-  roughness 1, head on), because BSDL's energy tables are made for BSDL's own sampler.
+  MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. A very
+  rough refracting `dielectric_bsdf` lit by a sampled light returns about 2% more light
+  than it receives, as it does in OSL's reference renderer.
 - **Texture filtering is isotropic.** Mip levels are chosen from ray cones, but the filter
   has no direction. A texture seen at a grazing angle is blurred more than an anisotropic
   (EWA) filter would blur it.

@@ -14,7 +14,8 @@ directions. For each case the probe reports what BSDL gives:
 - the layering filter `filter_o(wo)`: what the lobe lets through to a layer's
   base (0 for an opaque lobe);
 - `albedo_impl()`: the lobe's albedo estimate, which testrender picks lobes by;
-- the BSDF value times the cosine toward each light direction.
+- the BSDF value times the cosine toward each light direction;
+- BSDL's sampling density toward each light direction.
 
 The cases and the answers go to `crates/crust-core/tests/data/bsdl_oracle.txt`.
 `crates/crust-core/tests/bsdl_oracle.rs` replays them through crust's
@@ -283,7 +284,7 @@ def main():
             f.write(f"# AcademySoftwareFoundation/OpenShadingLanguage {luts.OSL_COMMIT} (src/libbsdl)\n")
             f.write(f"# AcademySoftwareFoundation/Imath {luts.IMATH_COMMIT}\n")
             f.write(f"# {len(inputs)} cases, {LIGHTS_PER_CASE} light directions each.\n")
-            f.write("# <id> <inputs> | <view> | <lights> || <albedo> | <filter> | <albedo_impl> | <values>\n")
+            f.write("# <id> <inputs> | <view> | <lights> || <albedo> | <filter> | <albedo_impl> | <values> | <pdfs>\n")
             for case, answer in zip(inputs, answers):
                 case_id, rest = answer.split(" |", 1)
                 if not case.startswith(case_id + " "):
