@@ -101,9 +101,12 @@ render.
   read in the prim's own space, not transformed to world space.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
-  Zeltner sheen uses the table Adobe's reference uses rather than MaterialX's own curve
-  fits, which differ from it by up to 0.08 in reflectance for very smooth sheens seen at
-  grazing angles.
+  MaterialX BSDFs follow BSDL, the library OSL's reference renderer shades with, not
+  MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. A very
+  rough refracting `dielectric_bsdf` lit by a sampled light returns about 2% more light
+  than it receives, as it does in OSL's reference renderer. A coat over glass, seen from
+  inside within a degree or two past the critical angle, returns up to 6% more than it
+  receives.
 - **Texture filtering is isotropic.** Mip levels are chosen from ray cones, but the filter
   has no direction. A texture seen at a grazing angle is blurred more than an anisotropic
   (EWA) filter would blur it.

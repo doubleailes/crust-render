@@ -2,7 +2,9 @@
 """Summarise a `run.py` results.json as Markdown.
 
 Reports crust's PSNR against `materialx-glsl` per suite group, beside the
-suite's own published renderers on the same materials, and — statically, from
+suite's own published renderers on the same materials, crust's PSNR against
+the other references `run.py --against` scored it on (`materialx-osl` by
+default), and — statically, from
 the documents themselves — which node categories the suite uses that
 `crust-mtlx` has no operator for. The static half is needed because the
 compiler degrades an unknown node to a constant and stops there, never reaching
@@ -38,8 +40,8 @@ SURFACES = ("standard_surface", "open_pbr_surface", "gltf_pbr")
 
 
 def supported_categories():
-    """The category arms of `Compiler`'s dispatch in crust-mtlx/src/eval.rs."""
-    src = (REPO / "crates/crust-mtlx/src/eval.rs").read_text()
+    """The category arms of `Compiler`'s dispatch in crust-mtlx/src/eval/compile.rs."""
+    src = (REPO / "crates/crust-mtlx/src/eval/compile.rs").read_text()
     start = src.index("match node.category.as_str()")
     end = src.index("other =>", start)
     arms = re.findall(r'^\s*((?:"[a-z0-9_]+"\s*\|?\s*)+)=>', src[start:end], re.M)
@@ -111,6 +113,16 @@ def main():
         mean, med = stats(r["psnr"] for r in rows)
         cells = [stats(r.get("others", {}).get(o) for r in rows)[0] for o in others]
         out.append(f"| {name} | {len(rows)} | {mean} | {med} | " + " | ".join(cells) + " |")
+
+    for ref in sorted({a for r in results for a in r.get("against", {})}):
+        out.append(f"\nCrust's PSNR against `{ref}` instead:\n")
+        out.append("| group | n | crust mean | crust median |")
+        out.append("|---|---|---|---|")
+        for name, rows in [("**all**", results)] + sorted(by_group.items()):
+            vals = [r.get("against", {}).get(ref) for r in rows]
+            vals = [v for v in vals if v is not None]
+            mean, med = stats(vals)
+            out.append(f"| {name} | {len(vals)} | {mean} | {med} |")
 
     ranked = sorted(scored, key=lambda r: r["psnr"])
     out.append("\nLowest crust PSNR:\n")

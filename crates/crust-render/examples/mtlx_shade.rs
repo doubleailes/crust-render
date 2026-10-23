@@ -10,11 +10,13 @@
 //! throughput of every layer above it), its lobe parameters and normal — plus
 //! the emitted radiance and the interior medium. The view is straight down
 //! the normal unless `--theta <degrees>` tilts it, since layer throughput is a
-//! function of the view angle.
+//! function of the view angle. `--back` shades the point from inside the
+//! surface (a back face: the interface's IOR inverted, a sheen black), where a
+//! reflection-only leaf can totally reflect.
 //!
 //! ```sh
 //! cargo run --release -p crust-render --example mtlx_shade -- \
-//!     Looks/teapot_ceramic_ldX.mtlx [material_node] [--theta deg] [u v]...
+//!     Looks/teapot_ceramic_ldX.mtlx [material_node] [--theta deg] [--back] [u v]...
 //! ```
 //!
 //! With no coordinates it sweeps a few points across the first UDIM tile.
@@ -29,7 +31,7 @@ use std::path::Path;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(file) = args.first() else {
-        eprintln!("usage: mtlx_shade <file.mtlx> [material_node] [--theta deg] [u v]...");
+        eprintln!("usage: mtlx_shade <file.mtlx> [material_node] [--theta deg] [--back] [u v]...");
         std::process::exit(2);
     };
     let file = Path::new(file);
@@ -40,8 +42,13 @@ fn main() {
     let mut node: Option<String> = None;
     let mut coords: Vec<f32> = Vec::new();
     let mut theta = 0.0f32;
+    let mut back = false;
     let mut rest = args[1..].iter();
     while let Some(a) = rest.next() {
+        if a == "--back" {
+            back = true;
+            continue;
+        }
         if a == "--theta" {
             theta = rest
                 .next()
@@ -126,7 +133,9 @@ fn main() {
             p: Vec3A::ZERO,
             normal: Vec3A::Z,
             t: 1.0,
-            front_face: true,
+            // The normal faces the viewer either way; `front_face` says which
+            // side of the surface that is.
+            front_face: !back,
             part: crust_core::HitPart::None,
             uv: Some((u, v)),
             tangent: Vec3A::X,

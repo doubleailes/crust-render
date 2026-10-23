@@ -1,15 +1,17 @@
 //! The MaterialX closure-tree evaluator.
 //!
 //! A MaterialX material compiles (`crust-mtlx`) to a tree of BSDF leaves
-//! combined by `layer`, `mix`, `add` and `multiply`, with MaterialX's own
-//! semantics: `layer(top, base) = top + base · T_top(ωo)`. The throughput
-//! `T_top` depends on the outgoing direction alone, and ωo is fixed at a path
-//! vertex, so there the tree is *exactly* a weighted sum of its leaves:
+//! combined by `layer`, `mix`, `add` and `multiply`, with the semantics of
+//! MaterialX's OSL backend as OSL's `testrender` renders it:
+//! `layer(top, base) = top + base · (1 − clamp(O_top(ωo), 0, 1))`. The
+//! opacity `O_top` depends on the outgoing direction alone, and ωo is fixed at
+//! a path vertex, so there the tree is *exactly* a weighted sum of its leaves:
 //!
-//! - `mix` scales its branches by `m` and `1 − m`,
-//! - `multiply` scales its input (and passes its throughput through),
-//! - `add` concatenates, with throughput `max(T_a + T_b − 1, 0)`,
-//! - `layer` scales every base leaf by the top's throughput.
+//! - `mix` scales its branches by `m` and `1 − m`, and blends their opacities,
+//! - `multiply` scales its input, response and opacity alike,
+//! - `add` concatenates, and sums the opacities,
+//! - `layer` scales every base leaf by `1 − clamp(O_top)`, and its own opacity
+//!   is the sum of its top's and its base's (`evaluate_layer_opacity`).
 //!
 //! [`ResolvedClosure::resolve`] walks the tree once per vertex and keeps that
 //! weighted list inline — no allocation, no second walk. Every BSDF query at
@@ -18,13 +20,20 @@
 //! is pooled: that is the difference from the reduction this replaced, which
 //! averaged every leaf onto one OpenPBR parameter set.
 //!
-//! The leaves follow MaterialX's GLSL reference (`libraries/pbrlib/genglsl`,
-//! ported in [`mx`]): its Fresnel models, Turquin energy compensation on the
-//! microfacet lobes, EON / Oren–Nayar / Burley diffuse and Imageworks sheen.
-//! The one table that is not MaterialX's is the dielectric reflection
-//! throughput — BSDL's tabulated filter ([`bsdl_tables`]), what NVIDIA
-//! Typhoon uses by default.
+//! The leaves are BSDL's `mtx::` lobes ([`bsdl`]), the ones testrender shades
+//! MaterialX with: GGX with Turquin's compensation on reflection-only lobes
+//! and a tabulated renormalisation on refracting ones, Oren–Nayar / EON /
+//! Burley diffuse, Conty–Kulla and Zeltner sheen, each with BSDL's layering
+//! filter — except a reflection-only leaf under a back face, which lets
+//! through only what its own lobe leaves (`DielectricReflBack`), where BSDL's
+//! would let through what the front face does. Each leaf samples as BSDL does
+//! (bounded VNDF, a uniform `conty_kulla` sheen, the `zeltner` sheen's LTC,
+//! cosine-weighted diffuse); only a thin-walled leaf that transmits keeps
+//! crust's VNDF. The Airy thin film, which BSDL's lobes do not apply, stays
+//! MaterialX's GLSL ([`mx`]); `tests/bsdl_oracle.rs` checks the leaves against
+//! BSDL itself.
 
+pub mod bsdl;
 mod bsdl_tables;
 pub mod hair;
 pub mod mx;
@@ -38,11 +47,11 @@ use crate::hittable::HitRecord;
 use crate::material::ScatterSample;
 use crate::material::SubsurfaceEntry;
 use crate::material::brdf::{
-    ZeltnerSheen, ggx_d_aniso, ggx_g2_smith_aniso, pdf_vndf_ggx_aniso_local,
-    pdf_vndf_h_aniso_local, sample_vndf_ggx_aniso_local, tangent_frame,
+    ZeltnerSheen, pdf_vndf_ggx_aniso_local, sample_vndf_ggx_aniso_local, tangent_frame,
 };
 use crate::medium::Medium;
 use crate::ray::Ray;
+use bsdl::{GGXDist, TabulatedEnergyCurve};
 use crust_mtlx::{Bsdf, Closure, Closures, DiffuseModel, NodeId, ScatterMode, SheenMode, Val};
 use mx::{Fresnel, FresnelModel};
 
@@ -54,10 +63,10 @@ use mx::{Fresnel, FresnelModel};
 /// silently drops one.
 pub const MAX_LEAVES: usize = 8;
 
-/// The GGX alpha floor. MaterialX clamps at `M_FLOAT_EPS`; crust's GGX
-/// helpers need a finite distribution, and a mirror this sharp is already
-/// indistinguishable from a delta at any pixel footprint.
-const MIN_ALPHA: f32 = 1e-4;
+/// The GGX alpha floor: BSDL's `EPSILON`, which its MaterialX lobes clamp
+/// the authored alphas to. A mirror this sharp is already indistinguishable
+/// from a delta at any pixel footprint.
+const MIN_ALPHA: f32 = bsdl::EPSILON;
 
 /// A leaf's shading frame: its own normal and tangent.
 #[derive(Clone, Copy, Debug)]
@@ -113,23 +122,36 @@ pub enum Lobe {
         roughness: f32,
     },
     /// A GGX microfacet interface: `dielectric_bsdf`, `conductor_bsdf` or
-    /// `generalized_schlick_bsdf`.
+    /// `generalized_schlick_bsdf`, BSDL's `DielectricLobe`, `ConductorLobe`
+    /// and `SchlickLobe`.
     Specular {
         fresnel: Fresnel,
-        tint: Vec3A,
+        /// The tint toward the reflecting side, and toward the far side:
+        /// MaterialX's `tint` split by scatter mode, as genosl splits it.
+        refl_tint: Vec3A,
+        refr_tint: Vec3A,
+        /// BSDL's distribution (`GGXDist::from_alphas`): the authored
+        /// alphas, re-expressed through its roughness and anisotropy.
         ax: f32,
         ay: f32,
         mode: ScatterMode,
         /// Relative IOR across the interface in the ray-facing frame
         /// (`η_t / η_i`), for the refracted half of a transmitting leaf.
         eta: f32,
+        /// A reflection-only leaf's Turquin `E_ms`: white GGX's missing
+        /// energy toward this view. 0 for a refracting one.
+        e_ms: f32,
+        /// A refracting leaf's renormalisation `1 / max(0.01, 1 − E_ms)`,
+        /// `E_ms` the reflect-and-refract table of its face. 1 otherwise.
+        renorm: f32,
         /// A thin-walled surface transmits straight through (a delta lobe).
         thin_walled: bool,
     },
-    /// `sheen_bsdf`. In `conty_kulla` mode MaterialX's Imageworks sheen,
-    /// sampled cosine-weighted; in `zeltner` mode the LTC sheen, prepared at
-    /// this vertex's view ([`ZeltnerSheen`]), the one the native `OpenPBR`'s
-    /// fuzz is.
+    /// `sheen_bsdf`, BSDL's `SheenLobe`. In `conty_kulla` mode the
+    /// Conty–Kulla lobe, sampled cosine-weighted, at `roughness` floored at
+    /// 0.06; in `zeltner` mode the LTC sheen at `√roughness` (floored at
+    /// 0.02), prepared at this vertex's view ([`ZeltnerSheen`]). Black on a
+    /// back face, which BSDL's sheen does not shade.
     Sheen {
         color: Vec3A,
         roughness: f32,
@@ -163,6 +185,9 @@ pub struct Prepared {
     pub frame: Frame,
     v: Vec3A,
     select: f32,
+    /// The leaf's albedo estimate its selection weight is the luminance of
+    /// (BSDL's `albedo_impl`), for probes.
+    pub albedo: Vec3A,
     /// The MaterialX category, for probes.
     pub category: &'static str,
     /// A reflecting interface layered over another reflecting interface: the
@@ -234,11 +259,14 @@ impl Prepared {
             } => format!("{model:?} color {} roughness {roughness:.3}", c(color)),
             Lobe::Specular {
                 fresnel,
-                tint,
+                refl_tint,
+                refr_tint,
                 ax,
                 ay,
                 mode,
                 eta,
+                e_ms,
+                renorm,
                 thin_walled,
             } => {
                 let f = match fresnel.model {
@@ -249,6 +277,7 @@ impl Prepared {
                         f82,
                         f90,
                         exponent,
+                        ..
                     } => format!(
                         "f0 {} f82 {} f90 {} exp {exponent:.2}",
                         c(f0),
@@ -262,8 +291,9 @@ impl Prepared {
                     .unwrap_or_default();
                 let wall = if thin_walled { " thin-walled" } else { "" };
                 format!(
-                    "{mode:?} {f}{film} tint {} alpha ({ax:.4} {ay:.4}) eta {eta:.4}{wall}",
-                    c(tint)
+                    "{mode:?} {f}{film} tint {} / {} alpha ({ax:.4} {ay:.4}) eta {eta:.4} e_ms {e_ms:.4} renorm {renorm:.4}{wall}",
+                    c(refl_tint),
+                    c(refr_tint)
                 )
             }
             Lobe::Sheen {
@@ -306,6 +336,7 @@ const EMPTY: Prepared = Prepared {
     },
     v: Vec3A::Z,
     select: 0.0,
+    albedo: Vec3A::ZERO,
     category: "",
     coat: false,
     over_base: false,
@@ -563,7 +594,7 @@ impl ResolvedClosure {
         for leaf in &self.leaves[..self.len] {
             let Lobe::Specular {
                 fresnel,
-                tint,
+                refr_tint,
                 ax,
                 ay,
                 mode,
@@ -584,7 +615,7 @@ impl ResolvedClosure {
             if vh <= 1e-6 {
                 continue;
             }
-            sum += leaf.weight * tint * (1.0 - scalar(fresnel.eval(vh)));
+            sum += leaf.weight * refr_tint * (1.0 - scalar(fresnel.eval(vh)));
         }
         sum
     }
@@ -705,7 +736,8 @@ impl ResolvedClosure {
     }
 
     /// Walks the subtree `id` reached with `weight`, pushing its leaves, and
-    /// returns its throughput toward ωo.
+    /// returns its opacity toward ωo: testrender's `evaluate_layer_opacity`,
+    /// linear in every weight and clamped only where a `layer` reads it.
     fn walk(
         &mut self,
         cl: &Closures,
@@ -717,7 +749,11 @@ impl ResolvedClosure {
         match &cl.nodes[id as usize] {
             Closure::Leaf(leaf) => {
                 let own = w.slots[leaf.weight as usize].x().max(0.0);
-                let (mut p, albedo) = prepare(leaf, iface, w);
+                // A leaf at weight 0 adds neither response nor opacity.
+                if own <= 0.0 {
+                    return Vec3A::ZERO;
+                }
+                let (mut p, filter) = prepare(leaf, iface, w);
                 let weight = weight * own;
                 if weight.max_element() > 0.0 && self.len < MAX_LEAVES {
                     p.weight = weight;
@@ -737,23 +773,20 @@ impl ResolvedClosure {
                     self.leaves[self.len] = p;
                     self.len += 1;
                 }
-                // MaterialX: `1 − E·weight` for a leaf that lets light through
-                // to a base (dielectric, generalized Schlick, sheen), and 0 for
-                // an opaque one (diffuse, conductor, subsurface, translucent)
-                // whatever its weight.
-                match albedo {
-                    Some(e) => (Vec3A::ONE - e * own).clamp(Vec3A::ZERO, Vec3A::ONE),
-                    None => Vec3A::ZERO,
-                }
+                // testrender: `weight · (1 − filter_o)`, which is `weight · E`
+                // for a leaf that lets light through to a base and `weight`
+                // for an opaque one (filter 0).
+                own * (Vec3A::ONE - filter)
             }
             Closure::Layer { top, base } => {
                 let first = self.len;
-                let t_top = self.walk(cl, *top, weight, iface, w);
+                let o_top = self.walk(cl, *top, weight, iface, w);
                 let middle = self.len;
                 // A dielectric over the base is what a random walk below it
                 // is entered through.
                 let under = interface_of(cl, *top, w.slots).unwrap_or(iface);
-                let t_base = self.walk(cl, *base, weight * t_top, under, w);
+                let through = Vec3A::ONE - o_top.clamp(Vec3A::ZERO, Vec3A::ONE);
+                let o_base = self.walk(cl, *base, weight * through, under, w);
                 // A reflecting interface over another one is a coat — the
                 // shape `standard_surface` and `open_pbr_surface` both expand
                 // to. (A reflecting specular over a transmission-only one is
@@ -772,25 +805,27 @@ impl ResolvedClosure {
                         p.over_base = true;
                     }
                 }
-                t_top * t_base
+                // testrender's `evaluate_layer_opacity` sums a nested
+                // layer's top and base, neither attenuated by the other.
+                o_top + o_base
             }
             Closure::Mix { fg, bg, mix } => {
                 let m = w.slots[*mix as usize].x().clamp(0.0, 1.0);
-                let t_fg = self.walk(cl, *fg, weight * m, iface, w);
-                let t_bg = self.walk(cl, *bg, weight * (1.0 - m), iface, w);
-                t_bg.lerp(t_fg, m)
+                let o_fg = self.walk(cl, *fg, weight * m, iface, w);
+                let o_bg = self.walk(cl, *bg, weight * (1.0 - m), iface, w);
+                o_fg * m + o_bg * (1.0 - m)
             }
             Closure::Add { a, b } => {
-                let ta = self.walk(cl, *a, weight, iface, w);
-                let tb = self.walk(cl, *b, weight, iface, w);
-                (ta + tb - Vec3A::ONE).max(Vec3A::ZERO)
+                let oa = self.walk(cl, *a, weight, iface, w);
+                let ob = self.walk(cl, *b, weight, iface, w);
+                oa + ob
             }
             Closure::Multiply { input, weight: k } => {
                 let k = sanitize(w.slots[*k as usize].rgb()).min(Vec3A::ONE);
-                self.walk(cl, *input, weight * k, iface, w)
+                k * self.walk(cl, *input, weight * k, iface, w)
             }
-            // A pruned branch: nothing to shade, and it lets everything through.
-            Closure::Empty => Vec3A::ONE,
+            // A pruned branch: nothing to shade, and nothing in the way.
+            Closure::Empty => Vec3A::ZERO,
         }
     }
 
@@ -902,14 +937,15 @@ impl ResolvedClosure {
                 Lobe::Hair(h) => h.albedo(),
                 Lobe::Specular {
                     fresnel,
-                    tint,
+                    refl_tint,
+                    refr_tint,
                     mode,
                     ..
                 } => {
                     if mode.reflects() {
-                        tint * fresnel.eval(1.0)
+                        refl_tint * fresnel.eval(1.0)
                     } else {
-                        tint
+                        refr_tint
                     }
                 }
             };
@@ -1190,10 +1226,10 @@ fn alphas(v: Val) -> (f32, f32) {
     (f(ax), f(ay))
 }
 
-/// Builds a leaf's lobe and frame at the vertex, and returns the directional
-/// albedo `E(ωo)` its throughput is `1 − E·weight` of — `None` for an opaque
-/// leaf, whose throughput is 0.
-fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
+/// Builds a leaf's lobe and frame at the vertex, and returns its layering
+/// filter: BSDL's `filter_o(ωo)`, what the leaf lets through to a layer's
+/// base (0 for an opaque leaf).
+fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared, Vec3A) {
     let s = |i: u32| w.slots[i as usize];
     let n = leaf
         .normal
@@ -1214,7 +1250,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
     let v = frame.to_local(w.v_world);
     let nv = v.z.clamp(1e-6, 1.0);
     let cx = LeafInputs { w, iface, nv, v };
-    let (lobe, select, throughput) = match &leaf.bsdf {
+    let (lobe, albedo, filter) = match &leaf.bsdf {
         Bsdf::Diffuse {
             model,
             color,
@@ -1254,19 +1290,19 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             weight: Vec3A::ZERO,
             frame,
             v,
-            select,
+            select: w.luma.of(albedo).max(0.02),
+            albedo,
             category: leaf.bsdf.category(),
             coat: false,
             over_base: false,
         },
-        throughput,
+        filter,
     )
 }
 
-/// A leaf's lobe, its selection weight (floored at 0.02), and the directional
-/// albedo its throughput is `1 − E·weight` of (`None`: opaque) — what each
-/// `prepare_*` builds.
-type Built = (Lobe, f32, Option<Vec3A>);
+/// A leaf's lobe, the albedo estimate it is selected by (its luminance,
+/// floored at 0.02), and its layering filter — what each `prepare_*` builds.
+type Built = (Lobe, Vec3A, Vec3A);
 
 /// What every `prepare_*` reads: the walk's slots and hit, the interface a
 /// subsurface leaf is entered through, and the view direction in the leaf's
@@ -1292,9 +1328,15 @@ impl LeafInputs<'_> {
         tf.map(|t| (self.s(t.thickness).x().max(0.0), self.s(t.ior).x().max(1.0)))
             .filter(|(d, _)| *d > 0.0)
     }
+
+    /// Whether the ray met the back face: BSDL's `backfacing`.
+    fn back(&self) -> bool {
+        !self.w.rec.front_face
+    }
 }
 
-/// [`prepare`] for a `Diffuse` leaf.
+/// [`prepare`] for a `Diffuse` leaf: opaque, selected by its colour (BSDL's
+/// `albedo_impl`).
 #[inline(always)]
 fn prepare_diffuse(
     cx: &LeafInputs<'_>,
@@ -1304,19 +1346,14 @@ fn prepare_diffuse(
 ) -> Built {
     let color = cx.rgb(*color);
     let r = cx.s(*roughness).x().clamp(0.0, 1.0);
-    let albedo = match model {
-        DiffuseModel::Eon => mx::eon_dir_albedo(cx.nv, r, color),
-        DiffuseModel::OrenNayar => color * mx::oren_nayar_dir_albedo(cx.nv, r),
-        DiffuseModel::Burley => color * mx::burley_dir_albedo(cx.nv, r),
-    };
     (
         Lobe::Diffuse {
             model: *model,
             color,
             roughness: r,
         },
-        cx.w.luma.of(albedo).max(0.02),
-        None,
+        color,
+        Vec3A::ZERO,
     )
 }
 
@@ -1354,7 +1391,7 @@ fn prepare_subsurface(cx: &LeafInputs<'_>, color: &u32, radius: &u32, anisotropy
             roughness: 0.0,
         }
     };
-    (lobe, cx.w.luma.of(color).max(0.02), None)
+    (lobe, color, Vec3A::ZERO)
 }
 
 /// [`prepare`] for a `Hair` leaf.
@@ -1399,53 +1436,108 @@ fn prepare_hair(cx: &LeafInputs<'_>, bsdf: &Bsdf) -> Built {
         |c| cx.w.luma.of(c),
     );
     let albedo = hair.albedo();
-    // Over a base, a fibre passes on what it does not scatter.
-    (
-        Lobe::Hair(hair),
-        cx.w.luma.of(albedo).max(0.02),
-        Some(albedo),
-    )
+    // Opaque over a base, as testrender takes every lobe it has no filter
+    // for (genosl has no fibre).
+    (Lobe::Hair(hair), albedo, Vec3A::ZERO)
 }
 
 /// [`prepare`] for a `Translucent` leaf.
 #[inline(always)]
 fn prepare_translucent(cx: &LeafInputs<'_>, color: &u32) -> Built {
     let color = cx.rgb(*color);
-    (
-        Lobe::Translucent { color },
-        cx.w.luma.of(color).max(0.02),
-        None,
-    )
+    (Lobe::Translucent { color }, color, Vec3A::ZERO)
 }
 
-/// [`prepare`] for a `Sheen` leaf.
-#[inline(always)]
+/// [`prepare`] for a `Sheen` leaf: BSDL's `SheenLobe`.
 ///
-/// Its directional albedo `E` (the layer throughput `1 − E · weight`, and the
-/// pick weight) is the mode's own: MaterialX's Imageworks fit, or the
-/// Zeltner table's `R`, which is the leaf's exact albedo.
+/// Its directional albedo `E(cosθo)` is the mode's own — MaterialX's rational
+/// fit for `conty_kulla`, the LTC table's `R` for `zeltner` — and its filter
+/// is `1 − min(E · max(color), 1)`. A back face is not shaded and lets
+/// everything through.
+#[inline(always)]
 fn prepare_sheen(cx: &LeafInputs<'_>, color: &u32, roughness: &u32, mode: SheenMode) -> Built {
     let color = cx.rgb(*color);
     let r = cx.s(*roughness).x().clamp(0.0, 1.0);
-    let (e, zeltner) = match mode {
-        SheenMode::ContyKulla => (mx::imageworks_sheen_dir_albedo(cx.nv, r), None),
-        SheenMode::Zeltner => {
-            let lobe = ZeltnerSheen::new(r, cx.nv);
-            (lobe.albedo(), Some(lobe))
+    let (alpha, e, zeltner) = match mode {
+        SheenMode::ContyKulla => {
+            let alpha = r.max(bsdl::CONTY_KULLA_MIN_ROUGHNESS);
+            (alpha, bsdl::conty_kulla_sheen_albedo(alpha, cx.nv), None)
         }
+        SheenMode::Zeltner => {
+            let alpha = r.sqrt().max(bsdl::ZELTNER_MIN_ROUGHNESS);
+            let lobe = ZeltnerSheen::new(alpha, cx.nv);
+            (alpha, lobe.albedo(), Some(lobe))
+        }
+    };
+    let (color, emiss) = if cx.back() {
+        (Vec3A::ZERO, 1.0)
+    } else {
+        (color, bsdl::sheen_emiss(e, color))
     };
     (
         Lobe::Sheen {
             color,
-            roughness: r,
+            roughness: alpha,
             zeltner,
         },
-        (cx.w.luma.of(color) * e).max(0.02),
-        Some(Vec3A::splat(e)),
+        color * (1.0 - emiss),
+        Vec3A::splat(emiss),
     )
 }
 
-/// [`prepare`] for a `Dielectric` leaf.
+/// The energy terms BSDL's `DielectricLobe` and `SchlickLobe` read at the
+/// view: Turquin's `E_ms` and the filter for a leaf that only reflects, the
+/// renormalisation for one that refracts, and the albedo it is selected by.
+/// `r` is BSDL's roughness, `eta` the ray-facing relative IOR. All BSDL's,
+/// except a reflection-only leaf's filter on a back face ([`bsdl::REFL_BACK`]).
+fn interface_energy(
+    cx: &LeafInputs<'_>,
+    r: f32,
+    eta: f32,
+    refl_tint: Vec3A,
+    refr_tint: Vec3A,
+) -> (f32, f32, Vec3A, Vec3A) {
+    let fi = bsdl::table_index(eta);
+    if refr_tint.max_element() > 0.0 {
+        let both = if cx.back() {
+            bsdl::BOTH_BACK
+        } else {
+            bsdl::BOTH_FRONT
+        };
+        // A thin wall transmits straight through, losing nothing to
+        // shadowing: BSDL's renormalisation is the rough refraction's.
+        let renorm = if cx.w.thin_walled {
+            1.0
+        } else {
+            1.0 / (1.0 - TabulatedEnergyCurve::new(both, r, fi).emiss_eval(cx.nv)).max(0.01)
+        };
+        // BSDL's `albedo_impl` for a refracting lobe: 1, whatever its tints.
+        (0.0, renorm, Vec3A::ZERO, Vec3A::ONE)
+    } else {
+        let e_ms = TabulatedEnergyCurve::new(bsdl::GGX, r, 0.0).emiss_eval(cx.nv);
+        // BSDL computes the filter only for a lobe that reflects something:
+        // a black one is opaque. Its filter is `DielectricReflFront` on both
+        // faces; on a back face, where `eta` is inverted and the lobe totally
+        // reflects past the critical angle, crust reads the same lobe's own
+        // table instead, on an axis that keeps that edge sharp, so a top that
+        // reflects everything also lets nothing through (BSDL's would pass
+        // 1 − F(front) to the base: a coat over glass returned 4× a white
+        // furnace from inside).
+        let filter = if refl_tint.max_element() > 0.0 {
+            if cx.back() {
+                TabulatedEnergyCurve::new(bsdl::REFL_BACK, r, fi)
+                    .emiss_eval(bsdl::refl_back_axis(cx.nv, eta))
+            } else {
+                TabulatedEnergyCurve::new(bsdl::REFL_FRONT, r, fi).emiss_eval(cx.nv)
+            }
+        } else {
+            0.0
+        };
+        (e_ms, 1.0, Vec3A::splat(filter), refl_tint * (1.0 - filter))
+    }
+}
+
+/// [`prepare`] for a `Dielectric` leaf: BSDL's `DielectricLobe`.
 #[inline(always)]
 fn prepare_dielectric(
     cx: &LeafInputs<'_>,
@@ -1457,51 +1549,51 @@ fn prepare_dielectric(
 ) -> Built {
     let ior = cx.s(*ior).x();
     let ior = if ior.is_finite() && ior > 0.0 {
-        ior
+        ior.clamp(bsdl::IOR_MIN, bsdl::IOR_MAX)
     } else {
         1.5
     };
-    let (ax, ay) = alphas(cx.s(*roughness));
+    let (rx, ry) = alphas(cx.s(*roughness));
+    let (dist, r) = GGXDist::from_alphas(rx, ry);
     let tint = cx.rgb(*tint);
+    // genosl's split: `T` reflects nothing, `R` transmits nothing.
+    let refl_tint = if *mode == ScatterMode::T {
+        Vec3A::ZERO
+    } else {
+        tint
+    };
+    let refr_tint = if *mode == ScatterMode::R {
+        Vec3A::ZERO
+    } else {
+        tint
+    };
     // In the ray-facing frame: entering the interior from the front,
     // leaving it from the back.
-    let eta = if cx.w.rec.front_face { ior } else { 1.0 / ior };
+    let eta = bsdl::dielectric_eta(ior, cx.back());
     let fresnel = Fresnel {
         model: FresnelModel::Dielectric { ior: eta },
         thin_film: cx.film(thin_film),
     };
-    let avg = mx::average_alpha(ax, ay);
-    // MaterialX's throughput for every dielectric mode: `1 − E_R·w`,
-    // the reflection albedo alone. BSDL's table where it applies (no
-    // film); MaterialX's Fresnel-weighted fit with a film.
-    let e_r = if fresnel.thin_film.is_some() {
-        let f = fresnel.eval(cx.nv);
-        fresnel.dir_albedo(cx.nv, avg) * mx::ggx_energy_compensation(cx.nv, avg, f)
-    } else {
-        Vec3A::splat(1.0 - dielectric_refl_filter(cx.nv, avg.sqrt(), ior))
-    };
-    let e = cx.w.luma.of(e_r);
-    let select = match mode {
-        ScatterMode::R => e,
-        ScatterMode::T => (1.0 - e) * cx.w.luma.of(tint),
-        ScatterMode::RT => e + (1.0 - e) * cx.w.luma.of(tint),
-    };
+    let (e_ms, renorm, filter, albedo) = interface_energy(cx, r, eta, refl_tint, refr_tint);
     (
         Lobe::Specular {
             fresnel,
-            tint,
-            ax,
-            ay,
+            refl_tint,
+            refr_tint,
+            ax: dist.ax,
+            ay: dist.ay,
             mode: *mode,
             eta,
+            e_ms,
+            renorm,
             thin_walled: cx.w.thin_walled,
         },
-        select.max(0.02),
-        Some(e_r),
+        albedo,
+        filter,
     )
 }
 
-/// [`prepare`] for a `Conductor` leaf.
+/// [`prepare`] for a `Conductor` leaf: BSDL's `ConductorLobe`, opaque.
 #[inline(always)]
 fn prepare_conductor(
     cx: &LeafInputs<'_>,
@@ -1510,7 +1602,8 @@ fn prepare_conductor(
     roughness: &u32,
     thin_film: &Option<crust_mtlx::ThinFilm>,
 ) -> Built {
-    let (ax, ay) = alphas(cx.s(*roughness));
+    let (rx, ry) = alphas(cx.s(*roughness));
+    let (dist, r) = GGXDist::from_alphas(rx, ry);
     let fresnel = Fresnel {
         model: FresnelModel::Conductor {
             n: cx.rgb(*ior),
@@ -1518,26 +1611,32 @@ fn prepare_conductor(
         },
         thin_film: cx.film(thin_film),
     };
-    let avg = mx::average_alpha(ax, ay);
-    let e = fresnel.dir_albedo(cx.nv, avg)
-        * mx::ggx_energy_compensation(cx.nv, avg, fresnel.eval(cx.nv));
+    let e_ms = TabulatedEnergyCurve::new(bsdl::GGX, r, 0.0).emiss_eval(cx.nv);
+    // BSDL's `albedo_impl` is a rough fit to the average Fresnel, for
+    // selection; this is the compensated lobe's albedo toward this view,
+    // `E_ss·F·(1 + F·E_ms/E_ss)` with `E_ss = 1 − E_ms`.
+    let f = fresnel.eval(cx.nv);
+    let albedo = f * (1.0 - e_ms) + f * f * e_ms;
     (
         Lobe::Specular {
             fresnel,
-            tint: Vec3A::ONE,
-            ax,
-            ay,
+            refl_tint: Vec3A::ONE,
+            refr_tint: Vec3A::ZERO,
+            ax: dist.ax,
+            ay: dist.ay,
             mode: ScatterMode::R,
             eta: 1.0,
+            e_ms,
+            renorm: 1.0,
             thin_walled: false,
         },
-        cx.w.luma.of(e).max(0.02),
-        // MaterialX: a conductor is opaque.
-        None,
+        albedo,
+        Vec3A::ZERO,
     )
 }
 
-/// [`prepare`] for a `Schlick` leaf.
+/// [`prepare`] for a `Schlick` leaf: BSDL's `SchlickLobe`, plus the F82
+/// tint BSDL does not apply.
 #[inline(always)]
 fn prepare_schlick(cx: &LeafInputs<'_>, bsdf: &Bsdf) -> Built {
     let Bsdf::Schlick {
@@ -1552,76 +1651,57 @@ fn prepare_schlick(cx: &LeafInputs<'_>, bsdf: &Bsdf) -> Built {
     else {
         unreachable!("prepare_schlick is handed a Schlick leaf")
     };
-    let (ax, ay) = alphas(cx.s(*roughness));
+    let (rx, ry) = alphas(cx.s(*roughness));
+    let (dist, r) = GGXDist::from_alphas(rx, ry);
     let f0 = cx.rgb(*color0);
+    // The refraction IOR, and the tables' index, from the average F0.
+    let eta = bsdl::dielectric_eta(bsdl::schlick_ior(f0), cx.back());
     let fresnel = Fresnel {
         model: FresnelModel::Schlick {
-            f0,
+            f0: f0.min(Vec3A::ONE),
             f82: cx.rgb(*color82),
-            f90: cx.rgb(*color90),
+            f90: cx.rgb(*color90).min(Vec3A::ONE),
             exponent: cx.s(*exponent).x().max(0.0),
+            tir_cos: bsdl::schlick_tir_cos(eta),
         },
         thin_film: cx.film(thin_film),
     };
-    let avg = mx::average_alpha(ax, ay);
-    let e = fresnel.dir_albedo(cx.nv, avg)
-        * mx::ggx_energy_compensation(cx.nv, avg, fresnel.eval(cx.nv));
-    let e_avg = (e.x + e.y + e.z) / 3.0;
-    let eta = mx::f0_to_ior(Vec3A::splat((f0.x + f0.y + f0.z) / 3.0)).x;
+    let refl_tint = if *mode == ScatterMode::T {
+        Vec3A::ZERO
+    } else {
+        Vec3A::ONE
+    };
+    let refr_tint = if mode.transmits() {
+        Vec3A::ONE
+    } else {
+        Vec3A::ZERO
+    };
+    let (e_ms, renorm, filter, albedo) = interface_energy(cx, r, eta, refl_tint, refr_tint);
     (
         Lobe::Specular {
             fresnel,
-            tint: Vec3A::ONE,
-            ax,
-            ay,
+            refl_tint,
+            refr_tint,
+            ax: dist.ax,
+            ay: dist.ay,
             mode: *mode,
-            eta: if cx.w.rec.front_face { eta } else { 1.0 / eta },
+            eta,
+            e_ms,
+            renorm,
             thin_walled: cx.w.thin_walled,
         },
-        e_avg.max(0.02),
-        Some(Vec3A::splat(e_avg)),
+        albedo,
+        filter,
     )
 }
 
-/// BSDL's dielectric reflection filter `1 − E_R(cosθo)` at perceptual
-/// roughness `r` (`α = r²`) and IOR `ior`, interpolated as BSDL's
-/// `TabulatedEnergyCurve` does: bilinear in (IOR, roughness), piecewise
-/// linear in the cosine.
+/// BSDL's dielectric reflection filter `1 − E_R(cosθo)` on a front face — the
+/// `DielectricReflFront` table — at BSDL roughness `r` (`α = r²`) and IOR
+/// `ior` (or its inverse, which reads the same row). A back face reads
+/// [`bsdl::REFL_BACK`] instead (`interface_energy`).
 pub fn dielectric_refl_filter(cos_o: f32, r: f32, ior: f32) -> f32 {
-    use bsdl_tables::{DIELECTRIC_REFL_FRONT as T, NC, NF, NR};
-    const IOR_MIN: f32 = 1.001;
-    const IOR_MAX: f32 = 5.0;
-    let eta = if ior < 1.0 { 1.0 / ior } else { ior };
-    let eta = eta.clamp(IOR_MIN, IOR_MAX);
-    let fi = ((eta - IOR_MIN) / (IOR_MAX - IOR_MIN)).sqrt() * (NF - 1) as f32;
-    let fa = (fi as usize).min(NF - 1);
-    let fb = (fa + 1).min(NF - 1);
-    let ff = fi - fa as f32;
-    let ri = r.clamp(0.0, 1.0) * (NR - 1) as f32;
-    let ra = (ri as usize).min(NR - 1);
-    let rb = (ra + 1).min(NR - 1);
-    let rf = ri - ra as f32;
-    let lerp = |t: f32, a: f32, b: f32| a + (b - a) * t;
-    let e = |c: usize| {
-        lerp(
-            ff,
-            lerp(rf, T[(fa * NR + ra) * NC + c], T[(fa * NR + rb) * NC + c]),
-            lerp(rf, T[(fb * NR + ra) * NC + c], T[(fb * NR + rb) * NC + c]),
-        )
-    };
-    let cosine = |i: usize| (i as f32 / (NC - 1) as f32).max(1e-6);
-    let c = cos_o.max(0.0);
-    if c <= cosine(0) {
-        return e(0);
-    }
-    for i in 1..NC {
-        let c1 = cosine(i);
-        if c < c1 {
-            let c0 = cosine(i - 1);
-            return lerp((c - c0) / (c1 - c0), e(i - 1), e(i));
-        }
-    }
-    e(NC - 1)
+    TabulatedEnergyCurve::new(bsdl::REFL_FRONT, r, bsdl::table_index(ior))
+        .emiss_eval(cos_o.max(0.0))
 }
 
 enum LobeSample {
@@ -1639,10 +1719,15 @@ enum LobeSample {
     },
 }
 
+/// The view a leaf's lobes are evaluated and sampled toward: `v` lifted to
+/// at least 1e-6 above the leaf's plane, which a normal map can tilt it under.
+fn lifted(v: Vec3A) -> Vec3A {
+    Vec3A::new(v.x, v.y, v.z.max(1e-6)).normalize()
+}
+
 /// `(f, pdf)` of a lobe for local `v`, `l`: the BSDF value without the cosine,
 /// and the lobe's own continuous sampling density.
 fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
-    let nv = v.z.clamp(1e-6, 1.0);
     match *lobe {
         Lobe::Diffuse {
             model,
@@ -1652,16 +1737,13 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
             if l.z <= 0.0 {
                 return (Vec3A::ZERO, 0.0);
             }
-            let nl = l.z;
+            let v = lifted(v);
             let f = match model {
-                DiffuseModel::Eon => mx::eon(nv, nl, l.dot(v), roughness, color),
-                DiffuseModel::OrenNayar => color * mx::oren_nayar(nv, nl, l.dot(v), roughness),
-                DiffuseModel::Burley => {
-                    let h = (v + l).normalize_or_zero();
-                    color * mx::burley(nv, nl, l.dot(h), roughness)
-                }
+                DiffuseModel::Eon => bsdl::oren_nayar(color, roughness, true, v, l),
+                DiffuseModel::OrenNayar => bsdl::oren_nayar(color, roughness, false, v, l),
+                DiffuseModel::Burley => bsdl::burley(color, roughness, v, l),
             };
-            (f * FRAC_1_PI, nl * FRAC_1_PI)
+            (f, l.z * FRAC_1_PI)
         }
         Lobe::Translucent { color } => {
             if l.z >= 0.0 {
@@ -1673,6 +1755,9 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
         // direction: no value and no continuous density.
         Lobe::Subsurface { .. } => (Vec3A::ZERO, 0.0),
         Lobe::Hair(ref h) => h.eval(l),
+        // A black sheen — every sheen on a back face, which BSDL does not
+        // shade — has no density either, as BSDL's returns none there.
+        Lobe::Sheen { color, .. } if color == Vec3A::ZERO => (Vec3A::ZERO, 0.0),
         Lobe::Sheen {
             color,
             zeltner: Some(lobe),
@@ -1693,55 +1778,74 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
             if l.z <= 0.0 {
                 return (Vec3A::ZERO, 0.0);
             }
-            let h = (v + l).normalize_or_zero();
-            let f = mx::imageworks_sheen(l.z, nv, h.z.max(0.0), roughness);
-            (color * f, l.z * FRAC_1_PI)
+            let f = bsdl::conty_kulla_sheen(roughness, lifted(v), l);
+            // BSDL samples it uniformly over the hemisphere, and answers
+            // with no density where the lobe has no value.
+            let pdf = if f > 0.0 { 0.5 * FRAC_1_PI } else { 0.0 };
+            (color * f, pdf)
         }
         Lobe::Specular {
             fresnel,
-            tint,
+            refl_tint,
+            refr_tint,
             ax,
             ay,
             mode,
             eta,
+            e_ms,
+            renorm,
             thin_walled,
         } => {
-            let avg = mx::average_alpha(ax, ay);
-            let transmit_continuous = mode.transmits() && !thin_walled;
+            let v = lifted(v);
+            let dist = GGXDist { ax, ay };
+            let fresnel = |c: f32| fresnel.eval(c);
+            // A thin wall that transmits is crust's; one that only reflects
+            // (an `R` leaf, or an `RT` one reduced by `exclude_straight`) is
+            // BSDL's like any other.
+            if thin_walled && mode.transmits() {
+                return eval_thin_walled(&dist, fresnel, refl_tint, renorm, mode, v, l);
+            }
+            // BSDL's `DielectricBSDF::eval` (or `eval_turquin_microms_reflection`
+            // for a lobe that only reflects), its bounded-VNDF density
+            // included. A `T` lobe answers on the reflecting side too, with
+            // no value: BSDL samples its (black) reflection as `RT` does.
+            let refracts = mode.transmits();
             if l.z > 0.0 {
-                if !mode.reflects() {
+                let h = (v + l).normalize();
+                let d_refl = dist.d_refl_d(v) * dist.d(h);
+                if !refracts {
+                    let value = refl_tint
+                        * bsdl::eval_turquin_microms_reflection(&dist, fresnel, e_ms, v, l);
+                    return (value, d_refl / (4.0 * v.z));
+                }
+                let cos_mo = h.dot(v);
+                if cos_mo <= 0.0 {
                     return (Vec3A::ZERO, 0.0);
                 }
-                let h = (v + l).normalize_or_zero();
-                if h.z <= 0.0 {
+                let p = bsdl::reflection_probability(fresnel(cos_mo));
+                if p <= 0.0 {
                     return (Vec3A::ZERO, 0.0);
                 }
-                let vh = v.dot(h).clamp(1e-6, 1.0);
-                let d = ggx_d_aniso(h.z, h.x, h.y, ax, ay);
-                let g = ggx_g2_smith_aniso(nv, v.x, v.y, l.z, l.x, l.y, ax, ay);
-                let f = fresnel.eval(vh);
-                let comp = mx::ggx_energy_compensation(nv, avg, f);
-                let value = tint * f * comp * (d * g / (4.0 * nv * l.z.max(1e-6)));
-                let mut pdf = pdf_vndf_ggx_aniso_local(v, h, ax, ay);
-                if mode == ScatterMode::RT {
-                    pdf *= scalar(f);
+                let value =
+                    refl_tint * renorm * bsdl::eval_dielectric_reflection(&dist, fresnel, v, l);
+                (value, d_refl / (4.0 * v.z) * p)
+            } else if refracts && l.z < 0.0 {
+                // Flipped to the same side as N.
+                let ht = (eta * l + v).normalize() * if eta > 1.0 { -1.0 } else { 1.0 };
+                let (cos_ho, cos_hi) = (ht.dot(v), ht.dot(l));
+                if cos_ho <= 0.0 || cos_hi >= 0.0 || ht.z <= 0.0 {
+                    return (Vec3A::ZERO, 0.0);
                 }
+                let pt = 1.0 - bsdl::reflection_probability(fresnel(cos_ho));
+                if pt <= 0.0 {
+                    return (Vec3A::ZERO, 0.0);
+                }
+                let j = (-cos_hi * cos_ho * eta * eta) / (v.z * (cos_hi * eta + cos_ho).powi(2));
+                let pdf = dist.d_refl_d(v) * dist.d(ht) * j * pt;
+                let value = refr_tint
+                    * renorm
+                    * bsdl::eval_dielectric_refraction(&dist, fresnel, eta, v, l);
                 (value, pdf)
-            } else if transmit_continuous && l.z < 0.0 {
-                let (btdf, p_h, vh) = refraction(v, l, eta, ax, ay);
-                if btdf <= 0.0 {
-                    return (Vec3A::ZERO, 0.0);
-                }
-                // Both modes pay the interface's `(1 − F)` (MaterialX GLSL's
-                // `mx_surface_transmission`, OSL, BSDL and Typhoon alike —
-                // the layer above attenuates only by its own throughput);
-                // `RT` also samples refraction with that probability.
-                let t = 1.0 - scalar(fresnel.eval(vh));
-                let pdf = match mode {
-                    ScatterMode::RT => p_h * t,
-                    _ => p_h,
-                };
-                (tint * (btdf * t), pdf)
             } else {
                 (Vec3A::ZERO, 0.0)
             }
@@ -1749,50 +1853,50 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
     }
 }
 
+/// [`eval_lobe`] for a thin-walled specular leaf that transmits, which is
+/// crust's, not BSDL's: its reflection sampled from the full GGX VNDF (an `RT` leaf picks
+/// it with probability `F`), its transmission a straight-through delta with
+/// no continuous density.
+fn eval_thin_walled(
+    dist: &GGXDist,
+    fresnel: impl Fn(f32) -> Vec3A,
+    refl_tint: Vec3A,
+    renorm: f32,
+    mode: ScatterMode,
+    v: Vec3A,
+    l: Vec3A,
+) -> (Vec3A, f32) {
+    if l.z <= 0.0 || !mode.reflects() {
+        return (Vec3A::ZERO, 0.0);
+    }
+    let h = (v + l).normalize_or_zero();
+    if h.z <= 0.0 {
+        return (Vec3A::ZERO, 0.0);
+    }
+    let value = refl_tint * renorm * bsdl::eval_dielectric_reflection(dist, &fresnel, v, l);
+    let mut pdf = pdf_vndf_ggx_aniso_local(v, h, dist.ax, dist.ay);
+    if mode == ScatterMode::RT {
+        pdf *= scalar(fresnel(v.dot(h).clamp(1e-6, 1.0)));
+    }
+    (value, pdf)
+}
+
 /// A Fresnel colour as the scalar probability of reflecting.
 fn scalar(f: Vec3A) -> f32 {
     ((f.x + f.y + f.z) / 3.0).clamp(0.0, 1.0)
 }
 
-/// Walter et al. 2007's refraction BTDF without its Fresnel factor — the
-/// `(1 − F)` is the caller's, film-aware Fresnel — plus the
-/// VNDF sampling density of `l` and `v·h` at the refraction half vector.
-/// `eta` is `η_t / η_i`.
-fn refraction(v: Vec3A, l: Vec3A, eta: f32, ax: f32, ay: f32) -> (f32, f32, f32) {
-    let (eta_i, eta_t) = (1.0, eta);
-    let mut h = -(v * eta_i + l * eta_t);
-    if h.length_squared() < 1e-12 {
-        return (0.0, 0.0, 0.0);
-    }
-    h = h.normalize();
-    if h.z < 0.0 {
-        h = -h;
-    }
-    let vh = v.dot(h);
-    let lh = l.dot(h);
-    if vh <= 1e-6 || lh >= -1e-6 {
-        return (0.0, 0.0, 0.0);
-    }
-    let nv = v.z.max(1e-6);
-    let nl = (-l.z).max(1e-6);
-    let d = ggx_d_aniso(h.z.max(1e-6), h.x, h.y, ax, ay);
-    let g = ggx_g2_smith_aniso(nv, v.x, v.y, nl, l.x, l.y, ax, ay);
-    let denom = eta_i * vh + eta_t * lh;
-    let denom2 = denom * denom;
-    if denom2 < 1e-10 {
-        return (0.0, 0.0, 0.0);
-    }
-    let btdf = (vh * -lh) / (nv * nl) * (eta_t * eta_t * d * g / denom2);
-    let p_h = pdf_vndf_h_aniso_local(v, h, ax, ay);
-    let jacobian = eta_t * eta_t * -lh / denom2;
-    (btdf.max(0.0), p_h * jacobian, vh)
-}
-
 /// Samples a direction from one lobe.
 fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample> {
     match *lobe {
-        Lobe::Diffuse { .. } | Lobe::Sheen { zeltner: None, .. } => Some(LobeSample::Continuous {
+        Lobe::Diffuse { .. } => Some(LobeSample::Continuous {
             dir: cosine_hemisphere(uv),
+            spread: crate::RayCone::MAX_SPREAD,
+        }),
+        Lobe::Sheen { color, .. } if color == Vec3A::ZERO => None,
+        // BSDL's `SheenMicrofacet::sample`: uniform over the hemisphere.
+        Lobe::Sheen { zeltner: None, .. } => Some(LobeSample::Continuous {
+            dir: uniform_hemisphere(uv),
             spread: crate::RayCone::MAX_SPREAD,
         }),
         Lobe::Sheen {
@@ -1818,15 +1922,38 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
         }
         Lobe::Specular {
             fresnel,
-            tint,
+            refr_tint,
             ax,
             ay,
             mode,
             eta,
             thin_walled,
+            ..
         } => {
             let spread = (ax + ay).min(crate::RayCone::MAX_SPREAD);
-            let v = Vec3A::new(v.x, v.y, v.z.max(1e-6)).normalize();
+            let v = lifted(v);
+            if !(thin_walled && mode.transmits()) {
+                // BSDL's `DielectricBSDF::sample` (or
+                // `sample_turquin_microms_reflection`): a bounded-VNDF
+                // micro-normal, reflected, or — for a lobe that refracts —
+                // reflected with probability `P = avg F` and refracted
+                // otherwise.
+                let dist = GGXDist { ax, ay };
+                let m = dist.sample_for_refl(v, uv[0], uv[1]);
+                let cos_mo = v.dot(m);
+                if cos_mo <= 0.0 {
+                    return None;
+                }
+                let reflect =
+                    !mode.transmits() || u < bsdl::reflection_probability(fresnel.eval(cos_mo));
+                let wi = if reflect {
+                    bsdl::reflect(v, m)
+                } else {
+                    bsdl::refract(v, m, eta)
+                };
+                let valid = if reflect { wi.z > 0.0 } else { wi.z < 0.0 };
+                return valid.then_some(LobeSample::Continuous { dir: wi, spread });
+            }
             let h = sample_vndf_ggx_aniso_local(v, ax, ay, uv);
             let vh = v.dot(h);
             if vh <= 1e-6 {
@@ -1847,8 +1974,8 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
                 // Both modes pay `(1 − F)`: `RT` by the selection above
                 // (so the estimator divides it out), `T` in the value.
                 let value = match mode {
-                    ScatterMode::RT => tint,
-                    _ => tint * (1.0 - scalar(fresnel.eval(vh))),
+                    ScatterMode::RT => refr_tint,
+                    _ => refr_tint * (1.0 - scalar(fresnel.eval(vh))),
                 };
                 return Some(LobeSample::Delta { dir: -v, value });
             }
@@ -1862,6 +1989,14 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
             (l.z < -1e-6).then_some(LobeSample::Continuous { dir: l, spread })
         }
     }
+}
+
+/// A direction uniform over the upper hemisphere, density `1/2π`.
+fn uniform_hemisphere(uv: [f32; 2]) -> Vec3A {
+    let z = uv[0];
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    let phi = 2.0 * std::f32::consts::PI * uv[1];
+    Vec3A::new(r * phi.cos(), r * phi.sin(), z)
 }
 
 /// The entry direction of a random walk, in the leaf's frame — Typhoon's

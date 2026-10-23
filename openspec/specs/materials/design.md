@@ -328,23 +328,38 @@
     allocation (the value stack is a thread-local scratch buffer). ~30 node
     types are implemented; an unknown one degrades that one input to a constant
     and is reported once per material, never fails the material.
-  - **A closure tree, evaluated with MaterialX's own semantics.** MaterialX
+  - **A closure tree, evaluated with testrender's semantics.** MaterialX
     assembles a look from standalone BSDF nodes glued with `layer`, `mix`, `add`
     and `multiply`, and `bsdf::flatten` keeps that tree as it is: an arena of
     `Closure::{Leaf, Layer, Mix, Add, Multiply, Empty}` whose parameters are
     program slots, so the graph's masks and textures drive them per point. The
-    rules are MaterialX GLSL's (`mx_*_bsdf.glsl`), which NVIDIA's Typhoon
-    follows too: `layer(top, base) = top + base · T_top(ωo)`;
+    rules are those of MaterialX's OSL backend as OSL's `testrender` renders it
+    (`process_closure` and `evaluate_layer_opacity` in `src/testrender/shading.cpp`):
+    `layer(top, base) = top + base · (1 − clamp(O_top(ωo), 0, 1))`;
     `mix(fg, bg, m) = m·fg + (1 − m)·bg` with `m` clamped; `multiply` scales
-    the response (its weight clamped to [0, 1]) and passes the throughput
-    through unchanged; `add` sums the responses and its throughput is
-    `max(t₁ + t₂ − 1, 0)`. A leaf's
-    throughput is `1 − E_R·w` for a dielectric (every scatter mode),
-    `1 − avg(E)·w` for generalized Schlick and `1 − E·w` for sheen — and **0**
-    for diffuse, conductor, subsurface and translucent *whatever their weight*.
-    That last rule is the trap: a leaf at weight 0.3 still hides its base
-    completely, and an early version that returned `1 − own albedo` let a
-    conductor's base shine through it.
+    the response (its weight clamped to [0, 1]); `add` sums the responses. The
+    opacity `O` is a second quantity the walk returns, linear in every weight:
+    a leaf gives `w · (1 − filter_o)` — `w·E(ωo)` for a dielectric or
+    generalized Schlick that only reflects and for a sheen, `w` for every
+    other leaf (diffuse, conductor, translucent, subsurface, hair, and a
+    dielectric or Schlick that refracts); `mix` blends opacities, `add` sums
+    them, `multiply` scales them, and a `layer` inside a top contributes
+    `O_top + O_base`, neither attenuated by the other.
+    That last rule is the trap, in reverse of the one the GLSL rules set. Under
+    MaterialX GLSL (what this followed until the BSDL port) an opaque leaf
+    hid its base *whatever its weight*, `multiply` passed its input's
+    throughput through, and a nested layer multiplied `T_top · T_base`; now a
+    diffuse at weight 0.3 over a conductor leaves 0.7 of it, a quarter of a
+    conductor leaves three quarters, and two reflection layers in a top sum
+    their `E`s (`1 − clamp(E_a + E_b)`, not `(1 − E_a)(1 − E_b)`). The sum is
+    testrender's and was kept on purpose: it is less physical than the product,
+    but no built-in graph nests a layer in a top, and `closure/tests.rs` pins it
+    (`a_layer_nested_in_a_top_sums_its_opacities`) beside a direct
+    transcription of `evaluate_layer_opacity` run on fixed trees
+    (`the_opacity_rule_matches_testrender`). No shipped surface moved under the
+    rule alone: every sample scene rendered bit-identically before the leaves
+    were ported, since the built-in graphs' tops are reflection-only
+    dielectrics and sheens, whose opacity is `w·E` under either rule.
     This replaced a reduction that pooled the leaves by kind onto one `OpenPBR`.
     Every recorded MaterialX bug came from that projection — coat promotion by
     tree shape, roughness pooled in alpha, a `coat_darkening` override,
@@ -357,37 +372,40 @@
     per hit. That covers a leaf whose weight is a literal 0 (in the surface
     builders, one that folds to 0), a `multiply` by a literal 0, and the far
     side of a `mix` at a literal 0 or 1. What it leaves behind is MaterialX's
-    `BSDF(0, 1)`: no response and a throughput of 1. That is the value
-    MaterialX's GLSL starts every BSDF at, and the value it leaves a
-    zero-weight dielectric, generalized Schlick or sheen at. A `mix` at a
-    literal endpoint selects its other branch exactly, and `layer`, `add` and
-    `multiply` simplify over an empty branch exactly (`layer(∅, b) = b`,
-    `add(a, ∅) = a`). **A `mix` with a live factor does not**: its throughput
-    `m·T_fg + (1 − m)·T_bg` still needs the pruned side's 1. So the mix stays a
-    mix, with a `Closure::Empty` on the pruned side (`Closures::mix`, the one
-    place `bsdf_tree` and the surface builders build a mix). That is the trap.
-    Rewriting `mix(fg, ∅, m)` as `multiply(fg, m)` keeps the response but loses
-    the throughput, because `multiply` passes `T_fg` through, and for an opaque
-    `fg` that is 0. The DPEL assets are built on exactly this difference. Each
-    dust and stain diffuse is mixed by its mask against a zero-weight, IOR-1
-    `dielectric_bsdf` (their "transmission dummy"), which turns the mask into a
-    *coverage*, and that coverage is layered over the glaze. With the rewrite,
-    the diffuse's 0 stood for the whole top, and both assets rendered black
-    except for their dust and the Lion's sheen: every glaze, conductor and body
-    leaf at weight exactly 0, with no NaN and no warning. The probe showed it at
-    the first point it was aimed at. `closure/tests.rs` now pins a pruned dummy
+    `BSDF(0, 1)`: no response, and nothing in the way (opacity 0, testrender's
+    null closure). A leaf at a *connected* weight of 0 gives the same, so
+    pruning is exact for every leaf. A `mix` at a literal endpoint selects its
+    other branch exactly, and `layer`, `add` and `multiply` simplify over an
+    empty branch exactly (`layer(∅, b) = b`, `add(a, ∅) = a`). A `mix` with a
+    live factor stays a mix, with a `Closure::Empty` on the pruned side
+    (`Closures::mix`, the one place `bsdf_tree` and the surface builders build
+    a mix). Under the GLSL rules that was the trap: rewriting `mix(fg, ∅, m)`
+    as `multiply(fg, m)` kept the response but lost the throughput, because
+    GLSL's `multiply` passed `T_fg` through, and for an opaque `fg` that is 0.
+    Under testrender's rule the two agree (`m · O_fg` either way), but the mix
+    is kept as the tree authors it. The DPEL assets are built on exactly this
+    shape. Each dust and stain diffuse is mixed by its mask against a
+    zero-weight, IOR-1 `dielectric_bsdf` (their "transmission dummy"), which
+    turns the mask into a *coverage*, and that coverage is layered over the
+    glaze; with the rewrite under GLSL, both assets rendered black except for
+    their dust and the Lion's sheen. `closure/tests.rs` pins a pruned dummy
     against the same dummy at a *connected* weight of 0, which the compiler
     cannot prune, bit for bit.
-  - **Collapsed at `resolve`, exactly.** `T_top` depends on ωo alone, and ωo
+  - **Collapsed at `resolve`, exactly.** `O_top` depends on ωo alone, and ωo
     is fixed at a path vertex, so there the tree *is* a weighted sum of leaves.
     `ResolvedClosure::resolve` walks it once per vertex: `mix` and `multiply`
-    scale the weight passed down, `layer` scales everything below by the top's
-    throughput, and each live leaf lands in an inline list of at most
+    scale the weight passed down, `layer` scales everything below by
+    `1 − clamp(O_top)`, and each live leaf lands in an inline list of at most
     `MAX_LEAVES` = 8 with its RGB weight, its own frame (a leaf's `normal` and
     `tangent` inputs, so a coat can carry a normal map its base does not) and its
     parameters. `eval` is `Σ wᵢ fᵢ`; sampling picks a leaf with probability
-    `∝ lum(wᵢ)·Êᵢ(ωo)` (floored at 0.02 so no live leaf gets probability 0, as
-    Typhoon's `_ApproxWeight` does) and returns the mixture pdf, one-sample MIS
+    `∝ lum(wᵢ)·lum(Êᵢ(ωo))` (floored at 0.02 so no live leaf gets probability 0,
+    as Typhoon's `_ApproxWeight` does), `Ê` BSDL's `albedo_impl` — the colour
+    for a diffuse or translucent leaf, `refl_tint · E_R` for a reflection-only
+    interface, 1 for a refracting one, `color · min(E · max(color), 1)` for a
+    sheen — except for a conductor, where BSDL's is a rough fit to the
+    average Fresnel and crust uses the compensated albedo toward the view,
+    `F(1 − E_ms) + F²E_ms` (`tests/bsdl_oracle.rs`, `conductor-selection`) and returns the mixture pdf, one-sample MIS
     as `OpenPBR` composes its own lobes. The worst built-in expansion is 7
     leaves (`standard_surface`); a document above 8 is **refused** at load
     with a `WARN` naming the count, never truncated — dropping a leaf would be a
@@ -404,30 +422,104 @@
     instructions (callgrind, `-s 2`) over the reduction it replaced. The
     `Drop` is inlined with the pool work out of line — otherwise every
     `ShadingPoint`, MaterialX or not, paid an out-of-line drop call.
-  - **Leaves.** Each is the MaterialX lobe, ported from MaterialX GLSL
-    (Apache-2.0, `closure/mx.rs`): GGX with VNDF sampling and MaterialX's
-    `mx_ggx_energy_compensation`; exact dielectric, complex-IOR conductor and
-    F82 generalized-Schlick Fresnel, each optionally through the Airy thin film
-    a `layer` of `thin_film_bsdf` puts on the base's specular leaves; EON (an
-    `oren_nayar_diffuse_bsdf` with `energy_compensation`), plain Oren–Nayar and
-    Burley diffuse; sheen: Imageworks in `conty_kulla` mode, and in `zeltner` mode the
-    native fuzz's LTC (`brdf::ZeltnerSheen`, Disney's table), sampled exactly and
-    prepared at the vertex's view. A specular leaf's `roughness` is GGX
-    **alpha**, taken as authored — the DPEL teapot's `desquare_roughness_*`
-    nodes exist to produce it — and only the BSDL table below is indexed by
-    perceptual roughness `√α`. Dielectric scatter modes: `R`; `RT`, which picks
-    reflection with probability `F(v·h)` — the *same* film-aware Fresnel on the
-    sampling and the pdf side, or the two disagree; and `T`, whose
-    transmission **pays its own `(1 − F)`**. MaterialX GLSL
-    (`mx_surface_transmission`), OSL, BSDL and Typhoon all do. Leaving it out,
-    on the reading that the reflection layer above "owns" the Fresnel loss,
-    made a glass's exit leaf transmit `1 − E_R` beside a reflection leaf already
-    reflecting total internal reflection, and the furnace caught a
-    `standard_surface` glass sphere returning 1.16× its environment at grazing
-    incidence. With it, that glass reads 0.92 head-on: MaterialX's own double
-    Fresnel, the reflection layer's `1 − E_R` times the transmission's `1 − F`,
-    which Typhoon's `standard_surface` shares. A thin-walled surface transmits
-    straight through; a thick one hands the refracted ray the interior medium.
+  - **Leaves are BSDL's.** Each is the `mtx::` lobe of BSDL (OSL's
+    `src/libbsdl`, BSD-3-Clause, at the commit `bsdl_luts_to_rust.py` pins),
+    transcribed in `closure/bsdl.rs` under BSDL's names: `DielectricLobe`,
+    `ConductorLobe`, `SchlickLobe`, `SheenLobe`, `OrenNayarDiffuseLobe` (with
+    and without `energy_compensation`, the latter EON), `BurleyDiffuseLobe` and
+    `TranslucentLobe`, with the helpers they use (`GGXDist`,
+    `TabulatedEnergyCurve`, the dielectric, conductor and Schlick Fresnel,
+    `eval_turquin_microms_reflection`). The value is BSDL's arithmetic in BSDL's
+    order, as `f` without the cosine, and so is the sampling, density
+    included (below). Specific points:
+    - **Roughness.** A specular leaf's `roughness` is GGX **alpha**, taken as
+      authored (floored at BSDL's `EPSILON`, 1e-4, and capped at 1) — the DPEL
+      teapot's `desquare_roughness_*` nodes exist to produce it. BSDL
+      re-expresses the pair as `roughness = √(α_max/(1 + aniso))`,
+      `aniso = (1 − b)/(1 + b)` with `b = α_min/α_max`, which is what its
+      tables are indexed by, and rebuilds GGX from that pair; the alphas come
+      back to rounding, and `r² = (α_x + α_y)/2`.
+    - **Multiple scattering.** A lobe that only reflects multiplies single
+      scattering by Turquin's `1 + F·E_ms/(1 − E_ms)` with `F = F(cos θ_mo)`
+      and `E_ms` white GGX's missing energy at the view (the `GGX` table): a
+      conductor, a reflection-only dielectric or Schlick. A lobe that refracts
+      gets no Turquin term; its single scattering (reflection and Walter
+      refraction, `1 − F` per channel) is divided by `max(0.01, 1 − E_ms)`
+      with `E_ms` from `DielectricBothFront` or `BothBack`, by face. A
+      thin-walled leaf, which transmits straight through and loses nothing
+      to shadowing, is not renormalised.
+    - **Layering filter.** A reflection-only dielectric or Schlick lets
+      `DielectricReflFront(cos θo)` through (a Schlick at the IOR its average
+      `F0` implies, `(1 + √F0)/(1 − √F0)`) — on a front face. On a back face
+      it lets through what its own lobe leaves, `DielectricReflBack`, which
+      is nothing past the critical angle (crust's deviation from BSDL, below
+      in "Known gaps: MaterialX"); a sheen `1 − min(E·max(color), 1)`
+      with `E` MaterialX's rational fit (`conty_kulla`, roughness floored at
+      0.06) or the LTC table's `R` (`zeltner`); everything else nothing. A
+      dielectric whose tints are both black is opaque, as BSDL computes no
+      filter for it.
+    - **Tints.** genosl splits `tint` by scatter mode: `R` reflects it and
+      transmits black, `T` the reverse, `RT` both (`refl_tint`, `refr_tint`).
+      A `T` leaf therefore pays its own `1 − F` (the reflection half is
+      black), as MaterialX GLSL, OSL, BSDL and Typhoon all do. Leaving it out,
+      on the reading that the reflection layer above "owns" the Fresnel loss,
+      once made a glass's exit leaf transmit `1 − E_R` beside a reflection leaf
+      already reflecting total internal reflection, and the furnace caught a
+      `standard_surface` glass sphere at 1.16× its environment.
+    - **IOR.** Clamped into BSDL's [1.001, 5] and inverted on a back face
+      (`DielectricFresnel`); `generalized_schlick_bsdf` reflects everything
+      past the critical angle on a back face (`SchlickFresnel::tir_cos`).
+    - **Sheen.** `conty_kulla` is BSDL's `ContyKullaSheenMTX`: the Charlie
+      distribution with the non-legacy visibility
+      `cosθi·cosθo/(cosθi + cosθo − cosθi·cosθo)` — MaterialX's Imageworks
+      sheen, with BSDL's 0.06 floor. `zeltner` reads the LTC table
+      (`brdf::ZeltnerSheen`, the native fuzz's, value for value BSDL's
+      `bsdf_zeltnersheen_param.h`) at `max(√roughness, 0.02)`, BSDL's index —
+      so the MaterialX sheen at `r` equals the native fuzz at `√r`. Neither
+      shades a back face.
+    - **Sampling is BSDL's** (doubleailes/crust-render#378). A microfacet
+      leaf draws its micro-normal with Eto and Tokuyoshi's bounded VNDF
+      (`GGXDist::sample_for_refl`) and reflects it, or — for a lobe that
+      refracts — reflects it with probability `P = avg F(cos θ_mo)` and
+      refracts it otherwise (`DielectricBSDF::sample`; a `T` leaf draws its
+      black reflection too, as BSDL does). Its density is BSDL's: `D_refl /
+      (4 cos θo)` reflected (times `P` when it refracts), `D_refl · J · (1 −
+      P)` refracted, `D_refl = D_refl_D(ωo) · D(m)`. A `conty_kulla` sheen is
+      sampled uniformly over the hemisphere (`1/2π`, none where the lobe has
+      no value), a `zeltner` one by its LTC, the diffuse and translucent
+      leaves cosine-weighted, all as BSDL. This is what makes the refracting
+      renormalisation right: `BothFront` / `BothBack` are the sampled weights'
+      average under exactly this sampler, so the BSDF-sampled estimator
+      returns what the lobe receives. Under the full GGX VNDF that crust used
+      first, a rough clear glass sphere returned 2.0 of a white furnace at
+      roughness 1 (1.23 at 0.7, 1.06 at 0.5); now 1.004
+      (`a_rough_glass_is_bounded_in_a_white_furnace`). Two things stay crust's:
+      a thin-walled leaf that transmits (its straight-through delta has no
+      BSDL counterpart) samples the full VNDF, and leaf *selection* stays
+      `∝ lum(w)·lum(Ê)`.
+      Cost (callgrind, `-s 2`, against the VNDF build): `cornellbox`
+      4 276 033 387 → 4 276 091 761 (+0.001%, bit-identical image),
+      `materialx_basic` 2 763 512 676 → 2 762 675 754 (−0.03%),
+      `materialx_surfaces` 5 440 988 714 → 5 515 381 081 (+1.37%: the rough
+      glass and its refractions); only MaterialX scenes change.
+    - **Diffuse and translucent.** BSDL's QON (no compensation) and EON
+      (compensation, Portsmouth) and Burley are MaterialX's GLSL lobes to
+      rounding; translucent is `color/π` below the plane.
+    - **What stays MaterialX's GLSL** (`closure/mx.rs`): the Airy thin film
+      (BSDL's lobes declare `thinfilm_*` and never apply it) and the F82 tint
+      of generalized Schlick (BSDL's `SchlickLobe` has no `color82`; with a
+      white `color82` crust evaluates BSDL's Schlick bit for bit), and
+      `chiang_hair_bsdf` (`closure/hair.rs`; genosl has only a placeholder).
+    - **Not BSDL's, on purpose:** no path-roughness regularisation
+      (testrender's `regularize_roughness` widens a lobe after a rough bounce,
+      which biases); no `visible_normal` bending — a normal map that tilts
+      the frame under the view is handled by lifting the view to 1e-6 above
+      the leaf's plane, in both `eval` and sampling.
+    Dielectric scatter modes: `R`; `RT`, which picks reflection with
+    probability `F(v·h)` — the *same* film-aware Fresnel on the sampling and
+    the pdf side, or the two disagree; and `T`. A thin-walled surface
+    transmits straight through; a thick one hands the refracted ray the
+    interior medium.
     The straight transmission is the integrator's to carry, as a pass-through
     (rendering design record, "Thin walls are pass-throughs"):
     `ResolvedClosure::straight_transmittance` estimates it with one VNDF draw
@@ -449,7 +541,7 @@
     drops them, and a live `mix` asks its heavier branch first — a coat
     textured to 0 at the hit must not set the entry), else Typhoon's closure
     defaults, IOR 1.5 and roughness 0.5. The interface's energy is already in
-    the leaf's weight (the layer's throughput); the entry only picks a
+    the leaf's weight (the layer's opacity above it); the entry only picks a
     direction. The tracer then runs the walk (`subsurface.rs`, a port of
     `ty::RandomWalkSSS`, itself Cycles' `subsurface_random_walk.h`): Chiang
     2016's albedo inversion with the 0.2 albedo floor and its throughput
@@ -642,25 +734,110 @@
     This is over the change's +0.3% budget, and kept: the cost is the hit record's
     size, not the instance transform the budget's fallback would have moved, and
     the one packing that keeps 48 bytes costs more.
-  - **Throughput tables are ported, not regenerated.** The dielectric throughput
-    is BSDL's `DielectricReflFront` filter `1 − E_R(cosθo)`
-    (`closure/bsdl_tables.rs`, 32 IOR × 16 roughness × 16 cosines, BSD-3-Clause),
-    regenerated from BSDL's `genluts` by `scripts/tables/bsdl_luts_to_rust.py`
-    and bit-identical to the table Typhoon ships
-    (`ty:dielectricLayerThroughputMode = "bsdl"`, its default); a film on the
-    dielectric uses MaterialX's Fresnel-weighted fit instead, as Typhoon does.
-    Generalized Schlick and a `conty_kulla` sheen use MaterialX's analytic fits
-    (`mx_ggx_dir_albedo`, `mx_imageworks_sheen_dir_albedo`); a `zeltner` sheen layers
-    with its own table's `R`, which is the leaf's exact albedo. The tables describe
-    BSDL's and MaterialX's lobes, not crust's, so the gap is measured and pinned
-    (`closure/tests.rs`, 4096 samples per point): the BSDL table is within
-    ±0.004 of crust's integrated dielectric leaf everywhere except near-smooth
-    grazing, worst +0.020 (IOR 2, r 0.05, cos 0.1), where its linear
-    interpolation in cosine undershoots a steep curve; the Schlick fit is within
-    0.011; the `conty_kulla` sheen fit overestimates by up to 0.035 at low
-    roughness and grazing — a sheen layer there loses energy, never creates it. The white
-    furnace over every fixture material (`tests/mtlx_surfaces.rs`) bounds the
-    sum: nothing returns more than its environment.
+  - **Energy tables are BSDL's, regenerated from upstream.**
+    `closure/bsdl_tables.rs` holds the four tables the ported lobes read:
+    `spi::MiniMicrofacetGGX` (16 roughness × 16 cosines spaced `(i/15)²`, white
+    GGX's missing energy, Turquin's `E_ms`) and `mtx::DielectricReflFront`,
+    `DielectricBothFront`, `DielectricBothBack` (32 IOR × 16 roughness × 16
+    cosines `i/15`), and a fifth BSDL does not bake, `DielectricReflBack`.
+    `scripts/tables/bsdl_luts_to_rust.py` fetches OSL
+    (`src/libbsdl`) and Imath at pinned commits, builds and runs BSDL's
+    `genluts` (about a minute on four cores) and writes the file; the bake is
+    deterministic (hashed QMC seeds), so a rerun reproduces it bit for bit.
+    `DielectricReflBack` is `DielectricReflFront` built with
+    `from_table_index(f, true)` — the reflection-only lobe seen from inside —
+    and baked by a copy of `genluts.cpp` with that struct and one loop added
+    (the pinned checkout is never modified; the other four tables come out
+    unchanged, as the seeds depend on each entry's indices alone). Its
+    cosine axis is not `i/15`: every IOR row puts its own critical cosine
+    `√(1 − η²)` at column 7, `[0, c_crit]` before it and `[c_crit, 1]` after,
+    each quadratically denser toward that column, and crust reads it at
+    `bsdl::refl_back_axis(cos θo, η)`. On BSDL's fixed cosines the edge where
+    the lobe starts to totally reflect moves with the IOR, so bilinear
+    interpolation straddled it — across cosines and across IOR rows alike —
+    and let a smooth top pass up to half its base past the critical angle
+    (a coat over glass returned 1.50 per bounce at IOR 1.6, 39°); evenly
+    spaced but aligned columns still left a slightly rough lobe's whole
+    transition inside one bin (1.22 at IOR 2.4, roughness 0.02). Aligned and
+    warped, the filter tracks the leaf within +0.058 / −0.016
+    (`the_back_face_filter_tracks_the_leaf_it_stands_for`, worst at IOR 2.4,
+    roughness 0.05, 1° past the critical angle).
+    The first gate when the source moved off NVIDIA Typhoon's vendored copy
+    held: upstream `cc6f9b1`'s `ReflFront` is bit for bit the table crust had
+    taken from Typhoon (`70c45e8`). The sheen tables `genluts` also bakes are
+    not converted: `mtx::SheenLobe` reads neither, and its `zeltner` LTC
+    parameters (`bsdf_zeltnersheen_param.h`) are `ltc_sheen_table.rs` value for
+    value, all 3072, so one table ships. The tables are read as
+    `TabulatedEnergyCurve` reads them — bilinear in (IOR index, roughness),
+    piecewise linear in the cosine — with the rows and weights found once per
+    curve and the cosine's bin found from the spacing rather than by BSDL's
+    scan (`the_direct_bin_is_the_scanned_one` pins the two equal, bit for
+    bit). Because the lobes are BSDL's and so are the tables, a filter and
+    the leaf it stands for are the same integral up to the bake's sampling:
+    `ReflFront` is within 0.025 of crust's integrated dielectric leaf, the
+    worst near-smooth grazing where linear interpolation in the cosine
+    undershoots a steep curve (`the_bsdl_table_tracks_the_leaf_it_stands_for`).
+    The filters BSDL takes from elsewhere are pinned the same way
+    (`the_layering_filters_track_the_leaves_they_stand_for`): a generalized
+    Schlick reads the dielectric table at the IOR its `F0` implies, which BSDL
+    itself notes is "a bit off" for a Schlick curve (worst +0.033 at roughness
+    0.1, grazing); a `conty_kulla` sheen layers with MaterialX's rational fit,
+    off by up to 0.035 at low roughness and grazing, where the layer then
+    loses energy rather than creating it.
+  - **Cost of the BSDL leaves, measured** (callgrind, `-s 2`, one thread,
+    before → after the port): `cornellbox` 4 279 082 833 → 4 275 967 240
+    (−0.07%, codegen in `advance_pixel`; it renders bit-identically);
+    `materialx_basic` 2 719 059 626 → 2 763 360 610 (+1.63%);
+    `materialx_surfaces` 5 329 130 786 → 5 441 103 373 (+2.10%). The cost is
+    table reads: a reflection-only interface reads two curves per vertex
+    (Turquin's GGX `E_ms` and its `ReflFront` filter) where the GLSL leaf read
+    one table and one rational fit. The first cut was +2.4% / +4.3%:
+    `Emiss_eval`'s linear scan over 16 cosines and `interpolate_emiss`
+    recomputing its rows per call cost more than the reads themselves, and a
+    refracting leaf read `ReflFront` for a selection albedo BSDL sets to 1.
+    `scripts/bench_ab.sh -n 7`, min / mean seconds: `cornellbox` 8.470 / 10.289
+    → 8.568 / 10.658 (+1.2% / +3.6%), `materialx_basic` 2.132 / 2.336 → 2.147 /
+    2.433 (+0.7% / +4.2%), `materialx_surfaces` 4.753 / 5.120 → 4.896 / 5.268
+    (+3.0% / +2.9%). The machine was loaded (a download ran beside it), and
+    `cornellbox`, whose instructions did not move, sets the noise floor: the
+    MaterialX scenes are inside it. The back-face reflection filter (a second
+    curve's axis, a square root under a back face) then cost
+    `materialx_surfaces` 5 512 095 636 → 5 534 763 330 (+0.41%, partly paths
+    that change with the image) and `cornellbox` 4 272 611 828 → 4 272 737 158
+    (+0.003%, codegen; bit-identical).
+  - **The BSDL oracle.** `scripts/bsdl_oracle.py` bakes the tables as above,
+    compiles `scripts/bsdl_oracle/probe.cpp` against the pinned `libbsdl` and
+    Imath (no OSL runtime: each lobe is built as testrender's `BSDL_WRAP`
+    builds it, on BSDL's default configuration with exact libm math), and
+    writes `crates/crust-core/tests/data/bsdl_oracle.txt`: 414 cases, each one
+    leaf with every input authored, a view and eight lights, answered with
+    the directional albedo over a 32 × 32 cosine-weighted grid on each side,
+    `filter_o`, `albedo_impl`, and `f·|cos|` and the sampling density toward
+    each light. The cases cover
+    every leaf and mode (`dielectric_bsdf` `R` / `T` / `RT` on both faces at
+    IOR 1.001–5 and roughness 0–1, anisotropic both ways and tinted;
+    `conductor_bsdf` for three metals; `generalized_schlick_bsdf` `R` and `RT`;
+    both sheens; Oren–Nayar with and without compensation; Burley;
+    translucent; films), plus 160 random ones, with a header naming both
+    pins. `tests/bsdl_oracle.rs` compiles each case as a MaterialX document,
+    collapses it with `ResolvedClosure::resolve` and reads the filter where it
+    acts (the weight a `layer` gives a base under the leaf). It uses
+    `adobe_oracle`'s `Deviation` rules: a case may differ only under rules
+    whose conditions hold, by at most the sum of their bounds, and a rule
+    that excuses nothing fails as stale. Tolerance 2e-3; every case outside
+    the rules matches to 0.00000 at the fixture's four decimals. The rules:
+    `thin-film` (0.611; BSDL ignores the film), `conductor-selection` (0.357;
+    `albedo_impl` only), `back-face-reflection-filter` (0.928; the filter and
+    the `albedo_impl` derived from it, for a reflection-only leaf under a back
+    face — a bound that excuses nearly the whole range, so the filter there is
+    pinned instead against the leaf itself, see "Energy tables" above). CI
+    needs no C++: the fixture is committed. Regenerate
+    with `scripts/bsdl_oracle.py` (git, cmake, a C++17 compiler, network),
+    then `cargo test -p crust-core --test bsdl_oracle -- --ignored --nocapture`
+    to re-measure the bounds; move the OSL pin in both scripts together. The
+    leaves were moved onto BSDL one at a time against temporary "genglsl
+    leaf" rules, each bounded by the GLSL leaf's measured error and each
+    failing as stale once its leaf matched; none remains.
   - **Surface shaders are their nodegraphs, node for node.** `open_pbr_surface`
     (1.1), `standard_surface` (1.0.1) and `gltf_pbr` (2.0.1) are MaterialX
     nodedefs implemented as nodegraphs over standalone BSDFs, and a document
@@ -1010,16 +1187,86 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   would mean interpolating the mesh's shading primvars at each displaced vertex
   into `VertexCtx`.
 
-- **A `zeltner` sheen is Adobe's, not MaterialX's.** MaterialX's own GLSL
-  evaluates `mode = zeltner` with analytic fits to the LTC coefficients and the
-  albedo (`mx_zeltner_sheen_ltc_aInv` / `_bInv`, `mx_zeltner_sheen_dir_albedo`,
-  roughness clamped to [0.01, 1]); crust uses the table those fits approximate,
-  Disney's "Volume" fit, which Adobe and BSDL ship, so that a MaterialX
-  `open_pbr_surface` and a native `OpenPBR` share one fuzz. Measured over a
-  101 × 100 grid of roughness and view cosine, the two differ by at most 0.013 in
-  `R` for roughness ≥ 0.3, and by up to 0.076 below it toward grazing (roughness
-  0.06, cos θ_o 0.01: 0.262 against the fit's 0.186); `a⁻¹` by up to 0.30. The
-  OSL oracle does not cover BSDF nodes, so nothing pins MaterialX's side.
+- **MaterialX's reference is BSDL, not its GLSL.** The leaves are BSDL's
+  `mtx::` lobes and the layering testrender's, so a document can render
+  differently in a GLSL viewer (MaterialX Viewer, Typhoon). The two differ
+  most in `layer` (GLSL hides a base under any opaque leaf whatever its
+  weight; testrender lets `1 − w` through), in the energy compensation of
+  refracting dielectrics, and in a `zeltner` sheen, which BSDL reads at
+  `max(√roughness, 0.02)` where GLSL's fits read `roughness`.
+- **A rough refracting dielectric's value is not its sampler's.** BSDL
+  renormalises a refracting lobe by `DielectricBothFront` / `BothBack`, baked
+  from its bounded-VNDF sampler (`use_bvn_refraction`, on by default), which
+  never draws a micro-normal that cannot reflect, though it could refract. So
+  the lobe's value integrates above 1 — 1.005 at roughness 0.3, 1.04 at 0.5,
+  1.16 at 0.7 and 1.75 at 1, head on, for a clear IOR-1.5 `RT` dielectric —
+  while its sampled weights average to 1, and BSDL's `eval` still answers,
+  with a density, for the refracted directions its sampler never reaches.
+  crust ports both halves exactly (#378, the user's choice over restricting
+  `eval` to the cap or baking the tables with BVN off). BSDF sampling alone
+  conserves energy; MIS with a light does not quite: light samples reach
+  those directions and are weighted against a BSDF density that never fires,
+  so a rough clear glass sphere in a white furnace whose emitter is also a
+  light returns 1.012–1.023 of it at roughness 1, 1.007–1.017 at 0.5 —
+  testrender's own inconsistency, and down from 2.0 before the port. Measured
+  directly, the density BSDL's `eval` claims, integrated over the sphere at
+  θo = 0.8, exceeds what its sampler lands by 0.031 at roughness 0.5, 0.125
+  at 0.7 and 0.614 at 1 (`bsdl_refraction_claims_more_density_than_it_samples`
+  pins those). Every other leaf's claimed density accounts for exactly the
+  draws that land, within 0.015 (`no_leaf_claims_more_density_than_it_samples`):
+  `every_sample_agrees_with_eval` checks the density only where samples land,
+  so it cannot see a density claimed where none do.
+- **A reflection-only top under a back face filters as crust's, not BSDL's.**
+  BSDL's `DielectricLobe` (and `SchlickLobe`) reads its layering filter from
+  `DielectricReflFront` on both faces, while its value on a back face inverts
+  the IOR and totally reflects past the critical angle. Under testrender's
+  `evaluate_layer_opacity` a coat seen from inside a glass therefore reflects
+  everything *and* lets about 95% of the glass beneath it through, and the
+  glass, seen from inside too, totally reflects as well: up to ≈ 2× per
+  bounce, compounding along paths trapped inside. The OpenPBR Shader
+  Playground's coated mason jar (`masonJarGlass`: coat 1.0 over
+  transmission) took `renderCam_main` from a mean luminance of 0.71 to 3.76
+  at 1024 spp, single paths reaching 1.1e7; a coated `open_pbr` glass cube
+  returned 4.03 of a white furnace, a raw `layer(dielectric R, dielectric
+  RT)` 7.03. (crust's GLSL leaves had the same flaw, more weakly: 3.30 and
+  6.89.) crust reads the filter under a back face from `DielectricReflBack`
+  instead (above, "Energy tables"): the same cube returns 0.13 and the raw
+  layer 0.94 at depth 12, the Playground region its base's median with
+  none of its fireflies. The oracle excuses it as `back-face-reflection-filter`;
+  `a_coat_over_glass_returns_no_more_than_it_receives_from_inside` pins
+  what is left, the table's interpolation within a degree or two past the
+  critical angle: at most 1.058 per bounce (IOR 2.4, roughness 0.05). A
+  perfect cube, which traps rays at the same angles forever, still gains
+  about 0.2% per bounce there: the coated cube passes 1 at depth 256 (0.67
+  at 64; the default is 32). Two things stay as testrender has them: the
+  layer order is not reversed under a back face — the coat's own IOR against
+  the outside sets its critical angle, though from inside the ray meets the
+  base first (38.7° rather than 41.8° for a 1.6 coat over 1.5 glass) — and
+  `open_pbr_surface`'s coat darkening, which its nodegraph applies to the
+  whole base, transmission included (0.706 of a clear glass under a clear
+  coat head on).
+- **Selection is crust's.** A leaf's value, albedo, filter, sampling and
+  density are BSDL's; the choice among leaves is `∝ lum(w)·lum(Ê)` with a
+  0.02 floor rather than testrender's `CompositeBSDF::prepare`, and a
+  conductor is picked by its compensated albedo rather than BSDL's fit. The
+  mixture pdf agrees with the mixture's samples
+  (`every_sample_agrees_with_eval`).
+- **No path regularisation, no visible-normal bending.** testrender widens a
+  lobe's roughness after a rough bounce (`regularize_roughness`), which is
+  biased; crust does not, so a smooth conductor seen through a diffuse bounce
+  is as sharp as seen directly. BSDL bends a shading normal the view cannot
+  see (`visible_normal`); crust lifts the view to 1e-6 above the leaf's
+  plane instead.
+- **Thin film, F82 and hair are not BSDL's.** BSDL's lobes declare
+  `thinfilm_*` and never apply it; crust keeps MaterialX's GLSL Airy film on
+  the dielectric and conductor (excused by the oracle's `thin-film` rule, up to
+  0.611) and the GLSL F82 tint on generalized Schlick (BSDL has no
+  `color82`; the oracle authors it white). `chiang_hair_bsdf` stays the GLSL
+  fibre (genosl has a placeholder) and, as testrender takes every lobe it has
+  no filter for, is opaque in a layer's top. `subsurface_bsdf` stays a random
+  walk, where testrender renders a Lambertian.
+- **A sheen is black on a back face**, as BSDL's `SheenLobe` shades only the
+  front, and lets everything beneath it through there.
 - **The random walk reflects less than its colour, as Typhoon's does.**
   Chiang's inversion is fitted for a *diffuse* entry; entered by refraction, a
   walk heads deeper and more of it is absorbed. Through the integrator a colour
@@ -1096,28 +1343,13 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   opacity. A segment follows at most 256 cutouts, on both sides. Opacity is
   point-sampled, so a distant cutout reads its alpha map's finest level —
   the price of NEE and the bounce side agreeing (rendering record).
-- **The throughput tables are not integrals of crust's leaves.** Measured above
-  (worst +0.020 dielectric, 0.035 sheen); the follow-up, if it ever matters, is
-  regenerating them from crust's leaves on the same axes. The dielectric table is
-  BSDL's *front-side* reflection filter and is used for a back-facing hit too, as
-  Typhoon does; from inside a thick glass the true reflection albedo includes
-  total internal reflection, so the transmission leaf below is weighted a little
-  high there. The `T` leaf's own `(1 − F)` keeps the sum bounded (furnace), but the
-  exit weighting is not BSDF-exact.
-- **Pruning is GLSL-exact only for leaves that let light through.** A diffuse,
-  conductor, subsurface or translucent leaf at a literal weight of 0 is pruned
-  to the empty BSDF like any other. MaterialX's GLSL, though, writes such a
-  leaf's throughput of 0 before it checks the weight, so there it still hides
-  its base, as it does in crust at a *connected* weight of 0, which is not
-  pruned. A literal `multiply` by 0 is pruned the same way, where GLSL passes
-  its input's throughput through. The difference shows only under a layer's
-  top, and neither the built-in surfaces (whose layer tops are dielectric and
-  sheen leaves) nor the DPEL assets put either one there.
-- **Layering is MaterialX's, not physical.** `T_top(ωo)` only (non-reciprocal,
-  single-scattering): NEE and bounce evaluate the same `f(ωo, ωi)`, so MIS is
-  consistent, but a bidirectional method would need care. A reflection layer over
-  a `T` dielectric pays Fresnel twice, so a `standard_surface` glass is ~8% dark
-  in a white furnace — as it is in MaterialX GLSL and Typhoon.
+- **Layering is testrender's, not physical.** `O_top(ωo)` only
+  (non-reciprocal, single-scattering): NEE and bounce evaluate the same
+  `f(ωo, ωi)`, so MIS is consistent, but a bidirectional method would need
+  care. A nested layer in a top sums its opacities rather than multiplying
+  its throughputs. A reflection layer over a `T` dielectric pays Fresnel
+  twice, so a smooth `standard_surface` glass is ~8% dark in a white furnace,
+  as it is in MaterialX GLSL, testrender and Typhoon.
 - **`crust:openpbr` and MaterialX `open_pbr_surface` disagree.** crust's native
   `OpenPBR` (also what `UsdPreviewSurface` maps to) is its own übershader: it
   differs from the MaterialX graph in layering, `specular_weight`, coat–base
@@ -1148,7 +1380,8 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   script's `CATEGORIES`), nor `geompropvalue` (it reads the host's primvars),
   nor anything the closure and surface builders
   (`bsdf.rs`, `surface/`) emit, which the pattern ops they lower to are
-  checked through. Matrix signatures are not generated because crust has no
+  checked through. BSDF nodes are the BSDL oracle's (§ MaterialX, "The BSDL
+  oracle"). Matrix signatures are not generated because crust has no
   such values, and `integer` / `boolean` ones only for the conditionals and
   random nodes (the conditionals' `...B` variants, with `boolean` values, not
   at all). `cellnoise2d`'s `texcoord` is always authored, through a

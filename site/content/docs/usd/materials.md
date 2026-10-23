@@ -72,6 +72,48 @@ A universal `outputs:surface` with a decodable shader, such as a `UsdPreviewSurf
 still used first. The `mtlx` terminal is read when the material has nothing else Crust
 Render can decode, so a stage that rendered through its preview surface renders the same.
 
+### How MaterialX BSDFs are shaded
+
+Crust Render shades a MaterialX material as its closure tree, with the semantics of
+MaterialX's OSL backend as OSL's `testrender` renders it. Each BSDF node is the
+corresponding lobe of [BSDL](https://github.com/AcademySoftwareFoundation/OpenShadingLanguage/tree/main/src/libbsdl),
+the library `testrender` shades with: its microfacet model, energy tables, Fresnel,
+sheen and diffuse lobes. A test replays reference values BSDL itself computed and checks
+every node against them.
+
+`layer(top, base)` lets the base through in proportion to how transparent the top is.
+Each node in the top adds to its opacity:
+
+- a `dielectric_bsdf` or `generalized_schlick_bsdf` that only reflects, and a
+  `sheen_bsdf`, add their weight times the share of light they reflect toward the viewer;
+- every other node adds its whole weight. That includes a dielectric that refracts, and a
+  diffuse or a conductor. A diffuse at weight 0.3 over a metal leaves 70% of the metal
+  showing;
+- `mix` blends opacities, `add` sums them, `multiply` scales them, and a `layer` nested in
+  a top adds its own top's and base's opacities together.
+
+The base is weighted by one minus the top's opacity, clamped to [0, 1].
+
+A few behaviours follow BSDL rather than MaterialX's GLSL shaders:
+
+- Each node is also sampled as BSDL samples it. A rough glass (a `dielectric_bsdf` that
+  refracts) relies on that: BSDL's energy tables are made for its own sampler. Lit by a
+  light that light sampling can also reach, a very rough glass still returns about 2% more
+  than it receives, as in `testrender`.
+- A `sheen_bsdf` in `zeltner` mode reads its fibre table at the square root of
+  `roughness`, so it is not the same as `crust:openpbr`'s fuzz at the same roughness. A
+  sheen is not shaded on a back face.
+- A `generalized_schlick_bsdf`'s `color82` and a thin film (`thinfilm_thickness`) are
+  MaterialX's own, since BSDL does not apply them.
+- A `chiang_hair_bsdf` in a layer's top hides what lies beneath it.
+
+One behaviour deliberately differs from `testrender`. Seen from inside an object (a back
+face), a `dielectric_bsdf` or `generalized_schlick_bsdf` that only reflects, in a layer's
+top, lets through only the light it does not reflect, and none past the critical angle,
+where it reflects everything. BSDL lets about as much through as it would from outside, so
+in `testrender` a coat over glass returns up to twice the light it receives from inside, and
+light trapped inside a coated glass object grows with every bounce.
+
 ## UsdPreviewSurface opacity
 
 `inputs:opacity` means one of two things, chosen by `inputs:opacityThreshold`:
