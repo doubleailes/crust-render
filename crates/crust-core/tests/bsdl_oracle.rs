@@ -5,15 +5,17 @@
 //! direction, light directions) with the values BSDL's `mtx::` lobes give for
 //! them: the directional albedo over a fixed grid on both sides of the
 //! surface, the layering filter `filter_o` (what the leaf lets through to a
-//! layer's base), `albedo_impl` (the albedo testrender picks lobes by) and
-//! the BSDF value times the cosine toward each light. The generator is
+//! layer's base), `albedo_impl` (the albedo testrender picks lobes by), and
+//! the BSDF value times the cosine and the sampling density toward each
+//! light. The generator is
 //! `scripts/bsdl_oracle.py`, which builds `scripts/bsdl_oracle/probe.cpp`
 //! against OSL's `src/libbsdl` at a pinned commit. Here each case is compiled
 //! as a MaterialX document and collapsed by crust's closure evaluator.
 //!
 //! The fixture is committed, so this needs neither a C++ compiler nor OSL's
-//! sources. The pdf is not compared: crust keeps its own sampling, whose
-//! density only has to agree with its own values (`closure/tests.rs`).
+//! sources. The pdf is compared too: the microfacet leaves sample as BSDL
+//! does (bounded VNDF), so their density is BSDL's toward every direction,
+//! the ones its sampler never reaches included.
 //!
 //! crust does not match BSDL everywhere. Every known difference is a
 //! [`Deviation`]: a named condition on a case's inputs, the gap it stands
@@ -48,6 +50,7 @@ struct Case<'a> {
     filter: Vec3A,
     albedo_impl: Vec3A,
     values: Vec<Vec3A>,
+    pdfs: Vec<f32>,
 }
 
 impl Case<'_> {
@@ -97,7 +100,7 @@ fn cases() -> Vec<Case<'static>> {
             let (question, answer) = l.split_once(" || ").expect("question || answer");
             let q: Vec<&str> = question.split(" | ").collect();
             let a: Vec<&str> = answer.split(" | ").collect();
-            assert_eq!((q.len(), a.len()), (3, 4), "{l:?}");
+            assert_eq!((q.len(), a.len()), (3, 5), "{l:?}");
             let mut head = q[0].split_whitespace();
             let id = head.next().expect("case id");
             let inputs = head
@@ -112,6 +115,7 @@ fn cases() -> Vec<Case<'static>> {
                 filter: vec3s(a[1])[0],
                 albedo_impl: vec3s(a[2])[0],
                 values: vec3s(a[3]),
+                pdfs: floats(a[4]),
             }
         })
         .collect()
@@ -245,6 +249,7 @@ struct Shaded {
     filter: Vec3A,
     albedo_impl: Vec3A,
     values: Vec<Vec3A>,
+    pdfs: Vec<f32>,
 }
 
 fn shade(case: &Case) -> Shaded {
@@ -252,6 +257,9 @@ fn shade(case: &Case) -> Shaded {
     let alone = resolve(case, &format!("<materialx>{node}</materialx>"), "x");
     let (ray, rec) = hit(case);
     let eval = |l: Vec3A| alone.eval(&ray, &rec, l).map_or(Vec3A::ZERO, |(f, _)| f);
+    // `eval` floors the density at 1e-4, which the comparison's 0.05 floor
+    // absorbs.
+    let pdf = |l: Vec3A| alone.eval(&ray, &rec, l).map_or(0.0, |(_, p)| p);
     let mut sum = glam::DVec3::ZERO;
     for side in [1.0, -1.0] {
         for i in 0..GRID {
@@ -288,19 +296,21 @@ fn shade(case: &Case) -> Shaded {
             .map_or(Vec3A::ZERO, |base| base.weight),
         albedo_impl: alone.leaves().first().map_or(Vec3A::ZERO, |l| l.albedo),
         values: case.lights.iter().map(|&l| eval(l)).collect(),
+        pdfs: case.lights.iter().map(|&l| pdf(l)).collect(),
     }
 }
 
-/// How far crust is from the reference on one case, in four measures that
+/// How far crust is from the reference on one case, in five measures that
 /// stay meaningful where values are near zero and where they peak: the
 /// albedo's, the filter's and `albedo_impl`'s absolute errors, and each
-/// value's error relative to `max(0.05, |value|)`.
+/// value's and each pdf's error relative to `max(0.05, |reference|)`.
 #[derive(Clone, Copy, Debug, Default)]
 struct Errors {
     albedo: f32,
     filter: f32,
     albedo_impl: f32,
     value: f32,
+    pdf: f32,
 }
 
 impl Errors {
@@ -332,6 +342,12 @@ impl Errors {
                 .zip(&case.values)
                 .map(|(&g, &w)| rel(g, w))
                 .fold(0.0, f32::max),
+            pdf: got
+                .pdfs
+                .iter()
+                .zip(&case.pdfs)
+                .map(|(&g, &w)| rel(Vec3A::splat(g), Vec3A::splat(w)))
+                .fold(0.0, f32::max),
         }
     }
 
@@ -340,6 +356,7 @@ impl Errors {
             .max(self.filter)
             .max(self.albedo_impl)
             .max(self.value)
+            .max(self.pdf)
     }
 }
 
@@ -404,13 +421,14 @@ fn report_deviations() {
             _ => {}
         }
         println!(
-            "{:<32} worst {:>8.4}  albedo {:.4} filter {:.4} impl {:.4} value {:.4}  {}",
+            "{:<32} worst {:>8.4}  albedo {:.4} filter {:.4} impl {:.4} value {:.4} pdf {:.4}  {}",
             case.id,
             errors.worst(),
             errors.albedo,
             errors.filter,
             errors.albedo_impl,
             errors.value,
+            errors.pdf,
             rules.join(", ")
         );
     }
@@ -454,6 +472,7 @@ fn the_fixture_is_complete() {
     for case in &cases {
         assert_eq!(case.lights.len(), lights, "{}: light directions", case.id);
         assert_eq!(case.values.len(), lights, "{}: answers", case.id);
+        assert_eq!(case.pdfs.len(), lights, "{}: densities", case.id);
     }
 }
 
@@ -506,6 +525,7 @@ fn a_non_finite_value_is_an_error() {
         filter: case.filter,
         albedo_impl: case.albedo_impl,
         values: case.values.clone(),
+        pdfs: case.pdfs.clone(),
     };
     assert_eq!(Errors::of(case, &exact()).worst(), 0.0);
     for bad in [f32::NAN, f32::INFINITY] {
@@ -513,6 +533,10 @@ fn a_non_finite_value_is_an_error() {
         values[3] = Vec3A::new(0.1, bad, 0.1);
         let one_light = Shaded { values, ..exact() };
         assert_eq!(Errors::of(case, &one_light).worst(), f32::INFINITY);
+        let mut pdfs = case.pdfs.clone();
+        pdfs[3] = bad;
+        let one_pdf = Shaded { pdfs, ..exact() };
+        assert_eq!(Errors::of(case, &one_pdf).worst(), f32::INFINITY);
         for which in 0..3 {
             let mut s = exact();
             match which {
@@ -565,13 +589,14 @@ fn materialx_leaves_match_bsdl() {
         .into_iter()
         .map(|(case, e, rules, bound)| {
             format!(
-                "{:<32} worst {:.4} (albedo {:.4}, filter {:.4}, impl {:.4}, value {:.4}) > {bound:.4} from [{}]",
+                "{:<32} worst {:.4} (albedo {:.4}, filter {:.4}, impl {:.4}, value {:.4}, pdf {:.4}) > {bound:.4} from [{}]",
                 case.id,
                 e.worst(),
                 e.albedo,
                 e.filter,
                 e.albedo_impl,
                 e.value,
+                e.pdf,
                 rules.join(", ")
             )
         })

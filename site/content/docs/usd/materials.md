@@ -96,10 +96,10 @@ The base is weighted by one minus the top's opacity, clamped to [0, 1].
 
 A few behaviours follow BSDL rather than MaterialX's GLSL shaders:
 
-- A rough glass (a `dielectric_bsdf` that refracts) reflects and transmits a little more
-  than it receives: about 4% at roughness 0.5 and up to 75% at roughness 1, seen head on.
-  BSDL's energy tables are made for its own sampler, and Crust Render keeps them as they
-  are to match the reference.
+- Each node is also sampled as BSDL samples it. A rough glass (a `dielectric_bsdf` that
+  refracts) relies on that: BSDL's energy tables are made for its own sampler. Lit by a
+  light that light sampling can also reach, a very rough glass still returns about 2% more
+  than it receives, as in `testrender`.
 - A `sheen_bsdf` in `zeltner` mode reads its fibre table at the square root of
   `roughness`, so it is not the same as `crust:openpbr`'s fuzz at the same roughness. A
   sheen is not shaded on a back face.

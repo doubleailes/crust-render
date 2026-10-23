@@ -16,7 +16,7 @@
 //
 // For each case it prints one line:
 //
-//     <id> | <albedo rgb> | <filter rgb> | <albedo_impl rgb> | <value rgb> ...
+//     <id> | <albedo rgb> | <filter rgb> | <albedo_impl rgb> | <value rgb> ... | <pdf> ...
 //
 // - albedo: (π / N) Σ f(v, l) over the cosine-weighted midpoint grid of
 //   `GRID`² directions on each side of the surface (`grid_direction` below;
@@ -27,7 +27,9 @@
 // - albedo_impl: the lobe's own albedo estimate, which testrender picks
 //   lobes by;
 // - value: `eval_impl` toward each light, `weight · pdf`, the BSDF times the
-//   cosine (crust's `Material::eval` convention).
+//   cosine (crust's `Material::eval` convention);
+// - pdf: `eval_impl`'s density toward each light, the one its `sample_impl`
+//   draws with (BSDL's own, bounded VNDF for the microfacet lobes).
 //
 // Built and run by `scripts/bsdl_oracle.py`; not part of the Cargo build.
 
@@ -163,6 +165,9 @@ static void answer(const L& lobe, const V3f& wo, const std::vector<V3f>& lights,
     std::printf(" |");
     for (const V3f& l : lights)
         print(value(l));
+    std::printf(" |");
+    for (const V3f& l : lights)
+        std::printf(" %.9g", lobe.eval_impl(lo, lobe.frame.local(l)).pdf);
 }
 
 static bool run(const Inputs& in, const V3f& wo, const std::vector<V3f>& lights)

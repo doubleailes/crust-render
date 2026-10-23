@@ -42,8 +42,7 @@ use crate::hittable::HitRecord;
 use crate::material::ScatterSample;
 use crate::material::SubsurfaceEntry;
 use crate::material::brdf::{
-    ZeltnerSheen, pdf_vndf_ggx_aniso_local, pdf_vndf_h_aniso_local, sample_vndf_ggx_aniso_local,
-    tangent_frame,
+    ZeltnerSheen, pdf_vndf_ggx_aniso_local, sample_vndf_ggx_aniso_local, tangent_frame,
 };
 use crate::medium::Medium;
 use crate::ray::Ray;
@@ -1738,6 +1737,9 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
         // direction: no value and no continuous density.
         Lobe::Subsurface { .. } => (Vec3A::ZERO, 0.0),
         Lobe::Hair(ref h) => h.eval(l),
+        // A black sheen — every sheen on a back face, which BSDL does not
+        // shade — has no density either, as BSDL's returns none there.
+        Lobe::Sheen { color, .. } if color == Vec3A::ZERO => (Vec3A::ZERO, 0.0),
         Lobe::Sheen {
             color,
             zeltner: Some(lobe),
@@ -1759,7 +1761,10 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
                 return (Vec3A::ZERO, 0.0);
             }
             let f = bsdl::conty_kulla_sheen(roughness, lifted(v), l);
-            (color * f, l.z * FRAC_1_PI)
+            // BSDL samples it uniformly over the hemisphere, and answers
+            // with no density where the lobe has no value.
+            let pdf = if f > 0.0 { 0.5 * FRAC_1_PI } else { 0.0 };
+            (color * f, pdf)
         }
         Lobe::Specular {
             fresnel,
@@ -1776,39 +1781,52 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
             let v = lifted(v);
             let dist = GGXDist { ax, ay };
             let fresnel = |c: f32| fresnel.eval(c);
+            // A thin wall that transmits is crust's; one that only reflects
+            // (an `R` leaf, or an `RT` one reduced by `exclude_straight`) is
+            // BSDL's like any other.
+            if thin_walled && mode.transmits() {
+                return eval_thin_walled(&dist, fresnel, refl_tint, renorm, mode, v, l);
+            }
+            // BSDL's `DielectricBSDF::eval` (or `eval_turquin_microms_reflection`
+            // for a lobe that only reflects), its bounded-VNDF density
+            // included. A `T` lobe answers on the reflecting side too, with
+            // no value: BSDL samples its (black) reflection as `RT` does.
+            let refracts = mode.transmits();
             if l.z > 0.0 {
-                if !mode.reflects() {
+                let h = (v + l).normalize();
+                let d_refl = dist.d_refl_d(v) * dist.d(h);
+                if !refracts {
+                    let value = refl_tint
+                        * bsdl::eval_turquin_microms_reflection(&dist, fresnel, e_ms, v, l);
+                    return (value, d_refl / (4.0 * v.z));
+                }
+                let cos_mo = h.dot(v);
+                if cos_mo <= 0.0 {
                     return (Vec3A::ZERO, 0.0);
                 }
-                let h = (v + l).normalize_or_zero();
-                if h.z <= 0.0 {
+                let p = bsdl::reflection_probability(fresnel(cos_mo));
+                if p <= 0.0 {
                     return (Vec3A::ZERO, 0.0);
                 }
-                // BSDL: Turquin's compensation when the lobe only reflects,
-                // the renormalised single scattering when it also refracts.
-                let value = if mode.transmits() {
-                    refl_tint * renorm * bsdl::eval_dielectric_reflection(&dist, fresnel, v, l)
-                } else {
-                    refl_tint * bsdl::eval_turquin_microms_reflection(&dist, fresnel, e_ms, v, l)
-                };
-                let mut pdf = pdf_vndf_ggx_aniso_local(v, h, ax, ay);
-                if mode == ScatterMode::RT {
-                    pdf *= scalar(fresnel(v.dot(h).clamp(1e-6, 1.0)));
-                }
-                (value, pdf)
-            } else if mode.transmits() && !thin_walled && l.z < 0.0 {
-                let (p_h, vh) = refraction_pdf(v, l, eta, ax, ay);
-                if p_h <= 0.0 {
+                let value =
+                    refl_tint * renorm * bsdl::eval_dielectric_reflection(&dist, fresnel, v, l);
+                (value, d_refl / (4.0 * v.z) * p)
+            } else if refracts && l.z < 0.0 {
+                // Flipped to the same side as N.
+                let ht = (eta * l + v).normalize() * if eta > 1.0 { -1.0 } else { 1.0 };
+                let (cos_ho, cos_hi) = (ht.dot(v), ht.dot(l));
+                if cos_ho <= 0.0 || cos_hi >= 0.0 || ht.z <= 0.0 {
                     return (Vec3A::ZERO, 0.0);
                 }
+                let pt = 1.0 - bsdl::reflection_probability(fresnel(cos_ho));
+                if pt <= 0.0 {
+                    return (Vec3A::ZERO, 0.0);
+                }
+                let j = (-cos_hi * cos_ho * eta * eta) / (v.z * (cos_hi * eta + cos_ho).powi(2));
+                let pdf = dist.d_refl_d(v) * dist.d(ht) * j * pt;
                 let value = refr_tint
                     * renorm
                     * bsdl::eval_dielectric_refraction(&dist, fresnel, eta, v, l);
-                // `RT` samples refraction with probability `1 − F`.
-                let pdf = match mode {
-                    ScatterMode::RT => p_h * (1.0 - scalar(fresnel(vh))),
-                    _ => p_h,
-                };
                 (value, pdf)
             } else {
                 (Vec3A::ZERO, 0.0)
@@ -1817,42 +1835,50 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
     }
 }
 
+/// [`eval_lobe`] for a thin-walled specular leaf that transmits, which is
+/// crust's, not BSDL's: its reflection sampled from the full GGX VNDF (an `RT` leaf picks
+/// it with probability `F`), its transmission a straight-through delta with
+/// no continuous density.
+fn eval_thin_walled(
+    dist: &GGXDist,
+    fresnel: impl Fn(f32) -> Vec3A,
+    refl_tint: Vec3A,
+    renorm: f32,
+    mode: ScatterMode,
+    v: Vec3A,
+    l: Vec3A,
+) -> (Vec3A, f32) {
+    if l.z <= 0.0 || !mode.reflects() {
+        return (Vec3A::ZERO, 0.0);
+    }
+    let h = (v + l).normalize_or_zero();
+    if h.z <= 0.0 {
+        return (Vec3A::ZERO, 0.0);
+    }
+    let value = refl_tint * renorm * bsdl::eval_dielectric_reflection(dist, &fresnel, v, l);
+    let mut pdf = pdf_vndf_ggx_aniso_local(v, h, dist.ax, dist.ay);
+    if mode == ScatterMode::RT {
+        pdf *= scalar(fresnel(v.dot(h).clamp(1e-6, 1.0)));
+    }
+    (value, pdf)
+}
+
 /// A Fresnel colour as the scalar probability of reflecting.
 fn scalar(f: Vec3A) -> f32 {
     ((f.x + f.y + f.z) / 3.0).clamp(0.0, 1.0)
 }
 
-/// The density crust's VNDF sampler draws the refracted direction `l` with
-/// (`h` from the VNDF, `l` refracted through it), and `v·h` at that half
-/// vector; `(0, 0)` where `l` is no refraction of `v`. `eta` is `η_t / η_i`.
-fn refraction_pdf(v: Vec3A, l: Vec3A, eta: f32, ax: f32, ay: f32) -> (f32, f32) {
-    let mut h = -(v + l * eta);
-    if h.length_squared() < 1e-12 {
-        return (0.0, 0.0);
-    }
-    h = h.normalize();
-    if h.z < 0.0 {
-        h = -h;
-    }
-    let vh = v.dot(h);
-    let lh = l.dot(h);
-    if vh <= 1e-6 || lh >= -1e-6 {
-        return (0.0, 0.0);
-    }
-    let denom = vh + eta * lh;
-    let denom2 = denom * denom;
-    if denom2 < 1e-10 {
-        return (0.0, 0.0);
-    }
-    let jacobian = eta * eta * -lh / denom2;
-    (pdf_vndf_h_aniso_local(v, h, ax, ay) * jacobian, vh)
-}
-
 /// Samples a direction from one lobe.
 fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample> {
     match *lobe {
-        Lobe::Diffuse { .. } | Lobe::Sheen { zeltner: None, .. } => Some(LobeSample::Continuous {
+        Lobe::Diffuse { .. } => Some(LobeSample::Continuous {
             dir: cosine_hemisphere(uv),
+            spread: crate::RayCone::MAX_SPREAD,
+        }),
+        Lobe::Sheen { color, .. } if color == Vec3A::ZERO => None,
+        // BSDL's `SheenMicrofacet::sample`: uniform over the hemisphere.
+        Lobe::Sheen { zeltner: None, .. } => Some(LobeSample::Continuous {
+            dir: uniform_hemisphere(uv),
             spread: crate::RayCone::MAX_SPREAD,
         }),
         Lobe::Sheen {
@@ -1888,6 +1914,28 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
         } => {
             let spread = (ax + ay).min(crate::RayCone::MAX_SPREAD);
             let v = lifted(v);
+            if !(thin_walled && mode.transmits()) {
+                // BSDL's `DielectricBSDF::sample` (or
+                // `sample_turquin_microms_reflection`): a bounded-VNDF
+                // micro-normal, reflected, or — for a lobe that refracts —
+                // reflected with probability `P = avg F` and refracted
+                // otherwise.
+                let dist = GGXDist { ax, ay };
+                let m = dist.sample_for_refl(v, uv[0], uv[1]);
+                let cos_mo = v.dot(m);
+                if cos_mo <= 0.0 {
+                    return None;
+                }
+                let reflect =
+                    !mode.transmits() || u < bsdl::reflection_probability(fresnel.eval(cos_mo));
+                let wi = if reflect {
+                    bsdl::reflect(v, m)
+                } else {
+                    bsdl::refract(v, m, eta)
+                };
+                let valid = if reflect { wi.z > 0.0 } else { wi.z < 0.0 };
+                return valid.then_some(LobeSample::Continuous { dir: wi, spread });
+            }
             let h = sample_vndf_ggx_aniso_local(v, ax, ay, uv);
             let vh = v.dot(h);
             if vh <= 1e-6 {
@@ -1923,6 +1971,14 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
             (l.z < -1e-6).then_some(LobeSample::Continuous { dir: l, spread })
         }
     }
+}
+
+/// A direction uniform over the upper hemisphere, density `1/2π`.
+fn uniform_hemisphere(uv: [f32; 2]) -> Vec3A {
+    let z = uv[0];
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    let phi = 2.0 * std::f32::consts::PI * uv[1];
+    Vec3A::new(r * phi.cos(), r * phi.sin(), z)
 }
 
 /// The entry direction of a random walk, in the leaf's frame — Typhoon's
