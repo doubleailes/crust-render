@@ -23,6 +23,10 @@ ninja = "*"
 cxx-compiler = "*"
 sysroot_linux-64 = ">=2.38"
 
+# Without this, a stage referencing a .mtlx segfaults on open: see the script.
+[target.linux-64.activation]
+scripts = ["hide_mtlx_stdlib.sh"]
+
 # What that sysroot needs of the machine (ubuntu-latest has 2.39). Linux only.
 [system-requirements]
 libc = "2.39"
