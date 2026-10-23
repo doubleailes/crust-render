@@ -246,6 +246,104 @@ fn every_sample_agrees_with_eval() {
     }
 }
 
+/// The density `eval` claims toward every direction, integrated over the
+/// sphere, and the share of `scatter`'s draws that land on a continuous
+/// direction (deltas excluded, as the density excludes them), for the closure
+/// `root` of `body` seen at `theta`. A density that integrates above the
+/// share its sampler delivers claims directions the sampler never draws,
+/// and MIS weighs a light sample there against BSDF samples that never come
+/// (doubleailes/crust-render#378). One below it hides directions the sampler
+/// does draw. `eval`'s 1e-4 floor is not density and is left out.
+fn claimed_and_landed(body: &str, root: &str, theta: f32, front: bool) -> (f64, f64) {
+    let c = resolved(body, root, theta, front);
+    let (r, rec) = (arriving(theta), hit(front));
+    // Midpoint rule, equal-area cells in (z, φ): fine enough for lobes no
+    // sharper than α ≈ 0.04 seen off the pole, which a grid cannot resolve.
+    let (nz, np) = (1600, 400);
+    let mut claimed = 0.0f64;
+    for i in 0..nz {
+        let z = -1.0 + 2.0 * (i as f32 + 0.5) / nz as f32;
+        let s = (1.0 - z * z).max(0.0).sqrt();
+        for j in 0..np {
+            let phi = 2.0 * PI * (j as f32 + 0.5) / np as f32;
+            let wi = Vec3A::new(s * phi.cos(), s * phi.sin(), z);
+            let p = c.eval(&r, &rec, wi).map_or(0.0, |(_, p)| p);
+            if p > 1e-4 {
+                claimed += p as f64;
+            }
+        }
+    }
+    claimed *= 4.0 * std::f64::consts::PI / (nz * np) as f64;
+    let mut sampler = S(0);
+    let n = 16_384;
+    let landed = (0..n)
+        .filter(|_| {
+            c.scatter(&r, &rec, sampler.next())
+                .is_some_and(|x| !x.delta)
+        })
+        .count();
+    (claimed, landed as f64 / n as f64)
+}
+
+#[test]
+fn no_leaf_claims_more_density_than_it_samples() {
+    // Every test leaf, a glass refracting from inside and one refracting
+    // only, and the Zeltner sheen. Each claimed density must account for
+    // exactly the draws that land: no more (the MIS inconsistency of #378)
+    // and no less. The glasses are rough enough to integrate (α 0.09) and
+    // smooth enough that BSDL's cap leaves no refraction out (the exception
+    // below).
+    let glass = |mode: &str| {
+        format!(
+            r#"<dielectric_bsdf name="x" type="BSDF">
+                 <input name="roughness" type="vector2" value="0.09, 0.09" />
+                 <input name="scatter_mode" type="string" value="{mode}" />
+               </dielectric_bsdf>"#
+        )
+    };
+    let mut docs: Vec<(String, String, &str, bool)> = LEAVES
+        .iter()
+        .map(|(n, b)| (n.to_string(), doc(b), "x", true))
+        .collect();
+    docs.push(("dielectric RT, back".into(), doc(&glass("RT")), "x", false));
+    docs.push(("dielectric T".into(), doc(&glass("T")), "x", true));
+    docs.push(("zeltner sheen".into(), zeltner_sheen(0.5), "s", true));
+    for (name, body, root, front) in &docs {
+        let (claimed, landed) = claimed_and_landed(body, root, 0.8, *front);
+        println!("{name}: claimed {claimed:.4}, landed {landed:.4}");
+        assert!(
+            (claimed - landed).abs() < 0.015,
+            "{name}: the density claims {claimed:.4}, the sampler lands {landed:.4}"
+        );
+    }
+}
+
+/// BSDL's refracting dielectric is the named exception: its `eval` answers,
+/// with a density, toward refracted directions its bounded-VNDF sampler
+/// never draws, so the claimed density exceeds what lands, by more as the
+/// lobe roughens. crust keeps BSDL's `eval` there (#378, the user's choice);
+/// this pins how far, so a change that closes or widens the gap shows.
+#[test]
+fn bsdl_refraction_claims_more_density_than_it_samples() {
+    // Measured at θ = 0.8: 0.031 at roughness 0.5, 0.125 at 0.7, 0.614 at 1.
+    for (r, lo, hi) in [(0.5f32, 0.015, 0.06), (0.7, 0.08, 0.2), (1.0, 0.45, 0.8)] {
+        let a = r * r;
+        let body = doc(&format!(
+            r#"<dielectric_bsdf name="x" type="BSDF">
+                 <input name="roughness" type="vector2" value="{a}, {a}" />
+                 <input name="scatter_mode" type="string" value="RT" />
+               </dielectric_bsdf>"#
+        ));
+        let (claimed, landed) = claimed_and_landed(&body, "x", 0.8, true);
+        let excess = claimed - landed;
+        println!("roughness {r}: claimed {claimed:.4}, landed {landed:.4}");
+        assert!(
+            (lo..hi).contains(&excess),
+            "roughness {r}: excess {excess:.4} outside [{lo}, {hi})"
+        );
+    }
+}
+
 #[test]
 fn the_mixture_pdf_integrates_to_one() {
     // A reflect-only tree: every leaf's density is a normalised distribution

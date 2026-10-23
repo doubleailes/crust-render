@@ -1155,7 +1155,14 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   those directions and are weighted against a BSDF density that never fires,
   so a rough clear glass sphere in a white furnace whose emitter is also a
   light returns 1.012–1.023 of it at roughness 1, 1.007–1.017 at 0.5 —
-  testrender's own inconsistency, and down from 2.0 before the port.
+  testrender's own inconsistency, and down from 2.0 before the port. Measured
+  directly, the density BSDL's `eval` claims, integrated over the sphere at
+  θo = 0.8, exceeds what its sampler lands by 0.031 at roughness 0.5, 0.125
+  at 0.7 and 0.614 at 1 (`bsdl_refraction_claims_more_density_than_it_samples`
+  pins those). Every other leaf's claimed density accounts for exactly the
+  draws that land, within 0.015 (`no_leaf_claims_more_density_than_it_samples`):
+  `every_sample_agrees_with_eval` checks the density only where samples land,
+  so it cannot see a density claimed where none do.
 - **Selection is crust's.** A leaf's value, albedo, filter, sampling and
   density are BSDL's; the choice among leaves is `∝ lum(w)·lum(Ê)` with a
   0.02 floor rather than testrender's `CompositeBSDF::prepare`, and a

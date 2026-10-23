@@ -54,3 +54,4 @@
 - [x] 6.3 Add the pdf toward each light to the BSDL oracle (probe, script, fixture regenerated with every earlier answer unchanged, replay) and verify every case outside the named deviations matches
 - [x] 6.4 Pin the furnace: a rough clear glass sphere within 1.02 (BSDF sampling) and 1.04 (with NEE) at roughness 0.5 and 1; record before/after in the design record
 - [x] 6.5 Measure callgrind on `cornellbox`, `materialx_basic` and `materialx_surfaces` against the previous commit, verify non-MaterialX scenes are bit-identical, and run the full CI set
+- [x] 6.6 Add a density test: every leaf's `eval` density, integrated over the sphere, equals the share of its draws that land (within 0.015), with BSDL's rough refraction as a named, pinned exception; verify it fails on a rough (α 0.25) refracting glass
