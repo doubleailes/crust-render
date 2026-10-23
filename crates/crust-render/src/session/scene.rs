@@ -5,9 +5,9 @@
 //! (`live-stage-scene-deltas`, [`Imported::update`]).
 
 use super::delta::Applied;
-use crate::{CheckArgs, Checked, Cli, Command};
+use crate::Assets;
+use crate::{CheckArgs, Checked};
 use clap::Parser;
-use crust_assets::FileAssets;
 use crust_core::check::CheckReport;
 use crust_core::live::{Change, Provenance, Structural};
 use crust_core::{AovRequest, LightList, RenderSettings, Renderer, Scene, WorldBuilder};
@@ -56,7 +56,7 @@ pub struct Imported {
     pub report: CheckReport,
     /// The loader the scene was imported with: held, never read, because it
     /// owns the texture caches the scene's textures stream through.
-    pub _assets: Arc<FileAssets>,
+    pub _assets: Arc<dyn Assets>,
     /// The scene-linear space the scene renders in, which its images are
     /// encoded from.
     pub working_space: crust_core::color::Space,
@@ -214,7 +214,7 @@ impl Imported {
     /// The session's scene from a checked import.
     fn of(
         checked: Checked,
-        assets: Arc<FileAssets>,
+        assets: Arc<dyn Assets>,
         took: Duration,
         applied: Applied,
         geometry: u64,
@@ -262,33 +262,37 @@ impl Imported {
     }
 }
 
-/// The arguments `crust <args>` would parse to for `check`, with `--pass`
-/// when the session renders a pass: the session imports with the CLI's own
-/// defaults, by construction.
+/// `crust check`'s own arguments, parsed alone: what [`check_args`] parses
+/// with, so a session imports with the CLI's defaults by construction.
+#[derive(Parser)]
+#[command(name = "crust check")]
+struct CheckCommand {
+    #[command(flatten)]
+    args: CheckArgs,
+}
+
+/// The arguments `crust check <args>` would parse to, with `--pass` when the
+/// session renders a pass: the session imports with the CLI's own defaults,
+/// by construction.
 fn check_args(layer: &Path, pass: Option<&str>) -> Result<CheckArgs, String> {
     let layer = layer.to_str().ok_or("the layer path is not UTF-8")?;
     let pass = pass.into_iter().flat_map(|p| ["--pass", p]);
-    match Cli::try_parse_from(["crust", "check", "-i", layer].into_iter().chain(pass)) {
-        Ok(Cli {
-            command: Command::Check(args),
-            ..
-        }) => Ok(*args),
-        Ok(_) => unreachable!("parsed as check"),
-        Err(e) => Err(e.to_string()),
-    }
+    CheckCommand::try_parse_from(["crust check", "-i", layer].into_iter().chain(pass))
+        .map(|c| c.args)
+        .map_err(|e| e.to_string())
 }
 
 /// Imports the saved layer at `layer` through `assets`, rendering `pass`.
 pub fn import(
     layer: &Path,
     pass: Option<&str>,
-    assets: Arc<FileAssets>,
+    assets: Arc<dyn Assets>,
 ) -> Result<Imported, String> {
     let args = check_args(layer, pass)?;
     let started = Instant::now();
     // The session imports once per edit batch and lives on: each stage is
     // freed, and with it any mapping of the layer it read.
-    let checked = crate::import_checked(&args, false, &assets)?;
+    let checked = crate::import_checked(&args, false, &*assets)?;
     let took = started.elapsed();
     // One per edit batch: a count that grows with the session.
     debug!("Session import of {} in {took:.2?}", layer.display());

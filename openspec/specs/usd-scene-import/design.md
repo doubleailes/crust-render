@@ -1612,9 +1612,12 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
 
 ## Known gaps: following a stage live
 
-- **No Hydra render delegate.** A `crust-hydra` `HdRenderDelegate` over a C ABI would
-  drive the provenance and the `live` entry points (keyed by path strings, given built
-  values), but it brings Pixar's C++ USD as a build dependency and `unsafe` FFI.
+- **A Hydra delegate follows the stage through layers, not through `live`.**
+  `hdCrust` (the `hydra-delegate` design record) writes what Hydra presents as USD
+  layers and applies changes through the session core, so its edits classify like an
+  MCP session's. It does not call the `live` entry points with Hydra's values
+  directly. That path, which avoids the layer round trip, is the fallback the record
+  keeps if memory or latency demand it.
 - **No subtree re-traversal.** A transform, topology, binding, visibility, variant or
   namespace edit re-imports the stage, however small the subtree.
 - **No BVH refit.** A refit tree is not the tree a fresh build gives, so it would break
