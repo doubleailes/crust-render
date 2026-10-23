@@ -238,6 +238,11 @@ scripts/geomutil_oracle.py --keep /tmp/geomutil   # rewrites crust-core/tests/da
 # named point on the chart. See "MaterialX" under USD import.
 cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_basic.mtlx mtlx_ceramic 0.25 0.5
+# ...and from inside the surface (a back face), at 45° from the normal: past
+# the critical angle the glass's reflection leaf lets almost nothing through to
+# its transmission leaf (weight 0.024), as it totally reflects.
+cargo run --release -p crust-render --example mtlx_shade -- \
+    samples/materialx_surfaces.mtlx mtlx_standard_glass --theta 45 --back 0.5 0.5
 
 # ...and across a whole MaterialX corpus: Ben Houston's Material Fidelity suite,
 # 826 materials scored by PSNR against MaterialXView's render (~80 min on 4

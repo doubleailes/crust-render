@@ -107,6 +107,13 @@ A few behaviours follow BSDL rather than MaterialX's GLSL shaders:
   MaterialX's own, since BSDL does not apply them.
 - A `chiang_hair_bsdf` in a layer's top hides what lies beneath it.
 
+One behaviour deliberately differs from `testrender`. Seen from inside an object (a back
+face), a `dielectric_bsdf` or `generalized_schlick_bsdf` that only reflects, in a layer's
+top, lets through only the light it does not reflect, and none past the critical angle,
+where it reflects everything. BSDL lets about as much through as it would from outside, so
+in `testrender` a coat over glass returns up to twice the light it receives from inside, and
+light trapped inside a coated glass object grows with every bounce.
+
 ## UsdPreviewSurface opacity
 
 `inputs:opacity` means one of two things, chosen by `inputs:opacityThreshold`:

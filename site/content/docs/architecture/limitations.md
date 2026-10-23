@@ -104,7 +104,9 @@ render.
   MaterialX BSDFs follow BSDL, the library OSL's reference renderer shades with, not
   MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. A very
   rough refracting `dielectric_bsdf` lit by a sampled light returns about 2% more light
-  than it receives, as it does in OSL's reference renderer.
+  than it receives, as it does in OSL's reference renderer. A coat over glass, seen from
+  inside within a degree or two past the critical angle, returns up to 6% more than it
+  receives.
 - **Texture filtering is isotropic.** Mip levels are chosen from ray cones, but the filter
   has no direction. A texture seen at a grazing angle is blurred more than an anisotropic
   (EWA) filter would blur it.

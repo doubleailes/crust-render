@@ -390,6 +390,12 @@ const DEVIATIONS: &[Deviation] = &[
         applies: |c| c.is("conductor"),
         bound: 0.357,
     },
+    Deviation {
+        name: "back-face-reflection-filter",
+        gap: "under a back face a reflection-only dielectric or Schlick lets through what its own lobe leaves (crust's DielectricReflBack table, nothing past the critical angle), where BSDL reads DielectricReflFront and lets 1 − F(front) through a lobe that totally reflects",
+        applies: |c| c.back() && c.input("mode") == Some("R"),
+        bound: 0.928,
+    },
 ];
 
 /// Prints every case's applicable deviations and errors, and for each

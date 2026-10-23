@@ -211,6 +211,29 @@ condition and measured bound.
 - **THEN** the oracle replays the committed fixture without compiling or
   fetching OSL's sources
 
+### Requirement: A reflection-only top lets through only what it does not reflect
+
+Under a back face, a `dielectric_bsdf` or `generalized_schlick_bsdf` that only
+reflects SHALL let a layer's base through in the share its own lobe does not
+reflect, which is nothing past the critical angle, where BSDL lets through
+what the front face would. The BSDL oracle SHALL excuse the difference under a
+named deviation rule.
+
+#### Scenario: A coat over glass, from inside
+
+- **WHEN** a `layer` whose top is a reflection-only `dielectric_bsdf` and whose
+  base is a refracting `dielectric_bsdf` of the same IOR is shaded under a
+  back face, at and past the critical angle
+- **THEN** its directional albedo exceeds 1 by no more than the back-face
+  table's interpolation allows (0.07)
+
+#### Scenario: The filter is the leaf's own
+
+- **WHEN** a reflection-only `dielectric_bsdf` over a white diffuse base is
+  shaded under a back face around the critical angle
+- **THEN** one minus the weight its base receives matches the leaf's own
+  directional albedo within 0.07
+
 ### Requirement: MaterialX leaves are sampled as BSDL samples them
 
 A MaterialX leaf SHALL be sampled as BSDL samples it, with BSDL's density

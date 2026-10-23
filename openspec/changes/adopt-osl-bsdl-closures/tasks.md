@@ -55,3 +55,11 @@
 - [x] 6.4 Pin the furnace: a rough clear glass sphere within 1.02 (BSDF sampling) and 1.04 (with NEE) at roughness 0.5 and 1; record before/after in the design record
 - [x] 6.5 Measure callgrind on `cornellbox`, `materialx_basic` and `materialx_surfaces` against the previous commit, verify non-MaterialX scenes are bit-identical, and run the full CI set
 - [x] 6.6 Add a density test: every leaf's `eval` density, integrated over the sphere, equals the share of its draws that land (within 0.015), with BSDL's rough refraction as a named, pinned exception; verify it fails on a rough (α 0.25) refracting glass
+
+## 7. Back-face reflection filter (design decision 9)
+
+- [x] 7.1 Bake `DielectricReflBack` with `genluts`' estimator from a patched copy of `genluts.cpp`, on a cosine axis aligned to each row's critical angle; verify the other four tables regenerate bit for bit and that a smooth row lets nothing through below its critical cosine
+- [x] 7.2 Read it, at `bsdl::refl_back_axis`, for a reflection-only dielectric or Schlick under a back face; add the oracle's `back-face-reflection-filter` rule with its measured bound
+- [x] 7.3 Pin the filter against the leaf (`the_back_face_filter_tracks_the_leaf_it_stands_for`) and a coat over glass from inside (`a_coat_over_glass_returns_no_more_than_it_receives_from_inside`); verify both fail with BSDL's filter
+- [x] 7.4 Re-render the MaterialX samples, the DPEL assets and the OpenPBR Shader Playground against the previous commit; verify non-MaterialX scenes are bit-identical and the Playground no longer explodes
+- [x] 7.5 Measure callgrind on `materialx_surfaces` against the previous commit, and run the full CI set
