@@ -53,4 +53,4 @@
 - [x] 6.2 Sample the `conty_kulla` sheen uniformly with BSDL's density, and give a black (back-face) sheen no density; verify the closure tests
 - [x] 6.3 Add the pdf toward each light to the BSDL oracle (probe, script, fixture regenerated with every earlier answer unchanged, replay) and verify every case outside the named deviations matches
 - [x] 6.4 Pin the furnace: a rough clear glass sphere within 1.02 (BSDF sampling) and 1.04 (with NEE) at roughness 0.5 and 1; record before/after in the design record
-- [ ] 6.5 Measure callgrind on `cornellbox`, `materialx_basic` and `materialx_surfaces` against the previous commit, verify non-MaterialX scenes are bit-identical, and run the full CI set
+- [x] 6.5 Measure callgrind on `cornellbox`, `materialx_basic` and `materialx_surfaces` against the previous commit, verify non-MaterialX scenes are bit-identical, and run the full CI set
