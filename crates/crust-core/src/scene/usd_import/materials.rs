@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use glam::Vec3A;
 use openusd::sdf;
-use openusd::usd::{CollectionAPI, Prim, Stage};
+use openusd::usd::{CollectionAPI, Prim, PrimPredicate, Stage};
 use openusd_schemas::shade::{
     BindingStrength, CollectionBinding, Connectable, Material as UsdMaterial, MaterialBindingAPI,
     ProducerFilter, Shader, TerminalSource,
@@ -50,9 +50,83 @@ pub(super) struct MaterialCache {
     /// handed from [`load_mtlx_material`] to [`cached_material`], which keeps
     /// it with the material: the document is compiled once, for both.
     mtlx_displacement: Option<Arc<crate::materialx::MtlxDisplacement>>,
+    /// Where materials bound from outside a streamed chunk are composed
+    /// ([`material_stage`]).
+    pub(super) outside: OutsideMaterials,
+    /// The custom MaterialX node definitions under
+    /// `PXR_MTLX_PLUGIN_SEARCH_PATHS` ([`mtlx_library`]), read once per import.
+    pub(super) library: Arc<crust_mtlx::Library>,
+}
+
+/// The custom MaterialX node definitions in every `.mtlx` file under
+/// `PXR_MTLX_PLUGIN_SEARCH_PATHS` (USD's `usdMtlx` variable), read for one
+/// import: empty, and nothing read, when the variable is unset. A path or file
+/// that cannot be read warns `mtlx.library_unreadable` and is skipped; the
+/// rest of the library still loads.
+pub(super) fn mtlx_library() -> Arc<crust_mtlx::Library> {
+    let paths = &crate::config().mtlx_plugin_search_paths;
+    if paths.is_empty() {
+        return Arc::default();
+    }
+    let started = Instant::now();
+    let (library, errors) = crust_mtlx::Library::load(paths);
+    for (path, e) in errors {
+        warning!(
+            MtlxLibraryUnreadable,
+            "PXR_MTLX_PLUGIN_SEARCH_PATHS: {} cannot be read ({e}) — its MaterialX node \
+             definitions are not loaded",
+            path.display()
+        );
+    }
+    debug!(
+        "MaterialX node library: {} nodedef(s), {} implemented as node graphs, from {} file(s) \
+         under PXR_MTLX_PLUGIN_SEARCH_PATHS in {:?}",
+        library.nodedefs().len(),
+        library.implemented(),
+        library.files.len(),
+        started.elapsed()
+    );
+    Arc::new(library)
+}
+
+/// A stage masked to the materials streamed chunks bind from outside
+/// themselves, kept across chunks and released with the last
+/// ([`super::traverse_stage`]).
+///
+/// A chunk's mask is its subtree, so a `Material` in a sibling subtree — a
+/// top-level `/MaterialX/Materials` scope beside the geometry, as a DCC's
+/// MaterialX export writes it — is not on the stage that traverses the
+/// geometry bound to it. Re-opening the chunk with a wider mask would
+/// compose its geometry twice; this stage composes the materials alone.
+#[derive(Default)]
+pub(super) struct OutsideMaterials {
+    /// What `stage` is masked to: every out-of-chunk binding target met so
+    /// far, found or not, so that a dangling binding opens nothing twice.
+    mask: Vec<sdf::Path>,
+    stage: Option<Stage>,
+}
+
+impl OutsideMaterials {
+    /// Drops the stage, handing back the layers it composed.
+    pub(super) fn release(&mut self) -> Vec<String> {
+        self.mask.clear();
+        self.stage
+            .take()
+            .map(|s| s.layer_identifiers())
+            .unwrap_or_default()
+    }
 }
 
 impl MaterialCache {
+    /// An empty cache for one import, holding that import's MaterialX node
+    /// library ([`mtlx_library`]).
+    pub(super) fn new() -> Self {
+        MaterialCache {
+            library: mtlx_library(),
+            ..MaterialCache::default()
+        }
+    }
+
     /// Each material prim the cache resolved → the `world` slots holding it
     /// and whether a mesh was displaced by it ([`crate::live::Provenance`]).
     /// By `Arc` identity: a slot holds exactly the `Arc` the cache handed out.
@@ -189,8 +263,10 @@ const RENDER_BINDING_PURPOSE: &str = "full";
 ///   binding: no material provenance for `crust mcp`, no
 ///   `material.fallback_default` warning. So when it answers nothing, the
 ///   binding is read as the *winning* binding's target instead
-///   ([`winning_binding_target`]), which the resolution then reports as
-///   unresolvable, as it always did. It has to be the winner, strength and
+///   ([`winning_binding_target`]), which the resolution then composes on the
+///   stage it keeps for materials outside the chunk ([`material_stage`]),
+///   reporting it unresolvable only when it is not there either. It has to
+///   be the winner, strength and
 ///   collections included: a weaker binding that does resolve would render
 ///   its material where the winner's default grey belongs.
 pub(super) fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
@@ -342,7 +418,8 @@ pub(super) fn resolve_bound(
     }
     let mtlx = entry.mtlx.clone();
     let displacement = if crate::config().displace {
-        resolve_displacement(stage, &mat_path, mtlx, caches).map(Arc::new)
+        let home = material_stage(stage, &mat_path, caches);
+        resolve_displacement(&home, &mat_path, mtlx, caches).map(Arc::new)
     } else {
         None
     };
@@ -381,8 +458,9 @@ fn cached_material(
     // is what keeps one streamed chunk's `/__Prototype_N` apart from the
     // next's — see `MaterialCache::key`.
     debug!("Resolving material {mat_path} (epoch {})", key.0);
-    let (material, mtlx) = resolve_fresh(stage, &mat_path, caches);
-    let reads = material_reads(stage, &mat_path);
+    let home = material_stage(stage, &mat_path, caches);
+    let (material, mtlx) = resolve_fresh(&home, &mat_path, caches);
+    let reads = material_reads(&home, &mat_path);
     caches.materials.by_path.insert(
         key.clone(),
         CachedMaterial {
@@ -393,6 +471,83 @@ fn cached_material(
         },
     );
     Some((key, mat_path))
+}
+
+/// The stage to resolve the material at `mat_path` on: `stage` itself when
+/// its population mask holds the material's whole subtree — always, outside
+/// a streamed import — and otherwise the stage [`OutsideMaterials`] keeps,
+/// masked to it.
+///
+/// That stage is opened at the first miss it cannot answer, masked to every
+/// binding target outside the chunk ([`outside_binding_targets`]) and to all
+/// it was masked to before, so one chunk costs at most one open, and a chunk
+/// binding nothing new none. A material that reads a prim outside itself (a
+/// connection into a shared node graph elsewhere) still finds it missing
+/// there: only the material's own subtree is masked in.
+fn material_stage(stage: &Stage, mat_path: &sdf::Path, caches: &mut ImportCaches<'_>) -> Stage {
+    let mask = stage.mask();
+    // Prototypes are populated whatever the mask; their paths are not in it.
+    if mask.includes_subtree(mat_path) || mat_path.as_str().starts_with("/__Prototype") {
+        return stage.clone();
+    }
+    let outside = &mut caches.materials.outside;
+    let covered = outside.mask.iter().any(|p| mat_path.has_prefix(p));
+    if let (true, Some(side)) = (covered, &outside.stage) {
+        return side.clone();
+    }
+    let Some(path_str) = caches.stage_path.to_str() else {
+        return stage.clone();
+    };
+    let started = Instant::now();
+    let mut paths = std::mem::take(&mut outside.mask);
+    paths.extend(outside_binding_targets(stage));
+    paths.push(mat_path.clone());
+    paths.sort();
+    paths.dedup();
+    match super::open_stage_masked(caches.stage_path, path_str, Some(paths.clone())) {
+        Ok(side) => {
+            debug!(
+                "Opened a stage for {} material path(s) bound from outside the chunk in {:?}",
+                paths.len(),
+                started.elapsed()
+            );
+            outside.mask = paths;
+            outside.stage = Some(side.clone());
+            side
+        }
+        // Resolved on the chunk, the material reports itself unresolvable,
+        // as it did before this stage existed.
+        Err(e) => {
+            debug!("Could not open a stage for materials outside the chunk: {e}");
+            stage.clone()
+        }
+    }
+}
+
+/// The prim paths every `material:binding*` relationship on `stage` targets
+/// outside its population mask, instance proxies included. A collection
+/// binding's collection is a property path and is skipped: its material is
+/// the target that matters.
+fn outside_binding_targets(stage: &Stage) -> Vec<sdf::Path> {
+    let mask = stage.mask();
+    let mut paths = Vec::new();
+    let _ = stage.traverse(PrimPredicate::DEFAULT_PROXIES, |p| paths.push(p.clone()));
+    let mut targets = Vec::new();
+    for path in paths {
+        let prim = prim_at(stage, path);
+        for rel in prim.authored_relationships().unwrap_or_default() {
+            if !rel.name().starts_with("material:binding") {
+                continue;
+            }
+            targets.extend(
+                rel.targets()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| t.is_prim() && !mask.includes_subtree(t)),
+            );
+        }
+    }
+    targets
 }
 
 /// The prims outside the material at `mat_path` that its network reads: the
@@ -687,6 +842,9 @@ fn resolve_material_uncached(
         };
     }
 
+    // Which shader ids are MaterialX: the standard `ND_…`, and the ids the
+    // import's node library defines.
+    let library = caches.materials.library.clone();
     let mat = match UsdMaterial::get(stage, mat_path.clone()) {
         Ok(Some(m)) => m,
         _ => {
@@ -721,14 +879,15 @@ fn resolve_material_uncached(
     // material: the volume is the medium inside the bound geometry, under the
     // MaterialX surface of the same network when there is one, and a
     // transparent medium boundary when there is none.
-    if let Some(volume) = terminal_shader(mat.volume_source(VOLUME_RENDER_CONTEXTS))
-        .filter(|s| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id)))
-    {
+    if let Some(volume) = terminal_shader(mat.volume_source(VOLUME_RENDER_CONTEXTS)).filter(|s| {
+        shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id, &library))
+    }) {
         // Each context is checked for MaterialX on its own: an `mtlx`
         // surface that is not a MaterialX shader must not hide a universal
         // one that is.
-        let is_mtlx =
-            |s: &Shader| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id));
+        let is_mtlx = |s: &Shader| {
+            shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id, &library))
+        };
         let surface = terminal_shader(mat.surface_source(&["mtlx"]))
             .filter(is_mtlx)
             .or_else(|| terminal_shader(mat.surface_source(&[""])).filter(is_mtlx));
@@ -783,7 +942,7 @@ fn resolve_material_uncached(
             preview_surface_material(stage, mat_path, shader, caches)
         }
         Some("PxrDisneyBsdf") => Arc::new(disney_to_openpbr(stage, mat_path, caches)),
-        Some(id) if super::mtlx_network::is_mtlx_id(id) => {
+        Some(id) if super::mtlx_network::is_mtlx_id(id, &library) => {
             inline_mtlx_material(stage, mat_path, Some(shader), None, caches)
                 .unwrap_or_else(default_material)
         }
@@ -849,6 +1008,7 @@ fn inline_mtlx_material(
     let net = super::mtlx_network::translate(
         stage,
         caches.stage_path,
+        &caches.materials.library,
         surface.map(|s| &**s),
         volume.map(|s| &**s),
     );
@@ -860,8 +1020,8 @@ fn inline_mtlx_material(
             net.reported.join("; ")
         );
     }
-    let surface = net.surface.as_deref().and_then(|n| net.doc.find("", n));
-    let volume = net.volume.as_deref().and_then(|n| net.doc.find("", n));
+    let surface = net.surface.as_deref().and_then(|n| net.doc.find_node(n));
+    let volume = net.volume.as_deref().and_then(|n| net.doc.find_node(n));
     if surface.is_none() && volume.is_none() {
         return None;
     }
@@ -1089,8 +1249,15 @@ fn load_mtlx_material(
 ) -> Option<Arc<dyn Material>> {
     let dir = file.parent().unwrap_or(std::path::Path::new("."));
     let label = file.display().to_string();
+    let library = caches.materials.library.clone();
     compile_mtlx(&label, mat_path, dir, caches, |host, luma| {
-        crate::materialx::load_in(file, (!node.is_empty()).then_some(node), host, luma)
+        crate::materialx::load_with(
+            file,
+            (!node.is_empty()).then_some(node),
+            &library,
+            host,
+            luma,
+        )
     })
 }
 

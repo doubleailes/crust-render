@@ -10,7 +10,7 @@ use crust_mtlx::{
     CHIANG_HAIR_ABSORPTION_FROM_COLOR, CHIANG_HAIR_BSDF, CHIANG_HAIR_ROUGHNESS,
     DEON_HAIR_ABSORPTION_FROM_MELANIN,
 };
-use crust_mtlx::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
+use crust_mtlx::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE, USD_PREVIEW_SURFACE};
 use std::path::Path;
 
 /// `(name, type, value)` of every input of `nodedef` in `file`, with an
@@ -79,6 +79,11 @@ fn nodedef_tables_match_materialx() {
         GLTF_PBR,
         "ND_gltf_pbr_surfaceshader.mtlx",
         "ND_gltf_pbr_surfaceshader",
+    );
+    check(
+        USD_PREVIEW_SURFACE,
+        "ND_UsdPreviewSurface_surfaceshader.mtlx",
+        "ND_UsdPreviewSurface_surfaceshader",
     );
 }
 

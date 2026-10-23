@@ -515,6 +515,11 @@ probe that needs another setting builds a `Config` and passes it
 standard variable naming the config, `Config::ocio`, and only the CLI obeys
 it, as the fallback for `--ocio-config` (the library keeps the builtin config
 unless a host installs one, so no test depends on the shell's `OCIO`).
+`PXR_MTLX_PLUGIN_SEARCH_PATHS` is not one either: it is USD's `usdMtlx`
+variable naming the directories of custom MaterialX node definitions,
+`Config::mtlx_plugin_search_paths`, split as the OS splits `PATH`. Every import
+reads the `.mtlx` files under it into `MaterialCache::library`
+(`materials::mtlx_library`), and an unreadable file is `mtlx.library_unreadable`.
 
 Adding a switch: give it a field on `Config`, a line here and a section in the user
 documentation (`site/content/docs/reference/environment-variables.md`), and make the

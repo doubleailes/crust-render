@@ -456,9 +456,9 @@ fn an_authored_coordinate_is_sampled_and_differentiated_through() {
 
 #[test]
 fn an_uncompilable_coordinate_falls_back_to_the_chart() {
-    // `place2d` has no operator here; its constant stand-in would pin the
+    // `rotate2d` has no operator here; its constant stand-in would pin the
     // lookup to one texel, so the chart is used instead (and reported).
-    let doc = height_doc(r#"<place2d name="c" type="vector2" />"#);
+    let doc = height_doc(r#"<rotate2d name="c" type="vector2" />"#);
     let (h, p) = eval_with(&doc, "h", RampTex(10.0), 0.01);
     assert!((h.x() - 3.0).abs() < 1e-5, "height {}", h.x());
     assert!(texture_coords(&p).iter().all(Option::is_none));

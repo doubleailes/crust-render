@@ -1,7 +1,7 @@
 //! MaterialX surface-shader nodes expanded into the closure tree of their
 //! implementation nodegraphs.
 //!
-//! `open_pbr_surface`, `standard_surface` and `gltf_pbr` are, in MaterialX,
+//! `open_pbr_surface`, `standard_surface`, `gltf_pbr` and `UsdPreviewSurface` are, in MaterialX,
 //! nodedefs whose implementations are nodegraphs over standalone BSDF nodes
 //! (`libraries/bxdf/*.mtlx`, MaterialX 1.39). A document authoring one never
 //! carries the implementation, so this module reproduces each graph **node for
@@ -37,10 +37,12 @@ use std::collections::HashMap;
 mod gltf_pbr;
 mod open_pbr;
 mod standard_surface;
+mod usd_preview_surface;
 
 use gltf_pbr::gltf_pbr;
 use open_pbr::open_pbr_surface;
 use standard_surface::standard_surface;
+use usd_preview_surface::usd_preview_surface;
 
 /// One nodedef input: its name, MaterialX type and default. `None` for an
 /// input whose default is a geometric property (`Nworld`, `Tworld`) or that
@@ -183,17 +185,37 @@ mod tables {
         InputDef { name: "anisotropy_rotation", ty: "float", default: Some(Val::float(0.0)) },
         InputDef { name: "dispersion", ty: "float", default: Some(Val::float(0.0)) },
     ];
-    
-}
-pub use tables::{GLTF_PBR, OPEN_PBR_SURFACE, STANDARD_SURFACE};
 
-/// Expands `node` — an `open_pbr_surface`, `standard_surface` or `gltf_pbr` —
-/// into `out`.
+    /// `ND_UsdPreviewSurface_surfaceshader`'s inputs, in nodedef order.
+    pub const USD_PREVIEW_SURFACE: &[InputDef] = &[
+        InputDef { name: "diffuseColor", ty: "color3", default: Some(Val::vec3(0.18, 0.18, 0.18)) },
+        InputDef { name: "emissiveColor", ty: "color3", default: Some(Val::vec3(0.0, 0.0, 0.0)) },
+        InputDef { name: "useSpecularWorkflow", ty: "integer", default: Some(Val::float(0.0)) },
+        InputDef { name: "specularColor", ty: "color3", default: Some(Val::vec3(0.0, 0.0, 0.0)) },
+        InputDef { name: "metallic", ty: "float", default: Some(Val::float(0.0)) },
+        InputDef { name: "roughness", ty: "float", default: Some(Val::float(0.5)) },
+        InputDef { name: "clearcoat", ty: "float", default: Some(Val::float(0.0)) },
+        InputDef { name: "clearcoatRoughness", ty: "float", default: Some(Val::float(0.01)) },
+        InputDef { name: "opacity", ty: "float", default: Some(Val::float(1.0)) },
+        InputDef { name: "opacityMode", ty: "integer", default: Some(Val::float(0.0)) },
+        InputDef { name: "opacityThreshold", ty: "float", default: Some(Val::float(0.0)) },
+        InputDef { name: "ior", ty: "float", default: Some(Val::float(1.5)) },
+        InputDef { name: "normal", ty: "vector3", default: Some(Val::vec3(0.0, 0.0, 1.0)) },
+        InputDef { name: "displacement", ty: "float", default: Some(Val::float(0.0)) },
+        InputDef { name: "occlusion", ty: "float", default: Some(Val::float(1.0)) },
+    ];
+
+}
+pub use tables::{GLTF_PBR, OPEN_PBR_SURFACE, STANDARD_SURFACE, USD_PREVIEW_SURFACE};
+
+/// Expands `node` — an `open_pbr_surface`, `standard_surface`, `gltf_pbr` or
+/// `UsdPreviewSurface` — into `out`.
 pub fn build(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) {
     let (defs, default_version): (&'static [InputDef], &str) = match node.category.as_str() {
         "open_pbr_surface" => (OPEN_PBR_SURFACE, "1.1"),
         "standard_surface" => (STANDARD_SURFACE, "1.0.1"),
         "gltf_pbr" => (GLTF_PBR, "2.0.1"),
+        "UsdPreviewSurface" => (USD_PREVIEW_SURFACE, "2.6"),
         other => {
             c.unsupported.insert(other.to_string());
             return;
@@ -217,6 +239,7 @@ pub fn build(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) {
     match node.category.as_str() {
         "open_pbr_surface" => open_pbr_surface(&mut b),
         "standard_surface" => standard_surface(&mut b),
+        "UsdPreviewSurface" => usd_preview_surface(&mut b),
         _ => gltf_pbr(&mut b),
     }
 }

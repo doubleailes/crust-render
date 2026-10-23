@@ -827,7 +827,8 @@
     leaf" rules, each bounded by the GLSL leaf's measured error and each
     failing as stale once its leaf matched; none remains.
   - **Surface shaders are their nodegraphs, node for node.** `open_pbr_surface`
-    (1.1), `standard_surface` (1.0.1) and `gltf_pbr` (2.0.1) are MaterialX
+    (1.1), `standard_surface` (1.0.1), `gltf_pbr` (2.0.1) and `UsdPreviewSurface`
+    (2.6) are MaterialX
     nodedefs implemented as nodegraphs over standalone BSDFs, and a document
     never carries the implementation. `surface/` reproduces each graph — the
     same leaves, the same `layer` / `mix` / `multiply` in the same order, the same
@@ -849,6 +850,43 @@
     `transmission_scatter` volume and glTF's attenuation (`σ = −ln(color) /
     distance`) become the interior `Medium`; `standard_surface`'s graph has
     none, so its `transmission_depth` is reported rather than invented.
+    `UsdPreviewSurface` (2.6, `ND_UsdPreviewSurface_surfaceshader`, the id a
+    DCC's MaterialX export often gives its surfaces) is built from MaterialX's own
+    `IMP_UsdPreviewSurface_surfaceshader`, not mapped onto OpenPBR as the
+    UsdShade `UsdPreviewSurface` id is (`preview.rs`): its inputs arrive from
+    MaterialX node graphs that the preview decoder cannot read, and the graph
+    is the definition of that id. Both workflows, the clearcoat, the
+    `opacity` transmission mix and the `opacityMode` switch are the graph's;
+    `occlusion` and `displacement`, which the graph does not use, are
+    reported. **One deliberate departure:** at an `opacityThreshold` that
+    folds to 0 the graph's presence is `opacity ≥ 0`, which is 1 for every
+    opacity that means anything, so it is taken as 1. Compiled as written, it
+    would make every preview surface with a connected opacity a cutout, and a
+    cutout makes the shadow side walk every blocked ray hit by hit.
+  - **Custom nodes are their graphs, expanded before compilation.**
+    `crust_mtlx::Library` holds `<nodedef>`s and their `<nodegraph nodedef=…>`
+    implementations: a document's own (`Doc::library`) and those under
+    `PXR_MTLX_PLUGIN_SEARCH_PATHS` (`MaterialCache::library`, read once per
+    import, `materials::mtlx_library`). `Doc::expand` replaces each instance
+    with a copy of its graph whose nodes are renamed `instance/node` in the
+    instance's scope; an `interfacename` input takes the instance's input as
+    authored, else the nodedef default, else stays unauthored; every reference
+    to the instance — node inputs, nodegraph and document outputs, and a
+    terminal (`Doc::find_node`) — is redirected to the graph output it selects,
+    keeping that output's own `output=`. It runs in passes, so a graph that
+    instantiates another custom node (a layering node built from several
+    instances of a blending node) expands in turn, cut at `MAX_DEPTH` (16) and
+    reported. Both ways MaterialX arrives go through it: `compile_with` for a
+    `.mtlx`, `mtlx_network::translate` for an inline network, whose shader ids
+    are looked up in the library before `nodedef_category` parses them (a
+    studio nodedef's name need not follow `ND_<category>_<type>`). **The compiler's operators
+    always win** (`expand::BUILTIN_CATEGORIES`, kept in step with
+    `compile_node` by a test): a library shipping a node-graph `place2d` must not
+    replace the operator the OSL oracle pins. An expanded node computes, bit for
+    bit, what the same graph written by hand computes
+    (`an_expanded_node_is_bit_identical_to_its_graph_by_hand`): expansion adds
+    no ops of its own, and the compiler's memo shares a node read by several
+    interface inputs.
   - **Opacity is presence, and the integrator's.** Every surface graph ends in
     MaterialX's `surface` node, whose `opacity` blends the whole surface —
     BSDF and EDF — with nothing, and that is a statement about the geometry,
@@ -1164,11 +1202,12 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   Chiang channel MIS, so a strongly chromatic interior is noisier than
   Typhoon's (unbiased either way). A `PreviewSurface` beside a MaterialX
   volume drops the volume (above).
-- **Inline networks read the nodedef by name.** A custom nodedef, or a
-  standard one whose name breaks the `ND_<category>_<signature>` pattern, is
-  translated as whatever category that parse gives, which the compiler then
-  reports as unsupported. Nodegraph-scoped names are flattened: every node is
-  addressed by its prim path.
+- **Inline networks read the nodedef by name.** A shader id the import's node
+  library defines is read through its nodedef (category, instance type) first;
+  any other id that breaks the `ND_<category>_<signature>` pattern is translated
+  as whatever category that parse gives, which the compiler then reports as
+  unsupported. Nodegraph-scoped names are flattened: every node is addressed by
+  its prim path.
 - **A displacement reads no primvar.** It is evaluated at the import's
   vertices, before any `PrimvarTable` exists, so a `geompropvalue` in a
   `displacementshader` graph gives its default (`mtlx.incomplete`). Reading one
@@ -1355,9 +1394,12 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   model's `(1−R)/(1+R)` natively, one interface's `1 − F` in the closure), which is
   what keeps NEE and the bounce side in agreement on each.
 - **Capacity.** A tree with more than 8 live-reachable leaves is refused, whole.
-- **Pattern nodes.** Only document-scope and `<nodegraph>` nodes are read;
-  `<nodedef>` custom node *implementations* are not, so a graph instantiating one
-  gets that input at a constant (reported). The pattern operators the Material
+- **Pattern nodes.** Only document-scope and `<nodegraph>` nodes are compiled.
+  A custom node is first replaced by its `<nodegraph nodedef=…>` implementation
+  (`Doc::expand`, below); one with no graph implementation (an
+  `<implementation>` naming source code only) gets that input at a constant
+  (reported). A plain `<nodegraph>`'s own interface (`<input>` children read
+  through `interfacename`) is still not wired: such an input is a zero. The pattern operators the Material
   Fidelity suite still lacks are listed in `docs/material_fidelity.md`. No
   `<look>` / `<materialassign>`: bindings come from USD. One parser quirk
   predates the tree: two nodes with the same name in one scope collide.
@@ -1425,6 +1467,33 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   `Signature` carries a non-curve slot's primvar names, so a material edit that
   changes them re-imports. A mesh whose material reads none keeps the plain path:
   every sample scene, which authors no such material, is unchanged.
+- **Channel, compositing, `switch`, `place2d` and `transformmatrix`.** What a
+  studio node library is typically built from, each as MaterialX 1.39 defines it and out of
+  existing ops only (the JIT needed nothing new). `separate2/3/4` is one
+  `Extract` per output (`NG_separate*`). `switch` is `NG_switch_*`'s chain of
+  `ifgreater(k, which, in<k>, …)`: `in1` below a `which` of 1, … `in10` below
+  10, **zero** from 10 on (not `in10`); a `which` that folds selects one input
+  and compiles nothing else, so a layered texture's unused blend modes load no
+  texture. `over`, `in`, `out`, `difference` and `premult` are their genosl
+  `sourcecode` / `mx_premult_color4`, in the same order of operations.
+  `place2d` is `NG_place2d_vector2` (SRT or TRS through its own `switch`),
+  `rotate2d` inlined as `mx_rotate_vector2`; its `rotate` is read as a scalar,
+  since an unauthored float default is widened to the node's `vector2`.
+  `transformmatrix` takes its matrix only as a **compile-time constant** (a
+  literal, a `constant` node's value through any chain of them, or the
+  identity): `Val` holds four lanes and a projection's matrix is in practice a
+  constant, so each row becomes a constant and the product is
+  `((x·r0 + y·r1) + z·r2) + r3`. Any other matrix is reported and the input
+  passes through. **GLSL wins over genosl here**: `mx_transformmatrix_vector3M4`
+  multiplies `(v, 1)`, so the last row translates a point, while genosl's
+  `transform(matrix, vector)` drops the translation of a `vector`;
+  placing a point needs the former. The matrix is row-major with the
+  translation in the last row, which is USD's `Gf` order too, so an inline
+  `matrix4d` is its 16 values as authored. `position` reads world space; any
+  other `space` is reported (it would silently read world otherwise). Pinned
+  by `crust-mtlx/tests/stdlib_nodes.rs` against the stdlib's expressions;
+  `scripts/osl_oracle.py` lists all but `transformmatrix`, whose fixture cases
+  wait for a regeneration on an exact-math OSL build.
 - **HSV, conditionals and random nodes.** `rgbtohsv` / `hsvtorgb` are ops over
   the `hsvadjust` transcriptions of OSL's `transformc` (Foley & van Dam); a
   `color4` keeps its alpha. `ifgreater` / `ifgreatereq` / `ifequal` are one

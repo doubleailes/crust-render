@@ -45,7 +45,9 @@
 // Private modules: every public item has exactly one path, at the crate root.
 mod bsdf;
 mod eval;
+mod expand;
 mod hair;
+mod library;
 mod parse;
 mod surface;
 mod texture;
@@ -60,6 +62,7 @@ pub use eval::{
     BinOp, CmpOp, Compiler, CurveCtx, CurveProp, Op, Program, ShadeCtx, UnOp, perturb_normal,
     reflectivity_from_ior,
 };
+pub use expand::{BUILTIN_CATEGORIES, MAX_DEPTH as MAX_EXPANSION_DEPTH, compiles};
 /// The nodedef input tables the hair nodes and the surface-shader expansions
 /// are built from, transcribed from MaterialX's own `stdlib` / `pbrlib`
 /// definitions (pinned against them by `tests/nodedefs.rs`).
@@ -67,8 +70,9 @@ pub use hair::{
     CHIANG_HAIR_ABSORPTION_FROM_COLOR, CHIANG_HAIR_BSDF, CHIANG_HAIR_ROUGHNESS,
     DEON_HAIR_ABSORPTION_FROM_MELANIN,
 };
+pub use library::{DefInput, DefOutput, ImplOutput, Implementation, Library, NodeDef};
 pub use parse::{Doc, Input, MtlxError, Node, Source};
-pub use surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
+pub use surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE, USD_PREVIEW_SURFACE};
 pub use texture::{Texture, TextureRef};
 pub use value::{Val, arity_of, parse_literal};
 pub use values::{ValueGraph, compile_value_graph};
@@ -283,10 +287,22 @@ pub fn compile(
     material_node: Option<&str>,
     host: &Host<'_>,
 ) -> Result<Compiled, MtlxError> {
-    let doc = Doc::open(path)?;
+    compile_with(path, material_node, &Library::default(), host)
+}
+
+/// [`compile`], with the custom nodes the document instantiates expanded
+/// ([`Doc::expand`]) from its own definitions and then `library`'s.
+pub fn compile_with(
+    path: &std::path::Path,
+    material_node: Option<&str>,
+    library: &Library,
+    host: &Host<'_>,
+) -> Result<Compiled, MtlxError> {
+    let mut doc = Doc::open(path)?;
+    doc.expand(library);
     let root = match material_node {
         Some(n) => doc
-            .find("", n)
+            .find_node(n)
             .cloned()
             .ok_or_else(|| MtlxError::NoSuchMaterial(n.to_string()))?,
         None => doc
@@ -325,6 +341,7 @@ pub fn compile_terminals(
 ) -> Compiled {
     let mut c = Compiler::new(doc, host);
     let mut closures = Closures::default();
+    closures.reported.extend(doc.reported.iter().cloned());
     let mut displaced = None;
     if let Some(s) = surface {
         flatten(&mut c, s, &mut closures);

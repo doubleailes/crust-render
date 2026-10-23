@@ -658,7 +658,7 @@ fn shader(c: &mut Compiler<'_>, node: &Node, depth: usize, out: &mut Closures) {
                 out.opacity = c.optional_input(node, "opacity");
             }
         }
-        "open_pbr_surface" | "standard_surface" | "gltf_pbr" => {
+        "open_pbr_surface" | "standard_surface" | "gltf_pbr" | "UsdPreviewSurface" => {
             crate::surface::build(c, node, out);
         }
         _ => out.root = bsdf_tree(c, node, depth, out),

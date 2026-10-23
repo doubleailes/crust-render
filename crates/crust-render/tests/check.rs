@@ -895,3 +895,159 @@ fn the_active_pass_and_its_settings_are_reported() {
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(parse(&out.stdout)["settings"].is_null());
 }
+
+/// `PXR_MTLX_PLUGIN_SEARCH_PATHS` is read once per import: every `.mtlx`
+/// under its directories joins the import's MaterialX node library, and a
+/// file that cannot be read is a `mtlx.library_unreadable` warning naming it,
+/// without losing the rest.
+#[test]
+fn the_mtlx_plugin_search_path_loads_a_node_library() {
+    let dir = work_dir("mtlx_library");
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(lib.join("studio")).expect("library dir");
+    std::fs::write(
+        lib.join("studio").join("studio_nodes.mtlx"),
+        r#"<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodedef name="studio_mix" node="studio_mix">
+    <input name="fg_color" type="color3" value="0, 0, 0" />
+    <input name="bg_color" type="color3" value="0, 0, 0" />
+    <input name="amount" type="float" value="0.5" />
+    <output name="blended" type="color3" />
+  </nodedef>
+  <nodegraph name="NG_studio_mix" nodedef="studio_mix">
+    <mix name="mix" type="color3">
+      <input name="bg" type="color3" interfacename="bg_color" />
+      <input name="fg" type="color3" interfacename="fg_color" />
+      <input name="mix" type="float" interfacename="amount" />
+    </mix>
+    <output name="blended" type="color3" nodename="mix" />
+  </nodegraph>
+</materialx>"#,
+    )
+    .expect("write library");
+    std::fs::write(lib.join("broken.mtlx"), "<materialx><nodedef").expect("write");
+    let input = cornellbox();
+    let out = Command::new(env!("CARGO_BIN_EXE_crust"))
+        .current_dir(&dir)
+        .env("PXR_MTLX_PLUGIN_SEARCH_PATHS", &lib)
+        .args([
+            "check",
+            "-i",
+            input.to_str().unwrap(),
+            "--json",
+            "-",
+            "-l",
+            "debug",
+        ])
+        .output()
+        .expect("run crust");
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "MaterialX node library: 1 nodedef(s), 1 implemented as node graphs, from 1 file(s) under PXR_MTLX_PLUGIN_SEARCH_PATHS"
+        ),
+        "{stderr}"
+    );
+    let v = parse(&out.stdout);
+    let unreadable: Vec<_> = v["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter(|w| w["code"] == "mtlx.library_unreadable")
+        .collect();
+    assert_eq!(unreadable.len(), 1, "{:#}", v["warnings"]);
+    assert_eq!(unreadable[0]["count"], 1);
+    let message = unreadable[0]["message"].as_str().expect("message");
+    assert!(message.contains("broken.mtlx"), "{message}");
+}
+
+/// An inline USD network whose shader id is a custom node from the library
+/// (`studio_mix`, which no `ND_` name parse would find) is expanded
+/// and compiles completely; without the library it is reported, by name.
+#[test]
+fn an_inline_custom_node_from_the_library_compiles() {
+    let dir = work_dir("mtlx_inline_custom");
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).expect("library dir");
+    std::fs::write(
+        lib.join("blend.mtlx"),
+        r#"<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodedef name="studio_mix" node="studio_mix">
+    <input name="fg_color" type="color3" value="0, 0, 0" />
+    <input name="bg_color" type="color3" value="0, 0, 0" />
+    <input name="amount" type="float" value="0.5" />
+    <output name="blended" type="color3" />
+  </nodedef>
+  <nodegraph name="NG_studio_mix" nodedef="studio_mix">
+    <mix name="mix" type="color3">
+      <input name="bg" type="color3" interfacename="bg_color" />
+      <input name="fg" type="color3" interfacename="fg_color" />
+      <input name="mix" type="float" interfacename="amount" />
+    </mix>
+    <output name="blended" type="color3" nodename="mix" />
+  </nodegraph>
+</materialx>"#,
+    )
+    .expect("write library");
+    let path = stage(
+        &dir,
+        r#"    def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, -5), (1, -1, -5), (1, 1, -5), (-1, 1, -5)]
+        rel material:binding = </World/Looks/M>
+    }
+    def Scope "Looks"
+    {
+        def Material "M"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/M/Surface.outputs:out>
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_UsdPreviewSurface_surfaceshader"
+                color3f inputs:diffuseColor.connect = </World/Looks/M/Blend.outputs:blended>
+                token outputs:out
+            }
+            def Shader "Blend"
+            {
+                uniform token info:id = "studio_mix"
+                color3f inputs:fg_color = (0.8, 0.2, 0.1)
+                float inputs:amount = 1
+                color3f outputs:blended
+            }
+        }
+    }
+"#,
+        "",
+    );
+    let run = |library: Option<&Path>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_crust"));
+        cmd.current_dir(&dir)
+            .env_remove("PXR_MTLX_PLUGIN_SEARCH_PATHS")
+            .args(["check", "-i", path.to_str().unwrap(), "--json", "-"]);
+        if let Some(l) = library {
+            cmd.env("PXR_MTLX_PLUGIN_SEARCH_PATHS", l);
+        }
+        let out = cmd.output().expect("run crust");
+        assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+        let v = parse(&out.stdout);
+        v["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .filter(|w| w["code"].as_str().is_some_and(|c| c.starts_with("mtlx.")))
+            .map(|w| w["message"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+    let without = run(None);
+    assert!(
+        without.iter().any(|m| m.contains("studio_mix")),
+        "{without:?}"
+    );
+    let with = run(Some(&lib));
+    assert!(with.is_empty(), "{with:?}");
+}

@@ -29,14 +29,32 @@ top-level subtrees, then composes, traverses and **drops one masked stage per su
 On the island: 117.10 GiB / 13:20 → 43.76 GiB / 09:19, output pixel-identical.
 `MIN_STREAM_CHUNKS` keeps the single-stage path for scenes too small to repay the
 re-opens; `CRUST_STREAM_IMPORT=0` forces it.
-**A binding into a sibling chunk does not resolve.** A chunk's mask is its subtree
-alone, so a `Material` that is itself a top-level subtree (`/World/Fog` beside
-`/World/Box`, four or more of them) is absent from the stage that traverses the
-geometry bound to it, and resolves to grey with "not resolvable". Production stages
-keep their materials under the geometry's element (Moana) or in a stage-level scope
-reached through a referenced layer; small stages stay under `MIN_STREAM_CHUNKS`. Not
-fixed: expanding each mask by its prims' binding targets (C++ USD's
-`ExpandPopulationMask`) is the fix, and costs an extra walk of the index stage.
+**A binding into a sibling chunk resolves on a stage of its own.** A chunk's mask is
+its subtree alone, so a `Material` in another top-level subtree (`/World/Looks` beside
+`/World/Box`; a DCC's MaterialX export may put every material under one top-level
+`/MaterialX/Materials`) is absent from the stage that traverses the geometry bound
+to it. It used to resolve to grey with "not resolvable" — the Cornell box's
+`/scene/Looks` did, from five sibling chunks, unseen because that material is empty;
+a stage laid out that way lost every material. Now
+`materials::material_stage` notices a material outside the chunk's mask, walks the
+chunk's `material:binding*` relationships once (`outside_binding_targets`, instance
+proxies included) and opens **one** stage masked to every out-of-chunk target,
+resolving the material there. The stage is kept across chunks (`OutsideMaterials`)
+and re-opened only when a chunk binds a path it does not cover, with its mask grown
+to the union, then dropped after the last chunk, before the top-level commit. A
+dangling target stays in the mask, so it costs no second open, and still reports
+"not resolvable". The cost is one more masked open per import (the root layer
+parsed once more, the materials composed) for a stage that binds from outside its
+chunks, and none for one that does not. On a small stage with a large root layer
+the single-stage import (`CRUST_STREAM_IMPORT=0`) can be faster than streaming
+altogether, which `MIN_STREAM_CHUNKS` (a count of subtrees) does not see. Rejected: re-opening the chunk with an expanded mask (C++ USD's
+`ExpandPopulationMask`) composes the chunk's geometry twice, which the common
+"one `/Looks` scope beside N geometry chunks" layout would pay per chunk; walking
+the index stage up front composes everything outside payloads, which on ALab is the
+whole stage. A chunk with nothing bound from outside pays nothing: the walk runs at
+the first miss. Gap: only the material's own subtree is masked in, so a material
+whose network connects to a prim outside itself (a node graph shared from another
+scope) still finds that prim missing.
 The subtlety is cache keying: prototype paths (`/__Prototype_N`) are **numbered per
 composition**, so every masked stage has its own `/__Prototype_0`. Anything keyed on
 such a path must be scoped per stage, or one chunk's data is silently handed to the

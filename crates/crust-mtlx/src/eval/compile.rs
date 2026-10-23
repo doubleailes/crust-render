@@ -233,6 +233,288 @@ impl<'a> Compiler<'a> {
         slot
     }
 
+    /// `NG_switch_*`: `in1` below a `which` of 1, `in2` below 2, … `in10`
+    /// below 10, and zero from 10 on — the graph's chain of
+    /// `ifgreater(k, which, in<k>, …)`. A `which` that folds selects its input
+    /// outright, so the branches it does not select are not compiled (nor
+    /// their textures loaded): the chain would give the same value.
+    fn compile_switch(&mut self, node: &Node) -> u32 {
+        let which = self.input_or(node, "which", Val::ZERO);
+        let zero = Val::ZERO.broadcast_to(arity_of(&node.type_name));
+        if let Some(w) = self.fold(which).map(|v| v.x()) {
+            return match (1..=10).find(|&k| k as f32 > w) {
+                Some(k) => self.input_or(node, &format!("in{k}"), Val::ZERO),
+                None => self.constant(zero),
+            };
+        }
+        let mut next = self.constant(zero);
+        for k in (1..=10).rev() {
+            let in_k = self.input_or(node, &format!("in{k}"), Val::ZERO);
+            let value1 = self.constant(Val::float(k as f32));
+            next = self.emit(Op::Select {
+                cmp: CmpOp::Greater,
+                value1,
+                value2: which,
+                in1: in_k,
+                in2: next,
+            });
+        }
+        next
+    }
+
+    /// The compositing nodes, each as its genosl source writes it, `bg`
+    /// weighted by `1 − mix`:
+    /// - `over`: `(fg + bg·(1 − fg.a))·mix + bg·(1 − mix)`;
+    /// - `in`: `fg·bg.a·mix + bg·(1 − mix)`;
+    /// - `out`: `fg·(1 − bg.a)·mix + bg·(1 − mix)`;
+    /// - `difference`: `mix·|bg − fg| + (1 − mix)·bg`.
+    fn compile_composite(&mut self, node: &Node) -> u32 {
+        let fg = self.input_or(node, "fg", Val::ZERO);
+        let bg = self.input_or(node, "bg", Val::ZERO);
+        let mix = self.input_or(node, "mix", Val::ONE);
+        let one = self.constant(Val::ONE);
+        let inv_mix = self.bin_op(BinOp::Sub, one, mix);
+        let rest = self.bin_op(BinOp::Mul, bg, inv_mix);
+        if node.category == "difference" {
+            let d = self.bin_op(BinOp::Sub, bg, fg);
+            let d = self.emit(Op::Unary {
+                op: UnOp::Abs,
+                a: d,
+            });
+            let d = self.bin_op(BinOp::Mul, mix, d);
+            return self.bin_op(BinOp::Add, d, rest);
+        }
+        let top = match node.category.as_str() {
+            "over" => {
+                let fga = self.emit(Op::Extract { a: fg, index: 3 });
+                let t = self.bin_op(BinOp::Sub, one, fga);
+                let t = self.bin_op(BinOp::Mul, bg, t);
+                self.bin_op(BinOp::Add, fg, t)
+            }
+            "in" => {
+                let bga = self.emit(Op::Extract { a: bg, index: 3 });
+                self.bin_op(BinOp::Mul, fg, bga)
+            }
+            _ => {
+                let bga = self.emit(Op::Extract { a: bg, index: 3 });
+                let t = self.bin_op(BinOp::Sub, one, bga);
+                self.bin_op(BinOp::Mul, fg, t)
+            }
+        };
+        let top = self.bin_op(BinOp::Mul, top, mix);
+        self.bin_op(BinOp::Add, top, rest)
+    }
+
+    fn bin_op(&mut self, op: BinOp, a: u32, b: u32) -> u32 {
+        self.emit(Op::Binary { op, a, b })
+    }
+
+    /// `NG_place2d_vector2`. SRT (`operationorder` 0): `rotate2d((texcoord −
+    /// pivot) / scale, rotate) − offset + pivot`; TRS (1): `rotate2d(texcoord
+    /// − pivot − offset, rotate) / scale + pivot`, selected as the graph's
+    /// `switch` selects (an order that folds compiles that order only).
+    /// `rotate2d` is `mx_rotate_vector2`: `radians(amount)`, then
+    /// `(c·x + s·y, −s·x + c·y)`.
+    fn compile_place2d(&mut self, node: &Node) -> u32 {
+        let tc = self.input_or(node, "texcoord", Val::ZERO);
+        let pivot = self.input_or(node, "pivot", Val::ZERO);
+        let scale = self.input_or(node, "scale", Val::ONE);
+        // A scalar: an unauthored default is widened to the node's `vector2`.
+        let rotate = self.input_or(node, "rotate", Val::ZERO);
+        let rotate = self.emit(Op::Extract {
+            a: rotate,
+            index: 0,
+        });
+        let offset = self.input_or(node, "offset", Val::ZERO);
+        let order = self.input_or(node, "operationorder", Val::ZERO);
+        let sub_pivot = self.bin_op(BinOp::Sub, tc, pivot); // N_subpivot
+        let folded = self.fold(order).map(|v| v.x());
+        let want_srt = folded.is_none_or(|o| o < 1.0);
+        let want_trs = folded.is_none_or(|o| (1.0..2.0).contains(&o));
+        let srt = want_srt.then(|| {
+            let s = self.bin_op(BinOp::Div, sub_pivot, scale); // N_applyscale
+            let r = self.rotate2d(s, rotate); // N_applyrot
+            let o = self.bin_op(BinOp::Sub, r, offset); // N_applyoffset
+            self.bin_op(BinOp::Add, o, pivot) // N_addpivot
+        });
+        let trs = want_trs.then(|| {
+            let o = self.bin_op(BinOp::Sub, sub_pivot, offset); // N_applyoffset2
+            let r = self.rotate2d(o, rotate); // N_applyrot2
+            let s = self.bin_op(BinOp::Div, r, scale); // N_applyscale2
+            self.bin_op(BinOp::Add, s, pivot) // N_addpivot2
+        });
+        let zero = Val::ZERO.broadcast_to(2);
+        match (srt, trs) {
+            // N_switch_operationorder, unfolded: in1 below 1, in2 below 2.
+            (Some(s), Some(t)) if folded.is_none() => {
+                let z = self.constant(zero);
+                let two = self.constant(Val::float(2.0));
+                let second = self.emit(Op::Select {
+                    cmp: CmpOp::Greater,
+                    value1: two,
+                    value2: order,
+                    in1: t,
+                    in2: z,
+                });
+                let one = self.constant(Val::ONE);
+                self.emit(Op::Select {
+                    cmp: CmpOp::Greater,
+                    value1: one,
+                    value2: order,
+                    in1: s,
+                    in2: second,
+                })
+            }
+            (Some(s), _) => s,
+            (None, Some(t)) => t,
+            (None, None) => self.constant(zero),
+        }
+    }
+
+    /// `mx_rotate_vector2`.
+    fn rotate2d(&mut self, v: u32, degrees: u32) -> u32 {
+        let k = self.constant(Val::float(std::f32::consts::PI / 180.0));
+        let r = self.bin_op(BinOp::Mul, degrees, k);
+        let sa = self.emit(Op::Unary {
+            op: UnOp::Sin,
+            a: r,
+        });
+        let ca = self.emit(Op::Unary {
+            op: UnOp::Cos,
+            a: r,
+        });
+        let x = self.emit(Op::Extract { a: v, index: 0 });
+        let y = self.emit(Op::Extract { a: v, index: 1 });
+        let cx = self.bin_op(BinOp::Mul, ca, x);
+        let sy = self.bin_op(BinOp::Mul, sa, y);
+        let nx = self.bin_op(BinOp::Add, cx, sy);
+        let minus = self.constant(Val::float(-1.0));
+        let nsa = self.bin_op(BinOp::Mul, minus, sa);
+        let sx = self.bin_op(BinOp::Mul, nsa, x);
+        let cy = self.bin_op(BinOp::Mul, ca, y);
+        let ny = self.bin_op(BinOp::Add, sx, cy);
+        self.emit(Op::Combine2 { a: nx, b: ny })
+    }
+
+    /// `transformmatrix` by a matrix that is a compile-time constant: a
+    /// literal, a `constant` node's value, or the nodedef's identity. The
+    /// input is a row vector times the authored (row-major) matrix, as
+    /// MaterialX's GLSL computes it; a `vector3` by a `matrix44` and a
+    /// `vector2` by a `matrix33` are homogeneous, `(v, 1)`, so the last row
+    /// translates (`mx_transformmatrix_vector3M4`). genosl's
+    /// `transform(matrix, vector)` drops that translation; the GLSL is
+    /// followed, since placing a point is what the `M4` signature is for.
+    /// Each component is `((x·r0 + y·r1) + z·r2) + r3`, the GLSL product's
+    /// order. A matrix that is not a constant is reported, and the input
+    /// passes through (the nodedef's `defaultinput`).
+    fn compile_transformmatrix(&mut self, node: &Node) -> u32 {
+        let v = self.input_or(node, "in", Val::ZERO);
+        let width = arity_of(&node.type_name) as usize;
+        let Some(m) = self.constant_matrix(node, "mat") else {
+            self.unsupported
+                .insert("transformmatrix (a matrix that is not a constant)".into());
+            return v;
+        };
+        // The matrix's order: 4 or 3 rows.
+        let n = if m.len() == 16 { 4 } else { 3 };
+        let row = |r: usize| -> Val {
+            let mut val = Val::ZERO.broadcast_to(width as u8);
+            val.v[..width].copy_from_slice(&m[r * n..r * n + width]);
+            val
+        };
+        let mut out = None;
+        for r in 0..width.min(n) {
+            let c = self.emit(Op::Extract { a: v, index: r });
+            let k = self.constant(row(r));
+            let term = self.bin_op(BinOp::Mul, c, k);
+            out = Some(match out {
+                None => term,
+                Some(a) => self.bin_op(BinOp::Add, a, term),
+            });
+        }
+        let mut out = out.unwrap_or(v);
+        if width < n {
+            let t = self.constant(row(n - 1));
+            out = self.bin_op(BinOp::Add, out, t);
+        }
+        out
+    }
+
+    /// The matrix input `name` of `node` as a compile-time constant, its
+    /// values in the authored (row-major) order: 16 for a `matrix44`, 9 for a
+    /// `matrix33`. A literal, a `constant` node's `value` (followed through a
+    /// chain of them), or — unauthored — the identity of the width the
+    /// node's type implies. `None` for anything that is not a constant.
+    fn constant_matrix(&self, node: &Node, name: &str) -> Option<Vec<f32>> {
+        let parse = |text: &str| -> Option<Vec<f32>> {
+            let m: Vec<f32> = text
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| p.parse::<f32>().ok())
+                .collect::<Option<_>>()?;
+            matches!(m.len(), 9 | 16).then_some(m)
+        };
+        let identity = |n: usize| -> Vec<f32> {
+            (0..n * n)
+                .map(|i| if i % (n + 1) == 0 { 1.0 } else { 0.0 })
+                .collect()
+        };
+        let mut node = node.clone();
+        let mut name = name.to_string();
+        for _ in 0..crate::MAX_EXPANSION_DEPTH {
+            let Some(input) = node.input(&name) else {
+                return Some(identity(if arity_of(&node.type_name) == 2 { 3 } else { 4 }));
+            };
+            match &input.source {
+                Source::Node { name: up, .. } => {
+                    let scope = node.graph.clone().unwrap_or_default();
+                    let up = self.doc.find(&scope, up)?;
+                    if up.category != "constant" {
+                        return None;
+                    }
+                    node = up.clone();
+                    name = "value".into();
+                }
+                Source::Value(_) => return input.text.as_deref().and_then(parse),
+                Source::Graph { .. } => return None,
+            }
+        }
+        None
+    }
+
+    /// Names, in [`Compiler::unsupported`], every category upstream of the
+    /// unsupported `node` that has no operator either. Nothing there is
+    /// compiled — no op emitted, no texture loaded — since `node`'s value is a
+    /// constant whatever feeds it; but a graph whose first unsupported node
+    /// hides others (an expanded custom node behind a `separate4`) is then
+    /// reported whole, not one node per fix.
+    fn note_unsupported_upstream(&mut self, node: &Node) {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![node.clone()];
+        while let Some(n) = stack.pop() {
+            let scope = n.graph.clone().unwrap_or_default();
+            for input in &n.inputs {
+                let up = match &input.source {
+                    Source::Node { name, .. } => self.doc.find(&scope, name),
+                    Source::Graph { graph, output } => {
+                        self.doc.graph_output(graph, output).map(|g| g.node)
+                    }
+                    Source::Value(_) => None,
+                };
+                let Some(up) = up else { continue };
+                let key = (up.graph.clone().unwrap_or_default(), up.name.clone());
+                if !seen.insert(key) {
+                    continue;
+                }
+                if !crate::compiles(&up.category) {
+                    self.unsupported.insert(up.category.clone());
+                }
+                stack.push(up.clone());
+            }
+        }
+    }
+
     fn compile_node(&mut self, node: &Node, output: Option<&str>) -> u32 {
         let arity = arity_of(&node.type_name);
         let bin = |c: &mut Self, op: BinOp, d1: Val, d2: Val| {
@@ -252,7 +534,44 @@ impl<'a> Compiler<'a> {
             }),
             "normal" => self.emit(Op::Normal),
             "viewdirection" => self.emit(Op::ViewDirection),
-            "position" => self.emit(Op::Position),
+            "position" => {
+                // The shading point is in world space; another `space` is
+                // not implemented, and reading world for it would be silently
+                // wrong.
+                let space = node.input("space").and_then(|i| i.text.as_deref());
+                if let Some(other) = space.filter(|s| *s != "world") {
+                    self.unsupported
+                        .insert(format!("position space=\"{other}\""));
+                }
+                self.emit(Op::Position)
+            }
+            "separate2" | "separate3" | "separate4" => {
+                // `NG_separate*`: one `extract` per output.
+                let a = self.input_or(node, "in", Val::ZERO);
+                let index = match output.and_then(|o| o.chars().last()) {
+                    Some('g' | 'y') => 1,
+                    Some('b' | 'z') => 2,
+                    Some('a' | 'w') => 3,
+                    _ => 0,
+                };
+                self.emit(Op::Extract { a, index })
+            }
+            "switch" => self.compile_switch(node),
+            "over" | "in" | "out" | "difference" => self.compile_composite(node),
+            "premult" => {
+                // `mx_premult_color4`: `color4(in.rgb * in.a, in.a)`.
+                let c = self.input_or(node, "in", Val::vec4(0.0, 0.0, 0.0, 1.0));
+                let alpha = self.emit(Op::Extract { a: c, index: 3 });
+                let rgb = self.emit(Op::Convert { a: c, arity: 3 });
+                let rgb = self.emit(Op::Binary {
+                    op: BinOp::Mul,
+                    a: rgb,
+                    b: alpha,
+                });
+                self.emit(Op::Combine2 { a: rgb, b: alpha })
+            }
+            "place2d" => self.compile_place2d(node),
+            "transformmatrix" => self.compile_transformmatrix(node),
             "add" => bin(self, BinOp::Add, Val::ZERO, Val::ZERO),
             "subtract" => bin(self, BinOp::Sub, Val::ZERO, Val::ZERO),
             // The unauthored defaults are the nodedefs': `in1` is zero and
@@ -456,6 +775,7 @@ impl<'a> Compiler<'a> {
             }
             other => {
                 self.unsupported.insert(other.to_string());
+                self.note_unsupported_upstream(node);
                 // Degrade this input to mid-grey rather than to black: an
                 // unsupported *pattern* node is usually a colour correction,
                 // and zero would turn whatever it feeds into a hole.

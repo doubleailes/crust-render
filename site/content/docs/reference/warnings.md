@@ -253,6 +253,7 @@ Sample and display filters ([render settings](@/docs/usd/render-settings.md#prec
 | `material.volume_ignored` | skipped | A MaterialX volume terminal beside a non-MaterialX surface is ignored. | Make the surface MaterialX too, or drop the volume terminal. |
 | `mtlx.incomplete` | approximated | Part of a MaterialX network is not represented; those inputs fall back to their defaults. | Check the nodes the message names against the [materials page](@/docs/usd/materials.md). |
 | `mtlx.unusable` | skipped | A MaterialX document or network cannot be used; the material falls back. | Fix the MaterialX document; the message gives the reason. |
+| `mtlx.library_unreadable` | skipped | A path in PXR_MTLX_PLUGIN_SEARCH_PATHS, or a .mtlx file under it, cannot be read; its node definitions are not loaded. | Fix the file or the path the message names, or remove it from [`PXR_MTLX_PLUGIN_SEARCH_PATHS`](@/docs/reference/environment-variables.md#pxr-mtlx-plugin-search-paths). |
 | `preview.multiple_primvars` | approximated | A UsdPreviewSurface's textures read several primvars; the first is read for all. | Read one primvar for every texture of a material. |
 | `preview.unsupported_connection` | skipped | A UsdPreviewSurface input connects to something other than a UsdUVTexture output; its constant is used. | Connect the input to a `UsdUVTexture` output. |
 | `preview.texture_without_file` | skipped | A UsdUVTexture has no inputs:file; the input keeps its constant. | Author `inputs:file`. |

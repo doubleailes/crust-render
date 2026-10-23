@@ -60,13 +60,22 @@ CATEGORIES = [
     "clamp", "contrast", "remap", "invert", "smoothstep", "convert", "extract",
     "combine2", "combine3", "normalmap", "artistic_ior", "rgbtohsv", "hsvtorgb",
     "ifgreater", "ifgreatereq", "ifequal", "cellnoise2d", "randomfloat", "randomcolor",
+    "separate2", "separate3", "separate4", "switch", "over", "in", "out",
+    "difference", "premult", "place2d",
 ]
+# Not `transformmatrix`: genosl writes `transform(matrix, vector)`, which drops
+# the translation of a `vector3` by a `matrix44` that MaterialX's GLSL applies
+# (`mx_transformmatrix_vector3M4`), and crust follows the GLSL. Its cases are
+# in `crates/crust-mtlx/tests/stdlib_nodes.rs`.
 
 # Categories whose signatures may take `integer` inputs (the conditionals'
 # `...I` variants, the random nodes' `seed`) or give `integer` / `boolean`
 # outputs, all of which crust carries as a one-lane float. `extract`'s
 # `index` is the other integer input.
-INTEGER_CATEGORIES = {"extract", "ifgreater", "ifgreatereq", "ifequal", "randomfloat", "randomcolor"}
+INTEGER_CATEGORIES = {
+    "extract", "ifgreater", "ifgreatereq", "ifequal", "randomfloat", "randomcolor",
+    "switch", "place2d",
+}
 SCALAR_OUTPUTS = {"integer": "%d", "boolean": "%d"}
 
 # Integer literals for those inputs.

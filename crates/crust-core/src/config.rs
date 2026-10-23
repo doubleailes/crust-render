@@ -12,7 +12,8 @@
 //!
 //! `OCIO` is not a switch: it is OpenColorIO's own variable naming the config
 //! every OCIO application uses, read here so the environment is still read in
-//! one place. Only the CLI obeys it, as the fallback for `--ocio-config`; the
+//! one place. Nor is `PXR_MTLX_PLUGIN_SEARCH_PATHS`, USD's `usdMtlx` variable
+//! naming the directories of custom MaterialX node definitions. Only the CLI obeys it, as the fallback for `--ocio-config`; the
 //! library keeps its builtin config unless a host installs another, so a
 //! test's colours never depend on the shell it runs in.
 //!
@@ -313,6 +314,12 @@ pub struct Config {
     /// path or an `ocio://` URI, `None` when unset or empty. Not validated
     /// here: loading it is the host's, which reports a bad one as an error.
     pub ocio: Option<String>,
+    /// `PXR_MTLX_PLUGIN_SEARCH_PATHS`: the directories whose `.mtlx` files
+    /// define custom MaterialX nodes, as USD's `usdMtlx` plugin reads them —
+    /// split with the OS path-list separator (`;` on Windows, `:` elsewhere),
+    /// empty entries dropped. Empty when unset. Not validated here: a
+    /// directory that cannot be read is reported when the import walks it.
+    pub mtlx_plugin_search_paths: Vec<std::path::PathBuf>,
 }
 
 /// Default `.tx` tile cache and Ptex streaming budgets, in MiB: OIIO's own
@@ -364,6 +371,7 @@ impl Default for Config {
             tube_sampling: TubeSampling::Equiangular,
             disk_sampling: DiskSampling::Area,
             ocio: None,
+            mtlx_plugin_search_paths: Vec::new(),
         }
     }
 }
@@ -459,6 +467,9 @@ impl Config {
             ),
             // OCIO's own convention: an empty `OCIO` is no config.
             ocio: lookup("OCIO").filter(|v| !v.is_empty()),
+            mtlx_plugin_search_paths: lookup("PXR_MTLX_PLUGIN_SEARCH_PATHS")
+                .map(|v| search_paths(&v))
+                .unwrap_or_default(),
         }
     }
 }
@@ -535,6 +546,14 @@ pub fn env_parse<T: FromStr + std::fmt::Display>(
 /// sends it down the parser's warn-and-default path like any other bad value.
 fn present(value: Option<std::ffi::OsString>) -> Option<String> {
     value.map(|v| v.to_string_lossy().into_owned())
+}
+
+/// A path list split as the OS splits `PATH` (`std::env::split_paths`), with
+/// the empty entries a doubled or trailing separator leaves dropped.
+fn search_paths(list: &str) -> Vec<std::path::PathBuf> {
+    std::env::split_paths(list)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
 }
 
 static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
@@ -696,5 +715,20 @@ mod tests {
         assert_eq!(with(&[("OCIO", "")]).ocio, None);
         let c = with(&[("OCIO", "/studio/config.ocio")]);
         assert_eq!(c.ocio.as_deref(), Some("/studio/config.ocio"));
+    }
+
+    /// `PXR_MTLX_PLUGIN_SEARCH_PATHS` splits as the OS splits `PATH`, and a
+    /// doubled or trailing separator names no directory.
+    #[test]
+    fn mtlx_plugin_search_paths_split_on_the_os_separator() {
+        use std::path::PathBuf;
+        assert!(with(&[]).mtlx_plugin_search_paths.is_empty());
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let list = format!("/studio/mtlx{sep}{sep}/show/mtlx{sep}");
+        let c = with(&[("PXR_MTLX_PLUGIN_SEARCH_PATHS", &list)]);
+        assert_eq!(
+            c.mtlx_plugin_search_paths,
+            [PathBuf::from("/studio/mtlx"), PathBuf::from("/show/mtlx")]
+        );
     }
 }
