@@ -427,7 +427,10 @@
       to shadowing, is not renormalised.
     - **Layering filter.** A reflection-only dielectric or Schlick lets
       `DielectricReflFront(cos θo)` through (a Schlick at the IOR its average
-      `F0` implies, `(1 + √F0)/(1 − √F0)`); a sheen `1 − min(E·max(color), 1)`
+      `F0` implies, `(1 + √F0)/(1 − √F0)`) — on a front face. On a back face
+      it lets through what its own lobe leaves, `DielectricReflBack`, which
+      is nothing past the critical angle (crust's deviation from BSDL, below
+      in "Known gaps: MaterialX"); a sheen `1 − min(E·max(color), 1)`
       with `E` MaterialX's rational fit (`conty_kulla`, roughness floored at
       0.06) or the LTC table's `R` (`zeltner`); everything else nothing. A
       dielectric whose tints are both black is opaque, as BSDL computes no
@@ -713,10 +716,29 @@
     `spi::MiniMicrofacetGGX` (16 roughness × 16 cosines spaced `(i/15)²`, white
     GGX's missing energy, Turquin's `E_ms`) and `mtx::DielectricReflFront`,
     `DielectricBothFront`, `DielectricBothBack` (32 IOR × 16 roughness × 16
-    cosines `i/15`). `scripts/tables/bsdl_luts_to_rust.py` fetches OSL
+    cosines `i/15`), and a fifth BSDL does not bake, `DielectricReflBack`.
+    `scripts/tables/bsdl_luts_to_rust.py` fetches OSL
     (`src/libbsdl`) and Imath at pinned commits, builds and runs BSDL's
     `genluts` (about a minute on four cores) and writes the file; the bake is
     deterministic (hashed QMC seeds), so a rerun reproduces it bit for bit.
+    `DielectricReflBack` is `DielectricReflFront` built with
+    `from_table_index(f, true)` — the reflection-only lobe seen from inside —
+    and baked by a copy of `genluts.cpp` with that struct and one loop added
+    (the pinned checkout is never modified; the other four tables come out
+    unchanged, as the seeds depend on each entry's indices alone). Its
+    cosine axis is not `i/15`: every IOR row puts its own critical cosine
+    `√(1 − η²)` at column 7, `[0, c_crit]` before it and `[c_crit, 1]` after,
+    each quadratically denser toward that column, and crust reads it at
+    `bsdl::refl_back_axis(cos θo, η)`. On BSDL's fixed cosines the edge where
+    the lobe starts to totally reflect moves with the IOR, so bilinear
+    interpolation straddled it — across cosines and across IOR rows alike —
+    and let a smooth top pass up to half its base past the critical angle
+    (a coat over glass returned 1.50 per bounce at IOR 1.6, 39°); evenly
+    spaced but aligned columns still left a slightly rough lobe's whole
+    transition inside one bin (1.22 at IOR 2.4, roughness 0.02). Aligned and
+    warped, the filter tracks the leaf within +0.058 / −0.016
+    (`the_back_face_filter_tracks_the_leaf_it_stands_for`, worst at IOR 2.4,
+    roughness 0.05, 1° past the critical angle).
     The first gate when the source moved off NVIDIA Typhoon's vendored copy
     held: upstream `cc6f9b1`'s `ReflFront` is bit for bit the table crust had
     taken from Typhoon (`70c45e8`). The sheen tables `genluts` also bakes are
@@ -755,7 +777,11 @@
     2.433 (+0.7% / +4.2%), `materialx_surfaces` 4.753 / 5.120 → 4.896 / 5.268
     (+3.0% / +2.9%). The machine was loaded (a download ran beside it), and
     `cornellbox`, whose instructions did not move, sets the noise floor: the
-    MaterialX scenes are inside it.
+    MaterialX scenes are inside it. The back-face reflection filter (a second
+    curve's axis, a square root under a back face) then cost
+    `materialx_surfaces` 5 512 095 636 → 5 534 763 330 (+0.41%, partly paths
+    that change with the image) and `cornellbox` 4 272 611 828 → 4 272 737 158
+    (+0.003%, codegen; bit-identical).
   - **The BSDL oracle.** `scripts/bsdl_oracle.py` bakes the tables as above,
     compiles `scripts/bsdl_oracle/probe.cpp` against the pinned `libbsdl` and
     Imath (no OSL runtime: each lobe is built as testrender's `BSDL_WRAP`
@@ -778,7 +804,11 @@
     that excuses nothing fails as stale. Tolerance 2e-3; every case outside
     the rules matches to 0.00000 at the fixture's four decimals. The rules:
     `thin-film` (0.611; BSDL ignores the film), `conductor-selection` (0.357;
-    `albedo_impl` only). CI needs no C++: the fixture is committed. Regenerate
+    `albedo_impl` only), `back-face-reflection-filter` (0.928; the filter and
+    the `albedo_impl` derived from it, for a reflection-only leaf under a back
+    face — a bound that excuses nearly the whole range, so the filter there is
+    pinned instead against the leaf itself, see "Energy tables" above). CI
+    needs no C++: the fixture is committed. Regenerate
     with `scripts/bsdl_oracle.py` (git, cmake, a C++17 compiler, network),
     then `cargo test -p crust-core --test bsdl_oracle -- --ignored --nocapture`
     to re-measure the bounds; move the OSL pin in both scripts together. The
@@ -1163,6 +1193,35 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   draws that land, within 0.015 (`no_leaf_claims_more_density_than_it_samples`):
   `every_sample_agrees_with_eval` checks the density only where samples land,
   so it cannot see a density claimed where none do.
+- **A reflection-only top under a back face filters as crust's, not BSDL's.**
+  BSDL's `DielectricLobe` (and `SchlickLobe`) reads its layering filter from
+  `DielectricReflFront` on both faces, while its value on a back face inverts
+  the IOR and totally reflects past the critical angle. Under testrender's
+  `evaluate_layer_opacity` a coat seen from inside a glass therefore reflects
+  everything *and* lets about 95% of the glass beneath it through, and the
+  glass, seen from inside too, totally reflects as well: up to ≈ 2× per
+  bounce, compounding along paths trapped inside. The OpenPBR Shader
+  Playground's coated mason jar (`masonJarGlass`: coat 1.0 over
+  transmission) took `renderCam_main` from a mean luminance of 0.71 to 3.76
+  at 1024 spp, single paths reaching 1.1e7; a coated `open_pbr` glass cube
+  returned 4.03 of a white furnace, a raw `layer(dielectric R, dielectric
+  RT)` 7.03. (crust's GLSL leaves had the same flaw, more weakly: 3.30 and
+  6.89.) crust reads the filter under a back face from `DielectricReflBack`
+  instead (above, "Energy tables"): the same cube returns 0.13 and the raw
+  layer 0.94 at depth 12, the Playground region its base's median with
+  none of its fireflies. The oracle excuses it as `back-face-reflection-filter`;
+  `a_coat_over_glass_returns_no_more_than_it_receives_from_inside` pins
+  what is left, the table's interpolation within a degree or two past the
+  critical angle: at most 1.058 per bounce (IOR 2.4, roughness 0.05). A
+  perfect cube, which traps rays at the same angles forever, still gains
+  about 0.2% per bounce there: the coated cube passes 1 at depth 256 (0.67
+  at 64; the default is 32). Two things stay as testrender has them: the
+  layer order is not reversed under a back face — the coat's own IOR against
+  the outside sets its critical angle, though from inside the ray meets the
+  base first (38.7° rather than 41.8° for a 1.6 coat over 1.5 glass) — and
+  `open_pbr_surface`'s coat darkening, which its nodegraph applies to the
+  whole base, transmission included (0.706 of a clear glass under a clear
+  coat head on).
 - **Selection is crust's.** A leaf's value, albedo, filter, sampling and
   density are BSDL's; the choice among leaves is `∝ lum(w)·lum(Ê)` with a
   0.02 floor rather than testrender's `CompositeBSDF::prepare`, and a

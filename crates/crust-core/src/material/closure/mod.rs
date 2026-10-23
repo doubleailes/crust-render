@@ -24,9 +24,14 @@
 //! MaterialX with: GGX with Turquin's compensation on reflection-only lobes
 //! and a tabulated renormalisation on refracting ones, Oren–Nayar / EON /
 //! Burley diffuse, Conty–Kulla and Zeltner sheen, each with BSDL's layering
-//! filter. Sampling is crust's own (GGX VNDF, cosine, the sheen's LTC). The
-//! Airy thin film, which BSDL's lobes do not apply, stays MaterialX's GLSL
-//! ([`mx`]); `tests/bsdl_oracle.rs` checks the leaves against BSDL itself.
+//! filter — except a reflection-only leaf under a back face, which lets
+//! through only what its own lobe leaves (`DielectricReflBack`), where BSDL's
+//! would let through what the front face does. Each leaf samples as BSDL does
+//! (bounded VNDF, a uniform `conty_kulla` sheen, the `zeltner` sheen's LTC,
+//! cosine-weighted diffuse); only a thin-walled leaf that transmits keeps
+//! crust's VNDF. The Airy thin film, which BSDL's lobes do not apply, stays
+//! MaterialX's GLSL ([`mx`]); `tests/bsdl_oracle.rs` checks the leaves against
+//! BSDL itself.
 
 pub mod bsdl;
 mod bsdl_tables;
@@ -1483,7 +1488,8 @@ fn prepare_sheen(cx: &LeafInputs<'_>, color: &u32, roughness: &u32, mode: SheenM
 /// The energy terms BSDL's `DielectricLobe` and `SchlickLobe` read at the
 /// view: Turquin's `E_ms` and the filter for a leaf that only reflects, the
 /// renormalisation for one that refracts, and the albedo it is selected by.
-/// `r` is BSDL's roughness, `eta` the ray-facing relative IOR.
+/// `r` is BSDL's roughness, `eta` the ray-facing relative IOR. All BSDL's,
+/// except a reflection-only leaf's filter on a back face ([`bsdl::REFL_BACK`]).
 fn interface_energy(
     cx: &LeafInputs<'_>,
     r: f32,
@@ -1510,9 +1516,20 @@ fn interface_energy(
     } else {
         let e_ms = TabulatedEnergyCurve::new(bsdl::GGX, r, 0.0).emiss_eval(cx.nv);
         // BSDL computes the filter only for a lobe that reflects something:
-        // a black one is opaque.
+        // a black one is opaque. Its filter is `DielectricReflFront` on both
+        // faces; on a back face, where `eta` is inverted and the lobe totally
+        // reflects past the critical angle, crust reads the same lobe's own
+        // table instead, on an axis that keeps that edge sharp, so a top that
+        // reflects everything also lets nothing through (BSDL's would pass
+        // 1 − F(front) to the base: a coat over glass returned 4× a white
+        // furnace from inside).
         let filter = if refl_tint.max_element() > 0.0 {
-            TabulatedEnergyCurve::new(bsdl::REFL_FRONT, r, fi).emiss_eval(cx.nv)
+            if cx.back() {
+                TabulatedEnergyCurve::new(bsdl::REFL_BACK, r, fi)
+                    .emiss_eval(bsdl::refl_back_axis(cx.nv, eta))
+            } else {
+                TabulatedEnergyCurve::new(bsdl::REFL_FRONT, r, fi).emiss_eval(cx.nv)
+            }
         } else {
             0.0
         };
@@ -1678,9 +1695,10 @@ fn prepare_schlick(cx: &LeafInputs<'_>, bsdf: &Bsdf) -> Built {
     )
 }
 
-/// BSDL's dielectric reflection filter `1 − E_R(cosθo)` — the
+/// BSDL's dielectric reflection filter `1 − E_R(cosθo)` on a front face — the
 /// `DielectricReflFront` table — at BSDL roughness `r` (`α = r²`) and IOR
-/// `ior` (or its inverse, which reads the same row).
+/// `ior` (or its inverse, which reads the same row). A back face reads
+/// [`bsdl::REFL_BACK`] instead (`interface_energy`).
 pub fn dielectric_refl_filter(cos_o: f32, r: f32, ior: f32) -> f32 {
     TabulatedEnergyCurve::new(bsdl::REFL_FRONT, r, bsdl::table_index(ior))
         .emiss_eval(cos_o.max(0.0))

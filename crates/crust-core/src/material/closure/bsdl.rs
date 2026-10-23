@@ -6,25 +6,29 @@
 //! MaterialX's OSL backend renders its BSDF nodes as these lobes in OSL's
 //! `testrender`, so they are the reference crust's leaves are checked
 //! against (`tests/bsdl_oracle.rs`). Names follow BSDL's, so each function
-//! can be read against its source line by line. Two conventions differ:
-//! a value here is the BSDF `f` without the cosine (crust's `eval_lobe`
+//! can be read against its source line by line. One convention differs: a
+//! value here is the BSDF `f` without the cosine (crust's `eval_lobe`
 //! multiplies it in), where BSDL returns `f·|cos θi|` as a sample weight times
-//! its pdf; and sampling is crust's own, so nothing here samples.
+//! its pdf. The sampling pieces (`sample_for_refl`, `d_refl_d`, `reflect`,
+//! `refract`) are BSDL's; the closure evaluator assembles them per leaf.
 //!
 //! What is BSDL's: the GGX distribution and its roughness / anisotropy
-//! parameterisation, the tabulated energy curves (`bsdl_tables`), Turquin's
-//! multiple-scattering compensation on reflection-only lobes, the
-//! renormalisation of refracting ones, the dielectric, conductor and Schlick
-//! Fresnel models, the sheen and diffuse lobes and every lobe's layering
-//! filter. What is not: the Airy thin film and the F82 tint (BSDL's lobes
-//! declare neither; `mx` keeps MaterialX's GLSL for both).
+//! parameterisation, its bounded-VNDF sampling, the tabulated energy curves
+//! (`bsdl_tables`), Turquin's multiple-scattering compensation on
+//! reflection-only lobes, the renormalisation of refracting ones, the
+//! dielectric, conductor and Schlick Fresnel models, the sheen and diffuse
+//! lobes and every lobe's layering filter on a front face. What is not: the
+//! Airy thin film and the F82 tint (BSDL's lobes declare neither; `mx` keeps
+//! MaterialX's GLSL for both), and a reflection-only lobe's filter on a back
+//! face, which reads [`REFL_BACK`] — the same lobe's own table, which BSDL
+//! does not bake — where BSDL reads [`REFL_FRONT`] on both faces.
 
 use glam::Vec3A;
 use std::f32::consts::{FRAC_1_PI, PI};
 
 use super::bsdl_tables::{
-    DIELECTRIC_BOTH_BACK, DIELECTRIC_BOTH_FRONT, DIELECTRIC_REFL_FRONT, GGX as GGX_TABLE, NC, NF,
-    NR,
+    DIELECTRIC_BOTH_BACK, DIELECTRIC_BOTH_FRONT, DIELECTRIC_REFL_BACK, DIELECTRIC_REFL_FRONT,
+    GGX as GGX_TABLE, NC, NF, NR,
 };
 
 /// BSDL's `EPSILON`: the roughness floor its lobes clamp MaterialX's alphas to.
@@ -211,6 +215,14 @@ pub const REFL_FRONT: Table = Table {
     nf: NF,
     squared: false,
 };
+/// `DielectricReflFront` from inside, which BSDL does not bake: past the
+/// critical angle it reflects everything, so it lets nothing through. Read
+/// it at [`refl_back_axis`], not at the cosine.
+pub const REFL_BACK: Table = Table {
+    data: &DIELECTRIC_REFL_BACK,
+    nf: NF,
+    squared: false,
+};
 /// `mtx::DielectricBothFront`: a dielectric that reflects and refracts, from outside.
 pub const BOTH_FRONT: Table = Table {
     data: &DIELECTRIC_BOTH_FRONT,
@@ -343,6 +355,35 @@ pub fn dielectric_fresnel(c: f32, eta: f32) -> f32 {
 pub fn table_index(eta: f32) -> f32 {
     let seta = (if eta < 1.0 { 1.0 / eta } else { eta }).clamp(IOR_MIN, IOR_MAX);
     ((seta - IOR_MIN) * (1.0 / (IOR_MAX - IOR_MIN))).sqrt()
+}
+
+/// The column of [`REFL_BACK`] every row's critical cosine sits at
+/// (`REFL_BACK_KNEE` in `scripts/tables/bsdl_luts_to_rust.py`).
+const REFL_BACK_KNEE: usize = 7;
+
+/// Where [`REFL_BACK`] is read for a view cosine `c` under a back face of
+/// ray-facing relative IOR `eta` (< 1): the table's axis puts the critical
+/// cosine `√(1 − η²)` at column `REFL_BACK_KNEE` (7), `[0, c_crit]` spread over
+/// the columns before it and `[c_crit, 1]` over those after, each
+/// quadratically denser toward the knee. So no interpolation straddles the
+/// edge where the lobe starts to totally reflect, and the few degrees past it
+/// where a slightly rough lobe stops letting anything through span more than
+/// one bin. The inverse of the bake's `reflback_cosine`.
+pub fn refl_back_axis(c: f32, eta: f32) -> f32 {
+    let knee = REFL_BACK_KNEE as f32 / (NC - 1) as f32;
+    let c_crit = if eta < 1.0 {
+        (1.0 - sq(eta)).sqrt()
+    } else {
+        0.0
+    };
+    let c = c.clamp(0.0, 1.0);
+    // Strictly below, so `c_crit = 0` never divides by zero; the two
+    // branches meet at the knee.
+    if c < c_crit {
+        knee * (1.0 - (1.0 - c / c_crit).sqrt())
+    } else {
+        knee + (1.0 - knee) * ((c - c_crit) / (1.0 - c_crit)).sqrt()
+    }
 }
 
 /// `ConductorFresnel::eval`, per channel.
@@ -644,6 +685,71 @@ mod tests {
         // The GGX table's cosines are squared: (i/15)².
         let g = TabulatedEnergyCurve::new(GGX, r, 0.0);
         assert!((g.emiss_eval(sq(9.0 / 15.0)) - GGX_TABLE[5 * NC + 9]).abs() < 1e-6);
+    }
+
+    /// The back side of IOR row `f`, as the bake builds it:
+    /// `DielectricFresnel::from_table_index(f / 31, true)`.
+    fn back_eta(f: usize) -> f32 {
+        let tx = f as f32 / (NF - 1) as f32;
+        1.0 / lerp(sq(tx), IOR_MIN, IOR_MAX)
+    }
+
+    /// The bake's `reflback_cosine` (`scripts/tables/bsdl_luts_to_rust.py`).
+    fn back_cosine(c: usize, eta: f32) -> f32 {
+        let c_crit = (1.0 - eta * eta).sqrt();
+        let cos = if c <= REFL_BACK_KNEE {
+            let t = 1.0 - c as f32 / REFL_BACK_KNEE as f32;
+            c_crit * (1.0 - t * t)
+        } else {
+            let t = (c - REFL_BACK_KNEE) as f32 / (NC - 1 - REFL_BACK_KNEE) as f32;
+            c_crit + (1.0 - c_crit) * t * t
+        };
+        cos.max(1e-6)
+    }
+
+    #[test]
+    fn the_back_table_axis_inverts_the_bake() {
+        // Every row's every column is read back at its own grid point, the
+        // critical cosine at the knee, whatever the IOR.
+        for f in 0..NF {
+            let eta = back_eta(f);
+            for c in 1..NC {
+                let u = refl_back_axis(back_cosine(c, eta), eta);
+                let want = c as f32 / (NC - 1) as f32;
+                assert!((u - want).abs() < 1e-4, "row {f} column {c}: {u} ≠ {want}");
+            }
+            let knee = refl_back_axis((1.0 - eta * eta).sqrt(), eta);
+            assert!((knee - REFL_BACK_KNEE as f32 / (NC - 1) as f32).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_smooth_back_face_lets_nothing_through_past_the_critical_angle() {
+        // A smooth reflection-only interface seen from inside totally
+        // reflects below the critical cosine; BSDL's `DielectricReflFront`,
+        // its filter on both faces, lets through what the front would.
+        for f in [3, 11, 20, 31] {
+            let eta = back_eta(f);
+            let c_crit = (1.0 - eta * eta).sqrt();
+            let back = TabulatedEnergyCurve::new(REFL_BACK, 0.0, f as f32 / 31.0);
+            let front = TabulatedEnergyCurve::new(REFL_FRONT, 0.0, f as f32 / 31.0);
+            for c in [0.2 * c_crit, 0.6 * c_crit, 0.97 * c_crit] {
+                let through = back.emiss_eval(refl_back_axis(c, eta));
+                assert!(through < 1e-3, "row {f} cos {c}: lets {through} through");
+                assert!(front.emiss_eval(c) > 0.3, "the front table at {c}");
+            }
+            // Past the edge, it lets through what the front does at the
+            // refracted angle: `1 − F` either way.
+            let c = 0.5 * (1.0 + c_crit);
+            let outside = (1.0 - (1.0 - c * c) / (eta * eta)).sqrt();
+            let want = 1.0 - dielectric_fresnel(c, eta);
+            assert!((want - (1.0 - dielectric_fresnel(outside, 1.0 / eta))).abs() < 1e-4);
+            let got = back.emiss_eval(refl_back_axis(c, eta));
+            assert!(
+                (got - want).abs() < 0.02,
+                "row {f} cos {c}: {got} vs 1 − F = {want}"
+            );
+        }
     }
 
     /// BSDL's `Emiss_eval`, its linear scan, verbatim.

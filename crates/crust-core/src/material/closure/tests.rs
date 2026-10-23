@@ -1002,13 +1002,15 @@ fn a_transmission_only_dielectric_pays_its_fresnel_loss() {
     assert!(tir.max_element() < 1e-3, "total internal reflection: {tir}");
 }
 
-/// Task 2.4's measurement, kept as a bound: BSDL's baked `E_R` describes
-/// BSDL's own GGX (with its Turquin multiple-scattering term), not crust's
-/// leaf (MaterialX's analytic fit for the compensation), so the two are not
-/// the same integral. This measures the gap over the table's range — the
-/// layer throughput a top leaf hands its base is `1 − E_table` while the top
-/// itself reflects `E_leaf`, so `E_leaf − E_table` is exactly the energy a
-/// layer creates (positive) or loses (negative). `--nocapture` prints the grid.
+/// A reflection-only dielectric on a front face hands its layer's base
+/// `1 − E_table` (`DielectricReflFront`) while it reflects `E_leaf` itself, so
+/// `E_leaf − E_table` is exactly the energy a layer creates (positive) or
+/// loses (negative). The leaf is the lobe the table was baked from (BSDL's
+/// GGX with Turquin's compensation), so the gap is the bake's sampling and
+/// the table's interpolation alone, worst near-smooth and grazing, where
+/// linear interpolation in the cosine undershoots a steep curve. The back
+/// face is `the_back_face_filter_tracks_the_leaf_it_stands_for`.
+/// `--nocapture` prints the grid.
 #[test]
 fn the_bsdl_table_tracks_the_leaf_it_stands_for() {
     let mut worst = (0.0f32, 0.0, 0.0, 0.0);
@@ -1046,8 +1048,8 @@ fn the_bsdl_table_tracks_the_leaf_it_stands_for() {
 /// The same measurement for the filters BSDL takes from something other than
 /// the leaf's own table — generalized Schlick (the *dielectric* table at the
 /// IOR its F0 implies, which BSDL notes is "a bit off" for a Schlick curve)
-/// and a `conty_kulla` sheen (MaterialX's `mx_imageworks_sheen_dir_albedo`
-/// fit). The `E` a layer uses is read back as `1 − weight` of a white diffuse
+/// and a `conty_kulla` sheen (BSDL's `ContyKullaSheenMTX` albedo, MaterialX's
+/// rational fit). The `E` a layer uses is read back as `1 − weight` of a white diffuse
 /// base under the leaf.
 #[test]
 fn the_layering_filters_track_the_leaves_they_stand_for() {
@@ -1712,4 +1714,108 @@ fn a_thin_film_still_interferes() {
     );
     let spread = coloured.max_element() - coloured.min_element();
     assert!(spread > 0.1 * coloured.max_element(), "{coloured}");
+}
+
+/// `the_layering_filters_track_the_leaves_they_stand_for` under a back face,
+/// around the critical angle, where the leaf totally reflects: a reflection-
+/// only dielectric hands its base `1 − E_leaf` there too. BSDL's own filter
+/// (`DielectricReflFront` on both faces) handed it up to `1 − F(front)` past
+/// the critical angle; crust reads `DielectricReflBack` on an axis aligned to
+/// that angle, so the gap is the table's interpolation alone. A positive gap
+/// is energy a layer creates, a negative one energy it loses.
+#[test]
+fn the_back_face_filter_tracks_the_leaf_it_stands_for() {
+    let mut worst = (0.0f32, 0.0f32, String::new());
+    for ior in [1.33f32, 1.5, 2.4] {
+        let crit = (1.0 / ior).asin().to_degrees();
+        for r in [0.0f32, 0.05, 0.2, 0.6] {
+            let a = r * r;
+            let top = format!(
+                r#"<dielectric_bsdf name="t" type="BSDF">
+                     <input name="ior" type="float" value="{ior}" />
+                     <input name="roughness" type="vector2" value="{a}, {a}" />
+                   </dielectric_bsdf>"#
+            );
+            let alone = doc(&format!(
+                r#"{top}<surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="t" /></surface>"#
+            ));
+            let layered = doc(&format!(
+                r#"{top}<oren_nayar_diffuse_bsdf name="d" type="BSDF"><input name="color" type="color3" value="1, 1, 1" /></oren_nayar_diffuse_bsdf>
+                   <layer name="l" type="BSDF"><input name="top" type="BSDF" nodename="t" /><input name="base" type="BSDF" nodename="d" /></layer>
+                   <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="l" /></surface>"#
+            ));
+            let mut row = String::new();
+            for d in [-10.0f32, -2.0, 1.0, 3.0, 6.0, 12.0] {
+                let deg = (crit + d).min(85.0);
+                let theta = deg.to_radians();
+                let e_leaf = albedo(&resolved(&alone, "s", theta, false), theta, false, 2048).x;
+                let c = resolved(&layered, "s", theta, false);
+                let base = c
+                    .leaves()
+                    .iter()
+                    .find(|l| l.category == "oren_nayar_diffuse_bsdf")
+                    .map_or(0.0, |l| l.weight.x);
+                let gap = e_leaf - (1.0 - base);
+                row += &format!("  {deg:.0}°: {gap:+.3}");
+                if gap > worst.0 {
+                    worst.0 = gap;
+                    worst.2 = format!("ior {ior} r {r} θ {deg:.1}°");
+                }
+                worst.1 = worst.1.min(gap);
+            }
+            println!("ior {ior} r {r:.2}{row}");
+        }
+    }
+    println!(
+        "worst creation {:+.4} ({}), worst loss {:+.4}",
+        worst.0, worst.2, worst.1
+    );
+    // Measured: +0.058 at IOR 2.4, roughness 0.05, 1° past the critical
+    // angle (the lobe's transition is narrower than a bin), −0.016 at worst
+    // the other way. BSDL's filter gave up to +0.91 here.
+    assert!(worst.0 < 0.07, "creates: {worst:?}");
+    assert!(worst.1 > -0.03, "loses: {worst:?}");
+}
+
+/// The Playground's mason jar: a coat over glass, seen from inside the glass.
+/// Past the coat's critical angle the coat totally reflects; with BSDL's
+/// filter it still let the glass beneath it reflect as much again, so each
+/// bounce inside returned up to 1.5–2× what it received and a coated glass
+/// cube returned 4× a white furnace. Now a bounce returns what it receives,
+/// within the back-face table's interpolation around the critical angle.
+#[test]
+fn a_coat_over_glass_returns_no_more_than_it_receives_from_inside() {
+    let mut worst = (0.0f32, String::new());
+    for ior in [1.33f32, 1.5, 2.4] {
+        let crit = (1.0 / ior).asin().to_degrees();
+        for r in [0.0f32, 0.05, 0.2] {
+            let a = r * r;
+            let leaf = |name: &str, mode: &str| {
+                format!(
+                    r#"<dielectric_bsdf name="{name}" type="BSDF">
+                         <input name="ior" type="float" value="{ior}" />
+                         <input name="roughness" type="vector2" value="{a}, {a}" />
+                         <input name="scatter_mode" type="string" value="{mode}" />
+                       </dielectric_bsdf>"#
+                )
+            };
+            let body = doc(&format!(
+                r#"{}{}<layer name="l" type="BSDF"><input name="top" type="BSDF" nodename="c" /><input name="base" type="BSDF" nodename="g" /></layer>
+                   <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="l" /></surface>"#,
+                leaf("c", "R"),
+                leaf("g", "RT")
+            ));
+            for d in [-2.0f32, 1.0, 3.0, 6.0, 12.0] {
+                let deg = (crit + d).min(85.0);
+                let theta = deg.to_radians();
+                let e = albedo(&resolved(&body, "s", theta, false), theta, false, 2048).x;
+                if e > worst.0 {
+                    worst = (e, format!("ior {ior} r {r} θ {deg:.1}°"));
+                }
+            }
+        }
+    }
+    println!("worst {:.4} ({})", worst.0, worst.1);
+    // Measured: 1.058 at IOR 2.4, roughness 0.05, 1° past the critical angle.
+    assert!(worst.0 < 1.07, "{worst:?}");
 }

@@ -15,7 +15,10 @@ dependencies are not listed; each carries its own licence in its crate.
   leaves are. `crates/crust-core/src/material/closure/bsdl_tables.rs` holds the
   four energy tables those lobes read (`spi::MiniMicrofacetGGX`,
   `mtx::DielectricReflFront`, `mtx::DielectricBothFront`,
-  `mtx::DielectricBothBack`). `scripts/bsdl_oracle/probe.cpp` builds against
+  `mtx::DielectricBothBack`), and a fifth, `DielectricReflBack`, that BSDL
+  does not bake: `DielectricReflFront` seen from inside, baked by BSDL's own
+  `genluts.cpp` estimator from a copy with that struct and its loop added.
+  `scripts/bsdl_oracle/probe.cpp` builds against
   the library (fetched at the pinned commit, not vendored) to produce the
   reference values in `crates/crust-core/tests/data/bsdl_oracle.txt`.
 - **Source:** <https://github.com/AcademySoftwareFoundation/OpenShadingLanguage>,

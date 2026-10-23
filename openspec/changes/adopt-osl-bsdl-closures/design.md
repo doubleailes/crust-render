@@ -207,6 +207,39 @@ behaviour it replaced. This change alters what the image *should* be, so the
 A/B is two binaries: `bench_ab.sh` for time and `crust diff` / `check_images.sh`
 for the image.
 
+### 9. A reflection-only top under a back face filters by its own lobe
+
+Testing the branch against real assets found one place where matching
+testrender exactly is wrong. BSDL's `DielectricLobe` (and `SchlickLobe`) reads
+its layering filter from `DielectricReflFront` on both faces, while its value
+on a back face inverts the IOR and totally reflects past the critical angle.
+Under `evaluate_layer_opacity` a coat seen from inside a glass then reflects
+everything and lets ≈ 95% of the glass through too, and that glass totally
+reflects as well: ≈ 2× per bounce, compounding inside the object. The OpenPBR
+Shader Playground's coated mason jar took its main camera from a mean of 0.71
+to 3.76 at 1024 spp; a coated glass cube returned 4.03 of a white furnace.
+(The GLSL leaves this change replaces had the flaw too, more weakly.)
+
+The user chose to fix it here. A reflection-only leaf under a back face reads
+a fifth table, `DielectricReflBack`: `DielectricReflFront` built with
+`from_table_index(f, true)`, baked by `genluts`' own estimator from a copy of
+`genluts.cpp` with that struct and its loop added (the pinned checkout is not
+modified, and the other tables come out bit for bit as before). Its cosine
+axis puts every IOR row's critical cosine at one column, with columns
+quadratically denser toward it, because the filter there jumps from 0 to
+`1 − F`: on BSDL's fixed cosines interpolation straddled that edge and still
+let a smooth coat pass half its base (1.50 per bounce); aligned but evenly
+spaced, a slightly rough lobe's transition fit inside one bin (1.22). The
+oracle excuses the difference as `back-face-reflection-filter`; closure tests
+pin the filter against the leaf (+0.058 / −0.016) and a coat over glass from
+inside (≤ 1.058 per bounce).
+
+*Alternatives considered:* the back-side Fresnel average, analytic but
+exact only for a smooth lobe; capping a layer's response at 1, which hides
+the error rather than removing it; and reversing the layer order under a back
+face, which is closer to physics (the ray meets the base first) but changes
+the closure semantics the spec pins to testrender.
+
 ## Risks / Trade-offs
 
 - [Every MaterialX golden changes] → Re-record them once, at the end, at
