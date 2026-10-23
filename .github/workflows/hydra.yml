@@ -77,6 +77,18 @@ jobs:
           pixi run cmake -S hdCrust -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           pixi run cmake --build build
           pixi run cmake --install build --prefix install
+      - name: DEBUG materialx_basic
+        working-directory: hydra
+        continue-on-error: true
+        run: |
+          set -x
+          sudo apt-get install -y gdb >/dev/null 2>&1 || true
+          export PXR_PLUGINPATH_NAME="$PWD/install/plugin/usd/hdCrust/resources"
+          pixi run usdcat ../samples/materialx_basic.mtlx | head -20; echo "usdcat mtlx exit ${PIPESTATUS[0]}"
+          pixi run usdcat --flatten ../samples/materialx_basic.usda | head -20; echo "usdcat usda exit ${PIPESTATUS[0]}"
+          mkdir -p "$RUNNER_TEMP/dbg"
+          pixi run install/bin/hdCrustTest ../samples/materialx_basic.usda "$RUNNER_TEMP/dbg/hd.exr" "$RUNNER_TEMP/dbg" --camera /World/ShotCam --width 160 --height 90 --spp 16; echo "hdCrustTest exit $?"
+          pixi run gdb -batch -ex run -ex bt --args install/bin/hdCrustTest ../samples/materialx_basic.usda "$RUNNER_TEMP/dbg/hd.exr" "$RUNNER_TEMP/dbg" --camera /World/ShotCam --width 160 --height 90 --spp 16 2>&1 | tail -60
       - name: Delegate against crust render
         working-directory: hydra
         run: pixi run bash hdCrust/test/compare.sh "$PWD/install" "$RUNNER_TEMP/compare"
