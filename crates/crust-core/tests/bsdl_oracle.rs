@@ -189,7 +189,7 @@ fn leaf_node(case: &Case) -> String {
 /// Compiles `root` of an inline document and evaluates its program.
 fn tree(doc: &str, root: &str) -> (Closures, Vec<Val>) {
     let d = Doc::parse(doc).expect("document parses");
-    let loader = |_: &str, _: Option<&str>| None;
+    let loader = |_: &str, _: crust_core::mtlx::TexelSpace<'_>| None;
     let mut c = Compiler::new(&d, &Host::new(&loader));
     let node = d.find("", root).expect("root").clone();
     let mut out = Closures::default();
