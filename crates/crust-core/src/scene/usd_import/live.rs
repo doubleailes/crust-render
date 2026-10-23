@@ -28,12 +28,14 @@ use super::mesh::SubdivPolicy;
 use super::time::EvalTimeScope;
 use super::xform::compose_with_parent;
 use super::{
-    ImportCaches, ImportCtx, ValidOptions, apply_exposure, emit_light, open_stage,
-    open_stage_masked, prim_at, read_index, stage_builder,
+    ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, frame_pose,
+    invisible_overrides, open_stage, open_stage_masked, prim_at, read_index, stage_builder,
 };
 
 /// Warning codes a settings change can move, by family: the settings, the
 /// products and their AOVs, the camera, the time code and the colour space.
+/// Not `primvar.`: those are raised reading geometry, for the primvars the
+/// geometry kept, and a refresh that would change that set is refused.
 const SETTINGS_FAMILIES: &[&str] = &[
     "settings.",
     "product.",
@@ -261,10 +263,12 @@ impl Rebuilding<'_> {
             let emitters = geoms
                 .map(|id| (id, ctx.world.material(id).clone()))
                 .collect();
+            let gains = ctx.lights.lobe_gains(0);
             let (light, _) = ctx.lights.remove(0);
             Ok(LightUpdate {
                 index: origin.index,
                 light,
+                gains,
                 emitters,
             })
         })();
@@ -291,8 +295,10 @@ fn scratch_ctx<'a>(r: &'a Rebuilding<'a>, world: WorldBuilder) -> ImportCtx<'a> 
         caches: r.caches(),
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
+        pass: None,
         light_origins: Vec::new(),
         settings: crate::tracer::RenderSettings::default(),
+        framing: Default::default(),
         stage_path: r.layer,
         index: None,
         assets: r.assets,
@@ -338,9 +344,13 @@ fn refresh_settings(
         if read.subdiv.level != facts.subdiv_level {
             return Err(Structural("the subdivision level changed".into()));
         }
-        // Tessellation that reads the camera stands only when what it read is
-        // what it would read now, bit for bit: an exposure keeps it, a move,
-        // a lens or a resolution does not.
+        // Tessellation that reads the dicing camera stands only when it reads
+        // the same camera, and what it read is what it would read now, bit
+        // for bit: an exposure keeps it, a move, a lens or a resolution does
+        // not. Moving a render camera that does not dice keeps it too.
+        if read.dicing.as_ref().map(ToString::to_string) != facts.dicing {
+            return Err(Structural("the dicing camera changed".into()));
+        }
         if read.subdiv.adaptive.map(|r| r.key()) != facts.adaptive {
             return Err(Structural(
                 "adaptive subdivision would read another camera projection".into(),
@@ -358,8 +368,24 @@ fn refresh_settings(
                 "implicit shapes would be sized for the newly named camera".into(),
             ));
         }
+        // Geometry was placed at the shutter's ends, so another shutter
+        // re-imports, as a transform edit does.
+        if read.shutter.key(
+            asks_about_time(&read.shutter, &read.products),
+            frame_pose(&read.shutter, &read.products),
+        ) != facts.shutter
+        {
+            return Err(Structural("the camera shutter changed".into()));
+        }
         if read.domes_seen_by_camera != facts.domes_seen_by_camera {
             return Err(Structural("the dome's camera visibility changed".into()));
+        }
+        // The geometry kept the primvars the products asked for when it was
+        // read, and nothing else: asking for another needs it read again.
+        if read.products.primvars.key() != facts.primvars {
+            return Err(Structural(
+                "the products ask for other primvars than the geometry kept".into(),
+            ));
         }
         if read
             .wanted_camera
@@ -368,12 +394,16 @@ fn refresh_settings(
         {
             return Err(Structural("the render camera changed".into()));
         }
+        let invisible_overrides = invisible_overrides(&index);
+        let motion_blur = read.settings.motion_blur() && read.shutter.interval.is_some();
         drop(index);
         let stage = open_stage(layer, path_str, Some(cam_path.clone()))
             .map_err(|e| Structural(format!("cannot open the stage: {e}")))?;
         let prim: Prim = prim_at(&stage, cam_path.clone());
-        let rc = build_camera(&stage, &prim, &read.settings)
+        let rc = build_camera(&stage, &prim, &read.settings, read.products.framing)
             .ok_or_else(|| Structural(format!("{camera} is no longer a camera")))?;
+        rc.warn_lens_units(Some(camera));
+        rc.warn_framing(Some(camera));
         let settings = apply_exposure(
             read.settings,
             read.exposure_compensation,
@@ -384,6 +414,9 @@ fn refresh_settings(
             settings,
             camera: rc.camera,
             aovs: read.products.request,
+            lens: rc.lens,
+            motion_blur,
+            invisible_overrides,
         })
     })();
     let raised = scope.finish();

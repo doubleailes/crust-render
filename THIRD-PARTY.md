@@ -6,14 +6,26 @@ dependencies are not listed; each carries its own licence in its crate.
 
 ## BSDL (Open Shading Language)
 
-- **Used in:** `crates/crust-core/src/material/closure/bsdl_tables.rs`, the
-  rough-dielectric reflection throughput table (`mtx::DielectricReflFront`) the
-  MaterialX closure evaluator uses for `layer` throughput.
-- **Source:** BSDL's `genluts.cpp`, run by
-  `scripts/tables/bsdl_luts_to_rust.py`'s recipe on the copy of BSDL vendored in
-  NVIDIA's OpenUSD `typhoon/main` branch at commit `70c45e8`
-  (`pxr/imaging/plugin/hdEmbree/renderer/materials/BSDL`). Its output matches
-  the table Typhoon ships bit for bit.
+- **Used in:** `crates/crust-core/src/material/closure/bsdl.rs`, a port of
+  BSDL's `mtx::` lobes (`DielectricLobe`, `ConductorLobe`, `SchlickLobe`,
+  `SheenLobe`, `OrenNayarDiffuseLobe`, `BurleyDiffuseLobe`, `TranslucentLobe`)
+  and the helpers they use (`GGXDist`, `TabulatedEnergyCurve`,
+  `DielectricFresnel`, `ConductorFresnel`, `SchlickFresnel`,
+  `eval_turquin_microms_reflection`), which the MaterialX closure evaluator's
+  leaves are. `crates/crust-core/src/material/closure/bsdl_tables.rs` holds the
+  four energy tables those lobes read (`spi::MiniMicrofacetGGX`,
+  `mtx::DielectricReflFront`, `mtx::DielectricBothFront`,
+  `mtx::DielectricBothBack`), and a fifth, `DielectricReflBack`, that BSDL
+  does not bake: `DielectricReflFront` seen from inside, baked by BSDL's own
+  `genluts.cpp` estimator from a copy with that struct and its loop added.
+  `scripts/bsdl_oracle/probe.cpp` builds against
+  the library (fetched at the pinned commit, not vendored) to produce the
+  reference values in `crates/crust-core/tests/data/bsdl_oracle.txt`.
+- **Source:** <https://github.com/AcademySoftwareFoundation/OpenShadingLanguage>,
+  `src/libbsdl` at commit `cc6f9b1`. The tables are BSDL's `genluts.cpp` output,
+  baked by `scripts/tables/bsdl_luts_to_rust.py` at that commit;
+  `DielectricReflFront` is bit for bit the table crust first took from the copy
+  of BSDL vendored in NVIDIA's OpenUSD `typhoon/main` branch (`70c45e8`).
 - **Licence:** BSD-3-Clause.
 
 ```
@@ -50,10 +62,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 - **Used in:** `crates/crust-core/src/material/closure/mx.rs` — ports of
   MaterialX 1.39's GLSL BSDF library (`libraries/pbrlib/genglsl/lib/
-  mx_microfacet*.glsl`: the GGX directional-albedo fit, Turquin energy
-  compensation, the dielectric / conductor / Hoffman–Schlick and Airy thin-film
-  Fresnel models, Oren–Nayar / EON / Burley diffuse and Imageworks sheen with
-  their albedo fits). Also the surface-shader builders in
+  mx_microfacet*.glsl`): the Airy thin-film Fresnel (with the dielectric,
+  conductor and Hoffman–Schlick Fresnel models it is built on) and the F82
+  tint of `generalized_schlick_bsdf`, which BSDL's lobes do not apply. Also
+  the surface-shader builders in
   `crates/crust-mtlx/src/surface.rs`, which reproduce the structure of
   `libraries/bxdf/{open_pbr_surface,standard_surface,gltf_pbr}.mtlx`, and the
   nodedef defaults they carry.

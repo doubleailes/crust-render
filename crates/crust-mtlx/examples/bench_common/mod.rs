@@ -17,7 +17,7 @@ impl Texture for Procedural {
     }
 }
 
-pub fn procedural(_: &str, _: Option<&str>) -> Option<TextureRef> {
+pub fn procedural(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     Some(TextureRef(Arc::new(Procedural)))
 }
 
@@ -36,6 +36,7 @@ pub fn points() -> Vec<ShadeCtx<'static>> {
                 position: Vec3A::new(t, 1.0 - t, t * t),
                 uv_width: t * 0.01,
                 curve: None,
+                primvars: &[],
             }
         })
         .collect()

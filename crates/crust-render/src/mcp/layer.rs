@@ -2,6 +2,7 @@
 //! only composition arc is a sublayer on the input; every edit is an opinion
 //! in it; it is saved after every edit batch.
 
+use openusd::sdf;
 use std::path::{Component, Path, PathBuf};
 
 /// `path` made absolute against the working directory, without resolving
@@ -67,18 +68,143 @@ pub fn anchored(target: &Path, dir: &Path) -> String {
     }
 }
 
-/// The text of a new override layer in `dir` on `input`: a sublayer and no
-/// opinion.
-pub fn new_layer_text(input: &Path, dir: &Path) -> String {
-    format!(
-        "#usda 1.0\n(\n    subLayers = [\n        @{}@\n    ]\n)\n\n",
+/// The stage metadata a session's layer copies from its input's root layer,
+/// as that layer authors it: the units and the up axis. A stage reads its
+/// metadata from its root layer only, and a session's root layer is the
+/// override layer, so without the copy the session would read the fallbacks
+/// (a centimetre, Y up) whatever the input says.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StageMetrics {
+    pub meters_per_unit: Option<f64>,
+    pub up_axis: Option<String>,
+}
+
+impl StageMetrics {
+    /// What the root layer at `path` authors; nothing when it cannot be read
+    /// (the import reports that).
+    pub fn of_layer(path: &Path) -> StageMetrics {
+        let Some(layer) = path.to_str().and_then(|p| sdf::Layer::open(p).ok()) else {
+            return StageMetrics::default();
+        };
+        let field = |name: &str| {
+            layer
+                .data()
+                .try_field(&sdf::Path::abs_root(), name)
+                .ok()
+                .flatten()
+        };
+        let meters_per_unit = field("metersPerUnit").and_then(|v| match v.as_ref() {
+            sdf::Value::Double(d) => Some(*d),
+            sdf::Value::Float(f) => Some(f64::from(*f)),
+            _ => None,
+        });
+        let up_axis = field("upAxis").and_then(|v| match v.as_ref() {
+            sdf::Value::Token(t) => Some(t.as_str().to_owned()),
+            sdf::Value::String(s) => Some(s.clone()),
+            _ => None,
+        });
+        StageMetrics {
+            meters_per_unit,
+            up_axis,
+        }
+    }
+
+    /// The fields of `self` that `layer` does not author: what a resumed
+    /// session adds to its layer.
+    pub fn missing_from(&self, layer: &StageMetrics) -> StageMetrics {
+        StageMetrics {
+            meters_per_unit: self
+                .meters_per_unit
+                .filter(|_| layer.meters_per_unit.is_none()),
+            up_axis: self.up_axis.clone().filter(|_| layer.up_axis.is_none()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.meters_per_unit.is_none() && self.up_axis.is_none()
+    }
+}
+
+/// A double as usda writes it: `inf`, `-inf` and `nan` by name.
+fn usda_double(d: f64) -> String {
+    if d.is_nan() {
+        "nan".to_owned()
+    } else if d.is_infinite() {
+        if d > 0.0 { "inf" } else { "-inf" }.to_owned()
+    } else {
+        format!("{d}")
+    }
+}
+
+/// The text of a new override layer in `dir` on `input`: a sublayer, the
+/// input's `metrics`, and no opinion.
+pub fn new_layer_text(input: &Path, dir: &Path, metrics: &StageMetrics) -> String {
+    let mut text = String::from("#usda 1.0\n(\n");
+    if let Some(m) = metrics.meters_per_unit {
+        text.push_str(&format!("    metersPerUnit = {}\n", usda_double(m)));
+    }
+    text.push_str(&format!(
+        "    subLayers = [\n        @{}@\n    ]\n",
         anchored(input, dir)
-    )
+    ));
+    if let Some(axis) = &metrics.up_axis {
+        text.push_str(&format!("    upAxis = {axis:?}\n"));
+    }
+    text.push_str(")\n\n");
+    text
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn written(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("crust_mcp_layer_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(name);
+        std::fs::write(&path, text).expect("write");
+        path
+    }
+
+    /// A new layer carries what the input authors of its units and up axis,
+    /// beside its sublayer, and only that.
+    #[test]
+    fn a_new_layer_copies_the_inputs_metrics() {
+        let input = written(
+            "metrics_both.usda",
+            "#usda 1.0\n(\n    metersPerUnit = 1\n    upAxis = \"Z\"\n)\n",
+        );
+        let metrics = StageMetrics::of_layer(&input);
+        assert_eq!(
+            metrics,
+            StageMetrics {
+                meters_per_unit: Some(1.0),
+                up_axis: Some("Z".into()),
+            }
+        );
+        let dir = input.parent().unwrap();
+        let layer = written(
+            "metrics_both_layer.usda",
+            &new_layer_text(&input, dir, &metrics),
+        );
+        assert_eq!(StageMetrics::of_layer(&layer), metrics);
+        let opened = sdf::Layer::open(layer.to_str().unwrap()).expect("the layer parses");
+        let sublayers = opened
+            .data()
+            .try_field(&sdf::Path::abs_root(), "subLayers")
+            .unwrap()
+            .expect("subLayers");
+        assert!(format!("{sublayers:?}").contains("metrics_both.usda"));
+
+        // An input authoring neither: the layer as it always was.
+        let bare = written("metrics_none.usda", "#usda 1.0\n");
+        let metrics = StageMetrics::of_layer(&bare);
+        assert!(metrics.is_empty());
+        assert_eq!(
+            new_layer_text(&bare, dir, &metrics),
+            "#usda 1.0\n(\n    subLayers = [\n        @./metrics_none.usda@\n    ]\n)\n\n"
+        );
+    }
 
     #[test]
     fn anchored_paths_are_relative_on_one_volume() {

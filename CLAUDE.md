@@ -67,6 +67,8 @@ cargo test -p crust-mtlx --test osl_oracle          # MaterialX nodes vs Materia
 scripts/osl_oracle.py                               # regenerate those values (needs materialx + exact-math OSL)
 cargo test -p crust-core --test adobe_oracle        # native OpenPBR vs Adobe's openpbr-bsdf, gap by gap
 scripts/adobe_oracle.py                             # regenerate those values (needs a C++17 compiler + network)
+cargo test -p crust-core --test bsdl_oracle         # MaterialX BSDF leaves vs BSDL (OSL testrender's lobes)
+scripts/bsdl_oracle.py                              # regenerate those values (needs cmake, a C++17 compiler + network)
 cargo test -p crust-core --test geomutil_oracle     # implicit shapes vs OpenUSD's GeomUtil meshes, point for point
 scripts/geomutil_oracle.py                          # regenerate them (needs a C++17 compiler + conda.anaconda.org)
 
@@ -147,10 +149,11 @@ without the other (full list: `docs/architecture.md` § Invariants):
   sides (`PdfSolidAngle::new` → `None`), never replaced by a finite stand-in.
 - Light path expression AOVs reuse the beauty's own recurrence, so their pairs are the
   beauty's: `eval_all` ↔ `eval_split`, `scatter_resolved` ↔ `scatter_split` (one
-  `scatter_with`), `escaped_emission` ↔ `escaped_split`. `C.*[LO]` is pinned bitwise to the
+  `scatter_with`); infinite-light emission and routing share `escaped_split`.
+  `C.*[LO]` is pinned bitwise to the
   beauty, and the zero-AOV render to its instruction count (`docs/architecture.md`).
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
-  JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; streamed `capped` Ptex ↔
+  JIT ↔ interpreter; streamed `capped` Ptex ↔
   preloaded Ptex at and below the cap (one `decode_face`, one `reduce_level`); tiles ↔
   scanlines (a render mode is scheduling only); the staged first sweep ↔ one unstaged
   sweep (so is staging); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`);

@@ -160,18 +160,27 @@ across all streamed chunks together, never per chunk.
 
 ### Requirement: Directly instanced meshes have tangents
 
-A mesh placed more than once through direct, static instances SHALL shade normal
-maps with a tangent frame, computed at the hit from the prototype's vertices and the
-placement's transform, exactly as a baked mesh does. A prototype part placed through
-an instancer's group (a `PointInstancer` or native-instancing prototype), whose hit
-id is forwarded rather than its own, and a motion-blurred instance still shade with
-the geometric normal; those are the remaining gap.
+A mesh placed more than once through direct instances SHALL shade normal maps with a
+tangent frame, computed at the hit from the prototype's vertices and the placement's
+transform, exactly as a baked mesh does. A moving direct instance (a time-sampled
+transform or `crust:motion:translate`) SHALL use its transform interpolated at the
+ray's shutter time, the one the ray was intersected through. A prototype part placed
+through an instancer's group (a `PointInstancer` or native-instancing prototype), whose
+hit id is forwarded rather than its own, still shades with the geometric normal; that is
+the remaining gap.
 
 #### Scenario: A normal map on a directly instanced mesh
 
 - **WHEN** a normal-mapped material is bound to a mesh prim authored twice
 - **THEN** each placement shades with a perturbed normal, and a placement whose
   transform is the identity matches the baked render of the same mesh bit for bit
+
+#### Scenario: A normal map on an animated mesh
+
+- **WHEN** a normal-mapped mesh has a time-sampled rotation and the camera authors a
+  non-instantaneous shutter, with or without `disableMotionBlur`
+- **THEN** it shades with a perturbed normal whose tangent follows the mesh's rotation at
+  each ray's shutter time, as it did before the shutter was read
 
 ### Requirement: Native instance nesting
 
@@ -376,6 +385,9 @@ back to defaults (128 spp, depth 32, 640×360, power MIS, guiding off,
 subdivision level 0, no products). `crust:subdivisionLevel` SHALL be clamped to
 0–6, with a warning when the authored value is out of range. A host override
 (the CLI's `--subdiv-level`) SHALL take precedence over the authored value.
+`crust:maxDepth` counts shaded path vertices, not bounces (1 is direct lighting
+only); a value below 1 SHALL be refused with a `settings.invalid_value`
+warning naming the attribute, and the default depth used.
 
 #### Scenario: Authored settings
 
@@ -386,6 +398,13 @@ subdivision level 0, no products). `crust:subdivisionLevel` SHALL be clamped to
 
 - **WHEN** a `crust:` param is absent
 - **THEN** the documented default is used in its place
+
+#### Scenario: A max depth below one is refused
+
+- **WHEN** the `RenderSettings` prim authors `int crust:maxDepth = 0` (or a
+  negative value)
+- **THEN** one `settings.invalid_value` warning names `crust:maxDepth`, and the
+  render uses depth 32 instead of rendering black
 
 #### Scenario: Subdivision level from render settings
 
@@ -400,12 +419,13 @@ subdivision level 0, no products). `crust:subdivisionLevel` SHALL be clamped to
 
 ### Requirement: Render settings can disable motion blur
 
-`disableMotionBlur = true` SHALL trace every camera ray at shutter open, so
-the beauty and every AOV show moving geometry sharp at its authored position.
-`instantaneousShutter = true` SHALL mean the same. Motion stays in the scene,
-so motion vectors are still produced. The value is resolved like the
-render's camera: the first product's value, else the settings prim's.
-Neither attribute SHALL be warned about as not honoured.
+`disableMotionBlur = true` SHALL render moving geometry sharp where it is at the
+frame (UsdRender's `[0, 0]` shutter at the current time code), in the beauty and
+every AOV. `instantaneousShutter = true` SHALL also turn blur off, but sharp at
+shutter open, `f + shutter:open`; with both, `disableMotionBlur` wins. Motion
+stays in the scene, so motion vectors are still produced. Each value is resolved
+like the render's camera: the first product's, else the settings prim's.
+Neither SHALL be warned about as not honoured.
 
 #### Scenario: Sharp beauty with motion authored
 
@@ -414,11 +434,33 @@ Neither attribute SHALL be warned about as not honoured.
 - **THEN** the sphere renders sharp at its authored position, with no streak
   along X, and no warning about `disableMotionBlur` is logged
 
+#### Scenario: Sharp beauty at the frame for an animated transform
+
+- **WHEN** a sphere's transform is time-sampled, the camera authors
+  `shutter:open = -0.25` and `shutter:close = 0.25`, the render is made with `-f 5`, and the
+  render settings author `disableMotionBlur = true`
+- **THEN** the sphere renders sharp where its transform places it at time code 5, and its
+  `motionvector` is the screen displacement its transform makes from time code 4.75 to
+  5.25, measured from there
+
+#### Scenario: instantaneousShutter is sharp at shutter open
+
+- **WHEN** the same stage authors `instantaneousShutter = true` and not
+  `disableMotionBlur`
+- **THEN** the sphere renders sharp where its transform places it at time code 4.75
+
 #### Scenario: instantaneousShutter is a synonym
 
-- **WHEN** the render settings author `instantaneousShutter = true` and not
-  `disableMotionBlur`
+- **WHEN** the camera's `shutter:open` is 0, or the stage authors no shutter, and the
+  render settings author `instantaneousShutter = true` and not `disableMotionBlur`
 - **THEN** the render is the same as with `disableMotionBlur = true`
+
+#### Scenario: Toggling the frame pose in a session re-imports
+
+- **WHEN** an MCP session's stage has a time-sampled transform and a shutter opening
+  before the frame, and an edit authors `disableMotionBlur = true`
+- **THEN** the edit re-imports the stage, and the render equals a fresh import of the same
+  layer
 
 #### Scenario: Product overrides the settings
 
@@ -457,12 +499,24 @@ refined with the surface:
 - a `faceVarying` primvar SHALL be interpolated under the mesh's
   `faceVaryingLinearInterpolation` (`none`, `cornersOnly`, `cornersPlus1`,
   `cornersPlus2`, `boundaries` or `all`; `cornersPlus1` when unauthored);
-- a `vertex` or `varying` primvar SHALL be refined like the points.
+- a `vertex` or `varying` primvar SHALL be refined like the points;
+- a `constant` or `uniform` primvar SHALL be read as the faceVarying primvar it
+  is equivalent to (every face-vertex indexing value 0, or its face's value),
+  so it reads one coordinate per mesh or per face, on the cage and at every
+  level alike. An unauthored `interpolation` SHALL be read as `vertex`, except
+  on a chart of exactly one value, which is `constant`.
 
 A UV-textured material bound to a subdivided mesh SHALL therefore sample its
 textures. Ptex lookups SHALL keep addressing the authored cage's face ids; a
 `loop` mesh whose material reads Ptex SHALL therefore render as its smooth cage
 with a warning rather than refine.
+
+#### Scenario: A uniform chart reads one coordinate per face
+
+- **WHEN** a two-quad mesh authors `primvars:st = [(0.25, 0.5), (0.75, 0.5)]`
+  with `interpolation = "uniform"`, at level 0 or 2
+- **THEN** every hit on the first face reads `(0.25, 0.5)` and every hit on the
+  second `(0.75, 0.5)`
 
 #### Scenario: Loop mesh with a Ptex texture
 
@@ -751,11 +805,16 @@ The importer SHALL accept authored values in these forms:
 - `driver:parameters:aov:*` keys on vars, and `driver:parameters:*` keys on
   products.
 
+The vars SHALL be resolved before any geometry is loaded, so the geometry
+import reads the primvars that `sourceType = "primvar"` vars name (see the
+aovs capability, "Primvar sources"), and no others for them.
+
 The importer SHALL refuse the following, each with one warning:
 
 - a target that is not a RenderProduct or RenderVar;
 - a product whose camera does not resolve;
-- `sourceType = "intrinsic"`.
+- `sourceType = "intrinsic"`;
+- `sourceType = "primvar"` with an empty `sourceName`.
 
 The render's camera and resolution SHALL be the first product's resolved
 values. `--camera` SHALL still take precedence.
@@ -781,6 +840,19 @@ values. `--camera` SHALL still take precedence.
 #### Scenario: Intrinsic source refused
 
 - **WHEN** a RenderVar authors `sourceType = "intrinsic"`
+- **THEN** a warning names the var and it is skipped
+
+#### Scenario: Primvar var accepted
+
+- **WHEN** a RenderVar `Pref` authors `uniform token dataType = "point3f"`,
+  `uniform string sourceName = "rest"` and
+  `uniform token sourceType = "primvar"`
+- **THEN** the product gets a closest-mode three-channel `Pref`, and no
+  warning is raised for the var
+
+#### Scenario: Primvar var without a name refused
+
+- **WHEN** a RenderVar authors `sourceType = "primvar"` and no `sourceName`
 - **THEN** a warning names the var and it is skipped
 
 ### Requirement: Imported opacity inputs are cutouts
@@ -1158,3 +1230,569 @@ shape SHALL render undisplaced with the rest of its material.
 
 - **WHEN** a `Cube` is bound to a material with a displacement
 - **THEN** a warning names the prim, and the cube renders as an undisplaced box
+
+### Requirement: The camera shutter defines the motion interval
+
+The importer SHALL read the render camera's `shutter:open` and `shutter:close`, which are
+offsets in time codes from the frame given by `-f`, with USD's fallback of 0 for each. With
+frame `f`, motion SHALL be measured from `f + open` (shutter open) to `f + close` (shutter
+close). The shutter SHALL be instantaneous when `close <= open`, or when no frame is given.
+The same interval SHALL drive the beauty's motion blur and the `motionvector` AOV.
+
+#### Scenario: Shutter authored on the camera
+
+- **WHEN** the render camera authors `shutter:open = 0` and `shutter:close = 0.5`, and the
+  render is made with `-f 5`
+- **THEN** motion is measured from time code 5 to time code 5.5
+
+#### Scenario: Shutter opening before the frame
+
+- **WHEN** the camera authors `shutter:open = -0.25` and `shutter:close = 0.25`, and the
+  render is made with `-f 5`
+- **THEN** motion is measured from time code 4.75 to time code 5.25
+
+#### Scenario: No shutter authored
+
+- **WHEN** the camera authors neither attribute
+- **THEN** the shutter is instantaneous, and a stage with time-sampled transforms renders
+  bitwise as it did before this change, with or without `-f`
+
+#### Scenario: Shutter of a named camera
+
+- **WHEN** `--camera` or `RenderSettings.camera` names a camera whose shutter is authored,
+  and another camera with a different shutter comes first on the stage
+- **THEN** the named camera's shutter is used
+
+#### Scenario: Camera settled on differs from the one whose shutter was read
+
+- **WHEN** no camera is named, and the camera the render goes through is not the first
+  camera on the stage with payloads unloaded, and the two cameras' shutters differ
+- **THEN** one warning names both cameras and the shutter the motion was measured over
+
+### Requirement: Time-sampled transforms move geometry over the shutter
+
+When the shutter is not instantaneous, each mesh, sphere, implicit shape, native
+instance and `PointInstancer` placement whose world transform varies over time (its own
+ops or an ancestor's) SHALL move from its shutter-open world transform to its
+shutter-close one, interpolated linearly. Unless motion blur is disabled, the beauty SHALL
+be blurred along that motion.
+
+#### Scenario: Animated translate is blurred
+
+- **WHEN** a sphere's `xformOp:translate` has time samples (-2, 0.6, 0) at frame 1 and
+  (2, 0.6, 0) at frame 10, the camera authors `shutter:close = 1`, and the render is made
+  with `-f 5`
+- **THEN** the sphere is streaked along +X over the distance it covers from frame 5 to
+  frame 6, about 0.44 units
+
+#### Scenario: Animated ancestor
+
+- **WHEN** a static mesh sits under an `Xform` whose `xformOp:rotateY` is time-sampled,
+  and the shutter is not instantaneous
+- **THEN** the mesh moves with its ancestor's rotation over the shutter
+
+#### Scenario: Animated instanceable prim
+
+- **WHEN** an instanceable prim whose prototype holds two meshes has a time-sampled
+  transform, and the shutter is not instantaneous
+- **THEN** both meshes of that instance move over the shutter, and other instances of the
+  same prototype with static transforms do not
+
+#### Scenario: Animated PointInstancer
+
+- **WHEN** a `PointInstancer`'s own `xformOp:translate` is time-sampled, and the shutter
+  is not instantaneous
+- **THEN** every instance it places moves with that translation over the shutter
+
+#### Scenario: Static prims are unchanged
+
+- **WHEN** the shutter is not instantaneous and a prim's world transform has no time
+  samples on itself or any ancestor
+- **THEN** that prim renders exactly as it would with an instantaneous shutter
+
+#### Scenario: Other attributes stay at the frame
+
+- **WHEN** a light's intensity and a moving mesh's transform are both time-sampled, and
+  the shutter opens before the frame
+- **THEN** the light's intensity is evaluated at the frame, and only the mesh's transform
+  is evaluated at shutter open and shutter close
+
+### Requirement: Authored translation adds to animated motion
+
+`crust:motion:translate` SHALL remain a world-space displacement over the shutter,
+whatever the shutter's length, including an instantaneous one. On a prim whose world
+transform also varies over the shutter, the authored translation SHALL be added to that
+motion: the prim's shutter-close placement SHALL be its shutter-close world transform,
+moved by the authored translation.
+
+#### Scenario: Translation without a shutter
+
+- **WHEN** a sphere authors `crust:motion:translate = (1, 0, 0)` and the camera authors no
+  shutter
+- **THEN** the sphere is blurred over one unit along X, as before this change
+
+#### Scenario: Translation on an animated prim
+
+- **WHEN** a mesh whose `xformOp:translate` moves it by (0, 1, 0) over the shutter also
+  authors `crust:motion:translate = (1, 0, 0)`
+- **THEN** each of its points moves by (1, 1, 0) over the shutter
+
+### Requirement: Time-sampled motion that is not produced is reported
+
+The importer SHALL warn, once per cause with a count of the prims involved, when a drawn
+prim's world transform varies over time but produces no motion:
+
+- the shutter is not instantaneous but no frame was given;
+- the prim is a curve, a light or a volume;
+- it lies inside a prototype;
+- it is a mesh baked for a non-invertible transform.
+
+Static stages and stages with an instantaneous shutter SHALL raise none of these warnings.
+
+#### Scenario: No frame given
+
+- **WHEN** the camera authors `shutter:close = 0.5`, a mesh's transform is time-sampled,
+  and the render is made without `-f`
+- **THEN** one warning says that time samples are not evaluated without a frame, and the
+  mesh renders sharp
+
+#### Scenario: Animated curves
+
+- **WHEN** a `BasisCurves` prim's transform is time-sampled and the shutter is not
+  instantaneous
+- **THEN** the curves render sharp where their transform places them at the frame, and
+  one warning counts them
+
+#### Scenario: Instantaneous shutter is not warned about here
+
+- **WHEN** the camera authors no shutter and a mesh's transform is time-sampled
+- **THEN** none of these warnings is raised
+
+### Requirement: Camera depth of field
+
+The render camera's lens SHALL have diameter `focalLength / fStop × 0.001 /
+metersPerUnit` scene units: `focalLength` read in millimetres, `metersPerUnit`
+the stage's. It SHALL focus at `focusDistance` scene units. Fallbacks:
+`focalLength` 50, `focusDistance` 10, `metersPerUnit` 0.01. An `fStop` of 0 or
+less, or unauthored, SHALL be a pinhole. The field of view SHALL not depend on
+`fStop`, `focusDistance` or `metersPerUnit`.
+
+#### Scenario: A centimetre stage
+
+- **WHEN** a stage authors `metersPerUnit = 0.01` and the render camera
+  authors `focalLength = 50`, `fStop = 2` and `focusDistance = 500`
+- **THEN** the lens diameter is 2.5 scene units (25 mm), and rays from every
+  lens sample through the frame centre meet 500 units down the view axis
+
+#### Scenario: A metre stage
+
+- **WHEN** a stage authors `metersPerUnit = 1` and the render camera authors
+  `focalLength = 50` and `fStop = 2`
+- **THEN** the lens diameter is 0.025 scene units (25 mm)
+
+#### Scenario: metersPerUnit unauthored
+
+- **WHEN** a stage does not author `metersPerUnit` and the render camera
+  authors `focalLength = 50` and `fStop = 2`
+- **THEN** the lens diameter is 2.5 scene units, as on a centimetre stage
+
+#### Scenario: No fStop is a pinhole
+
+- **WHEN** the render camera authors no `fStop`, or `fStop = 0`
+- **THEN** every camera ray through a pixel starts at the camera's position,
+  whatever the lens sample
+
+#### Scenario: The field of view does not change
+
+- **WHEN** the same camera is rendered on a stage with `metersPerUnit = 0.01`
+  and on one with `metersPerUnit = 1`
+- **THEN** the ray through each pixel's centre from the lens centre has the
+  same direction on both
+
+### Requirement: An unusable metersPerUnit is refused
+
+A stage `metersPerUnit` that is not finite, not positive, or so small that the
+lens diameter is not a finite `f32` SHALL be refused with
+one `camera.invalid_meters_per_unit` warning naming the value, and SHALL read as
+0.01. The check SHALL apply only when the render camera has a lens, so a
+pinhole render raises no warning.
+
+#### Scenario: A zero metersPerUnit
+
+- **WHEN** a stage authors `metersPerUnit = 0` and the render camera authors
+  `focalLength = 50` and `fStop = 2`
+- **THEN** one `camera.invalid_meters_per_unit` warning is raised and the lens
+  diameter is 2.5 scene units
+
+#### Scenario: A pinhole does not check
+
+- **WHEN** a stage authors `metersPerUnit = 0` and the render camera authors
+  no `fStop`
+- **THEN** no `camera.invalid_meters_per_unit` warning is raised
+
+#### Scenario: A unit too small for the lens
+
+- **WHEN** a stage authors `metersPerUnit = 1e-42` and the render camera authors
+  `focalLength = 50` and `fStop = 2`
+- **THEN** one `camera.invalid_meters_per_unit` warning is raised, the lens
+  diameter is 2.5 scene units and every camera ray is finite
+
+### Requirement: Render settings can disable depth of field
+
+`disableDepthOfField = true` SHALL render through a pinhole at the camera's
+position, whatever its `fStop`. The field of view and the focus plane SHALL not
+change. The value SHALL be resolved like `disableMotionBlur`: the first
+product's authored value, else the settings prim's, default `false`. It SHALL
+not be warned about as not honoured. An MCP edit of it SHALL take effect as a
+full re-import would.
+
+#### Scenario: Sharp render with a lens authored
+
+- **WHEN** the render camera authors `fStop = 2` and the render settings author
+  `disableDepthOfField = true`
+- **THEN** every camera ray starts at the camera's position, and no
+  `product.unhonoured_attribute` warning names `disableDepthOfField`
+
+#### Scenario: Product overrides the settings
+
+- **WHEN** the settings prim authors `disableDepthOfField = true` and the first
+  product authors `disableDepthOfField = false`, and the camera authors
+  `fStop = 2`
+- **THEN** the render has depth of field
+
+#### Scenario: Depth of field stays on by default
+
+- **WHEN** `disableDepthOfField` is not authored and the camera authors
+  `fStop = 2`
+- **THEN** the render has depth of field
+
+#### Scenario: Products that disagree
+
+- **WHEN** the first product authors `disableDepthOfField = true` and a second
+  product with the same camera and resolution authors
+  `disableDepthOfField = false`
+- **THEN** both products are written without depth of field and one
+  `product.depth_of_field_mismatch` warning names the second product
+
+### Requirement: The camera's aperture is conformed to the image's aspect
+
+The importer SHALL read `aspectRatioConformPolicy` from the first `RenderProduct`,
+else from the `RenderSettings` prim, as it resolves `resolution`; unauthored it SHALL
+be `expandAperture`. Before the field of view is derived, the render camera's
+apertures SHALL be conformed to the image's aspect as OpenUSD's
+`CameraUtilConformWindow` does, with square pixels. An unauthored `verticalAperture`
+SHALL still follow the image's aspect, so it needs no conform.
+
+#### Scenario: expandAperture keeps a narrow aperture's height
+
+- **WHEN** the camera authors `horizontalAperture = 36`, `verticalAperture = 24`, and
+  the settings author `resolution = (200, 100)` and no policy
+- **THEN** the render frames a 48 × 24 aperture: the vertical field of view is the
+  authored one, and the image is identical to the render before this change
+
+#### Scenario: expandAperture keeps a wide aperture's width
+
+- **WHEN** the camera authors `horizontalAperture = 36`, `verticalAperture = 24`, and
+  the settings author `resolution = (100, 100)` and no policy
+- **THEN** the render frames a 36 × 36 aperture: the whole authored width is in frame
+
+#### Scenario: adjustApertureHeight keeps the width
+
+- **WHEN** the camera authors `horizontalAperture = 36`, `verticalAperture = 24`, and
+  the settings author `resolution = (200, 100)` and
+  `aspectRatioConformPolicy = "adjustApertureHeight"`
+- **THEN** the render frames a 36 × 18 aperture, and the image differs from the one
+  rendered without the policy
+
+#### Scenario: cropAperture keeps the smaller extent
+
+- **WHEN** the camera authors `horizontalAperture = 36`, `verticalAperture = 24`, and
+  the settings author `resolution = (100, 100)` and
+  `aspectRatioConformPolicy = "cropAperture"`
+- **THEN** the render frames a 24 × 24 aperture
+
+#### Scenario: adjustApertureWidth keeps the height
+
+- **WHEN** the camera authors `horizontalAperture = 36`, `verticalAperture = 24`, and
+  the settings author `resolution = (100, 100)` and
+  `aspectRatioConformPolicy = "adjustApertureWidth"`
+- **THEN** the render frames a 24 × 24 aperture
+
+#### Scenario: A product's policy overrides the settings'
+
+- **WHEN** the settings author `aspectRatioConformPolicy = "adjustApertureWidth"` and
+  the first product authors `aspectRatioConformPolicy = "adjustApertureHeight"`
+- **THEN** the product's policy frames the render
+
+#### Scenario: An aperture that matches the image is unchanged
+
+- **WHEN** the camera's authored aperture has the image's aspect, or authors no
+  `verticalAperture`
+- **THEN** every policy renders the same image as before this change
+
+#### Scenario: The policy on the camera is not read
+
+- **WHEN** the camera prim, not the settings or a product, authors
+  `aspectRatioConformPolicy`
+- **THEN** it has no effect, as in OpenUSD, and the settings' policy (or
+  `expandAperture`) frames the render
+
+### Requirement: Everything that reads the camera's framing reads the conformed one
+
+Adaptive subdivision, on-screen implicit-shape sizing and the MCP session's
+in-place settings edits SHALL read the same conformed apertures as the render
+camera, so a policy that reframes the image also re-sizes what was tessellated for
+the old frame.
+
+#### Scenario: Adaptive subdivision follows the policy
+
+- **WHEN** a stage with adaptive subdivision changes only its
+  `aspectRatioConformPolicy` so that the conformed vertical aperture changes
+- **THEN** the tessellation is computed for the conformed field of view, and an MCP
+  edit making that change re-imports rather than applying in place
+
+#### Scenario: An in-place policy edit matches a re-import
+
+- **WHEN** an MCP edit changes `aspectRatioConformPolicy` on a stage whose geometry
+  does not read the camera
+- **THEN** the edit applies in place, and its render is bit-identical to a full
+  import of the same layer
+
+### Requirement: adjustPixelAspectRatio falls back to expandAperture
+
+Crust SHALL render square pixels only. A resolved policy of
+`adjustPixelAspectRatio` whose aperture aspect differs from the image's SHALL be
+conformed as `expandAperture`, with one `product.unhonoured_attribute` warning naming
+the pixel aspect ratio it would have needed.
+
+#### Scenario: A pixel-aspect policy on a mismatched aperture
+
+- **WHEN** the camera authors a 36 × 24 aperture, and the settings author
+  `resolution = (200, 100)` and
+  `aspectRatioConformPolicy = "adjustPixelAspectRatio"`
+- **THEN** one `product.unhonoured_attribute` warning names a pixel aspect ratio of
+  0.75, and the render is the `expandAperture` one
+
+#### Scenario: A pixel-aspect policy on a matching aperture
+
+- **WHEN** the policy is `adjustPixelAspectRatio` and the aperture already has the
+  image's aspect
+- **THEN** no warning is raised and the framing is unchanged
+
+### Requirement: An unknown conform policy is refused
+
+An authored `aspectRatioConformPolicy` that is not one of the five schema tokens
+SHALL be refused with one `product.invalid_conform_policy` warning naming the prim
+and the token, and read as `expandAperture`.
+
+#### Scenario: A misspelt policy
+
+- **WHEN** the settings author `aspectRatioConformPolicy = "adjustApertureHieght"`
+- **THEN** one `product.invalid_conform_policy` warning is raised, and the render is
+  framed as `expandAperture`
+
+### Requirement: Products that differ in conform policy share the first's framing
+
+Crust SHALL render one framing per render. A product after the first whose
+resolved `aspectRatioConformPolicy` differs from the first product's SHALL still be
+written, framed by the first's policy, with one `product.framing_mismatch` warning.
+
+#### Scenario: A second product with another policy
+
+- **WHEN** two products share the camera and resolution, the first resolves
+  `expandAperture` and the second `adjustApertureHeight`
+- **THEN** both files are written with the `expandAperture` framing, and one
+  `product.framing_mismatch` warning names the second product
+
+### Requirement: A curve hit knows its place on the strand
+
+A hit on a `BasisCurves` or `NurbsCurves` curve SHALL carry the index of the
+curve within its prim and `v`, its position along the whole strand in [0, 1]:
+the curve's parameter normalised so the first authored point (or the start of
+the NURBS domain, narrowed by `ranges`) is 0 and the last is 1. `v` SHALL be
+continuous across span boundaries and SHALL hold at every placement: top-level,
+instanced and `PointInstancer`-placed (curves carry no motion blur).
+
+#### Scenario: v runs root to tip on a cubic strand
+
+- **WHEN** a material outputs `curve:v` as its colour on a cubic `bspline`
+  strand of 7 control points (4 spans)
+- **THEN** the strand reads 0 at its first span's start, 0.25 at the boundary
+  between its first and second spans, and 1 at its last span's end
+
+#### Scenario: v on a linear curve follows its points
+
+- **WHEN** the same material is on a `linear` curve of 5 points
+- **THEN** a hit on the third segment at its midpoint reads `v` = 0.625
+
+#### Scenario: v on a trimmed NURBS curve spans the trimmed domain
+
+- **WHEN** an order-4 `NurbsCurves` curve authors `ranges = [(0, 0.5)]`
+- **THEN** the rendered half of the curve reads `v` from 0 at its start to 1
+  at its trimmed end
+
+#### Scenario: Curve index counts within the prim
+
+- **WHEN** a `BasisCurves` prim authors `curveVertexCounts = [4, 4, 4]` and
+  its material outputs `curve:index`
+- **THEN** the three strands read 0, 1 and 2
+
+#### Scenario: Instanced strands keep their prototype's v and index
+
+- **WHEN** a `PointInstancer` places a prototype hair clump at two rotations
+- **THEN** both placements read the same `v` and curve index at corresponding
+  points of corresponding strands
+
+### Requirement: Curve primvars are read for the materials that use them
+
+`constant`, `uniform`, `varying` and `vertex` primvars on `BasisCurves` and
+`NurbsCurves` of type `float`, `float2`, `float3`, `color3f` and `int` (read as
+float), in any precision and as an array or a lone `constant` value, SHALL be
+read when a material bound to the prim reads them by name, and
+interpolated at a hit as USD specifies: `uniform` per curve, `varying` linearly
+within a span, `vertex` by the curve's own basis. A primvar no bound material
+reads SHALL NOT be decoded.
+
+#### Scenario: A vertex colour ramp follows the curve's basis
+
+- **WHEN** a cubic `bspline` strand authors a `vertex` `color3f` primvar and
+  its material reads it through `geompropvalue`
+- **THEN** at every hit the colour equals the B-spline of the authored control
+  colours evaluated at that hit's curve parameter, inside a span as well as at
+  its ends
+
+#### Scenario: A uniform primvar colours each strand
+
+- **WHEN** a prim of three curves authors a `uniform` `color3f` primvar
+  `[(1,0,0), (0,1,0), (0,0,1)]` read by its material
+- **THEN** the strands render red, green and blue
+
+#### Scenario: Varying interpolates linearly within a span
+
+- **WHEN** a cubic strand authors a `varying` `float` primvar
+- **THEN** the value at a hit is the linear interpolation, in the span's own
+  parameter, of the values at that span's two ends
+
+#### Scenario: An unsupported primvar type is refused
+
+- **WHEN** a curve material reads a curve primvar of type `string` or
+  `matrix4d`
+- **THEN** the import raises `curves.unsupported_primvar` naming the prim and
+  the primvar, and the material reads the `geompropvalue`'s `default`
+
+#### Scenario: An interpolation the curves do not support is refused
+
+- **WHEN** a curve material reads a `faceVarying` curve primvar
+- **THEN** the import raises `curves.unsupported_primvar` naming it, and the
+  material reads the `geompropvalue`'s `default`
+
+### Requirement: A curve's st feeds its texture chart
+
+`primvars:st` (or the chart a bound material names) on a `BasisCurves` or
+`NurbsCurves` prim SHALL be read when a bound material reads the default chart,
+interpolated as any curve primvar, so `texcoord` and images read it on a curve
+as they do on a mesh. A curve without the chart SHALL read (0, 0), as a mesh
+without one does.
+
+#### Scenario: An image along the strand
+
+- **WHEN** a curve authors a `vertex` `primvars:st` and its material's `image`
+  reads the default chart
+- **THEN** the image is sampled at the interpolated `st` of each hit
+
+#### Scenario: No st, no chart
+
+- **WHEN** the same material is bound to a curve that authors no `st`
+- **THEN** every hit reads the image at (0, 0) and the import raises no
+  warning
+
+### Requirement: A curve's chart is filtered by the ray's footprint
+
+Images SHALL filter a curve's chart by the ray's footprint, converted through
+how fast the chart changes along the strand, as they filter a mesh's chart
+through its UV density.
+
+#### Scenario: A chart seen from afar is filtered
+
+- **WHEN** a ray whose footprint is 0.01 wide hits a strand whose `vertex` `st`
+  changes by half a unit per world unit along it
+- **THEN** the hit's texture footprint is 0.005 chart units, and 0 for a chart
+  authored once per curve
+
+### Requirement: The curve: primvar namespace is reserved
+
+The `geomprop` names `curve:v`, `curve:index` and `curve:random` SHALL name the
+hit's curve properties. An authored curve primvar under `primvars:curve:` SHALL
+NOT be read; the import SHALL raise `curves.reserved_primvar` naming the prim
+and the primvar once, and a material SHALL read the property.
+
+#### Scenario: An authored primvars:curve:v is refused
+
+- **WHEN** a `BasisCurves` prim authors `primvars:curve:v` and its material
+  reads `geompropvalue` `curve:v`
+- **THEN** the material reads the strand's own `v`, not the authored values,
+  and `curves.reserved_primvar` names the prim and `primvars:curve:v`
+
+### Requirement: Curve attributes cost nothing when no material reads them
+
+A scene in which no material bound to a curve reads a curve property, a curve
+primvar or the curve's chart SHALL build no per-span strand table and SHALL
+render bit-identically to its render before this change. A mesh SHALL render
+bit-identically unless its material uses a node that did not compile before
+(it then had the reported unsupported-node grey).
+
+A curve whose material reads only the chart, and which authors none, SHALL
+build no strand table either.
+
+#### Scenario: A textured groom with no st
+
+- **WHEN** a curve that authors no `st` is bound to a material whose only
+  curve need is the chart
+- **THEN** the import builds no strand table for it, and every hit reads the
+  chart at (0, 0)
+
+#### Scenario: The curves sample is unchanged
+
+- **WHEN** `samples/curves.usda` is rendered at 16 spp
+- **THEN** the image is bit-identical to the one rendered before this change
+
+#### Scenario: Unread primvars are not decoded
+
+- **WHEN** a groom prim authors ten primvars and its material reads one
+- **THEN** only that one primvar is decoded, and the `--stats` curve-table
+  memory counts only its values
+
+### Requirement: The dicing camera
+
+Tessellation that reads a camera SHALL read the dicing camera: adaptive subdivision levels, per-face edge rates and their view test, and the radial count of implicit shapes. Where those requirements say "the render camera", they mean the dicing camera. The dicing camera SHALL be the target of `rel crust:dicingCamera` on the `RenderSettings` prim when that target is a camera, and the render camera otherwise.
+
+#### Scenario: Unauthored, the render camera dices
+
+- **WHEN** a stage authors no `crust:dicingCamera`
+- **THEN** every subdivision level, edge rate and radial count is the one the
+  import gave before this requirement, and a 16 spp render is bit-identical to it
+
+#### Scenario: Geometry is diced for the dicing camera
+
+- **WHEN** a stage authors `crust:subdivisionEdgeLength`, renders through camera
+  `/A`, and sets `crust:dicingCamera` to camera `/B`, placed elsewhere
+- **THEN** every mesh is tessellated exactly as when the same stage renders
+  through `/B` with no `crust:dicingCamera`, while the image is seen through `/A`
+
+#### Scenario: A dicing camera alone enables adaptive tessellation
+
+- **WHEN** a stage authors `crust:subdivisionEdgeLength` and `crust:dicingCamera`
+  but names no render camera (no `--camera`, no `RenderSettings.camera`)
+- **THEN** adaptive subdivision and on-screen radial counts are computed through
+  the dicing camera, and no `subdiv.adaptive_needs_camera` warning is emitted
+
+#### Scenario: A target that is not a camera
+
+- **WHEN** `crust:dicingCamera` targets a prim that is not a camera, or no prim
+- **THEN** one warning naming the target is emitted, and the render camera dices
+
+#### Scenario: Products do not override it
+
+- **WHEN** the first render product authors its own `camera`
+- **THEN** the dicing camera is still `crust:dicingCamera` when authored, and the
+  product's camera only when it is not

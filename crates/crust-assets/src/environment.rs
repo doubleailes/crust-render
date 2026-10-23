@@ -73,9 +73,7 @@ fn decode_pixels(
     } else {
         decode_image_pixels(path)?
     };
-    space
-        .resolve_auto(integer, 3)
-        .decode_rgb_slice(&mut samples);
+    space.resolve_auto(integer).decode_rgb_slice(&mut samples);
     let pixels = samples
         .as_chunks::<3>()
         .0
@@ -243,7 +241,12 @@ fn decode_image_pixels(
             .as_deref(),
         Some("hdr")
     );
-    Ok((w, h, rgb.into_raw(), !is_hdr))
+    Ok((
+        w,
+        h,
+        rgb.into_raw(),
+        !is_hdr && crate::image_file::is_integer(decoded.color()),
+    ))
 }
 
 #[cfg(test)]

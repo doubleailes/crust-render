@@ -146,7 +146,8 @@ warning.
 
 The type must fit the source: three or four channels for the beauty, three for positions
 and normals, two for UVs and motion vectors, one for scalars. An integer type is accepted
-only for `sampleCount`. A var whose type does not fit is skipped with a warning.
+only for `sampleCount` and [primvars](#primvars). A var whose type does not fit is
+skipped with a warning.
 
 ### Source types
 
@@ -154,7 +155,7 @@ only for `sampleCount`. A var whose type does not fit is skipped with a warning.
 |--------------|---------|
 | `raw` (default) | `sourceName` is looked up in the table below. An empty `sourceName` uses the channel name. |
 | `lpe` | `sourceName` is a [light path expression](#light-path-expressions). An `lpe:` prefix (Hydra's) is dropped. |
-| `primvar` | Not supported yet: skipped with a warning. |
+| `primvar` | `sourceName` names a primvar of the hit prim, with or without the `primvars:` prefix. See [Primvars](#primvars). |
 | `intrinsic` | Unimplemented in UsdRender itself: skipped with a warning. |
 
 `sourceType` and `driver:parameters:aov:name` may be authored as a `token` or a
@@ -174,7 +175,7 @@ case-sensitive.
 | `distance` | `DistanceToCameraSD` | `float` | closest | Distance from the camera position to the first hit. `+inf` where nothing was hit. |
 | `P` | `Pworld`, `__Pworld`, `Position` | `point3f` | closest | World-space position of the first hit. |
 | `Peye` | `Pcam`, `__Pcam` | `point3f` | closest | Camera-space position of the first hit. |
-| `normal` | `N`, `Nworld`, `__Nworld`, `Normal` | `normal3f` | filtered | World-space shading normal, facing the camera. |
+| `normal` | `N`, `Nworld`, `__Nworld`, `Normal` | `normal3f` | filtered | World-space shading normal, facing the camera, after normal maps. |
 | `Neye` | `Nn` | `normal3f` | filtered | The same normal in camera space. |
 | `primvars:st` | `st`, `uv`, `UV` | `texCoord2f` | filtered | The first hit's texture coordinates. |
 | `sampleCount` | `__sampleCount` | `float` / `int` | per pixel | Samples the pixel took: shows where adaptive sampling stopped early. |
@@ -257,6 +258,77 @@ These authored attributes change the mode, first match wins:
 nothing was hit. Houdini authors `0` for every var, including depth.
 
 The beauty, `sampleCount` and `variance` are per-pixel quantities and ignore the mode.
+
+## Primvars
+
+A var with `sourceType = "primvar"` holds a primvar of the prim the camera ray hits
+first, interpolated at the hit as it is authored: `constant`, `uniform`, `vertex`,
+`varying` or `faceVarying`, indexed (`primvars:<name>:indices`) or not. `sourceName`
+names the primvar, with or without the `primvars:` prefix: `rest` and `primvars:rest` are
+the same channel. The pass production asks for most is the rest position, which keeps a
+compositing mask on a deforming surface:
+
+```usda
+def RenderVar "Pref"
+{
+    uniform token dataType = "point3f"
+    uniform string sourceName = "rest"
+    uniform token sourceType = "primvar"
+}
+```
+
+Other common ones are a second UV set (`texCoord2f`), `displayColor` (`color3f`) and an
+integer ID (`int`).
+
+- **Meshes and curves.** A primvar is read on `Mesh`, `BasisCurves` and `NurbsCurves`
+  prims, whatever their material reads. A prim that does not author it, a volume and
+  the background hold the var's clear value.
+- **Refined with the surface.** On a subdivided mesh, uniform or adaptive, a `vertex`
+  or `varying` primvar is refined like the points and a `faceVarying` one under the
+  mesh's `faceVaryingLinearInterpolation`, as the texture chart is; a `uniform` one
+  gives each refined face its cage face's value. A `rest` equal to the points therefore
+  agrees with `P` on a subdivided surface. A `varying` primvar is smoothed like a
+  `vertex` one, not interpolated bilinearly over each face as USD defines it.
+- **Displacement leaves it.** A displaced point reads the primvar of the undisplaced
+  point it came from: `Pref` is the rest position, not the displaced one.
+- **Read as authored.** A colour primvar is not converted into the working colour space.
+
+### Types
+
+`dataType` gives the channel count, which must be 1, 2 or 3: a four-component type
+(`color4f`, `float4`) is refused with a warning. The primvar must have that many
+components (an `int` primvar fits an `int` or a `float` var). On a prim whose primvar
+has another count, or no numeric value per element (a `string`, a `token`, a matrix, an
+array-valued primvar with `elementSize` above 1), the var is refused with one warning per
+var and prim, and that prim reads the clear value.
+
+The `dataType`'s family sets the default [accumulation](#accumulation) and the channel
+names:
+
+| `dataType` | accumulation | channels |
+|------------|--------------|----------|
+| `point3f`, `vector3f`, `normal3f` | closest | `.X .Y .Z` |
+| `int`, `uint` | closest | one channel, written as UINT |
+| `color3f` | filtered | `.R .G .B` |
+| `texCoord2f`, `float2` | filtered | `.U .V` |
+| `float`, `half` | filtered | one channel |
+
+A position, a direction or an ID is closest because a value blended across an edge
+belongs to neither surface. The overrides in [Accumulation](#accumulation) still apply.
+An integer is exact in the channel up to 2²⁴.
+
+Houdini authors `driver:parameters:aov:format` beside `dataType`. The format then sets
+the channel count and precision (`half3` writes three half channels), and the
+`dataType` still sets the family: a `point3f` var stored as `half3` stays closest.
+
+### Cost
+
+Primvars are read only when a var names them: a render without a primvar var reads,
+stores and evaluates none beyond what its materials read, and its beauty is unchanged.
+With one, each mesh authoring a named primvar keeps a table of about 12 bytes per
+triangle plus 16 per value, and a curves prim keeps a strand table (which takes its
+hits off the fastest intersection path); `--stats` reports both, as `primvar tables` and
+`curve strand tables`.
 
 ## Light path expressions
 
@@ -548,10 +620,15 @@ and blurs a sharp beauty along it. Its definition is Arnold's raw `motionvector`
 - **2D, in pixels of the rendered image**, measured through a pinhole at the lens centre
   (depth of field is ignored: the vector describes the in-focus image);
 - **`u` right, `v` up**, Nuke's conventions, in channels named `u` and `v`;
-- **per shutter**: the authored
-  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) is the
-  displacement over the shutter, and that is what the vector measures. The camera's
-  `shutter:open` / `shutter:close` are not read;
+- **per shutter**: the vector covers the
+  [camera's shutter](@/docs/usd/render-settings.md#camera-shutter), from
+  `frame + shutter:open` to `frame + shutter:close`. A shutter of one frame
+  (`shutter:close = 1`) gives a vector per frame, one of half a frame half that;
+- **from every motion crust renders**: a time-sampled transform (its own `xformOp`s or an
+  ancestor's) on a mesh, sphere, implicit shape, native instance or `PointInstancer`
+  placement, including rotation and scale, plus an authored
+  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), which is a
+  displacement over the shutter whatever its length;
 - **closest** by default (see [Accumulation](#accumulation)), with a clear value of `0`:
   a pixel at an object's edge holds the object's vector or the background's, never a
   blend that VectorBlur would smear across the edge;
@@ -562,15 +639,40 @@ shutter time is measured from where that point was at shutter open. The intended
 is a sharp beauty, with
 [`disableMotionBlur`](@/docs/usd/render-settings.md#disablemotionblur) on the render
 settings, and the blur added in Nuke. Blurring a beauty crust has already blurred doubles
-the blur.
+the blur. With `disableMotionBlur`, the sharp beauty is the scene at the frame, as
+`UsdRender` defines it, and each vector is the shutter's motion measured from there: a
+forward blur covers a shutter's length starting at the frame. With a shutter that opens at
+the frame (`shutter:open = 0`, as below) that is exactly the camera's shutter. With one
+that opens before it (`-0.25 .. 0.25`), the blur is shifted a quarter frame later; the
+deprecated `instantaneousShutter` keeps the sharp image at shutter open instead, where a
+forward blur covers the camera's shutter exactly.
+
+For an animated stage, that is three things: a shutter on the camera, blur off on the
+settings, and the var.
 
 ```usda
+def Camera "cam"
+{
+    double shutter:open = 0
+    double shutter:close = 0.5
+}
+
+def RenderSettings "settings"
+{
+    uniform bool disableMotionBlur = 1
+}
+
 def RenderVar "forward"
 {
     uniform token dataType = "float2"
     uniform string sourceName = "motionvector"
 }
 ```
+
+Render with a frame (`-f 5`): without one, time samples are not read at all. Without a
+shutter, the vector of a time-sampled transform is `(0, 0)`, and a
+[`camera.shutter_instantaneous`](@/docs/reference/warnings.md) warning says so when the
+stage has one.
 
 A var named `forward` writes `forward.u` and `forward.v`, which Nuke reads as its built-in
 `forward` layer, so VectorBlur2's `uv channels` knob finds it without any renaming. Any
@@ -581,13 +683,20 @@ could not hold leftward or downward motion), are refused with a warning.
 
 In VectorBlur2, select the layer in `uv channels`, choose the forward motion-vector type
 (crust writes no backward vector), and set the blur scale to the fraction of the shutter
-you want blurred: `1` blurs over the whole authored translation. VectorBlur clamps very
+you want blurred: `1` blurs over the whole shutter. VectorBlur clamps very
 long vectors with its own maximum; an object passing close to the camera produces such
 vectors, finite but large.
 
-Across one object the vector is not constant even though every point of the object moves
-by the same amount: a point closer to the camera covers more pixels for the same world
-displacement. This is perspective, not interpolation. A straight path in the scene still
+A rotating or scaling object's points move by different amounts: each point's vector is
+the straight chord from where it is at shutter open to where it is at shutter close, the
+path the blurred beauty follows too. Under a large rotation within one shutter the chord
+cuts the corner of the arc. Motion the vector cannot attribute to one placement (inside a
+prototype, or through a nested `PointInstancer`) is blurred but reads `(0, 0)`, with an
+[`xform.motion_vector_unsupported`](@/docs/reference/warnings.md) warning.
+
+Across one translating object the vector is not constant either, even though every point
+of the object moves by the same amount: a point closer to the camera covers more pixels
+for the same world displacement. This is perspective, not interpolation. A straight path in the scene still
 projects to a straight segment on screen, the one VectorBlur blurs along; only the speed
 along it varies.
 
@@ -635,6 +744,16 @@ it mirrors:
 | `crust:pixelFilterRadius` | `float` | its radius in pixels | [`--filter-radius`](@/docs/reference/command-line.md#filter-radius), `crust:pixelFilterRadius` |
 | `crust:frame` | `double` | the time code evaluated, a subframe included (not the sampler seed); absent without one | [`-f`](@/docs/reference/command-line.md#frame) |
 | `crust:camera` | `string` | the camera rendered through, after any fallback; absent for the procedural camera | [`--camera`](@/docs/reference/command-line.md#camera), `rel camera` |
+| `crust:focalLength` | `float` | the render camera's focal length, mm; absent for the procedural camera (as are the five below) | `focalLength` |
+| `crust:horizontalAperture` | `float` | its horizontal aperture as authored, mm | `horizontalAperture` |
+| `crust:verticalAperture` | `float` | its vertical aperture as authored, mm (the horizontal over the image's aspect when unauthored) | `verticalAperture` |
+| `crust:aspectRatioConformPolicy` | `string` | how the aperture was conformed to the image | `aspectRatioConformPolicy` |
+| `crust:fStop` | `float` | the lens's f-stop, `0` for a pinhole | `fStop` |
+| `crust:focusDistance` | `float` | the focus distance | `focusDistance` |
+| `crust:depthOfField` | `int` | `1` when the lens was open (an `fStop` above 0, depth of field not disabled), else `0` | `fStop`, `disableDepthOfField` |
+| `crust:motionBlur` | `int` | `1` when moving geometry was blurred (motion blur on, over a shutter that opens an interval), else `0` | `disableMotionBlur`, `shutter:open` / `shutter:close` |
+| `crust:layerStack` | `string` | the stage's root layer stack, strongest first (session layer, root layer, sublayers): one line per file, the 16-digit hex FNV-1a hash of its bytes as the scene was loaded (`-` if unreadable), a space, its absolute path (characters outside printable ASCII, and `%`, written as `%XX` UTF-8 bytes); absent when no layer is known | — |
+| `crust:invisibleOverrides` | `int` | the prims the strongest layer of that stack hides with an `over` authoring `visibility = "invisible"` — what a session or override layer hid of the scene beneath it | — |
 | `crust:version` | `string` | the crust version | — |
 
 The working space is not repeated: `colorInteropID` already records it. The stamp
@@ -687,20 +806,23 @@ Each of these is refused with a warning when authored, never ignored silently:
 - identity AOVs (`primId`, `instanceId`, `elementId`) and ID mattes. ID mattes are
   planned as [OpenEXRId](https://github.com/MercenariesEngineering/openexrid) deep EXRs,
   not Cryptomatte, once crust can write deep EXRs;
-- `sourceType = "primvar"`;
+- primvars a prim inherits: a `constant` primvar authored on an ancestor, the
+  per-instance primvars of a `PointInstancer`, and primvars authored on an instance prim.
+  Each is reported once per var, and the prims below read the clear value;
+- primvars of implicit shapes (`Sphere`, `Cube`, …), Gaussian splats and volumes: these
+  read the clear value without a warning;
+- four-component primvar vars;
 - the geometric normal `Ng`;
 - deep output (`productType = "deepRaster"`);
 - more than one camera or resolution in a render;
-- `pixelAspectRatio` and `disableDepthOfField` (warned only when authored with a value
-  that would change the image). `disableMotionBlur` and `instantaneousShutter` are
-  honoured: see [Render settings](@/docs/usd/render-settings.md#disablemotionblur), and
-  so is `dataWindowNDC`: see
-  [Render settings](@/docs/usd/render-settings.md#datawindowndc);
+- `pixelAspectRatio` (warned only when authored with a value that would change the
+  image). `disableMotionBlur` and `instantaneousShutter` are honoured: see
+  [Render settings](@/docs/usd/render-settings.md#disablemotionblur), and so are
+  `disableDepthOfField`: see
+  [Render settings](@/docs/usd/render-settings.md#disabledepthoffield), and
+  `dataWindowNDC`: see [Render settings](@/docs/usd/render-settings.md#datawindowndc);
 - a `dataWindowNDC` reaching outside the frame (overscan): it is clipped to the frame.
 
 The `resolution` fallback is crust's 640×360, not the schema's 2048×1080, so scenes
 without a `resolution` keep their size.
 
-For MaterialX surfaces whose `normal` input is connected (a normal map inside the
-MaterialX graph), `normal` and `Neye` give the interpolated mesh normal, before that
-input. UsdPreviewSurface normal maps are applied.

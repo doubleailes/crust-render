@@ -216,6 +216,56 @@ impl TileData {
         }
     }
 
+    /// A `half` payload's colour through `space`'s curve, alpha untouched;
+    /// a `u8` one unchanged, since its curve is in the sampler's table.
+    pub fn decoded(self, space: crust_core::ResolvedColorSpace) -> TileData {
+        if self.kind != TileKind::Half {
+            return self;
+        }
+        let mut samples: Vec<f32> = self
+            .bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| f16::from_bits(u16::from_le_bytes(*b)).to_f32())
+            .collect();
+        if self.alpha {
+            crate::decode_rgb_of_rgba(&mut samples, |rgb| space.decode_curve_slice(rgb));
+        } else {
+            space.decode_curve_slice(&mut samples);
+        }
+        let halves: Vec<f16> = samples.iter().map(|&s| f16::from_f32(s)).collect();
+        TileData::half(&halves, self.alpha)
+    }
+
+    /// The payload with its colour premultiplied by its alpha, in linear
+    /// light: a `u8` one through its space's tables (`crate::premultiply_u8`),
+    /// a `half` one, already linear, directly. A payload without alpha is
+    /// returned unchanged.
+    pub fn premultiplied(mut self, to_linear: &[f32; 256], steps: &[f32; 255]) -> TileData {
+        if !self.alpha {
+            return self;
+        }
+        match self.kind {
+            TileKind::U8 => {
+                crate::premultiply_u8(&mut self.bytes, to_linear, steps);
+                self
+            }
+            TileKind::Half => {
+                let mut samples: Vec<f32> = self
+                    .bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| f16::from_bits(u16::from_le_bytes(*b)).to_f32())
+                    .collect();
+                crate::premultiply_f32(&mut samples);
+                let halves: Vec<f16> = samples.iter().map(|&s| f16::from_f32(s)).collect();
+                TileData::half(&halves, true)
+            }
+        }
+    }
+
     /// Components (not bytes) — three per texel, four with alpha.
     pub fn len(&self) -> usize {
         match self.kind {
@@ -1305,7 +1355,7 @@ mod tests {
                 [(x % 251) as u8, (y % 251) as u8, ((x * 3 + y) % 251) as u8]
             })
             .collect();
-        write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+        write_tx(&path, &src, w, h).expect("write");
         path
     }
 
@@ -1367,8 +1417,7 @@ mod tests {
                 [x * 0.125, y * 0.0625, 12.5]
             })
             .collect();
-        crate::tiled::write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW)
-            .expect("write");
+        crate::tiled::write_tx_exr(&path, &src, w, h).expect("write");
 
         let tf = TiledFile::open(&path).expect("open");
         let budget = 1024 * 1024;
@@ -1926,7 +1975,7 @@ mod tests {
                 let src: Vec<u8> = (0..w * h)
                     .flat_map(|i| [(i % 251) as u8, k as u8, ((i / w) % 251) as u8])
                     .collect();
-                write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::RAW).expect("write");
+                write_tx(&path, &src, w, h).expect("write");
                 path
             })
             .collect()

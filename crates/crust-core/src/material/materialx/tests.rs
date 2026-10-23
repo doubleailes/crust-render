@@ -230,6 +230,43 @@ fn a_materialx_displacement_evaluates_at_the_vertex() {
     }
 }
 
+/// A displacement runs at the import's vertices, which supply no primvars: a
+/// `geompropvalue` there is reported (it reads its default), while one the
+/// surface alone reads is not.
+#[test]
+fn a_primvar_read_by_a_displacement_is_reported() {
+    let graph = |height: &str| {
+        format!(
+            r#"
+    <geompropvalue name="mask" type="float"><input name="geomprop" type="string" value="mask" /></geompropvalue>
+    <oren_nayar_diffuse_bsdf name="d" type="BSDF"><input name="weight" type="float" nodename="mask" /></oren_nayar_diffuse_bsdf>
+    <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="d" /></surface>
+    <constant name="one" type="float"><input name="value" type="float" value="1" /></constant>
+    <displacement name="disp" type="displacementshader">
+      <input name="displacement" type="float" nodename="{height}" />
+    </displacement>
+    <surfacematerial name="m" type="material">
+      <input name="surfaceshader" type="surfaceshader" nodename="s" />
+      <input name="displacementshader" type="displacementshader" nodename="disp" />
+    </surfacematerial>"#
+        )
+    };
+    let reported = |name: &str, height: &str| {
+        let loaded = load_inline(name, &graph(height)).expect("loads");
+        assert!(loaded.displacement.is_some() || !crate::config().displace);
+        loaded
+            .reported
+            .iter()
+            .any(|r| r.contains("geompropvalue in its displacement"))
+    };
+    assert_eq!(
+        reported("disp_primvar", "mask"),
+        crate::config().displace,
+        "the displacement reads one"
+    );
+    assert!(!reported("disp_plain", "one"), "only the surface reads one");
+}
+
 /// The JIT build of the displacement root matches the interpreter bit for
 /// bit, the pin every other MaterialX program carries.
 #[cfg(feature = "jit")]
@@ -290,4 +327,28 @@ fn only_reflection_only_leaves_are_opaque() {
         "tx_translucent",
         r#"<translucent_bsdf name="b" type="BSDF" />"#
     ));
+}
+
+#[test]
+fn viewdirection_is_unit_length_whatever_the_ray_length() {
+    // A camera ray points at the focus plane, so its direction is ~10 long
+    // here; `viewdirection` must not carry that length (#355).
+    let loaded = load_inline(
+        "view_length",
+        &emitter(
+            r#"<viewdirection name="v" type="vector3" />
+               <dotproduct name="len2" type="float">
+                 <input name="in1" type="vector3" nodename="v" />
+                 <input name="in2" type="vector3" nodename="v" />
+               </dotproduct>
+               <convert name="c" type="color3"><input name="in" type="float" nodename="len2" /></convert>
+               <uniform_edf name="e" type="EDF"><input name="color" type="color3" nodename="c" /></uniform_edf>"#,
+        ),
+    )
+    .expect("loads");
+    let (_, rec) = upward();
+    for dir in [Vec3A::new(0.0, 0.0, -10.0), Vec3A::new(3.0, -4.0, -0.5)] {
+        let e = loaded.material.emitted_at(&Ray::new(-dir, dir), &rec, 1.0);
+        assert!(e.abs_diff_eq(Vec3A::ONE, 1e-5), "|view|² = {e} for {dir}");
+    }
 }

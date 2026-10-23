@@ -76,6 +76,15 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// This camera with its lens closed: every ray leaves the eye, as
+    /// `disableDepthOfField` asks of the procedural fallback too.
+    pub(crate) fn pinhole(self) -> Self {
+        Self {
+            lens_radius: 0.0,
+            ..self
+        }
+    }
+
     /// Creates a new `Camera` with the specified parameters.
     pub fn new(
         lookfrom: Vec3A,
@@ -110,6 +119,12 @@ impl Camera {
             v,
             lens_radius,
         }
+    }
+
+    /// Whether the lens is open: rays leave a disk rather than the eye, and
+    /// out-of-focus depths blur.
+    pub fn has_depth_of_field(&self) -> bool {
+        self.lens_radius > 0.0
     }
 
     /// The world-space width one pixel spans at ray parameter `t = 1`.

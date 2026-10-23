@@ -2,7 +2,7 @@
 title = "Limitations"
 description = "What Crust Render does not do, or does only partly."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-14T08:00:00+00:00
+updated = 2026-10-21T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
@@ -29,10 +29,20 @@ render.
 
 ## Geometry
 
-- **Motion blur is transform-only.** It is set with
-  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), and the
-  transform is interpolated linearly. There is no deformation blur, no rotation blur, and
-  animated transforms aren't blurred.
+- **Motion blur is transform-only.** It comes from time-sampled transforms over the
+  [camera's shutter](@/docs/usd/render-settings.md#camera-shutter) and from
+  [`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate). What is not
+  blurred:
+  - deformation: animated `points` and `velocities` are read at the frame;
+  - curves, lights and volumes, and transforms animated inside a prototype or on a
+    `PointInstancer`'s per-instance arrays;
+  - the camera's own motion.
+
+  Only the shutter's two ends are read, and the transform is interpolated linearly
+  between them, element by element. A path that curves or goes out and back within the
+  shutter becomes its chord, and a large rotation shrinks the object mid-blur. With
+  `shutter:open` other than 0, transforms are read at `frame + shutter:open` while every
+  other attribute is read at the frame.
 - **No OpenVDB or `UsdVolVolume`.** Volumes are the three
   [`crust:volume:type`](@/docs/usd/volumes.md#crust-volume-type) kinds: homogeneous,
   procedural smoke, or a voxel grid authored in USD, or a homogeneous medium inside a mesh
@@ -80,14 +90,23 @@ render.
   roughness of about 0.6.
 - **Curves are round, open tubes.** `BasisCurves` `normals` (ribbons) and `wrap`
   (periodic curves) are not read. Curve primvars reach materials, but `faceVarying`
-  ones are not read, and on meshes `geompropvalue` reads only the chart. Rational
+  ones are not read. Rational
   `NurbsCurves` (unequal `pointWeights`) are approximated by polynomial spans, and
   NURBS curves above order 4 are skipped.
+- **Mesh primvars in materials have gaps.** `geompropvalue` reads a mesh's own primvars,
+  but not one authored on an ancestor or a `PointInstancer`; implicit shapes read only
+  `constant` ones; and a material that also reads a Ptex texture reads every primvar's
+  `default`. A `geompropvalue` in a MaterialX displacement graph reads no primvar at all
+  (it gives its `default`, with `mtlx.incomplete`). Point, vector and normal primvars are
+  read in the prim's own space, not transformed to world space.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
-  Zeltner sheen uses the table Adobe's reference uses rather than MaterialX's own curve
-  fits, which differ from it by up to 0.08 in reflectance for very smooth sheens seen at
-  grazing angles.
+  MaterialX BSDFs follow BSDL, the library OSL's reference renderer shades with, not
+  MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. A very
+  rough refracting `dielectric_bsdf` lit by a sampled light returns about 2% more light
+  than it receives, as it does in OSL's reference renderer. A coat over glass, seen from
+  inside within a degree or two past the critical angle, returns up to 6% more than it
+  receives.
 - **Texture filtering is isotropic.** Mip levels are chosen from ray cones, but the filter
   has no direction. A texture seen at a grazing angle is blurred more than an anisotropic
   (EWA) filter would blur it.
@@ -118,10 +137,23 @@ render.
 - **Some inputs are read but not used**, with a warning: `subsurface*` and `specularTint`
   on `PxrDisneyBsdf`, and `UsdTransform2d` on `UsdPreviewSurface` textures.
 
+## Camera and framing
+
+- **Square pixels only.** An authored `pixelAspectRatio` other than 1 is ignored with a
+  warning, and the `aspectRatioConformPolicy` `adjustPixelAspectRatio` frames as
+  `expandAperture` with a warning naming the pixel aspect it would have needed
+  ([details](@/docs/usd/render-settings.md#aspectratioconformpolicy)).
+- **No lens shift.** `horizontalApertureOffset` and `verticalApertureOffset` are not read:
+  the frame is always centred on the camera's axis.
+
 ## Lights
 
 - **Not supported:** mesh lights, portal lights, light filters, and shaping on distant and
-  dome lights. `inputs:diffuse` and `inputs:specular` are ignored with a warning.
+  dome lights.
+- **Diffuse and specular multipliers are averaged in the lobe AOVs.** The part of a light
+  with `inputs:diffuse` or `inputs:specular` that a surface receives through a bounce is
+  shared between its lobes' AOVs at the multipliers' average for that bounce
+  ([details](@/docs/usd/lights.md#diffuse-and-specular-multipliers)). The beauty is exact.
 - **Emissive surfaces aren't sampled as lights.** An emissive MaterialX surface, emissive
   curves, instances or volumes are found only by rays that hit them. Use UsdLux lights for
   a scene's main light sources.
@@ -181,9 +213,22 @@ render.
 
 ## MCP sessions
 
-- **Every edit imports the whole stage again**, and a session holds the stage it authors
-  beside the scene it renders, about twice a render's import memory: Moana-scale stages
-  are out of reach. See [Look-dev with Claude Desktop](@/docs/help/claude-desktop.md#limits).
+- **Structural edits import the whole stage again.** An edit confined to values of the
+  render settings, the render camera, a light's inputs or a used material's shader inputs
+  is applied in place, keeping the scene's geometry and BVH. Anything else (a prim added
+  or removed, a binding, a transform, visibility, a variant, a light's size), or an
+  in-place update that cannot give the same scene a full import would, imports the saved
+  file again, which on a production stage takes as long as a render's import, less the
+  texture decoding the session keeps.
+  [`CRUST_SCENE_DELTAS=0`](@/docs/reference/environment-variables.md#crust-scene-deltas)
+  imports every edit whole.
+- **A large stage costs more memory in a session than in a render.** Between edits a
+  session holds the scene it renders, its authoring stage (payloads unloaded) and every
+  texture it decoded, including ones the scene no longer uses until the next full import.
+  A full import builds the new scene before the old one is let go, so its peak is about
+  two scenes; an in-place edit does not. Applying most edits in place makes look-dev
+  edits cheap, not the stage smaller: Moana-scale stages are still out of reach. See
+  [Look-dev with Claude Desktop](@/docs/help/claude-desktop.md#limits).
 - **`query` can show a fallback the render does not use.** An unauthored schema
   attribute answers the USD schema's fallback (`source` `fallback`), but where crust has
   its own default the render uses that instead: a DistantLight with no

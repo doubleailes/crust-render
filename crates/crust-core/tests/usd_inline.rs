@@ -180,6 +180,61 @@ def Scope "Render"
     assert_eq!(none.settings.sampler(), crust_core::SamplerKind::Sobol);
 }
 
+/// `crust:maxDepth` counts shaded vertices, so 0 would render black (#344)
+/// and a negative depth would wrap to `u32::MAX`: both warn once, naming
+/// the attribute, and keep the default. 1, direct lighting only, is read.
+#[test]
+fn a_max_depth_below_one_warns_and_keeps_the_default() {
+    for (name, n) in [("max_depth_zero", 0), ("max_depth_negative", -2)] {
+        let scene = load_with_settings(
+            name,
+            "",
+            &format!(
+                r#"
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int crust:maxDepth = {n}
+    }}
+}}"#
+            ),
+        );
+        assert_eq!(scene.settings.max_depth(), 32, "maxDepth = {n}");
+        let invalid: Vec<_> = scene
+            .warnings
+            .iter()
+            .filter(|w| w.code == crust_core::WarningCode::SettingsInvalidValue)
+            .collect();
+        assert_eq!(invalid.len(), 1, "{invalid:?}");
+        assert!(
+            invalid[0].message.contains("crust:maxDepth"),
+            "{}",
+            invalid[0].message
+        );
+    }
+
+    let direct = load_with_settings(
+        "max_depth_one",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int crust:maxDepth = 1
+    }
+}"#,
+    );
+    assert_eq!(direct.settings.max_depth(), 1);
+    assert!(
+        !direct
+            .warnings
+            .iter()
+            .any(|w| w.code == crust_core::WarningCode::SettingsInvalidValue)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Prims and geometry
 // ---------------------------------------------------------------------------
@@ -702,6 +757,333 @@ fn f_stop_gives_the_camera_a_lens() {
     // Both converge on the focus plane 5 units down the axis.
     assert!(a.at(1.0).abs_diff_eq(Vec3A::ZERO, 1e-3), "{}", a.at(1.0));
     assert!(b.at(1.0).abs_diff_eq(Vec3A::ZERO, 1e-3), "{}", b.at(1.0));
+}
+
+/// A stage authoring `metadata` (e.g. `metersPerUnit = 1`) whose only
+/// prim is a camera at the origin looking down −Z with `lens` authored, and
+/// `render` (prims under `/Render`, which must hold `settings`) when not
+/// empty.
+fn load_lens(name: &str, metadata: &str, lens: &str, render: &str) -> Scene {
+    let render = if render.is_empty() {
+        String::new()
+    } else {
+        format!("def Scope \"Render\"\n{{\n{render}\n}}\n")
+    };
+    load_raw(
+        name,
+        &format!(
+            r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    {metadata}
+)
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 50
+        {lens}
+    }}
+}}
+{render}"#
+        ),
+    )
+}
+
+/// The distance between the origins of the rays the lens samples at the
+/// two ends of the disk's horizontal diameter give through the frame
+/// centre: the lens diameter in scene units.
+fn lens_diameter(scene: &Scene) -> f32 {
+    let a = scene.camera.get_ray(0.5, 0.5, [0.0, 0.5], 0.0);
+    let b = scene.camera.get_ray(0.5, 0.5, [1.0, 0.5], 0.0);
+    a.origin().distance(b.origin())
+}
+
+fn invalid_unit_warnings(scene: &Scene) -> usize {
+    scene
+        .warnings
+        .iter()
+        .filter(|w| w.code == crust_core::WarningCode::CameraInvalidMetersPerUnit)
+        .count()
+}
+
+#[test]
+fn the_lens_is_millimetres_converted_by_meters_per_unit() {
+    // A centimetre stage: 50 mm at f/2 is 25 mm, 2.5 units, and every lens
+    // sample's ray through the frame centre meets 500 units down the axis.
+    let cm = load_lens(
+        "lens_cm",
+        "metersPerUnit = 0.01",
+        "float fStop = 2\n        float focusDistance = 500",
+        "",
+    );
+    assert!(
+        (lens_diameter(&cm) - 2.5).abs() < 1e-5,
+        "{}",
+        lens_diameter(&cm)
+    );
+    let focus = Vec3A::new(0.0, 0.0, -500.0);
+    for lens in [[0.0, 0.5], [1.0, 0.5], [0.5, 0.0], [0.5, 1.0], [0.5, 0.5]] {
+        let ray = cm.camera.get_ray(0.5, 0.5, lens, 0.0);
+        assert!(
+            ray.at(1.0).abs_diff_eq(focus, 1e-3),
+            "{lens:?}: {}",
+            ray.at(1.0)
+        );
+    }
+
+    // A metre stage: the same 25 mm is 0.025 units.
+    let m = load_lens("lens_m", "metersPerUnit = 1", "float fStop = 2", "");
+    assert!(
+        (lens_diameter(&m) - 0.025).abs() < 1e-7,
+        "{}",
+        lens_diameter(&m)
+    );
+
+    // Unauthored reads USD's fallback, a centimetre.
+    let unauthored = load_lens("lens_unauthored", "", "float fStop = 2", "");
+    assert!(
+        (lens_diameter(&unauthored) - 2.5).abs() < 1e-5,
+        "{}",
+        lens_diameter(&unauthored)
+    );
+    for scene in [&cm, &m, &unauthored] {
+        assert_eq!(invalid_unit_warnings(scene), 0);
+    }
+}
+
+#[test]
+fn no_f_stop_is_a_pinhole() {
+    for (name, lens) in [
+        ("pinhole_unauthored", ""),
+        ("pinhole_zero", "float fStop = 0"),
+    ] {
+        let scene = load_lens(name, "metersPerUnit = 1", lens, "");
+        for uv in [[0.0, 0.5], [1.0, 0.5], [0.3, 0.9]] {
+            let ray = scene.camera.get_ray(0.2, 0.7, uv, 0.0);
+            assert_eq!(ray.origin(), Vec3A::ZERO, "{name}: {uv:?}");
+        }
+    }
+}
+
+#[test]
+fn the_field_of_view_does_not_depend_on_the_units() {
+    let cm = load_lens("fov_cm", "metersPerUnit = 0.01", "float fStop = 2", "");
+    let m = load_lens("fov_m", "metersPerUnit = 1", "float fStop = 2", "");
+    for (s, t) in [(0.5, 0.5), (0.0, 0.0), (1.0, 0.25), (0.1, 0.9)] {
+        let a = cm.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        let b = m.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        assert!(
+            a.direction()
+                .normalize()
+                .abs_diff_eq(b.direction().normalize(), 1e-6),
+            "({s}, {t}): {} vs {}",
+            a.direction(),
+            b.direction()
+        );
+    }
+}
+
+#[test]
+fn an_unusable_meters_per_unit_is_refused_only_for_a_lens() {
+    let lens = load_lens("unit_zero_lens", "metersPerUnit = 0", "float fStop = 2", "");
+    assert_eq!(invalid_unit_warnings(&lens), 1, "{:?}", lens.warnings);
+    assert!(
+        (lens_diameter(&lens) - 2.5).abs() < 1e-5,
+        "{}",
+        lens_diameter(&lens)
+    );
+
+    // Finite and positive, but the diameter (2.5e40 units) overflows `f32`: the
+    // lens would offset every ray to infinity.
+    let tiny = load_lens(
+        "unit_tiny_lens",
+        "metersPerUnit = 1e-42",
+        "float fStop = 2",
+        "",
+    );
+    assert_eq!(invalid_unit_warnings(&tiny), 1, "{:?}", tiny.warnings);
+    assert!(
+        (lens_diameter(&tiny) - 2.5).abs() < 1e-5,
+        "{}",
+        lens_diameter(&tiny)
+    );
+    let ray = tiny.camera.get_ray(0.5, 0.5, [0.9, 0.1], 0.0);
+    assert!(ray.origin().is_finite() && ray.direction().is_finite());
+
+    let pinhole = load_lens("unit_zero_pinhole", "metersPerUnit = 0", "", "");
+    assert_eq!(invalid_unit_warnings(&pinhole), 0, "{:?}", pinhole.warnings);
+
+    // A camera met first and dropped for the named one is not checked: one
+    // warning, for the camera rendered through.
+    let named = load_raw(
+        "unit_zero_named",
+        r#"#usda 1.0
+(
+    metersPerUnit = 0
+)
+
+def Xform "World"
+{
+    def Camera "First"
+    {
+        float fStop = 2
+    }
+    def Camera "Named"
+    {
+        float fStop = 4
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Named>
+    }
+}
+"#,
+    );
+    assert_eq!(invalid_unit_warnings(&named), 1, "{:?}", named.warnings);
+    assert!(
+        (lens_diameter(&named) - 1.25).abs() < 1e-5,
+        "{}",
+        lens_diameter(&named)
+    );
+}
+
+/// A stage with no camera renders through the procedural fallback, whose
+/// lens `disableDepthOfField` closes as it does a USD camera's.
+#[test]
+fn disable_depth_of_field_closes_the_fallback_cameras_lens() {
+    let stage = |name: &str, render: &str| {
+        load_raw(
+            name,
+            &format!(
+                "#usda 1.0\n\ndef Xform \"World\"\n{{\n}}\n\ndef Scope \"Render\"\n{{\n{render}\n}}\n"
+            ),
+        )
+    };
+    let blurred = stage("dof_fallback_lens", "");
+    assert!(lens_diameter(&blurred) > 0.0, "the fallback has a lens");
+    let sharp = stage(
+        "dof_fallback_pinhole",
+        r#"    def RenderSettings "settings"
+    {
+        uniform bool disableDepthOfField = 1
+    }"#,
+    );
+    assert_eq!(lens_diameter(&sharp), 0.0);
+    for (s, t) in [(0.5, 0.5), (0.0, 1.0)] {
+        let a = sharp.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        let b = blurred.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        assert!(a.direction().abs_diff_eq(b.direction(), 1e-5));
+    }
+}
+
+const DOF_PRODUCT: &str = r#"
+    def RenderProduct "p"
+    {
+        PRODUCT_DOF
+        token productName = "p.exr"
+        rel orderedVars = [</Render/beauty>]
+    }
+    def RenderVar "beauty"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "color"
+    }"#;
+
+#[test]
+fn disable_depth_of_field_renders_through_a_pinhole() {
+    let lens = "float fStop = 2\n        float focusDistance = 5";
+    // The settings disable it: a pinhole at the camera, and no warning
+    // calling the attribute unhonoured.
+    let sharp = load_lens(
+        "dof_disabled",
+        "metersPerUnit = 0.01",
+        lens,
+        r#"    def RenderSettings "settings"
+    {
+        uniform bool disableDepthOfField = 1
+    }"#,
+    );
+    assert_eq!(lens_diameter(&sharp), 0.0);
+    assert!(
+        sharp.warnings.iter().all(|w| {
+            w.code != crust_core::WarningCode::ProductUnhonouredAttribute
+                || !w.message.contains("disableDepthOfField")
+        }),
+        "{:?}",
+        sharp.warnings
+    );
+    // The field of view is the lens camera's.
+    let blurred = load_lens("dof_default_lens", "metersPerUnit = 0.01", lens, "");
+    assert!((lens_diameter(&blurred) - 2.5).abs() < 1e-5);
+    for (s, t) in [(0.5, 0.5), (0.0, 1.0), (0.8, 0.3)] {
+        let a = sharp.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        let b = blurred.camera.get_ray(s, t, [0.5, 0.5], 0.0);
+        assert!(a.direction().abs_diff_eq(b.direction(), 1e-5));
+    }
+
+    // The first product's value beats the settings'.
+    let product_on = load_lens(
+        "dof_product_on",
+        "",
+        lens,
+        &format!(
+            r#"    def RenderSettings "settings"
+    {{
+        uniform bool disableDepthOfField = 1
+        rel products = [</Render/p>]
+    }}{DOF_PRODUCT}"#
+        )
+        .replace("PRODUCT_DOF", "uniform bool disableDepthOfField = 0"),
+    );
+    assert!((lens_diameter(&product_on) - 2.5).abs() < 1e-5);
+
+    // Products that disagree: the render is the first's, sharp.
+    let disagree = load_lens(
+        "dof_products_disagree",
+        "",
+        lens,
+        &format!(
+            r#"    def RenderSettings "settings"
+    {{
+        rel products = [</Render/p>, </Render/q>]
+    }}{}{}"#,
+            DOF_PRODUCT.replace("PRODUCT_DOF", "uniform bool disableDepthOfField = 1"),
+            r#"
+    def RenderProduct "q"
+    {
+        uniform bool disableDepthOfField = 0
+        token productName = "q.exr"
+        rel orderedVars = [</Render/beauty>]
+    }"#
+        ),
+    );
+    assert_eq!(lens_diameter(&disagree), 0.0);
+    let mismatch: Vec<_> = disagree
+        .warnings
+        .iter()
+        .filter(|w| w.code == crust_core::WarningCode::ProductDepthOfFieldMismatch)
+        .collect();
+    assert_eq!(mismatch.len(), 1, "{mismatch:?}");
+    assert!(mismatch[0].message.contains("/Render/q"), "{mismatch:?}");
+
+    // A disabled lens checks no unit.
+    let unit = load_lens(
+        "dof_disabled_bad_unit",
+        "metersPerUnit = 0",
+        lens,
+        r#"    def RenderSettings "settings"
+    {
+        uniform bool disableDepthOfField = 1
+    }"#,
+    );
+    assert_eq!(invalid_unit_warnings(&unit), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2357,6 +2739,106 @@ fn a_subdivided_mesh_keeps_its_uv_chart() {
                 (u - x / 2.0).abs() < 1e-4 && (v - y / 2.0).abs() < 1e-4,
                 "{what}: ({x}, {y}) reads ({u}, {v})"
             );
+        }
+    }
+}
+
+/// A `uniform` chart is one coordinate per face, a `constant` one (authored,
+/// or a lone unauthored value) one for the whole mesh — read per face and per
+/// mesh, not per point, and the same whether the mesh renders its cage or a
+/// refinement (each face's value sits behind a seam, so it stays put).
+#[test]
+fn a_uniform_or_constant_chart_is_read_per_face_or_per_mesh() {
+    let dir = std::env::temp_dir().join("crust_usd_inline_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("chart_interp.mtlx"),
+        r#"<?xml version="1.0"?>
+<materialx version="1.38">
+  <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+    <input name="color" type="color3" value="0.8, 0.8, 0.8" />
+  </oren_nayar_diffuse_bsdf>
+  <surface name="s" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="d" />
+  </surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="s" />
+  </surfacematerial>
+</materialx>
+"#,
+    )
+    .expect("write probe mtlx");
+    let probe = |name: &str, st: &str, level: u32| {
+        load_at_level(
+            name,
+            &format!(
+                r#"
+    def Scope "Looks" {{
+        def Material "Mtl" (
+            prepend references = @chart_interp.mtlx@</MaterialX/Materials/m>
+        ) {{
+        }}
+    }}
+    def Mesh "Quads" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0)]
+        {st}
+        uniform token subdivisionScheme = "catmullClark"
+        rel material:binding = </World/Looks/Mtl>
+    }}"#
+            ),
+            level,
+        )
+    };
+    let left = (0.25, 0.5);
+    let right = (0.75, 0.5);
+    let cases = [
+        (
+            "uniform",
+            r#"texCoord2f[] primvars:st = [(0.25, 0.5), (0.75, 0.5)] (interpolation = "uniform")"#,
+            [left, right],
+        ),
+        (
+            "uniform_indexed",
+            r#"texCoord2f[] primvars:st = [(0.75, 0.5), (0.25, 0.5)] (interpolation = "uniform")
+        int[] primvars:st:indices = [1, 0]"#,
+            [left, right],
+        ),
+        (
+            "constant",
+            r#"texCoord2f[] primvars:st = [(0.75, 0.5)] (interpolation = "constant")"#,
+            [right, right],
+        ),
+        (
+            "constant_unauthored",
+            r#"texCoord2f[] primvars:st = [(0.25, 0.5)]"#,
+            [left, left],
+        ),
+    ];
+    for (what, st, expected) in cases {
+        for level in [0, 2] {
+            let scene = probe(&format!("chart_interp_{what}_{level}"), st, level);
+            for (x, y, (eu, ev)) in [
+                (0.1, 0.1, expected[0]),
+                (0.5, 0.9, expected[0]),
+                (0.9, 0.5, expected[0]),
+                (1.1, 0.5, expected[1]),
+                (1.5, 0.1, expected[1]),
+                (1.9, 0.9, expected[1]),
+            ] {
+                let r = Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
+                let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
+                let (u, v) = hit
+                    .rec
+                    .uv
+                    .unwrap_or_else(|| panic!("{what} level {level}: no chart at ({x}, {y})"));
+                assert!(
+                    (u - eu).abs() < 1e-5 && (v - ev).abs() < 1e-5,
+                    "{what} level {level}: ({x}, {y}) reads ({u}, {v}), not ({eu}, {ev})"
+                );
+            }
         }
     }
 }

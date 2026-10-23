@@ -113,15 +113,15 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
 /// A link collection's authored opinions, as far as membership depends on
 /// them — what two stages must agree on to be interchangeable for it.
 #[derive(PartialEq)]
-struct Opinions {
-    includes: Vec<sdf::Path>,
-    excludes: Vec<sdf::Path>,
-    include_root: Option<bool>,
-    expansion_rule: Option<String>,
-    expression: bool,
+pub(super) struct Opinions {
+    pub(super) includes: Vec<sdf::Path>,
+    pub(super) excludes: Vec<sdf::Path>,
+    pub(super) include_root: Option<bool>,
+    pub(super) expansion_rule: Option<String>,
+    pub(super) expression: bool,
 }
 
-fn opinions(prim: &Prim, name: &str) -> Opinions {
+pub(super) fn opinions(prim: &Prim, name: &str) -> Opinions {
     let prop = |suffix: &str| format!("collection:{name}:{suffix}");
     let targets = |suffix: &str| {
         prim.relationship(prop(suffix))
@@ -139,7 +139,7 @@ fn opinions(prim: &Prim, name: &str) -> Opinions {
 
 /// Whether some strict ancestor of `path` is a native instance, i.e. `path`
 /// names geometry inside a prototype.
-fn inside_instance(stage: &Stage, path: &sdf::Path) -> bool {
+pub(super) fn inside_instance(stage: &Stage, path: &sdf::Path) -> bool {
     let mut p = path.parent();
     while let Some(a) = p {
         if a.is_abs_root() {
@@ -192,6 +192,21 @@ impl LightLinks {
             .iter()
             .zip(&self.run_ends)
             .filter_map(|(&(first, id), &end)| Some((first..end, by_id[id as usize]?.to_string())))
+            .collect()
+    }
+
+    /// The path of each prim that emitted a volume region, once each, in
+    /// traversal order: kept for [`crate::live::Provenance`].
+    pub(super) fn volume_paths(&self) -> Vec<String> {
+        let mut by_id: Vec<Option<&sdf::Path>> = vec![None; self.paths.len()];
+        for (p, &id) in &self.paths {
+            by_id[id as usize] = Some(p);
+        }
+        let mut seen = vec![false; self.paths.len()];
+        self.volumes
+            .iter()
+            .filter(|&&(_, id)| !std::mem::replace(&mut seen[id as usize], true))
+            .filter_map(|&(_, id)| Some(by_id[id as usize]?.to_string()))
             .collect()
     }
 

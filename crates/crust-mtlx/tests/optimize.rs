@@ -26,7 +26,7 @@ impl Texture for Procedural {
     }
 }
 
-fn procedural(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn procedural(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     Some(TextureRef(Arc::new(Procedural)))
 }
 
@@ -55,6 +55,7 @@ fn shading_points() -> Vec<ShadeCtx<'static>> {
             position: Vec3A::new(t, 1.0 - t, t * t),
             uv_width: if i % 3 == 0 { 0.0 } else { t * 0.01 },
             curve: None,
+            primvars: &[],
         });
     }
     out

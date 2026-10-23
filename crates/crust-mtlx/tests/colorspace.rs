@@ -5,7 +5,8 @@
 //! effective space, `None` for a data image).
 
 use crust_mtlx::{
-    Closures, Compiler, Doc, Host, Op, ShadeCtx, Texture, TextureRef, Val, compile, flatten,
+    Closures, Compiler, Doc, Host, Op, ShadeCtx, TexelSpace, Texture, TextureRef, Val, compile,
+    flatten,
 };
 use glam::Vec3A;
 use std::cell::RefCell;
@@ -24,7 +25,7 @@ fn convert(space: &str, rgb: [f32; 3]) -> [f32; 3] {
     }
 }
 
-fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn decline(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     None
 }
 
@@ -45,6 +46,7 @@ fn ctx() -> ShadeCtx<'static> {
         position: Vec3A::ZERO,
         uv_width: 0.0,
         curve: None,
+        primvars: &[],
     }
 }
 
@@ -68,14 +70,13 @@ fn run(doc: &str, name: &str) -> Val {
 }
 
 /// Every `(file, colorspace)` the loader was asked for while compiling the
-/// nodes `names` of `doc`, in order.
-fn loads(doc: &str, names: &[(&str, &str)]) -> Vec<(String, Option<String>)> {
+/// nodes `names` of `doc`, in order: the declared name, `data` for a
+/// non-colour image and `unset` for a colour one no scope declares.
+fn loads(doc: &str, names: &[(&str, &str)]) -> Vec<(String, String)> {
     let d = Doc::parse(doc).expect("document parses");
     let asked = RefCell::new(Vec::new());
-    let loader = |f: &str, cs: Option<&str>| -> Option<TextureRef> {
-        asked
-            .borrow_mut()
-            .push((f.to_string(), cs.map(str::to_string)));
+    let loader = |f: &str, cs: TexelSpace<'_>| -> Option<TextureRef> {
+        asked.borrow_mut().push((f.to_string(), described(cs)));
         Some(TextureRef(Arc::new(Flat)))
     };
     let host = Host {
@@ -94,8 +95,16 @@ fn rgb(v: Val) -> [f32; 3] {
     v.rgb().to_array()
 }
 
-fn space(s: &str) -> Option<String> {
-    Some(s.to_string())
+fn space(s: &str) -> String {
+    s.to_string()
+}
+
+fn described(cs: TexelSpace<'_>) -> String {
+    match cs {
+        TexelSpace::Data => "data".to_string(),
+        TexelSpace::Unset => "unset".to_string(),
+        TexelSpace::Named(name) => name.to_string(),
+    }
 }
 
 #[test]
@@ -181,7 +190,7 @@ fn an_empty_colorspace_stops_the_inheritance() {
     assert_eq!(rgb(run(doc, "c")), [0.1, 0.2, 0.3]);
     assert_eq!(
         loads(doc, &[("", "tex")]),
-        [("albedo.png".to_string(), None)]
+        [("albedo.png".to_string(), space(""))]
     );
 }
 
@@ -201,8 +210,8 @@ fn a_data_image_gets_no_colorspace_whatever_the_document_says() {
     assert_eq!(
         loads(doc, &[("", "mask"), ("", "nrm"), ("", "rgba")]),
         [
-            ("mask.png".to_string(), None),
-            ("normal.png".to_string(), None),
+            ("mask.png".to_string(), space("data")),
+            ("normal.png".to_string(), space("data")),
             ("rgba.png".to_string(), space("srgb_texture")),
         ]
     );
@@ -384,10 +393,8 @@ fn compile_threads_the_host_through() {
     std::fs::write(&path, doc).unwrap();
 
     let asked = RefCell::new(Vec::new());
-    let loader = |f: &str, cs: Option<&str>| -> Option<TextureRef> {
-        asked
-            .borrow_mut()
-            .push((f.to_string(), cs.map(str::to_string)));
+    let loader = |f: &str, cs: TexelSpace<'_>| -> Option<TextureRef> {
+        asked.borrow_mut().push((f.to_string(), described(cs)));
         Some(TextureRef(Arc::new(Flat)))
     };
     let host = Host {

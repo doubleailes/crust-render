@@ -43,6 +43,7 @@ mod medium;
 pub mod names;
 mod pdf;
 pub mod place;
+mod primvars;
 /// The opt-in render profile (`--profile`): per-section thread time inside
 /// the render, after Guerilla Render's "Render Profile".
 pub mod profile;
@@ -86,6 +87,7 @@ pub use crust_rt as rt;
 pub use aabb::AABB;
 pub use aov::{
     Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, Precision,
+    PrimvarRole, PrimvarSource,
 };
 pub use buffer::Buffer;
 pub use camera::Camera;
@@ -110,8 +112,8 @@ pub use hittable::{FaceHit, HitPart, HitRecord};
 pub use light::{
     AffineShape, AreaLight, AreaShape, DistantLight, DomeLight, EVERY_CLASS, FoundAlong, Light,
     LightBounds, LightKind, LightLinks, LightList, LightSample, LightSelection, LightShape,
-    LightTree, Receiver, RectShape, ShapeExtent, ShapeHits, SolidAngleSampler, SolidAngleSampling,
-    SphereShape, TREE_DEFENSIVE_SHARE, UnitShape, projected_cone_solid_angle,
+    LightTree, LobeGains, Receiver, RectShape, ShapeExtent, ShapeHits, SolidAngleSampler,
+    SolidAngleSampling, SphereShape, TREE_DEFENSIVE_SHARE, UnitShape, projected_cone_solid_angle,
 };
 pub use lux::{
     IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_in, blackbody_rgb,
@@ -120,6 +122,7 @@ pub use lux::{
 pub use material::*;
 pub use medium::Medium;
 pub use pdf::{InvPdfArea, PdfSolidAngle};
+pub use primvars::{MeshHit, PrimvarChannel, PrimvarTable};
 pub use ray::{
     MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask, TRACE_T_MIN,
 };
@@ -139,7 +142,7 @@ pub mod implicit_shapes {
 pub use rt_world::traversal_report;
 pub use scene::{
     AssetLoader, CameraRecord, LS_FORMAT, LightRecord, ListKind, ListRecord, Listing,
-    MaterialRecord, NoAssets, UsdImportOptions, usd_schema_registry,
+    MaterialRecord, NoAssets, PassRecord, PassSummary, UsdImportOptions, usd_schema_registry,
 };
 pub use stats::{
     DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,

@@ -907,3 +907,178 @@ fn shared_and_nested_prototype_shapes_take_the_fixed_count() {
         "the nested cylinder is built shared"
     );
 }
+
+/// The dicing camera's tests: the render camera `/W/Cam` at the origin, a
+/// second camera `/W/Near` halfway to a cube at −600, where the two read the
+/// cube at different rates.
+fn dicing_body() -> String {
+    format!(
+        r#"{CAMERA}
+    def Camera "Near"
+    {{
+        double3 xformOp:translate = (0, 0, -300)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Xform "NotACamera" {{}}
+{}"#,
+        cube("Cube", (0.0, 0.0, -600.0), "")
+    )
+}
+
+/// A `RenderSettings` prim at 640×360 and a 2 px target, authoring `extra`
+/// and no camera.
+fn dicing_settings(extra: &str) -> String {
+    format!(
+        r#"def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        uniform int2 resolution = (640, 360)
+        float crust:subdivisionEdgeLength = 2
+        {extra}
+    }}
+}}"#
+    )
+}
+
+/// What a scene tessellated: its triangle count, per-edge rate bins, and the
+/// bits of the hit distance along rays from the origin into the cube.
+fn tessellation(scene: &Scene) -> (usize, Vec<u32>, Vec<Option<u32>>) {
+    let hits = [
+        (0.0, 0.0),
+        (0.3, 0.2),
+        (-0.7, 0.6),
+        (0.9, -0.9),
+        (0.5, 0.95),
+    ]
+    .iter()
+    .map(|&(x, y)| hit_t(scene, (x, y, -600.0)).map(f32::to_bits))
+    .collect();
+    let bins = scene
+        .stats
+        .subdivision
+        .rate_bins
+        .iter()
+        .map(|&b| b as u32)
+        .collect();
+    (unique_triangles(scene), bins, hits)
+}
+
+fn dicing_scene(name: &str, extra: &str) -> Scene {
+    let path = write_stage(name, &dicing_body(), &dicing_settings(extra));
+    load(&path, &UsdImportOptions::default())
+}
+
+fn codes(scene: &Scene) -> Vec<&str> {
+    scene.warnings.iter().map(|w| w.code.as_str()).collect()
+}
+
+/// Unauthored, the render camera dices; authored, the geometry is the one a
+/// render through the dicing camera gets, while the image is seen through the
+/// render camera.
+#[test]
+fn geometry_is_diced_for_the_dicing_camera() {
+    let through_cam = dicing_scene("dicing_unauthored", "rel camera = </W/Cam>");
+    let through_near = dicing_scene("dicing_through_near", "rel camera = </W/Near>");
+    assert_ne!(
+        tessellation(&through_cam),
+        tessellation(&through_near),
+        "the two cameras read the cube at different rates"
+    );
+    // Naming the render camera as the dicing camera changes nothing.
+    let cam_dices = dicing_scene(
+        "dicing_self",
+        "rel camera = </W/Cam>\n        rel crust:dicingCamera = </W/Cam>",
+    );
+    assert_eq!(tessellation(&cam_dices), tessellation(&through_cam));
+
+    let diced = dicing_scene(
+        "dicing_near",
+        "rel camera = </W/Cam>\n        rel crust:dicingCamera = </W/Near>",
+    );
+    assert!(diced.warnings.is_empty(), "{:?}", codes(&diced));
+    assert_eq!(
+        diced.camera_path.as_deref(),
+        Some("/W/Cam"),
+        "seen through /W/Cam"
+    );
+    assert_eq!(
+        format!("{:?}", diced.camera),
+        format!("{:?}", through_cam.camera)
+    );
+    assert_eq!(tessellation(&diced), tessellation(&through_near));
+}
+
+/// With no render camera named, a dicing camera is enough for adaptive
+/// tessellation, and nothing warns that a camera is needed.
+#[test]
+fn a_dicing_camera_alone_enables_adaptive_tessellation() {
+    let unnamed = dicing_scene("dicing_unnamed", "");
+    assert_eq!(unnamed.stats.subdivision.adaptive, None);
+    assert!(codes(&unnamed).contains(&"subdiv.adaptive_needs_camera"));
+
+    let diced = dicing_scene("dicing_alone", "rel crust:dicingCamera = </W/Near>");
+    assert_eq!(diced.stats.subdivision.adaptive, Some((2.0, 3)));
+    assert!(
+        !codes(&diced).contains(&"subdiv.adaptive_needs_camera"),
+        "{:?}",
+        codes(&diced)
+    );
+    let through_near = dicing_scene("dicing_alone_ref", "rel camera = </W/Near>");
+    assert_eq!(tessellation(&diced), tessellation(&through_near));
+}
+
+/// A target that is not a camera — another prim, no prim, or a property —
+/// warns once naming it, and the render camera dices.
+#[test]
+fn a_dicing_target_that_is_not_a_camera_warns() {
+    let through_cam = dicing_scene("dicing_ref", "rel camera = </W/Cam>");
+    for (name, target) in [
+        ("dicing_xform", "/W/NotACamera"),
+        ("dicing_nothing", "/W/Nope"),
+        ("dicing_property", "/W/Near.focalLength"),
+    ] {
+        let scene = dicing_scene(
+            name,
+            &format!("rel camera = </W/Cam>\n        rel crust:dicingCamera = <{target}>"),
+        );
+        let warned: Vec<_> = scene
+            .warnings
+            .iter()
+            .filter(|w| w.code.as_str() == "camera.dicing_not_a_camera")
+            .collect();
+        assert_eq!(warned.len(), 1, "{target}: {:?}", codes(&scene));
+        assert_eq!(warned[0].count, 1, "{target}");
+        assert!(warned[0].message.contains(target), "{}", warned[0].message);
+        assert_eq!(tessellation(&scene), tessellation(&through_cam), "{target}");
+    }
+}
+
+/// The first product's camera is the render camera, and dices only when no
+/// dicing camera is authored.
+#[test]
+fn products_do_not_override_the_dicing_camera() {
+    let product = |dicing: &str| {
+        format!(
+            "rel camera = </W/Cam>\n        rel products = [</Render/p>]\n        {dicing}\n    \
+             }}\n    def RenderProduct \"p\"\n    {{\n        rel camera = </W/Near>"
+        )
+    };
+    let through_cam = dicing_scene("dicing_product_ref_cam", "rel camera = </W/Cam>");
+    let through_near = dicing_scene("dicing_product_ref_near", "rel camera = </W/Near>");
+
+    let undiced = dicing_scene("dicing_product", &product(""));
+    assert_eq!(
+        undiced.camera_path.as_deref(),
+        Some("/W/Near"),
+        "the product's camera"
+    );
+    assert_eq!(tessellation(&undiced), tessellation(&through_near));
+
+    let diced = dicing_scene(
+        "dicing_product_diced",
+        &product("rel crust:dicingCamera = </W/Cam>"),
+    );
+    assert_eq!(diced.camera_path.as_deref(), Some("/W/Near"));
+    assert_eq!(tessellation(&diced), tessellation(&through_cam));
+}

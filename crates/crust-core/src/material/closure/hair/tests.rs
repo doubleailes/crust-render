@@ -320,3 +320,37 @@ fn demux_gives_two_numbers_in_the_unit_interval() {
     // Different inputs, different pairs.
     assert_ne!(demux(0.3), demux(0.7));
 }
+
+/// `r_fraction` is R's share of the value: times the whole fibre's value it
+/// is the value of the same fibre with only R tinted, toward every
+/// direction — what a light's `inputs:specular` scales of a fibre, the rest
+/// answering to its `inputs:diffuse`.
+#[test]
+fn r_fraction_is_the_primary_reflections_share() {
+    let full = params(0.3, 0.4, Vec3A::new(0.2, 0.5, 0.9), 0.5);
+    let r_only = HairParams {
+        tint: [Vec3A::ONE, Vec3A::ZERO, Vec3A::ZERO],
+        ..full
+    };
+    for &(theta, phi) in &VIEWS {
+        let wo = dir(theta, phi);
+        let h = Hair::new(&full, wo, luma);
+        let r = Hair::new(&r_only, wo, luma);
+        for (t, p) in [(0.2, 0.3), (-0.4, 1.9), (0.7, -2.5), (0.0, 3.0)] {
+            let wi = dir(t, p);
+            let frac = h.r_fraction(wi);
+            assert!(
+                frac.cmpge(Vec3A::ZERO).all() && frac.cmple(Vec3A::ONE).all(),
+                "{frac}"
+            );
+            let (f, _) = h.eval(wi);
+            let (fr, _) = r.eval(wi);
+            let err = (frac * f - fr).abs().max_element();
+            assert!(
+                err <= 1e-5 * f.max_element().max(1e-3),
+                "{wi}: {} vs {fr}",
+                frac * f
+            );
+        }
+    }
+}

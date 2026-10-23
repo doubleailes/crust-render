@@ -73,7 +73,9 @@ true curve, between 16 and 256 segments. A capsule's end caps get a quarter as m
 and at least two.
 
 This needs the render camera before the stage is read, so it applies only when the camera
-is named with `--camera` or `RenderSettings.camera`. It doesn't need adaptive subdivision
+is named with `--camera` or `RenderSettings.camera`. When
+[`crust:dicingCamera`](@/docs/usd/render-settings.md#crust-dicingcamera) names a camera,
+the size on screen is read through that camera instead, named or not. It doesn't need adaptive subdivision
 to be turned on. Without a named camera, every curved shape gets 48 segments. So does a
 shape inside a prototype that is placed more than once, since one mesh serves every
 placement. A prototype placed once is sized for its placement only when
@@ -130,9 +132,11 @@ Use only bits 0–2. Crust Render uses the higher bits for UsdLux shadow linking
 
 A world-space translation that the prim moves through while the shutter is open, for
 transform motion blur. The prim starts at its authored position when the shutter opens and
-has moved by this vector when it closes.
+has moved by this vector when it closes. It is one displacement over the shutter, whatever
+the shutter's length, including the default instantaneous one.
 
-Read on `Mesh`, `Sphere` and the [implicit shapes](#implicit-shapes).
+Read on `Mesh`, `Sphere`, the [implicit shapes](#implicit-shapes) and native instances
+(an `instanceable` prim).
 
 ```usda
 # A sphere that moves one unit to the right during the shutter.
@@ -145,9 +149,18 @@ def Sphere "Mover"
 }
 ```
 
-This is the only kind of motion blur. There is no deformation (per-vertex) blur, and
-animated `xformOp`s are read at the render frame only: they don't blur. A mesh with a non-invertible transform (for example, a scale of zero on
-one axis) can't move. Its `crust:motion:translate` is ignored with a warning.
+Time-sampled `xformOp`s are the other source of motion: with a
+[camera shutter](@/docs/usd/render-settings.md#camera-shutter) authored, a prim whose
+transform is animated moves from its shutter-open transform to its shutter-close one. On
+a prim that has both, the translation is added on top: the prim ends the shutter at its
+shutter-close transform, moved by `crust:motion:translate`. A mesh whose transform moves
+by `(0, 1, 0)` over the shutter and authors `(1, 0, 0)` has every point move by
+`(1, 1, 0)`.
+
+There is no deformation (per-vertex) blur: animated `points` are read at the frame. A
+mesh with a non-invertible transform (for example, a scale of zero on one axis) can't
+move. Its `crust:motion:translate` is ignored with a warning, and so is its animated
+transform ([`xform.motion_ignored`](@/docs/reference/warnings.md)).
 
 The blur can be turned off for the whole render with
 [`disableMotionBlur`](@/docs/usd/render-settings.md#disablemotionblur) on the
@@ -197,9 +210,10 @@ is what root-to-tip ramps, faded tips and per-strand colour variation are built 
 | `curve:random` | `float` | a value in [0, 1) per curve: the same strand gets the same value on every frame and render, neighbouring curves and different prims get unrelated ones |
 | any other name | as authored | the primvar of that name (`hairColor` reads `primvars:hairColor`) |
 
-Anywhere else, on a mesh or a sphere, `geompropvalue` gives its `default`. A curve prim
-that does not author the primvar, or authors one that can't be read, gives the `default`
-there too.
+Anywhere else, on a mesh or a sphere, the `curve:` names give the node's `default`, and
+any other name reads that geometry's own primvar (see
+[primvars in materials](#primvars-in-materials)). A curve prim that does not author the
+primvar, or authors one that can't be read, gives the `default` there too.
 
 Curve primvars are read with any of these interpolations:
 
@@ -264,8 +278,68 @@ per-curve id as a `uniform` `int` primvar and use it as a `randomfloat`'s `in`, 
 These attributes cost nothing unless a material reads them. A curve whose material reads
 none of them carries no extra data, and renders as it did before they existed. One that
 does carries a table of its spans and of the primvars it reads, decoded for that
-material only; `--stats` reports its size as `curve strand tables`.
+material only; `--stats` reports its size as `curve strand tables`. A
+[primvar AOV](@/docs/usd/aovs.md#primvars) gives a curve that authors its primvar a table
+too, whatever its material reads.
 
+
+## Primvars in materials
+
+A material bound to a `Mesh` reads the mesh's primvars by name through MaterialX
+`geompropvalue`, as a curve's material reads the groom's: `geomprop` `Alpha` reads
+`primvars:Alpha`, with or without the `primvars:` prefix, converted to the node's type as
+MaterialX's `convert` does (a `float` fills every channel of a `color3`, a wider value
+keeps its leading channels). That is how per-point opacity, vertex colours, per-face ids
+and `displayColor` reach a look.
+
+| interpolation | values | at a hit |
+|---------------|--------|----------|
+| `constant` | 1 | that value |
+| `uniform` | one per face | the face's value |
+| `vertex`, `varying` | one per point | linear across each triangle of the face |
+| `faceVarying` | one per face-vertex | linear across each triangle, discontinuous between faces |
+
+The types read are those curves read: `float`, `float2`, `float3`, `color3f` (converted
+from its `colorSpace`) and `int` (read as a float), in any precision, as an array or, for
+`constant`, a lone value. Indexed primvars (`primvars:<name>:indices`) are expanded. A
+subdivided mesh refines its `vertex` and `faceVarying` primvars with the surface, as it
+refines `primvars:st`, and each refined face keeps its cage face's `uniform` value. A
+displaced point reads the primvar of the point it was moved from.
+
+A mesh that does not author the primvar gives the node's `default`, silently. One
+authored with another type, an empty array or one whose length does not match its
+interpolation, or indices that are out of range or not an `int[]` gives the `default`
+too, with
+[`mesh.unsupported_primvar`](@/docs/reference/warnings.md#meshes-subdivision-and-displacement).
+
+`Sphere`, `Cube`, `Cylinder`, `Cone`, `Capsule` and `Plane` read `constant` primvars
+only: their tessellation has no points or faces an authored array could address, so any
+other interpolation is refused with the same warning.
+
+```usda
+def Mesh "Debris" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    int[] faceVertexCounts = [...]
+    int[] faceVertexIndices = [...]
+    point3f[] points = [...]
+    float[] primvars:Alpha = [...] (interpolation = "vertex")
+    rel material:binding = </World/Looks/Debris>
+}
+```
+
+```xml
+<geompropvalue name="alpha" type="float">
+  <input name="geomprop" type="string" value="Alpha" />
+  <input name="default" type="float" value="1" />
+</geompropvalue>
+<!-- into the surface's opacity, or open_pbr_surface's geometry_opacity -->
+```
+
+Only the primvars a material names are read, and only on the prims it is bound to, so
+a mesh whose material reads none pays nothing. A primvar is not inherited from an
+ancestor prim or a `PointInstancer`, and a material that reads both a Ptex texture and
+a primvar reads the primvar's `default`, with `mesh.unsupported_primvar`. See
+[limitations](@/docs/architecture/limitations.md#materials-and-textures).
 ## Standard geometry attributes
 
 Crust Render reads these standard `UsdGeom` attributes without any `crust:` attribute.

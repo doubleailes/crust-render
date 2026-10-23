@@ -69,6 +69,7 @@ fn session_matches_cli(name: &str, sample: &str, region: [usize; 4]) {
         .open_session(
             samples().join(sample).to_str().unwrap(),
             layer.to_str().unwrap(),
+            None,
         )
         .expect("opened");
     let open = state.session().expect("open");
@@ -120,6 +121,7 @@ fn an_undo_that_does_not_import_is_not_applied() {
         .open_session(
             samples().join("cornellbox.usda").to_str().unwrap(),
             layer.to_str().unwrap(),
+            None,
         )
         .expect("opened");
     let open = state.session().expect("open");
@@ -350,7 +352,7 @@ fn same_as_full_import(state: &mut State, dir: &Path, what: &str) {
     std::fs::copy(&layer, &copy).expect("copy the layer");
     let mut full = State::default();
     let opened = full
-        .open_session(input.to_str().unwrap(), copy.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), copy.to_str().unwrap(), None)
         .expect("the copy resumes");
     assert_eq!(opened["resumed"], true);
     assert_eq!(
@@ -373,7 +375,7 @@ fn lookdev_session(name: &str) -> (State, PathBuf) {
     let layer = dir.join("lookdev.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -676,7 +678,7 @@ fn probe_names_the_instance_or_the_instancer() {
     let input = samples().join("instancing.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     let job = finished_render(&mut state);
     assert_eq!(
@@ -699,6 +701,7 @@ fn cornell_render(name: &str, region: [usize; 4]) -> (State, std::sync::Arc<supe
         .open_session(
             samples().join("cornellbox.usda").to_str().unwrap(),
             layer.to_str().unwrap(),
+            None,
         )
         .expect("opened");
     let (job, _) = state
@@ -937,7 +940,7 @@ fn sourced_session(name: &str) -> (State, PathBuf) {
     let layer = dir.join("lookdev.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -1137,7 +1140,7 @@ fn session_on(name: &str, stage: &str) -> (State, PathBuf) {
     let layer = dir.join("edits.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -1211,6 +1214,540 @@ def Xform "World"
         let lens = r#"over "World" { over "Cam" { float focalLength = 35 } }"#;
         assert_eq!(author(&mut state, lens), "full", "{name} focal length");
     }
+}
+
+/// A translate, then a rotate, of the camera at `camera`: each
+/// is `class`, and when in place, the scene is a full import's.
+fn move_camera(state: &mut State, dir: &Path, name: &str, camera: &str, class: &str) {
+    let (parent, cam) = camera.rsplit_once('/').unwrap();
+    let parent = parent.trim_start_matches('/');
+    let moves = [
+        ("translate", "double3 xformOp:translate = (0.3, 0.6, 5.5)"),
+        (
+            "rotate",
+            "float3 xformOp:rotateXYZ = (-4, 6, 0)\n uniform token[] xformOpOrder = \
+             [\"xformOp:translate\", \"xformOp:rotateXYZ\"]",
+        ),
+    ];
+    for (what, op) in moves {
+        let usda = format!(r#"over "{parent}" {{ over "{cam}" {{ {op} }} }}"#);
+        assert_eq!(author(state, &usda), class, "{name} {what}");
+        if class != "full" {
+            same_as_full_import(state, dir, &format!("{name} {what}"));
+        }
+    }
+}
+
+/// A stage of meshes only (nothing tessellated from the camera) seen by
+/// `/World/Cam`; `settings` and `under_camera` are spliced into the settings
+/// prim and the camera prim.
+fn mesh_stage(settings: &str, under_camera: &str) -> String {
+    format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+        {settings}
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+{under_camera}
+    }}
+
+    def DomeLight "Sky"
+    {{
+        color3f inputs:color = (0.4, 0.5, 0.8)
+    }}
+
+    def DistantLight "Sun"
+    {{
+        float inputs:intensity = 3
+    }}
+
+    def Mesh "Floor"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, 0, 4), (4, 0, 4), (4, 0, -4), (-4, 0, -4)]
+    }}
+
+    def Mesh "Card"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)]
+    }}
+}}
+"#
+    )
+}
+
+/// The render camera's transform is a settings edit, in place and a full
+/// import's bit for bit, where nothing tessellated reads it: meshes alone,
+/// the Cornell box (whose camera is the first one met, unnamed), and a dome
+/// the camera does not see.
+#[test]
+fn moving_the_render_camera_is_a_settings_edit() {
+    let (mut state, dir) = session_on("camera_moves", &mesh_stage("", ""));
+    move_camera(&mut state, &dir, "meshes", "/World/Cam", "settings");
+    assert_eq!(undo(&mut state), "settings", "undo the rotate");
+    same_as_full_import(&mut state, &dir, "undo the rotate");
+
+    let hidden = mesh_stage("bool domeLightCameraVisibility = 0", "");
+    let (mut state, dir) = session_on("camera_moves_dome_hidden", &hidden);
+    move_camera(&mut state, &dir, "dome hidden", "/World/Cam", "settings");
+
+    let s = samples();
+    let cornell = format!(
+        r#"#usda 1.0
+(
+    subLayers = [@{}/cornellbox.usda@]
+)
+
+def Scope "Render" {{ def RenderSettings "settings" {{ uniform int2 resolution = (48, 32) }} }}
+"#,
+        s.display()
+    );
+    let (mut state, dir) = session_on("camera_moves_cornell", &cornell);
+    move_camera(&mut state, &dir, "cornellbox", "/scene/camera1", "settings");
+}
+
+/// A `!resetXformStack!` on the render camera drops its parent's transform:
+/// in place, as the rebuild re-reads the camera through the import's own
+/// composition, and the render is a full import's.
+#[test]
+fn resetting_the_render_camera_s_transform_stack_is_a_settings_edit() {
+    let stage = mesh_stage("", "").replace(
+        "def Xform \"World\"\n{\n",
+        "def Xform \"World\"\n{\n    double3 xformOp:translate = (0.5, 0.4, 0)\n    \
+         uniform token[] xformOpOrder = [\"xformOp:translate\"]\n",
+    );
+    assert!(stage.contains("(0.5, 0.4, 0)"), "the parent is transformed");
+    let (mut state, dir) = session_on("camera_reset", &stage);
+    let reset = r#"over "World" { over "Cam" {
+        uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"] } }"#;
+    assert_eq!(author(&mut state, reset), "settings");
+    same_as_full_import(&mut state, &dir, "reset the camera's transform stack");
+    assert_eq!(undo(&mut state), "settings");
+    same_as_full_import(&mut state, &dir, "undo the reset");
+}
+
+/// A camera that carries an imported prim moves it: `full`.
+#[test]
+fn moving_a_camera_with_prims_below_it_is_full() {
+    let carried = r#"
+        def Mesh "Badge"
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(0, 0, -2), (0.2, 0, -2), (0, 0.2, -2)]
+        }"#;
+    let (mut state, dir) = session_on("camera_carries", &mesh_stage("", carried));
+    move_camera(&mut state, &dir, "carried", "/World/Cam", "full");
+    // An exposure still is not a transform.
+    let exposure = r#"over "World" { over "Cam" { float exposure = 1 } }"#;
+    assert_eq!(author(&mut state, exposure), "settings");
+
+    // A volume region carried by the camera moves with it too.
+    let fog = r#"
+        def Cube "Fog"
+        {
+            double size = 1
+            token crust:volume:type = "homogeneous"
+            color3f crust:volume:sigmaS = (0.4, 0.4, 0.4)
+            color3f crust:volume:sigmaA = (0.05, 0.05, 0.05)
+            double3 xformOp:translate = (0, 0, -3)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }"#;
+    let (mut state, dir) = session_on("camera_carries_fog", &mesh_stage("", fog));
+    move_camera(&mut state, &dir, "carried fog", "/World/Cam", "full");
+    same_as_full_import(&mut state, &dir, "carried fog");
+}
+
+/// Tessellation diced for another camera stands when the render camera
+/// moves; moving the dicing camera, or retargeting it, re-imports, and so
+/// does moving a render camera that dices.
+#[test]
+fn a_dicing_camera_keeps_render_camera_moves_in_place() {
+    let s = samples();
+    let s = s.display();
+    let dicer = r#"
+    def Camera "Dicer"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#;
+    let adaptive = |dicing: &str| {
+        format!(
+            r#"#usda 1.0
+(
+    subLayers = [@{s}/subdivision_adaptive.usda@]
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+over "Render" {{ over "settings" {{
+    int2 resolution = (48, 27)
+    {dicing}
+}} }}
+
+over "World" {{ {dicer} }}
+"#
+        )
+    };
+    // No dicing camera: the render camera dices, and moving it moves geometry.
+    let (mut state, dir) = session_on("dicing_none", &adaptive(""));
+    move_camera(&mut state, &dir, "adaptive", "/World/Cam", "full");
+
+    let dicing = "rel crust:dicingCamera = </World/Dicer>";
+    let (mut state, dir) = session_on("dicing_adaptive", &adaptive(dicing));
+    assert!(!has_warning(&mut state, "subdiv.adaptive_needs_camera"));
+    move_camera(&mut state, &dir, "adaptive diced", "/World/Cam", "settings");
+    let moved = r#"over "World" { over "Dicer" { double3 xformOp:translate = (0, 0.5, 4) } }"#;
+    assert_eq!(
+        author(&mut state, moved),
+        "full",
+        "moving the dicing camera"
+    );
+    let retarget = r#"over "Render" { over "settings" { rel crust:dicingCamera = </World/Cam> } }"#;
+    assert_eq!(
+        author(&mut state, retarget),
+        "full",
+        "retargeting the dicing camera"
+    );
+
+    // Implicit shapes sized on screen, diced for another camera.
+    let on_screen = format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        {dicing}
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    {dicer}
+
+    def DistantLight "Sun"
+    {{
+        float inputs:intensity = 3
+    }}
+
+    def Cylinder "Post"
+    {{
+        double radius = 1
+        double height = 2
+    }}
+}}
+"#
+    );
+    let (mut state, dir) = session_on("dicing_on_screen", &on_screen);
+    move_camera(
+        &mut state,
+        &dir,
+        "on-screen diced",
+        "/World/Cam",
+        "settings",
+    );
+}
+
+/// A stage authoring `metadata` whose camera has a lens (`fStop = 2`), for
+/// the depth-of-field edits.
+fn lens_stage(metadata: &str) -> String {
+    format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    {metadata}
+)
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }}
+}}
+
+def Xform "World"
+{{
+    def Camera "Cam"
+    {{
+        float focalLength = 50
+        float fStop = 2
+        float focusDistance = 6
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+
+    def DistantLight "Sun"
+    {{
+        float inputs:intensity = 3
+    }}
+
+    def Sphere "Near"
+    {{
+        double radius = 0.5
+        double3 xformOp:translate = (-1, 0, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+
+    def Sphere "Far"
+    {{
+        double radius = 2
+        double3 xformOp:translate = (1, 0, -6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+}}
+"#
+    )
+}
+
+fn has_warning(state: &mut State, code: &str) -> bool {
+    state
+        .session()
+        .expect("open")
+        .scene
+        .report
+        .warnings
+        .iter()
+        .any(|w| w.code.as_str() == code)
+}
+
+/// `disableDepthOfField` is a settings edit: in place, it turns the lens
+/// into a pinhole as a full import of the same layer does, and its undo
+/// brings the lens back the same way. On a stage whose `metersPerUnit` the
+/// lens refuses, the refusal goes with the lens, as a full import drops it.
+#[test]
+fn disabling_depth_of_field_edits_as_a_full_import() {
+    let disable = r#"over "Render" { over "settings" { uniform bool disableDepthOfField = 1 } }"#;
+
+    let (mut state, dir) = session_on("dof_in_place", &lens_stage("metersPerUnit = 0.01"));
+    assert!(state.session().unwrap().scene.settings.depth_of_field());
+    assert_eq!(author(&mut state, disable), "settings");
+    assert!(!state.session().unwrap().scene.settings.depth_of_field());
+    same_as_full_import(&mut state, &dir, "disable depth of field");
+    assert_eq!(undo(&mut state), "settings");
+    same_as_full_import(&mut state, &dir, "undo disable depth of field");
+
+    let refused = "camera.invalid_meters_per_unit";
+    let (mut state, dir) = session_on("dof_bad_unit", &lens_stage("metersPerUnit = 0"));
+    assert!(has_warning(&mut state, refused));
+    author(&mut state, disable);
+    assert!(!has_warning(&mut state, refused), "no stale refusal");
+    same_as_full_import(&mut state, &dir, "disable depth of field, bad unit");
+    undo(&mut state);
+    assert!(has_warning(&mut state, refused), "the lens is back");
+    same_as_full_import(&mut state, &dir, "undo disable depth of field, bad unit");
+}
+
+/// A session over a metre-scale input with a lens renders as `crust render`
+/// of the input does, in a session render and in `render_final`: the
+/// override layer carries the input's `metersPerUnit`, so the lens is the
+/// input's 25 mm, not one read in centimetres.
+#[test]
+fn a_session_renders_the_inputs_lens() {
+    let stage = lens_stage("metersPerUnit = 1").replace(
+        "int crust:maxDepth = 2",
+        "int crust:maxDepth = 2\n        int crust:samplesPerPixel = 16",
+    );
+    let (mut state, dir) = session_on("lens_units", &stage);
+    let open = state.session().expect("open");
+    let (input, output) = (open.input.clone(), open.output.clone());
+    let region = [0, 0, 48, 32];
+
+    let (job, _) = open.start_render(Some(region), Some(16)).expect("started");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(job.wait(Duration::from_secs(3600)));
+    let finished = job.finished().expect("finished");
+    let session = planes(&finished, &job.aovs, "session");
+    let [(None, session)] = &session[..] else {
+        panic!("one beauty: {:?}", session.len())
+    };
+
+    let cli_dir = dir.join("cli");
+    std::fs::create_dir_all(&cli_dir).unwrap();
+    cli_render(&input, region, &cli_dir);
+    let cli = crust_assets::read_exr_planes(&cli_dir.join("output.exr")).expect("the CLI's file");
+    let report = crust_core::compare::compare(&cli, session);
+    assert!(report.identical, "session render: {}", report.to_text());
+
+    state
+        .session()
+        .unwrap()
+        .render_final()
+        .expect("render_final");
+    let last = crust_assets::read_exr_planes(&output.with_extension("exr")).expect("render_final");
+    let report = crust_core::compare::compare(&cli, &last);
+    assert!(report.identical, "render_final: {}", report.to_text());
+}
+
+/// A session over a Z-up input is Z up on its own stage, which reads its
+/// metadata from the override layer.
+#[test]
+fn a_session_over_a_z_up_input_is_z_up() {
+    let stage = lens_stage("").replace("upAxis = \"Y\"", "upAxis = \"Z\"");
+    let (mut state, _dir) = session_on("z_up_units", &stage);
+    let open = state.session().expect("open");
+    let axis = openusd_schemas::geom::StageMetadata::up_axis(&open.stage).expect("readable");
+    assert_eq!(axis.as_ref().map(|t| t.as_str()), Some("Z"));
+}
+
+/// Resuming a layer written before sessions copied the input's metrics adds
+/// the ones it lacks, keeping its opinions and any value it authors.
+#[test]
+fn resuming_adds_the_inputs_metrics_the_layer_lacks() {
+    let dir = work_dir("resume_metrics");
+    let input = dir.join("input.usda");
+    std::fs::write(
+        &input,
+        lens_stage("metersPerUnit = 1").replace("upAxis = \"Y\"", "upAxis = \"Z\""),
+    )
+    .unwrap();
+    // As the old `new_layer_text` wrote it, with an edit and an up axis of
+    // its own.
+    let layer = dir.join("edits.usda");
+    std::fs::write(
+        &layer,
+        "#usda 1.0\n(\n    subLayers = [\n        @./input.usda@\n    ]\n    upAxis = \"Y\"\n)\n\n\
+         over \"World\"\n{\n    over \"Cam\"\n    {\n        float exposure = 1\n    }\n}\n",
+    )
+    .unwrap();
+    let mut state = State::default();
+    let opened = state
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
+        .expect("resumed");
+    assert_eq!(opened["resumed"], true);
+    assert_eq!(
+        layer_field(&layer, "/", "metersPerUnit"),
+        Some(openusd::sdf::Value::Double(1.0))
+    );
+    assert!(
+        matches!(layer_field(&layer, "/", "upAxis"), Some(openusd::sdf::Value::Token(t)) if t.as_str() == "Y"),
+        "the layer's own up axis stays"
+    );
+    assert_eq!(
+        layer_field(&layer, "/World/Cam.exposure", "default"),
+        Some(openusd::sdf::Value::Float(1.0)),
+        "the edit stays"
+    );
+    let text = std::fs::read_to_string(&layer).unwrap();
+    assert!(text.contains("input.usda"), "{text}");
+}
+
+/// The shutter motion is measured over was read before the traversal and
+/// placed geometry at its ends, so editing it re-imports, and renders as a
+/// full import of the same layer would; the camera's exposure still applies
+/// in place.
+#[test]
+fn a_shutter_edit_reimports_and_an_exposure_stays_in_place() {
+    let stage = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 10
+)
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (48, 32)
+        int crust:maxDepth = 2
+    }
+}
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+    }
+
+    def Sphere "Mover"
+    {
+        double radius = 0.5
+        double3 xformOp:translate.timeSamples = {
+            1: (-1, 0, 0),
+            10: (1, 0, 0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"#;
+    let (mut state, dir) = session_on("shutter_edit", stage);
+    let exposure = r#"over "World" { over "Cam" { float exposure = 1 } }"#;
+    assert_eq!(author(&mut state, exposure), "settings");
+    same_as_full_import(&mut state, &dir, "shutter exposure");
+    let shutter = r#"over "World" { over "Cam" { double shutter:close = 0.5 } }"#;
+    assert_eq!(author(&mut state, shutter), "full");
+    same_as_full_import(&mut state, &dir, "shutter close");
+    assert_eq!(undo(&mut state), "full", "undo the shutter");
+    same_as_full_import(&mut state, &dir, "undo shutter close");
+
+    // Over a shutter that opens before the frame, `disableMotionBlur` poses
+    // the moving sphere at the frame rather than at shutter open: geometry
+    // moves, so the settings edit re-imports.
+    let centred = r#"over "World" { over "Cam" {
+        double shutter:open = -0.25
+        double shutter:close = 0.25
+    } }"#;
+    assert_eq!(author(&mut state, centred), "full");
+    let sharp = r#"over "Render" { over "settings" { uniform bool disableMotionBlur = 1 } }"#;
+    assert_eq!(author(&mut state, sharp), "full");
+    same_as_full_import(&mut state, &dir, "sharp at the frame");
 }
 
 /// A light-linked scene keeps its resolved links through an in-place light
@@ -1413,7 +1950,7 @@ def Xform "World"
     let layer = dir.join("edits.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     let roughness = r#"over "World" { over "Looks" { over "Clay" { over "Surface" {
         float inputs:roughness = 0.15 } } } }"#;
@@ -1681,7 +2218,7 @@ fn placement_session(name: &str) -> (State, PathBuf) {
     let layer = dir.join("placed.usda");
     let mut state = State::default();
     state
-        .open_session(input.to_str().unwrap(), layer.to_str().unwrap())
+        .open_session(input.to_str().unwrap(), layer.to_str().unwrap(), None)
         .expect("opened");
     (state, dir)
 }
@@ -1694,7 +2231,7 @@ fn session_vertices(state: &mut State, prim: &str) -> Vec<DVec3> {
     for ids in prov.geometry_of(prim) {
         open.scene
             .renderer
-            .world
+            .world()
             .visit(ids, RayMask::CAMERA, |_, piece| {
                 if let Piece::Triangle(vs) = piece {
                     out.extend(vs.map(|v| v.as_dvec3()));
@@ -1788,7 +2325,7 @@ fn a_drop_lands_only_on_its_target_and_on_uneven_ground() {
     let open = state.session().unwrap();
     let prov = open.scene.provenance().unwrap();
     let terrain = prov.geometry_of("/World/terrain");
-    let world = &open.scene.renderer.world;
+    let world = open.scene.renderer.world();
     let gaps: Vec<f64> = rock
         .iter()
         .filter_map(|v| {
@@ -2245,4 +2782,238 @@ fn a_curve_material_reading_a_new_primvar_reimports() {
     same_as_full_import(&mut state, &dir, "groom reads its primvar");
     assert_eq!(undo(&mut state), "full");
     same_as_full_import(&mut state, &dir, "groom primvar undone");
+}
+
+/// A stage with a mesh authoring `primvars:rest`, whose settings render the
+/// product without a primvar var.
+fn primvar_stage() -> String {
+    r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        double3 xformOp:translate = (0, 0, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+    }
+    def Mesh "M"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        point3f[] primvars:rest = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)] (
+            interpolation = "vertex"
+        )
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        uniform int2 resolution = (32, 24)
+        int crust:maxDepth = 2
+        rel products = [</Render/plain>]
+    }
+    def RenderProduct "plain"
+    {
+        token productName = "plain.exr"
+        rel orderedVars = [</Render/C>]
+    }
+    def RenderProduct "withRest"
+    {
+        token productName = "rest.exr"
+        rel orderedVars = [</Render/C>, </Render/Pref>]
+    }
+    def RenderVar "C"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "color"
+    }
+    def RenderVar "Pref"
+    {
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+    }
+}
+"#
+    .to_owned()
+}
+
+/// Retargeting `products` to one with a primvar var asks the geometry for a
+/// primvar it was read without, so the edit is `full`, and its render — the
+/// `Pref` channel included — is a full import's of the same layer, bit for
+/// bit; so is its undo.
+#[test]
+fn a_product_asking_for_a_new_primvar_reimports() {
+    let (mut state, dir) = session_on("primvar_products", &primvar_stage());
+    assert_eq!(
+        author(
+            &mut state,
+            r#"over "Render" { over "settings" { rel products = [</Render/withRest>] } }"#,
+        ),
+        "full"
+    );
+    same_as_full_import(&mut state, &dir, "products with Pref");
+    assert_eq!(undo(&mut state), "full");
+    same_as_full_import(&mut state, &dir, "products with Pref undone");
+}
+
+/// The `mcp-session` spec's "A session renders one pass": a session on
+/// `/Render/Passes/char` renders what `crust render --pass` of its layer
+/// renders, an edit to the pass's `matte` re-imports and holds the new target
+/// out, and a pass that is not one fails the call.
+#[test]
+fn a_session_renders_its_pass() {
+    let dir = work_dir("pass");
+    // The sample, small and quick.
+    let input = dir.join("shot.usda");
+    let text = std::fs::read_to_string(samples().join("render_passes.usda"))
+        .unwrap()
+        .replace("int2 resolution = (160, 90)", "int2 resolution = (32, 18)")
+        .replace(
+            "int crust:samplesPerPixel = 64",
+            "int crust:samplesPerPixel = 4",
+        );
+    std::fs::write(&input, text).unwrap();
+    let layer = dir.join("lookdev.usda");
+    let mut state = State::default();
+
+    let e = state
+        .open_session(
+            input.to_str().unwrap(),
+            layer.to_str().unwrap(),
+            Some("/World"),
+        )
+        .expect_err("not a pass");
+    assert!(e.contains("/World") && e.contains("RenderPass"), "{e}");
+    assert!(!layer.exists(), "a refused session leaves no layer");
+
+    let opened = state
+        .open_session(
+            input.to_str().unwrap(),
+            layer.to_str().unwrap(),
+            Some("/Render/Passes/char"),
+        )
+        .expect("opened");
+    assert_eq!(opened["pass"], "/Render/Passes/char");
+    let pass = |state: &mut State| state.session().unwrap().scene.report.pass.clone().unwrap();
+    assert_eq!(pass(&mut state).holdouts, 3);
+
+    // An edit applied in place keeps the pass in the check report.
+    let applied = author(
+        &mut state,
+        r#"over "World" { over "Key" { float inputs:intensity = 50 } }"#,
+    );
+    assert_eq!(applied, "lights", "a light input applies in place");
+    assert_eq!(pass(&mut state).holdouts, 3, "still the char pass");
+
+    state
+        .session()
+        .unwrap()
+        .render_final()
+        .expect("render_final");
+    let session = crust_assets::read_exr_planes(&dir.join("char.exr")).expect("char.exr");
+    let cli_dir = dir.join("cli");
+    std::fs::create_dir_all(&cli_dir).unwrap();
+    let Cli {
+        command: Command::Render(args),
+        ..
+    } = Cli::try_parse_from([
+        "crust",
+        "render",
+        "-i",
+        layer.to_str().unwrap(),
+        "--pass",
+        "/Render/Passes/char",
+    ])
+    .expect("render arguments")
+    else {
+        unreachable!("parsed as render")
+    };
+    let control = RenderControl::without_snapshots();
+    let beauty = cli_dir.join("output.exr");
+    let run = RenderRun {
+        control: &control,
+        progress_bar: false,
+        rendering: &|| {},
+        rendered: &|| false,
+        anchor: Some(&cli_dir),
+        beauty: Some(beauty.to_str().unwrap()),
+    };
+    render_and_write(&args, &run).expect("the CLI renders");
+    let cli = crust_assets::read_exr_planes(&cli_dir.join("char.exr")).expect("the CLI's char.exr");
+    let report = crust_core::compare::compare(&cli, &session);
+    assert!(report.identical, "render_final: {}", report.to_text());
+
+    let applied = author(
+        &mut state,
+        r#"over "Render" { over "Passes" { over "char" {
+            prepend rel collection:matte:includes = </World/Chars/Hero> } } }"#,
+    );
+    assert_eq!(applied, "full", "a collection edit re-imports");
+    assert_eq!(pass(&mut state).holdouts, 4, "the hero is held out too");
+}
+
+/// The latency of a render camera move, in place against `full`, measured as
+/// the `mcp-session` design record reports it: two sessions on the Cornell box
+/// at 640×480, the second without kept assets (`CRUST_SCENE_DELTAS=0`'s
+/// session), their translates interleaved so load lands on both. Prints each
+/// side's `import_s` min / mean. A measurement, not a check:
+/// `cargo test --release -p crust-render --bin crust camera_move_latency -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn camera_move_latency() {
+    let s = samples();
+    let stage = format!(
+        r#"#usda 1.0
+(
+    subLayers = [@{}/cornellbox.usda@]
+)
+
+def Scope "Render" {{ def RenderSettings "settings" {{ uniform int2 resolution = (640, 480) }} }}
+"#,
+        s.display()
+    );
+    let (mut in_place, _) = session_on("latency_in_place", &stage);
+    let (mut full, _) = session_on("latency_full", &stage);
+    full.session().unwrap().assets = None;
+    let moves = [
+        r#"over "scene" { over "camera1" { double3 xformOp:translate = (0.0074, 1.99, 4.01) } }"#,
+        r#"over "scene" { over "camera1" { double3 xformOp:translate = (0.2, 2.1, 4.3) } }"#,
+    ];
+    let mut times = [Vec::new(), Vec::new()];
+    for round in 0..20 {
+        for (side, (state, class)) in [(&mut in_place, "settings"), (&mut full, "full")]
+            .into_iter()
+            .enumerate()
+        {
+            let result = state
+                .session()
+                .unwrap()
+                .author_usda(moves[round % 2])
+                .expect("authored");
+            assert_eq!(result["applied"], class);
+            times[side].push(result["import_s"].as_f64().unwrap() * 1e3);
+        }
+    }
+    for (side, t) in ["in place", "full"].iter().zip(&times) {
+        let min = t.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mean = t.iter().sum::<f64>() / t.len() as f64;
+        eprintln!(
+            "{side}: {min:.2} / {mean:.2} ms (min / mean of {})",
+            t.len()
+        );
+    }
 }

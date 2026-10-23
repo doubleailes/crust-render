@@ -205,14 +205,9 @@ fn denying_skipped_warnings_exits_3_with_the_codes() {
     );
 }
 
-/// A texture with no `.tx` is a finding, not a warning: `--deny all` passes.
-#[test]
-fn findings_alone_do_not_deny() {
-    let dir = work_dir("findings_only");
-    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]))
-        .save(dir.join("albedo.png"))
-        .expect("png");
-    let body = r#"    def Scope "Looks"
+/// A sphere whose material reads `albedo.png` through a UsdUVTexture with no
+/// `sourceColorSpace` (so `auto`, sRGB for a PNG).
+const ALBEDO_LOOK: &str = r#"    def Scope "Looks"
     {
         def Material "M"
         {
@@ -236,6 +231,135 @@ fn findings_alone_do_not_deny() {
         rel material:binding = </World/Looks/M>
     }
 "#;
+
+/// The `crust-check/2` finding ids for `args` on a stage that binds
+/// `albedo.png`.
+fn finding_ids(dir: &Path, args: &[&str]) -> Vec<String> {
+    let path = stage(dir, ALBEDO_LOOK, "");
+    let mut all = vec!["check", "-i", path.to_str().unwrap(), "--json", "-"];
+    all.extend_from_slice(args);
+    let out = crust(dir, &all);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    parse(&out.stdout)["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// `--tx-color-space` names the `.tx` a check looks for, as it names the one
+/// `--auto-tx` writes: a file named for `Linear Rec.709 (sRGB)` streams the
+/// texture under that target (spelled by any alias) and is not looked for
+/// under the default ACEScg, where the texture has no `.tx`.
+#[test]
+fn the_tx_target_space_is_a_shared_flag() {
+    let dir = work_dir("tx_color_space");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]))
+        .save(dir.join("albedo.png"))
+        .expect("png");
+    // Any readable `.tx` will do: an Arnold-written one, under the name a
+    // Linear Rec.709 target gives this binding.
+    let arnold = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../crust-assets/tests/data/arnold_tx/srgb_canon_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx",
+    );
+    std::fs::copy(
+        arnold,
+        dir.join("albedo_sRGB Encoded Rec.709 (sRGB)_Linear Rec.709 (sRGB).png.tx"),
+    )
+    .expect("copy the .tx");
+    let without = "textures_without_tx".to_string();
+    assert!(finding_ids(&dir, &[]).contains(&without));
+    for target in ["Linear Rec.709 (sRGB)", "lin_rec709"] {
+        let ids = finding_ids(&dir, &["--tx-color-space", target]);
+        assert!(!ids.contains(&without), "{target}: {ids:?}");
+    }
+}
+
+/// A `.tx` target the OCIO config does not define is a usage error, for
+/// `render` as for `check`, and nothing is loaded or written.
+#[test]
+fn an_unknown_tx_target_space_is_a_usage_error() {
+    let dir = work_dir("tx_color_space_unknown");
+    let input = cornellbox();
+    for command in ["render", "check"] {
+        let out = crust(
+            &dir,
+            &[
+                command,
+                "-i",
+                input.to_str().unwrap(),
+                "--tx-color-space",
+                "nonsense",
+            ],
+        );
+        assert_eq!(code(&out), 2, "{command}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("defines no such colour space"),
+            "{command}: {err}"
+        );
+    }
+    assert!(files(&dir).is_empty(), "{:?}", files(&dir));
+}
+
+/// A config without `ACEScg` (it needs only crust's five well-known spaces)
+/// still renders when no `--tx-color-space` is given: the default target falls
+/// back to the data space. Only a target the user names is checked.
+#[test]
+fn a_config_without_the_default_tx_target_still_renders() {
+    let dir = work_dir("tx_color_space_no_acescg");
+    let config = dir.join("no_acescg.ocio");
+    std::fs::write(
+        &config,
+        "ocio_profile_version: 2\n\
+         roles:\n  default: lin_rec709\n  scene_linear: lin_rec709\n  data: raw\n\
+         displays:\n  sRGB:\n    - !<View> {name: Raw, colorspace: raw}\n\
+         colorspaces:\n\
+         \x20 - !<ColorSpace>\n    name: lin_rec709\n\
+         \x20 - !<ColorSpace>\n    name: raw\n    isdata: true\n\
+         \x20 - !<ColorSpace>\n    name: srgb_texture\n    from_scene_reference: \
+         !<ExponentWithLinearTransform> {gamma: 2.4, offset: 0.055, direction: inverse}\n\
+         \x20 - !<ColorSpace>\n    name: g22_rec709\n    from_scene_reference: \
+         !<ExponentTransform> {value: 2.2, direction: inverse}\n\
+         \x20 - !<ColorSpace>\n    name: g18_rec709\n    from_scene_reference: \
+         !<ExponentTransform> {value: 1.8, direction: inverse}\n",
+    )
+    .expect("write the config");
+    let input = cornellbox();
+    let render = |extra: &[&str]| {
+        let mut args = vec![
+            "render",
+            "-i",
+            input.to_str().unwrap(),
+            "-s",
+            "1",
+            "--ocio-config",
+            config.to_str().unwrap(),
+            "--display",
+            "sRGB",
+            "--view",
+            "Raw",
+            "-o",
+            "out.exr",
+        ];
+        args.extend_from_slice(extra);
+        crust(&dir, &args)
+    };
+    let out = render(&[]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let out = render(&["--tx-color-space", "ACEScg"]);
+    assert_eq!(code(&out), 2, "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A texture with no `.tx` is a finding, not a warning: `--deny all` passes.
+#[test]
+fn findings_alone_do_not_deny() {
+    let dir = work_dir("findings_only");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]))
+        .save(dir.join("albedo.png"))
+        .expect("png");
+    let body = ALBEDO_LOOK;
     let path = stage(&dir, body, "");
     let out = crust(
         &dir,
@@ -260,7 +384,11 @@ fn findings_alone_do_not_deny() {
         .collect();
     assert_eq!(ids, ["textures_without_tx"]);
     assert_eq!(v["findings"][0]["action"]["flag"], "--auto-tx");
-    assert!(!dir.join("albedo.tx").exists(), "check converts nothing");
+    assert!(
+        !files(&dir).iter().any(|f| f.ends_with(".tx")),
+        "check converts nothing: {:?}",
+        files(&dir)
+    );
 }
 
 #[test]
@@ -703,4 +831,67 @@ fn an_unknown_path_variable_is_kept_and_reported() {
         .unwrap_or_else(|| panic!("no product.unknown_variable in {:#?}", v["warnings"]));
     assert_eq!(unknown["prims"], serde_json::json!(["/Render/main"]));
     assert_eq!(unknown["kind"], "refused");
+}
+
+fn render_passes() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/render_passes.usda")
+        .canonicalize()
+        .expect("samples/render_passes.usda")
+}
+
+/// The `scene-check` spec's "A pass with its own settings" and "No pass":
+/// the report names the pass, the settings its `renderSource` chooses, the
+/// products those write and what it held out.
+#[test]
+fn the_active_pass_and_its_settings_are_reported() {
+    let dir = work_dir("pass");
+    let input = render_passes();
+    let input = input.to_str().unwrap();
+    let out = crust(
+        &dir,
+        &[
+            "check",
+            "-i",
+            input,
+            "--pass",
+            "/Render/Passes/char",
+            "--json",
+            "-",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    assert_eq!(v["pass"]["path"], "/Render/Passes/char");
+    // The crate, the mirror ball and the floor; the sky is a light.
+    assert_eq!(v["pass"]["holdouts"], 3);
+    assert_eq!(v["pass"]["camera_hidden"], 0);
+    assert_eq!(v["settings"], "/Render/charSettings");
+    assert_eq!(v["products"][0]["file"], "char.exr");
+
+    let out = crust(&dir, &["check", "-i", input, "--json", "-"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let v = parse(&out.stdout);
+    assert!(v["pass"].is_null());
+    assert_eq!(v["settings"], "/Render/settings");
+    assert_eq!(v["products"][0]["file"], "props.exr");
+
+    let out = crust(&dir, &["check", "-i", input, "--pass", "/World"]);
+    assert_eq!(code(&out), 1, "a path that is not a pass stops the check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("/World") && stderr.contains("RenderPass"),
+        "{stderr}"
+    );
+    assert!(files(&dir).is_empty(), "{:?}", files(&dir));
+
+    // A stage with no settings prim renders on the defaults, and says so:
+    // no settings prim is named, not the conventional path it fell back to.
+    let cornell = cornellbox();
+    let out = crust(
+        &dir,
+        &["check", "-i", cornell.to_str().unwrap(), "--json", "-"],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(parse(&out.stdout)["settings"].is_null());
 }

@@ -62,6 +62,8 @@ pub struct Options<'a> {
     pub scene_path: String,
     pub frame: Option<f64>,
     pub camera: Option<String>,
+    /// `--pass`, when given: the render pass the scene was imported with.
+    pub pass: Option<String>,
     /// `--region`, image space: the only crop.
     pub region: Option<PixelRect>,
     pub budget: Duration,
@@ -91,6 +93,7 @@ impl Options<'_> {
             scene_path: scene_path.into(),
             frame: None,
             camera: None,
+            pass: None,
             region: None,
             budget: Duration::from_secs(120),
             repeats: 3,
@@ -367,7 +370,7 @@ fn shoot(renderer: &mut Renderer, settings: RenderSettings) -> (Shot, Measured) 
         },
     );
     let rect = settings.region().flip_y(settings.get_dimensions().1);
-    let lum = luminance(&m, rect, renderer.lights.luma());
+    let lum = luminance(&m, rect, renderer.lights().luma());
     let (selection_s, training_s) = setup_parts(settings, selection, m.setup_s);
     let shot = Shot {
         image: CropImage {
@@ -2201,6 +2204,9 @@ fn command(
     }
     if let Some(c) = &options.camera {
         parts.extend(["--camera".into(), quote(c)]);
+    }
+    if let Some(p) = &options.pass {
+        parts.extend(["--pass".into(), quote(p)]);
     }
     if let Some(r) = options.region.and(region) {
         parts.extend([

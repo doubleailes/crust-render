@@ -203,3 +203,92 @@ fn the_sampler_is_recorded() {
         text("sobol")
     );
 }
+
+/// An override layer that sublayers the shot, opens the lens and hides a
+/// prim: its EXR records the lens, depth of field on, both layers strongest
+/// first with their content hashes, and the one prim it hid; `crust diff`
+/// against the shot's own render names the depth of field on both sides.
+#[test]
+fn the_lens_the_layer_stack_and_the_overrides_are_recorded() {
+    let dir = work_dir("lens");
+    let shot = sample("cornellbox.usda");
+    let layer = dir.join("override.usda");
+    std::fs::write(
+        &layer,
+        format!(
+            "#usda 1.0\n(\n    subLayers = [@{}@]\n)\nover \"scene\"\n{{\n    \
+             over \"camera1\"\n    {{\n        float fStop = 0.02\n        \
+             float focusDistance = 360\n    }}\n    over \"pTorus1\"\n    {{\n        \
+             token visibility = \"invisible\"\n    }}\n}}\n",
+            shot.display()
+        ),
+    )
+    .expect("write the override layer");
+    let args = ["-s", "1", "--region", "0,0,8,8"];
+    render(&dir, &shot, &[&["-o", "a.exr"][..], &args].concat());
+    render(&dir, &layer, &[&["-o", "b.exr"][..], &args].concat());
+
+    let a = stamp(&dir.join("a.exr"));
+    assert_eq!(a["crust:depthOfField"], AttributeValue::I32(0));
+    assert_eq!(a["crust:motionBlur"], AttributeValue::I32(0));
+    assert_eq!(a["crust:invisibleOverrides"], AttributeValue::I32(0));
+    assert!(matches!(a["crust:focalLength"], AttributeValue::F32(_)));
+    assert_eq!(a["crust:aspectRatioConformPolicy"], text("expandAperture"));
+
+    let b = stamp(&dir.join("b.exr"));
+    assert_eq!(b["crust:fStop"], AttributeValue::F32(0.02));
+    assert_eq!(b["crust:focusDistance"], AttributeValue::F32(360.0));
+    assert_eq!(b["crust:depthOfField"], AttributeValue::I32(1));
+    assert_eq!(b["crust:invisibleOverrides"], AttributeValue::I32(1));
+    let hash =
+        |p: &Path| crust_core::stamp::content_hash(&std::fs::read(p).expect("read the layer"));
+    let stack = format!(
+        "{:016x} {}\n{:016x} {}",
+        hash(&layer),
+        layer.display(),
+        hash(&shot),
+        shot.display()
+    );
+    assert_eq!(b["crust:layerStack"], text(&stack));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_crust"))
+        .current_dir(&dir)
+        .args(["diff", "a.exr", "b.exr"])
+        .output()
+        .expect("run crust diff");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("depth of field differs (a: no depth of field; b: fStop 0.02, focus 360)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("crust:invisibleOverrides differs (0 vs 1)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("crust:layerStack: {} only in b", layer.display())),
+        "{stderr}"
+    );
+}
+
+/// The same stage typed relative to the working directory stamps the same
+/// absolute layer path, so `diff` sees one layer, not two.
+#[test]
+fn a_relative_stage_path_stamps_the_absolute_layer() {
+    let dir = work_dir("relative");
+    let shot = sample("cornellbox.usda");
+    let samples = shot.parent().expect("samples dir");
+    let out = dir.join("rel.exr");
+    let out = out.to_str().expect("utf-8 temp path");
+    render(
+        samples,
+        Path::new("cornellbox.usda"),
+        &["-o", out, "-s", "1", "--region", "0,0,8,8"],
+    );
+    let s = stamp(&dir.join("rel.exr"));
+    let hash = crust_core::stamp::content_hash(&std::fs::read(&shot).expect("read the shot"));
+    assert_eq!(
+        s["crust:layerStack"],
+        text(&format!("{hash:016x} {}", shot.display()))
+    );
+}

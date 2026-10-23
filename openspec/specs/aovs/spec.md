@@ -47,7 +47,8 @@ parentheses.
 - `P` (`Pworld`, `__Pworld`, `Position`) and `Peye` (`Pcam`, `__Pcam`):
   first-hit position, in world space and camera space respectively.
 - `normal` (`N`, `Nworld`, `__Nworld`, `Normal`) and `Neye` (`Nn`): the
-  shading normal, facing the ray, in world space and camera space
+  shading normal after any normal map (a MaterialX `normal` input included),
+  facing the ray, in world space and camera space
   respectively. Values are in [-1, 1].
 - `primvars:st` (`st`, `uv`, `UV`): the first hit's UV.
 - `sampleCount` (`__sampleCount`): the samples the pixel took.
@@ -111,7 +112,11 @@ Each AOV SHALL be accumulated in one of two modes:
 The default mode SHALL come from the source:
 
 - colour, LPE, alpha, normal, albedo and UV are filtered;
-- depth, distance, position, motion vectors and IDs are closest.
+- depth, distance, position, motion vectors and IDs are closest;
+- a primvar source's default comes from its `dataType`. `point*`,
+  `vector*`, `normal*` and integer types are closest, because they are
+  positions, directions or identifiers that must never be blended across an
+  edge. `color*`, `float*`, `half*` and `texCoord*` types are filtered.
 
 The default SHALL be overridden by `driver:parameters:aov:multiSampled`
 (true → filtered, false → closest), and then by Arnold `arnold:filter`, Karma
@@ -136,6 +141,17 @@ default clear value.
   background, and its `motionvector` var authors no accumulation override
 - **THEN** the pixel holds either the foreground's vector or `(0, 0)`, never
   a value in between
+
+#### Scenario: A rest position is never blended across an edge
+
+- **WHEN** a pixel straddles two meshes whose `primvars:rest` differ, and a
+  `point3f` primvar var for `rest` authors no accumulation override
+- **THEN** the pixel holds one mesh's rest position, never a value in between
+
+#### Scenario: A colour primvar is filtered
+
+- **WHEN** the same pixel is read through a `color3f` var for `displayColor`
+- **THEN** the pixel holds the filter-weighted blend of the two colours
 
 ### Requirement: Light path expression sources
 
@@ -368,9 +384,12 @@ zero-AOV render, unchanged.
 The `motionvector` source SHALL be the first hit's forward 2D screen-space
 displacement from shutter open to shutter close, in pixels of the rendered
 image. `u` SHALL be positive to the right and `v` positive upwards, as Nuke
-expects. A hit on geometry authoring `crust:motion:translate` SHALL report
-where that translation moves the hit's shutter-open point on screen. Units
-SHALL be per shutter interval. The source SHALL have two floating-point
+expects. A hit on geometry that moves over the shutter SHALL report
+where that motion takes the hit's shutter-open point on screen. That motion is an
+authored `crust:motion:translate` or a time-sampled transform, including rotation and
+scale. Units
+SHALL be per shutter interval, the camera's `shutter:open` to `shutter:close`. The
+source SHALL have two floating-point
 components (float or half) and a clear value of 0.
 
 #### Scenario: Object moving right
@@ -388,10 +407,36 @@ components (float or half) and a clear value of 0.
   axis
 - **THEN** pixels on the sphere hold a positive `v`
 
+#### Scenario: Time-sampled translate
+
+- **WHEN** `samples/animation.usda`'s `Mover` (whose `xformOp:translate` goes from
+  (-2, 0.6, 0) at frame 1 to (2, 0.6, 0) at frame 10) is rendered with `-f 5`, a camera
+  authoring `shutter:close = 1`, and a `motionvector` var
+- **THEN** its centre pixel's `u` equals, within 0.01 px, the screen distance between the
+  projections of the hit's shutter-open point and that point moved 4/9 units along +X,
+  and its `v` is 0 within tolerance
+
+#### Scenario: Time-sampled rotation
+
+- **WHEN** a cube spinning about the camera's view axis through its centre by a
+  time-sampled `xformOp:rotateZ` is rendered with a non-instantaneous shutter and a
+  `motionvector` var
+- **THEN** each pixel on the cube holds the screen displacement of its hit point rotated
+  by the shutter's angle about that axis: tangential, longer away from the axis, and
+  near zero at its centre
+
+#### Scenario: Shutter length scales the vector
+
+- **WHEN** the same animated stage is rendered once with `shutter:close = 0.5` and once
+  with `shutter:close = 1`, both with `shutter:open = 0`, for a prim moving at constant
+  speed parallel to the image plane at constant depth
+- **THEN** the second render's vectors are twice the first's, within floating-point
+  tolerance
+
 #### Scenario: Static geometry and escapes
 
-- **WHEN** a pixel's chosen sample hits geometry with no
-  `crust:motion:translate`, hits a volume, or escapes to a dome or the sky
+- **WHEN** a pixel's chosen sample hits geometry that does not move over the
+  shutter, hits a volume, or escapes to a dome or the sky
 - **THEN** the pixel holds `(0, 0)`
 
 #### Scenario: Perspective varies the vector across an object
@@ -504,3 +549,216 @@ the samples a render takes do not depend on the exposure. An exposure scale of e
 
 - **WHEN** a camera authors no exposure attribute
 - **THEN** every output is bit-identical to the same render before this requirement
+
+### Requirement: Motion vectors over an instantaneous shutter are reported
+
+When a `motionvector` var is requested and the shutter is instantaneous, while a drawn
+prim's world transform varies over time, the render SHALL warn once. The warning SHALL
+say that the time-sampled motion reads zero, and that authoring the camera's
+`shutter:open` / `shutter:close` measures it. The vector SHALL still be produced for
+`crust:motion:translate`.
+
+#### Scenario: Animated stage with no shutter authored
+
+- **WHEN** `samples/animation.usda` is rendered with `-f 5` and a `motionvector` var,
+  and its camera authors no shutter
+- **THEN** one warning names the instantaneous shutter, and the vector is `(0, 0)` on the
+  moving sphere
+
+#### Scenario: Static stage with no shutter authored
+
+- **WHEN** a stage with no time-sampled transforms requests `motionvector` and its camera
+  authors no shutter
+- **THEN** no warning about the shutter is raised
+
+### Requirement: Primvar sources
+
+A RenderVar with `sourceType = "primvar"` SHALL hold the named primvar's value
+at the camera ray's first hit. `sourceName` names the primvar, with or without
+the `primvars:` prefix. The value SHALL be interpolated as the primvar is
+authored (`constant`, `uniform`, `vertex`, `varying` or `faceVarying`, indexed
+or not) and evaluated at the render's time code. Where the hit prim does not
+author the primvar, or the ray escapes or scatters in a volume, the channel
+SHALL hold the var's clear value.
+
+#### Scenario: Rest position
+
+- **WHEN** a RenderVar authors `sourceName = "rest"`, `sourceType = "primvar"`
+  and `dataType = "point3f"` on a scene whose mesh authors a `vertex`
+  `point3f[] primvars:rest` equal to its points at frame 1, and the mesh is
+  translated at frame 5
+- **THEN** the channel at frame 5 holds each hit's frame-1 position, which
+  differs from the `P` channel by the translation
+
+#### Scenario: Prefix is optional
+
+- **WHEN** two vars author `sourceName = "rest"` and
+  `sourceName = "primvars:rest"`
+- **THEN** both channels are bit-identical
+
+#### Scenario: Clear value where not authored
+
+- **WHEN** a primvar var names `rest`, and the camera sees a mesh that
+  authors it, a mesh that does not, and the background
+- **THEN** the second mesh and the background hold the clear value (0, or the
+  authored `driver:parameters:aov:clearValue`)
+
+#### Scenario: Face-varying UV set
+
+- **WHEN** a var authors `sourceName = "uv2"`, `sourceType = "primvar"` and
+  `dataType = "texCoord2f"`, on a mesh whose `faceVarying` `primvars:uv2` is
+  indexed by `primvars:uv2:indices`
+- **THEN** the channel holds the second UV set, with a seam where the chart
+  has one
+
+#### Scenario: Per-face colour
+
+- **WHEN** a var asks for `displayColor` as `color3f` on a mesh whose
+  `primvars:displayColor` is `uniform`
+- **THEN** each face's pixels hold that face's colour
+
+### Requirement: Primvar types must fit the var
+
+A primvar var's width and precision SHALL come from
+`driver:parameters:aov:format` when authored, else `dataType`: 1, 2 or 3
+components, four refusing the var (not yet supported). Its role SHALL come
+from `dataType`. A primvar whose component count differs from the var's, or
+with no numeric value per point, SHALL be refused on that prim with one
+warning per var and prim; that prim reads the clear value. An `int` primvar
+SHALL fit an `int` or `float` var.
+
+#### Scenario: Mismatched component count
+
+- **WHEN** a var asks for `rest` as `float2` and the mesh authors
+  `point3f[] primvars:rest`
+- **THEN** one warning names the var, the prim and both types, and the mesh
+  reads the clear value
+
+#### Scenario: Houdini's format sets the storage, not the role
+
+- **WHEN** a var authors `dataType = "point3f"` and
+  `driver:parameters:aov:format = "half3"` for `rest`
+- **THEN** the channel is three half channels, accumulated closest
+
+#### Scenario: Four components refused
+
+- **WHEN** a primvar var authors `dataType = "color4f"`
+- **THEN** a warning names the var and says four-component primvar vars are
+  not supported yet, and the product has no channel for it
+
+#### Scenario: Integer IDs
+
+- **WHEN** a var asks for `objectId` as `int` and a mesh authors a `constant`
+  `int primvars:objectId = 7`
+- **THEN** that mesh's pixels hold 7
+
+### Requirement: Primvars follow the refined surface
+
+A requested primvar SHALL be refined with its mesh, at every subdivision
+level, uniform or adaptive. A `vertex` or `varying` primvar SHALL be refined
+like the points, and a `faceVarying` one under the mesh's
+`faceVaryingLinearInterpolation`, as the chart is. A `varying` primvar is
+therefore smoothed, not interpolated bilinearly over each face as USD defines
+it; the chart already follows this rule. Displacement SHALL NOT
+change a primvar's value: a displaced point reads the primvar of the
+undisplaced point it came from.
+
+#### Scenario: Rest position on a subdivided mesh
+
+- **WHEN** a `catmullClark` mesh whose `primvars:rest` equals its points is
+  rendered at subdivision level 3 with a `rest` var and a `P` var
+- **THEN** the two channels agree to within float rounding on every hit
+  pixel
+
+#### Scenario: Displacement leaves the rest position
+
+- **WHEN** the same mesh is bound to a displacing material
+- **THEN** the `rest` channel holds the undisplaced surface's rest position,
+  and differs from `P` by the displacement
+
+### Requirement: Primvar sources read the hit prim only
+
+*Not yet supported: inherited and per-instance primvars.*
+
+A primvar var SHALL read only the primvar authored on the geometry prim that
+was hit: a mesh, or a `BasisCurves` / `NurbsCurves` prim. A constant primvar
+authored on an ancestor prim, a per-instance primvar of a `PointInstancer`,
+and a primvar authored on an instance prim SHALL NOT be inherited. Such a
+primvar SHALL be reported with one warning per var, and the prims below it
+SHALL read the clear value.
+
+#### Scenario: Ancestor primvar is reported, not inherited
+
+- **WHEN** a var asks for `objectId`, and an `Xform` authors
+  `constant int primvars:objectId = 3` above a mesh that authors none
+- **THEN** a warning says the primvar is authored on an ancestor and is not
+  inherited, and the mesh reads the clear value
+
+#### Scenario: Curves primvar
+
+- **WHEN** a var asks for `displayColor` on a `BasisCurves` prim authoring a
+  `uniform` `primvars:displayColor`
+- **THEN** each strand's pixels hold its curve's colour
+
+### Requirement: Primvar sources cost nothing unless asked for
+
+A render whose RenderVars name no primvar SHALL read, store and evaluate no
+primvar beyond what its materials read. Its scene's memory and its render's
+instruction count SHALL match the same render without this capability. The
+one cost allowed at import: a subdivided mesh's UV chart is refined at four
+lanes and narrowed back to two, so the import's transient memory and
+instruction count grow slightly.
+
+#### Scenario: No primvar var
+
+- **WHEN** a scene with `primvars:rest` on every mesh is rendered with a
+  product requesting only `depth` and `normal`
+- **THEN** `--stats` reports 0 bytes of primvar tables, and the beauty is
+  bit-identical to the same render with no `primvars:rest` authored
+
+#### Scenario: Primvar tables are reported
+
+- **WHEN** the same scene is rendered with a `rest` primvar var and `--stats`
+- **THEN** the stats report the primvar tables' bytes
+
+### Requirement: Holdout samples are empty in every AOV
+
+A sample whose camera ray ended at a holdout SHALL contribute to every RenderVar
+what an escaped camera ray that met no light contributes: 0 to the beauty, alpha
+and every light path expression source, and the clear value to every data source
+(depth, distance, P, normal, st, motion vector, primvars, albedo, diffuse
+filter). It SHALL still count toward the pixel's sample count and filter weight.
+
+#### Scenario: Premultiplied coverage at a holdout edge
+
+- **WHEN** a pixel is half covered by a holdout in front of a white emissive wall
+  of radiance 1, rendered as `color4f`
+- **THEN** both the beauty and its alpha converge to 0.5, so the pixel is a
+  correctly premultiplied half-covered white
+
+#### Scenario: Passes that hold each other out add up
+
+- **WHEN** a character pass holds out the props, the set and the dome, and a props
+  pass holds out the character, both rendered from the same stage and camera at
+  `-s 16`
+- **THEN** the sum of the two passes' beauty, alpha and LPE channels matches the
+  render with no pass active, to float rounding, edge pixels included
+
+#### Scenario: Geometry visible in both passes is counted twice
+
+- **WHEN** the same two passes are rendered but neither holds out the dome
+- **THEN** their sum shows the dome's colour twice where the camera sees it, so
+  passes recombine by addition only when each camera-visible object is visible
+  in exactly one of them
+
+#### Scenario: Depth shows the visible surface
+
+- **WHEN** a pixel straddles a holdout at depth 2 and a visible background at
+  depth 10, and `depth` is closest-accumulated
+- **THEN** the pixel's depth is 10
+
+#### Scenario: A pixel covered only by a holdout
+
+- **WHEN** every sample of a pixel ends at a holdout
+- **THEN** its `depth`, `normal` and `P` hold their clear values, as for a pixel
+  that sees nothing

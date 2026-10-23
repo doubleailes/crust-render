@@ -18,7 +18,7 @@ top = false
 
 ```bash
 crust render [OPTIONS]              # render a scene
-crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materials
+crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights, materials or passes
 crust check -i <SCENE> [OPTIONS]    # what a render would use, and what crust refused
 crust diff <A> <B>                  # did the image change, and by how much?
 crust diagnostic -i <SCENE> [OPTIONS]  # measure how to render it faster or cleaner
@@ -29,7 +29,7 @@ crust mcp                           # serve a live editing session to Claude Des
 | command | what it does |
 |---------|--------------|
 | `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` belongs to it. |
-| [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line, or as JSON with the values a render reads for each. |
+| [`ls`](#ls) | prints the stage's cameras, lights, materials or render passes, one prim path per line, or as JSON with the values a render reads for each. |
 | [`check`](#check) | imports the stage as a render would and reports on it without rendering: the render it describes, its effective settings, the import's cost, findings and warnings. Takes the scene flags of `render`. |
 | [`diff`](#diff) | compares two EXRs: whether they are identical, by how much they differ, and whether they can be compared at all. |
 | [`diagnostic`](#diagnostic) | measures which settings make the stage's render faster or cleaner, within a time budget, and reports the evidence. Takes the scene flags of `render`. |
@@ -68,6 +68,7 @@ The flags of `crust render`:
 | [`--neighbour-tolerance`](#neighbour-tolerance) | number | scene / 1 | `crust:adaptiveNeighbourTolerance` |
 | [`-f`, `--frame`](#frame) | number | default values | `crust:frame` (seed) |
 | [`--camera`](#camera) | prim path | `RenderSettings.camera` | `rel camera` |
+| [`--pass`](#pass) | prim path | no pass | — |
 | [`--subdiv-level`](#subdiv-level) | 0–6 | scene / 0 | `crust:subdivisionLevel` |
 | [`--subdiv-edge-length`](#subdiv-edge-length) | pixels | scene / off | `crust:subdivisionEdgeLength` |
 | [`--strategy`](#strategy) | name | scene / `power` | `crust:samplingStrategy` |
@@ -83,6 +84,7 @@ The flags of `crust render`:
 | [`--display`](#display) | display | `sRGB - Display` | — |
 | [`--view`](#view) | view | `Un-tone-mapped` | — |
 | [`--auto-tx`](#auto-tx) | flag | off | — |
+| [`--tx-color-space`](#tx-color-space) | colour space | `ACEScg` | — |
 | [`--scanline`](#scanline) | flag | off (tiles) | — |
 | [`--checkpoint`](#checkpoint) | seconds | off | — |
 | [`--stats`](#stats) | flag | off | — |
@@ -101,8 +103,8 @@ The flags of `crust render`:
 
 The scene to render: a `.usda`, `.usdc` or `.usdz` file. USD is the only scene format.
 
-Without `-i`, Crust Render draws a built-in procedural scene. `--frame` and `--camera`
-have no effect on it, and say so with a warning.
+Without `-i`, Crust Render draws a built-in procedural scene. `--frame`, `--camera` and
+`--pass` have no effect on it, and say so with a warning.
 
 If the file can't be loaded, the run logs an error and exits with a non-zero status.
 
@@ -282,6 +284,33 @@ render stops with an error. If the `RenderSettings` camera is missing, the rende
 warning and falls back to the first camera.
 
 [`crust ls camera`](#ls) lists the paths `--camera` accepts.
+
+### pass
+
+`--pass <PRIM_PATH>`
+
+The render pass to render, as the absolute path of a `RenderPass` prim, for example
+`/Render/Passes/char`. One stage can then hold every pass of a shot:
+
+- The geometry in the pass's `collection:matte` is held out: where the camera sees it
+  first, the image has zero colour and zero alpha, while it still casts shadows and shows
+  in reflections.
+- What its `collection:cameraVisibility` leaves out is hidden from camera rays only.
+- When its `renderSource` targets a `RenderSettings` prim, that prim is the settings the
+  render reads (resolution, camera, products, every `crust:` setting) instead of the
+  stage's.
+
+Without `--pass`, no pass is active, even on a stage that defines passes: the stage never
+chooses one. A path that is not a `RenderPass` prim on the stage stops the render with an
+error. `render`, `check`, `diagnostic` and `light-paths` all take it.
+
+```bash
+crust render -i shot.usda --pass /Render/Passes/char
+crust render -i shot.usda --pass /Render/Passes/bg
+```
+
+[`crust ls pass`](#ls) lists the paths `--pass` accepts. How passes are authored and
+composited, and what they do not read yet: [Render passes](@/docs/usd/render-passes.md).
 
 ## Geometry
 
@@ -557,16 +586,40 @@ crust render -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nit
 `--auto-tx`
 
 The first time a UV texture is used, convert it to a tiled, mip-mapped `.tx` file beside
-the original (same path, `.tx` extension). A texture is converted when its `.tx` is
-missing or older than the source, or when an older Crust Render wrote it without the
-alpha channel the source has.
+the original, the way Arnold's auto-tx does. Crust Render names and writes the file as
+Arnold 7.5 would for the same binding:
+- `<stem>_raw.<ext>.tx` when nothing is converted;
+- otherwise `<stem>_<source space>_<target>.<ext>.tx`, where the target is
+  [`--tx-color-space`](#tx-color-space).
+
+So the two renderers share the file. A texture is converted when its `.tx` is missing or
+its modification time differs from the source's.
 
 Crust Render always streams from a `.tx` when one exists beside a texture. This flag only
 creates the missing ones. The run prints one line saying how many textures it converted,
 and a texture that fails to convert is loaded fully into memory instead.
 
-The conversion records the colour space of its mip levels in the file (see
-[Materials and textures](@/docs/usd/materials.md#tx-files)).
+See [Materials and textures](@/docs/usd/materials.md#tx-files) for how a `.tx` is named,
+converted and read.
+
+### tx-color-space
+
+`--tx-color-space <SPACE>`
+
+The colour space a `.tx` converts to, and so the one its name records. Any name or alias
+of the OCIO config is accepted. The default, `ACEScg`, is Arnold's rendering space, so
+Crust Render finds and writes the files Arnold uses. It is independent of
+[`--working-space`](#working-space): a render in `lin_rec709` still reads the `ACEScg`
+files and converts their values into its working space.
+
+A name you give that the OCIO config does not define is refused before anything is
+loaded. Without the flag, a config that has no `ACEScg` still renders: every `.tx` is
+then looked for and written as `_raw`. Set it to the rendering space your Arnold scenes
+use when that is not ACEScg.
+
+```bash
+crust render -i scene.usda --auto-tx --tx-color-space "Linear Rec.709 (sRGB)"
+```
 
 ## Rendering mode
 
@@ -742,8 +795,9 @@ order. `KIND` is one of:
 | `camera` | the cameras a render can go through: the paths `--camera` accepts |
 | `light` | the lights the render reads (sphere, rect, disk, cylinder, distant, dome) |
 | `material` | the `Material` prims a binding can reach, whether or not anything binds them |
+| `pass` | the `RenderPass` prims: the paths `--pass` accepts |
 
-The plurals (`cameras`, `lights`, `materials`) work too.
+The plurals (`cameras`, `lights`, `materials`, `passes`) work too.
 
 ```bash
 $ crust ls camera -i samples/cornellbox.usda
@@ -767,6 +821,7 @@ the list is what a render would use:
   reads none.
 - A material is listed wherever a binding can reach it: only one inside an instance's
   prototype is left out.
+- A render pass is listed unless it is under an inactive ancestor.
 
 The log goes to stderr, so stdout holds only the list and can be piped:
 
@@ -791,9 +846,10 @@ render's own code, so an unauthored value is the one the render falls back to:
 
 | kind | values |
 |------|--------|
-| `camera` | `focal_length_mm`, `aperture_mm` (horizontal, vertical: the vertical one defaults to the horizontal over the image's aspect), `f_stop` (`0` is a pinhole), `focus_distance`, `is_render_camera`, `hidden` |
+| `camera` | `focal_length_mm`, `aperture_mm` (horizontal, vertical: the vertical one defaults to the horizontal over the image's aspect), `conformed_aperture_mm` (the aperture the render frames: `aperture_mm` fitted to the image by the render's [`aspectRatioConformPolicy`](@/docs/usd/render-settings.md#aspectratioconformpolicy)), `f_stop` (`0` is a pinhole), `focus_distance`, `is_render_camera`, `hidden` |
 | `light` | `type` (`sphere`, `rect`, `disk`, `cylinder`, `distant`, `dome`), `intensity`, `exposure`, `color`, `normalize`, as authored on the light: no transform, colour space or colour temperature applied |
 | `material` | `surface`, the `info:id` of the surface shader the render decodes (`null` when there is none), and `bound` |
+| `pass` | `render_source`, the first target of its `renderSource` as authored (`null` when it has none) |
 
 `is_render_camera` marks the camera `crust render` without `--camera` goes through: the
 first RenderProduct's camera, else `RenderSettings.camera`, else (that camera missing, or
@@ -826,7 +882,10 @@ Imports the stage exactly as `crust render` with the same flags would, renders n
 and reports:
 
 - **the render it describes**: the stage, the frame, the camera the render goes through
-  (after any fallback), the resolution, the region, and every file the render would write
+  (after any fallback), the resolution, the region, the [`--pass`](#pass) (with how many
+  prims it holds out and hides from the camera; `null` in the JSON without one), the
+  `RenderSettings` prim the render reads (`null` in the JSON when the stage has none and
+  the render uses the defaults), and every file the render would write
   with its channels. A stage with no `RenderProduct` reports the one beauty EXR a render
   writes, `output.exr`;
 - **effective settings**: every setting the render would run with, each with the flag
@@ -849,8 +908,8 @@ values and defaults: [`-i`](#input) (required), [`-f`](#frame), [`--camera`](#ca
 [`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
 [`--filter-radius`](#filter-radius), [`--variance-threshold`](#variance-threshold),
 [`--min-samples`](#min-samples), [`--neighbour-tolerance`](#neighbour-tolerance),
-[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
-[`--auto-tx`](#auto-tx). The rest of
+[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length),
+[`--auto-tx`](#auto-tx) and [`--tx-color-space`](#tx-color-space). The rest of
 `render`'s flags (`-s`, `-o`, the colour and statistics flags) are refused. Its own flags:
 
 | flag | value | default | what it does |
@@ -888,11 +947,13 @@ mean abs diff: 2.4019428117913372e-2
 rmse: 4.149975813667258e-2
 relmse: 4.757807812359412e-2
 relmse (trimmed 0.1%): 4.602686768547243e-2
+stamp differences:
+  crust:spp: 16 vs 4
 comparability: warn
   crust:spp differs: 16 vs 4
 ```
 
-(The last two lines are on stderr.)
+(The last four lines are on stderr.)
 
 When both files have `R`, `G` and `B`, it lists the first eight differing pixels and the
 beauty's error metrics against `A`: the largest absolute and relative difference, the mean
@@ -937,7 +998,21 @@ count, the depth, the light samples, the threshold, the pixel filter and its rad
 strategy, the light selection, and `colorInteropID`. Two builds of crust are never a
 reason to warn: comparing them is what `diff` is for.
 
-In text mode the notes go to stderr, so stdout reads the same either way. Comparability
+The lens and the stage are judged too, when both files record them: depth of field on one
+side only (the note names each side's lens, for example `depth of field differs (a: fStop
+0.02, focus 360; b: no depth of field)`), another `fStop` or focus distance with depth of
+field on both, motion blur on one side only, a focal length, aperture or conform policy
+that frames the image differently, a layer in one file's layer stack only (a session or
+override layer on one side), and another count of prims hidden by visibility overrides.
+
+Every stamped value that differs is also listed, with or without a note, under `stamp
+differences:` (`comparability.differences` in the JSON): the version, an `fStop` on two
+pinholes, and the layer stack layer by layer — a layer in one file only, a layer whose
+content changed (or could not be compared, when one render could not read it), shared
+layers in another order. A layer whose content alone changed has
+no note, since an edited layer is often the change under test.
+
+In text mode the differences and the notes go to stderr, so stdout reads the same either way. Comparability
 **never changes the exit status**, which answers only whether the pixels changed. And
 `ok` only means the stamps match: it is not proof that a difference is noise. To show
 that, render both sides at several sample counts and check that the difference falls as
@@ -977,8 +1052,8 @@ and defaults as `render`, so a suggestion made as a flag can be passed straight 
 [`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
 [`--filter-radius`](#filter-radius), [`--variance-threshold`](#variance-threshold),
 [`--min-samples`](#min-samples), [`--neighbour-tolerance`](#neighbour-tolerance),
-[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
-[`--auto-tx`](#auto-tx).
+[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length),
+[`--auto-tx`](#auto-tx) and [`--tx-color-space`](#tx-color-space).
 
 With `--region`, that region is the only crop the trials render. `--auto-tx` is the one
 flag that writes beside the stage: the `.tx` files it creates, as a render would.
@@ -1044,8 +1119,8 @@ same names, values and defaults: [`-i`](#input) (required), [`-f`](#frame),
 [`--light-samples-indirect`](#light-samples-indirect), [`--indirect-clamp`](#indirect-clamp),
 [`--filter`](#filter), [`--filter-radius`](#filter-radius),
 [`--variance-threshold`](#variance-threshold), [`--min-samples`](#min-samples),
-[`--neighbour-tolerance`](#neighbour-tolerance), [`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
-[`--auto-tx`](#auto-tx); and `render`'s [`-s`](#samples), so it reproduces a render made
+[`--neighbour-tolerance`](#neighbour-tolerance), [`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length),
+[`--auto-tx`](#auto-tx) and [`--tx-color-space`](#tx-color-space); and `render`'s [`-s`](#samples), so it reproduces a render made
 at that count. The rest of `render`'s flags (`-o`, the colour and statistics flags,
 `--scanline`, `--log-file`) are refused. Its own flags:
 

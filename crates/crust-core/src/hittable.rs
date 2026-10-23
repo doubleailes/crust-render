@@ -1,3 +1,4 @@
+use crate::primvars::MeshHit;
 use crate::ray::Ray;
 use crate::strands::CurveHit;
 use glam::Vec3A;
@@ -10,7 +11,8 @@ use glam::Vec3A;
 /// into `HitRecord`s and looks up the material by `geom_id`.
 ///
 /// `'w` is the [`crate::World`] the hit was found in: a curve hit borrows
-/// the strand table its material reads curve primvars from ([`Self::curve`]).
+/// the strand table its material reads curve primvars from ([`Self::curve`]),
+/// and a mesh hit the primvar table its material reads ([`Self::mesh`]).
 ///
 /// 96 bytes, and kept there: [`crate::WorldHit`] wraps one in exactly 128,
 /// the most LLVM copies inline, and the integrator moves a `WorldHit` at
@@ -76,6 +78,9 @@ pub enum HitPart<'w> {
     /// Where on its strand a curve hit lies, when the geometry carries a
     /// strand table (its material reads a curve property, primvar or chart).
     Curve(CurveHit<'w>),
+    /// Where on a mesh (or an analytic sphere) a hit lies, when its material
+    /// reads one of its primvars ([`crate::PrimvarTable::shading`]).
+    Mesh(MeshHit<'w>),
 }
 
 /// A hit's Ptex face identity (see [`HitRecord::face`]).
@@ -137,10 +142,21 @@ impl<'w> HitRecord<'w> {
         }
     }
 
-    /// The record without its strand ([`HitRecord::curve`]), so it can
-    /// outlive the world it was found in: for a hit kept only for its
-    /// geometry (a data AOV's first hit, a random walk's exit, which the
-    /// exit Lambertian shades), never for one a curve's own material shades.
+    /// Where on a mesh the hit lies, when its material reads the mesh's
+    /// primvars.
+    #[inline]
+    pub fn mesh(&self) -> Option<&MeshHit<'w>> {
+        match &self.part {
+            HitPart::Mesh(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The record without its strand ([`HitRecord::curve`]) or its mesh
+    /// primvars ([`HitRecord::mesh`]), so it can outlive the world it was
+    /// found in: for a hit kept only for its geometry (a data AOV's first
+    /// hit, a random walk's exit, which the exit Lambertian shades), never
+    /// for one a curve's or a mesh's own material shades.
     pub fn detached(self) -> HitRecord<'static> {
         HitRecord {
             p: self.p,
@@ -149,7 +165,7 @@ impl<'w> HitRecord<'w> {
             front_face: self.front_face,
             part: match self.part {
                 HitPart::Face(f) => HitPart::Face(f),
-                HitPart::None | HitPart::Curve(_) => HitPart::None,
+                HitPart::None | HitPart::Curve(_) | HitPart::Mesh(_) => HitPart::None,
             },
             uv: self.uv,
             tangent: self.tangent,

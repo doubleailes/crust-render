@@ -152,6 +152,10 @@ pub struct SceneCounters {
     /// `kernel_memory`, and zero unless a curve's material reads a curve
     /// property, primvar or chart.
     pub strand_tables_bytes: usize,
+    /// Bytes of the meshes' primvar tables ([`crate::PrimvarTable`]), each
+    /// counted once however many placements share it: host-side like the
+    /// strand tables, and zero unless a render var asks for a primvar.
+    pub primvar_tables_bytes: usize,
 }
 
 /// Work the integrator did, in rays and path vertices.
@@ -179,7 +183,8 @@ pub struct RayStats {
     /// Their ratio says whether roulette is doing anything worth tuning.
     pub rr_tested: u64,
     pub rr_killed: u64,
-    /// Paths that ended by leaving the scene.
+    /// Paths that ended by leaving the scene, or at a holdout — a camera ray
+    /// the film records as an escape.
     pub ended_escaped: u64,
     /// Paths that ended by exhausting `max_depth` — if this is ~0, the
     /// depth ceiling is not what a render is paying for.
@@ -1305,6 +1310,14 @@ impl RenderStats {
                 human_bytes(s.strand_tables_bytes as u64)
             )?;
         }
+        if s.primvar_tables_bytes > 0 {
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "primvar tables",
+                human_bytes(s.primvar_tables_bytes as u64)
+            )?;
+        }
         if let Some(peak) = self.peak_memory_bytes {
             writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
         }
@@ -2396,6 +2409,7 @@ mod tests {
             "scene.kernel_memory.vertex_normals_bytes",
             "scene.kernel_memory.vertices_bytes",
             "scene.lights",
+            "scene.primvar_tables_bytes",
             "scene.strand_tables_bytes",
             "scene.top_level",
             "scene.top_level.cubic_curve_spans",

@@ -24,28 +24,29 @@
 
 ## Texture residency switches
 
-Texture *residency* has two more. A texture with a `.tx` beside it (same path, extension
-swapped: `foo.1001.exr` → `foo.1001.tx`) is streamed instead of preloaded, paging 64x64
-tiles under a byte budget set by `CRUST_TEX_CACHE_MB` (default 1024, matching OIIO's own).
-That lookup is **always on**: a `.tx` exists only because someone converted the texture
-for streaming. `CRUST_TEX_STREAM=0` turns it off and preloads everything, which is the A/B
-(`=1` is accepted and changes nothing). It falls back to preloading for any texture it
-declines — no `.tx`, a UDIM set only partly converted (it would stream with black holes),
-a mip chain reduced in a different colour space, a file it cannot read — so a stray `.tx`
-can make a render slower but never break it. **`--auto-tx`** creates the missing ones:
-before a texture opens, every tile whose `.tx` is missing, older than its source, or
-written by an older crust without the alpha its source declares (`tx_staleness`, below)
-is converted beside it (`tiled::make_tx_atomic`, in parallel, written to a temporary and
-renamed so an interrupted run leaves no truncated `.tx` to trust). A float source keeps
-`half` tiles even when its values fit in `[0, 1]` (`TxFormat::FromSampleType` —
-`maketx`'s by-range default would band linear data), and the colour space recorded is
-the one the material binds with, `auto` resolved. A tile that fails to convert preloads
-its texture. Without the flag a stale `.tx` is still used, with a warning. **Ptex is
-excluded from all of it** (`tiled::is_ptex`): a `.ptx` is already a tiled per-face mip
-pyramid that streams as it is (`CRUST_PTEX_STREAM`), so it is never converted — `make_tx`
-refuses one outright — and a `foo.tx` beside a `foo.ptx` is never read in its place, even
-when the `.ptx` reaches `load_texture` as a UV texture. A `.tx` is backed by either a tiled TIFF (`u8`
-tiles) or a tiled mip EXR (`half` tiles), picked by magic number rather than extension.
+Texture *residency* has two more. A texture with the `.tx` Arnold 7.5 would use beside it
+(`chair.1001_sRGB Encoded Rec.709 (sRGB)_ACEScg.tif.tx` for `chair.1001.tif` bound sRGB;
+the convention, its measurements and the code are under "Streaming textures" below) is
+streamed instead of preloaded, paging 64x64 tiles under a byte budget set by
+`CRUST_TEX_CACHE_MB` (default 1024, matching OIIO's own). That lookup is **always on**: a
+`.tx` exists only because someone converted the texture for streaming.
+`CRUST_TEX_STREAM=0` turns it off and preloads everything, which is the A/B (`=1` is
+accepted and changes nothing). It falls back to preloading for any texture it declines — no
+`.tx`, a UDIM set only partly converted (it would stream with black holes), a file it cannot
+read — so a stray `.tx` can make a render slower but never break it. **`--auto-tx`**
+creates the missing ones: before a texture opens, every tile whose `.tx` is missing or
+whose modification time is not its source's in whole seconds (`tx_staleness`) is
+converted beside it as Arnold's auto-tx converts it (`tiled::make_tx_atomic`, in parallel,
+written to a temporary and renamed so an interrupted run leaves no truncated `.tx` to
+trust, then stamped with the source's time). **`--tx-color-space`** (default `ACEScg`) is
+the space conversions go to and names record, independent of the working space. A tile
+that fails to convert preloads its texture. Without the flag a stale `.tx` is still used,
+with a warning. **Ptex is excluded from all of it** (`tiled::is_ptex`): a `.ptx` is already
+a tiled per-face mip pyramid that streams as it is (`CRUST_PTEX_STREAM`), so it is never
+converted — `make_tx` refuses one outright — and no `.tx` beside a `.ptx` is read in its
+place, even when the `.ptx` reaches `load_texture` as a UV texture. A `.tx` is backed by
+either a tiled TIFF (8- or 16-bit) or a tiled mip EXR (`half` or `float`), picked by magic
+number rather than extension.
 
 Ptex has the same pair, and since `stream-ptex-by-default` it is on by default too.
 A `.ptx` that would preload in more than `CRUST_PTEX_STREAM_MIN_MB` (8 MiB) gets a
@@ -62,8 +63,8 @@ resolution both hold.
 **`CRUST_PTEX_STREAM_MIPSPACE` decides the chain, and it is on the correctness side of
 the trade rather than the tuning side.** A `.ptx`'s stored mip levels were reduced in the
 file's own encoding while `PtexColor` reduces in linear light from the decoded base, which
-is the same mismatch `crust:mipspace` **refuses** for `.tx` — and refuses for the reason
-it is dangerous, not for tidiness: level 0 stays perfectly correct and only coarser levels
+is the mismatch crust's earlier `.tx` marker (`crust:mipspace`) refused — and is refused
+here for the reason it is dangerous, not for tidiness: level 0 stays perfectly correct and only coarser levels
 are wrong, so it reads as a filtering bug rather than a colour one. **But the preload's own
 base is the file's level at the cap**: `PtexColor` fetches `get_data_at_res(min(authored,
 cap))`, so on a face authored above the cap its exact part is "the file at the cap, linear
@@ -129,18 +130,22 @@ the finest level held at every footprint). See
     prototype shared by N instances — N transforms against one table — got
     none. Now `World` reads the hit triangle's vertices from the kernel
     (`Scene::triangle_vertices`: the top-level scene for a baked mesh, the
-    prototype through its placement for a direct static instance) and derives
-    the tangent with the same arithmetic (`tangent_of`), so directly instanced
-    meshes shade normal maps too. What still has no frame, by construction
+    prototype through its placement for a direct static instance, and for a
+    direct moving instance through both of its transforms interpolated at the
+    ray's shutter time with the kernel's own arithmetic) and derives the
+    tangent with the same arithmetic (`tangent_of`), so directly instanced
+    meshes shade normal maps too, moving or not
+    (`motion_blurred_instances_get_a_tangent_at_the_ray_time`; the moving case
+    was a gap until `time-sampled-transform-motion` made every animated
+    transform an instance with an end transform, which would otherwise have
+    lost its normal map). What still has no frame, by construction
     (`VertexSource::Unresolved`, never a lookup against the top-level scene):
     a prototype part placed through an instancer's group, whose hit id is a
     forwarded slot shared by every placement of that prototype, so the hit
-    names no transform (`forwarded_placements_sharing_a_slot_get_no_tangent`);
-    and a motion-blurred instance, intersected through a transform
-    interpolated at the ray's time that no retained start transform
-    reproduces (`motion_blurred_instances_get_no_tangent`). Closing both needs
-    the kernel to hand back the traversed instance's composed transform with
-    the hit. A mirrored baked placement's stored
+    names no transform (`forwarded_placements_sharing_a_slot_get_no_tangent`),
+    and an instance whose inner scene itself moves. Closing those needs the
+    kernel to hand back the traversed instance's composed transform with the
+    hit. A mirrored baked placement's stored
     tangent paired the swapped vertex order with unswapped corners; the derived
     one un-swaps first (`tangent_unswaps_a_mirrored_placement`).
   - **The resolution cap is not an optimisation.** Fourteen 4096² tiles is 674
@@ -186,14 +191,12 @@ the finest level held at every footprint). See
     dark — an 8× disagreement decided by nothing but which end the clamp was
     at. On an **even** axis every overlap is exactly 1.0 and the divisor
     exactly 4.0, so the reduction is bit-identical to what it was; every
-    checked-in texture is 64×64, so no sample golden moves and the
-    streamed-versus-preloaded invariant is untouched. Both halves of that hold
-    only because `reduce_half` and `reduce_half_linear` share `axis_taps` —
-    they back the TIFF and EXR `.tx` writers, and one fixed without the other
-    would leave two internally consistent chains that disagree. A `.tx`
-    written by an older build still carries old-filter odd levels; they are
-    gitignored artefacts `maketx` regenerates, so this is a note rather than a
-    migration.
+    checked-in texture is 64×64, so no sample golden moved. Both halves of
+    that hold only because `reduce_half` and `reduce_half_linear` share
+    `axis_taps` — the 8-bit and float preload pyramids, and one fixed without
+    the other would leave two internally consistent chains that disagree.
+    (They backed the `.tx` writers too until `tx-arnold-convention`, which
+    writes OIIO's reduction, `maketx::mip_chain`, instead.)
 
   - **Alpha is decoded, as the fourth channel, only where it cuts** (issue #267,
     `decode-texture-alpha`). `Texture2D::eval` always returned RGBA, but both
@@ -215,9 +218,14 @@ the finest level held at every footprint). See
       curve and primaries apply to RGB alone (`decode_rgb_of_rgba` around the
       decode), as a GPU's `SRGB8_ALPHA8` leaves alpha linear. Mip levels average
       alpha through `ALPHA_U8` / `ALPHA_STEPS` in `reduce_half`, independently of
-      the colour, which is **not premultiplied** for the average — the colour
-      channels' arithmetic is the RGB path's, so their bits are unchanged
-      (`the_two_reducers_agree_on_alpha` pins both halves).
+      the colour. The colour reaching the reducer is already **premultiplied**
+      (decision 9 of `tx-arnold-convention`: a straight-alpha source is
+      premultiplied once, in linear light, before the pyramid; a `.tx` declaring
+      unassociated alpha at page-in; an associated file is read as stored), so a
+      level averages premultiplied light while the reducers' arithmetic is the RGB
+      path's (`the_two_reducers_agree_on_alpha` pins both halves). A texture with
+      no alpha takes none of this: every sample golden without alpha rendered
+      bit-identical across the change.
     - **The dispatch is the storage's.** `UvTexture::eval` already matched the
       storage once per lookup, and the alpha flag joins that match
       (`(Storage, alpha)`); `StreamingTexture::eval` keeps its `linear` test and
@@ -263,29 +271,25 @@ the finest level held at every footprint). See
     still cannot help a scene that binds more than fits. Production renderers
     convert once, offline, to a tiled mip-mapped file and stream tiles behind a
     bounded cache, so memory scales with the *cache* instead.
-  - **Two backings, one seam.** A `.tx` is either a tiled mip **TIFF** with
-    `u8` tiles or a tiled mip **EXR** with `half` ones, and `TiledFile` picks
-    between them by **magic number** — which is what makes `maketx --format exr
-    -o foo.tx`, an EXR inside a file named `.tx`, simply work. The split is by
-    *sample type*, not container: unsigned integer samples (8- and 16-bit TIFF)
-    page in as `TileKind::U8` exactly as before, float samples as
-    `TileKind::Half`. An 8-bit texture pays nothing for HDR existing — its
-    tiles, its bytes and its bit-identical agreement with the preload path are
-    untouched — and an HDR one is not silently clipped to fit an 8-bit cache.
+  - **Two backings, one seam.** A `.tx` is either a tiled mip **TIFF** (8- or
+    16-bit) or a tiled mip **EXR** (`half` or `float`), and `TiledFile` picks
+    between them by **magic number** — which is what makes Arnold's
+    `x_….png.tx`, an EXR inside a file named `.tx`, simply work. The split is by
+    *sample type*, not container: 8-bit samples page in as `TileKind::U8`,
+    16-bit and float ones as `TileKind::Half`. An 8-bit texture pays nothing for
+    HDR existing, and an HDR one is not silently clipped to fit an 8-bit cache.
     A tile's payload is bytes plus that kind rather than an enum over two
     buffers, and the sampler reads it through `Tile::rgb_u8` or `Tile::rgb_half`
     chosen by a const generic — for the measured reason two bullets down.
-  - **Why EXR and not float TIFF.** TIFF can hold `f32`, but the format is the
-    smaller half of the question and the industry already answered it: OIIO's
-    `maketx --format exr` writes 64x64-tiled, full-MIPMAP, zipped `half` with
-    `textureformat`/`wrapmodes` as first-class header attributes (better
-    provenance than TIFF, which has to smuggle them through `ImageDescription`),
-    V-Ray's native streaming texture format *is* tiled mip EXR, and Karma
-    recommends `.exr` or `.rat`. Adding EXR is the opposite of diverging from
-    OIIO; a TIFF-only path was the narrower one. `half` rather than `f32`
-    because it is what every streaming texture format stores and what keeps an
-    HDR tile at twice a `u8` tile rather than four times — a texture is shading
-    input, not a render target.
+  - **Which file, of which type, is Arnold's decision** (`tx-arnold-convention`,
+    measured on Arnold 7.5 by `scripts/arnold_tx_oracle.py`; every fact below is
+    in `crust-assets/tests/data/arnold_tx/cases.json`). The sample type is the
+    source's — 8-bit TIFF, 16-bit TIFF, `half` EXR, `float` EXR — except that an
+    **8-bit** source bound in a space Arnold does not take as linear (a curve, a
+    name the config lacks, the keyword `raw`) becomes a `half` EXR, DWAA level 45
+    for three or four channels and zip for one. A linear or data space keeps the
+    8-bit TIFF, converted and requantised. A `half` tile is twice a `u8` one, so
+    an sRGB colour texture costs the cache twice what it did (measured below).
   - **The EXR reader is hand-rolled around the block API; the writer is not.**
     `exr` writes tiles and mip levels through its ordinary public API
     (`Blocks::Tiles` + `Levels::Mip`), so unlike TIFF there is no container
@@ -299,9 +303,10 @@ the finest level held at every footprint). See
     `(level, tile) → chunk index` map (EXR mandates no chunk order, so it must
     not be assumed row-major); `decompress_chunk` returns **native**-endian
     samples, so reading them is a reinterpret; and the level sizes come from
-    the header's own `RoundingMode` rather than from `div_ceil`, because
-    `maketx` writes `ROUND_DOWN` while crust writes `ROUND_UP` to match
-    `reduce_half`.
+    the header's own `RoundingMode` rather than from `div_ceil` (crust and
+    `maketx` both write `ROUND_DOWN` now). Arnold's DWAA files decode tile by
+    tile through `exr`'s DWA path with OpenEXR's own minimum, maximum and mean
+    (`arnold_dwaa_tiles_decode`).
   - **The offset table is probed, not trusted.** `MetaData` is read through a
     `PeekRead` that may hold one byte it has consumed and not handed back, so
     the reader's position afterwards is either the table's start or one past
@@ -311,7 +316,7 @@ the finest level held at every footprint). See
     fallback is forced by a test (`the_offset_table_is_found_even_when_the_
     reader_is_a_byte_late`) rather than left to rot.
   - **`.tx` is a plain TIFF.** Tiled 64x64, mip levels as chained IFDs,
-    Deflate. `tiff` 0.11.3 reads one tile at one level with a real seek
+    Deflate with the horizontal predictor, as `maketx` writes it. `tiff` 0.11.3 reads one tile at one level with a real seek
     (`seek_to_image` + `read_chunk`, which walks the cached `TileOffsets`
     table); it **cannot write** tiled, so `write.rs` supplies the tile grid, the
     per-tile zlib stream and the tile tags while borrowing `DirectoryEncoder`
@@ -456,49 +461,109 @@ the finest level held at every footprint). See
     to read a tile. Together: `texel::<false>` is 414,851,273 instructions,
     equal to the pre-EXR binary's to the instruction, whole-render instructions
     are +0.017%, and wall clock lands at −5.4% min / −6.1% mean (i.e. noise).
-  - **The colour space is recorded in the file** (`crust:mipspace=`, in
-    ImageDescription for TIFF and as a header attribute for EXR) and a mismatch
-    is refused. It means "the space this file is to be bound with", and the two
-    backings reach that from opposite directions. A TIFF `.tx` stores
-    display-encoded texels and reduces its levels in *linear light*, so the
-    space is baked into every level above 0: read an sRGB chain as raw and
-    level 0 is perfectly correct while every coarser level is wrong — visible
-    only under minification and, by eye, indistinguishable from a filtering
-    bug. An EXR `.tx` stores **linear** texels, decoded once at conversion
-    because EXR has no transfer curve of its own, so binding it under another
-    space would apply a curve to data that has already had one removed. A file
-    with no marker (anything `maketx` wrote) is accepted, since its chain came
-    from OIIO's filter and there is nothing to match against.
-  - **Which backing a conversion produces is decided by the source's range**,
-    not its extension: `maketx` writes EXR for a source that actually carries
-    values above 1.0 and TIFF otherwise, so a `.hdr` of an overcast sky does
-    not pay double for a range it never uses. `--format tiff|exr` overrides
-    either way, and a TIFF conversion that clips is warned about rather than
-    done quietly.
-  - **The invariant.** For any texture at or below the preload cap, streamed
-    and preloaded renders must be **bit-identical** — same level 0, same
-    `reduce_half`, same level selection. `samples/materialx_basic` at 16 spp:
-    0 of 230 400 pixels differ. Measured on 8 UDIM tiles of 2048² (96 MiB
-    authored), 640x360 at 4 spp: preload capped 54.16 MiB / 0.223s with detail
-    discarded, preload uncapped 142.46 MiB / 0.231s, **streamed at a 16 MiB
-    budget 15.94 MiB / 0.449s and bit-identical to the uncapped preload**. The
-    ~2x render cost is the honest worst case — one textured plane at depth 2,
-    so nearly every shading call is a fetch. That invariant is about the `u8`
-    path and stays exactly as it was; the `half` path is where the two paths
-    are *supposed* to disagree. Measured at the seam rather than in a render: a
-    Radiance source whose white checks are at 8.0 comes back at 8.0 streamed
-    and at exactly 1.0 preloaded (`to_rgb8()` clips it), while below 1.0 the
-    two agree to within the 8 bits the preload path keeps — so the divergence
-    is the range and not a different lookup.
-    It holds for **alpha** too: a `.tx` converted from an RGBA source streams the
-    preloaded alpha bit for bit at every level, clipped edge tiles and odd levels
-    included (`streamed_alpha_agrees_bit_for_bit_with_preloaded`). The TIFF
-    backing writes it as a fourth sample declared unassociated alpha
-    (`ExtraSamples = 2`, `write_tx_rgba`), the EXR backing as an `A` channel
-    (`write_tx_exr_rgba`, agreeing to `half` precision), and `make_tx` keeps it
-    exactly when the preload does, so a source whose alpha is opaque converts to
-    the RGB `.tx` it always did. A UDIM set may mix the two
-    (`a_udim_set_streams_alpha_per_chart`).
+  - **The name records the conversion; the reader takes it from the name.**
+    Arnold names a `.tx` `<stem>_raw.<ext>.tx`, or `<stem>_<C>_<T>.<ext>.tx`
+    with `C` the OCIO config's own name for the binding's space and `T` the
+    target (`--tx-color-space`). `tiled::tx_name` computes the one candidate from
+    the source path, the binding and the target — never by parsing names, since
+    stems and space names both contain `_` and spaces, and a glob would pick up
+    files another config wrote (the playground's `_srgb_tx_ACEScg` files hold
+    unconverted data). The binding's *spelling* survives resolution
+    (`ColorSpace::spelling`) because `""`, the keyword `raw` and the OCIO `Raw`
+    convert alike but name three files. The space a file is read in
+    (`TxName::read_as`, the effective space E): `T` for a converted file, the
+    binding's for `_raw`, nothing for a file converted from a data space, and the
+    binding's for a `.tx` bound directly — as Arnold reads each (`cases.json`,
+    `direct_binding`). An 8-bit tile keeps the 256-entry table, built for E; a
+    `half` tile in a curved E is decoded once as it pages in
+    (`TiledFile::decoding`), never per lookup; E → working is the per-lookup
+    matrix as before. So the common case — Arnold's half EXR of linear ACEScg —
+    costs one matrix a lookup and nothing else.
+  - **What `--auto-tx` writes is Arnold's file.** `tiled::maketx` is OIIO's
+    pipeline in its order, each stage fitted to Arnold's files: `fixnan box3`;
+    opaque, constant-colour (shrunk to one tile, `oiio:ConstantColor`) and
+    monochrome (one `Y` channel) detection; unpremultiply, convert C → T with
+    crust's OCIO processor in `f32`, premultiply; then every level built from
+    the previous level's **floats** by a bilinear sample at each destination
+    centre, sizes rounded down — which reproduces Arnold's 8-bit levels to the
+    byte, where building from the quantised level did not. A straight-alpha
+    source is associated first as OIIO's reader does it, `round(c · a / 255)`
+    (all 2 553 samples of `cut_empty`; `floor` matched 1 834). The metadata is
+    OIIO's (`Software` and `Exif:ImageHistory`, `textureformat`, `wrapmodes`,
+    `fovcot`, `autotx`, `oiio:AverageColor` — the *source's* mean put through the
+    conversion as one colour, not the stored level's — and an in-crate SHA-1),
+    in the TIFF tags and EXR attributes Arnold uses, and the modification time is
+    the source's truncated to whole seconds. Against Arnold's own `.tx` of the
+    same 40 sources: same names, file types, sample types, compression, level
+    sizes and alpha; every level within a mean of 0.002 and a maximum of 0.02
+    (worst: `tile_srgb` level 3, mean 0.0016, max 0.0103 — two DWAA encoders);
+    and `oiiotool --info -v` reads the same keys and values, but for `oiio:SHA-1`,
+    `DateTime` and the `chunkCount` `exr` always writes
+    (`crust_writes_what_arnold_writes`, `oiio_reads_crusts_header_as_arnolds`).
+  - **Staleness is Arnold's.** A `.tx` is stale when it is missing or its
+    modification time is not its source's, in whole seconds. Arnold's update
+    check rebuilds a `.tx` whose time is newer *or* older than its source's, or
+    whose `Software` differs by a character, prefix included (`cases.json`,
+    `rebuild`); `stamp_as_source` sets the time, and the `Software` string is the
+    command line Arnold 7.5 runs (`command_line`, one constant for the prefix).
+    Its paths are written without Windows' verbatim `\\?\` prefix, which the
+    import's canonicalised asset paths carry and Arnold never writes.
+  - **End to end on the OpenPBR playground** (432x324, 64 spp, unclamped,
+    non-adaptive). Crust's `--auto-tx` converted a fresh copy (148 tiles,
+    280 s); Arnold then rendered that copy and **kept every one of the 148**.
+    The 9 files it generated were ones crust never wrote: the dome's EXR (crust
+    reads an environment whole, never through a `.tx`) and the dresser's 8 UDIM
+    tiles, bound through `GeomSubset`s that crust's import does not read (it
+    shades the dresser grey). Arnold's render on crust's files against Arnold's
+    on its own: relMSE 1.4e-5. Crust's render on Arnold's files against crust's
+    on its own: relMSE 0.078 at full resolution, but that is same-seed path
+    divergence, not bias — over 8x8 and 16x16 block averages it falls to
+    1.0e-3 and 1.3e-4 (as noise does, by about the block's pixel count), while
+    two seeds of one render differ by 0.27, then 0.016. Crust also reads 11
+    textures Arnold never converts (the `wings`, `OJ*` and `walls_Normal`
+    families among them), which preload on Arnold's set. Rerun at `a1640dca`
+    (paths without the verbatim prefix, mixed-depth sets declined), from a fresh
+    conversion: the same 9 generated and every crust file kept, Arnold relMSE
+    1.4e-5, crust 0.089 at full resolution and 2.1e-4 over 16x16 blocks.
+  - **The A/B is a tolerance, not bit identity** (`tx-arnold-convention`
+    decision 7). A streamed `.tx` is Arnold's file — converted to the target
+    space, reduced as `maketx` reduces, DWAA-compressed — so it agrees with the
+    preloaded source within bounds rather than to the bit:
+    - **Lookups, level 0:** per channel, alpha included, a mean absolute
+      difference of at most 0.005 and a 99th percentile of at most 0.02
+      (`a_converted_tx_streams_what_its_source_preloads`,
+      `a_converted_cutout_streams_what_its_source_preloads`). A raw 8-bit file
+      holds its source's bytes, so its level 0 still agrees exactly, edge tiles
+      included (`a_raw_tx_reads_its_source_s_texels_across_clipped_edge_tiles`).
+    - **Images:** at `-s 16 --indirect-clamp 0`, `CRUST_TEX_STREAM=0` against
+      streamed after `--auto-tx`, measured 2026-10-22: `samples/materialx_basic`
+      (UDIM albedo and normal, a mask) relMSE **2.4e-6**, `samples/usdpreview_textured`
+      relMSE **2.1e-7**, against a bound of 1e-3; the largest pixel differences
+      (0.35, 0.07) are a handful of paths that diverged.
+    - **Arnold reading crust's files:** for 13 bindings (sRGB, linear, `Raw`,
+      the keyword `raw`, unset, `auto`, cutout, grey, constant, 16-bit, float,
+      half), Arnold 7.5 kept every crust file — no regeneration in its log — and
+      rendered it within relMSE **3.4e-7** of its render of its own; the 8-bit
+      TIFF cases are pixel-identical (`scripts/arnold_tx_oracle.py --crust`,
+      `tests/data/arnold_tx/arnold_reads_crust.json`).
+    - **What it costs** (`bench_ab.sh -n 5`, 2026-10-22, the 8-UDIM 2048²
+      alias scene, each binary reading its own convention's files from one
+      directory): Render **0.301 / 0.315 s → 0.332 / 0.351 s (+10.3% min,
+      +11.4% mean)**. That is the worst case — one textured plane, nearly every
+      shading call a fetch — and nearly all of it is page-in: a tile now decodes
+      DWAA into `half` (3.10 ms a tile against 0.36 ms for zipped `u8`;
+      TextureLoad 4.8% of thread time against 0.5%), while a lookup costs what it
+      did plus the gamut matrix. Peak resident tile bytes doubled (1.27 → 2.54 MiB
+      on that scene): a `half` colour tile is 6 bytes a texel against 3, so the
+      same `CRUST_TEX_CACHE_MB` holds half as many sRGB colour texels; it is left
+      at 1024. Conversion is slower too (`--auto-tx` 2.2 s against 0.4 s for the
+      eight tiles), once per texture.
+    - **HDR range** is what the `half` path is for: a source with values at 8.0
+      streams them, while the preload's `to_rgb8()` clips at 1.0
+      (`hdr_survives_streaming_and_does_not_survive_preloading`).
+    The **alpha** of a converted `.tx` is premultiplied, as every lookup's is
+    (decision 9): a straight source is associated as OIIO's reader associates
+    it, and the colour levels average premultiplied light.
     - **A tile whose alpha is opaque throughout is cached as RGB**
       (`TiledFile::read_tile` → `TileData::without_opaque_alpha`). A file only
       *declares* alpha, and an OIIO `maketx` file of an RGBA image whose alpha
@@ -508,28 +573,18 @@ the finest level held at every footprint). See
       is decided tile by tile at page-in, where the tile is decoded anyway. The
       alpha sampler then asks each tile (`texel_rgba`), and a tile without alpha
       reads 1.0 — what `ALPHA_U8[255]` and a `half` 1.0 decode to, so a cutting
-      `.tx` with opaque tiles still matches its preload bit for bit
-      (`a_cutout_with_opaque_tiles_agrees_bit_for_bit_with_preloaded`). The RGB
+      `.tx` with opaque tiles still matches its preload within tolerance
+      (`a_cutout_with_opaque_tiles_streams_what_its_source_preloads`). The RGB
       fetch never asks.
-    - **A `.tx` written before alpha was carried is stale.** A crust conversion
-      before `decode-texture-alpha` wrote RGB from an RGBA source, and that file
-      is newer than its source, so its age would never retire it and its cutout
-      would read opaque — the issue's bug, back with no warning. Every `.tx`
-      crust writes now records its conversion version beside `crust:mipspace`
-      (`crust:txversion=2`, `TX_VERSION`), and `tx_staleness` calls a crust
-      `.tx` with no version stale (`PredatesAlpha`) when its source's header
-      declares alpha. Two header reads, no pixel: an alpha that turns out opaque
-      everywhere is reconverted once all the same, to a `.tx` that is then
-      current. `--auto-tx` reconverts it; without the flag it is refused and the
-      texture preloads with `texture.stream_fallback`, as a `.tx` of the wrong
-      mip space is — a stale `.tx` that only shows the old texture is used with a
-      warning, but one that would render the cutout opaque renders nothing
-      anybody converted. An OIIO file (no `crust:mipspace`) is never judged by
-      this (`a_tx_written_before_alpha_is_stale_for_a_source_that_has_one`,
-      `a_tx_from_before_alpha_is_refused_or_reconverted`).
+    - **Crust's earlier `.tx` convention** (`<stem>.tx`, levels reduced like the
+      preload's, `crust:mipspace` and `crust:txversion` in the header, a mismatch
+      refused, a pre-alpha file judged stale) is retired whole: its files are not
+      looked for, and `--auto-tx` writes the Arnold-named file beside them. They
+      are left on disk for the previous binary.
   - **Conversion is explicit, or opt-in automatic.** `examples/maketx` converts by
     hand, and `--auto-tx` converts on first use (Arnold's `autotx`). Both run one
-    conversion, `crust_assets::tiled::make_tx`. Automatic conversion stays behind a flag
+    conversion, `crust_assets::tiled::make_tx_atomic`, and write the file Arnold
+    names beside its source. Automatic conversion stays behind a flag
     because a renderer that silently writes multi-gigabyte files next to a read-only
     asset library is a surprise nobody asked for.
   - **The microcache is keyed by cache as well as tile.** A `TileId`'s file index is
@@ -703,8 +758,9 @@ the finest level held at every footprint). See
     only — a 4 MiB render is bit-identical to a 1 GiB one. `docs/ptex_streaming.md` has
     the measurements and the reasoning.
     **The mip chain is refused, not documented, and that is the project's own standard
-    rather than a new rule.** `crust:mipspace` refuses a `.tx` whose levels were reduced
-    in the wrong colour space, because the failure is invisible — level 0 is perfectly
+    rather than a new rule.** Crust's earlier `.tx` marker (`crust:mipspace`) refused a
+    `.tx` whose levels were reduced in the wrong colour space, because the failure is
+    invisible — level 0 is perfectly
     correct and only minification is wrong, which by eye is a filtering bug and nothing
     else. A `.ptx` has no marker and needs none: crust decodes colour Ptex by 2.2 and the
     file reduced before that, so the mismatch is unconditional for colour. A `Raw`
@@ -892,15 +948,61 @@ the finest level held at every footprint). See
   textured planes filling frame): ~2.8x the preloaded render, against ~2x for the UV
   path's.
   On the UV side: automatic conversion needs `--auto-tx` and writes beside the asset
-  (a read-only library preloads, with a warning per failed tile), 16-bit integer sources are still narrowed to 8 on page-in (deliberately —
-  the renderer decodes `u8` through a 256-entry table, and two more bits of an LDR
-  texture is not worth halving what the byte budget holds), there is no
+  (a read-only library preloads, with a warning per failed tile), there is no
   single-flight on a miss so two workers can decode the same tile at once (counted as
   "concurrent double fills", bounded by the thread count), and the cache is per-process
-  rather than shared between renders. The EXR backing reads RGB (or a replicated single
+  rather than shared between renders. A 16-bit TIFF pages in as `half`, twice a `u8`
+  tile's bytes: Arnold writes a 16-bit source's `.tx` at 16 bits converted to linear
+  light, which eight bits would band. The EXR backing reads RGB (or a replicated single
   channel) and `A`, refuses ripmaps, multi-layer and deep files, and requires
-  square tiles; the TIFF writer emits 8-bit RGB or RGBA only, so an HDR conversion is an
-  EXR conversion.
+  square tiles. A TIFF whose extra sample is unspecified under the horizontal
+  predictor is declined and preloads: `tiff` 0.11.3 undoes the predictor with the
+  wrong stride (neither OIIO nor crust writes one).
+
+## Known gaps: Arnold's `.tx` convention
+
+- **A source already tiled and mip-mapped is never converted**, by decision: a tiled
+  mip EXR (every ALab texture is one) streams as it is, and `--auto-tx` writes nothing
+  beside it (`auto_tx_leaves_a_source_that_already_streams_alone`). Arnold's auto-tx
+  converts it anyway, to `<stem>_raw.exr.tx` for a float source under `auto`; crust
+  neither writes nor reads that copy. For a raw float EXR the values are the same; the
+  two renderers differ only in which file's mip chain they filter.
+- **Only Arnold 7.5 is matched.** The `Software` string is OIIO 2.6.3's
+  (`OpenImageIO-Arnold 2.6.3.0dev : maketx …`, one constant in `tiled/make.rs`), and
+  Arnold's update check compares the whole string. Another Arnold version, or another
+  `maketx` flag list, rebuilds crust's files — and on Windows a rebuild over an
+  existing `.tx` fails ("Could not rename file: Access denied") and aborts the render
+  under `abort_on_error`. A rebuilt file is correct; only the abort is a hazard.
+- **The path in `Software` must be the one Arnold resolves, byte for byte.** Crust
+  writes the source and `.tx` paths absolute with forward slashes. A scene opened by
+  Arnold through another spelling of the same directory (a mapped drive against a UNC
+  path, an 8.3 short name) sees a different command line and rebuilds, as it would
+  rebuild its own files opened that way.
+- **`oiio:SHA-1` is crust's own hash**, of the converted level 0 and the conversion,
+  not OIIO's (which hashes its read buffer with extra data that a brute-force of the
+  likely strings did not reproduce). OIIO uses it only to share identical textures in
+  its cache, so a crust file costs that sharing in Arnold and nothing else.
+- **`openexr:chunkCount`** is in every EXR crust writes: the `exr` crate always writes
+  it. OpenEXR 2 permits it in a single-part file, and nothing compares it.
+- **8-bit linear and data conversions requantise to 8 bits**, as Arnold's do:
+  `Linear Rec.709 (sRGB)` → ACEScg is stored as `u8`, which bands in the shadows of a
+  smooth gradient. That is Arnold's file, deliberately reproduced.
+- **UsdUVTexture's `sRGB` token is not shared.** Crust reads it as sRGB, as the schema
+  says, and names its `.tx` canonically; Arnold, with crust's OCIO config, passes the
+  token to its `image` node as it is, finds no colour space of that name, and writes
+  `<stem>_sRGB_ACEScg` with the bytes unconverted (rendering them undecoded). Neither
+  reads the other's file for that token. `srgb_texture` is shared.
+- **A MaterialX colour image with no `colorspace`, and `auto`, follow Arnold**
+  (decision 8): an integer image is sRGB, so a greyscale 8-bit roughness bound through
+  UsdUVTexture with no `sourceColorSpace` is now decoded (MaterialX `float` images, and
+  UsdUVTexture `displacement`, stay data). This departs from MaterialX's "already in the
+  working space" and from Hydra's 8-bit-RGB-only `auto`. The one sample golden it
+  moved is `usdpreview_textured`: its roughness, `usdpreview_rough.png` bound with
+  `sourceColorSpace = "auto"`, is now decoded as sRGB (14% of pixels, relMSE 6.1e-3
+  at 16 spp, `--indirect-clamp 0`); every other golden is bit-identical.
+- **A name the OCIO config does not know** is read as stored by crust (with a
+  warning) and named `_raw`; Arnold names it verbatim (`_<name>_<T>`) and does not
+  convert. Neither finds the other's file.
 
 - **Streamed Ptex holds one file descriptor per `.ptx` for the whole render.**
   `ptex::SharedReader` keeps its `File` open, so the count scales with the streamed files
@@ -990,8 +1092,7 @@ the finest level held at every footprint). See
 ## Known gaps: UV textures
 
 - **UV texture caveats.** Normal maps need a tangent, which prototype parts
-  placed through an instancer's group and motion-blurred instances still lack
-  (above). On the
+  placed through an instancer's group still lack (above). On the
   `UsdPreviewSurface` side: `UsdTransform2d` is
   not evaluated, `occlusion`/`specularColor` are not read (`displacement` is, at import —
   see the `usd-scene-import` design record § Displacement), and a
@@ -1012,16 +1113,10 @@ the finest level held at every footprint). See
   one it is a *resize* averaged in the file's own encoding, so fixing it would
   move every render of a texture above the cap. Worth doing, not urgent.
 - **Alpha caveats.** Texture alpha is read (above); what it is not:
-  - **The colour is not premultiplied for filtering.** Levels and bilinear taps
-    blend each channel alone, so a transparent texel's colour bleeds into a
-    coarse level's edge. A cutout reads only the alpha, so it does not notice;
-    a colour read across a soft edge does. Premultiplying would move the colour
-    of every RGBA texture's mip chain, and nothing has asked for it.
-  - **Associated alpha is read with its colour as stored.** OIIO's `maketx`
-    writes TIFF `.tx` with associated alpha (`ExtraSamples = 1`) by default, and
-    EXR's convention is premultiplied. Crust reads the alpha and leaves the
-    colour premultiplied; a cutout is right, the colour at a soft edge is darker
-    than an unassociated source's. Crust's own `.tx` writes unassociated alpha.
+  - **Every lookup returns premultiplied colour**, preloaded or streamed, as
+    Arnold's files store it and as Arnold reads a straight source. A shader that
+    wants straight colour across a soft edge must divide by the alpha itself;
+    a cutout reads only the alpha and is unaffected.
   - **Ptex alpha is not carried**: `PtexTexture::eval` returns RGB, and nothing
     reads a Ptex alpha. A TIFF whose extra sample is unspecified
     (`ExtraSamples = 0`) has no alpha, by definition.

@@ -70,7 +70,11 @@ cargo test -p crust-render --test mcp # the server driven over its pipes, tool b
 # --stats (per-phase profile + scene statistics),
 # --profile (implies --stats; adds a Guerilla-style per-section render profile),
 # --stats-json PATH|- (the same statistics as crust-stats/1 JSON; `-` moves the log to stderr),
-# --auto-tx (convert UV textures to a .tx beside the original on first use),
+# --auto-tx (convert UV textures to a .tx beside the original on first use, named and
+#   written as Arnold 7.5's auto-tx names and writes it),
+# --tx-color-space SPACE (the space a .tx converts to and its name records; default
+#   ACEScg, Arnold's rendering space; independent of --working-space; shared with
+#   diagnostic, check and light-paths; a name the OCIO config lacks is a usage error),
 # --checkpoint SECONDS (rewrite the PNG preview from the render's snapshots while it runs)
 
 # Keep a full record of a render. The file gets the same events as the terminal
@@ -234,6 +238,11 @@ scripts/geomutil_oracle.py --keep /tmp/geomutil   # rewrites crust-core/tests/da
 # named point on the chart. See "MaterialX" under USD import.
 cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_basic.mtlx mtlx_ceramic 0.25 0.5
+# ...and from inside the surface (a back face), at 45° from the normal: past
+# the critical angle the glass's reflection leaf lets almost nothing through to
+# its transmission leaf (weight 0.024), as it totally reflects.
+cargo run --release -p crust-render --example mtlx_shade -- \
+    samples/materialx_surfaces.mtlx mtlx_standard_glass --theta 45 --back 0.5 0.5
 
 # ...and across a whole MaterialX corpus: Ben Houston's Material Fidelity suite,
 # 826 materials scored by PSNR against MaterialXView's render (~80 min on 4
@@ -550,7 +559,13 @@ warning code: removing a code bumps every report that carries warnings, by the
 `scene-warnings` versioning rule. The shape did not change.)
 `format`, `crust_version`; `scene` (the diagnostic's `SceneInfo`: `path`, `frame`,
 `camera` — the camera the import resolved, after any fallback — `resolution`,
-`region`); `products[]` (`prim` — `null` for the default beauty — `file`, `channels`);
+`region`); `pass` (`null` with no `--pass`, else `path`, `holdouts`, `camera_hidden`:
+how many prims that bring geometry in the pass holds out and hides from the camera);
+`settings` (the `RenderSettings` prim the render reads — the pass's `renderSource`, else
+the stage's — or `null` when no settings prim is there and the render uses the defaults;
+the provenance keeps the fallback path itself, so an edit authoring settings there is
+still classified as a settings edit); `products[]` (`prim` — `null` for
+the default beauty — `file`, `channels`);
 `effective_settings[]` (`name`, `value`, `flag`, `usd_attribute`, from the one
 `diagnostic::effective_settings`); `import[]` (`crust-stats/1`'s phase objects:
 `name`, `depth`, `time_s`, `rss_end_bytes`, `peak_end_bytes`); `counts`

@@ -13,7 +13,7 @@ use super::delta::{Applied, classify, layer_diff};
 use super::edit::{
     Snippet, active_snippet, attribute_snippet, binding_snippet, reanchor, variant_snippet,
 };
-use super::layer::{absolute, new_layer_text, same_file};
+use super::layer::{StageMetrics, absolute, new_layer_text, same_file};
 use super::query::{prim_at, variant_sets};
 use super::render::{Job, Renders};
 use super::scene::{Imported, import};
@@ -46,6 +46,9 @@ pub struct Open {
     pub input: PathBuf,
     /// The override layer, absolute: the session itself.
     pub output: PathBuf,
+    /// The render pass the session renders (`open_session`'s `pass`): every
+    /// import and the final render take `--pass` with it.
+    pub pass: Option<String>,
     /// The authoring stage, opened on the override layer (its root layer, so
     /// the edit target) with payloads unloaded.
     pub stage: Stage,
@@ -89,10 +92,14 @@ fn loader(kept: Option<&Arc<FileAssets>>) -> (Arc<FileAssets>, usize) {
     }
 }
 
-/// Imports the saved layer at `layer` through `assets`, then lets go of the
-/// kept decodes the new scene does not use.
-fn import_kept(layer: &Path, assets: Arc<FileAssets>) -> Result<Imported, String> {
-    let scene = import(layer, assets.clone())?;
+/// Imports the saved layer at `layer` through `assets`, rendering `pass`,
+/// then lets go of the kept decodes the new scene does not use.
+fn import_kept(
+    layer: &Path,
+    pass: Option<&str>,
+    assets: Arc<FileAssets>,
+) -> Result<Imported, String> {
+    let scene = import(layer, pass, assets.clone())?;
     let unused = assets.sweep();
     if unused > 0 {
         debug!("{unused} decoded asset(s) the scene no longer uses let go");
@@ -142,6 +149,48 @@ fn names(paths: &[PathBuf]) -> String {
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Authors `metrics` as the stage metadata of `stage`'s root layer, the
+/// override layer at `output`, and saves it.
+fn author_metrics(stage: &Stage, metrics: &StageMetrics, output: &Path) -> Result<(), String> {
+    let failed = |e: &dyn std::fmt::Display| format!("cannot author {}: {e}", output.display());
+    if let Some(m) = metrics.meters_per_unit {
+        stage
+            .set_stage_metadata("metersPerUnit", sdf::Value::Double(m))
+            .map_err(|e| failed(&e))?;
+    }
+    if let Some(axis) = &metrics.up_axis {
+        stage
+            .set_stage_metadata("upAxis", sdf::Value::Token(axis.as_str().into()))
+            .map_err(|e| failed(&e))?;
+    }
+    let root = stage.root_layer().identifier().to_owned();
+    let mut layer = stage
+        .layer_mut(&root)
+        .ok_or_else(|| format!("cannot save {}: the stage has no root layer", root))?;
+    layer
+        .save()
+        .map_err(|e| format!("cannot save {}: {e}", output.display()))?;
+    debug!("{}: added the input's {metrics:?}", output.display());
+    Ok(())
+}
+
+/// `result`, after putting `original` back as the bytes at `path` when it
+/// failed: a refused resume leaves the layer as it found it. A restore that
+/// fails too is added to the error.
+fn restoring<T>(
+    path: &Path,
+    original: Option<&[u8]>,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    match (result, original) {
+        (Err(e), Some(bytes)) => Err(match replace_file(path, bytes) {
+            Ok(()) => e,
+            Err(io) => format!("{e}; and {} could not be restored: {io}", path.display()),
+        }),
+        (result, _) => result,
+    }
 }
 
 /// The sublayers `stage`'s root layer authors, as written.
@@ -244,14 +293,16 @@ impl Open {
         self.refresh()?;
         let cancelled = self.renders.stop();
         let layer = self.output.to_str().ok_or("the layer path is not UTF-8")?;
-        let args = match Cli::try_parse_from(["crust", "render", "-i", layer]) {
-            Ok(Cli {
-                command: Command::Render(args),
-                ..
-            }) => args,
-            Ok(_) => unreachable!("parsed as render"),
-            Err(e) => return Err(e.to_string()),
-        };
+        let pass = self.pass.iter().flat_map(|p| ["--pass", p.as_str()]);
+        let args =
+            match Cli::try_parse_from(["crust", "render", "-i", layer].into_iter().chain(pass)) {
+                Ok(Cli {
+                    command: Command::Render(args),
+                    ..
+                }) => args,
+                Ok(_) => unreachable!("parsed as render"),
+                Err(e) => return Err(e.to_string()),
+            };
         let beauty = self.output.with_extension("exr");
         let beauty = beauty.to_str().ok_or("the layer path is not UTF-8")?;
         let dir = self.layer_dir();
@@ -385,7 +436,7 @@ impl Open {
             )),
             camera: self.scene.report.scene.camera.clone(),
         };
-        let own = renderer.settings;
+        let own = renderer.settings();
         renderer.retune(job.settings);
         let report = inspect::run(renderer, rect, &options);
         renderer.retune(own);
@@ -538,14 +589,17 @@ impl Open {
         } else if self.assets.is_some()
             && let Some((applied, change)) = self.classify(before)
         {
-            match self.scene.update(&self.output, &change, applied) {
+            match self
+                .scene
+                .update(&self.output, self.pass.as_deref(), &change, applied)
+            {
                 Ok(()) => return Ok(()),
                 // One per edit batch that falls back.
                 Err(why) => debug!("{applied} edit applied as full instead: {why}"),
             }
         }
         let before = self.sources.now();
-        self.scene = import_kept(&self.output, assets)?;
+        self.scene = import_kept(&self.output, self.pass.as_deref(), assets)?;
         self.sources = Sources::of(&self.scene.layers, &self.output, &before);
         self.stale = None;
         Ok(())
@@ -714,7 +768,17 @@ impl State {
     /// anything is written when `output` is the input, is not a `.usda`, or
     /// exists without being an override layer of `input`; a refused or
     /// failed call leaves the open session as it was, its history included.
-    pub fn open_session(&mut self, input: &str, output: &str) -> Result<serde_json::Value, String> {
+    ///
+    /// With `pass` (spec: "A session renders one pass"), every import, probe
+    /// and final render of the session takes `--pass <pass>`; a pass that is
+    /// not a `RenderPass` on the stage fails the import, so the call, naming
+    /// the path.
+    pub fn open_session(
+        &mut self,
+        input: &str,
+        output: &str,
+        pass: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         let cancelled = self.open.as_mut().and_then(|open| open.renders.stop());
         let input = absolute(Path::new(input))?;
         let output = absolute(Path::new(output))?;
@@ -738,6 +802,9 @@ impl State {
             .ok_or("the output has no directory")?
             .to_owned();
         let resumed = output.exists();
+        // The resumed layer's bytes before this call added metrics to it, put
+        // back if the session it opens is refused.
+        let mut before_metrics = None;
         let stage = if resumed {
             let stage = open_stage(&output)?;
             let sublayers = authored_sublayers(&stage);
@@ -750,10 +817,22 @@ impl State {
                     input.display()
                 ));
             }
+            // A layer written before sessions copied the input's metrics:
+            // add what it lacks, keeping what it authors.
+            let missing =
+                StageMetrics::of_layer(&input).missing_from(&StageMetrics::of_layer(&output));
+            if !missing.is_empty() {
+                let original =
+                    std::fs::read(&output).map_err(|e| format!("{}: {e}", output.display()))?;
+                let authored = author_metrics(&stage, &missing, &output);
+                before_metrics = Some(original);
+                restoring(&output, before_metrics.as_deref(), authored)?;
+            }
             stage
         } else {
             std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            std::fs::write(&output, new_layer_text(&input, &dir))
+            let metrics = StageMetrics::of_layer(&input);
+            std::fs::write(&output, new_layer_text(&input, &dir, &metrics))
                 .map_err(|e| format!("{}: {e}", output.display()))?;
             match open_stage(&output) {
                 Ok(stage) => stage,
@@ -766,7 +845,8 @@ impl State {
         let assets = crust_core::config()
             .scene_deltas
             .then(|| Arc::new(FileAssets::new().keep_decoded()));
-        let scene = match import_kept(&output, loader(assets.as_ref()).0) {
+        let imported = import_kept(&output, pass, loader(assets.as_ref()).0);
+        let scene = match restoring(&output, before_metrics.as_deref(), imported) {
             Ok(scene) => scene,
             Err(e) => {
                 // A new layer the import refuses is no session: leave nothing.
@@ -780,6 +860,7 @@ impl State {
         let result = serde_json::json!({
             "input": input,
             "output": output,
+            "pass": pass,
             "resumed": resumed,
             "camera": report.scene.camera,
             "resolution": report.scene.resolution,
@@ -799,6 +880,7 @@ impl State {
         self.open = Some(Open {
             input,
             output,
+            pass: pass.map(str::to_owned),
             stage,
             scene,
             undo: Vec::new(),
@@ -888,6 +970,35 @@ impl Session {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// A failed step of a resume puts back the bytes the layer had before
+    /// the resume added metrics to it; a step that succeeds keeps them, as
+    /// does a new layer, which has no earlier bytes.
+    #[test]
+    fn a_failed_resume_restores_the_layer() {
+        let dir = std::env::temp_dir().join("crust_mcp_restoring");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let layer = dir.join("edits.usda");
+        let original = b"#usda 1.0\n# as found\n";
+        let with_metrics = b"#usda 1.0\n(\n    metersPerUnit = 1\n)\n";
+
+        std::fs::write(&layer, with_metrics).unwrap();
+        let e = restoring(
+            &layer,
+            Some(original),
+            Err::<(), _>("import refused".into()),
+        );
+        assert_eq!(e, Err("import refused".to_owned()));
+        assert_eq!(std::fs::read(&layer).unwrap(), original);
+
+        std::fs::write(&layer, with_metrics).unwrap();
+        assert_eq!(restoring(&layer, Some(original), Ok(7)), Ok(7));
+        assert_eq!(std::fs::read(&layer).unwrap(), with_metrics);
+
+        let none = restoring::<()>(&layer, None, Err("refused".into()));
+        assert!(none.is_err());
+        assert_eq!(std::fs::read(&layer).unwrap(), with_metrics);
+    }
 
     /// `replace_file` gives the path a new file rather than rewriting the one
     /// there, so an import that still maps the old layer keeps the bytes it

@@ -444,8 +444,10 @@ fn an_exr_pyramid_preserves_the_mean_on_an_odd_axis() {
     assert!((top.pixels[0] - 1.5).abs() < 1e-5);
 }
 
+/// `auto` as Arnold resolves it: any integer image — RGB, greyscale, 16-bit
+/// — is sRGB, and a float one is used as stored.
 #[test]
-fn auto_decodes_an_rgb_png_and_leaves_a_grey_one_raw() {
+fn auto_decodes_every_integer_png_and_leaves_a_float_image_raw() {
     let dir = scratch("auto_png");
     let rgb = dir.join("rgb.png");
     write_tile(&rgb, [128, 128, 128]);
@@ -453,17 +455,32 @@ fn auto_decodes_an_rgb_png_and_leaves_a_grey_one_raw() {
     image::GrayImage::from_pixel(1, 1, image::Luma([128]))
         .save(&grey)
         .expect("write png");
+    let deep = dir.join("deep.png");
+    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_pixel(1, 1, image::Luma([128 * 257]))
+        .save(&deep)
+        .expect("write png");
+    let srgb = ResolvedColorSpace::SRGB.decode_curve(128.0 / 255.0);
+    for path in [&rgb, &grey, &deep] {
+        let t = UvTexture::open(path, ColorSpace::AUTO).expect("loads");
+        assert_eq!(
+            t.color_space(),
+            ResolvedColorSpace::SRGB,
+            "{}",
+            path.display()
+        );
+        assert!(
+            (t.eval(0.5, 0.5, 0.0)[0] - srgb).abs() < 1e-6,
+            "{}",
+            path.display()
+        );
+    }
 
-    let t = UvTexture::open(&rgb, ColorSpace::AUTO).expect("loads");
-    assert_eq!(t.color_space(), ResolvedColorSpace::SRGB);
-    assert!(
-        (t.eval(0.5, 0.5, 0.0)[0] - ResolvedColorSpace::SRGB.decode_curve(128.0 / 255.0)).abs()
-            < 1e-6
-    );
-
-    let t = UvTexture::open(&grey, ColorSpace::AUTO).expect("loads");
+    let hdr = dir.join("float.hdr");
+    image::codecs::hdr::HdrEncoder::new(std::fs::File::create(&hdr).expect("create"))
+        .encode(&[image::Rgb([0.5f32, 0.5, 0.5])], 1, 1)
+        .expect("write hdr");
+    let t = UvTexture::open(&hdr, ColorSpace::AUTO).expect("loads");
     assert_eq!(t.color_space(), ResolvedColorSpace::RAW);
-    assert_eq!(t.eval(0.5, 0.5, 0.0)[0], 128.0 / 255.0);
 }
 
 /// Writes a scanline EXR whose channels are `names`, each flat `values`.
@@ -627,14 +644,16 @@ fn rgb_png_of(path: &Path, w: usize, h: usize, rgba: &[u8]) {
 const WIDTHS: [f32; 8] = [0.0, 0.004, 0.02, 0.09, 0.3, 0.7, 2.0, 9.0];
 
 /// **What the issue asked for.** A PNG's alpha is the lookup's fourth
-/// component, at every texel and level; its colour is exactly what the same
-/// image without alpha reads.
+/// component, at every texel and level, and its colour is premultiplied by
+/// it (design decision 9 of `tx-arnold-convention`): exactly what the same
+/// image without alpha reads where the alpha is 1, and black where it is 0,
+/// at every level — the pyramid averages premultiplied light.
 ///
 /// The cutout path in the importer already thresholds `outputs:a`; it read
 /// 1.0 everywhere because the decode went through `to_rgb8` and the
 /// bilinear blend wrote an opaque alpha.
 #[test]
-fn an_rgba_png_reads_its_alpha_and_its_colour_is_unchanged() {
+fn an_rgba_png_reads_its_alpha_and_its_colour_premultiplied() {
     let dir = scratch("rgba");
     let (w, h) = (64usize, 48usize);
     // Transparent on the left half, opaque on the right, as a leaf card.
@@ -646,17 +665,29 @@ fn an_rgba_png_reads_its_alpha_and_its_colour_is_unchanged() {
             if x < w / 2 { 0 } else { 255 }
         },
     );
-    rgb_png_of(&dir.join("leaf_rgb.png"), w, h, &rgba);
+    // The same colour premultiplied: unchanged where opaque, black where cut.
+    let premultiplied: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|t| if t[3] == 0 { [0, 0, 0, 0] } else { *t })
+        .collect();
+    rgb_png_of(&dir.join("leaf_rgb.png"), w, h, &premultiplied);
 
     for space in [ColorSpace::SRGB, ColorSpace::RAW] {
         let tex = UvTexture::open_with(&dir.join("leaf.png"), space, true).expect("rgba");
         let rgb = UvTexture::open_with(&dir.join("leaf_rgb.png"), space, true).expect("rgb");
         assert!(tex.has_alpha() && !rgb.has_alpha());
         assert_eq!(tex.level_count(), rgb.level_count());
-        // Point-sampled at texel centres: exactly the stored alpha.
+        // Point-sampled at texel centres: exactly the stored alpha, and a
+        // cut texel's colour is black.
         for (x, want) in [(3usize, 0.0), (w / 2 - 1, 0.0), (w / 2, 1.0), (w - 2, 1.0)] {
             let (u, v) = ((x as f32 + 0.5) / w as f32, 0.5 + 0.5 / h as f32);
-            assert_eq!(tex.eval(u, v, 0.0)[3], want, "texel {x}");
+            let px = tex.eval(u, v, 0.0);
+            assert_eq!(px[3], want, "texel {x}");
+            if want == 0.0 {
+                assert_eq!(px[..3], [0.0; 3], "texel {x}");
+            }
         }
         for width in WIDTHS {
             for i in 0..23 {
@@ -691,8 +722,13 @@ fn alpha_is_not_colour_managed() {
     for width in WIDTHS {
         assert_eq!(tex.eval(0.3, 0.6, width)[3], 128.0 / 255.0, "width {width}");
     }
-    // And the colour space did decode the colour, so the test is not vacuous.
+    // And the colour space did decode the colour, so the test is not vacuous;
+    // the colour is premultiplied in linear light: the decoded checker times
+    // 128/255, to the byte the premultiplied value was stored in.
     assert_eq!(tex.color_space(), ResolvedColorSpace::SRGB);
+    let px = tex.eval(0.5 / 16.0, 1.0 - 0.5 / 16.0, 0.0);
+    let want = ResolvedColorSpace::SRGB.decode_curve(230.0 / 255.0) * 128.0 / 255.0;
+    assert!((px[0] - want).abs() < 0.004, "{px:?} against {want}");
 }
 
 /// An alpha that is opaque at every texel is not stored: the texture holds

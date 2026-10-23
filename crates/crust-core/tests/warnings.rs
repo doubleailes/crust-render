@@ -131,7 +131,8 @@ fn product_and_aov_warnings() {
     def RenderProduct "beauty"
     {
         token productName = "beauty.exr"
-        rel orderedVars = [</Render/color>, </Render/bogus>, </Render/badLpe>, </Render/primvar>]
+        rel orderedVars = [</Render/color>, </Render/bogus>, </Render/badLpe>, </Render/intrinsic>,
+                           </Render/nameless>]
     }
     def Scope "notAProduct"
     {
@@ -149,10 +150,14 @@ fn product_and_aov_warnings() {
         uniform token sourceType = "lpe"
         uniform string sourceName = "C<<<"
     }
-    def RenderVar "primvar"
+    def RenderVar "intrinsic"
+    {
+        uniform token sourceType = "intrinsic"
+        uniform string sourceName = "cameraDepth"
+    }
+    def RenderVar "nameless"
     {
         uniform token sourceType = "primvar"
-        uniform string sourceName = "st"
     }
 }
 "#,
@@ -171,7 +176,11 @@ fn product_and_aov_warnings() {
     );
     assert_eq!(
         record(&scene, WarningCode::AovUnsupportedSource).prims,
-        ["/Render/primvar"]
+        ["/Render/intrinsic"]
+    );
+    assert_eq!(
+        record(&scene, WarningCode::AovPrimvarNoName).prims,
+        ["/Render/nameless"]
     );
     for w in &scene.warnings {
         assert_eq!(w.kind, WarningKind::Skipped, "{w:?}");
@@ -558,6 +567,57 @@ fn two_broken_materials_share_one_code() {
     assert_eq!(r.kind, WarningKind::Skipped);
     assert_eq!(r.count, 2);
     assert_eq!(r.prims, ["/World/Empty", "/World/Alien"]);
+}
+
+/// A winning binding whose target is not on the stage — what a streamed
+/// chunk makes of every material outside it — falls back to default grey
+/// with `material.fallback_default` at the winner's path. Neither a weaker
+/// binding that does resolve (the mesh's own, under a
+/// `strongerThanDescendants` ancestor) nor the absence of a direct binding (a
+/// collection binding) may stand in for it.
+#[test]
+fn an_unresolvable_winning_binding_falls_back_at_its_own_path() {
+    let scene = load(
+        "unresolvable_winner",
+        r#"    def Xform "Strong" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Missing> (
+            bindMaterialAs = "strongerThanDescendants"
+        )
+        def Material "Real"
+        {
+            token outputs:surface.connect = </World/Strong/Real/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                token outputs:surface
+            }
+        }
+        def Sphere "a" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </World/Strong/Real>
+        }
+    }
+    def Xform "Coll" (prepend apiSchemas = ["MaterialBindingAPI", "CollectionAPI:set"])
+    {
+        rel collection:set:includes = [</World/Coll/b>]
+        rel material:binding:collection:set = [</World/Coll.collection:set>, </World/Gone>]
+        def Sphere "b" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+        }
+    }
+"#,
+        "",
+    );
+    let r = record(&scene, WarningCode::MaterialFallbackDefault);
+    let mut prims = r.prims.clone();
+    prims.sort();
+    assert_eq!(
+        prims,
+        ["/World/Gone", "/World/Missing"],
+        "{:#?}",
+        scene.warnings
+    );
 }
 
 /// Without a host that decodes assets, a dome's map is declined by the

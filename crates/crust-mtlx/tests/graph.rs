@@ -15,7 +15,7 @@ use std::sync::Arc;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn decline(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     None
 }
 
@@ -28,6 +28,7 @@ fn ctx() -> ShadeCtx<'static> {
         position: Vec3A::new(1.0, 2.0, 3.0),
         uv_width: 0.0,
         curve: None,
+        primvars: &[],
     }
 }
 
@@ -791,6 +792,32 @@ fn dotproduct_and_luminance() {
 }
 
 #[test]
+fn magnitude_is_the_vector_length() {
+    let magnitude = |ty: &str, value: &str| {
+        let doc = format!(
+            r#"<materialx>
+                 <magnitude name="n" type="float">
+                   <input name="in" type="{ty}" value="{value}" />
+                 </magnitude>
+               </materialx>"#
+        );
+        run(&doc, "n")
+    };
+    let v = magnitude("vector2", "3, 4");
+    assert_eq!(v.arity, 1);
+    assert!(approx(v.x(), 5.0));
+    assert!(approx(magnitude("vector3", "2, 3, 6").x(), 7.0));
+    assert!(approx(magnitude("vector4", "1, 2, 2, 4").x(), 5.0));
+    assert_eq!(magnitude("vector3", "0, 0, 0").x(), 0.0);
+    // Unauthored, `in` is the zero vector.
+    let v = run(
+        r#"<materialx><magnitude name="n" type="float" /></materialx>"#,
+        "n",
+    );
+    assert_eq!(v.x(), 0.0);
+}
+
+#[test]
 fn geometric_inputs_read_the_shading_context() {
     let c = ctx();
     let uv = run_with(
@@ -1004,9 +1031,9 @@ fn a_declined_image_falls_back_to_its_default() {
 
 #[test]
 fn a_loaded_image_is_sampled_and_counted() {
-    let loader = |file: &str, cs: Option<&str>| -> Option<TextureRef> {
+    let loader = |file: &str, cs: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         assert_eq!(file, "albedo.png");
-        assert_eq!(cs, Some("srgb_texture"));
+        assert_eq!(cs, crust_mtlx::TexelSpace::Named("srgb_texture"));
         Some(TextureRef(Arc::new(Flat([0.6, 0.7, 0.8, 1.0]))))
     };
     let doc = r#"<materialx><image name="n" type="color3">
@@ -1030,7 +1057,7 @@ fn a_loaded_image_is_sampled_and_counted() {
 
 #[test]
 fn a_float_image_reads_one_lane() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.3, 0.9, 0.9, 1.0]))))
     };
     let v = run_with(
@@ -1047,8 +1074,9 @@ fn a_float_image_reads_one_lane() {
 
 #[test]
 fn image_lookups_use_the_context_uv() {
-    let loader =
-        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Echo)))
+    };
     let v = run_with(
         r#"<materialx><image name="n" type="vector2">
              <input name="file" type="filename" value="e.png" />
@@ -1062,8 +1090,9 @@ fn image_lookups_use_the_context_uv() {
 
 #[test]
 fn tiledimage_scales_and_offsets_the_uv() {
-    let loader =
-        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Echo)))
+    };
     let v = run_with(
         r#"<materialx><tiledimage name="n" type="vector2">
              <input name="file" type="filename" value="e.png" />
@@ -1088,8 +1117,9 @@ fn tiledimage_scales_and_offsets_the_uv() {
 /// the checker rendered untiled; a connection that folds is its constant.
 #[test]
 fn a_connected_uvtiling_that_folds_is_applied() {
-    let loader =
-        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Echo)))
+    };
     let at = |tiling: &str| {
         run_with(
             &format!(
@@ -1112,7 +1142,7 @@ fn a_connected_uvtiling_that_folds_is_applied() {
 
 #[test]
 fn a_flat_normal_map_returns_the_geometric_normal() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.5, 0.5, 1.0, 1.0]))))
     };
     let c = ctx();
@@ -1135,7 +1165,7 @@ fn a_flat_normal_map_returns_the_geometric_normal() {
 #[test]
 fn a_tilted_normal_map_leans_along_the_tangent() {
     // Red > 0.5 encodes a +tangent tilt.
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.9, 0.5, 0.6, 1.0]))))
     };
     let c = ctx();
@@ -1161,7 +1191,7 @@ fn a_tilted_normal_map_leans_along_the_tangent() {
 
 #[test]
 fn a_normal_map_without_a_tangent_passes_the_normal_through() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.9, 0.2, 0.6, 1.0]))))
     };
     let mut c = ctx();
@@ -1651,11 +1681,11 @@ fn sample_first_material_is_used_when_none_is_named() {
 #[test]
 fn sample_textures_are_requested_with_their_colorspace() {
     let asked = std::sync::Mutex::new(Vec::new());
-    let loader = |file: &str, cs: Option<&str>| -> Option<TextureRef> {
+    let loader = |file: &str, cs: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         asked
             .lock()
             .unwrap()
-            .push((file.to_string(), cs.map(str::to_string)));
+            .push((file.to_string(), cs.name().map(str::to_string)));
         Some(TextureRef(Arc::new(Flat([0.5, 0.5, 1.0, 1.0]))))
     };
     let c = compile(&sample_mtlx(), Some("mtlx_ceramic"), &Host::new(&loader)).expect("compiles");
@@ -2370,14 +2400,24 @@ fn cellnoise2d_unauthored_reads_the_chart() {
 // geompropvalue: curve properties and primvars
 // ---------------------------------------------------------------------------
 
-/// Compiles `name` of `doc` and evaluates it with `curve` as the strand.
-fn run_on_curve(doc: &str, name: &str, curve: Option<crust_mtlx::CurveCtx<'_>>) -> (Val, Program) {
+/// A hit's strand (`None` off a curve) and its primvar values.
+type Hit<'a> = (Option<crust_mtlx::CurveCtx>, &'a [Option<Val>]);
+
+/// Compiles `name` of `doc` and evaluates it at `hit`.
+fn run_on_curve(doc: &str, name: &str, (curve, primvars): Hit<'_>) -> (Val, Program) {
     let d = Doc::parse(doc).expect("document parses");
     let mut c = Compiler::new(&d, &Host::new(&decline));
     let slot = c.compile_named("", name, None);
     assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
     let mut slots = Vec::new();
-    c.program.eval(&ShadeCtx { curve, ..ctx() }, &mut slots);
+    c.program.eval(
+        &ShadeCtx {
+            curve,
+            primvars,
+            ..ctx()
+        },
+        &mut slots,
+    );
     (slots[slot as usize], c.program)
 }
 
@@ -2397,13 +2437,18 @@ fn lanes(v: Val) -> (Vec<f32>, u8) {
     (v.v[..v.arity as usize].to_vec(), v.arity)
 }
 
-fn strand(primvars: &[Option<Val>]) -> Option<crust_mtlx::CurveCtx<'_>> {
-    Some(crust_mtlx::CurveCtx {
+fn strand(primvars: &[Option<Val>]) -> Hit<'_> {
+    let curve = crust_mtlx::CurveCtx {
         v: 0.625,
         index: 7,
         random: 0.3,
-        primvars,
-    })
+    };
+    (Some(curve), primvars)
+}
+
+/// A mesh hit: no strand, only primvars.
+fn mesh(primvars: &[Option<Val>]) -> Hit<'_> {
+    (None, primvars)
 }
 
 #[test]
@@ -2424,12 +2469,12 @@ fn curve_properties_read_the_strand() {
 
 #[test]
 fn curve_properties_off_a_curve_read_the_default() {
-    let (v, _) = run_on_curve(&geomprop("float", "curve:v", "0.5"), "g", None);
+    let (v, _) = run_on_curve(&geomprop("float", "curve:v", "0.5"), "g", mesh(&[]));
     assert_eq!(lanes(v), lanes(Val::float(0.5)));
     let (v, _) = run_on_curve(
         &geomprop("color3", "curve:random", "0.1, 0.2, 0.3"),
         "g",
-        None,
+        mesh(&[]),
     );
     assert_eq!(lanes(v), lanes(Val::vec3(0.1, 0.2, 0.3)));
 }
@@ -2453,11 +2498,14 @@ fn primvars_are_read_by_name_in_program_order() {
     let (v, p) = run_on_curve(doc, "sum", strand(&values));
     assert_eq!(p.primvars, ["hairColor", "melanin"]);
     assert_eq!(lanes(v), lanes(Val::vec3(1.1, 1.2, 1.3)));
-    // Absent on this curve, or off a curve: the default (and the colour's
-    // unauthored default, zero).
+    // A mesh hit reads them the same way, with no strand.
+    let (v, _) = run_on_curve(doc, "sum", mesh(&values));
+    assert_eq!(lanes(v), lanes(Val::vec3(1.1, 1.2, 1.3)));
+    // Absent on this curve, or a hit with none: the default (and the
+    // colour's unauthored default, zero).
     let (v, _) = run_on_curve(doc, "sum", strand(&[Some(Val::vec3(0.1, 0.2, 0.3)), None]));
     assert_eq!(lanes(v), lanes(Val::vec3(0.35, 0.45, 0.55)));
-    let (v, _) = run_on_curve(doc, "sum", None);
+    let (v, _) = run_on_curve(doc, "sum", mesh(&[]));
     assert_eq!(lanes(v), lanes(Val::vec3(0.25, 0.25, 0.25)));
 }
 
@@ -2478,7 +2526,7 @@ fn a_float_primvar_into_a_colour_broadcasts() {
 
 #[test]
 fn geompropvalue_st_reads_the_chart() {
-    let (v, p) = run_on_curve(&geomprop("vector2", "st", "0, 0"), "g", None);
+    let (v, p) = run_on_curve(&geomprop("vector2", "st", "0, 0"), "g", mesh(&[]));
     assert_eq!(lanes(v), lanes(Val::vec2(0.25, 0.75)));
     assert!(p.reads_chart() && !p.reads_curve());
 }
@@ -2510,7 +2558,7 @@ fn an_image_at_a_named_uv_set_reads_the_chart() {
            </materialx>"#,
     )
     .unwrap();
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.5; 4]))))
     };
     let mut c = Compiler::new(&d, &Host::new(&loader));
@@ -2541,7 +2589,7 @@ fn an_image_at_a_curve_property_reads_it_with_or_without_the_prefix() {
                </materialx>"#
         ))
         .unwrap();
-        let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+        let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
             Some(TextureRef(Arc::new(Flat([0.5; 4]))))
         };
         let mut c = Compiler::new(&d, &Host::new(&loader));

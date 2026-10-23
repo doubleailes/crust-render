@@ -213,8 +213,55 @@ pub struct LightList {
     /// Per light, the name it was imported under (its USD prim path), for
     /// messages and reports; kept in step with `lights` like `lpe_tags`.
     pub(super) names: Vec<Option<Box<str>>>,
+    /// Per light, its per-lobe multipliers (`inputs:diffuse`,
+    /// `inputs:specular`); kept in step with `lights` like `lpe_tags`.
+    pub(super) gains: Vec<LobeGains>,
+    /// Whether any light's [`LobeGains`] is not [`LobeGains::ONE`]: the
+    /// integrator splits a vertex's BSDF by lobe for them only then.
+    pub(super) any_gains: bool,
     /// The working colour space's luminance weights ([`LightList::luma`]).
     pub(super) luma: utils::Luma,
+}
+
+/// A light's multipliers on its contribution to the diffuse and the
+/// specular response of a surface — UsdLux `inputs:diffuse` and
+/// `inputs:specular`, non-physical controls. Which lobes each scales is
+/// [`LobeLabel::is_specular`](crate::material::lobe::LobeLabel::is_specular)'s
+/// answer, a fibre's R term counting as specular and its other terms as
+/// diffuse. Applied alike on both sides of MIS — NEE's connection and the
+/// emission a bounce reaches — as part of the integrand, never of a weight;
+/// volume scattering is the light's whole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LobeGains {
+    pub diffuse: f32,
+    pub specular: f32,
+}
+
+impl LobeGains {
+    /// The schema's fallback: the light's contribution unscaled.
+    pub const ONE: LobeGains = LobeGains {
+        diffuse: 1.0,
+        specular: 1.0,
+    };
+
+    /// The gain, per channel, on a BSDF value whose `specular` share (per
+    /// channel, in [0, 1]) answers to `inputs:specular` and the rest to
+    /// `inputs:diffuse`.
+    ///
+    /// Weighted sum, not `d + s·(spec − d)`: the difference of two finite
+    /// gains of opposite sign can overflow, and a zero share times its
+    /// infinity is a NaN in the film. Each term here is bounded by its own
+    /// gain, and a share of 0 or 1 gives that gain exactly.
+    #[inline]
+    pub fn blend(self, specular: Vec3A) -> Vec3A {
+        (Vec3A::ONE - specular) * self.diffuse + specular * self.specular
+    }
+}
+
+impl Default for LobeGains {
+    fn default() -> Self {
+        LobeGains::ONE
+    }
 }
 
 impl Default for LightList {
@@ -241,6 +288,8 @@ impl LightList {
             twinned: Vec::new(),
             lpe_tags: Vec::new(),
             names: Vec::new(),
+            gains: Vec::new(),
+            any_gains: false,
             luma: utils::Luma::REC709,
         }
     }
@@ -289,6 +338,7 @@ impl LightList {
         self.lights.push(light);
         self.lpe_tags.push(None);
         self.names.push(None);
+        self.gains.push(LobeGains::ONE);
         self.pmf.clear();
         self.cdf.clear();
         self.cache = None;
@@ -341,6 +391,8 @@ impl LightList {
         let light = self.lights.remove(index);
         self.lpe_tags.remove(index);
         self.names.remove(index);
+        self.gains.remove(index);
+        self.any_gains = self.gains.iter().any(|g| *g != LobeGains::ONE);
         self.by_geom.retain(|_, i| *i != index);
         for i in self.by_geom.values_mut() {
             if *i > index {
@@ -373,6 +425,25 @@ impl LightList {
     /// `L` events it ends, which a light group `<L.'tag'>` selects.
     pub fn lpe_tag(&self, index: usize) -> Option<&str> {
         self.lpe_tags.get(index).and_then(|t| t.as_deref())
+    }
+
+    /// Sets light `index`'s per-lobe multipliers ([`LobeGains`]).
+    pub fn set_lobe_gains(&mut self, index: usize, gains: LobeGains) {
+        self.gains[index] = gains;
+        self.any_gains = self.gains.iter().any(|g| *g != LobeGains::ONE);
+    }
+
+    /// Light `index`'s per-lobe multipliers ([`LobeGains::ONE`] unless set).
+    #[inline]
+    pub fn lobe_gains(&self, index: usize) -> LobeGains {
+        self.gains.get(index).copied().unwrap_or(LobeGains::ONE)
+    }
+
+    /// Whether any light scales its diffuse and specular contributions
+    /// apart ([`LobeGains`]).
+    #[inline]
+    pub fn has_lobe_gains(&self) -> bool {
+        self.any_gains
     }
 
     /// Names light `index` — the importer gives each light its prim path.
@@ -912,6 +983,18 @@ impl LightList {
             *m = RayMask(m.0 & !MASK_CAMERA.0);
         }
         self.backdrops.clear();
+    }
+
+    /// Hides the light at infinity at `index` from the camera, as
+    /// [`LightList::hide_infinite_from_camera`] hides all of them: the active
+    /// render pass leaves it out of `cameraVisibility`. How it illuminates is
+    /// unchanged. Nothing for a finite light, whose camera visibility is its
+    /// geometry's mask.
+    pub fn hide_from_camera(&mut self, index: usize) {
+        if let Some(at) = self.infinite.iter().position(|&i| i as usize == index) {
+            let m = &mut self.infinite_masks[at];
+            *m = RayMask(m.0 & !MASK_CAMERA.0);
+        }
     }
 
     /// Adds a backdrop: a light at infinity that illuminates nothing and

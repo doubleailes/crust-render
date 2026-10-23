@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 const FIXTURE: &str = include_str!("data/osl_oracle.txt");
 
-fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn decline(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     None
 }
 
@@ -119,6 +119,7 @@ fn eval(case: &Case) -> Val {
         position: Vec3A::ZERO,
         uv_width: 0.0,
         curve: None,
+        primvars: &[],
     };
 
     let doc = Doc::parse(&xml).unwrap_or_else(|e| panic!("line {}: {e:?}", case.line));

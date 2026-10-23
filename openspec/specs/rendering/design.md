@@ -389,6 +389,19 @@ consumed as ordinary dependencies:
    and `renders/foo.png`. Tone mapping and PNG encoding live in `main.rs`; the engine
    crate only produces the `Buffer`.
 
+## Renderer state and light-selection lifetime
+
+`Renderer` keeps its camera, world, lights, settings and volumes private. Its
+accessors return a settings copy or shared references; settings updates go
+through `reconfigure` (always rebuild selection) or `retune` (reuse only when
+the selection strategy, resolution and frame are unchanged). A host editing
+scene parts consumes `into_parts` and constructs a new renderer, preserving
+geometry and assets while rebuilding selection for the edited scene.
+
+Infinite-light emission has one traversal, `escaped_split`, shared by the
+beauty sum and light-path routing. It owns the camera visibility, links,
+selection density and MIS weight, in the same accumulation order for both.
+
 ## Adaptive sampling
 
 The final pass stops a pixel once the relative standard error of its mean
@@ -472,7 +485,10 @@ served its purpose. What stays pinned: the same sample indices whatever the
 schedule, "exactly the samples the pixel would take alone" under `t < 0`, and
 tiles ↔ scanlines. Work units are tiles or rows as before — rows are now
 `width`×1 tiles through the one gather — with one `PathScratch` per rayon
-worker (`for_each_init`). Progress counts samples, not units: each unit has
+worker (`for_each_init`). A scratch reserves at most 64 vertex records up
+front whatever `max_depth` is, and grows past that only if a path does: a
+depth authored as "unlimited" (`i32::MAX`) once reserved hundreds of GB per
+worker and aborted the render at its first pixel (#361). Progress counts samples, not units: each unit has
 `min(spp, 64)` steps (`PROGRESS_STEPS`), and a unit finishing a stage of the first
 sweep or a round reports the share of them that stage or round scheduled —
 `taken · steps / spp`, so one a sample up to 64 spp. A step per unit per stage let the
@@ -740,6 +756,69 @@ a sampler, where a flat three-standard-error bound fails one by chance (run it w
 `cargo test --release -p crust-core --test sampler_setting -- every_sampler_converges --nocapture`,
 which also prints each sampler's worst |z|). A `crust diagnostic` trial over samplers is the
 natural follow-up; this change only makes it possible.
+
+## Holdouts at the camera vertex
+
+A holdout (the active render pass's `matte`, `World::is_holdout`) ends a camera path in
+`trace_path` right after `pass_cutouts` has settled where the camera segment ends, before
+the medium-boundary crossing and any shading: no emission, NEE or scatter, and the film
+records `FirstHit::Escaped` (or the thin wall passed first) with albedo 0. Only the camera
+segment is checked (`records.is_empty()`); every other ray meets the holdout as geometry,
+so shadows and reflections of it are bitwise those of the render without the pass
+(`tests/holdouts.rs`). A volume scatter before the surface `continue`s before the check,
+so fog in front of a holdout keeps its in-scatter; what the segment's volumes emitted up
+to the holdout (`vol_emit`, carried boundary stretches included) is kept too, and routed
+as an escape with no background (`escape_begin(vol_emit, vol_tr, 0)`), so a glowing
+volume in front of a matte is not cut out by it. On the camera segment `pass_cutouts`
+judges a holdout by its presence alone: its straight transmission is ignored there, so a
+glass matte is a hole rather than a window onto what is behind it. The path counts as
+`ended_escaped`.
+
+The check is `world.has_holdouts() && records.is_empty() && world.is_holdout(geom_id)`,
+behind the sparse table's emptiness, so a world without holdouts pays one predictable
+branch per segment and nothing else. Measured when it went in (`render-pass-matte-and-
+camera-visibility`): callgrind on `cornellbox.usda -s 2`, `RAYON_NUM_THREADS=1`,
+4,268,951,482 instructions before and 4,266,418,438 after (−0.06%, code layout: well
+inside one branch per camera ray, 460,800 of them), the images bit-identical; and
+`scripts/check_images.sh check` against goldens recorded by the binary before the change
+reported every checked-in sample identical.
+
+Two passes that hold each other out split the samples between them, so their beauty,
+alpha and light path expressions **add** to the render with no pass. Measured on
+`samples/render_passes.usda` at 48×27, `--indirect-clamp 0`
+(`crust-core/tests/render_passes.rs`, § Compositing):
+
+- **plus, holding each other out** (`passes_that_hold_each_other_out_add_up_to_the_whole`):
+  colour RMS 3.2e-9 at 16 spp and 7.9e-9 at 64, alpha exactly 0, `C<RD>.*[LO]` 1.4e-9
+  and 2.6e-9 (float rounding; it grows to 4e-7 at 4096 spp as the sums get longer).
+  `over` on the same pair is a bias at edge pixels: RMS 3.9e-2 at 16 spp, 3.7e-2 at 64,
+  3.3e-2 at 4096. It takes the foreground's share away from the background a second time.
+- **double counting** (`a_dome_visible_in_both_passes_is_counted_twice`): with the dome
+  visible in both passes, the sum minus the no-pass render is the dome alone (a pass
+  holding out every geometry) to 4.1e-9 at 16 spp. Escaped samples carry no alpha, so
+  the alpha still adds up and the error is in colour only.
+- **hidden in back** (`a_back_pass_that_hides_the_character_goes_under_it`): the back
+  pass leaves the hero out of `cameraVisibility`, so `char over back` is the merge. Away
+  from edges it is exact (0). At an edge pixel of coverage α its error is
+  `α(1 − α)·(B̄ behind − B̄ beside)`: the background's mean over the samples the hero
+  covers against its mean over the rest. It therefore depends on the background:
+  - against the sky (40 of the 84 edge pixels at 16 spp), the background is one colour
+    and the error is rounding (1.5e-8);
+  - where the background is independent of the silhouette, it is the noise between two
+    sample subsets and falls as 1/√N: 4 floor pixels go 1.4e-3 → 1.3e-4 from 64 to
+    4096 spp, a factor of 10 for √64 = 8;
+  - against the floor, the background is not independent: it darkens under the hero's
+    contact shadow, and the crate's edges cross the silhouette. That error is a bias.
+    RMS 7.2e-3 at 16 spp, 6.0e-3 at 256 and 5.2e-3 at 4096 (max 2.4e-2, mean pixel
+    0.24), where noise would have fallen by 16.
+
+  So `over` is the right merge for a back pass that hides the front object, but not an
+  exact one at edges. Plus is exact only for passes that hold each other out.
+
+These tests read the alpha through `Film::var_channels`, which is top-down like
+`Buffer::get_rgb`. `Buffer::get_pixel` is bottom-up, and pairing it with that alpha
+put each pixel's colour beside the alpha of its mirrored row. The first `over`
+measurement (4.5e-2) was taken that way.
 
 ## Known gaps: the sampler setting
 

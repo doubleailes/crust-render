@@ -218,7 +218,9 @@ impl Space {
         f(&registry().read().expect("space registry")[self.0 as usize])
     }
 
-    /// The config's name for the space.
+    /// The config's own name for the space, never an alias: what Arnold's
+    /// `.tx` names spell a conversion with (`sRGB Encoded Rec.709 (sRGB)`
+    /// for `srgb_tx`, `srgb_texture` or `sRGB`).
     pub fn name(self) -> &'static str {
         self.info(|s| s.name)
     }
@@ -520,6 +522,12 @@ impl Conversion {
         self.gamut
     }
 
+    /// Whether the conversion has a per-channel curve, a transfer function,
+    /// before its change of primaries.
+    pub fn has_curve(&self) -> bool {
+        self.curve.is_some()
+    }
+
     /// Whether the conversion changes nothing.
     pub fn is_identity(&self) -> bool {
         self.curve.is_none() && self.gamut.is_none()
@@ -725,6 +733,22 @@ pub struct ColorSpace {
     /// `None` is "decide from the file" (UsdUVTexture's `auto`).
     source: Option<Space>,
     working: Space,
+    spelling: Spelling,
+}
+
+/// How a binding spelled a space that converts nothing, which the resolved
+/// space forgets: Arnold's `.tx` convention gives the three different files
+/// (see "Streaming textures" in `openspec/specs/textures/design.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Spelling {
+    /// A space by name, any alias (`Raw` included), or `auto`.
+    Named,
+    /// Nothing authored: values already in the working space, or data that
+    /// names no space at all.
+    Unset,
+    /// The keyword `raw` (UsdUVTexture's token, or a MaterialX `colorspace`
+    /// spelled so), which Arnold tells apart from the config's `Raw` space.
+    RawKeyword,
 }
 
 impl ColorSpace {
@@ -735,11 +759,18 @@ impl ColorSpace {
     pub const GAMMA22: ColorSpace = ColorSpace::new_const(Space::G22_REC709);
     /// A pure 1.8 power law (`g18_rec709`), into `lin_rec709`.
     pub const GAMMA18: ColorSpace = ColorSpace::new_const(Space::G18_REC709);
-    /// Nothing converted: data (normals, roughness, masks), or values already
-    /// in the working space.
+    /// Nothing converted and nothing authored: data (normals, roughness,
+    /// masks), or values already in the working space.
     pub const RAW: ColorSpace = ColorSpace {
         source: Some(Space::RAW),
         working: Space::RAW,
+        spelling: Spelling::Unset,
+    };
+    /// Nothing converted, spelled with the keyword `raw`: the same values as
+    /// [`ColorSpace::RAW`], under another `.tx` name.
+    pub const RAW_KEYWORD: ColorSpace = ColorSpace {
+        spelling: Spelling::RawKeyword,
+        ..ColorSpace::RAW
     };
     /// "Decide from the file" — UsdUVTexture's `sourceColorSpace = "auto"`,
     /// which is also its fallback — into `lin_rec709`. Resolved at open
@@ -747,28 +778,35 @@ impl ColorSpace {
     pub const AUTO: ColorSpace = ColorSpace {
         source: None,
         working: Space::LIN_REC709,
+        spelling: Spelling::Named,
     };
 
     const fn new_const(source: Space) -> ColorSpace {
         ColorSpace {
             source: Some(source),
             working: Space::LIN_REC709,
+            spelling: Spelling::Named,
         }
     }
 
-    /// Values authored in `source`, wanted in `working`. A data source is
-    /// [`RAW`], which carries no working space; one equal to the working
-    /// space converts nothing but keeps it, since an environment map needs
-    /// the working space's luminance weights whatever its pixels are in.
+    /// Values authored in `source`, wanted in `working`. A data source
+    /// converts nothing and carries no working space, as [`RAW`] does, but
+    /// keeps that it was named; one equal to the working space converts
+    /// nothing but keeps it, since an environment map needs the working
+    /// space's luminance weights whatever its pixels are in.
     ///
     /// [`RAW`]: ColorSpace::RAW
     pub fn new(source: Space, working: Space) -> ColorSpace {
         if source.is_data() {
-            ColorSpace::RAW
+            ColorSpace {
+                spelling: Spelling::Named,
+                ..ColorSpace::RAW
+            }
         } else {
             ColorSpace {
                 source: Some(source),
                 working,
+                spelling: Spelling::Named,
             }
         }
     }
@@ -776,13 +814,24 @@ impl ColorSpace {
     /// The same request into another working space.
     pub fn into_working(self, working: Space) -> ColorSpace {
         match self.source {
-            Some(s) if self != ColorSpace::RAW => ColorSpace::new(s, working),
-            Some(_) => ColorSpace::RAW,
+            _ if self.is_raw() => self,
+            Some(s) => ColorSpace::new(s, working),
             None => ColorSpace {
                 source: None,
                 working,
+                spelling: Spelling::Named,
             },
         }
+    }
+
+    /// Whether the values are used as stored, however that was spelled.
+    pub fn is_raw(self) -> bool {
+        self.source == Some(Space::RAW)
+    }
+
+    /// How the binding spelled its space.
+    pub fn spelling(self) -> Spelling {
+        self.spelling
     }
 
     /// The working space the values are converted to.
@@ -795,12 +844,12 @@ impl ColorSpace {
     /// The name resolves through the OCIO config, so every alias it lists is
     /// accepted — `Utility - sRGB - Texture`, `srgb_rec709_scene`, `acescg`,
     /// `g22_ap1`, … — case-insensitively; `srgb`, which older documents use
-    /// and the config does not list, is kept as `srgb_texture`. **An absent
-    /// attribute means the values are already in the working space**, as
-    /// MaterialX specifies for a document with no `colorspace`; that is also
-    /// right for normal, roughness and mask maps, which carry no colour. A
-    /// name the config does not know is refused with a warning and read the
-    /// same way.
+    /// and the config does not list, is kept as `srgb_texture`, and `raw`
+    /// is [`ColorSpace::RAW_KEYWORD`]. `None` means no space: the values are
+    /// used as stored. (A *colour* image no scope gives a space is `auto`
+    /// instead, as Arnold reads it; the image loader decides that, since only
+    /// it knows the image's type.) A name the config does not know is
+    /// refused with a warning and read as stored.
     ///
     /// `g22_rec709` and `g18_rec709` are *not* spellings of sRGB: both are
     /// pure power laws with no linear toe, where sRGB's EOTF is piecewise.
@@ -810,6 +859,9 @@ impl ColorSpace {
         let Some(name) = name else {
             return ColorSpace::RAW;
         };
+        if name == "raw" {
+            return ColorSpace::RAW_KEYWORD;
+        }
         if name.eq_ignore_ascii_case("srgb") {
             return ColorSpace::new(Space::SRGB_TEXTURE, working);
         }
@@ -826,6 +878,20 @@ impl ColorSpace {
         }
     }
 
+    /// The request a MaterialX `image` node's texels are read under, as
+    /// Arnold reads them: a colour image no scope gives a space is `auto`
+    /// (an integer file is sRGB) rather than MaterialX's "already in the
+    /// working space", an explicit `colorspace=""` converts nothing, a
+    /// non-colour image is data, and a name goes through
+    /// [`ColorSpace::from_mtlx`].
+    pub fn from_mtlx_image(space: crust_mtlx::TexelSpace<'_>, working: Space) -> ColorSpace {
+        match space {
+            crust_mtlx::TexelSpace::Data | crust_mtlx::TexelSpace::Named("") => ColorSpace::RAW,
+            crust_mtlx::TexelSpace::Unset => ColorSpace::AUTO.into_working(working),
+            crust_mtlx::TexelSpace::Named(name) => ColorSpace::from_mtlx(Some(name), working),
+        }
+    }
+
     /// Maps a UsdUVTexture `sourceColorSpace` token onto a request into
     /// `working`.
     ///
@@ -838,25 +904,24 @@ impl ColorSpace {
     pub fn from_usd(token: Option<&str>, working: Space) -> ColorSpace {
         match token.map(str::to_ascii_lowercase).as_deref() {
             Some("srgb") => ColorSpace::new(Space::SRGB_TEXTURE, working),
-            Some("raw") => ColorSpace::RAW,
+            Some("raw") => ColorSpace::RAW_KEYWORD,
             _ => ColorSpace::AUTO.into_working(working),
         }
     }
 
-    /// Resolves `auto` against the file's pixel format; every other request
+    /// Resolves `auto` against the file's sample type; every other request
     /// is returned resolved as it is.
     ///
-    /// The UsdUVTexture rule, which Hydra implements: absent colour metadata
-    /// in the file, an **8-bit image with three or four channels** is sRGB and
-    /// everything else — single-channel, 16-bit, float — is used as read. So a
-    /// greyscale roughness PNG stays raw while an RGB albedo PNG decodes, and
-    /// an EXR is taken as already in the working space.
-    pub fn resolve_auto(self, eight_bit: bool, channels: u8) -> ResolvedColorSpace {
+    /// Arnold's rule, measured on Arnold 7.5 (`scripts/arnold_tx_oracle.py`):
+    /// an image with **integer samples** — 8- or 16-bit, any channel count —
+    /// is sRGB, and a half or float one is used as read, taken as already in
+    /// the working space. A greyscale PNG decodes as sRGB too, as it does in
+    /// Arnold; a non-colour binding (a normal, a MaterialX `float` image)
+    /// never asks, because it is never `auto`.
+    pub fn resolve_auto(self, integer: bool) -> ResolvedColorSpace {
         match self.resolved() {
             Some(space) => space,
-            None if eight_bit && (channels == 3 || channels == 4) => {
-                ResolvedColorSpace::new(Space::SRGB_TEXTURE, self.working)
-            }
+            None if integer => ResolvedColorSpace::new(Space::SRGB_TEXTURE, self.working),
             None => ResolvedColorSpace::RAW,
         }
     }
@@ -865,7 +930,7 @@ impl ColorSpace {
     /// only a file can decide.
     pub fn resolved(self) -> Option<ResolvedColorSpace> {
         match self.source {
-            _ if self == ColorSpace::RAW => Some(ResolvedColorSpace::RAW),
+            _ if self.is_raw() => Some(ResolvedColorSpace::RAW),
             Some(s) => Some(ResolvedColorSpace::new(s, self.working)),
             None => None,
         }
@@ -940,6 +1005,11 @@ impl ResolvedColorSpace {
         self.conversion().gamut()
     }
 
+    /// Whether the stored values carry a transfer curve to decode.
+    pub fn has_curve(self) -> bool {
+        self.conversion().has_curve()
+    }
+
     /// The curve alone over samples of any layout (see
     /// [`Conversion::decode_curve_slice`]).
     pub fn decode_curve_slice(self, values: &mut [f32]) {
@@ -966,7 +1036,11 @@ impl ResolvedColorSpace {
 
 impl From<ResolvedColorSpace> for ColorSpace {
     fn from(space: ResolvedColorSpace) -> ColorSpace {
-        ColorSpace::new(space.source, space.working)
+        if space.is_raw() {
+            ColorSpace::RAW
+        } else {
+            ColorSpace::new(space.source, space.working)
+        }
     }
 }
 
@@ -1301,11 +1375,12 @@ mod tests {
         ] {
             assert_eq!(mtlx(Some(s), rec709), ColorSpace::SRGB, "{s}");
         }
-        // Absent and data are raw; the working space itself converts
-        // nothing but keeps its working space.
-        for s in [None, Some("raw")] {
-            assert_eq!(mtlx(s, rec709), ColorSpace::RAW, "{s:?}");
-        }
+        // Absent and data are raw, each keeping how it was spelled; the
+        // working space itself converts nothing but keeps its working space.
+        assert_eq!(mtlx(None, rec709), ColorSpace::RAW);
+        assert_eq!(mtlx(Some("raw"), rec709), ColorSpace::RAW_KEYWORD);
+        let named = mtlx(Some("Raw"), rec709);
+        assert!(named.is_raw() && named.spelling() == Spelling::Named);
         for (s, w) in [("lin_rec709", rec709), ("acescg", aces)] {
             let r = mtlx(Some(s), w).resolved().unwrap();
             assert!(r.conversion().is_identity(), "{s}");
@@ -1326,28 +1401,58 @@ mod tests {
     fn usd_source_color_space_defaults_to_auto_not_raw() {
         let w = Space::LIN_REC709;
         assert_eq!(ColorSpace::from_usd(Some("sRGB"), w), ColorSpace::SRGB);
-        assert_eq!(ColorSpace::from_usd(Some("raw"), w), ColorSpace::RAW);
+        assert_eq!(
+            ColorSpace::from_usd(Some("raw"), w),
+            ColorSpace::RAW_KEYWORD
+        );
         for s in [None, Some("auto"), Some("bogus")] {
             assert_eq!(ColorSpace::from_usd(s, w), ColorSpace::AUTO, "{s:?}");
         }
     }
 
+    /// What Arnold's `.tx` names are built from: the config's own name for
+    /// a space however the binding spelled it, and the spelling of a space
+    /// that converts nothing, which the resolved space forgets.
     #[test]
-    fn auto_resolves_by_pixel_format() {
+    fn a_binding_names_its_space_canonically_and_keeps_raw_apart_from_raw() {
+        let w = Space::LIN_REC709;
+        let canonical = "sRGB Encoded Rec.709 (sRGB)";
+        for s in ["srgb_tx", canonical, "srgb_texture"] {
+            let r = ColorSpace::from_mtlx(Some(s), w).resolved().unwrap();
+            assert_eq!(r.source().name(), canonical, "{s}");
+        }
+        let auto = ColorSpace::AUTO.resolve_auto(true);
+        assert_eq!(auto.source().name(), canonical);
+        assert_eq!(ColorSpace::from_usd(Some("sRGB"), w), ColorSpace::SRGB);
+
+        let keyword = ColorSpace::from_usd(Some("raw"), w);
+        let ocio = ColorSpace::from_mtlx(Some("Raw"), w);
+        assert_ne!(keyword, ocio);
+        assert_eq!(keyword.spelling(), Spelling::RawKeyword);
+        assert_eq!(ocio.spelling(), Spelling::Named);
+        assert_eq!(ColorSpace::RAW.spelling(), Spelling::Unset);
+        // All three convert nothing.
+        for raw in [keyword, ocio, ColorSpace::RAW] {
+            assert!(raw.is_raw());
+            assert_eq!(raw.resolved(), Some(ResolvedColorSpace::RAW));
+            assert_eq!(raw.into_working(acescg()), raw);
+        }
+    }
+
+    #[test]
+    fn auto_resolves_by_sample_type() {
         let a = ColorSpace::AUTO;
-        assert_eq!(a.resolve_auto(true, 3), ResolvedColorSpace::SRGB);
-        assert_eq!(a.resolve_auto(true, 4), ResolvedColorSpace::SRGB);
-        assert_eq!(a.resolve_auto(true, 1), ResolvedColorSpace::RAW);
-        assert_eq!(a.resolve_auto(true, 2), ResolvedColorSpace::RAW);
-        assert_eq!(a.resolve_auto(false, 3), ResolvedColorSpace::RAW);
+        // Arnold's rule: any integer image is sRGB, whatever its channels.
+        assert_eq!(a.resolve_auto(true), ResolvedColorSpace::SRGB);
+        assert_eq!(a.resolve_auto(false), ResolvedColorSpace::RAW);
         // An explicit space is never second-guessed by the file.
-        let raw = ColorSpace::RAW.resolve_auto(true, 3);
+        let raw = ColorSpace::RAW.resolve_auto(true);
         assert_eq!(raw, ResolvedColorSpace::RAW);
-        let srgb = ColorSpace::SRGB.resolve_auto(false, 1);
+        let srgb = ColorSpace::SRGB.resolve_auto(false);
         assert_eq!(srgb, ResolvedColorSpace::SRGB);
         // `auto` into ACEScg keeps its working space.
         let aces = acescg();
-        let r = a.into_working(aces).resolve_auto(true, 3);
+        let r = a.into_working(aces).resolve_auto(true);
         assert_eq!((r.source(), r.working()), (Space::SRGB_TEXTURE, aces));
         for r in [
             ResolvedColorSpace::SRGB,

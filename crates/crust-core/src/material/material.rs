@@ -260,6 +260,16 @@ pub trait Material: Send + Sync {
         }
     }
 
+    /// The primvars this material reads by name, in the order its program
+    /// numbers them ([`crust_mtlx::Program::primvars`]) — on a mesh, what the
+    /// import decodes into the mesh's [`crate::PrimvarTable::shading`] and a
+    /// hit carries as a [`crate::MeshHit`]; a curve reads the same list
+    /// through [`Material::curve_needs`]. Empty by default: a material that
+    /// reads none takes no mesh off `World::intersect`'s plain path.
+    fn primvars(&self) -> &[String] {
+        &[]
+    }
+
     /// The primvar holding the chart this material reads, when it names one
     /// other than the conventional `st`.
     ///
@@ -622,6 +632,25 @@ impl<'a> ShadingPoint<'a> {
         }
     }
 
+    /// The share of `event`, the `i`-th entry of a split this shading point
+    /// made toward `wi` ([`ShadingPoint::eval_lobes`],
+    /// [`ShadingPoint::scatter_split`]), that a light's `inputs:specular`
+    /// scales, per channel in [0, 1] — the rest answers to its
+    /// `inputs:diffuse` ([`crate::LobeGains`]). By the event's label, but a
+    /// fibre's leaf by its terms: R is specular, TT and TRT diffuse.
+    pub(crate) fn specular_fraction(
+        &self,
+        i: usize,
+        event: crate::material::lobe::LobeEvent,
+        wi: Vec3A,
+    ) -> Vec3A {
+        match &self.bsdf {
+            Resolved::Closure(c) => c.specular_fraction(i, wi),
+            _ if event.label.is_specular() => Vec3A::ONE,
+            _ => Vec3A::ZERO,
+        }
+    }
+
     /// [`ShadingPoint::scatter_importance`], also splitting a continuous
     /// sample's value by lobe into `out` (empty for a delta sample), at
     /// exactly the direction sampled — so the shares sum to `value`.
@@ -732,9 +761,14 @@ impl<'a> ShadingPoint<'a> {
     }
 
     /// The shading normal at this hit — after bump and normal mapping, the
-    /// one every query here shades with. For the AOVs only.
+    /// one every query here shades with. For the AOVs only. A MaterialX
+    /// closure shades each leaf in its own frame over the hit's record, so
+    /// its normal is the leaves' ([`ResolvedClosure::shading_normal`]).
     pub(crate) fn normal(&self) -> Vec3A {
-        self.rec.normal
+        match &self.bsdf {
+            Resolved::Closure(c) => c.shading_normal().unwrap_or(self.rec.normal),
+            _ => self.rec.normal,
+        }
     }
 
     /// [`Material::emitted_at`] at this hit.

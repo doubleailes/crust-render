@@ -1,4 +1,8 @@
 <p align="center">
+  <b>USD is the new RIB</b>
+</p>
+
+<p align="center">
   <img src="logo/curst-render-logo.png" width="60%" alt="Crust Render"/>
 </p>
 

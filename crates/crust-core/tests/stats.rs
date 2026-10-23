@@ -200,6 +200,19 @@ fn kernel_footprint_is_reported_by_structure() {
     assert!(!RenderStats::default().report().contains("kernel memory"));
     // The curves' strand tables, host-side: their own row, when there are any.
     assert!(!out.contains("curve strand tables"), "{out}");
+    assert!(!out.contains("primvar tables"), "{out}");
+    let with_primvars = RenderStats {
+        scene: SceneCounters {
+            primvar_tables_bytes: 2 * 1024,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let text = with_primvars.report();
+    assert!(
+        text.contains("primvar tables") && text.contains("2.00 KiB"),
+        "{text}"
+    );
     let with_tables = RenderStats {
         scene: SceneCounters {
             strand_tables_bytes: 3 * 1024,

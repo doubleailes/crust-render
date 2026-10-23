@@ -32,9 +32,9 @@ pub use apply::{perturb_normal, reflectivity_from_ior};
 pub use compile::Compiler;
 
 /// What a hit on a curve knows about its strand, for `geompropvalue`'s curve
-/// properties and curve primvars (see [`ShadeCtx::curve`]).
+/// properties (see [`ShadeCtx::curve`]).
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CurveCtx<'a> {
+pub struct CurveCtx {
     /// Position along the whole strand, 0 at its first point and 1 at its
     /// last — `curve:v`.
     pub v: f32,
@@ -42,10 +42,6 @@ pub struct CurveCtx<'a> {
     pub index: u32,
     /// A per-curve value in [0, 1) — `curve:random`.
     pub random: f32,
-    /// The hit's value of each primvar [`Program::primvars`] names, in that
-    /// order: `None` where the curve has no readable primvar of that name,
-    /// and a slice shorter than the list reads `None` past its end.
-    pub primvars: &'a [Option<Val>],
 }
 
 /// The shading point a [`Program`] is evaluated at.
@@ -61,7 +57,7 @@ pub struct ShadeCtx<'a> {
     pub tangent: Vec3A,
     /// Direction from the viewer *to* the surface — MaterialX's
     /// `viewdirection`, which is the incoming ray's direction, not its
-    /// negation.
+    /// negation. Unit length: the host normalizes the ray direction.
     pub view: Vec3A,
     pub position: Vec3A,
     /// Diameter of the shading point's texture footprint, in the same UV
@@ -70,8 +66,14 @@ pub struct ShadeCtx<'a> {
     /// tracks no footprint should leave it at.
     pub uv_width: f32,
     /// The strand, on a curve hit; `None` anywhere else, where a curve
-    /// property or primvar reads its `geompropvalue`'s `default`.
-    pub curve: Option<CurveCtx<'a>>,
+    /// property reads its `geompropvalue`'s `default`.
+    pub curve: Option<CurveCtx>,
+    /// The hit's value of each primvar [`Program::primvars`] names, in that
+    /// order, on a curve or a mesh alike: `None` where the geometry has no
+    /// readable primvar of that name, and a slice shorter than the list
+    /// (empty, for a host that supplies none) reads `None` past its end —
+    /// the `geompropvalue`'s `default`.
+    pub primvars: &'a [Option<Val>],
 }
 
 /// A property of the strand a curve hit lies on, read by `geompropvalue`.
@@ -432,7 +434,7 @@ pub struct Program {
     /// The primvars the program reads by name (`geompropvalue` of anything
     /// but the chart and the `curve:` properties), without their
     /// `primvars:` prefix: [`Op::Primvar`]'s `channel` indexes this, and so
-    /// does [`CurveCtx::primvars`]. What a host decodes for the geometry the
+    /// does [`ShadeCtx::primvars`]. What a host decodes for the geometry the
     /// program shades, and nothing more.
     pub primvars: Vec<String>,
 }
@@ -470,6 +472,11 @@ impl Program {
         self.ops
             .iter()
             .any(|op| matches!(op, Op::Curve { .. } | Op::Primvar { .. }))
+    }
+
+    /// Whether an evaluation reads a primvar ([`ShadeCtx::primvars`]).
+    pub fn reads_primvar(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, Op::Primvar { .. }))
     }
 
     /// Whether every operand refers to a slot strictly before its user's —
@@ -551,6 +558,7 @@ impl Program {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            primvars: &[],
         };
         let mut scratch: Vec<Val> = vec![Val::ZERO; n];
         for (i, op) in self.ops.iter().enumerate() {

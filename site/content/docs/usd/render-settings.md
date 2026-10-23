@@ -16,7 +16,9 @@ top = false
 
 All the attributes on this page go on the `RenderSettings` prim. This is the prim named
 by the stage's `renderSettingsPrimPath` metadata, or `/Render/settings` if there is none.
-See [Overview](@/docs/usd/overview.md#which-prim-holds-the-render-settings).
+See [Overview](@/docs/usd/overview.md#which-prim-holds-the-render-settings). A
+[render pass](@/docs/usd/render-passes.md#rendersource) rendered with `--pass` can name
+another `RenderSettings` prim with its `renderSource`.
 
 ## Example
 
@@ -67,29 +69,39 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 |-----------|---------|---------|
 | `int2 resolution` | `(640, 360)` | image width and height in pixels. The first render product's own `resolution` overrides it. |
 | `float4 dataWindowNDC` | `(0, 0, 1, 1)` | the part of the frame to render. The first render product's own value overrides it. See [below](#datawindowndc). |
+| `token aspectRatioConformPolicy` | `expandAperture` | how the camera's aperture is fitted to the image when their aspect ratios differ. The first render product's own value overrides it. See [below](#aspectratioconformpolicy). |
 | `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
-| `bool disableMotionBlur` | `false` | render moving geometry sharp, at its shutter-open position. The first render product's own value overrides it. See [below](#disablemotionblur). |
+| `bool disableMotionBlur` | `false` | render moving geometry sharp, where it is at the frame. The first render product's own value overrides it. See [below](#disablemotionblur). |
 | `bool instantaneousShutter` | `false` | the same switch under its older `UsdRender` name. Either one set to `true` turns the blur off. |
+| `bool disableDepthOfField` | `false` | render through a pinhole, sharp at every depth, whatever the camera's `fStop`. The first render product's own value overrides it. See [below](#disabledepthoffield). |
 | `token renderingColorSpace` | `lin_rec709` | the working colour space. See [below](#renderingcolorspace). |
 
 ### disableMotionBlur
 
 `uniform bool disableMotionBlur = 1`
 
-Turns off motion blur for the whole render. Every camera ray is traced at shutter open, so
-geometry that authors
-[`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate) renders sharp
-at its authored position, in the beauty and in every AOV. The motion itself stays in the
-scene: the [`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, so
-the blur can be added in compositing from a sharp beauty.
+Turns off motion blur for the whole render. `UsdRender` defines it as a `[0, 0]` shutter:
+one sample at the current time code. Moving geometry therefore renders sharp where it is
+at the frame, in the beauty and in every AOV: at its authored position for
+[`crust:motion:translate`](@/docs/usd/geometry.md#crust-motion-translate), and at its
+transform at the frame for a time-sampled one, whatever the camera's
+[shutter](#camera-shutter). The motion itself stays in the scene: the
+[`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV is still written, measuring the
+shutter's motion from that sharp position, so the blur can be added in compositing from a
+sharp beauty.
 
-`instantaneousShutter` is the attribute's older name in `UsdRender`, and means the same.
-Either one set to `true` turns the blur off; both are resolved like the render's camera and
-resolution, from the first `RenderProduct` when it authors them, else from this prim. A
-product that authors only one of the two inherits the other from this prim. A later
-product that asks for the other setting is still written, with the first product's, and a
-warning says so: one render has one shutter, as it has one camera.
+`instantaneousShutter` is the attribute's older, deprecated name in `UsdRender`, which
+closes the shutter where it opens. It also turns the blur off, but the sharp image is at
+shutter open, `frame + shutter:open`. The two agree unless the shutter opens before or
+after the frame: with a `-0.25 .. 0.25` shutter, `instantaneousShutter` renders a quarter
+frame before the frame. When both are set, `disableMotionBlur` wins.
+
+Both are resolved like the render's camera and resolution, from the first `RenderProduct`
+when it authors them, else from this prim. A product that authors only one of the two
+inherits the other from this prim. A later product that asks for another setting is still
+written, with the first product's, and a warning says so: one render has one shutter, as
+it has one camera.
 
 ```usda
 def RenderSettings "settings"
@@ -99,6 +111,29 @@ def RenderSettings "settings"
 ```
 
 `samples/motionvector.usda` renders moving geometry this way.
+
+### disableDepthOfField
+
+`uniform bool disableDepthOfField = 1`
+
+Turns off the camera's [depth of field](#camera-depth-of-field) for the whole render.
+Every camera ray starts at the camera's position, as with a camera that authors no
+`fStop`: the image is sharp at every depth. The field of view and the framing do not
+change, and neither does anything else the camera authors. A stage with no camera
+renders through crust's built-in fallback camera, and this closes its lens too.
+
+It is resolved like `disableMotionBlur`: from the first `RenderProduct` when it
+authors it, else from this prim. A later product that asks for the other setting is
+still written, with the first product's, and a
+[`product.depth_of_field_mismatch`](@/docs/reference/warnings.md) warning says so: one
+render has one camera.
+
+```usda
+def RenderSettings "settings"
+{
+    uniform bool disableDepthOfField = 1
+}
+```
 
 ### dataWindowNDC
 
@@ -134,6 +169,58 @@ def RenderSettings "settings"
     uniform float4 dataWindowNDC = (0.25, 0.25, 0.75, 0.75)
 }
 ```
+
+### aspectRatioConformPolicy
+
+`uniform token aspectRatioConformPolicy = "adjustApertureHeight"`
+
+Decides what the render frames when the camera's aperture (`horizontalAperture` ×
+`verticalAperture`) has another aspect ratio than the image (`resolution`). The aperture is
+conformed to the image before the field of view is derived, as OpenUSD's
+`CameraUtilConformWindow` does; the camera prim itself is not changed. For a 36 × 24 mm
+aperture (3:2):
+
+| policy | keeps | on a square image | on a 2:1 image |
+|--------|-------|-------------------|----------------|
+| `expandAperture` (default) | the whole aperture: one side grows | 36 × 36 | 48 × 24 |
+| `cropAperture` | the aperture's middle: one side shrinks | 24 × 24 | 36 × 18 |
+| `adjustApertureWidth` | the vertical aperture | 24 × 24 | 48 × 24 |
+| `adjustApertureHeight` | the horizontal aperture | 36 × 36 | 36 × 18 |
+| `adjustPixelAspectRatio` | the aperture, with non-square pixels | not supported: as `expandAperture` | not supported: as `expandAperture` |
+
+`adjustApertureHeight` is the horizontal fit Maya and Nuke use; `adjustApertureWidth` is
+a vertical fit. An aperture that already has the image's aspect, and a camera that authors
+no `verticalAperture` (it follows the image's aspect), frame the same under every policy.
+
+The policy is a render-settings attribute, read from the first `RenderProduct` when it
+authors one, else from this prim, like the resolution. Authored on the **camera** prim it
+is not read, as in OpenUSD. A later product that asks for another policy is still written,
+with the first product's framing, and a warning says so. A token that is none of the five
+is refused with a warning and read as `expandAperture`.
+
+Crust renders square pixels only, so `adjustPixelAspectRatio`, which keeps the aperture
+and changes the pixels' shape instead, frames as `expandAperture` and warns with the
+`pixelAspectRatio` it would have needed (none when the aperture already fits).
+`crust ls camera --json` reports each camera's authored `aperture_mm` and the
+`conformed_aperture_mm` the render frames.
+
+```usda
+def RenderSettings "settings"
+{
+    uniform int2 resolution = (2048, 858)
+    uniform token aspectRatioConformPolicy = "adjustApertureHeight"
+}
+```
+
+#### Stages written for older versions
+
+Before Crust Render read this attribute it always kept the vertical aperture, as
+`adjustApertureWidth` does, whatever the stage asked for. Under the default
+`expandAperture`, a camera whose aperture is **wider** than the image (a 36 × 24 mm
+aperture on a square image, say) now shows its whole authored width instead of being
+cropped at the sides. To keep the old framing, author
+`aspectRatioConformPolicy = "adjustApertureWidth"` on the render settings. Cameras whose
+aperture is narrower than the image, or as wide, frame as before.
 
 ### renderingColorSpace
 
@@ -206,7 +293,18 @@ refused with a warning, and the default is used.
 
 `int`, default **32**.
 
-The maximum number of bounces along a path. Russian roulette usually ends paths sooner.
+The longest path, counted in shaded vertices rather than bounces: `1` shades only the
+surface the camera sees, so it renders visible emitters and direct lighting with no
+indirect light; `2` adds one bounce of indirect light, and so on. (In a renderer that
+counts bounces, such as Arnold's `GI_total_depth`, `crust:maxDepth = N` is a depth of
+`N - 1`.) Russian roulette usually ends paths sooner.
+
+A value below `1` would shade nothing and render black, so it is refused with a warning
+and the default is used. There is no upper bound: a very large value, such as
+`2147483647`, means "no limit". Russian roulette then ends most paths, but it only
+ends a path whose throughput has fallen below 1: in a closed scene of lossless
+(albedo 1) surfaces a path keeps bouncing to the limit, so a render there may not
+finish. Keep a finite depth for such scenes.
 
 ### crust:indirectClamp
 
@@ -419,8 +517,9 @@ the near part of a mesh is refined and its far part keeps its cage.
 - Only geometry used once is adaptive. A prototype placed several times is refined to
   `crust:subdivisionLevel` (else 0) everywhere.
 - Faces outside the camera's view are not refined.
-- The camera must be named by `rel camera` on this prim or by `--camera`. Otherwise a
-  warning is logged and the uniform level applies.
+- The camera must be named by `rel camera` on this prim, by `--camera`, or by
+  [`crust:dicingCamera`](#crust-dicingcamera). Otherwise a warning is logged and the
+  uniform level applies.
 - A value that is not a positive number is ignored with a warning.
 
 ```usda
@@ -433,6 +532,145 @@ def RenderSettings "settings"
 
 `samples/subdivision_adaptive.usda` places one cube five times at growing distances,
 refined to levels 3, 3, 2, 1 and 0.
+
+### crust:dicingCamera
+
+`rel`, unset by default. No CLI flag.
+
+The camera that geometry is tessellated for, when it is not the camera the image is seen
+through. It sets:
+
+- the levels and per-edge rates of
+  [adaptive subdivision](#crust-subdivisionedgelength), and which faces count as in view;
+- [how many segments](@/docs/usd/geometry.md#how-many-segments-a-curved-shape-gets) a
+  cylinder, cone or capsule is cut into around its axis.
+
+Unset, the render camera dices, as it always has. The render's resolution and framing
+apply to the dicing camera as they do to the render camera. A render product's own
+`camera` replaces the render camera, not the dicing camera.
+
+Use it when the render camera moves but the geometry should not, for example:
+
+- a fly-through of a static set, diced once from a camera that sees all of it;
+- a Hydra viewport or an interactive session, where the stage's shot camera dices and
+  the camera that tumbles only looks. Moving a render camera that does not dice is then
+  an [in-place edit](@/docs/help/claude-desktop.md) rather than a re-import.
+
+Geometry is diced for the dicing camera's view. Seen from a render camera that is much
+closer, it can look coarse, and faces outside the dicing camera's view are not refined
+at all.
+
+A target that is not a camera, or no prim, is ignored with a
+[`camera.dicing_not_a_camera`](@/docs/reference/warnings.md) warning, and the render
+camera dices.
+
+```usda
+def RenderSettings "settings"
+{
+    rel camera = </World/ShotCam>
+    rel crust:dicingCamera = </World/LayoutCam>
+    float crust:subdivisionEdgeLength = 2
+}
+```
+
+## Camera depth of field
+
+A render camera that authors an `fStop` greater than 0 has a lens, and renders sharp
+only at its `focusDistance`. The lens is a disk whose diameter, in scene units, is
+
+```text
+diameter = focalLength / fStop × 0.001 / metersPerUnit
+```
+
+`focalLength` is read in millimetres, as a camera's lens is specified, and the stage's
+`metersPerUnit` converts it into scene units. A 50 mm lens at f/2 is 25 mm across: 2.5
+units on a centimetre stage (`metersPerUnit = 0.01`), 0.025 units on a metre stage
+(`metersPerUnit = 1`). `focusDistance` is in scene units. Unauthored, `focalLength` is
+50, `focusDistance` 10 and `metersPerUnit` 0.01, USD's fallback. An `fStop` of 0, or
+none, is a pinhole: no blur at all.
+
+The field of view depends only on `focalLength` and the apertures, so neither `fStop`,
+`focusDistance` nor `metersPerUnit` reframes the image.
+
+A `metersPerUnit` that is not a positive number (0, say), or one so small that the lens
+would be wider than a float can hold (`1e-42`), is refused with a
+[`camera.invalid_meters_per_unit`](@/docs/reference/warnings.md) warning and read as
+0.01. Only a camera with a lens checks it, so a pinhole render says nothing about it.
+[`disableDepthOfField`](#disabledepthoffield) on the render settings turns the lens off
+without editing the camera.
+
+```usda
+#usda 1.0
+(
+    metersPerUnit = 1
+)
+
+def Camera "cam"
+{
+    float focalLength = 50
+    float fStop = 2.8
+    float focusDistance = 4
+}
+```
+
+**Stages written for older versions.** Crust Render used to take `focalLength / fStop`
+as a diameter in scene units directly, which made the blur 10 times too strong on a
+centimetre stage (and on one that authors no `metersPerUnit`) and 1000 times too strong
+on a metre stage. Such a stage now renders much sharper. To keep an old look, divide its
+`fStop` by the same factor: 10 on a centimetre stage, 1000 on a metre stage.
+
+**Hydra.** OpenUSD's own camera (`GfCamera`, which usdview and hdEmbree use) reads lens
+lengths in tenths of a scene unit whatever `metersPerUnit` says. That agrees with
+millimetres only at `metersPerUnit = 0.01`. On a centimetre stage, or one that authors no
+units, Crust Render's depth of field matches Hydra's. On any other stage it does not. A
+metre stage exported in Hydra's convention, with `focalLength = 0.5` for a 50 mm lens,
+gets a lens 100 times smaller than intended. Its framing is unaffected, because the
+apertures are in the same units as the focal length.
+
+## Camera shutter
+
+The render camera's `shutter:open` and `shutter:close` say over which interval motion is
+measured. They are offsets in time codes from the frame given by `-f`, and each defaults
+to `0`, as USD defines it. With frame `f`, motion runs from `f + shutter:open` (shutter
+open) to `f + shutter:close` (shutter close):
+
+```usda
+def Camera "cam"
+{
+    double shutter:open = 0
+    double shutter:close = 0.5   # half a frame after the frame
+}
+```
+
+Over that interval, every mesh, sphere, implicit shape, native instance and
+`PointInstancer` placement whose transform is time-sampled (its own `xformOp`s or an
+ancestor's) moves from its transform at shutter open to its transform at shutter close.
+The beauty is blurred along that path, unless [`disableMotionBlur`](#disablemotionblur)
+is set (the prim is then sharp where it is at the frame), and the
+[`motionvector`](@/docs/usd/aovs.md#motion-vectors) AOV measures the same motion. Only the
+transform is read at the two ends: every other attribute, points included, is read at the
+frame, and prims that get no motion (curves, lights, volumes) sit where they are at the
+frame.
+
+The shutter is **instantaneous**, and nothing time-sampled moves, when:
+
+- neither attribute is authored, or `shutter:close` is not after `shutter:open`. This
+  is the default, so a stage that authors no shutter renders exactly as before;
+- no frame is given. Time samples are then not evaluated, and a
+  [`time.motion_needs_frame`](@/docs/reference/warnings.md) warning says so if the
+  stage has any.
+
+The shutter is read before the stage is walked, from the camera the render goes
+through: the one named by `--camera` or `RenderSettings.camera`, even inside a payload,
+else the first camera on the stage. If the render ends up going through another camera
+whose shutter differs (for example, the first camera sits in an unloaded payload), a
+[`camera.shutter_mismatch`](@/docs/reference/warnings.md) warning names both. Naming the
+camera avoids it.
+
+Only the shutter's two ends are read. A path that curves or turns back inside the
+interval is rendered as the straight chord between them, and a rotation is interpolated
+the same way, so a large turn within one shutter shrinks the object in the middle of the
+blur. See [limitations](@/docs/architecture/limitations.md#geometry).
 
 ## Camera exposure
 

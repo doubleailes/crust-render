@@ -28,6 +28,13 @@ composition arc is a sublayer on `input`:
 )
 ```
 
+When the input authors a `metersPerUnit` or an `upAxis`, the layer copies them, since
+a stage reads its units and up axis from its root layer: without the copy the session
+would render a camera's [depth of field](@/docs/usd/render-settings.md#camera-depth-of-field),
+or a dome's `poleAxis = "scene"`, unlike `crust render` of the input. Resuming a layer that
+lacks them adds them. A layer keeps the value it copied even if the input's changes later:
+edit it in the layer to follow.
+
 Every edit the agent makes is an opinion in that layer, as an `over` where the prim
 is defined elsewhere, and the layer is saved after every edit. What is rendered is
 always the saved file, imported exactly as `crust render <output>` imports it. So:
@@ -37,6 +44,14 @@ always the saved file, imported exactly as `crust render <output>` imports it. S
 - nothing is lost if the server stops: at most the edit in flight;
 - calling `open_session` again with the same `input` and `output` resumes it, with
   every opinion it holds. Undo history does not survive the process.
+
+`open_session` also takes an optional `pass`, the path of a `RenderPass` prim: the
+session then renders that [render pass](@/docs/usd/render-passes.md) everywhere, as
+`crust render <output> --pass <pass>` does — its holdouts, its camera visibility and
+the settings its `renderSource` names, in every render, probe and `render_final`. The
+pass is not written to the layer, so a resumed session names it again. A path that is
+not a `RenderPass` on the stage fails the call. An edit to the pass's collections (a
+new `collection:matte:includes` target, say) takes effect on the next render.
 
 The output must be a `.usda`: a session is a small text file of opinions, readable
 and diffable. The sublayer path is written relative to the output's directory
@@ -100,7 +115,7 @@ Add `"-l", "debug"` to `args` to record every import and render in Desktop's MCP
 
 | tool | what it does |
 |------|--------------|
-| `open_session(input, output)` | creates the override layer `output` on `input` (or resumes it) and imports it; reports the camera, the resolution and the warnings |
+| `open_session(input, output, pass?)` | creates the override layer `output` on `input` (or resumes it) and imports it, rendering the render pass `pass` when given; reports the camera, the resolution and the warnings |
 | `query(path)` | a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and `source`, the layer its value comes from, `fallback` for a schema's fallback nothing authors, or null when nothing gives it a value) |
 | `check()` | the [`crust check`](@/docs/reference/command-line.md#check) report of the current layer, as `crust-check/2` JSON |
 | `set_attribute(path, value, type?)` | authors an attribute value in the layer, typed as the attribute is declared |
@@ -135,10 +150,10 @@ these:
 
 | `applied` | what changed | what crust does |
 |-----------|--------------|-----------------|
-| `settings` | an attribute of the `RenderSettings` prim the render uses, or of the render camera (not its transform) | reads the settings and the camera again |
+| `settings` | an attribute of the `RenderSettings` prim the render uses, or of the render camera, its transform included unless a prim the scene renders sits below the camera | reads the settings and the camera again |
 | `materials` | an `inputs:*` value on a shader of a material the scene uses, or one of the material's own inputs | rebuilds those materials |
 | `lights` | an `inputs:*` value on a light (not its `width`, `height`, `radius` or `length`) | rebuilds those lights and the light selection |
-| `full` | anything else: a prim added or removed, a binding, a connection, a transform, visibility, a variant, a light's size | imports the saved file again |
+| `full` | anything else: a prim added or removed, a binding, a connection, any other transform, visibility, a variant, a light's size | imports the saved file again |
 
 An edit with changes of several kinds is applied as the most expensive of them, in the
 order of the table. A change that turns out to need more is applied as `full`: a material
@@ -157,7 +172,10 @@ its own, turns an edit into `full`:
   camera, a camera or settings edit stays in place when the view those shapes were
   tessellated for is unchanged: exposure, f-stop, focus distance, samples, AOVs. Moving
   the camera, changing its focal length or aperture, or changing the resolution
-  re-tessellates, so it is `full`.
+  re-tessellates, so it is `full`. Name another camera with
+  [`crust:dicingCamera`](@/docs/usd/render-settings.md#crust-dicingcamera) and the
+  shapes are tessellated for that one instead: moving the render camera then stays
+  `settings`, and moving the dicing camera is `full`.
 - **Light linking.** On a scene whose lights author `collection:lightLink` or
   `collection:shadowLink`, a light's `inputs:*` edit is still `lights`, and the links stay
   as they were. Editing a link itself is `full`, and so is editing a light whose
@@ -352,8 +370,12 @@ and any USD tool opens it.
 - **Most structural edits import the whole stage again.** A `full` edit takes seconds on
   a medium stage; each result says how long. Only the edits in the table above are
   applied in place. Decoded textures the scene no longer uses are let go at the next
-  `full` edit. A session holds the stage it authors and the scene it renders at once,
-  about twice the memory of a render's import, which puts Moana-scale stages out of reach.
+  `full` edit.
+- **A large stage costs more memory than its render.** Between edits the session holds
+  the scene it renders, its authoring stage (payloads unloaded) and the textures it
+  decoded. A `full` edit builds the new scene before letting the old one go, so its peak
+  is about two scenes; an in-place edit's is not. In-place edits make look-dev cheap, not
+  the stage smaller: Moana-scale stages are still out of reach.
 - **`probe` names the prim the import recorded, not the one you may expect.** It names
   the first surface the camera ray through the pixel's centre meets, before any opacity,
   so a cutout's hole names the surface it cuts. A hit inside a native instance or a

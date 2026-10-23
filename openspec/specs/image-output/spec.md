@@ -409,3 +409,39 @@ exposure applied.
 
 - **WHEN** a stage whose camera authors no exposure is rendered
 - **THEN** each EXR written records `crust:exposureScale = 1`
+
+### Requirement: EXRs record the lens and the layer stack
+
+Every EXR `crust render` writes SHALL record what shaped its pixels beyond the
+sampling settings:
+
+- the render camera's lens at the frame, under its USD attribute names:
+  `crust:focalLength`, `crust:horizontalAperture`, `crust:verticalAperture` (as
+  authored, in millimetres), `crust:aspectRatioConformPolicy`, `crust:fStop` and
+  `crust:focusDistance` — absent for the procedural camera;
+- `crust:depthOfField` and `crust:motionBlur`, `1` or `0`: whether the lens was
+  open (an `fStop` above 0, depth of field not disabled), and whether moving
+  geometry was blurred (motion blur on, over a shutter that opens an interval);
+- `crust:layerStack`: the files of the stage's root layer stack in strength order
+  (the session layer, the root layer, its sublayers), one per line as the
+  16-digit hex FNV-1a hash of its bytes as the scene was loaded (`-` when they
+  could not be read), a space, and its absolute path, printable ASCII as is and
+  every other UTF-8 byte (and `%`) as `%XX` — absent when no layer is known;
+- `crust:invisibleOverrides`: the prims the strongest layer of that stack hides
+  with an `over` authoring `visibility = "invisible"` (as a default or a time
+  sample) — absent for a hand-assembled scene.
+
+#### Scenario: An override layer that opens the lens
+
+- **WHEN** a layer that sublayers `samples/cornellbox.usda`, sets the camera's
+  `fStop = 0.02` and `focusDistance = 360` and hides one prim with an `over` is
+  rendered
+- **THEN** its EXR has `crust:fStop = 0.02`, `crust:focusDistance = 360`,
+  `crust:depthOfField = 1`, `crust:invisibleOverrides = 1`, and a
+  `crust:layerStack` listing the override layer and then the shot, each with
+  its hash
+
+#### Scenario: A pinhole
+
+- **WHEN** `samples/cornellbox.usda` is rendered as it is
+- **THEN** its EXR has `crust:depthOfField = 0` and `crust:invisibleOverrides = 0`

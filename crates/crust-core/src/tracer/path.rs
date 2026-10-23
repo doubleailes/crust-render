@@ -8,7 +8,7 @@
 use glam::Vec3A;
 use utils::exp3;
 
-use crate::aov::FirstHit;
+use crate::aov::{FirstHit, HitPrim};
 use crate::guiding::SampleData;
 use crate::hittable::{FaceHit, HitPart, HitRecord};
 use crate::material::{Material, ScatterSample, ShadingPoint};
@@ -20,7 +20,7 @@ use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{EVERY_CLASS, Light, LightList, Receiver, profile};
+use crate::{EVERY_CLASS, Light, LightList, LobeGains, Receiver, profile};
 use openqmc::{Sampler, SamplerImpl};
 
 use super::GuidingContext;
@@ -310,7 +310,7 @@ pub(super) fn ray_cones_enabled() -> bool {
 // profiler switch LLVM stopped inlining them into either copy — +1.1%
 // instructions on cornellbox with profiling off.
 #[inline(always)]
-fn sample_bounce_direction<S: SamplerImpl, const AOV: bool>(
+fn sample_bounce_direction<S: SamplerImpl, const SPLIT: bool>(
     r: &Ray,
     rec: &HitRecord,
     sp: &ShadingPoint,
@@ -319,9 +319,10 @@ fn sample_bounce_direction<S: SamplerImpl, const AOV: bool>(
     split: Option<&mut LobeSplit>,
 ) -> Option<ScatterSample> {
     // The material's own sample — split by lobe at the direction it drew
-    // (see `ShadingPoint::scatter_split`) when light path expressions want
-    // the split, which only the AOV instantiation can ask for.
-    let mut split = if AOV { split } else { None };
+    // (see `ShadingPoint::scatter_split`) when light path expressions or a
+    // light's per-lobe multipliers want the split, which only the `SPLIT`
+    // instantiation can ask for: the other compiles the split path away.
+    let mut split = if SPLIT { split } else { None };
     // Distinct sub-domains: the BSDF scatter block, and the guide block whose
     // first dimension is the α-coin and whose incidental stream drives the
     // quadtree descent. The material is handed the numbers, not the domain:
@@ -345,7 +346,7 @@ fn sample_bounce_direction<S: SamplerImpl, const AOV: bool>(
         if let Some((wi, p_guide)) = g.field.sample(rec.p, &mut guide_dom.rng())
             && let Some((value, p_bsdf)) = sp.eval(r, wi)
         {
-            if AOV && let Some(out) = split {
+            if SPLIT && let Some(out) = split {
                 // `value` is `eval` toward `wi`, so the split is `eval`'s.
                 sp.eval_lobes(r, wi, out);
             }
@@ -468,6 +469,10 @@ pub(crate) struct PathScratch {
     /// Whether a var asks for the motion vector, so the first hit's motion
     /// is looked up at all. Set on the scratch of an AOV pass only.
     pub(super) motion: bool,
+    /// The first hit's kept primvars, by keep-set index, refilled per camera
+    /// sample. Sized on the scratch of an AOV pass that asks for primvars
+    /// only; empty otherwise.
+    pub(super) primvars: Vec<Option<[f32; 4]>>,
     /// The path's routing record and per-sample results ([`Route`]).
     pub(super) route: Route,
     /// Per-lobe shares — NEE's toward the light, the bounce's toward the
@@ -503,9 +508,9 @@ struct ThinWalls {
     /// without its straight transmission, which the passes carry instead.
     reduced: bool,
     /// The first thin wall passed, as the camera's first hit when this is
-    /// the camera's segment: its `t`, the hit there and its `geom_id` (for
-    /// the wall's motion, read in the AOV instantiation only).
-    first: Option<(f32, HitRecord<'static>, u32)>,
+    /// the camera's segment: its `t`, the hit there and its primitive (for
+    /// the wall's motion and primvars, read in the AOV instantiation only).
+    first: Option<(f32, HitRecord<'static>, HitPrim)>,
     /// The hidden light sources the segment crossed, in order. Written by
     /// every [`pass_cutouts`], in a world with any.
     crossed: Vec<Crossing>,
@@ -564,14 +569,23 @@ impl Crossing {
 }
 
 impl PathScratch {
-    /// `max_depth` is a capacity hint only; the walk may push fewer.
+    /// The most vertex records reserved up front, whatever the depth.
+    const RESERVE_CAP: usize = 64;
+
+    /// `max_depth` is a capacity hint only; the walk may push fewer, and
+    /// reserves at most [`Self::RESERVE_CAP`] up front: a depth authored as
+    /// "unlimited" (`i32::MAX`) would otherwise reserve hundreds of GB per
+    /// worker, while Russian roulette ends almost every path long before. A
+    /// longer path (a lossless one roulette never kills) still grows the
+    /// vector (#361).
     pub(crate) fn new(max_depth: usize) -> Self {
         Self {
-            records: Vec::with_capacity(max_depth),
+            records: Vec::with_capacity(max_depth.min(Self::RESERVE_CAP)),
             sss_exit: PendingExit::default(),
             first: FirstHit::Escaped,
             route_ctx: None,
             motion: false,
+            primvars: Vec::new(),
             route: Route::default(),
             nee_split: LobeSplit::default(),
             bounce_split: LobeSplit::default(),
@@ -595,6 +609,11 @@ pub(super) struct PrevBounce<'a> {
     pub(super) from: Receiver,
     pub(super) pdf: PdfSolidAngle,
     pub(super) delta: bool,
+    /// The share of the bounce's value, per channel, that a light's
+    /// `inputs:specular` scales, the rest answering to its `inputs:diffuse`
+    /// ([`bounce_gain`]). Zero, and unread, unless a light has
+    /// [`LobeGains`].
+    pub(super) specular: Vec3A,
     /// The light-link class of the surface this bounce left: the receiver
     /// whose links decide what the bounce may collect.
     pub(super) class: u16,
@@ -759,77 +778,26 @@ pub(super) fn escaped_emission(
     strategy: SamplingStrategy,
 ) -> Vec3A {
     let mut radiance = Vec3A::ZERO;
-    if lights.escapes_to_backdrop(mask) {
-        // No NEE ever competes for a backdrop — nothing can select it — so
-        // its emission is taken whole, as for any camera ray.
-        for backdrop in lights.backdrops() {
-            if let Some((emitted, _)) = backdrop.escaped(Vec3A::ZERO, direction) {
-                radiance += emitted * strategy.unopposed_weight();
-            }
-        }
-        return radiance;
-    }
-    if lights.count() == 0 {
-        return radiance;
-    }
-    // As on the bounce-hit path, a delta or non-evaluable previous vertex
-    // means NEE could not have found this light, so there is no competing
-    // strategy and the emission is taken whole.
-    let competing = match prev {
-        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.from, p.pdf, p.nee_count)),
-        Some(PrevVertex::Phase {
-            pos,
-            pdf,
-            nee_count,
-            ..
-        }) => Some((Receiver::at(*pos), *pdf, *nee_count)),
-        // Primary rays, and rays leaving a carried-medium scatter, run no
-        // NEE — full weight, exactly as `prev = None` means elsewhere.
-        None => None,
-    };
-    // The receiver whose light links apply: the surface or volume region
-    // the ray left. The camera has none, and sees every light.
-    let class = match prev {
-        Some(PrevVertex::Surface(p)) => p.class,
-        Some(PrevVertex::Phase { class, .. }) => *class,
-        None => EVERY_CLASS,
-    };
-    let from = competing.map_or(Receiver::at(Vec3A::ZERO), |(r, _, _)| r);
-    // The pmf at the vertex the escaping ray left: the one its NEE picked with.
-    // Only lights at infinity can answer `escaped`; the rest are skipped.
-    for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
-        if !lights.illuminates(index, class) {
-            continue;
-        }
-        // The link twin's, or NEE's alone, at a continuous vertex (see
-        // `bounce_emission_weight`).
-        if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
-            continue;
-        }
-        let Some((emitted, pdf)) = light.escaped(from.p, direction) else {
-            continue;
-        };
-        let weight = match (competing, pdf) {
-            (Some((_, bounce_pdf, count)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
-                let light_pdf = lights.density(pdf, pmf, count).max(1e-6);
-                strategy.bounce_weight(bounce_pdf, light_pdf)
-            }
-            // No NEE ran for this vertex, the strategy does not sample lights
-            // at all, the selection never picks this one, or the light never
-            // samples this direction: nothing competes.
-            _ => strategy.unopposed_weight(),
-        };
-        radiance += emitted * weight;
-    }
+    escaped_split(
+        prev,
+        lights,
+        direction,
+        mask,
+        strategy,
+        |_, contribution| {
+            radiance += contribution;
+        },
+    );
     radiance
 }
 
-/// [`escaped_emission`], one light at a time: `f(light, contribution)` for
-/// each light at infinity it adds (`None` for a backdrop), in its order, so
-/// the contributions sum to its result bit for bit (the AOV instantiation
-/// asserts it in debug builds). The light-path-expression routing's view of
-/// an escape: each light's share ends an `L` event with that light's tag.
-/// A pair with `escaped_emission`: change one, change both.
+/// Each infinite light's MIS-weighted contribution, in accumulation order:
+/// the single traversal used by both the beauty and light-path routing.
+/// `None` names a backdrop, which no light sampler can select.
+///
+/// Forced inline so the beauty's addition remains in the integrator, with
+/// no callback dispatch or routing work in a beauty-only render.
+#[inline(always)]
 fn escaped_split(
     prev: &Option<PrevVertex>,
     lights: &LightList,
@@ -839,6 +807,7 @@ fn escaped_split(
     mut f: impl FnMut(Option<usize>, Vec3A),
 ) {
     if lights.escapes_to_backdrop(mask) {
+        // Camera backdrops are never selected by NEE.
         for backdrop in lights.backdrops() {
             if let Some((emitted, _)) = backdrop.escaped(Vec3A::ZERO, direction) {
                 f(None, emitted * strategy.unopposed_weight());
@@ -849,6 +818,8 @@ fn escaped_split(
     if lights.count() == 0 {
         return;
     }
+    // Primary rays, carried-medium scatters and delta bounces have no
+    // competing continuous light sample, and keep emission whole.
     let competing = match prev {
         Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.from, p.pdf, p.nee_count)),
         Some(PrevVertex::Phase {
@@ -859,6 +830,7 @@ fn escaped_split(
         }) => Some((Receiver::at(*pos), *pdf, *nee_count)),
         None => None,
     };
+    // A bounce inherits the light links of the receiver it left.
     let class = match prev {
         Some(PrevVertex::Surface(p)) => p.class,
         Some(PrevVertex::Phase { class, .. }) => *class,
@@ -869,17 +841,23 @@ fn escaped_split(
         if !lights.illuminates(index, class) {
             continue;
         }
+        // A restricted light's continuous bounce share belongs to its
+        // link twin, or to NEE alone, so it cannot also be collected here.
         if competing.is_some() && lights.bounce_skips(index, strategy.samples_lights()) {
             continue;
         }
-        let Some((emitted, pdf)) = light.escaped(from.p, direction) else {
+        let Some((mut emitted, pdf)) = light.escaped(from.p, direction) else {
             continue;
         };
+        if lights.has_lobe_gains() {
+            emitted *= bounce_gain(prev.as_ref(), lights, index);
+        }
         let weight = match (competing, pdf) {
             (Some((_, bounce_pdf, count)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
                 let light_pdf = lights.density(pdf, pmf, count).max(1e-6);
                 strategy.bounce_weight(bounce_pdf, light_pdf)
             }
+            // No NEE, zero selection probability or an unsampled direction.
             _ => strategy.unopposed_weight(),
         };
         f(Some(index), emitted * weight);
@@ -1543,6 +1521,11 @@ fn point_sampled<'w>(rec: &HitRecord<'w>) -> HitRecord<'w> {
 /// count) and spends the same crossing budget. Shadow rays never meet one, so
 /// this has no shadow-side twin: their masks leave it out.
 ///
+/// `holdouts` is set on a camera segment in a world with holdouts: there a
+/// holdout's presence is its opacity alone, so a holdout with straight
+/// transmission (a glass matte) is never passed for it, and the camera ray
+/// stops there and ends with nothing instead of seeing through it.
+///
 /// Its shadow-side twin is [`cutout_through`].
 #[cold]
 #[inline(never)]
@@ -1553,13 +1536,14 @@ fn pass_cutouts<'w, S: SamplerImpl>(
     vertex: Sampler<S>,
     thin: &mut ThinWalls,
     stats: &mut RayStats,
+    holdouts: bool,
 ) -> bool {
     let emitters = world.has_transparent_emitters();
     if emitters {
         thin.crossed.clear();
     }
     if world.has_straight_transmission() {
-        return pass_walls(world, ray, hit, vertex, thin, stats);
+        return pass_walls(world, ray, hit, vertex, thin, stats, holdouts);
     }
     // Cutouts alone: the loop as it always was.
     let mut rng = None;
@@ -1628,6 +1612,7 @@ fn pass_walls<'w, S: SamplerImpl>(
     vertex: Sampler<S>,
     thin: &mut ThinWalls,
     stats: &mut RayStats,
+    holdouts: bool,
 ) -> bool {
     thin.passes.clear();
     thin.kinds.clear();
@@ -1659,7 +1644,10 @@ fn pass_walls<'w, S: SamplerImpl>(
             continue;
         }
         let cutout = h.mat.has_cutout();
-        let straight = h.mat.has_straight_transmission();
+        // A holdout on the camera segment is met or passed by its presence
+        // alone (see `pass_cutouts`).
+        let straight =
+            h.mat.has_straight_transmission() && !(holdouts && world.is_holdout(h.geom_id));
         if !(cutout || straight) {
             break;
         }
@@ -1687,7 +1675,7 @@ fn pass_walls<'w, S: SamplerImpl>(
             thin.passes.push((h.rec.t, p / q));
             if thin.first.is_none() {
                 // Kept for its geometry only, past this world's borrow.
-                thin.first = Some((h.rec.t, h.rec.detached(), h.geom_id));
+                thin.first = Some((h.rec.t, h.rec.detached(), HitPrim::of(h)));
             }
         } else {
             if opacity >= 1.0 {
@@ -1720,25 +1708,40 @@ fn pass_walls<'w, S: SamplerImpl>(
 /// it where it was a vertex before it became a pass-through — only a
 /// cutout is not a hit. The normal is the geometric one, facing the ray:
 /// the wall was never shaded. Its motion is looked up only when a var asks
-/// for the motion vector (`motion_on`).
+/// for the motion vector (`motion_on`), its barycentrics only when one asks
+/// for a primvar (`primvars_on`, the camera ray).
 fn first_wall(
     thin: &ThinWalls,
     walls: bool,
     t: f32,
     world: &World,
     motion_on: bool,
+    primvars_on: Option<&Ray>,
+    time: f32,
 ) -> Option<FirstHit> {
-    let (t_wall, rec, geom_id) = thin.first.filter(|_| walls)?;
+    let (t_wall, rec, prim) = thin.first.filter(|_| walls)?;
     (t_wall < t).then(|| FirstHit::Surface {
         p: rec.p,
         n: rec.normal,
         uv: rec.uv,
         motion: if motion_on {
-            world.motion(geom_id)
+            world.motion(prim.geom_id, rec.p, time)
         } else {
             Vec3A::ZERO
         },
+        prim: with_barycentrics(prim, world, primvars_on, t_wall),
     })
+}
+
+/// `prim` with its triangle's barycentrics looked up, when a var asks for a
+/// primvar (`camera` is then the camera ray) and the hit is not a curve's.
+fn with_barycentrics(mut prim: HitPrim, world: &World, camera: Option<&Ray>, t: f32) -> HitPrim {
+    if let Some(ray) = camera
+        && prim.curve_u.is_none()
+    {
+        prim.bary = world.hit_barycentrics(ray, prim.geom_id, prim.prim_id, t);
+    }
+    prim
 }
 
 /// The arriving segment's volume event when it passed thin walls: the
@@ -1938,7 +1941,10 @@ fn collect_crossings(
         if c.emitted == Vec3A::ZERO {
             continue;
         }
-        let e = reach * scale(c.t) * c.emitted;
+        let mut e = reach * scale(c.t) * c.emitted;
+        if lights.has_lobe_gains() {
+            e *= bounce_gain_of_geom(prev.as_ref(), lights, c.geom_id);
+        }
         let w = prev.as_ref().map_or(1.0, |p| {
             bounce_emission_weight_at(p, lights, c.geom_id, c.p, strategy)
         });
@@ -1988,6 +1994,7 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
     receiver: Receiver,
     dir: Vec3A,
     bounce_pdf: PdfSolidAngle,
+    specular: Option<Vec3A>,
     class: u16,
     nee_count: u32,
     inside: Option<&Enclosure>,
@@ -2019,6 +2026,9 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         }
         bounce_weighs_from(Some(receiver), false);
         let pmf = lights.pmf_at(receiver, index);
+        // The bounce's `bounce_gain`, from the vertex the twin stands in for
+        // (`None` at a phase scatter, whose light is whole).
+        let gain = specular.map_or(Vec3A::ONE, |s| lights.lobe_gains(index).blend(s));
         let domain = vertex.new_domain(K_LINK_TWIN).new_domain(index as i32);
         light.found_along(from, dir, |found| {
             // `bounce_emission_weight_at`'s weight, for this point.
@@ -2050,7 +2060,7 @@ fn link_twin<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
             if tr == Vec3A::ZERO {
                 return;
             }
-            let e = found.radiance * tr;
+            let e = found.radiance * tr * gain;
             weighted += e * weight;
             raw += e;
             if let Some(ctx) = routing {
@@ -2324,14 +2334,32 @@ fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
             // continuous transmission lobe can see a light behind the
             // ray-facing normal). Applying it again here is what used
             // to make this an integral of `brdf · cos²`.
-            nee = match &mixed {
-                None => ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get(),
-                Some(m) => ls.radiance * m.shaded * weight / light_pdf.get(),
+            // A light that scales the diffuse and specular responses apart
+            // (`LobeGains`) is connected share by share, each share scaled
+            // by its own gain: the split is then the beauty's expression.
+            let gains = lights.lobe_gains(light_index);
+            let gained = lights.has_lobe_gains() && gains != LobeGains::ONE;
+            nee = if gained {
+                gained_split(sp, ray, light_dir_unit, gains, split);
+                let f = split
+                    .iter()
+                    .enumerate()
+                    .fold(Vec3A::ZERO, |acc, (i, (_, f))| {
+                        acc + f * mixed.as_ref().map_or(shadow_tr, |m| m.tr(i))
+                    });
+                ls.radiance * f * weight / light_pdf.get()
+            } else {
+                match &mixed {
+                    None => ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get(),
+                    Some(m) => ls.radiance * m.shaded * weight / light_pdf.get(),
+                }
             };
             if let Some(ctx) = routing {
                 // Each lobe's share, in the beauty's own expression. A
                 // walk's exit is part of the walk's event: no event here.
-                sp.eval_lobes(ray, light_dir_unit, split);
+                if !gained {
+                    sp.eval_lobes(ray, light_dir_unit, split);
+                }
                 let light_pdf = light_pdf.get();
                 route.nee(
                     ctx.light(light_index),
@@ -2348,6 +2376,73 @@ fn surface_light_sample<S: SamplerImpl, const PROFILE: bool, const MEDIA: bool>(
         }
     }
     nee
+}
+
+/// `split` set to the shares of `sp`'s value toward `wi`
+/// ([`ShadingPoint::eval_lobes`]), each scaled by the gain `gains` gives it
+/// ([`ShadingPoint::specular_fraction`]): a light's per-lobe multipliers on
+/// NEE's side. Out of line: only a scene whose lights author them comes here.
+#[cold]
+#[inline(never)]
+fn gained_split(sp: &ShadingPoint, ray: &Ray, wi: Vec3A, gains: LobeGains, split: &mut LobeSplit) {
+    sp.eval_lobes(ray, wi, split);
+    let mut k = [Vec3A::ONE; crate::material::lobe::MAX_SPLIT];
+    for (i, (e, _)) in split.iter().enumerate() {
+        k[i] = gains.blend(sp.specular_fraction(i, e, wi));
+    }
+    split.scale_by(|i| k[i]);
+}
+
+/// The share of a surface bounce's value that answers to a light's
+/// `inputs:specular` ([`PrevBounce::specular`]): a delta sample's by its
+/// event, a continuous one's by the lobe split `split` made at the direction
+/// sampled, per channel. Out of line, for the reason [`gained_split`] is.
+#[cold]
+#[inline(never)]
+fn bounce_specular(sp: &ShadingPoint, sample: &ScatterSample, split: &LobeSplit) -> Vec3A {
+    if sample.delta {
+        return if sp.delta_event(sample).label.is_specular() {
+            Vec3A::ONE
+        } else {
+            Vec3A::ZERO
+        };
+    }
+    let wi = sample.ray.direction();
+    let (mut specular, mut total) = (Vec3A::ZERO, Vec3A::ZERO);
+    for (i, (e, f)) in split.iter().enumerate() {
+        specular += f * sp.specular_fraction(i, e, wi);
+        total += f;
+    }
+    Vec3A::select(
+        total.cmpgt(Vec3A::ZERO),
+        (specular / total).clamp(Vec3A::ZERO, Vec3A::ONE),
+        Vec3A::ZERO,
+    )
+}
+
+/// What light `index`'s emission, reached by the bounce `prev` left by, is
+/// scaled by: its [`LobeGains`] blended over that bounce's lobes
+/// ([`PrevBounce::specular`]) — NEE's [`gained_split`], on the bounce side.
+/// Whole after a phase scatter: volume scattering is not a surface's
+/// diffuse or specular response. Only asked when
+/// [`LightList::has_lobe_gains`].
+#[cold]
+#[inline(never)]
+fn bounce_gain(prev: Option<&PrevVertex>, lights: &LightList, index: usize) -> Vec3A {
+    match prev {
+        Some(PrevVertex::Surface(p)) => lights.lobe_gains(index).blend(p.specular),
+        _ => Vec3A::ONE,
+    }
+}
+
+/// [`bounce_gain`] for the emitter `geom_id`: one only a light is.
+#[cold]
+#[inline(never)]
+fn bounce_gain_of_geom(prev: Option<&PrevVertex>, lights: &LightList, geom_id: u32) -> Vec3A {
+    match lights.index_of_geom(geom_id) {
+        Some(index) => bounce_gain(prev, lights, index),
+        None => Vec3A::ONE,
+    }
 }
 
 /// Light samples 1 … `count − 1` of a surface vertex, each from its own
@@ -2613,6 +2708,9 @@ pub(super) fn trace_path<
     // the motion vector, so other AOV renders do not pay for it. Constant
     // `false` in the beauty-only instantiation.
     let motion_on = AOV && scratch.motion;
+    // Whether the first hit's primvars are read: only when a var asks for
+    // one. The camera ray, whose hit's barycentrics they are read at.
+    let primvars_on = (AOV && !scratch.primvars.is_empty()).then_some(r);
     let first = &mut scratch.first;
     if AOV {
         *first = FirstHit::Escaped;
@@ -2678,7 +2776,7 @@ pub(super) fn trace_path<
                 let mut walls = false;
                 let mut crossed = false;
                 if world.has_bounce_pass_throughs() {
-                    walls = pass_cutouts(world, &ray, &mut hit, v, thin, stats);
+                    walls = pass_cutouts(world, &ray, &mut hit, v, thin, stats, false);
                     crossed = world.has_transparent_emitters() && !thin.crossed.is_empty();
                 }
                 // Through any medium boundaries, measuring what their
@@ -2746,6 +2844,9 @@ pub(super) fn trace_path<
                         if walls {
                             emitted *= thin.before(hit.rec.t) * thin.meet;
                         }
+                        if lights.has_lobe_gains() {
+                            emitted *= bounce_gain_of_geom(Some(p), lights, hit.geom_id);
+                        }
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
                         last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
@@ -2775,7 +2876,8 @@ pub(super) fn trace_path<
         let mut walls = false;
         let mut crossed = false;
         if world.has_bounce_pass_throughs() && !exiting {
-            walls = pass_cutouts(world, &ray, &mut hit_opt, v, thin, stats);
+            let holdouts = world.has_holdouts() && records.is_empty();
+            walls = pass_cutouts(world, &ray, &mut hit_opt, v, thin, stats, holdouts);
             crossed = world.has_transparent_emitters() && !thin.crossed.is_empty();
         }
         // Cutouts and thin walls passed on the way here: `Ts` events before
@@ -2863,7 +2965,7 @@ pub(super) fn trace_path<
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 if AOV && records.is_empty() {
-                    *first = first_wall(thin, walls, t, world, motion_on)
+                    *first = first_wall(thin, walls, t, world, motion_on, primvars_on, ray.time())
                         .unwrap_or(FirstHit::Volume { p });
                 }
                 let wi = ray.direction().normalize();
@@ -2941,6 +3043,7 @@ pub(super) fn trace_path<
                         Receiver::at(p),
                         dir,
                         phase_pdf,
+                        None,
                         class,
                         nee_count,
                         enclosure.as_ref(),
@@ -3000,8 +3103,16 @@ pub(super) fn trace_path<
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
             if AOV && records.is_empty() {
-                *first = first_wall(thin, walls, t_med, world, motion_on)
-                    .unwrap_or(FirstHit::Volume { p: pos });
+                *first = first_wall(
+                    thin,
+                    walls,
+                    t_med,
+                    world,
+                    motion_on,
+                    primvars_on,
+                    ray.time(),
+                )
+                .unwrap_or(FirstHit::Volume { p: pos });
             }
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
             let dir = sample_henyey_greenstein(
@@ -3095,6 +3206,7 @@ pub(super) fn trace_path<
                     Receiver::at(pos),
                     dir,
                     phase_pdf,
+                    None,
                     e.class,
                     nee_count,
                     Some(e),
@@ -3138,7 +3250,15 @@ pub(super) fn trace_path<
             stats.ended_escaped += 1;
             if AOV
                 && records.is_empty()
-                && let Some(wall) = first_wall(thin, walls, f32::INFINITY, world, motion_on)
+                && let Some(wall) = first_wall(
+                    thin,
+                    walls,
+                    f32::INFINITY,
+                    world,
+                    motion_on,
+                    primvars_on,
+                    ray.time(),
+                )
             {
                 *first = wall;
             }
@@ -3150,7 +3270,7 @@ pub(super) fn trace_path<
             // With light path expressions, each light's share is routed by
             // its own `L`, and the background is their sum — the additions
             // `escaped_emission` makes, in its order, so bit for bit its
-            // answer (asserted in debug builds) without evaluating every
+            // answer through the same traversal, without evaluating every
             // light at infinity twice.
             let background = if let Some(ctx) = routing {
                 route.escape_lights_begin();
@@ -3165,15 +3285,7 @@ pub(super) fn trace_path<
                         route.escape_light(sym, light.map_or(NO_LIGHT, |i| i as u32), e);
                     },
                 );
-                let total = route.escaped_total();
-                debug_assert!(
-                    total.to_array().map(f32::to_bits)
-                        == escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy)
-                            .to_array()
-                            .map(f32::to_bits),
-                    "escaped_split must sum to escaped_emission"
-                );
-                total
+                route.escaped_total()
             } else {
                 escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy)
             };
@@ -3188,6 +3300,41 @@ pub(super) fn trace_path<
             }
             break;
         };
+        // === Holdout ===
+        // A camera ray that reaches a holdout (the active render pass's
+        // `matte`), past the cutouts it passed and the hidden lights it
+        // crossed, ends there with nothing: no emission, no NEE, no scatter,
+        // and the film records an escape (alpha 0, every data AOV clear) —
+        // unless a thin wall was passed first, which is then the first hit.
+        // A scatter before the surface never gets here, so fog in front of a
+        // holdout keeps its in-scatter, and what the segment's volumes emitted
+        // up to it stays, as an escape keeps it: an escape with no background.
+        // Secondary rays meet it as geometry.
+        // `has_holdouts` first: a world without one pays this one branch.
+        if world.has_holdouts() && records.is_empty() && world.is_holdout(hit.geom_id) {
+            stats.ended_escaped += 1;
+            terminal = vol_emit;
+            if AOV {
+                route.terminal_arrival(arrival_ts);
+                if routing.is_some() {
+                    route.escape_begin(vol_emit, vol_tr, Vec3A::ZERO);
+                }
+                *first = first_wall(
+                    thin,
+                    walls,
+                    hit.rec.t,
+                    world,
+                    motion_on,
+                    primvars_on,
+                    ray.time(),
+                )
+                .unwrap_or(FirstHit::Escaped);
+                if albedo_on {
+                    route.albedo_at(Vec3A::ZERO);
+                }
+            }
+            break;
+        }
         if boundaries && hit.mat.is_medium_boundary() {
             // === Medium boundary: crossed, not shaded ===
             // No vertex and no depth: the stretch up to here is carried into
@@ -3249,17 +3396,26 @@ pub(super) fn trace_path<
             route.diffuse_filter = sp.diffuse_filter(cos_o);
         }
         if AOV && records.is_empty() {
-            *first =
-                first_wall(thin, walls, rec.t, world, motion_on).unwrap_or(FirstHit::Surface {
-                    p: rec.p,
-                    n: sp.normal(),
-                    uv: rec.uv,
-                    motion: if motion_on {
-                        world.motion(hit.geom_id)
-                    } else {
-                        Vec3A::ZERO
-                    },
-                });
+            *first = first_wall(
+                thin,
+                walls,
+                rec.t,
+                world,
+                motion_on,
+                primvars_on,
+                ray.time(),
+            )
+            .unwrap_or(FirstHit::Surface {
+                p: rec.p,
+                n: sp.normal(),
+                uv: rec.uv,
+                motion: if motion_on {
+                    world.motion(hit.geom_id, rec.p, ray.time())
+                } else {
+                    Vec3A::ZERO
+                },
+                prim: with_barycentrics(HitPrim::of(&hit), world, primvars_on, hit.rec.t),
+            });
         }
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;
@@ -3268,6 +3424,9 @@ pub(super) fn trace_path<
                 if emitted.length_squared() > 0.0 {
                     let last = records.last_mut().expect("prev implies a record");
                     last.next_emit = atten * emitted;
+                    if lights.has_lobe_gains() {
+                        last.next_emit *= bounce_gain_of_geom(Some(p), lights, hit.geom_id);
+                    }
                     last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
                     if let Some(ctx) = routing {
                         let (sym, light) = ctx.emitter(lights, hit.geom_id);
@@ -3387,14 +3546,21 @@ pub(super) fn trace_path<
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         let mut bounce = {
             let _p = profile::scope_if::<PROFILE>(Section::Bounce);
-            sample_bounce_direction::<S, AOV>(
-                &ray,
-                &rec,
-                &sp,
-                guiding_here,
-                v,
-                routing.is_some().then_some(&mut *bounce_split),
-            )
+            // A light's per-lobe multipliers read the split too
+            // (`bounce_specular`); a beauty-only render of a scene without
+            // them keeps the copy with no split path in it.
+            if AOV || lights.has_lobe_gains() {
+                sample_bounce_direction::<S, true>(
+                    &ray,
+                    &rec,
+                    &sp,
+                    guiding_here,
+                    v,
+                    (routing.is_some() || lights.has_lobe_gains()).then_some(&mut *bounce_split),
+                )
+            } else {
+                sample_bounce_direction::<S, false>(&ray, &rec, &sp, guiding_here, v, None)
+            }
         };
         // A subsurface leaf was selected: walk the interior now. The walk is
         // part of this surface event — the entry's record carries its weight
@@ -3508,11 +3674,17 @@ pub(super) fn trace_path<
                 }
                 // A BSDF (or guide-mixture) pdf, in solid angle.
                 let bounce_pdf = PdfSolidAngle::from_measure(sample.pdf);
+                let specular = if lights.has_lobe_gains() {
+                    bounce_specular(&sp, &sample, bounce_split)
+                } else {
+                    Vec3A::ZERO
+                };
                 if TWINS && !sample.delta {
                     let (w, raw) = link_twin::<S, PROFILE, MEDIA>(
                         Receiver::surface(rec.p, rec.normal, opaque_here),
                         dir,
                         bounce_pdf,
+                        Some(specular),
                         class_here,
                         nee_count,
                         enclosure.as_ref(),
@@ -3539,6 +3711,7 @@ pub(super) fn trace_path<
                     from: receiver,
                     pdf: bounce_pdf,
                     delta: sample.delta,
+                    specular,
                     class: class_here,
                     nee_count,
                     #[cfg(debug_assertions)]

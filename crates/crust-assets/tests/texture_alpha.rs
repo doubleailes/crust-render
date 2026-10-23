@@ -124,11 +124,10 @@ fn a_preview_cutout_reads_its_texture_alpha() {
 fn a_streamed_cutout_reads_the_same_alpha() {
     let dir = scratch("streamed");
     leaf_png(&dir.join("leaf.png"));
-    let scene = load(
-        &leaf_stage(&dir, "leaf.png"),
-        &FileAssets::new().with_auto_tx(true),
-    );
-    assert!(dir.join("leaf.tx").exists(), "--auto-tx converted the leaf");
+    let assets = FileAssets::new().with_auto_tx(true);
+    let scene = load(&leaf_stage(&dir, "leaf.png"), &assets);
+    assert_eq!(assets.tx_report().0, 1, "--auto-tx converted the leaf");
+    assert_eq!(assets.texture_cache_stats().files, 1, "and it streams");
     assert_eq!(opacity_at(&scene, 0.25), 0.0);
     assert_eq!(opacity_at(&scene, 0.75), 1.0);
 }
@@ -147,7 +146,8 @@ fn a_texture_without_alpha_reads_opaque() {
 }
 
 /// The leaf's `.tx` as a crust from before this change wrote it: RGB, with
-/// no `crust:txversion`, and newer than its source.
+/// What an older crust left beside the leaf: `leaf.tx`, under its own old
+/// name, converted from an RGB image — so without the leaf's alpha.
 fn pre_alpha_tx(dir: &Path) -> PathBuf {
     let rgb = dir.join("leaf_rgb.png");
     image::RgbImage::from_pixel(64, 64, image::Rgb([200, 20, 20]))
@@ -158,53 +158,100 @@ fn pre_alpha_tx(dir: &Path) -> PathBuf {
         &rgb,
         &tx,
         crust_core::ColorSpace::AUTO,
-        crust_assets::TxFormat::Tiff,
+        crust_assets::default_tx_color_space(),
     )
     .expect("convert");
-    let mut bytes = std::fs::read(&tx).expect("read");
-    let marker = b" crust:txversion=2";
-    let at = bytes
-        .windows(marker.len())
-        .position(|w| w == marker)
-        .expect("a versioned .tx");
-    bytes[at..at + marker.len()].fill(b' ');
-    std::fs::write(&tx, bytes).expect("write");
+    std::fs::remove_file(&rgb).expect("remove");
     tx
 }
 
-/// A `.tx` an older crust converted from the leaf dropped its alpha and is
-/// newer than the leaf, so its age never retires it. Without `--auto-tx` it
-/// is refused and the leaf preloads (and cuts), with a warning naming the
-/// fix; with it, the `.tx` is reconverted and streams the alpha.
+/// A `.tx` an older crust converted from the leaf, alpha dropped, under its
+/// old name `leaf.tx`, is not looked for: without `--auto-tx` the leaf
+/// preloads and cuts; with it, the `.tx` Arnold names is written beside the
+/// leaf and streams the alpha.
 #[test]
-fn a_tx_from_before_alpha_is_refused_or_reconverted() {
+fn a_tx_from_before_alpha_is_not_looked_for() {
     let dir = scratch("pre_alpha_tx");
     leaf_png(&dir.join("leaf.png"));
-    let tx = pre_alpha_tx(&dir);
+    pre_alpha_tx(&dir);
     let stage = leaf_stage(&dir, "leaf.png");
 
     let scene = load(&stage, &FileAssets::new());
-    assert_eq!(
-        opacity_at(&scene, 0.25),
-        0.0,
-        "the refused .tx does not answer"
-    );
+    assert_eq!(opacity_at(&scene, 0.25), 0.0, "the old .tx does not answer");
     assert_eq!(opacity_at(&scene, 0.75), 1.0);
-    assert!(
-        scene
-            .warnings
-            .iter()
-            .any(|w| w.code.as_str() == "texture.stream_fallback"),
-        "{:?}",
-        scene.warnings
-    );
 
-    let scene = load(&stage, &FileAssets::new().with_auto_tx(true));
+    let assets = FileAssets::new().with_auto_tx(true);
+    let scene = load(&stage, &assets);
     assert_eq!(opacity_at(&scene, 0.25), 0.0);
     assert_eq!(opacity_at(&scene, 0.75), 1.0);
-    let bytes = std::fs::read(&tx).expect("read");
-    assert!(
-        bytes.windows(17).any(|w| w == b"crust:txversion=2"),
-        "--auto-tx reconverted it"
+    assert_eq!(assets.tx_report().0, 1, "--auto-tx converted the leaf");
+    let arnold_named = std::fs::read_dir(&dir).expect("list").any(|e| {
+        let name = e.expect("entry").file_name().to_string_lossy().into_owned();
+        name.starts_with("leaf_") && name.ends_with(".png.tx")
+    });
+    assert!(arnold_named, "the .tx is written under Arnold's name");
+}
+
+/// **The `Texture alpha` scenarios on both backends** (design decision 9 of
+/// `tx-arnold-convention`): a lookup's colour is premultiplied by its alpha,
+/// in linear light, preloaded from the PNG and streamed from the `.tx`
+/// `--auto-tx` writes alike — a leaf card's cut half is black, a texture at
+/// alpha 128 reads its decoded colour times 128/255 at every footprint, and a
+/// texture without alpha reads its colour and 1.0.
+#[test]
+fn texture_colour_is_premultiplied_preloaded_and_streamed() {
+    use crust_core::AssetLoader;
+    let dir = scratch("premultiplied");
+    leaf_png(&dir.join("leaf.png"));
+    image::RgbaImage::from_pixel(32, 32, image::Rgba([230, 100, 20, 128]))
+        .save(dir.join("half.png"))
+        .expect("png");
+    image::RgbImage::from_pixel(32, 32, image::Rgb([230, 100, 20]))
+        .save(dir.join("rgb.png"))
+        .expect("png");
+    let srgb = |b: u8| crust_core::ResolvedColorSpace::SRGB.decode_curve(b as f32 / 255.0);
+    let preload = FileAssets::with_config(crust_core::Config {
+        tex_stream: false,
+        ..Default::default()
+    });
+    let streamed = FileAssets::new().with_auto_tx(true);
+    for (assets, what) in [(&preload, "preloaded"), (&streamed, "streamed")] {
+        let load = |f: &str| {
+            assets
+                .load_texture(&dir.join(f), crust_core::ColorSpace::SRGB)
+                .expect("loads")
+        };
+        let close = |got: f32, want: f32, at: &str| {
+            assert!(
+                (got - want).abs() < 0.004,
+                "{what} {at}: {got} against {want}"
+            );
+        };
+
+        let leaf = load("leaf.png");
+        let cut = leaf.eval(0.25, 0.5, 0.0);
+        assert_eq!(cut[3], 0.0, "{what}");
+        for c in &cut[..3] {
+            close(*c, 0.0, "cut colour");
+        }
+        let kept = leaf.eval(0.75, 0.5, 0.0);
+        assert_eq!(kept[3], 1.0, "{what}");
+        close(kept[0], srgb(200), "kept colour");
+
+        let half = load("half.png");
+        for width in [0.0f32, 0.05, 0.3, 2.0] {
+            let px = half.eval(0.5, 0.5, width);
+            close(px[3], 128.0 / 255.0, "alpha");
+            close(px[0], srgb(230) * 128.0 / 255.0, "premultiplied colour");
+        }
+
+        let rgb = load("rgb.png").eval(0.5, 0.5, 0.0);
+        assert_eq!(rgb[3], 1.0, "{what}");
+        close(rgb[0], srgb(230), "colour without alpha");
+    }
+    assert_eq!(
+        streamed.texture_cache_stats().files,
+        3,
+        "all three streamed"
     );
 }

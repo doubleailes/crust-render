@@ -61,6 +61,73 @@ pub enum AovSource {
     /// pixels: `u` right, `v` up (Nuke's conventions, Arnold's raw
     /// `motionvector`). Zero on static geometry, in volumes and on escapes.
     MotionVector,
+    /// A primvar at the camera ray's first hit (`sourceType = "primvar"`),
+    /// interpolated as authored; the clear value where the hit prim does not
+    /// author it.
+    Primvar(PrimvarSource),
+}
+
+/// What a primvar var reads: which kept primvar, and how its `dataType`
+/// says to treat it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PrimvarSource {
+    /// The primvar's index in the render's primvar keep set — the import's
+    /// list of `(name, components)` that primvar vars ask for, in first-use
+    /// order.
+    pub index: u16,
+    /// 1, 2 or 3.
+    pub components: u8,
+    pub role: PrimvarRole,
+}
+
+/// The kind of value a primvar var's `dataType` names, which picks its
+/// default accumulation and its channel names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrimvarRole {
+    /// `color*`: filtered, `R G B`.
+    Color,
+    /// `point*`, `vector*`, `normal*`: positions and directions, closest.
+    Vector,
+    /// `texCoord*`: filtered.
+    TexCoord,
+    /// `float*`, `half*`, `double*`: filtered.
+    Float,
+    /// `int*`, `uint*`: identifiers, closest, written as UINT.
+    Integer,
+}
+
+impl PrimvarRole {
+    /// The role an Sdf type name's family gives: `point3f` → `Vector`.
+    pub fn of_type(name: &str) -> Option<Self> {
+        const FAMILIES: &[(&str, PrimvarRole)] = &[
+            ("color", PrimvarRole::Color),
+            ("point", PrimvarRole::Vector),
+            ("vector", PrimvarRole::Vector),
+            ("normal", PrimvarRole::Vector),
+            ("texCoord", PrimvarRole::TexCoord),
+            ("float", PrimvarRole::Float),
+            ("half", PrimvarRole::Float),
+            ("double", PrimvarRole::Float),
+            ("uint", PrimvarRole::Integer),
+            ("int", PrimvarRole::Integer),
+        ];
+        FAMILIES
+            .iter()
+            .find(|(f, _)| name.starts_with(f))
+            .map(|(_, r)| *r)
+    }
+
+    /// Positions, directions and identifiers must never be blended across
+    /// an edge: a rest position averaged over a silhouette is a point on
+    /// neither surface.
+    pub fn default_accumulation(self) -> Accumulation {
+        match self {
+            PrimvarRole::Vector | PrimvarRole::Integer => Accumulation::Closest,
+            PrimvarRole::Color | PrimvarRole::TexCoord | PrimvarRole::Float => {
+                Accumulation::Filtered
+            }
+        }
+    }
 }
 
 /// `(name, source)` for every canonical name and alias a `raw` var may ask
@@ -204,6 +271,7 @@ impl AovSource {
             AovSource::Albedo => "albedo",
             AovSource::DiffuseFilter => "diffuse_albedo",
             AovSource::MotionVector => "motionvector",
+            AovSource::Primvar(_) => "primvar",
         }
     }
 
@@ -225,6 +293,7 @@ impl AovSource {
             | AovSource::Distance
             | AovSource::SampleCount
             | AovSource::Variance => 1,
+            AovSource::Primvar(p) => p.components as usize,
         }
     }
 
@@ -247,7 +316,8 @@ impl AovSource {
             | AovSource::SampleCount
             | AovSource::Albedo
             | AovSource::DiffuseFilter
-            | AovSource::MotionVector => 0,
+            | AovSource::MotionVector
+            | AovSource::Primvar(_) => 0,
         }
     }
 
@@ -266,6 +336,12 @@ impl AovSource {
             | AovSource::Distance
             | AovSource::SampleCount
             | AovSource::Variance => ChannelKind::Scalar,
+            AovSource::Primvar(p) => match (p.components, p.role) {
+                (1, _) => ChannelKind::Scalar,
+                (2, _) => ChannelKind::Uv,
+                (_, PrimvarRole::Color) => ChannelKind::Color,
+                _ => ChannelKind::Vector,
+            },
         }
     }
 
@@ -273,9 +349,11 @@ impl AovSource {
     /// never be blended across an edge is closest, the rest filtered. A
     /// motion vector blended at an edge would have VectorBlur smear the
     /// foreground into the background (Arnold users pair `motionvector`
-    /// with `closest_filter` for the same reason).
+    /// with `closest_filter` for the same reason). A primvar's follows its
+    /// role ([`PrimvarRole::default_accumulation`]).
     pub fn default_accumulation(self) -> Accumulation {
         match self {
+            AovSource::Primvar(p) => p.role.default_accumulation(),
             AovSource::Depth
             | AovSource::Distance
             | AovSource::P
@@ -455,6 +533,11 @@ impl AovRequest {
             .any(|v| v.source != AovSource::Color || v.with_alpha())
     }
 
+    /// Whether any product writes a var of `source`.
+    pub fn asks_for(&self, source: AovSource) -> bool {
+        self.vars().any(|v| v.source == source)
+    }
+
     fn vars(&self) -> impl Iterator<Item = &AovVar> {
         self.products.iter().flat_map(|p| &p.vars)
     }
@@ -534,6 +617,9 @@ pub(crate) struct AovLayout {
     /// Whether a var asks for the motion vector, so the integrator looks up
     /// the first hit's motion at all.
     pub(crate) motion: bool,
+    /// How many kept primvars the first hit is read for: one past the
+    /// largest keep-set index a var names, 0 when none does.
+    pub(crate) primvars: usize,
     /// The working space's luminance weights, which an expression's
     /// variance reduces each sample by — the beauty's (`LightList::luma`).
     pub(crate) luma: utils::Luma,
@@ -578,6 +664,14 @@ impl AovLayout {
         layout.sample_count = request.vars().any(|v| v.source == AovSource::SampleCount);
         layout.variance = request.vars().any(|v| v.source == AovSource::Variance);
         layout.motion = request.vars().any(|v| v.source == AovSource::MotionVector);
+        layout.primvars = request
+            .vars()
+            .filter_map(|v| match v.source {
+                AovSource::Primvar(p) => Some(p.index as usize + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
         layout
     }
 }
@@ -604,6 +698,34 @@ pub(crate) struct SampleExtras<'a> {
     /// The sample's shutter time in `[0, 1)`: 0 unless the scene moves and
     /// motion blur is on. The motion vector rebases the hit by it.
     pub(crate) time: f32,
+    /// The first hit's kept primvars, by keep-set index: `None` where the hit
+    /// prim does not author one (or the ray met no surface). Empty unless a
+    /// var asks for a primvar.
+    pub(crate) primvars: &'a [Option<[f32; 4]>],
+}
+
+/// Which primitive a camera ray's first hit lies on, for the primvar AOVs:
+/// the geometry, its triangle or curve segment, and for a curve the
+/// parameter along it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HitPrim {
+    pub(crate) geom_id: u32,
+    pub(crate) prim_id: u32,
+    /// A triangle's barycentrics as the kernel reports them, looked up only
+    /// when a var asks for a primvar ([`crate::World::hit_barycentrics`]).
+    pub(crate) bary: Option<(f32, f32)>,
+    pub(crate) curve_u: Option<f32>,
+}
+
+impl HitPrim {
+    pub(crate) fn of(hit: &crate::WorldHit<'_>) -> Self {
+        HitPrim {
+            geom_id: hit.geom_id,
+            prim_id: hit.prim_id,
+            bary: None,
+            curve_u: hit.rec.curve().map(|c| c.span_u()),
+        }
+    }
 }
 
 /// What the camera ray met at the path's first vertex, recorded by the
@@ -624,6 +746,8 @@ pub(crate) enum FirstHit {
         /// the shutter ([`World::motion`](crate::World::motion)); zero when
         /// it does not move, or when no var asks for the motion vector.
         motion: Vec3A,
+        /// The primitive hit, which the primvar AOVs are read at.
+        prim: HitPrim,
     },
 }
 
@@ -720,6 +844,14 @@ fn sample_value(
         ) => {
             out[0] = *u;
             out[1] = *v;
+        }
+        // A primvar the hit prim authors; a volume, an escape or a prim
+        // without it keeps the clear value.
+        (AovSource::Primvar(pv), FirstHit::Surface { .. }) => {
+            if let Some(Some(v)) = extras.primvars.get(pv.index as usize) {
+                let n = pv.components as usize;
+                out[..n].copy_from_slice(&v[..n]);
+            }
         }
         _ => {}
     }
@@ -1287,6 +1419,14 @@ mod tests {
         albedo: Vec3A::ZERO,
         diffuse_filter: Vec3A::ZERO,
         time: 0.0,
+        primvars: &[],
+    };
+
+    const NO_PRIM: HitPrim = HitPrim {
+        geom_id: 0,
+        prim_id: 0,
+        bary: None,
+        curve_u: None,
     };
 
     /// A camera at the origin looking down −Z with a 90° square frame one
@@ -1406,6 +1546,7 @@ mod tests {
             n: Vec3A::Z,
             uv: None,
             motion: Vec3A::ZERO,
+            prim: NO_PRIM,
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
         unit.add(&surface, &NONE, 0.5, 0.5, 3.0);
@@ -1660,6 +1801,7 @@ mod tests {
             n: Vec3A::Z,
             uv: None,
             motion: Vec3A::ZERO,
+            prim: NO_PRIM,
         };
         let samples = [Vec3A::new(1.0, 0.0, 0.0), Vec3A::new(3.0, 0.0, 0.0)];
         for lpe in &samples {
@@ -1706,6 +1848,7 @@ mod tests {
             n: Vec3A::Z,
             uv: None,
             motion: Vec3A::new(1.0, 0.0, 0.0),
+            prim: NO_PRIM,
         };
         sample_value(&key, &moving, &NONE, &cam, &mut out);
         assert!(
@@ -1717,8 +1860,125 @@ mod tests {
             n: Vec3A::Z,
             uv: None,
             motion: Vec3A::ZERO,
+            prim: NO_PRIM,
         };
         sample_value(&key, &still, &NONE, &cam, &mut out);
         assert_eq!(out[..2], [0.0, 0.0]);
+    }
+
+    fn primvar(index: u16, components: u8, role: PrimvarRole) -> AovSource {
+        AovSource::Primvar(PrimvarSource {
+            index,
+            components,
+            role,
+        })
+    }
+
+    #[test]
+    fn a_primvar_role_sets_the_default_accumulation_and_channels() {
+        let role = |t: &str| PrimvarRole::of_type(t).unwrap();
+        for (t, mode) in [
+            ("point3f", Accumulation::Closest),
+            ("normal3f", Accumulation::Closest),
+            ("vector3d", Accumulation::Closest),
+            ("int", Accumulation::Closest),
+            ("uint", Accumulation::Closest),
+            ("color3f", Accumulation::Filtered),
+            ("float", Accumulation::Filtered),
+            ("half2", Accumulation::Filtered),
+            ("texCoord2f", Accumulation::Filtered),
+        ] {
+            assert_eq!(role(t).default_accumulation(), mode, "{t}");
+            assert_eq!(primvar(0, 1, role(t)).default_accumulation(), mode, "{t}");
+        }
+        assert_eq!(PrimvarRole::of_type("string"), None);
+        let kind = |c, r| primvar(0, c, r).channel_kind();
+        assert_eq!(kind(1, PrimvarRole::Integer), ChannelKind::Scalar);
+        assert_eq!(kind(2, PrimvarRole::TexCoord), ChannelKind::Uv);
+        assert_eq!(kind(3, PrimvarRole::Color), ChannelKind::Color);
+        assert_eq!(kind(3, PrimvarRole::Vector), ChannelKind::Vector);
+        assert_eq!(primvar(0, 2, PrimvarRole::Float).components(), 2);
+    }
+
+    /// A primvar is data: the camera's exposure leaves it alone.
+    #[test]
+    fn exposure_leaves_primvar_slots_alone() {
+        let v = var(primvar(0, 3, PrimvarRole::Color), Accumulation::Filtered);
+        let request = AovRequest {
+            products: vec![AovProduct {
+                prim_path: "/Render/p".into(),
+                name: "p.exr".into(),
+                vars: vec![v.clone()],
+                attributes: Vec::new(),
+            }],
+        };
+        let layout = AovLayout::new(&request);
+        assert_eq!(layout.primvars, 1);
+        let mut unit = UnitAov::new(&layout, frame(), 1);
+        let hit = FirstHit::Surface {
+            p: Vec3A::new(0.0, 0.0, -1.0),
+            n: Vec3A::Z,
+            uv: None,
+            motion: Vec3A::ZERO,
+            prim: NO_PRIM,
+        };
+        let primvars = [Some([0.25, 0.5, 0.75, 0.0])];
+        let extras = SampleExtras {
+            primvars: &primvars,
+            ..NONE
+        };
+        unit.add(&hit, &extras, 0.5, 0.5, 1.0);
+        let mut film = AovFilm::new(&layout, PixelRect::full(1, 1));
+        film.store(&unit, 0, 0, 0, 1.0, 1, 0.0);
+        film.apply_exposure(4.0);
+        assert_eq!(
+            film.var_channels(&Buffer::new(1, 1), &v),
+            vec![vec![0.25], vec![0.5], vec![0.75]]
+        );
+    }
+
+    /// The clear value where the hit prim does not author the primvar, on a
+    /// volume and on an escape; only the var's components are written.
+    #[test]
+    fn a_primvar_reads_its_clear_value_where_unauthored() {
+        let cam = frame();
+        let key = var(primvar(1, 2, PrimvarRole::TexCoord), Accumulation::Closest)
+            .slot_key(&[])
+            .unwrap();
+        let surface = FirstHit::Surface {
+            p: Vec3A::new(0.0, 0.0, -1.0),
+            n: Vec3A::Z,
+            uv: None,
+            motion: Vec3A::ZERO,
+            prim: NO_PRIM,
+        };
+        let mut out = [9.0f32; 3];
+        let both = [Some([1.0, 2.0, 3.0, 4.0]), Some([5.0, 6.0, 7.0, 8.0])];
+        let extras = SampleExtras {
+            primvars: &both,
+            ..NONE
+        };
+        sample_value(&key, &surface, &extras, &cam, &mut out);
+        assert_eq!(out[..2], [5.0, 6.0]);
+        let unauthored = [Some([1.0, 2.0, 3.0, 4.0]), None];
+        let extras = SampleExtras {
+            primvars: &unauthored,
+            ..NONE
+        };
+        sample_value(&key, &surface, &extras, &cam, &mut out);
+        assert_eq!(out[..2], [0.0, 0.0]);
+        let extras = SampleExtras {
+            primvars: &both,
+            ..NONE
+        };
+        for hit in [
+            FirstHit::Escaped,
+            FirstHit::Volume {
+                p: Vec3A::new(0.0, 0.0, -1.0),
+            },
+        ] {
+            sample_value(&key, &hit, &extras, &cam, &mut out);
+            assert_eq!(out[..2], [0.0, 0.0], "{hit:?}");
+        }
     }
 }

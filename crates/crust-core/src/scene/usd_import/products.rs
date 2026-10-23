@@ -18,17 +18,20 @@
 //! valid.
 
 use crate::warning;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::render::{
-    Product as RenderProduct, ProductSchema, Settings as UsdRenderSettings, SettingsBaseSchema,
-    SettingsSchema, Var as RenderVar,
+    AspectRatioConformPolicy, Product as RenderProduct, ProductSchema,
+    Settings as UsdRenderSettings, SettingsBaseSchema, SettingsSchema, Var as RenderVar,
 };
 use tracing::debug;
 
-use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
+use crate::aov::{
+    Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision, PrimvarRole, PrimvarSource,
+};
 use crate::region::PixelRect;
 
 use super::attrs::{custom_bool, custom_token, decode_bool, decode_number, prim_value, value_at};
@@ -37,11 +40,26 @@ use super::settings::render_settings_path;
 
 const DRIVER_PARAMETERS: &str = "driver:parameters:";
 
-/// The stage's products, and the camera, resolution, data window and
-/// motion-blur switch the render takes from the first of them.
+/// How the render camera's aperture is fitted to the image: the first
+/// product's resolved `aspectRatioConformPolicy`, which
+/// [`super::camera`]'s frame read applies before any field of view is
+/// derived. Kept beside the resolution rather than on
+/// [`crate::tracer::RenderSettings`], which holds no USD vocabulary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Framing {
+    /// `expandAperture` when nothing authors one.
+    pub(super) policy: AspectRatioConformPolicy,
+}
+
+/// The stage's products, and the camera, resolution, data window, framing
+/// and motion-blur and depth-of-field switches the render takes from the
+/// first of them.
 #[derive(Debug)]
 pub(super) struct RenderProducts {
     pub(super) request: AovRequest,
+    /// The primvars the request's primvar vars read, which the geometry
+    /// import keeps (and nothing else for them).
+    pub(super) primvars: PrimvarKeep,
     /// The first product's resolved camera — the settings' own when the
     /// product authors none.
     pub(super) camera: Option<sdf::Path>,
@@ -52,22 +70,37 @@ pub(super) struct RenderProducts {
     /// ymax`, bottom-left origin), when the settings or the product author
     /// one; [`region_from_ndc`] turns it into the render's region.
     pub(super) data_window: Option<[f32; 4]>,
+    /// The first product's resolved conform policy.
+    pub(super) framing: Framing,
     /// Whether moving geometry is motion blurred: `false` when the first
     /// product (else the settings prim) authors `disableMotionBlur = true`
     /// or its deprecated synonym `instantaneousShutter = true`. The stage's
     /// motion stays in the scene either way (`RenderSettings::with_motion_blur`).
     pub(super) motion_blur: bool,
+    /// Whether the sharp beauty is posed at the frame rather than at shutter
+    /// open: `disableMotionBlur = true`, which UsdRender defines as a `[0, 0]`
+    /// shutter at the current time code. `instantaneousShutter` alone keeps
+    /// shutter open.
+    pub(super) sharp_at_frame: bool,
+    /// Whether the camera's lens is kept: `false` when the first product
+    /// (else the settings prim) authors `disableDepthOfField = true`, and the
+    /// camera is built as a pinhole (`RenderSettings::with_depth_of_field`).
+    pub(super) depth_of_field: bool,
 }
 
-/// Hand-written for one field: a stage that authors nothing blurs.
+/// Hand-written for two fields: a stage that authors nothing blurs.
 impl Default for RenderProducts {
     fn default() -> Self {
         RenderProducts {
             request: AovRequest::default(),
+            primvars: PrimvarKeep::default(),
             camera: None,
             resolution: None,
             data_window: None,
+            framing: Framing::default(),
             motion_blur: true,
+            sharp_at_frame: false,
+            depth_of_field: true,
         }
     }
 }
@@ -80,10 +113,12 @@ struct Base {
     camera: Option<sdf::Path>,
     resolution: Option<(usize, usize)>,
     data_window: Option<[f32; 4]>,
+    conform: AspectRatioConformPolicy,
     /// `disableMotionBlur` and `instantaneousShutter`, each resolved on its
     /// own: a product that authors one of them inherits the other.
     disable_motion_blur: bool,
     instantaneous_shutter: bool,
+    disable_depth_of_field: bool,
 }
 
 fn read_resolution(view: &impl SettingsBaseSchema) -> Option<(usize, usize)> {
@@ -96,20 +131,53 @@ fn read_data_window(view: &impl SettingsBaseSchema) -> Option<[f32; 4]> {
     Some([v.x, v.y, v.z, v.w])
 }
 
+/// The authored `aspectRatioConformPolicy`; `None` when unauthored, or when
+/// it names none of the five policies, which is refused at the prim that
+/// authors it.
+fn read_conform_policy(view: &impl SettingsBaseSchema) -> Option<AspectRatioConformPolicy> {
+    let value = value_at(&view.aspect_ratio_conform_policy_attr())?;
+    match AspectRatioConformPolicy::try_from(value.clone()) {
+        Ok(policy) => Some(policy),
+        Err(_) => {
+            let path = view.prim().path();
+            warning!(
+                ProductInvalidConformPolicy,
+                at = path,
+                "{path}: aspectRatioConformPolicy = {} is not one of expandAperture, \
+                 cropAperture, adjustApertureWidth, adjustApertureHeight or \
+                 adjustPixelAspectRatio; read as unauthored",
+                describe_value(&value),
+            );
+            None
+        }
+    }
+}
+
+/// An authored value as a warning quotes it: a token in quotes, anything
+/// else as its debug form.
+fn describe_value(value: &sdf::Value) -> String {
+    match value {
+        sdf::Value::Token(t) => format!("{:?}", t.as_str()),
+        other => format!("{other:?}"),
+    }
+}
+
 fn read_camera(view: &impl SettingsBaseSchema) -> Option<sdf::Path> {
     view.camera_rel().targets().ok()?.into_iter().next()
 }
 
 impl Base {
     /// Nothing authored anywhere: the first camera, the default resolution,
-    /// motion blur on.
+    /// motion blur and depth of field on.
     fn unauthored() -> Base {
         Base {
             camera: None,
             resolution: None,
             data_window: None,
+            conform: AspectRatioConformPolicy::ExpandAperture,
             disable_motion_blur: false,
             instantaneous_shutter: false,
+            disable_depth_of_field: false,
         }
     }
 
@@ -119,12 +187,16 @@ impl Base {
             camera: read_camera(view).or_else(|| fallback.camera.clone()),
             resolution: read_resolution(view).or(fallback.resolution),
             data_window: read_data_window(view).or(fallback.data_window),
+            conform: read_conform_policy(view).unwrap_or(fallback.conform),
             disable_motion_blur: value_at(&view.disable_motion_blur_attr())
                 .and_then(decode_bool)
                 .unwrap_or(fallback.disable_motion_blur),
             instantaneous_shutter: value_at(&view.instantaneous_shutter_attr())
                 .and_then(decode_bool)
                 .unwrap_or(fallback.instantaneous_shutter),
+            disable_depth_of_field: value_at(&view.disable_depth_of_field_attr())
+                .and_then(decode_bool)
+                .unwrap_or(fallback.disable_depth_of_field),
         }
     }
 
@@ -133,20 +205,196 @@ impl Base {
         !(self.disable_motion_blur || self.instantaneous_shutter)
     }
 
+    /// Whether the sharp beauty is posed at the frame: `disableMotionBlur`
+    /// wins over `instantaneousShutter`, which poses it at shutter open.
+    fn sharp_at_frame(&self) -> bool {
+        self.disable_motion_blur
+    }
+
+    /// How the render treats moving geometry, as a product's warning names it.
+    fn blur_mode(&self) -> &'static str {
+        match (self.motion_blur(), self.sharp_at_frame()) {
+            (true, _) => "on",
+            (false, true) => "off (sharp at the frame)",
+            (false, false) => "off (sharp at shutter open)",
+        }
+    }
+
+    /// Whether the render camera keeps its lens.
+    fn depth_of_field(&self) -> bool {
+        !self.disable_depth_of_field
+    }
+
+    fn framing(&self) -> Framing {
+        Framing {
+            policy: self.conform,
+        }
+    }
+
     /// Whether two products can be rendered by one render: the same camera
-    /// and resolution. The shutter flags and the data window are not part
-    /// of it — the render follows the first product's, and a later one that
+    /// and resolution. The shutter and depth-of-field flags, the data
+    /// window and the conform policy are not part of it — the render follows the first product's, and a later one that
     /// differs is warned about, not refused.
     fn same_render(&self, other: &Base) -> bool {
         self.camera == other.camera && self.resolution == other.resolution
     }
 }
 
+/// The primvars a render's primvar vars read: `(name, components)` without
+/// the `primvars:` prefix, deduplicated, in first-use order. An entry's index
+/// is the [`PrimvarSource::index`] of every var reading it.
+///
+/// It also remembers, for the import that reads geometry with it, which
+/// ancestors author a kept primvar crust does not inherit, and which entries
+/// have been warned about ([`PrimvarKeep::report_inherited`]); two keep sets
+/// are equal when their entries are.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PrimvarKeep {
+    pub(crate) entries: Vec<KeptPrimvar>,
+    /// `(entry, ancestor path)` → whether that prim authors the primvar.
+    authored_on: RefCell<HashMap<(usize, String), bool>>,
+    /// Per entry, whether its not-inherited warning was raised.
+    warned: RefCell<Vec<bool>>,
+}
+
+impl PartialEq for PrimvarKeep {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for PrimvarKeep {}
+
+/// One primvar the geometry import keeps for the AOVs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeptPrimvar {
+    /// Without the `primvars:` prefix.
+    pub(crate) name: String,
+    /// The components every var reading it asks for: 1, 2 or 3.
+    pub(crate) components: u8,
+    /// The RenderVar prims reading it, for the warnings that name them.
+    pub(crate) vars: Vec<String>,
+}
+
+impl KeptPrimvar {
+    /// The vars reading it and the verb: `/Render/Pref asks for`.
+    pub(crate) fn asking(&self) -> String {
+        let verb = if self.vars.len() == 1 {
+            "asks for"
+        } else {
+            "ask for"
+        };
+        format!("{} {verb}", self.vars.join(", "))
+    }
+}
+
+impl PrimvarKeep {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// What the geometry import keeps: each entry's `(name, components)`.
+    pub(crate) fn key(&self) -> Vec<(String, u8)> {
+        self.entries
+            .iter()
+            .map(|e| (e.name.clone(), e.components))
+            .collect()
+    }
+
+    /// Kept primvar `i`, which geometry prim `prim` does not author: when an
+    /// ancestor authors it, warns — once per entry — that it is not
+    /// inherited. Walks the ancestors once per `(entry, ancestor)`.
+    pub(crate) fn report_inherited(&self, prim: &Prim, i: usize) {
+        if self.warned.borrow().get(i).copied().unwrap_or(false) {
+            return;
+        }
+        let name = format!("primvars:{}", self.entries[i].name);
+        let mut at = prim.parent();
+        while let Some(a) = at {
+            let key = (i, a.path().to_string());
+            let authored = *self
+                .authored_on
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| prim_value(&a, &name).is_some());
+            if authored {
+                self.warn_not_inherited(i, Some(prim), &a, "an ancestor");
+                return;
+            }
+            at = a.parent();
+        }
+    }
+
+    /// An instance prim or a `PointInstancer` (`what`) placing geometry:
+    /// warns, once per entry, about each kept primvar it or an ancestor
+    /// authors, which the placed geometry does not inherit.
+    pub(crate) fn report_placement(&self, placement: &Prim, what: &str) {
+        for i in 0..self.entries.len() {
+            if self.warned.borrow().get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let name = format!("primvars:{}", self.entries[i].name);
+            if prim_value(placement, &name).is_some() {
+                self.warn_not_inherited(i, None, placement, what);
+            } else {
+                self.report_inherited(placement, i);
+            }
+        }
+    }
+
+    /// Warns that kept primvar `i`, which `what` authors on `on` (above the
+    /// geometry prim `below`, when one asked), is not inherited.
+    fn warn_not_inherited(&self, i: usize, below: Option<&Prim>, on: &Prim, what: &str) {
+        let e = &self.entries[i];
+        let above = below.map_or(String::new(), |b| format!(" above {}", b.path()));
+        warning!(
+            PrimvarNotInherited,
+            at = on.path(),
+            "{} primvar {:?}, which {what} authors on {}{above}; crust does not inherit \
+             primvars yet, so the prims it would reach read the clear value",
+            e.asking(),
+            e.name,
+            on.path(),
+        );
+        let mut warned = self.warned.borrow_mut();
+        if warned.len() < self.entries.len() {
+            warned.resize(self.entries.len(), false);
+        }
+        warned[i] = true;
+    }
+
+    /// The index of `(name, components)`, added if new, with `var` among
+    /// the vars reading it.
+    fn index_of(&mut self, name: &str, components: u8, var: &sdf::Path) -> u16 {
+        let i = match self
+            .entries
+            .iter()
+            .position(|e| e.name == name && e.components == components)
+        {
+            Some(i) => i,
+            None => {
+                self.entries.push(KeptPrimvar {
+                    name: name.to_owned(),
+                    components,
+                    vars: Vec::new(),
+                });
+                self.warned.borrow_mut().push(false);
+                self.entries.len() - 1
+            }
+        };
+        let var = var.to_string();
+        if !self.entries[i].vars.contains(&var) {
+            self.entries[i].vars.push(var);
+        }
+        i as u16
+    }
+}
+
 /// Resolves the render settings prim's products. Empty when the stage has no
 /// settings prim or the prim authors no `products` — the "write the single
 /// beauty EXR" case.
-pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
-    let Some(path) = render_settings_path(stage) else {
+pub(super) fn import_render_products(stage: &Stage, pass: Option<&sdf::Path>) -> RenderProducts {
+    let Some(path) = render_settings_path(stage, pass) else {
         return RenderProducts::default();
     };
     let Some(settings) = UsdRenderSettings::get(stage, path.clone()).ok().flatten() else {
@@ -160,7 +408,11 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     if targets.is_empty() {
         return RenderProducts {
             request: AovRequest::default(),
+            primvars: PrimvarKeep::default(),
             motion_blur: base.motion_blur(),
+            sharp_at_frame: base.sharp_at_frame(),
+            depth_of_field: base.depth_of_field(),
+            framing: base.framing(),
             camera: base.camera,
             resolution: base.resolution,
             data_window: base.data_window,
@@ -170,10 +422,14 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
 
     let mut out = RenderProducts {
         request: AovRequest::default(),
+        primvars: PrimvarKeep::default(),
         camera: base.camera.clone(),
         resolution: base.resolution,
         data_window: base.data_window,
+        framing: base.framing(),
         motion_blur: base.motion_blur(),
+        sharp_at_frame: base.sharp_at_frame(),
+        depth_of_field: base.depth_of_field(),
     };
     // The render's own base: the first accepted product's.
     let mut render_base: Option<Base> = None;
@@ -229,20 +485,36 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 );
                 continue;
             }
-            Some(first) if first.motion_blur() != resolved.motion_blur() => {
+            Some(first) if first.blur_mode() != resolved.blur_mode() => {
                 // One shutter per stage, like one camera: the file is still
                 // written, with the first product's blur.
-                let state = |on: bool| if on { "on" } else { "off" };
                 warning!(
                     ProductMotionBlurMismatch,
                     at = product_path,
                     "{product_path}: asks for motion blur {}, but the render has it {} (the \
                      first product's); its file is written with that",
-                    state(resolved.motion_blur()),
-                    state(first.motion_blur()),
+                    resolved.blur_mode(),
+                    first.blur_mode(),
                 );
             }
             Some(_) => {}
+        }
+        // Checked on its own, like the region: a product may differ from
+        // the first in both its shutter and its lens.
+        if let Some(first) = &render_base
+            && first.depth_of_field() != resolved.depth_of_field()
+        {
+            // One camera per render: the file is still written, with the
+            // first product's lens.
+            let state = |on: bool| if on { "on" } else { "off" };
+            warning!(
+                ProductDepthOfFieldMismatch,
+                at = product_path,
+                "{product_path}: asks for depth of field {}, but the render has it {} (the \
+                 first product's); its file is written with that",
+                state(resolved.depth_of_field()),
+                state(first.depth_of_field()),
+            );
         }
         // Compared as they render: an unauthored window is the full frame,
         // like an authored `(0, 0, 1, 1)`.
@@ -258,6 +530,20 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                  product's); its file is written with that",
                 describe_window(resolved.data_window),
                 describe_window(first.data_window),
+            );
+        }
+        // One framing per render, like one region: the file is still
+        // written, framed by the first product's policy.
+        if let Some(first) = &render_base
+            && first.conform != resolved.conform
+        {
+            warning!(
+                ProductFramingMismatch,
+                at = product_path,
+                "{product_path}: asks for aspectRatioConformPolicy {:?}, but the render's is {:?} \
+                 (the first product's); its file is written with that framing",
+                resolved.conform.as_token(),
+                first.conform.as_token(),
             );
         }
         warn_unhonoured(&prim);
@@ -277,7 +563,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             seen.push(var_path.clone());
             let var = vars
                 .entry(var_path.clone())
-                .or_insert_with(|| resolve_var(stage, &var_path))
+                .or_insert_with(|| resolve_var(stage, &var_path, &mut out.primvars))
                 .clone();
             // One DFA holds every expression of the render, each accepting
             // as one bit of a u64 and all sharing a bounded number of
@@ -325,6 +611,9 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     }
     if let Some(first) = render_base {
         out.motion_blur = first.motion_blur();
+        out.sharp_at_frame = first.sharp_at_frame();
+        out.depth_of_field = first.depth_of_field();
+        out.framing = first.framing();
         out.camera = first.camera;
         out.resolution = first.resolution;
         out.data_window = first.data_window;
@@ -415,8 +704,8 @@ fn describe_resolution(resolution: Option<(usize, usize)>) -> String {
 /// `RenderSettingsBase` attributes crust does not honour, warned about only
 /// when authored with a value that would change the image — Houdini authors
 /// every one of them at its fallback, and those need no word.
-/// `disableMotionBlur`, `instantaneousShutter` and `dataWindowNDC` are
-/// honoured ([`Base`]), so they are not here.
+/// `disableMotionBlur`, `instantaneousShutter`, `disableDepthOfField` and
+/// `dataWindowNDC` are honoured ([`Base`]), so they are not here.
 fn warn_unhonoured(prim: &Prim) {
     let mut ignored = Vec::new();
     let value = |name: &str| prim_value(prim, name);
@@ -424,9 +713,6 @@ fn warn_unhonoured(prim: &Prim) {
         && a != 1.0
     {
         ignored.push(format!("pixelAspectRatio = {a}"));
-    }
-    if custom_bool(prim, "disableDepthOfField") == Some(true) {
-        ignored.push("disableDepthOfField = true".to_owned());
     }
     if !ignored.is_empty() {
         warning!(
@@ -530,12 +816,16 @@ pub(super) fn parse_data_type(name: &str) -> Option<(usize, Precision)> {
 }
 
 /// Whether `source` can be written as `components` channels of `precision`.
+/// A primvar's width is its data type's, so any one to three components fit,
+/// as integers too.
 fn type_fits(source: AovSource, components: usize, precision: Precision) -> bool {
     let components_fit = match source {
         AovSource::Color | AovSource::Lpe => components == 3 || components == 4,
+        AovSource::Primvar(_) => (1..=3).contains(&components),
         s => components == s.components(),
     };
-    let precision_fits = precision != Precision::Uint || source == AovSource::SampleCount;
+    let precision_fits = precision != Precision::Uint
+        || matches!(source, AovSource::SampleCount | AovSource::Primvar(_));
     components_fit && precision_fits
 }
 
@@ -591,7 +881,7 @@ fn authored_accumulation(prim: &Prim) -> Option<Accumulation> {
 
 /// One RenderVar as a channel layer, or `None` (warned) when crust cannot
 /// honour it.
-fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
+fn resolve_var(stage: &Stage, path: &sdf::Path, keep: &mut PrimvarKeep) -> Option<AovVar> {
     if RenderVar::get(stage, path.clone()).ok().flatten().is_none() {
         warning!(
             AovNotARenderVar,
@@ -611,6 +901,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     let source_type = custom_token(&prim, "sourceType").unwrap_or_else(|| "raw".to_owned());
     let source_name = custom_token(&prim, "sourceName").unwrap_or_default();
     let mut expression = None;
+    let mut primvar = None;
     let mut raw = false;
     let raw_authored = custom_bool(&prim, "crust:aov:raw") == Some(true);
     let variance = custom_bool(&prim, "crust:aov:variance") == Some(true);
@@ -708,12 +999,25 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             AovSource::Lpe
         }
         "primvar" => {
-            warning!(
-                AovUnsupportedSource,
-                at = path,
-                "{path}: primvar source {source_name:?} is not supported yet; no channel written"
-            );
-            return None;
+            let name = source_name
+                .strip_prefix("primvars:")
+                .unwrap_or(&source_name);
+            if name.is_empty() {
+                warning!(
+                    AovPrimvarNoName,
+                    at = path,
+                    "{path}: sourceType \"primvar\" needs a sourceName naming the primvar; no \
+                     channel written"
+                );
+                return None;
+            }
+            primvar = Some(name.to_owned());
+            // Its index, width and role come with the data type, below.
+            AovSource::Primvar(PrimvarSource {
+                index: 0,
+                components: 0,
+                role: PrimvarRole::Float,
+            })
         }
         "intrinsic" => {
             warning!(
@@ -745,6 +1049,32 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             "{path}: data type {type_name:?} is not a numeric type; no channel written"
         );
         return None;
+    };
+    let source = match (source, &primvar) {
+        (AovSource::Primvar(_), Some(name)) => {
+            if components == 4 {
+                warning!(
+                    AovPrimvarFourComponents,
+                    at = path,
+                    "{path}: primvar {name:?} as {type_name:?}: four-component primvar vars are \
+                     not supported yet; no channel written"
+                );
+                return None;
+            }
+            // The role is the `dataType`'s (Houdini's `aov:format` names only
+            // the storage, `float3` for a `point3f`).
+            let role = custom_token(&prim, "dataType")
+                .and_then(|t| PrimvarRole::of_type(&t))
+                .or_else(|| PrimvarRole::of_type(&type_name))
+                .unwrap_or(PrimvarRole::Float);
+            let components = components as u8;
+            AovSource::Primvar(PrimvarSource {
+                index: keep.index_of(name, components, path),
+                components,
+                role,
+            })
+        }
+        (source, _) => source,
     };
     if variance && (components != 1 || precision == Precision::Uint) {
         warning!(
@@ -813,6 +1143,140 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The products of a stage holding `render` under `/Render` (which must
+    /// hold `/Render/settings`), and the warnings resolving them raised.
+    fn resolve(name: &str, render: &str) -> (RenderProducts, Vec<crate::Warning>) {
+        let dir = std::env::temp_dir().join("crust_products_framing");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("{name}.usda"));
+        std::fs::write(
+            &path,
+            format!("#usda 1.0\ndef Scope \"Render\"\n{{\n{render}\n}}\n"),
+        )
+        .expect("write stage");
+        let stage = super::super::stage_builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        let scope = crate::WarningScope::enter();
+        let products = import_render_products(&stage, None);
+        (products, scope.finish())
+    }
+
+    fn policy(name: &str, render: &str) -> AspectRatioConformPolicy {
+        let (products, warnings) = resolve(name, render);
+        assert!(warnings.is_empty(), "{name}: {warnings:?}");
+        products.framing.policy
+    }
+
+    fn settings(body: &str) -> String {
+        format!("    def RenderSettings \"settings\"\n    {{\n{body}\n    }}\n")
+    }
+
+    fn product(name: &str, body: &str) -> String {
+        format!(
+            "    def RenderProduct \"{name}\"\n    {{\n{body}\n        token productName = \
+             \"{name}.exr\"\n    }}\n"
+        )
+    }
+
+    const HEIGHT: &str =
+        "        uniform token aspectRatioConformPolicy = \"adjustApertureHeight\"";
+    const WIDTH: &str = "        uniform token aspectRatioConformPolicy = \"adjustApertureWidth\"";
+
+    #[test]
+    fn the_conform_policy_resolves_like_the_resolution() {
+        use AspectRatioConformPolicy::*;
+        assert_eq!(policy("unauthored", &settings("")), ExpandAperture);
+        assert_eq!(RenderProducts::default().framing.policy, ExpandAperture);
+        assert_eq!(
+            policy("settings_only", &settings(HEIGHT)),
+            AdjustApertureHeight
+        );
+        // A product that authors none inherits the settings'.
+        let inherits =
+            settings(&format!("{WIDTH}\n        rel products = [</Render/a>]")) + &product("a", "");
+        assert_eq!(policy("inherited", &inherits), AdjustApertureWidth);
+        // The first product's own wins over the settings'.
+        let overrides = settings(&format!("{WIDTH}\n        rel products = [</Render/a>]"))
+            + &product("a", HEIGHT);
+        assert_eq!(policy("overridden", &overrides), AdjustApertureHeight);
+    }
+
+    #[test]
+    fn a_misspelt_conform_policy_is_refused_as_unauthored() {
+        let (products, warnings) = resolve(
+            "misspelt",
+            &settings("        uniform token aspectRatioConformPolicy = \"adjustApertureHieght\""),
+        );
+        assert_eq!(
+            products.framing.policy,
+            AspectRatioConformPolicy::ExpandAperture
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert_eq!(w.code, crate::WarningCode::ProductInvalidConformPolicy);
+        assert_eq!(w.count, 1);
+        assert_eq!(w.prims, ["/Render/settings"]);
+        assert!(
+            w.message.contains("\"adjustApertureHieght\""),
+            "{}",
+            w.message
+        );
+
+        // On a product, it falls back to the settings' policy.
+        let (products, warnings) = resolve(
+            "misspelt_product",
+            &(settings(&format!("{WIDTH}\n        rel products = [</Render/a>]"))
+                + &product(
+                    "a",
+                    "        uniform token aspectRatioConformPolicy = \"stretch\"",
+                )),
+        );
+        assert_eq!(
+            products.framing.policy,
+            AspectRatioConformPolicy::AdjustApertureWidth
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].prims, ["/Render/a"]);
+    }
+
+    #[test]
+    fn a_later_product_with_another_policy_is_written_with_the_first_framing() {
+        let (products, warnings) = resolve(
+            "framing_mismatch",
+            &(settings("        rel products = [</Render/a>, </Render/b>]")
+                + &product(
+                    "a",
+                    "        uniform token aspectRatioConformPolicy = \"expandAperture\"",
+                )
+                + &product("b", HEIGHT)),
+        );
+        let names: Vec<&str> = products
+            .request
+            .products
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["a.exr", "b.exr"]);
+        assert_eq!(
+            products.framing.policy,
+            AspectRatioConformPolicy::ExpandAperture
+        );
+        let mismatch: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.code == crate::WarningCode::ProductFramingMismatch)
+            .collect();
+        assert_eq!(mismatch.len(), 1, "{warnings:?}");
+        assert_eq!(mismatch[0].count, 1);
+        assert_eq!(mismatch[0].prims, ["/Render/b"]);
+        assert!(
+            warnings
+                .iter()
+                .all(|w| w.code != crate::WarningCode::ProductCameraMismatch),
+            "{warnings:?}"
+        );
+    }
 
     #[test]
     fn data_types_parse_whole_names_only() {

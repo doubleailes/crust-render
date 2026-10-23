@@ -103,14 +103,14 @@ fn the_learned_table_is_the_same_under_every_sampler() {
     let (sobol, _) = scene(LightSelection::Learned, 1);
     for sampler in [SamplerKind::LatticeBn, SamplerKind::PmjBn] {
         let (other, _) = scene_with(LightSelection::Learned, 1, sampler);
-        assert_eq!(other.settings.sampler(), sampler);
+        assert_eq!(other.settings().sampler(), sampler);
         for z in -6..=6 {
             for x in -6..=6 {
                 let p = Vec3A::new(x as f32 * 0.9, 0.0, z as f32 * 0.9);
                 for index in 0..2 {
                     assert_eq!(
-                        sobol.lights.pmf_at(p, index).to_bits(),
-                        other.lights.pmf_at(p, index).to_bits(),
+                        sobol.lights().pmf_at(p, index).to_bits(),
+                        other.lights().pmf_at(p, index).to_bits(),
                         "{sampler:?} at {p:?}, light {index}"
                     );
                 }
@@ -122,12 +122,12 @@ fn the_learned_table_is_the_same_under_every_sampler() {
 #[test]
 fn a_sealed_light_is_learned_down_to_the_defensive_share() {
     let (r, by_power) = scene(LightSelection::Learned, 1);
-    assert_eq!(r.lights.selection(), LightSelection::Learned);
+    assert_eq!(r.lights().selection(), LightSelection::Learned);
     // Power alone favours the sealed light, which is the whole problem.
     assert!(by_power.pmf(1) > by_power.pmf(0));
 
     let p = Vec3A::new(0.0, 0.0, 0.0);
-    let (visible, sealed) = (r.lights.pmf_at(p, 0), r.lights.pmf_at(p, 1));
+    let (visible, sealed) = (r.lights().pmf_at(p, 0), r.lights().pmf_at(p, 1));
     // Nothing ever reached the floor from the sealed light, so all it keeps
     // is the defensive share: 0.3 over two lights.
     assert!((sealed - 0.15).abs() < 1e-6, "sealed light pmf {sealed}");
@@ -135,20 +135,20 @@ fn a_sealed_light_is_learned_down_to_the_defensive_share() {
 
     // The bounce side reads the same numbers the pick reports.
     for index in 0..2 {
-        let geom = r.lights.lights()[index].geom_id().unwrap();
-        let (found, pmf) = r.lights.find_index_by_geom_at(geom, p).unwrap();
+        let geom = r.lights().lights()[index].geom_id().unwrap();
+        let (found, pmf) = r.lights().find_index_by_geom_at(geom, p).unwrap();
         assert_eq!(found, index);
-        assert_eq!(pmf, r.lights.pmf_at(p, index));
+        assert_eq!(pmf, r.lights().pmf_at(p, index));
     }
     // And the pick lands on each light as often as its pmf says.
     let n = 10_000;
     let picked_sealed = (0..n)
         .filter(|&i| {
             let (index, pmf) = r
-                .lights
+                .lights()
                 .pick_index_at(p, (i as f32 + 0.5) / n as f32)
                 .unwrap();
-            assert_eq!(pmf, r.lights.pmf_at(p, index));
+            assert_eq!(pmf, r.lights().pmf_at(p, index));
             index == 1
         })
         .count();
@@ -156,7 +156,7 @@ fn a_sealed_light_is_learned_down_to_the_defensive_share() {
 
     // Far outside anything trained, the global power table answers.
     let far = Vec3A::splat(1e4);
-    assert_eq!(r.lights.pmf_at(far, 1), by_power.pmf(1));
+    assert_eq!(r.lights().pmf_at(far, 1), by_power.pmf(1));
 }
 
 /// Unbiased (same mean as power selection) and less noisy, at a floor point:
@@ -174,7 +174,7 @@ fn learned_selection_agrees_with_power_in_expectation_with_less_variance() {
         for i in 0..n {
             let v = ray_color(
                 &ray,
-                &r.world,
+                r.world(),
                 list,
                 &volumes,
                 3,
@@ -189,7 +189,7 @@ fn learned_selection_agrees_with_power_in_expectation_with_less_variance() {
         (mean, sq / n as f64 - mean * mean)
     };
     for s in [SamplingStrategy::PowerMis, SamplingStrategy::LightOnly] {
-        let (learned, var_learned) = moments(&r.lights, s);
+        let (learned, var_learned) = moments(r.lights(), s);
         let (power, var_power) = moments(&by_power, s);
         eprintln!(
             "{s:?}: variance ratio learned / power = {:.3}",
@@ -266,5 +266,5 @@ fn one_light_learns_nothing() {
         .with_adaptive_sampling(1, 0.0)
         .with_light_selection(LightSelection::Learned);
     let r = Renderer::new(camera, world.commit(), lights, settings);
-    assert_eq!(r.lights.selection(), LightSelection::Power);
+    assert_eq!(r.lights().selection(), LightSelection::Power);
 }

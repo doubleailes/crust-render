@@ -637,8 +637,8 @@ paths, for direct-light variance falling about as 1/N.
   light's `sizeFactor`: its **world-space surface area** for rect / disk / sphere /
   cylinder (transform scale included — `AffineShape::area` integrates it, exact for a
   disk and any similarity), `π·sin²θmax` for a distant light (`distant_size_factor`),
-  and nothing for a dome. `inputs:diffuse` / `inputs:specular` ≠ 1 warn and are ignored
-  (per-lobe multipliers crust's transport does not split). **`ShapingAPI`**
+  and nothing for a dome. `inputs:diffuse` / `inputs:specular` are read as the light's
+  `LobeGains` (below). **`ShapingAPI`**
   (`lux::Shaping`) — focus, focus tint, cone angle + softness, IES — is a per-direction
   factor on area lights' radiance, measured off the light's −Z. It is read off the prim
   whether or not the API is applied, but an unauthored `cone:angle` falls back to the
@@ -653,6 +653,34 @@ paths, for direct-light variance falling about as 1/N.
   light type, `normalize`, colour temperature, a shaped spot, an IES fixture from
   `samples/ies/spot30.ies`, a squashed sphere light, and a textured window card from
   `samples/textures/window_card.exr`).
+- **Per-lobe multipliers (`inputs:diffuse`, `inputs:specular`).** Non-physical controls
+  (a specular-only kicker for hair highlights, a fill without specular), kept on the
+  light list beside the light (`LightList::lobe_gains`, like the LPE tag, so an MCP
+  edit's rebuild carries them through `LightUpdate`) rather than folded into its
+  radiance, which would scale both lobes. Which lobes answer to which is
+  `LobeLabel::is_specular`: specular, coat and transmission are specular; diffuse,
+  sheen, subsurface and translucent diffuse. A fibre is one closure leaf whose event
+  says only reflect/transmit, so it is split by its terms instead
+  (`Hair::r_fraction`): R is specular, TT / TRT / TRRT+ diffuse — the classes the
+  issue asking for this named (#341). A gain is a factor of the integrand, never of an
+  MIS weight, and nothing it changes steers a sampling decision (selection power,
+  BSDF and light sampling, roulette all ignore it), so an unguided image is exactly
+  linear in the pair — `lobe_gains.rs` pins that pixel by pixel, which is the sharp test of a
+  one-sided gain. Path guiding is the exception, by design: its field trains on the
+  gathered radiance, gains included, as it trains on a light's intensity — a guide
+  that learned the ungained light would send samples toward a highlight
+  `inputs:specular = 0` has removed. A guided render is therefore not linear in the
+  pair, only unbiased at each. *NEE*: a gained light's connection is made share by share
+  (`gained_split`: `eval_lobes`, each share times `blend(specular_fraction)`), the
+  mixed-fibre transmittances per share as before. *Bounce side*: the vertex records
+  the specular share of its own sample's value (`PrevBounce::specular`, from the split
+  `scatter_split` made at the sampled direction, or the delta event's label), and the
+  emission it then reaches — a hit light, a crossed hidden light, an escape, a link
+  twin — is scaled by `gains.blend(specular)` (`bounce_gain`). That ratio is exact for
+  the beauty: `factor · Le · Σ gᵢfᵢ/Σ fᵢ = Σ gᵢ fᵢ/pdf · Le`. Volume scattering takes
+  the light whole (Arnold's `volume` multiplier is a separate control). A scene with no
+  gained light pays one well-predicted branch at each emission site and the split
+  request (`LightList::has_lobe_gains`); the splitting itself is out of line.
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
   0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
@@ -1058,7 +1086,13 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   `RectLight` is sampled by solid angle rather than by its map's luminance (a card
   with a small bright region is noisier than it need be), its lookup is nearest-texel
   as the reference's is, and a `.tex` (RenderMan) map is not decoded.
-  `inputs:diffuse` / `inputs:specular` warn and are ignored rather than split per lobe. Shaping is per *direction* only, so a shaped light
+  A light's per-lobe multipliers (`inputs:diffuse` / `inputs:specular`) are exact in
+  the beauty and in NEE's per-lobe AOV shares, but its emission reached by a bounce is
+  routed to the light path expressions at the bounce's *blended* gain on every lobe of
+  that vertex: the routes still sum to the beauty, while `C<RD>L` and `C<RG>L` of a
+  diffuse-only light share its bounce-side half between them (the gather's per-lobe
+  tables would need the gain per lobe, and the escape's terminal level per lobe of the
+  vertex before it). Shaping is per *direction* only, so a shaped light
   is still sampled without regard to its cone (by solid angle for a rect, by area otherwise): a narrow spotlight wastes the NEE samples its cone
   cuts off (unbiased, but noisier than cone-aware sampling), and shaping is not applied
   to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the

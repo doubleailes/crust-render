@@ -1,5 +1,5 @@
-//! The `.tx` sibling lookup and `--auto-tx` (`FileAssets::with_auto_tx`), seen
-//! through the public `AssetLoader` seam.
+//! The `.tx` lookup beside a source, under Arnold's names, and `--auto-tx`
+//! (`FileAssets::with_auto_tx`), seen through the public `AssetLoader` seam.
 //!
 //! A streamed texture and a preloaded one are indistinguishable by type from
 //! out here, so the tests make them distinguishable by content: the `.tx` is
@@ -7,7 +7,7 @@
 //! colour a lookup returns says which file answered.
 
 use crust_assets::FileAssets;
-use crust_assets::{TxFormat, make_tx};
+use crust_assets::{default_tx_color_space, make_tx, tx_name};
 use crust_core::{AssetLoader, ColorSpace};
 use std::path::{Path, PathBuf};
 
@@ -28,8 +28,15 @@ fn png(path: &Path, rgb: [u8; 3]) {
 fn decoy_tx(dir: &Path, tx: &Path, rgb: [u8; 3]) {
     let other = dir.join("decoy_src.png");
     png(&other, rgb);
-    make_tx(&other, tx, ColorSpace::RAW, TxFormat::Tiff).expect("convert decoy");
+    make_tx(&other, tx, ColorSpace::RAW, default_tx_color_space()).expect("convert decoy");
     std::fs::remove_file(&other).unwrap();
+}
+
+/// The `.tx` the lookup reads for `src` bound raw: `<stem>_raw.<ext>.tx`.
+fn tx_of(src: &Path) -> PathBuf {
+    tx_name(src, ColorSpace::RAW, default_tx_color_space())
+        .expect("named")
+        .path
 }
 
 fn red_at(assets: &FileAssets, path: &Path, u: f32) -> f32 {
@@ -42,12 +49,28 @@ fn a_tx_beside_the_texture_is_used_without_any_flag() {
     let dir = scratch("sibling");
     let src = dir.join("a.png");
     png(&src, [255, 0, 0]);
-    decoy_tx(&dir, &dir.join("a.tx"), [0, 0, 255]);
+    decoy_tx(&dir, &tx_of(&src), [0, 0, 255]);
+    assert!(tx_of(&src).ends_with("a_raw.png.tx"));
     let assets = FileAssets::new();
     assert_eq!(
         red_at(&assets, &src, 0.5),
         0.0,
         "the .tx answered, not the png"
+    );
+}
+
+/// A `.tx` under crust's previous name (`<stem>.tx`) is not looked for: the
+/// texture preloads from its source.
+#[test]
+fn a_tx_under_the_old_name_is_not_read() {
+    let dir = scratch("old_name");
+    let src = dir.join("albedo.png");
+    png(&src, [255, 0, 0]);
+    decoy_tx(&dir, &dir.join("albedo.tx"), [0, 0, 255]);
+    assert_eq!(
+        red_at(&FileAssets::new(), &src, 0.5),
+        1.0,
+        "the png answered"
     );
 }
 
@@ -59,7 +82,7 @@ fn a_config_passed_in_decides_the_backend() {
     let dir = scratch("config");
     let src = dir.join("a.png");
     png(&src, [255, 0, 0]);
-    decoy_tx(&dir, &dir.join("a.tx"), [0, 0, 255]);
+    decoy_tx(&dir, &tx_of(&src), [0, 0, 255]);
     let preload = FileAssets::with_config(crust_core::Config {
         tex_stream: false,
         ..Default::default()
@@ -77,7 +100,7 @@ fn an_incomplete_udim_set_of_tx_preloads_instead_of_streaming_holes() {
     let dir = scratch("partial");
     png(&dir.join("t.1001.png"), [255, 0, 0]);
     png(&dir.join("t.1002.png"), [255, 0, 0]);
-    decoy_tx(&dir, &dir.join("t.1001.tx"), [0, 0, 255]);
+    decoy_tx(&dir, &tx_of(&dir.join("t.1001.png")), [0, 0, 255]);
     let assets = FileAssets::new();
     let set = dir.join("t.<UDIM>.png");
     // Streaming would read the decoy in 1001 and black in 1002; the preloaded
@@ -95,7 +118,7 @@ fn auto_tx_converts_missing_tiles_beside_their_sources_and_streams_them() {
     let tex = assets
         .load_texture(&dir.join("c.<UDIM>.png"), ColorSpace::RAW)
         .expect("loads");
-    assert!(dir.join("c.1001.tx").exists() && dir.join("c.1002.tx").exists());
+    assert!(tx_of(&dir.join("c.1001.png")).exists() && tx_of(&dir.join("c.1002.png")).exists());
     assert_eq!(tex.eval(0.5, 0.5, 0.0)[..3], [1.0, 0.0, 0.0]);
     assert_eq!(tex.eval(1.5, 0.5, 0.0)[..3], [0.0, 1.0, 0.0]);
     assert_eq!(assets.tx_report().0, 2);
@@ -112,9 +135,16 @@ fn auto_tx_converts_missing_tiles_beside_their_sources_and_streams_them() {
 fn auto_tx_reconverts_a_tx_older_than_its_source() {
     let dir = scratch("stale");
     let src = dir.join("s.png");
-    decoy_tx(&dir, &dir.join("s.tx"), [0, 0, 255]);
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    decoy_tx(&dir, &tx_of(&src), [0, 0, 255]);
     png(&src, [255, 0, 0]);
+    // The source saved after the conversion, by more than the second the
+    // comparison resolves.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .and_then(|f| f.set_modified(later))
+        .expect("touch the source");
     // Without the flag the stale file is still what is read (and warned about).
     assert_eq!(red_at(&FileAssets::new(), &src, 0.5), 0.0);
     // With it, the texture is reconverted from the newer source.
@@ -161,11 +191,22 @@ fn auto_tx_leaves_a_source_that_already_streams_alone() {
     let src_png = dir.join("seed.png");
     png(&src_png, [255, 0, 0]);
     let tiled = dir.join("albedo.exr");
-    make_tx(&src_png, &tiled, ColorSpace::RAW, TxFormat::Exr).expect("tiled exr");
+    // The keyword `raw` on an 8-bit source is a `half` EXR, as Arnold writes.
+    let made = make_tx(
+        &src_png,
+        &tiled,
+        ColorSpace::RAW_KEYWORD,
+        default_tx_color_space(),
+    )
+    .expect("tiled exr");
+    assert!(made.kind.contains("exr"), "{}", made.kind);
     std::fs::remove_file(&src_png).unwrap();
 
     let assets = FileAssets::new().with_auto_tx(true);
-    assert_eq!(red_at(&assets, &tiled, 0.5), 1.0);
-    assert!(!dir.join("albedo.tx").exists(), "no copy written");
+    assert!((red_at(&assets, &tiled, 0.5) - 1.0).abs() < 1e-3);
+    let written = std::fs::read_dir(&dir)
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tx"));
+    assert!(!written, "no copy written");
     assert_eq!(assets.tx_report().0, 0);
 }

@@ -26,10 +26,11 @@ pub struct Compiler<'a> {
     /// compiles the shifted copies of its input.
     uv_shift: [f32; 2],
     /// What the loader answered per `(file, colorspace)` — the space as
-    /// handed to it — so the shifted copies of an `image`, and two images of
-    /// one file in one effective space, share the one sampler rather than
-    /// asking the host again.
-    images: std::collections::HashMap<(String, Option<String>), Option<TextureRef>>,
+    /// handed to it, `None` for data and `Some(None)` for a colour image with
+    /// none — so the shifted copies of an `image`, and two images of one file
+    /// in one effective space, share the one sampler rather than asking the
+    /// host again.
+    images: std::collections::HashMap<(String, Option<Option<String>>), Option<TextureRef>>,
     /// Nodes currently being compiled, so a cyclic document — which a
     /// hand-edited `.mtlx` can be — terminates as a constant rather than
     /// recursing until the stack runs out.
@@ -103,6 +104,7 @@ impl<'a> Compiler<'a> {
             position: Vec3A::ZERO,
             uv_width: 0.0,
             curve: None,
+            primvars: &[],
         };
         Some(apply(op, &slots, &ctx))
     }
@@ -262,6 +264,16 @@ impl<'a> Compiler<'a> {
                 let a = self.input_or(node, "in1", Val::ZERO);
                 let b = self.input_or(node, "in2", Val::ZERO);
                 self.emit(Op::DotProduct { a, b })
+            }
+            // `ND_magnitude_vector*`: the vector's length, as the
+            // dot product with itself, so the JIT inherits it exactly.
+            "magnitude" => {
+                let a = self.input_or(node, "in", Val::ZERO);
+                let d = self.emit(Op::DotProduct { a, b: a });
+                self.emit(Op::Unary {
+                    op: UnOp::Sqrt,
+                    a: d,
+                })
             }
             "mix" => {
                 let fg = self.input_or(node, "fg", Val::ZERO);
@@ -765,18 +777,26 @@ impl<'a> Compiler<'a> {
 
     fn compile_image(&mut self, node: &Node, arity: u8) -> u32 {
         let file = node.input("file");
-        // The texels' colour space: the `file` input's effective one, for a
-        // colour image only. A `float` or `vector3` image is data — a mask,
-        // a height, a normal map — whatever the document's default says.
-        let space = file
-            .filter(|_| is_color_type(&node.type_name))
-            .and_then(|f| self.doc.colorspace_of(node, f))
-            .map(str::to_string);
+        // The texels' colour space: the `file` input's declared one, for a
+        // colour image only — an explicit `colorspace=""` kept apart from
+        // none at all. A `float` or `vector3` image is data — a mask, a
+        // height, a normal map — whatever the document's default says.
+        let space = is_color_type(&node.type_name).then(|| {
+            file.and_then(|f| self.doc.declared_colorspace_of(node, f))
+                .map(str::to_string)
+        });
         let tex = file.and_then(|i| i.text.clone()).and_then(|f| {
             let loader = self.host.load_texture;
             self.images
                 .entry((f, space))
-                .or_insert_with_key(|(f, s)| loader(f, s.as_deref()))
+                .or_insert_with_key(|(f, s)| {
+                    let space = match s {
+                        None => crate::TexelSpace::Data,
+                        Some(None) => crate::TexelSpace::Unset,
+                        Some(Some(name)) => crate::TexelSpace::Named(name),
+                    };
+                    loader(f, space)
+                })
                 .clone()
         });
         // The authored `default` is a literal like any other: a colour one is

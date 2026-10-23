@@ -23,6 +23,7 @@ use super::attrs::{
     decode_vec3f_array, prim_motion_translate, prim_ray_mask, value_at,
 };
 use super::strands::{CurveCounts, StrandBuilder, StrandRequest, VertexRecipe};
+use super::xform::Span;
 
 // -----------------------------------------------------------------------
 // Sphere
@@ -33,15 +34,23 @@ pub(super) fn sphere_radius(sphere: &UsdSphere) -> f32 {
     attr_f32(&sphere.radius_attr()).unwrap_or(1.0)
 }
 
+/// A direct sphere over `span`: its centre in world space at shutter open,
+/// its radius as authored. A moving one rides an identity-placed instance
+/// whose end transform carries it to its shutter-close placement, moved by
+/// `crust:motion:translate`: `T(v) · X(close) · X(open)⁻¹`, or `T(v)` alone
+/// when only that is authored.
 pub(super) fn emit_sphere(
     world: &mut WorldBuilder,
     prim: &Prim,
     sphere: &UsdSphere,
-    world_xf: GMat4,
+    span: Span,
     material: Arc<dyn Material>,
+    working: crate::color::Space,
 ) {
+    // The constant primvars its material reads, the only kind a sphere has.
+    let primvars = super::mesh::constant_table(prim, &*material, working).map(Arc::new);
     let radius = sphere_radius(sphere);
-    let center_world = world_xf.transform_point3(Vec3::ZERO);
+    let center_world = span.open.transform_point3(Vec3::ZERO);
     let center = Vec3A::new(center_world.x, center_world.y, center_world.z);
     debug!(
         "Sphere at {} radius={} center={:?}",
@@ -50,24 +59,41 @@ pub(super) fn emit_sphere(
         center
     );
     let mask = prim_ray_mask(prim);
-    match prim_motion_translate(prim) {
-        // A moving sphere rides an identity-placed instance whose end
-        // transform is the shutter translation.
-        Some(v) => {
+    let v = prim_motion_translate(prim);
+    // A singular open placement has no inverse: its sphere stays where it is.
+    let invertible = span.open.determinant().abs() >= 1e-12;
+    let end = match span.close.filter(|_| span.moves() && invertible) {
+        Some(close) => {
+            let rel = Affine3A::from_mat4(close) * Affine3A::from_mat4(span.open).inverse();
+            Some(match v {
+                Some(v) => Affine3A::from_translation(v) * rel,
+                None => rel,
+            })
+        }
+        None => v.map(Affine3A::from_translation),
+    };
+    match end {
+        Some(end) => {
             let mut b = RtSceneBuilder::new();
             b.attach(Geometry::Sphere { center, radius });
-            world.attach_masked(
+            let id = world.attach_masked(
                 Geometry::Instance {
                     scene: Arc::new(b.commit_with(crate::commit_options())),
                     transform: Affine3A::IDENTITY,
-                    transform_end: Some(Box::new(Affine3A::from_translation(v))),
+                    transform_end: Some(Box::new(end)),
                 },
                 material,
                 mask,
             );
+            if let Some(table) = primvars {
+                world.set_primvars(id, table, false);
+            }
         }
         None => {
-            world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
+            let id = world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
+            if let Some(table) = primvars {
+                world.set_primvars(id, table, false);
+            }
         }
     }
 }

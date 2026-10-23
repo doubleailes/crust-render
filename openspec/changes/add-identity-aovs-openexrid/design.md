@@ -13,7 +13,6 @@ OpenEXRId files are deep.
 
 - Stable per-prim ids and OpenEXRId mattes a compositor can key across
   frames.
-- Primvar AOVs, which need nothing from deep output and can land first.
 
 **Non-Goals:**
 
@@ -55,13 +54,6 @@ per-pixel list of (id, weight) with a spill, never a full-frame hash map.
 **Unblocking:** deep scanline writing landing in `exr` (an upstream
 contribution), or a deep scanline writer in-tree in safe Rust (the OpenEXR
 deep format is documented). Decide between them when the work resumes.
-
-### D4. Primvars are kept at import because a var asked for them
-
-Primvars named by `sourceType = "primvar"` vars go into a keep set before the
-meshes load (`import_render_products` already runs first, on the index
-stage), are stored per face-varying or vertex like `st`, and are evaluated at
-the first hit.
 
 ## Risks / Trade-offs
 

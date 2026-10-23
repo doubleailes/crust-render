@@ -11,11 +11,25 @@
 
 - **The override layer is a real `.usda` on disk, and the import reads that file**
   (mcp-session D1). `open_session` writes `<output>.usda` with `subLayers = [@<input>@]`
-  and nothing else; every edit is merged into it and saved. What the session renders,
+  and the input's units (below), and nothing else; every edit is merged into it and saved. What the session renders,
   and what it leaves behind, is what `crust render <output>` renders: the session
   imports through the CLI's own argument defaults (`Cli::try_parse_from`) and the
   CLI's own `import_checked` / `check_scene`, so a render flag that changes the import
   belongs in those, never in one caller.
+- **The layer carries the input's units** (`physical-depth-of-field`). A stage reads
+  its metadata from its root layer only, and a session's root layer is the override
+  layer. So `open_session` copies the input root layer's `metersPerUnit` and `upAxis`
+  into the layer it creates (`StageMetrics`, `mcp/layer.rs`), and a resumed layer that
+  lacks one the input authors gets it added, keeping any value it authors itself. A
+  resume that is then refused (the addition cannot be saved, or the import fails) puts
+  the layer's earlier bytes back (`restoring`), so a refused `open_session` leaves the
+  file as it found it, like every other refused call.
+  Without the copy a session over a metre-scale input would read the 0.01 fallback and
+  render its lens 100x wider than `crust render` of the input, and so would
+  `render_final`, which renders the layer file. A fallback to the input's root layer
+  inside the session (as placement's up-axis read does) cannot fix that, so the file has
+  to say it. Only authored values are copied: an input that authors neither gets the
+  layer it always got. The copy wins over a later change to the input (Known gaps).
 - **One thread owns the authoring stage** (D2). openusd's `Stage` is `Rc` / `RefCell`;
   the protocol's async handlers reach it through a channel, one command at a time.
 - **Every edit is a USDA snippet merged into the layer** (D3, `mcp/edit.rs`): per
@@ -127,10 +141,10 @@ cheapest class that can follow all of them:
 
 | change | class |
 |---|---|
-| attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera (not `xformOp:*` / `xformOpOrder`) | `settings` |
+| attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera, its `xformOp:*` / `xformOpOrder` included unless an imported prim lies below it (`Provenance::any_below`) | `settings` |
 | `inputs:*` value on a light the scene has, other than `width`, `height`, `radius`, `length`, `treatAsPoint`, `treatAsLine` (the BVH holds its shape) | `lights` |
 | `inputs:*` value on a `Shader` under a material the scene uses, or on that `Material`, when no other material reads it | `materials` |
-| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
+| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform other than the render camera's own, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
 
 A batch is applied as its most expensive class, `settings` < `materials` < `lights` <
 `full`, and rebuilds every part it names. Namespace bookkeeping is not a change: an
@@ -153,6 +167,26 @@ type under a material the scene uses still classifies `materials`, and is listed
 payload-loaded stage, and anything else (a `NodeGraph`, a typo) falls back to `full`
 (`a_shader_behind_a_payload_edits_in_place`). A prim whose type the authoring stage
 does read and is not `Shader` is `full` at once, as before.
+
+*Render camera transforms* (`live-camera-update`). The settings rebuild already re-reads
+the camera through `build_camera`, which composes its ancestors, so a camera move needed
+only the classifier to admit it. Two guards keep it honest. An imported prim below the
+camera (a mesh parented to it) would move with it, and the rebuild re-reads only the
+camera, so `any_below` sends that to `full`; it scans the provenance's materials, lights,
+geometry runs and volume-region prims once per classification.
+*Trap:* a volume region is not a geometry run, so a scan of the runs alone missed a
+`crust:volume:type` prim parented to the camera, and the move applied in place left it
+behind (`moving_a_camera_with_prims_below_it_is_full`). Tessellation that read the camera is guarded
+by the rebuild, not the classifier: it compares the dicing camera's keys
+(`crust:dicingCamera`, else the render camera), so a move is in place exactly when the
+render camera does not dice, or nothing is tessellated from a camera. An edit on an
+ancestor of the camera stays `full`. `!resetXformStack!` in the camera's own
+`xformOpOrder` is `settings`: `build_camera` composes through `local_to_world`, which
+honours it (`resetting_the_render_camera_s_transform_stack_is_a_settings_edit`).
+
+*Alternative rejected:* trying every transform in place and falling back on refusal. The
+rebuild re-reads only the camera, so a mesh's transform would be silently ignored, not
+refused.
 
 *Alternative rejected:* classifying the parsed `Snippet`. An undo has no snippet, and
 merging can turn an authored spec into no change at all.
@@ -329,10 +363,28 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   into the engine) would reuse the provenance and the `live` entry points, which take
   paths and built values for that reason. It adds Pixar's C++ USD as a build dependency
   and `unsafe` FFI, which `CLAUDE.md` makes a project decision.
-- **Transforms, topology and namespace edits re-import.** Re-traversing only the
-  changed subtree, and BVH refit, are not done: a refit tree is not the tree a fresh
-  build gives. A light with no geometry (distant, dome) could move without touching the
-  BVH; it is `full` until the simpler classes have proved themselves.
+- **Transforms, topology and namespace edits re-import**, except the render camera's
+  own transform. Re-traversing only the changed subtree, and BVH refit, are not done: a
+  refit tree is not the tree a fresh build gives. A light with no geometry (distant,
+  dome) could move without touching the BVH; it is `full` until the simpler classes
+  have proved themselves. A render camera that dices (no `crust:dicingCamera`, on a
+  scene tessellated from the camera) still re-imports when it moves, and so does an
+  edit to one of the camera's ancestors.
+- **A camera move re-opens the stage.** The settings rebuild opens the index stage and
+  a stage masked to the camera per move. On the Cornell box at 640×480 it costs
+  6.64 / 8.31 ms (min / mean of 20) against 12.53 / 17.34 ms as `full`, measured by
+  `camera_move_latency` (`mcp/tests.rs`, `#[ignore]`: `cargo test --release -p
+  crust-render --bin crust camera_move_latency -- --ignored --nocapture`). It opens two
+  sessions on the stage, the second without kept assets (what `CRUST_SCENE_DELTAS=0`
+  gives a session), and interleaves their translates of the render camera so load lands
+  on both, as `scripts/bench_ab.sh` does for renders; `bench_ab.sh` itself times renders
+  of two binaries, not edits inside a session. On ALab (`entry.usda`, whose
+  `startTimeCode` is 1004, `crust:subdivisionEdgeLength = 2`, `learned` light
+  selection, a free `/freecam` rendering and the shot camera dicing) a move costs
+  31.7 / 32.7 ms (min / mean of 10, one session, no `full` side: a full import is the
+  215 s the session took to open). Release build, 16 threads, one machine. Enough to
+  restart a progressive render per drag event; a camera-only path that skips the stage
+  is a follow-up if a Hydra tumble shows it is the bottleneck.
 - **On a production shot, only confined edits are cheap.** ALab frame 1004
   (`in-place-edits-on-production-shots` `notes.md`): an exposure, a light's intensity and
   a payload-delivered shader's roughness apply in place in 18–60 ms. Any transform,
@@ -341,6 +393,12 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   milliseconds go on a large stage, against ~1 ms on the teapot, was not profiled.
 - **Kept decodes are let go only by a full import.** A run of in-place edits that stops
   using a texture keeps it until the next `full` edit sweeps.
+- **A `full` edit peaks at two scenes.** `apply_change` assigns `self.scene` only once
+  `import_kept` returns, so the old scene lives through the new import. In-place edits
+  rebuild named parts and do not. Applying edits in place does not shrink what a session
+  holds between edits (the scene, the payload-unloaded authoring stage, the kept
+  decodes); no session's peak memory has been measured, and Moana-scale stages are
+  still out of reach.
 - **Environment maps are decoded again** by every import and dome rebuild.
 - **The session re-composes the stage per rebuild** (a masked stage per material or
   light, the index stage for settings) rather than keeping one composed stage across
@@ -547,9 +605,10 @@ would otherwise run its own surface queries against geometry that is not what re
   pair cannot.
 - `xformOpOrder` is authored whole, which shadows later source changes to it (Known gaps).
 
-**Up axis.** Stage metadata is the root layer's, and the override layer authors no
-`upAxis`. So placement reads the override layer's `upAxis`, then the input's root layer's,
-alone with `sdf::Layer::open`, then falls back to Y.
+**Up axis.** Stage metadata is the root layer's. The override layer copies the input's
+`upAxis` (see "The layer carries the input's units" below), and placement reads the
+override layer's `upAxis`, then the input's root layer's, alone with `sdf::Layer::open`,
+then falls back to Y. The second read covers a layer the user edited the metadata out of.
 
 ### Scattering
 
@@ -638,9 +697,7 @@ The tests live in two places:
 - **CDF resolution.** The CDF is stored in f32, as fine as the sampler's numbers: a
   triangle under ~1e-7 of the target's area can be over- or under-drawn.
 - **Instances stand upright.** They are not aligned to the surface normal.
-- **The override layer carries no `upAxis`.** Found while writing the up-axis read: a
-  session's composed stage is Y-up whatever the input says. Placement reads the input's
-  root layer to compensate. Where the render reads the stage's up axis (a `DomeLight_1`
-  with `poleAxis = "scene"`), a session over a Z-up input renders the dome as Y-up, unlike
-  `crust render` of the input. `open_session` should copy the input's `upAxis` (and
-  `metersPerUnit`) into the layer it creates.
+- **The layer's copy of the input's units wins.** `open_session` copies the input root
+  layer's `metersPerUnit` and `upAxis` into the override layer (below), once. If the
+  input's change afterwards, the session keeps rendering the copied values until the line
+  is edited in the layer. Stage units are fixed early in a pipeline, so this is rare.

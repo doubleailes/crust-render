@@ -20,8 +20,10 @@ def Xform "World"
     # ---------------------------------------------------------------------
     # Camera — recovered from the RON's derived basis (u, v, w=(0,0.0905,0.9959)).
     # local -Z points at (0, -0.0905, -0.9959) → the lookat direction from
-    # (0, 3, 22) toward (0, 1, 0). fStop chosen so focal_length/fStop = 0.05
-    # matches the RON's `lens_radius=0.025` (aperture = 2 * lens_radius).
+    # (0, 3, 22) toward (0, 1, 0). fStop chosen so the lens diameter,
+    # focalLength / fStop millimetres in the stage's units (unauthored
+    # metersPerUnit: centimetres), 50 / 100 × 0.001 / 0.01 = 0.05 units,
+    # matches the RON's `lens_radius=0.025` (diameter = 2 * lens_radius).
     # ---------------------------------------------------------------------
     def Camera "Cam"
     {
@@ -34,7 +36,7 @@ def Xform "World"
         float focalLength = 50
         float horizontalAperture = 73.63848
         float verticalAperture = 41.42165
-        float fStop = 1000
+        float fStop = 100
         float focusDistance = 22
         token projection = "perspective"
     }

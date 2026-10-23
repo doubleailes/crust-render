@@ -29,10 +29,11 @@ APERTURE = 2.0 * FOCAL * math.tan(math.radians(FOV_DEG) / 2.0)
 AVIF_OPTIONS = {"quality": 90, "subsampling": "4:4:4"}
 IMAGE_EXTS = (".avif", ".png")
 SAMPLE_DIRS = ("mtlx-sample-library", "material-samples")
-# MaterialXView's lat-long puts the seam where crust (USD: -Z at u = 0.5) puts the
-# centre. Fitted on the background of the reference images: 180 scores 34 dB there,
-# 177 and 183 score 11-12 dB.
-ENV_ROTATE = 180.0
+# Fitted on the background of the reference images. 180 was the fit until crust's
+# dome-light orientation moved; refitted on 2026-10-22 (crust f584a2a and later, on
+# `transmission_rough` at 4 spp): 0 scores 18.6 dB on the whole image, 357 and 3
+# score 12.0 dB, 90, 180 and 270 score 10.2-10.7 dB.
+ENV_ROTATE = 0.0
 
 
 def samples_root(suite):

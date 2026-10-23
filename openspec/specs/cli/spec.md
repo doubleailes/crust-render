@@ -35,7 +35,8 @@ defaults:
 - `--strategy`, `--light-selection`, `--light-samples`,
   `--light-samples-indirect`;
 - `--indirect-clamp`, `--filter`, `--filter-radius`, `--sampler`;
-- `--subdiv-level`, `--subdiv-edge-length`, `--auto-tx`.
+- `--subdiv-level`, `--subdiv-edge-length`, `--auto-tx`, `--tx-color-space`;
+- `--variance-threshold`, `--min-samples`, `--neighbour-tolerance`.
 
 `light-paths` SHALL also accept `render`'s `-s`, so that it reproduces a render
 made at that sample count.
@@ -101,12 +102,33 @@ where it could take a subcommand's name or a positional as that directory.
 - **WHEN** the user runs `crust light-paths -i scene.usda --region 0,0,5,5 -o out.exr`
 - **THEN** the arguments are refused as a usage error and nothing is loaded
 
+#### Scenario: The adaptive flags are shared
+
+- **WHEN** the user runs
+  `crust diagnostic -i scene.usda --variance-threshold 0.02 --min-samples 16`
+- **THEN** the report's effective settings show `variance_threshold = 0.02` and
+  `min_samples_per_pixel = 16`, as a render with the same flags would use
+
+
+#### Scenario: The .tx target space is a shared flag
+
+- **WHEN** the user runs `crust check -i scene.usda --tx-color-space "Linear Rec.709 (sRGB)"`
+- **THEN** the `.tx` files the check looks for, and those `--auto-tx` would write, are
+  named for `Linear Rec.709 (sRGB)` as the target space, as a render with the same
+  flag would name them
+
+#### Scenario: An unknown .tx target space
+
+- **WHEN** the user runs `crust render -i scene.usda --tx-color-space nonsense`
+- **THEN** the arguments are refused with an error saying the OCIO config defines no
+  such colour space, and nothing is loaded
+
 ### Requirement: Listing what a stage holds
 
 `crust ls <kind> -i <scene>` SHALL print the stage's prims of `kind`, one
 absolute path per line on stdout, in namespace order, found by the render's
 own walk so that the list is what a render would use. `kind` SHALL be one of
-`camera`, `light` or `material`, each also accepted in the plural:
+`camera`, `light`, `material` or `pass`, each also accepted in the plural:
 
 - `camera`: exactly the cameras the render can go through — none under an
   inactive, abstract or proxy- / guide-purpose ancestor, inside an instance's
@@ -120,6 +142,8 @@ own walk so that the list is what a render would use. `kind` SHALL be one of
 - Each path SHALL be listed once, however many streamed chunks contain it.
 - `material`: every `UsdShadeMaterial` a binding can reach — all but those
   under an inactive ancestor or inside an instance's prototype.
+- `pass`: every `RenderPass` prim `--pass` accepts — all but those under an
+  inactive ancestor.
 
 Its log SHALL go to stderr, so stdout holds only the list.
 
@@ -127,6 +151,12 @@ Its log SHALL go to stderr, so stdout holds only the list.
 
 - **WHEN** the user runs `crust ls camera -i samples/cornellbox.usda`
 - **THEN** stdout is `/scene/camera1` and the exit status is 0
+
+#### Scenario: Listing the passes of a stage
+
+- **WHEN** a stage defines `/Render/Passes/bg` and `/Render/Passes/char`, and the
+  user runs `crust ls pass -i shot.usda`
+- **THEN** stdout is those two paths, one per line, in namespace order
 
 #### Scenario: An unknown kind
 
@@ -441,7 +471,16 @@ the render falls back to.
 
 - **WHEN** the user runs `crust ls camera -i samples/cornellbox.usda --json -`
 - **THEN** each record has `focal_length_mm`, `aperture_mm` (horizontal,
-  vertical), `f_stop`, `focus_distance`, `is_render_camera` and `hidden`
+  vertical), `conformed_aperture_mm` (horizontal, vertical), `f_stop`,
+  `focus_distance`, `is_render_camera` and `hidden`
+
+#### Scenario: The conformed aperture
+
+- **WHEN** a camera authors a 36 × 24 aperture, and the settings author
+  `resolution = (200, 100)` and
+  `aspectRatioConformPolicy = "adjustApertureHeight"`
+- **THEN** its record has `aperture_mm = [36, 24]` and
+  `conformed_aperture_mm = [36, 18]`, the aperture the render frames
 
 #### Scenario: The camera a render would use
 
@@ -548,3 +587,53 @@ file SHALL be written before the render ends.
 
 - **WHEN** the stage's first product has no beauty var and `--checkpoint` is passed
 - **THEN** a warning says no preview will be written, and the render proceeds
+
+### Requirement: Adaptive sampling flags
+
+`crust render` SHALL accept `--variance-threshold <t>` (a number ≥ 0; 0 turns
+adaptive sampling off), `--min-samples <n>` (an integer ≥ 1) and
+`--neighbour-tolerance <t>` (any number; negative turns the neighbour comparison
+off). They SHALL override `crust:varianceThreshold`, `crust:minSamplesPerPixel`
+and `crust:adaptiveNeighbourTolerance` for this render only.
+
+#### Scenario: Overriding the adaptive settings
+
+- **WHEN** the stage authors `crust:varianceThreshold = 0.05` and the user runs
+  `crust render -i scene.usda --variance-threshold 0.02`
+- **THEN** the render stops pixels at a relative error of 0.02, and the stage
+  is unchanged
+
+#### Scenario: Turning adaptive sampling off
+
+- **WHEN** the user runs `crust render -i scene.usda --variance-threshold 0 -s 64`
+- **THEN** every pixel takes exactly 64 samples
+
+#### Scenario: A negative threshold is refused
+
+- **WHEN** the user runs `crust render -i scene.usda --variance-threshold -1`
+- **THEN** the arguments are refused as a usage error and nothing is loaded
+
+### Requirement: Pass flag
+
+`crust render`, `check`, `diagnostic` and `light-paths` SHALL accept
+`--pass <PRIM_PATH>`, an absolute path to the `RenderPass` prim to render, as the
+`render-passes` capability defines. Without it, no pass is active. On the
+procedural fallback scene (no `-i`) it SHALL warn that it has no effect, as
+`--camera` does.
+
+#### Scenario: Rendering one pass
+
+- **WHEN** the user runs `crust render -i shot.usda --pass /Render/Passes/char`
+- **THEN** the render holds out and hides what `/Render/Passes/char`'s collections
+  name
+
+#### Scenario: The same pass in a check
+
+- **WHEN** the user runs `crust check -i shot.usda --pass /Render/Passes/char`
+- **THEN** the check describes the render that the same `crust render` command
+  line would run
+
+#### Scenario: A pass without a scene
+
+- **WHEN** the user runs `crust render --pass /Render/Passes/char` with no `-i`
+- **THEN** a warning says `--pass` has no effect, and the procedural scene renders

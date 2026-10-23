@@ -154,6 +154,8 @@ warning_codes! {
         "A light-sample count is above the most crust takes; the maximum is used.";
     TimeOutsideRange => "time.outside_range", Approximated, Each,
         "The frame lies outside the stage's time range; animated attributes hold their nearest sample.";
+    TimeMotionNeedsFrame => "time.motion_needs_frame", Skipped, Each,
+        "The camera's shutter opens but no frame was given; time-sampled transforms are not evaluated over it.";
     ColorWorkingSpaceRefused => "color.working_space_refused", Refused, Each,
         "renderingColorSpace names no usable working space; the render is in lin_rec709.";
     ColorUnknownSpace => "color.unknown_space", Refused, Each,
@@ -172,6 +174,14 @@ warning_codes! {
         "The render camera's exposure attributes give a scale that is not finite or not positive; the image is not scaled.";
     CameraUnreadable => "camera.unreadable", Skipped, Each,
         "A camera prim could not be built into a camera.";
+    CameraInvalidMetersPerUnit => "camera.invalid_meters_per_unit", Refused, Each,
+        "The stage's metersPerUnit is not finite or not positive; the lens reads it as 0.01, a centimetre.";
+    CameraShutterInstantaneous => "camera.shutter_instantaneous", Approximated, Each,
+        "A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero.";
+    CameraShutterMismatch => "camera.shutter_mismatch", Approximated, Each,
+        "The render goes through another camera than the one whose shutter motion was measured over.";
+    CameraDicingNotCamera => "camera.dicing_not_a_camera", Approximated, Each,
+        "crust:dicingCamera targets no camera; tessellation reads the render camera.";
 
     // Products, AOVs and light path expressions
     ProductNotARenderProduct => "product.not_a_render_product", Skipped, Each,
@@ -182,12 +192,18 @@ warning_codes! {
         "A product renders through another camera or resolution than the first; no file is written for it.";
     ProductMotionBlurMismatch => "product.motion_blur_mismatch", Approximated, Each,
         "A product asks for other motion blur than the first; its file is written with the first's.";
+    ProductDepthOfFieldMismatch => "product.depth_of_field_mismatch", Approximated, Each,
+        "A product asks for other depth of field than the first; its file is written with the first's.";
     ProductRegionMismatch => "product.region_mismatch", Approximated, Each,
         "A product asks for another dataWindowNDC than the first; its file is written over the first's.";
+    ProductFramingMismatch => "product.framing_mismatch", Approximated, Each,
+        "A product asks for another aspectRatioConformPolicy than the first; its file is framed by the first's.";
     ProductUnhonouredAttribute => "product.unhonoured_attribute", Approximated, Each,
         "A product authors a setting crust does not honour; it renders without it.";
     ProductInvalidDataWindow => "product.invalid_data_window", Refused, Each,
         "dataWindowNDC is not finite or selects no pixel; the full frame is rendered.";
+    ProductInvalidConformPolicy => "product.invalid_conform_policy", Refused, Each,
+        "aspectRatioConformPolicy names none of the five policies; it is read as unauthored.";
     ProductDataWindowClipped => "product.data_window_clipped", Approximated, Each,
         "dataWindowNDC reaches outside the frame; overscan is not supported, so it is clipped.";
     ProductNoName => "product.no_name", Skipped, Each,
@@ -203,7 +219,7 @@ warning_codes! {
     AovNotARenderVar => "aov.not_a_render_var", Skipped, Each,
         "orderedVars targets a prim that is not a RenderVar.";
     AovUnsupportedSource => "aov.unsupported_source", Skipped, Each,
-        "A RenderVar's source is one crust does not produce yet (planned, primvar, intrinsic); no channel is written.";
+        "A RenderVar's source is one crust does not produce yet (planned, intrinsic); no channel is written.";
     AovUnknownSource => "aov.unknown_source", Skipped, Each,
         "A RenderVar names an unknown source or sourceType; no channel is written.";
     AovTypeMismatch => "aov.type_mismatch", Skipped, Each,
@@ -218,6 +234,14 @@ warning_codes! {
         "crust:aov:raw is authored on a source that is not a light path expression; it is ignored.";
     AovInvalidRaw => "aov.invalid_raw", Skipped, Each,
         "crust:aov:raw needs an expression whose every path starts with a diffuse reflection; no channel is written.";
+    AovPrimvarNoName => "aov.primvar_no_name", Skipped, Each,
+        "A primvar RenderVar authors no sourceName; no channel is written.";
+    AovPrimvarFourComponents => "aov.primvar_four_components", Skipped, Each,
+        "A primvar RenderVar's data type has four components, which are not supported yet; no channel is written.";
+    PrimvarMismatch => "primvar.mismatch", Skipped, Each,
+        "A prim authors a primvar a RenderVar asks for with another component count, or with no numeric value; that prim reads the var's clear value.";
+    PrimvarNotInherited => "primvar.not_inherited", Skipped, Each,
+        "A primvar a RenderVar asks for is authored on an ancestor, a PointInstancer or an instance prim, which crust does not inherit yet; the prims below read the var's clear value.";
     LpeInvalid => "lpe.invalid", Skipped, Each,
         "A light path expression does not parse or compile; no channel is written.";
 
@@ -229,7 +253,9 @@ warning_codes! {
     XformUnknownType => "xform.unknown_type", Skipped, Once,
         "A prim of a type the schema registry does not know authors xformOps; it is not Xformable, so they are ignored.";
     XformMotionVectorUnsupported => "xform.motion_vector_unsupported", Approximated, Each,
-        "Geometry moves other than by a translation; it is motion blurred but the motionvector AOV reads zero.";
+        "Geometry moves in a way the vector cannot attribute to one placement; it is motion blurred but the motionvector AOV reads zero.";
+    XformMotionIgnored => "xform.motion_ignored", Skipped, Each,
+        "A time-varying transform on a prim that gets no motion (curves, lights, volumes, inside a prototype, a baked mesh); it renders without motion.";
 
     // Meshes, subdivision, displacement
     MeshNonInvertibleTransform => "mesh.non_invertible_transform", Approximated, Each,
@@ -246,6 +272,8 @@ warning_codes! {
         "A subdivisionScheme = none mesh with Ptex displacement and non-quad faces is displaced at its cage.";
     MeshDisplacementExceedsBound => "mesh.displacement_exceeds_bound", Approximated, Each,
         "Displacement reaches past crust:displacementBound; it is applied unclamped.";
+    MeshUnsupportedPrimvar => "mesh.unsupported_primvar", Skipped, Each,
+        "A mesh or implicit-shape primvar a material reads has a type, interpolation or length crust cannot read, or is not constant on an implicit shape or a material read through Ptex; the material reads its geompropvalue's default there.";
     SubdivInvalidSetting => "subdiv.invalid_setting", Refused, Each,
         "A subdivision level is negative or an edge length is not a positive pixel length; it is clamped or ignored.";
     SubdivLevelClamped => "subdiv.level_clamped", Approximated, Each,
@@ -314,8 +342,6 @@ warning_codes! {
     // Lights and light linking
     LightNonFiniteInput => "light.non_finite_input", Refused, Each,
         "A light input is not finite; its fallback is used.";
-    LightUnsupportedMultiplier => "light.unsupported_multiplier", Approximated, Each,
-        "A per-lobe light multiplier (diffuse, specular) is not supported; the light contributes at 1.0.";
     LightDegenerateShape => "light.degenerate_shape", Skipped, Each,
         "A light's size or transform collapses its shape; the light is skipped.";
     LightUnsupportedTextureFormat => "light.unsupported_texture_format", Skipped, Each,
@@ -338,6 +364,18 @@ warning_codes! {
         "Shadow linking rewrites the authored crust:rayMask bits 3-31.";
     LightLinkShadowLinkUnencodable => "light_link.shadow_link_unencodable", Approximated, Each,
         "A shadowLink collection cannot be encoded; the light is shadowed by every occluder.";
+
+    // Render passes
+    RenderPassRenderSourceInvalid => "render_pass.render_source_invalid", Refused, Each,
+        "The active render pass's renderSource does not target a RenderSettings prim; the stage's settings are read.";
+    RenderPassCollectionNotRead => "render_pass.collection_not_read", Skipped, Each,
+        "The active render pass's prune or renderVisibility collection restricts something; it is not read.";
+    RenderPassTargetInInstance => "render_pass.target_in_instance", Approximated, Each,
+        "A render pass collection targets a prim inside an instance; membership is judged on the instance.";
+    RenderPassVolumeIgnored => "render_pass.volume_ignored", Skipped, Each,
+        "A volume region is in the active pass's matte or outside its cameraVisibility; the pass does not apply to it.";
+    RenderPassNestedNotComposed => "render_pass.nested_not_composed", Skipped, Each,
+        "A render pass collection includes a collection outside the streamed chunk that reads it; it contributes nothing there.";
 
     // Materials
     MaterialFallbackDefault => "material.fallback_default", Skipped, Each,
@@ -365,7 +403,7 @@ warning_codes! {
     TextureUdimTileMissing => "texture.udim_tile_missing", Skipped, Each,
         "A tile of a UDIM set does not decode; the set is used without it.";
     TextureTxStale => "texture.tx_stale", Approximated, Each,
-        "A .tx is older than its source and is used anyway.";
+        "A .tx's modification time is not its source's; it is used anyway.";
     TextureTxConvertFailed => "texture.tx_convert_failed", Approximated, Each,
         "--auto-tx could not convert a texture; its source is read instead.";
     TextureStreamFallback => "texture.stream_fallback", Approximated, Each,

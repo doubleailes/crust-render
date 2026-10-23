@@ -295,6 +295,24 @@ Schema mapping:
       per-face Render 3.631 / 3.736 s (min / mean) against per-mesh 3.752 / 3.789 s.
       Stitched triangles are shaped like the interior grids' (1.2% below a quality of
       0.1 against 0.8%), so the BVH sees no sliver population.
+  - **The dicing camera** (`live-camera-update`): `rel crust:dicingCamera` on the
+    `RenderSettings` prim (`render_settings_dicing_camera`, same pass resolution as
+    `crust:subdivisionEdgeLength`) names the camera tessellation reads — adaptive
+    levels, per-face rates and their frustum, and implicit shapes' radial counts.
+    `read_camera_ahead` returns a `Dicer` (the dicing camera's projection) beside the
+    render camera's `Shutter`: the shutter never comes from the dicing camera.
+    Unauthored, or a target that is not a camera (`camera.dicing_not_a_camera`), the
+    render camera dices, so unauthored stages import exactly as before. A product's
+    `camera` overrides the render camera only. `subdiv.adaptive_needs_camera` fires
+    only when neither camera is named. A relationship rather than an import option,
+    so the session's layer records it and an MCP session dices as `crust render` does.
+    - **Trap: the import asserted the adaptive eye is the render camera's.** The
+      debug check in `record_geometry_counters` (one `CameraFrame` read off two
+      stages must agree) runs only when the render camera dices; with a dicing
+      camera the two eyes differ by design.
+    - `StageFacts::dicing` records the target; the in-place settings rebuild refuses
+      when it changes, and otherwise compares the dicing camera's keys as before, so
+      moving a render camera that does not dice stays in place.
   - The per-prim `crust:subdivisionLevel` this replaced is read only to warn — once per
     load (`SubdivPolicy::legacy_warned`), since a per-prim warning would scale with
     the scene.
@@ -318,14 +336,26 @@ Schema mapping:
   - **The UV chart is refined with the surface.** A `faceVarying` `primvars:st` (and
     `:indices`) becomes a real face-varying channel under the mesh's
     `faceVaryingLinearInterpolation` (USD fallback `cornersPlus1`, *not* OpenSubdiv's
-    `cornersOnly`); a `vertex` chart is refined like the points. Both are snapped to
+    `cornersOnly`); a `vertex` chart is refined like the points. A `constant` or
+    `uniform` chart is rewritten at read time (`mesh_uvs`) into faceVarying with
+    synthesized indices (all `0`, or the face index, composed with any authored
+    `:indices`), so neither refiner nor triangulation has a third case: each face's
+    value sits behind a seam wherever it differs from its neighbour's and stays
+    constant across the face. Before, both were read per *point*, which silently
+    smeared a constant chart towards `(0, 0)` and gave a uniform one another face's
+    value (#354). The synthesized array has exactly one entry per `faceVertexIndices`
+    entry, never `sum(faceVertexCounts)`: a malformed count far past the indices would
+    otherwise size the allocation (`synthesized_chart_indices_follow_the_face_vertex_indices`).
+    An unauthored `interpolation` stays `vertex` (not USD's `constant`), except on a
+    one-value chart. Both are snapped to
     the limit with the positions, so a texel stays on the limit point its vertex was
     snapped to. A chart whose indices do not resolve is dropped with a warning,
     because a refiner cannot skip a bad value the way a triangle lookup can. Pinned by
     `subdiv::tests` (affine charts reproduced exactly under all six rules, a UV seam
     keeps each side on its island, vertex charts) and by inline-USD tests reading the
     chart back through a hit (`a_subdivided_mesh_keeps_its_uv_chart`,
-    `every_face_varying_rule_is_read`).
+    `every_face_varying_rule_is_read`,
+    `a_uniform_or_constant_chart_is_read_per_face_or_per_mesh`).
   - **Ptex keeps indexing the base cage**: refined triangles carry explicit corner UVs
     (`FaceMap.uvs`) mapping them back into their cage face's unit square, from a
     synthetic face-varying channel, and `check_face_count` compares the texture
@@ -473,12 +503,34 @@ Schema mapping:
     (`elevate`). A prim that needs no table keeps its linear segments.
   - **Prototypes** carry their table on the part's slot (`PartSlot::strands`), set on
     every placement's `geom_id` like the UV map; `World::strand_table_bytes` counts a
-    shared table once (`--stats`: `curve strand tables`). Curves carry no motion blur:
+    shared table once (`--stats`: `curve strand tables`). A primvar AOV adds its kept
+    channels to the table (`StrandTable::kept`), and builds one for a prim authoring a
+    kept primvar whatever its material reads (see the `aovs` record). Curves carry no motion blur:
     `crust:motion:translate` is not read on them.
   - **Live edits.** What a table was decoded for is part of `Signature` on a curves slot
     only (`SideTables::curves`, set for every curves geometry, table or not): a curve
     material edit that starts reading a primvar or the strand re-imports, while a mesh
     material's edit is never refused over what only a curve would read.
+- **Mesh primvars.** A mesh's material reads its primvars through the table the
+  primvar AOVs built (`aovs` record): `MeshNeeds::shading` (the material's
+  `Material::primvars`) is read by `mesh_source` after the AOVs' keep set, into the
+  same `MeshSource::primvars` (`MeshSource::shading` counts the trailing ones), so
+  both are refined by one path — `vertex` / `faceVarying` as subdivision extras,
+  `uniform` through the base-face map — and hashed into `MeshKey` (with their
+  arity). `primvar_table` splits them into `PrimvarTable::channels` and
+  `::shading`; every placement path (baked, mirrored, instanced, prototype parts)
+  already calls `set_primvars`, which takes a geometry off the plain path only
+  when `shading` holds a channel. The material's reader (`shading_primvar`)
+  converts a `color3` into the working space (its colour space resolved once per
+  attribute, not per value) and accepts any arity, where the AOV reader keeps
+  colours as authored and checks the var's component count; both are
+  `decode_mesh_primvar`. Authored `:indices` that are not an `int[]` are refused,
+  never read as absent (the values would be read unindexed). An authored empty
+  array is unauthored to the AOVs, as before, but warned to a material, as on
+  curves. Implicit shapes have no authored topology, so they read
+  `constant` ones only (`with_constant_primvars`; `constant_table` for the
+  analytic sphere, direct or in a prototype). A material that reads a Ptex texture
+  reads none (`mesh.unsupported_primvar`): a hit carries the face instead.
 - `UsdGeomNurbsCurves` → the same two batches (`nurbs_curve_segments`), read through
   openusd-schemas' typed `NurbsCurves` (generated from its vendored `usdGeom` schema, so
   absent from the crate's hand-written `src/`). Each knot interval `[u_i, u_i+1]` inside the domain `[u_p, u_n+1]` (narrowed
@@ -837,9 +889,93 @@ same point.
   by the CLI's `parse_frame`): `NaN` compares false against the range, so it would
   otherwise pass the check silently.
   Not time-aware: `UsdPreviewSurface` inputs (read by openusd-schemas'
-  `read_preview_surface`, default only), and `crust:motion:translate` motion blur, which
-  is still an authored offset rather than derived from the samples across the shutter.
-  Sample: `samples/animation.usda`.
+  `read_preview_surface`, default only). `crust:motion:translate` stays an authored
+  offset over the shutter; time-sampled transforms are evaluated across the shutter
+  as well (below). Sample: `samples/animation.usda`.
+- **Camera shutter and time-sampled motion** (`time-sampled-transform-motion`, #336).
+  - *The shutter is read before the traversal* (`read_camera_ahead`, beside the
+    screen projection adaptive subdivision reads, one read for both): the named
+    camera off the index stage, else off a stage masked to it (a camera in a
+    payload); with none named, the first camera of `first_camera`'s walk of the
+    index stage, which mirrors the traversal (a stack, so last child first; the
+    same pruning; invisible subtrees walked; instances and `PointInstancer`s not
+    entered; chunk by chunk when the import streams), payloads unloaded.
+    `shutter:open` / `shutter:close` (fallbacks 0 / 0) give `Shutter { offsets,
+    camera, interval }`, the interval `f + open .. f + close` in time codes, `None`
+    (instantaneous) when `close <= open` or there is no frame. It has to be known
+    before the walk: geometry is emitted while walking, streamed chunks drop their
+    stage before it ends, and shapes are attached at once. After `resolve_camera`,
+    a render camera other than the pre-read one with different offsets raises
+    `camera.shutter_mismatch`, naming both (`RenderCamera::shutter` carries each
+    built camera's offsets).
+  - *The traversal carries a shutter pair through moving subtrees.* Stack entries
+    grew a `Timing` (`Static` | `Varies` | `Moves(Box<Pair { open, close }>)`,
+    boxed because every entry carries one and few move). A prim moves when its own
+    ops might vary (`XformQuery::transform_might_be_time_varying`) or its parent
+    moves and it does not `!resetXformStack!`; it is then composed at both ends by
+    `compose_at` — `compose_with_parent` under a nested `EvalTimeScope`, quiet
+    (the read at the frame already warned) — so the composition rule stays one
+    function. `pair.open` reuses `W_f` when `shutter:open == 0`. `W_f` is still
+    what lights, cameras, the zero-scale tests and `count_placements` read. The
+    question is asked only when the offsets open an interval or a `motionvector`
+    var is requested (`TransformMotion::query`); otherwise `timing` returns
+    `Static` without touching the prim.
+  - *One placement rule* (`Span { open, close }`, `Span::end`): start at `X(open)`,
+    end at `T(v)·X(close)` with `v` the authored `crust:motion:translate`;
+    `v` alone keeps its old `T(v)·X(open)` bit for bit, and a close equal to the
+    open is no motion. Meshes and implicit shapes carry `l2w_end` on
+    `MeshPlacement` (a moving one is never baked; a non-invertible one bakes at
+    open and is counted). Spheres keep their world-space centre at open inside an
+    identity instance ending at `T(v)·X(close)·X(open)⁻¹`. Native instances fold
+    `part.local` in on both sides and now read `v` on the instance prim.
+    `PointInstancer` placements get `W(open)·P_i → W(close)·P_i` from the
+    instancer prim's pair; per-instance arrays are read at the frame.
+  - *`disableMotionBlur` is sharp at the frame* (`TransformMotion::span`,
+    `RenderProducts::sharp_at_frame`). UsdRender defines it as a `[0, 0]` shutter
+    at the current time code; only the deprecated `instantaneousShutter` closes
+    the shutter where it opens. So with `disableMotionBlur` (it wins over the
+    other) and a shutter that opens away from the frame, a moving placement starts
+    at `X(f)` and ends at `D·X(f)`, `D = X(close)·X(open)⁻¹` the shutter's
+    world-space displacement: rays at `time = 0` see it exactly where it is at the
+    frame, and the vector is the shutter's displacement measured from there (the
+    same as from shutter open for a translation). An interpolation of the
+    shutter's ends at `τ_f = −open / (close − open)` was rejected: it misses `X(f)`
+    whenever a time sample lies inside the shutter, as in every per-frame cache.
+    `instantaneousShutter` keeps the shutter span and `time = 0`, so it is sharp at
+    `f + open`. The first version of this change posed both at shutter open, a
+    quarter frame early on a centred shutter (review of #347).
+  - *Moving instances keep their tangents* (`VertexSource::Moving`, the
+    `textures` record): otherwise every animated prim would lose its normal map
+    the moment a shutter is authored, blur on or off.
+  - *Warnings* (`report_unmoved`, once per cause with a count):
+    `time.motion_needs_frame` (offsets open, no frame, a drawn prim varies),
+    `camera.shutter_instantaneous` (a `motionvector` var, offsets that open
+    nothing, a drawn prim varies), `xform.motion_ignored` (curves, lights,
+    volumes, prims inside a prototype whose own ops vary, baked non-invertible
+    meshes). `camera.` and `time.` are settings families, so a scene carrying
+    one refuses MCP's in-place settings refresh.
+  - *MCP*: `StageFacts::shutter` is a `ShutterKey` (the camera, the offsets and
+    interval as bits, whether prims were asked about time, and whether moving
+    placements were posed at the frame); a settings refresh
+    whose key differs is `Structural("the camera shutter changed")`. The offsets
+    and the query flag are in it because they decide warnings even when the
+    interval does not move: the session renders without a frame, where a
+    `shutter:close` edit leaves the interval `None` but adds
+    `time.motion_needs_frame` to a full import.
+  - *Measured.* Every sample scene is bit-identical at 16 spp with
+    `--indirect-clamp 0` (none authors a shutter), and so is
+    `samples/animation.usda` at `-f 5`. The `AOV = false` instantiation is
+    unchanged under callgrind (`advance_pixel::<…, false, false, false, false>`,
+    3 806 012 499 instructions on cornellbox at 2 spp before and after). The
+    import itself is not free: on cornellbox `load_scene` counts +0.35% (the
+    camera pre-read), and on `samples/PointInstancedMedCity.usd` (`-s 1 -f 1`,
+    40 000 instancer placements, one thread) +0.6% with no shutter and +0.9% with
+    `shutter:close = 0.5` on its camera — about 56 instructions a placement of
+    `attach_proto_parts` plumbing (the optional close and `v`) and larger frames.
+    In time it is below the noise floor: `bench_ab.sh -n 20 -p "Parse USD stage"`
+    gives min / mean +2.4% / −1.0% (0.085 s) static and +5.6% / −1.9% (0.090 s)
+    with the shutter, and 0.004 s either way without a frame. No production stage
+    was available to measure.
 - **Camera choice** (`UsdImportOptions::camera`, the CLI's `--camera`): the named prim,
   else the stage's **`RenderSettings.camera`** relationship (read off the index stage, so
   the traversal knows it before meeting any camera), else the first `UsdGeomCamera` the
@@ -866,6 +1002,79 @@ same point.
   `camera.invalid_exposure` and stores 1. The scale reaches the
   image only after the film is resolved; the `aovs` design record says which outputs
   take it.
+- **Camera depth of field** (`physical-depth-of-field`): `lens_camera` gives the lens a
+  diameter of `focalLength / fStop × 0.001 / metersPerUnit` scene units — the focal
+  length read in millimetres, the stage's `metersPerUnit` (root and session layer only,
+  `UsdGeomGetStageMetersPerUnit`; unauthored is USD's fallback 0.01). It used to be
+  `focalLength / fStop` taken as scene units, a lens 10x too wide on centimetre stages and
+  1000x on metre stages; `samples/cornellbox_guided.usda` carried `fStop = 1000` against
+  it. The alternative was OpenUSD's own convention, tenths of a scene unit
+  (`GfCamera::FOCAL_LENGTH_UNIT`, what Hydra and usdview use), which matches usdview on
+  every stage but gives a 50 mm lens a 1.79 m opening on a metre stage; the two agree at
+  0.01, so stages that author no units still match Hydra. `CameraLens` stays the lens as
+  authored (what `crust ls camera --json` reports); only `lens_camera` derives the
+  diameter. Only a lens reads the unit: one that is not finite, not positive, or so
+  small that the diameter overflows `f32` (a lens offsetting every ray to infinity) is
+  refused as `camera.invalid_meters_per_unit` and reads as 0.01, raised like the
+  exposure check, for the camera rendered through only (`RenderCamera::warn_lens_units`),
+  so a fallback candidate the traversal built and dropped says nothing. `metersPerUnit`
+  is read for the lens only: light units, displacement bounds and edge lengths still
+  ignore it.
+- **Camera framing: `aspectRatioConformPolicy`** (`honour-aspect-ratio-conform-policy`,
+  #339). The policy is a `UsdRenderSettingsBase` attribute, resolved on `Base` in
+  `products.rs` like `resolution` (the first product's, else the settings prim's,
+  unauthored `expandAperture`) and carried as `products::Framing` beside the resolution —
+  not on `RenderSettings`, the tracer's struct, which holds no USD vocabulary. Authored
+  on the camera prim (where #339's repro put it) it is not read, as in OpenUSD. The
+  conform happens inside `CameraFrame::read`, after an unauthored `verticalAperture` is
+  defaulted to `horizontal · H / W` (which needs none), through
+  `openusd_schemas::render::conform_aperture` with pixel aspect 1. Inside the read
+  because `CameraFrame` is the one camera every reader derives from — `lens_camera`
+  (rays), `screen_projection` (adaptive subdivision and on-screen implicit shapes) and
+  `camera_lens` (`crust ls camera --json`, which reports the authored `aperture_mm` and
+  the `conformed_aperture_mm`): conforming in `lens_camera` alone would tessellate for
+  one frame and render another. Before it, every policy collapsed to
+  `adjustApertureWidth`: `lens_camera` derived the vertical field of view from the
+  vertical aperture alone and the horizontal one from the image, so the horizontal
+  aperture never framed anything. With square pixels the conformed aperture has the
+  image's aspect, so `Camera::new` keeps taking `W / H` (a `debug_assert` pins the two at
+  1e-5) and `screen_projection`'s `tan_h` stays `tan_v · W / H`, as the rays have it. An
+  aperture within 1e-6 (relative) of the image's aspect is not conformed at all, so a
+  conform that would only round cannot move the vertical aperture by an ulp: that is
+  why every repo sample and golden is unchanged. Under the default, an aperture *wider*
+  than the image now expands vertically instead of being cropped — the one framing
+  change; `adjustApertureWidth` restores the old crop. A token outside the five is
+  `product.invalid_conform_policy` at the prim authoring it and reads as unauthored; a
+  later product with another policy is `product.framing_mismatch`, written with the
+  first's framing (not part of `same_render`: framing, like the window, does not change
+  what can be rendered). In an MCP session a policy edit re-frames through the existing
+  projection key: in place unless adaptive subdivision or on-screen shapes read the old
+  projection. There is no environment switch: this is a scene setting, like
+  `dataWindowNDC`.
+  - *Non-square pixels*: `adjustPixelAspectRatio` keeps the aperture and asks for
+    `pixelAspectRatio = aperture aspect / (W / H)`; crust renders square pixels, so it is
+    conformed as `expandAperture` (the closest square-pixel frame that keeps the whole
+    aperture) and `RenderCamera::warn_framing` raises `product.unhonoured_attribute`
+    naming the pixel aspect it needed, for the camera rendered through only, like
+    `warn_lens_units`. An authored `pixelAspectRatio != 1` is still warned about by
+    `warn_unhonoured` and is not fed to the conform: conforming to a non-square image and
+    rendering square would distort. Honouring both is a small follow-up: the rays would
+    take independent tangents (aspect = conformed `h / v` instead of `W / H`), and the
+    `exr` crate's `ImageAttributes::pixel_aspect` carries the header.
+  - *Lens shift*: `horizontalApertureOffset` / `verticalApertureOffset` are unread; they
+    need an off-centre window in `Camera`.
+- **`disableDepthOfField`** is resolved in `import_render_products` like
+  `disableMotionBlur` — the first product's authored value, else the settings prim's —
+  and sets `RenderSettings::depth_of_field = false`, which `lens_camera` reads to build a
+  pinhole; a stage with no camera has the procedural fallback's lens closed the same way
+  (`Camera::pinhole` in `resolve_camera`), so the attribute is honoured on every path
+  that no longer warns it is not. It is applied at import rather than as a branch before
+  `get_ray`: the scene's
+  camera is then the one rendered, and the rays are exactly `fStop = 0`'s (the focus
+  distance only scales the viewport, which cancels in the ray direction). A later product
+  that differs is written with the first's setting under
+  `product.depth_of_field_mismatch`, as motion blur is. An MCP edit of it goes through
+  `live.rs`'s settings refresh, which rebuilds the camera from the settings it re-reads.
 - **`disableMotionBlur` / `instantaneousShutter`** (`RenderSettingsBase`, the second the
   deprecated name of the first) are resolved in `import_render_products` like the render's
   camera and resolution — the first product's authored value, else the settings prim's,
@@ -875,9 +1084,13 @@ same point.
   The tracer's shutter gate is then `world.has_motion() && settings.motion_blur`: no
   `K_TIME` domain is derived (so the other sample dimensions are a static scene's), every
   ray has `time = 0`, `transforms_at` returns the start transforms, and the beauty is sharp
-  at the authored positions while the motion records stay for the `motionvector` AOV. The
+  at the authored positions while the motion records stay for the `motionvector` AOV. With
+  a time-sampled transform and a shutter that opens away from the frame the two flags
+  differ: `disableMotionBlur` is sharp at the frame, `instantaneousShutter` at shutter open
+  (above). The
   two left `warn_unhonoured` when they became honoured; it still warns about
-  `disableDepthOfField` and `pixelAspectRatio`. `dataWindowNDC` left it too
+  `pixelAspectRatio`, now described with the camera framing above
+  (`disableDepthOfField` left it with `physical-depth-of-field`). `dataWindowNDC` left it too
   (`add-render-region`): it is resolved like `resolution` (first product, else the
   settings prim) and `region_from_ndc` turns it into the render's region — the pixels
   whose centres lie inside the window, NDC `y` bottom-up, overscan clipped and an empty
@@ -1198,8 +1411,11 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
   native instance inside a prototype into its parts. Volumes inside prototypes are skipped — they
   live outside the surface BVH by design and cannot ride an instance transform.
   `PointInstancer`
-  `velocities` / `accelerations` / `angularVelocities` are ignored, so vectorized instances
-  do not motion-blur (`crust:motion:translate` still works on ordinary prims). The
+  `velocities` / `accelerations` / `angularVelocities` are ignored, and per-instance
+  `positions` / `orientations` time samples are read at the frame only, so vectorized
+  instances do not motion-blur on their own; an instancer whose own transform (or an
+  ancestor's) is time-sampled moves every placement with it, and
+  `crust:motion:translate` works on ordinary prims and native instances. The
   per-instance arrays themselves (`protoIndices`, `positions`, `orientations`,
   `scales`, `ids`, `invisibleIds`) are evaluated at the requested frame like every
   other attribute, so an animated instancer does move between frames. Top-level `UsdGeomSphere` prims
@@ -1225,8 +1441,8 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
   extraordinary vertices (within 0.9% of an edge on the worst-case cube).
 - **Cracks between meshes.** Two separate meshes meeting at a boundary can be refined
   differently, exactly as two separately refined meshes always could.
-- **Level popping across frames.** Each frame imports at its own camera; there is no
-  dicing reference camera.
+- **Level popping across frames.** Each frame imports at its own camera unless
+  `crust:dicingCamera` names a static one; a dicing camera that moves still pops.
 - **The rate ignores motion.** It is chosen at the camera's and the placement's
   shutter-open transforms.
 
@@ -1374,6 +1590,25 @@ what the epoch in its key is for); an authored path has one `Arc` across every c
     = false )`) removes both.
   - The rig's **13 `CylinderLight`s** (oscilloscope and ham-radio button lights) now
     import as analytic cylinder lights; this used to be a gap.
+
+## Known gaps: time-sampled motion
+
+- **Two keys per shutter.** Only the shutter's ends are read, and the kernel lerps
+  between them: a path that curves inside the shutter becomes its chord, one that
+  goes out and back reads 0, and a large rotation bows (the `intersection-kernel`
+  gap). Several segments would need N transforms per instance in the kernel.
+- **Mixed-time evaluation.** With `shutter:open ≠ 0`, transforms are read at
+  `f + open` while every other attribute, points included, is read at `f`, so a mesh
+  whose points are baked per frame under an animated transform sits slightly
+  inconsistently. The deforming-points change reads points at the same two times.
+- **Not moved:** deformation (`points` time samples, `velocities`), per-instance
+  `PointInstancer` motion, curves, lights, volumes, transforms animated inside a
+  prototype, and the camera itself. Each but the camera is counted under
+  `xform.motion_ignored` when its transform moves.
+- **The pre-read camera can differ from the render's** when no camera is named and
+  the first camera sits in an unloaded payload, or the stage has several unnamed
+  cameras with different shutters: warned (`camera.shutter_mismatch`), and naming
+  the camera fixes it.
 
 ## Known gaps: following a stage live
 

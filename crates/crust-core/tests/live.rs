@@ -404,11 +404,11 @@ def Xform "W"
     assert!(prov.light("/W/Dead").is_none());
 }
 
-/// What a curve's strand table was decoded for is part of what a swap must
-/// keep, on curves only: a material that starts reading a primvar is refused
-/// on a curves slot (its table lacks the primvar) and taken on a mesh's.
+/// What a geometry's table was decoded for is part of what a swap must keep:
+/// a material that starts reading a primvar is refused on a curves slot (its
+/// strand table lacks the primvar) and on a mesh's (its primvar table does).
 #[test]
-fn a_curve_material_swap_is_refused_when_it_reads_something_new() {
+fn a_material_swap_is_refused_when_it_reads_a_new_primvar() {
     let dir = std::env::temp_dir().join("crust_live_curve_swap");
     std::fs::create_dir_all(&dir).unwrap();
     let mtlx = dir.join("looks.mtlx");
@@ -482,7 +482,352 @@ def Xform "World"
         "a new primvar"
     );
     assert!(
-        swap_check(&scene, &[card], load("reads")),
-        "a mesh reads no table"
+        !swap_check(&scene, &[card], load("reads")),
+        "a new mesh primvar"
     );
+    assert!(
+        swap_check(&scene, &[card], load("red")),
+        "same needs on a mesh"
+    );
+}
+
+/// A stage with a mesh authoring `primvars:rest`, whose settings target
+/// `products` (one of `</Render/plain>` and `</Render/withRest>`).
+fn primvar_stage(products: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("crust_live_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("live_primvars.usda");
+    std::fs::write(
+        &path,
+        format!(
+            r#"#usda 1.0
+def Xform "W"
+{{
+    def Camera "Cam"
+    {{
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Mesh "M"
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        point3f[] primvars:rest = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)] (
+            interpolation = "vertex"
+        )
+    }}
+}}
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </W/Cam>
+        uniform int2 resolution = (32, 32)
+        rel products = [{products}]
+    }}
+    def RenderProduct "plain"
+    {{
+        token productName = "plain.exr"
+        rel orderedVars = [</Render/depth>]
+    }}
+    def RenderProduct "withRest"
+    {{
+        token productName = "rest.exr"
+        rel orderedVars = [</Render/depth>, </Render/Pref>]
+    }}
+    def RenderVar "depth"
+    {{
+        uniform token dataType = "float"
+        uniform string sourceName = "depth"
+    }}
+    def RenderVar "Pref"
+    {{
+        uniform token dataType = "point3f"
+        uniform string sourceName = "rest"
+        uniform token sourceType = "primvar"
+    }}
+}}
+"#
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+/// The geometry keeps the primvars the products asked for when it was read:
+/// retargeting `products` to one with a primvar var re-imports, rather than
+/// render a channel the geometry never kept; the same products update in
+/// place. A fresh import of the retargeted layer keeps the primvar.
+#[test]
+fn a_settings_change_asking_for_new_primvars_reimports() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = primvar_stage("</Render/plain>");
+    let scene = Scene::from_usd(&path).expect("load");
+    assert!(!scene.world.has_primvars());
+    let prov = scene.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+    primvar_stage("</Render/withRest>");
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => assert!(why.contains("primvars"), "{why}"),
+        Ok(_) => panic!("a product asking for a primvar the geometry never kept updated in place"),
+    }
+    let fresh = Scene::from_usd(&path).expect("load");
+    assert!(fresh.world.has_primvars());
+    // And with the primvar kept, the same products update in place.
+    let prov = fresh.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &fresh.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+}
+
+/// The primvar warnings are raised reading geometry, for the primvars it
+/// kept, which a settings refresh cannot change without being refused: a
+/// scene carrying them still takes a settings edit in place.
+#[test]
+fn a_primvar_warning_does_not_block_a_settings_edit() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = primvar_stage("</Render/withRest>");
+    let text = std::fs::read_to_string(&path).expect("read stage");
+    // `rest` moves to the mesh's parent (not inherited), and a second mesh
+    // authors it with two components (a mismatch).
+    let text = text
+        .replace(
+            "def Xform \"W\"\n{",
+            "def Xform \"W\"\n{\n    point3f primvars:rest = (0, 0, 0) (interpolation = \"constant\")",
+        )
+        .replace(
+            "point3f[] primvars:rest = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)] (\n            interpolation = \"vertex\"\n        )",
+            "",
+        )
+        .replace(
+            "    def Mesh \"M\"",
+            "    def Mesh \"N\"\n    {\n        int[] faceVertexCounts = [3]\n        int[] faceVertexIndices = [0, 1, 2]\n        point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 1, 0)]\n        float2[] primvars:rest = [(0, 0)] (interpolation = \"constant\")\n    }\n    def Mesh \"M\"",
+        );
+    let path = path.with_file_name("live_primvar_warnings.usda");
+    std::fs::write(&path, text).expect("write stage");
+    let scene = Scene::from_usd(&path).expect("load");
+    let codes: Vec<&str> = scene.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert!(codes.contains(&"primvar.not_inherited"), "{codes:?}");
+    assert!(codes.contains(&"primvar.mismatch"), "{codes:?}");
+    let prov = scene.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+}
+
+/// A stage rendering a sphere under a dome through `/W/Cam`, a 36 × 24
+/// aperture on a 2:1 image, its settings authoring `extra`; a Catmull-Clark
+/// cube refined adaptively when `adaptive`.
+fn framing_stage(name: &str, extra: &str, adaptive: bool) -> PathBuf {
+    let dir = std::env::temp_dir().join("crust_live_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(format!("{name}.usda"));
+    let (cage, edge) = if adaptive {
+        (
+            r#"
+    def Mesh "Cage"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, 1), (-1, 1, -1), (1, 1, -1), (-1, -1, -1), (1, -1, -1)]
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
+            "float crust:subdivisionEdgeLength = 2",
+        )
+    } else {
+        ("", "")
+    };
+    std::fs::write(
+        &path,
+        format!(
+            r#"#usda 1.0
+def Xform "W"
+{{
+    def Camera "Cam"
+    {{
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Sphere "Ball" {{}}
+    def DomeLight "Sky" {{}}{cage}
+}}
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </W/Cam>
+        uniform int2 resolution = (64, 32)
+        {edge}
+        {extra}
+    }}
+}}
+"#
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+fn beauty_bits(scene: Scene) -> Vec<[u32; 3]> {
+    let settings = scene.settings.with_samples_per_pixel(16).with_max_depth(3);
+    let buffer =
+        crust_core::Renderer::new(scene.camera, scene.world, scene.lights, settings).render();
+    let (w, h) = buffer.size();
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| buffer.get_pixel(x, y).to_array().map(f32::to_bits))
+        .collect()
+}
+
+const HEIGHT_FIT: &str = "uniform token aspectRatioConformPolicy = \"adjustApertureHeight\"";
+
+/// An edit of `aspectRatioConformPolicy` alone re-frames the camera in
+/// place when no geometry read the camera, and renders bit for bit what a
+/// fresh import of the edited layer renders.
+#[test]
+fn a_conform_policy_edit_applies_in_place_as_a_reimport_would() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = framing_stage("live_framing", "", false);
+    let before = beauty_bits(Scene::from_usd(&path).expect("load"));
+    let mut scene = Scene::from_usd(&path).expect("load");
+    framing_stage("live_framing", HEIGHT_FIT, false);
+    let update = scene
+        .provenance
+        .as_ref()
+        .expect("provenance")
+        .rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+        .expect("a policy edit applies in place");
+    assert!(update.has_settings());
+    update.apply(&mut scene).expect("applies");
+    let fresh = Scene::from_usd(&path).expect("load the edited layer");
+    assert_eq!(format!("{:?}", scene.camera), format!("{:?}", fresh.camera));
+    let after = beauty_bits(scene);
+    assert_eq!(after, beauty_bits(fresh));
+    assert_ne!(after, before, "the edit re-framed the render");
+}
+
+/// Adaptive subdivision tessellated for the old frame, so a policy edit that
+/// moves the conformed aperture re-imports.
+#[test]
+fn a_conform_policy_edit_reimports_adaptive_subdivision() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let path = framing_stage("live_framing_adaptive", "", true);
+    let scene = Scene::from_usd(&path).expect("load");
+    assert!(scene.stats.subdivision.adaptive.is_some(), "adaptive");
+    let prov = scene.provenance.as_ref().expect("provenance");
+    assert_eq!(
+        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+            .map(|_| ()),
+        Ok(())
+    );
+    framing_stage("live_framing_adaptive", HEIGHT_FIT, true);
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => {
+            assert!(why.contains("another camera projection"), "{why}")
+        }
+        Ok(_) => panic!("adaptive subdivision for another frame was updated in place"),
+    }
+}
+
+/// `framing_stage`'s adaptive stage with a second camera, `/W/Dicer`, which
+/// `crust:dicingCamera` names when `dicing` is given; the render camera at
+/// `cam_z`.
+fn dicing_stage(name: &str, dicing: Option<&str>, cam_z: f32) -> PathBuf {
+    let path = framing_stage(name, "", true);
+    let text = std::fs::read_to_string(&path).expect("read stage");
+    let rel = dicing.map_or(String::new(), |d| format!("rel crust:dicingCamera = <{d}>"));
+    let text = text
+        .replace(
+            "double3 xformOp:translate = (0, 0, 10)",
+            &format!("double3 xformOp:translate = (0, 0, {cam_z})"),
+        )
+        .replace(
+            "    def Sphere \"Ball\" {}",
+            "    def Camera \"Dicer\"\n    {\n        float horizontalAperture = 36\n        \
+             float verticalAperture = 24\n        double3 xformOp:translate = (0, 1, 12)\n        \
+             uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }\n    \
+             def Sphere \"Ball\" {}",
+        )
+        .replace(
+            "rel camera = </W/Cam>",
+            &format!("rel camera = </W/Cam>\n        {rel}"),
+        );
+    std::fs::write(&path, text).expect("write stage");
+    path
+}
+
+/// With a dicing camera, moving the render camera applies in place as a
+/// fresh import would; retargeting `crust:dicingCamera` is structural.
+#[test]
+fn a_dicing_camera_keeps_a_render_camera_move_in_place() {
+    let change = crust_core::live::Change {
+        settings: true,
+        ..Default::default()
+    };
+    let name = "live_dicing";
+    let path = dicing_stage(name, Some("/W/Dicer"), 10.0);
+    let mut scene = Scene::from_usd(&path).expect("load");
+    assert!(scene.stats.subdivision.adaptive.is_some(), "adaptive");
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
+    let before = format!("{:?}", scene.camera);
+    dicing_stage(name, Some("/W/Dicer"), 7.0);
+    let prov = scene.provenance.clone().expect("provenance");
+    let update = prov
+        .rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+        .expect("a render camera move applies in place");
+    update.apply(&mut scene).expect("applies");
+    assert_ne!(format!("{:?}", scene.camera), before, "the camera moved");
+    let fresh = Scene::from_usd(&path).expect("load the edited layer");
+    assert_eq!(format!("{:?}", scene.camera), format!("{:?}", fresh.camera));
+    assert_eq!(beauty_bits(scene), beauty_bits(fresh));
+
+    // Without a dicing camera the same move re-tessellates.
+    let path = dicing_stage("live_dicing_none", None, 10.0);
+    let scene = Scene::from_usd(&path).expect("load");
+    dicing_stage("live_dicing_none", None, 7.0);
+    let prov = scene.provenance.as_ref().expect("provenance");
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => {
+            assert!(why.contains("another camera projection"), "{why}")
+        }
+        Ok(_) => panic!("a move of the dicing render camera was updated in place"),
+    }
+
+    // Retargeting the relationship moves what tessellation reads.
+    let path = dicing_stage("live_dicing_retarget", Some("/W/Dicer"), 10.0);
+    let scene = Scene::from_usd(&path).expect("load");
+    dicing_stage("live_dicing_retarget", Some("/W/Cam"), 10.0);
+    let prov = scene.provenance.as_ref().expect("provenance");
+    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+        Err(crust_core::live::Structural(why)) => {
+            assert!(why.contains("the dicing camera changed"), "{why}")
+        }
+        Ok(_) => panic!("a retargeted dicing camera was updated in place"),
+    }
 }

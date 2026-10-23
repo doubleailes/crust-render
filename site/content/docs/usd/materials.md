@@ -72,6 +72,48 @@ A universal `outputs:surface` with a decodable shader, such as a `UsdPreviewSurf
 still used first. The `mtlx` terminal is read when the material has nothing else Crust
 Render can decode, so a stage that rendered through its preview surface renders the same.
 
+### How MaterialX BSDFs are shaded
+
+Crust Render shades a MaterialX material as its closure tree, with the semantics of
+MaterialX's OSL backend as OSL's `testrender` renders it. Each BSDF node is the
+corresponding lobe of [BSDL](https://github.com/AcademySoftwareFoundation/OpenShadingLanguage/tree/main/src/libbsdl),
+the library `testrender` shades with: its microfacet model, energy tables, Fresnel,
+sheen and diffuse lobes. A test replays reference values BSDL itself computed and checks
+every node against them.
+
+`layer(top, base)` lets the base through in proportion to how transparent the top is.
+Each node in the top adds to its opacity:
+
+- a `dielectric_bsdf` or `generalized_schlick_bsdf` that only reflects, and a
+  `sheen_bsdf`, add their weight times the share of light they reflect toward the viewer;
+- every other node adds its whole weight. That includes a dielectric that refracts, and a
+  diffuse or a conductor. A diffuse at weight 0.3 over a metal leaves 70% of the metal
+  showing;
+- `mix` blends opacities, `add` sums them, `multiply` scales them, and a `layer` nested in
+  a top adds its own top's and base's opacities together.
+
+The base is weighted by one minus the top's opacity, clamped to [0, 1].
+
+A few behaviours follow BSDL rather than MaterialX's GLSL shaders:
+
+- Each node is also sampled as BSDL samples it. A rough glass (a `dielectric_bsdf` that
+  refracts) relies on that: BSDL's energy tables are made for its own sampler. Lit by a
+  light that light sampling can also reach, a very rough glass still returns about 2% more
+  than it receives, as in `testrender`.
+- A `sheen_bsdf` in `zeltner` mode reads its fibre table at the square root of
+  `roughness`, so it is not the same as `crust:openpbr`'s fuzz at the same roughness. A
+  sheen is not shaded on a back face.
+- A `generalized_schlick_bsdf`'s `color82` and a thin film (`thinfilm_thickness`) are
+  MaterialX's own, since BSDL does not apply them.
+- A `chiang_hair_bsdf` in a layer's top hides what lies beneath it.
+
+One behaviour deliberately differs from `testrender`. Seen from inside an object (a back
+face), a `dielectric_bsdf` or `generalized_schlick_bsdf` that only reflects, in a layer's
+top, lets through only the light it does not reflect, and none past the critical angle,
+where it reflects everything. BSDL lets about as much through as it would from outside, so
+in `testrender` a coat over glass returns up to twice the light it receives from inside, and
+light trapped inside a coated glass object grows with every bounce.
+
 ## UsdPreviewSurface opacity
 
 `inputs:opacity` means one of two things, chosen by `inputs:opacityThreshold`:
@@ -381,7 +423,9 @@ the mesh's UV tangent, so the card needs UVs whose `u` runs along the hair.
 
 A hair material can read where on its strand a hit lies, which curve it is, a random
 value per curve, and the groom's own primvars, through `geompropvalue`: see
-[curve attributes](@/docs/usd/geometry.md#curve-attributes-in-materials). These
+[curve attributes](@/docs/usd/geometry.md#curve-attributes-in-materials). Any other
+material reads its mesh's primvars the same way: see
+[primvars in materials](@/docs/usd/geometry.md#primvars-in-materials). These
 MaterialX nodes are what a per-strand look is usually built from:
 
 | node | what it does |
@@ -479,7 +523,9 @@ A `surfacematerial` whose `displacementshader` is a `displacement` node with a `
 `displacement` input is displaced by that input times the node's `scale`. The input can be
 any graph. It's evaluated at each vertex with the vertex's texture coordinate, and its
 object-space `position` and `normal`, as MaterialX defines displacement. Nodes that depend
-on the view direction have no meaningful value there. An `image` that can't be loaded
+on the view direction have no meaningful value there. A `geompropvalue` reads no primvar
+there: it gives its `default`, with an
+[`mtlx.incomplete`](@/docs/reference/warnings.md) warning. An `image` that can't be loaded
 falls back to its `default` (0.5 unless authored), as it does for shading.
 
 ```xml
@@ -545,9 +591,18 @@ load. The colour space a texture is authored in comes from:
 | --- | --- |
 | any colour space the [OCIO config](@/docs/reference/command-line.md#ocio-config) defines, by any name or alias: `srgb_texture`, `g22_rec709`, `acescg`, `g22_ap1`, `lin_rec2020`, `Utility - sRGB - Texture`, … | that space: its transfer curve, then its primaries into the working space's |
 | `srgb` (older MaterialX documents) | `srgb_texture` |
-| MaterialX: no colour space, or `raw` | nothing: the values are taken as already in the working space |
+| MaterialX: `raw`, or an explicit empty `colorspace=""` | nothing: the values are taken as already in the working space |
+| MaterialX: no colour space at any scope, on a `color3` / `color4` image | `auto`, as below |
 | `UsdUVTexture`: `sRGB` / `raw` | `srgb_texture` / nothing |
-| `UsdUVTexture`: `auto` or unauthored | `srgb_texture` for an 8-bit RGB or RGBA image, nothing otherwise |
+| `UsdUVTexture`: `auto` or unauthored | `auto`, as below |
+
+`auto` is decided by the file, as Arnold decides it: an image with integer samples (8- or
+16-bit, any number of channels, so a greyscale PNG too) is `srgb_texture`, and a half or
+float image (EXR, Radiance `.hdr`) is used as stored. Crust Render reads an unset
+MaterialX colour image and `auto` this way so that it renders those textures as Arnold
+does and shares their [`.tx` files](#tx-files). A greyscale roughness or mask you want read
+as data needs `sourceColorSpace = "raw"`, or a MaterialX `float` image. A `UsdUVTexture`
+feeding `displacement` stays data under `auto`.
 
 So an sRGB albedo map rendered in ACEScg has its curve removed and its Rec.709 primaries
 converted to ACEScg's, and an `acescg` texture rendered in the default `lin_rec709` is
@@ -590,32 +645,82 @@ its node's, its node graph's or the document's) when it has one. `PxrDisneyBsdf`
 
 ## .tx files
 
-A `.tx` is a tiled, mip-mapped texture file. When one exists beside a UV texture (same
-path, `.tx` extension), Crust Render streams the texture from it instead of loading the
-whole image. [`--auto-tx`](@/docs/reference/command-line.md#auto-tx) creates the missing
-ones, and `CRUST_TEX_STREAM=0` turns streaming off (see
+A `.tx` is a tiled, mip-mapped texture file. Crust Render uses Arnold's convention for
+them, so it and Arnold 7.5 share the same files. When the `.tx` Arnold would use stands
+beside a UV texture, Crust Render streams the texture from it instead of loading the whole
+image. [`--auto-tx`](@/docs/reference/command-line.md#auto-tx) creates the missing ones,
+and `CRUST_TEX_STREAM=0` turns streaming off (see
 [Environment variables](@/docs/reference/environment-variables.md#crust-tex-stream)).
 
-Every mip level of a `.tx` has to be reduced in the same colour space the renderer
-decodes the texture in. Otherwise the full-resolution level looks right and the coarser
-levels are wrong, which looks like a filtering bug. So a `.tx` that Crust Render writes
-records that colour space in its `ImageDescription` tag (an EXR `.tx` in header
-attributes), beside the version of the conversion that wrote it:
+A texture that is already a tiled, mip-mapped EXR streams from that file as it is: Crust
+Render writes no `.tx` for it, even under `--auto-tx`, and does not look for one. Arnold's
+auto-tx converts such a file too (to `<stem>_raw.exr.tx`); Crust Render leaves that copy
+unread.
 
-```text
-crust:mipspace=srgb_texture crust:txversion=2
-```
+### Names
 
-The values are `srgb_texture`, `g22_rec709`, `g18_rec709` and `raw`. If the recorded colour
-space doesn't match the one the material asks for, the `.tx` is refused with a warning and
-the source image is loaded instead.
+The name records the conversion, as Arnold's auto-tx names it:
 
-A `.tx` with no `crust:mipspace` tag, for example one written by OpenImageIO's `maketx`,
-is accepted as it is.
+| binding of `albedo.png` | `.tx` looked for |
+| --- | --- |
+| `srgb_texture`, `srgb_tx` or the full `sRGB Encoded Rec.709 (sRGB)` | `albedo_sRGB Encoded Rec.709 (sRGB)_ACEScg.png.tx` |
+| `lin_rec709` | `albedo_Linear Rec.709 (sRGB)_ACEScg.png.tx` |
+| the OCIO `Raw` space | `albedo_Raw_ACEScg.png.tx` |
+| nothing authored, the keyword `raw`, or `ACEScg` itself | `albedo_raw.png.tx` |
+| `auto` | the sRGB name for an 8- or 16-bit image, `_raw` for a float one |
 
-A `.tx` keeps its source's alpha channel when the alpha cuts something, so a streamed
-cutout reads the same mask as the source image. An alpha that is opaque everywhere is
-left out. Crust Render versions before `crust:txversion=2` dropped the alpha: such a
-`.tx`, beside a source that has an alpha channel, is reconverted by `--auto-tx`, and
-without the flag it is refused with a warning and the source image is loaded instead. OpenImageIO's `maketx` stores the colour of an image with alpha premultiplied;
-Crust Render reads that colour as it is stored.
+The source space is the OCIO config's own name for it, never an alias, and the last part
+is the target space, [`--tx-color-space`](@/docs/reference/command-line.md#tx-color-space)
+(`ACEScg` by default). A UDIM number stays in the stem: `chair.1001.tif` becomes
+`chair.1001_…_ACEScg.tif.tx`.
+
+### What `--auto-tx` writes
+
+The file Arnold 7.5 would write for the same binding, so Arnold uses it as its own and
+does not rebuild it:
+
+- an 8-bit source in a space with a transfer curve (sRGB) becomes a `half` OpenEXR
+  with DWAA compression, holding linear values in the target space;
+- an 8-bit source in a linear or data space becomes an 8-bit TIFF, converted to the
+  target space;
+- a 16-bit, `half` or float source keeps its sample type;
+- every level is half the size of the one above, rounded down, and 64x64-tiled;
+- an image whose three channels are equal everywhere is stored as one channel, an alpha
+  that is 1 everywhere is left out, and an image of one colour is stored as one tile;
+- the file carries Arnold's metadata, its `maketx` command line included, and its
+  modification time is the source's.
+
+A `.tx` is converted again when its modification time is not its source's (in whole
+seconds, as Arnold compares it). Without `--auto-tx`, such a `.tx` is still used, with a
+warning.
+
+### How a `.tx` is read
+
+- A `.tx` found beside its source under a converted name is read as linear values in the
+  target space, then converted to the render's
+  [working colour space](@/docs/usd/render-settings.md#renderingcolorspace).
+- A `_raw` `.tx` is read in the binding's colour space, as its source would be.
+- A `.tx` bound directly (the file path in the material is the `.tx` itself) is read in
+  the binding's colour space, whatever the file holds, as Arnold reads it. A `.tx`
+  already converted to ACEScg and bound as sRGB is converted again, and renders about
+  four times too dark in both renderers: bind such a file with no colour space.
+
+### Alpha
+
+A `.tx` keeps its source's alpha when the alpha cuts something, and stores the colour
+premultiplied by it, as OIIO and Arnold do. Every UV texture lookup returns premultiplied
+colour, whether the texture is streamed or loaded whole, so a partly transparent texel
+reads darker than its source's straight colour.
+
+### Moving from earlier versions
+
+Earlier versions of Crust Render wrote and looked for `<stem>.tx` (`albedo.tx`). Those
+files are no longer looked for, and are left where they are: without `--auto-tx` the
+texture is loaded whole, and with it the `.tx` is written again under its Arnold name.
+Delete the old files once nothing else reads them.
+
+A UsdUVTexture with `sourceColorSpace = "sRGB"` is read as sRGB and looks for the
+canonical name above. Arnold, with Crust Render's OCIO config, passes the token as it is,
+finds no colour space of that name, and writes `albedo_sRGB_ACEScg.png.tx` with the bytes
+unconverted, so the two renderers don't share that file. Author `srgb_texture` instead,
+which both read as sRGB under the same name.

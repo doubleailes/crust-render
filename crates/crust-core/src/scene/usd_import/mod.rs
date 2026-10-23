@@ -22,6 +22,7 @@
 //! | [`instancing`] | `PointInstancer` and native `instanceable` prototypes        |
 //! | [`lights`]     | every UsdLux light type, shaping and IES                     |
 //! | [`light_links`] | `collection:lightLink`: lights that illuminate nothing      |
+//! | [`passes`]     | the active `RenderPass`: `matte` holdouts, `cameraVisibility` |
 //! | [`materials`]  | binding resolution, the material cache, shader dispatch      |
 //! | [`preview`]    | `UsdPreviewSurface` + `UsdUVTexture` networks                |
 //! | [`mtlx_network`] | inline MaterialX (`ND_*`) networks → crust-mtlx documents  |
@@ -42,6 +43,7 @@ use std::time::{Duration, Instant};
 use glam::{Mat4 as GMat4, Vec3};
 use tracing::{debug, info};
 
+use crate::aov::AovSource;
 use crate::camera::Camera;
 use crate::light::LightList;
 use crate::live::{LightOrigin, Provenance, StageFacts};
@@ -80,6 +82,7 @@ mod live;
 mod materials;
 mod mesh;
 mod mtlx_network;
+mod passes;
 mod preview;
 mod products;
 mod settings;
@@ -94,7 +97,9 @@ use attrs::{
     custom_token, prim_value, resolve_adaptive_max_level, resolve_subdiv_edge_length,
     resolve_subdiv_level,
 };
-use camera::{RenderCamera, build_camera, screen_projection};
+use camera::{
+    RenderCamera, Shutter, ShutterOffsets, build_camera, screen_projection, shutter_offsets,
+};
 use implicit::{ImplicitPolicy, Shape, undisplaced};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
 use light_links::LightLinks;
@@ -107,18 +112,22 @@ pub(crate) use live::{prim_frames, rebuild};
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{
     MeshArena, MeshPlace, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes, place_mesh_source,
+    with_constant_primvars,
 };
+use passes::ActivePass;
+pub use passes::PassSummary;
 use products::import_render_products;
 use settings::{
     CameraChoice, CameraPick, check_time_range, dome_light_camera_visibility,
     enable_exposure_compensation, import_render_settings, pick_camera, render_settings_color_space,
-    render_settings_subdiv_edge_length, render_settings_subdiv_level,
+    render_settings_dicing_camera, render_settings_subdiv_edge_length,
+    render_settings_subdiv_level,
 };
 use shapes::{curve_segments, emit_curves, emit_sphere, nurbs_curve_segments};
 use strands::StrandRequest;
 use time::EvalTimeScope;
 use volume::emit_volume;
-use xform::compose_with_parent;
+use xform::{Timing, TransformMotion, compose_with_parent};
 
 /// `Stage::prim` for a path that is already an `sdf::Path`.
 ///
@@ -264,10 +273,14 @@ struct ImportCtx<'a> {
     /// Receivers seen and lights whose `collection:lightLink` restricts
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
+    /// The active render pass, decided at dispatch (see [`passes`]).
+    pass: Option<ActivePass>,
     /// Each light met, by prim path: where it went in the light list and the
     /// geometry it emitted ([`crate::live::Provenance`]).
     light_origins: Vec<(String, LightOrigin)>,
     settings: RenderSettings,
+    /// How the cameras' apertures are conformed to the image.
+    framing: products::Framing,
     /// The stage file, for resolving asset paths against its directory.
     stage_path: &'a Path,
     /// The whole stage with payloads unloaded, where light collections are
@@ -285,11 +298,15 @@ struct ImportCtx<'a> {
 /// into `ctx`. Takes the stage by reference and keeps nothing borrowed
 /// from it, so the caller may drop the stage afterwards and walk another.
 fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx) {
+    if let Some(pass) = &mut ctx.pass {
+        pass.begin_chunk(stage);
+    }
     // The flag is "under an invisible ancestor", which hides everything but
-    // cameras — see below.
-    let mut stack: Vec<(Prim, GMat4, bool)> = vec![(root, root_xf, false)];
+    // cameras — see below. The timing is the parent's over the shutter
+    // ([`TransformMotion`]).
+    let mut stack: Vec<(Prim, GMat4, bool, Timing)> = vec![(root, root_xf, false, Timing::Static)];
 
-    while let Some((prim, parent_world, parent_hidden)) = stack.pop() {
+    while let Some((prim, parent_world, parent_hidden, parent_timing)) = stack.pop() {
         let pruned = prune_reason(&prim, WalkScope::Stage);
         if let Some(reason) = pruned.filter(|&r| r != Prune::Invisible) {
             debug!("Skipping {reason} prim {}", prim.path());
@@ -315,11 +332,17 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             visit_camera(stage, &prim, ctx);
             if let Ok(children) = prim.children() {
                 for child in children {
-                    stack.push((child, this_world, true));
+                    stack.push((child, this_world, true, Timing::Static));
                 }
             }
             continue;
         }
+
+        let timing = ctx
+            .caches
+            .motion
+            .timing(&prim, &parent_timing, parent_world, this_world);
+        let span = ctx.caches.motion.span(this_world, &timing);
 
         // What this prim emits, for the light links: ids are handed out in
         // traversal order, so the range recorded after dispatch is exactly
@@ -336,16 +359,16 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         if prim.is_instance().unwrap_or(false) {
             match prim.prototype() {
                 Ok(Some(proto_path)) => {
+                    ctx.caches.motion.drawn(&prim, &timing);
                     emit_native_instance(
                         stage,
                         &mut ctx.world,
                         &prim,
                         &proto_path,
-                        this_world,
+                        span,
                         &mut ctx.caches,
                     );
-                    ctx.links
-                        .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
+                    saw(ctx, prim.path(), geoms_before..ctx.world.count(), 0..0);
                     continue;
                 }
                 _ => warning!(
@@ -365,66 +388,90 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // (`collect_proto_parts`), and a geometry prim no branch reads is
         // counted for `geom.unsupported_type`.
         if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
+            ctx.caches.motion.drawn(&prim, &timing);
             emit_point_instancer(
                 stage,
                 &mut ctx.world,
                 &prim,
                 &instancer,
-                this_world,
+                span,
                 &mut ctx.caches,
             );
-            ctx.links
-                .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
+            saw(ctx, prim.path(), geoms_before..ctx.world.count(), 0..0);
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
         } else if custom_token(&prim, "crust:volume:type").is_some() {
+            ctx.caches.motion.unmoved(&prim, &timing);
             emit_volume(&prim, this_world, &mut ctx.volumes, ctx.caches.working);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+            ctx.caches.motion.drawn(&prim, &timing);
             let mat = resolve_bound(stage, &prim, &mut ctx.caches);
-            emit_mesh(
+            let baked_moving = emit_mesh(
                 &mut ctx.world,
                 &prim,
                 &mesh,
-                this_world,
+                span,
                 mat,
                 &mut ctx.caches.meshes,
                 &mut ctx.pending_meshes,
             );
+            if baked_moving {
+                ctx.caches.motion.ignored.saw(&prim);
+            }
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
+            ctx.caches.motion.drawn(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            emit_sphere(&mut ctx.world, &prim, &sphere, this_world, mat);
+            emit_sphere(
+                &mut ctx.world,
+                &prim,
+                &sphere,
+                span,
+                mat,
+                ctx.caches.working,
+            );
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
+            ctx.caches.motion.unmoved(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let request = StrandRequest::of(&*mat, ctx.caches.working);
+            let request = StrandRequest::of(&*mat, ctx.caches.working, &ctx.caches.meshes.primvars);
             let imported = curve_segments(&prim, &curves, request.as_ref());
             emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Ok(Some(curves)) = UsdNurbsCurves::get(stage, prim.path().clone()) {
+            ctx.caches.motion.unmoved(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            let request = StrandRequest::of(&*mat, ctx.caches.working);
+            let request = StrandRequest::of(&*mat, ctx.caches.working, &ctx.caches.meshes.primvars);
             let imported = nurbs_curve_segments(&prim, &curves, request.as_ref());
             emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Some(shape) = Shape::read(&prim) {
+            ctx.caches.motion.drawn(&prim, &timing);
             let bound = undisplaced(&prim, resolve_bound(stage, &prim, &mut ctx.caches));
-            let src =
-                ctx.caches
-                    .implicit
-                    .source(prim.path(), &shape, MeshPlace::World(&this_world));
-            place_mesh_source(
+            let src = ctx
+                .caches
+                .implicit
+                .source(prim.path(), &shape, MeshPlace::World(&span.open));
+            let src = with_constant_primvars(src, &prim, &*bound.material, ctx.caches.working);
+            let baked_moving = place_mesh_source(
                 &mut ctx.world,
                 &prim,
                 src,
-                this_world,
+                span,
                 bound,
                 &mut ctx.caches.meshes,
                 &mut ctx.pending_meshes,
             );
+            if baked_moving {
+                ctx.caches.motion.ignored.saw(&prim);
+            }
         } else if visit_camera(stage, &prim, ctx) {
-            // Recorded (and built, if it is the one) inside the call.
-        } else if !emit_light(stage, ctx, &prim, this_world) {
+            // Recorded (and built, if it is the one) inside the call. A
+            // moving camera is out of scope: it renders from the frame.
+        } else if emit_light(stage, ctx, &prim, this_world) {
+            ctx.caches.motion.unmoved(&prim, &timing);
+        } else {
             ctx.caches.unread.saw(&prim);
         }
-        ctx.links.saw(
+        saw(
+            ctx,
             prim.path(),
             geoms_before..ctx.world.count(),
             vols_before..ctx.volumes.len(),
@@ -434,6 +481,9 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         if ctx.lights.count() > lights_before {
             ctx.links
                 .light_added(ctx.index.as_ref(), stage, prim.path(), lights_before);
+            if let Some(pass) = &ctx.pass {
+                pass.light_added(prim.path(), lights_before, &mut ctx.lights);
+            }
             ctx.light_origins.push((
                 prim.path().to_string(),
                 LightOrigin {
@@ -447,10 +497,25 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // per-prim dispatch above will pick up any typed schemas encountered.
         if let Ok(children) = prim.children() {
             for child in children {
-                stack.push((child, this_world, false));
+                stack.push((child, this_world, false, timing.clone()));
             }
         }
     }
+}
+
+/// Records that the prim at `path` emitted the geometries `geoms` and the
+/// volume regions `vols`: for the light links, which judge them after the
+/// last chunk, and the active pass, which flags them now.
+fn saw(
+    ctx: &mut ImportCtx,
+    path: &sdf::Path,
+    geoms: std::ops::Range<usize>,
+    vols: std::ops::Range<usize>,
+) {
+    if let Some(pass) = &mut ctx.pass {
+        pass.saw(path, geoms.clone(), vols.clone(), &mut ctx.world);
+    }
+    ctx.links.saw(path, geoms, vols);
 }
 
 /// Emits `prim` if it is a UsdLux light — the one dispatch the traversal
@@ -495,7 +560,7 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
     // camera is, and kept aside as the fallback while a named one
     // might still turn up later in the traversal.
     if ctx.camera.is_none() && (is_named || ctx.first_camera.is_none()) {
-        match build_camera(stage, prim, &ctx.settings) {
+        match build_camera(stage, prim, &ctx.settings, ctx.framing) {
             Some(c) if is_named || named.is_none() => {
                 debug!("Imported USD camera at {}", prim.path());
                 ctx.camera = Some((c, prim.path().clone()));
@@ -711,6 +776,9 @@ struct ValidOptions {
     time: Option<f64>,
     camera: Option<sdf::Path>,
     working: Option<crate::color::Space>,
+    /// The active render pass ([`passes`]), checked to be a prim path; that
+    /// it is a `RenderPass` is checked on the stage, by [`read_index`].
+    pass: Option<sdf::Path>,
 }
 
 impl ValidOptions {
@@ -740,10 +808,23 @@ impl ValidOptions {
             Some(name) => Some(crate::color::working_space(name)?),
             None => None,
         };
+        let pass = match &options.pass {
+            Some(p) => Some(
+                sdf::path(p)
+                    .ok()
+                    .filter(|p| p.is_abs() && p.is_prim() && !p.is_abs_root())
+                    .ok_or_else(|| crate::Error::PassNotFound {
+                        path: p.clone(),
+                        why: "not an absolute prim path such as /Render/Passes/char".into(),
+                    })?,
+            ),
+            None => None,
+        };
         Ok(ValidOptions {
             time,
             camera: requested_camera,
             working: host_working,
+            pass,
         })
     }
 }
@@ -784,7 +865,13 @@ fn traverse_stage(
             // running totals are what say whether it is doing its job.
             let chunk_start = Instant::now();
             debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
-            let stage = open_stage(path, path_str, Some(chunk.clone()))?;
+            // The active pass's collections are read on each chunk's stage
+            // (see `passes`), so the pass prim is composed in every one.
+            let mask = match &ctx.pass {
+                Some(pass) => vec![chunk.clone(), pass.path().clone()],
+                None => vec![chunk.clone()],
+            };
+            let stage = open_stage_masked(path, path_str, Some(mask))?;
             if ctx.caches.meshes.subdiv.adaptive.is_some() {
                 count_placements(&stage, &mut ctx.caches);
             }
@@ -872,10 +959,20 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
                 CameraMissing,
                 "USD stage has no UsdGeomCamera — falling back to world::get_settings camera"
             );
+            let camera = crate::world::get_settings().0;
+            let camera = if ctx.settings.depth_of_field() {
+                camera
+            } else {
+                camera.pinhole()
+            };
             (
                 RenderCamera {
-                    camera: crate::world::get_settings().0,
+                    camera,
                     exposure_scale: 1.0,
+                    refused_meters_per_unit: None,
+                    shutter: ShutterOffsets::default(),
+                    unhonoured_pixel_aspect: None,
+                    lens: None,
                 },
                 None,
             )
@@ -884,8 +981,9 @@ fn resolve_camera(ctx: &mut ImportCtx) -> Result<(RenderCamera, Option<String>),
 }
 
 /// The subdivision and displacement counters the traversal accumulated, into
-/// `--stats`.
-fn record_geometry_counters(meshes: &MeshArena, camera: &Camera, stats: &mut RenderStats) {
+/// `--stats`. `dicer` is the render camera when it is the camera adaptive
+/// subdivision read, `None` when a `crust:dicingCamera` dices.
+fn record_geometry_counters(meshes: &MeshArena, dicer: Option<&Camera>, stats: &mut RenderStats) {
     if meshes.subdiv.adaptive.is_some() {
         let [interior, stitched] = meshes.subdiv.quality;
         debug!(
@@ -898,12 +996,15 @@ fn record_geometry_counters(meshes: &MeshArena, camera: &Camera, stats: &mut Ren
         // may read it off a different stage (the unloaded index while
         // streaming); the two must still agree, or every level was chosen for
         // a viewpoint the render does not use.
-        debug_assert!(
-            (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
-            "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
-            rate.eye,
-            camera.origin()
-        );
+        if let Some(camera) = dicer {
+            debug_assert!(
+                (Vec3::from(camera.origin()) - rate.eye).length()
+                    <= 1e-4 * rate.eye.length().max(1.0),
+                "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
+                rate.eye,
+                camera.origin()
+            );
+        }
         stats.subdivision = SubdivisionCounters {
             adaptive: Some((rate.target, rate.max)),
             levels: meshes.subdiv.levels.clone(),
@@ -926,11 +1027,8 @@ pub(crate) fn load_scene(
     assets: &dyn AssetLoader,
     options: &crate::UsdImportOptions,
 ) -> Result<Scene, crate::Error> {
-    let ValidOptions {
-        time,
-        camera: requested_camera,
-        working: host_working,
-    } = ValidOptions::check(options)?;
+    let valid = ValidOptions::check(options)?;
+    let time = valid.time;
     let _time_scope = EvalTimeScope::enter(time);
     // Every coded warning this import raises, on this thread, is recorded
     // here and handed back on the scene.
@@ -971,18 +1069,12 @@ pub(crate) fn load_scene(
         wanted_camera,
         subdiv,
         projection,
-    } = read_index(
-        &index,
-        path,
-        path_str,
-        options,
-        &ValidOptions {
-            time,
-            camera: requested_camera,
-            working: host_working,
-        },
-    )?;
-    let render_settings = settings::render_settings_path(&index).map(|p| p.to_string());
+        dicing,
+        shutter,
+    } = read_index(&index, path, path_str, options, &valid)?;
+    let pass = valid.pass.as_ref();
+    let render_settings = settings::render_settings_path(&index, pass).map(|p| p.to_string());
+    let settings_prim = settings::read_settings_prim(&index, pass).map(|p| p.to_string());
     let chunks = stream_roots(&index);
     let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
         subtree_roots(&index)
@@ -998,6 +1090,8 @@ pub(crate) fn load_scene(
     // lazily, and only the lights' prims are ever asked for.
     let open_elapsed = open_start.elapsed();
     let open_mem = MemorySample::now();
+    let asks_time = asks_about_time(&shutter, &products);
+    let frame_posed = frame_pose(&shutter, &products);
 
     let mut ctx = ImportCtx {
         world: WorldBuilder::new(),
@@ -1018,17 +1112,28 @@ pub(crate) fn load_scene(
         caches: ImportCaches {
             subtrees,
             implicit: ImplicitPolicy::new(projection),
+            motion: TransformMotion::new(
+                shutter.interval,
+                shutter.offsets.open == 0.0,
+                frame_posed,
+                asks_time,
+            ),
             ..ImportCaches::new(assets, path, subdiv, working)
         },
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
+        pass: pass.map(|p| ActivePass::read(&index, p)),
         light_origins: Vec::new(),
         settings,
+        framing: products.framing,
         stage_path: path,
         index: Some(index),
         assets,
         layers: Default::default(),
     };
+    // The primvars the render vars read, resolved on the index stage before
+    // any geometry: every mesh read from here keeps exactly these.
+    ctx.caches.meshes.primvars = products.primvars.clone();
 
     let traverse_start = Instant::now();
     traverse_stage(
@@ -1047,6 +1152,11 @@ pub(crate) fn load_scene(
     let asset_time = ctx.caches.asset_time;
     let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
     ctx.caches.unread.report();
+    report_unmoved(
+        &ctx.caches.motion,
+        &shutter,
+        products.request.asks_for(AovSource::MotionVector),
+    );
     let traverse_mem = MemorySample::now();
     debug!(
         "Traversal done in {:?}, plus {:?} of host asset decoding taken out of it and \
@@ -1058,13 +1168,16 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
-    let (
-        RenderCamera {
-            camera,
-            exposure_scale,
-        },
-        camera_path,
-    ) = resolve_camera(&mut ctx)?;
+    let (render_camera, camera_path) = resolve_camera(&mut ctx)?;
+    render_camera.warn_lens_units(camera_path.as_deref());
+    render_camera.warn_framing(camera_path.as_deref());
+    check_shutter_camera(&shutter, camera_path.as_deref(), render_camera.shutter);
+    let RenderCamera {
+        camera,
+        exposure_scale,
+        lens,
+        ..
+    } = render_camera;
     let settings = apply_exposure(
         settings,
         exposure_compensation,
@@ -1078,6 +1191,7 @@ pub(crate) fn load_scene(
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
     let geometry_runs = ctx.links.geometry_runs();
+    let volume_paths = ctx.links.volume_paths();
     let remap =
         std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
     // The provenance names each light by its place in the list as the links
@@ -1090,8 +1204,10 @@ pub(crate) fn load_scene(
             }
             None => false,
         });
+    let mut root_stack = (Vec::new(), None);
     if let Some(index) = ctx.index.take() {
         ctx.layers.extend(index.layer_identifiers());
+        root_stack = (index.layer_stack(), Some(invisible_overrides(&index)));
     }
     if !domes_seen_by_camera {
         debug!(
@@ -1100,7 +1216,8 @@ pub(crate) fn load_scene(
         ctx.lights.hide_infinite_from_camera();
     }
 
-    record_geometry_counters(&ctx.caches.meshes, &camera, &mut stats);
+    let dicer = dicing.is_none().then_some(&camera);
+    record_geometry_counters(&ctx.caches.meshes, dicer, &mut stats);
     let implicit = &ctx.caches.implicit;
     if implicit.shapes > 0 {
         debug!(
@@ -1148,6 +1265,7 @@ pub(crate) fn load_scene(
         unique: committed.unique_primitive_breakdown().into(),
         footprint: committed.memory_footprint(),
         strand_tables_bytes: committed.strand_table_bytes(),
+        primvar_tables_bytes: committed.primvar_table_bytes(),
         lights: ctx.lights.count(),
         volumes: ctx.volumes.len(),
     };
@@ -1161,11 +1279,21 @@ pub(crate) fn load_scene(
     scene.time = time;
     scene.warnings = warning_scope.finish();
     scene.layers = layer_files(&ctx.layers, path);
+    scene.pass = ctx.pass.as_ref().map(ActivePass::summary);
+    scene.settings_prim = settings_prim;
+    scene.source = crate::scene::Source {
+        lens,
+        depth_of_field: scene.camera.has_depth_of_field(),
+        motion_blur: scene.settings.motion_blur() && shutter.interval.is_some(),
+        layer_stack: stack_files(&root_stack.0, path),
+        invisible_overrides: root_stack.1,
+    };
     scene.provenance = Some(Provenance {
         materials: ctx.caches.materials.origins(&scene.world),
         material_reads: ctx.caches.materials.reads(),
         lights: ctx.light_origins.into_iter().collect(),
         geometry: geometry_runs,
+        volumes: volume_paths,
         stage: StageFacts {
             options: options.clone(),
             render_settings,
@@ -1174,6 +1302,7 @@ pub(crate) fn load_scene(
             domes_seen_by_camera,
             working: Some(working),
             camera: scene.camera_path.clone(),
+            dicing: dicing.map(|p| p.to_string()),
             on_screen_shapes: ctx
                 .caches
                 .implicit
@@ -1181,6 +1310,8 @@ pub(crate) fn load_scene(
                 .then(|| ctx.caches.implicit.projection.map(|p| p.key()))
                 .flatten(),
             unsized_shapes: ctx.caches.implicit.fixed_unshared,
+            primvars: ctx.caches.meshes.primvars.key(),
+            shutter: shutter.key(asks_time, frame_posed),
         },
     });
     Ok(scene)
@@ -1214,6 +1345,61 @@ fn layer_files(
     files.into_iter().collect()
 }
 
+/// The files of the root layer stack `identifiers`, in their order: each
+/// mapped as [`layer_files`] maps it and made absolute against the working
+/// directory (links not resolved), an anonymous layer left out, and a
+/// package met twice kept once, where it is strongest.
+fn stack_files(identifiers: &[String], root: &Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for id in identifiers {
+        let one = std::collections::BTreeSet::from([id.clone()]);
+        for file in layer_files(&one, root) {
+            // Absolute, so the same layer stamps the same path whatever the
+            // working directory and however the stage path was typed.
+            let file = std::path::absolute(&file).unwrap_or(file);
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The prims the strongest layer of `stage`'s root layer stack — its session
+/// layer when it has one, else its root layer — hides with an `over`: a
+/// `visibility` spec on an `over` prim whose default or a time sample is
+/// `invisible`. What a session or override layer hid of the scene beneath
+/// it; a prim the layer itself defines invisible is the scene's own.
+pub(super) fn invisible_overrides(stage: &Stage) -> u32 {
+    let strongest = stage.session_layer().unwrap_or_else(|| stage.root_layer());
+    let data = strongest.data();
+    let invisible = |v: &sdf::Value| matches!(v, sdf::Value::Token(t) if t.as_str() == "invisible");
+    let mut count = 0u32;
+    for path in data.spec_paths() {
+        if !path.is_property() || !path.as_str().ends_with(".visibility") {
+            continue;
+        }
+        let prim = path.prim_path();
+        let is_over = matches!(
+            data.try_field(&prim, "specifier"),
+            Ok(Some(v)) if matches!(&*v, sdf::Value::Specifier(sdf::Specifier::Over))
+        );
+        if !is_over {
+            continue;
+        }
+        let default = matches!(data.try_field(&path, "default"), Ok(Some(v)) if invisible(&v));
+        let sampled = matches!(
+            data.try_field(&path, "timeSamples"),
+            Ok(Some(v)) if matches!(&*v, sdf::Value::TimeSamples(samples)
+                if samples.iter().any(|(_, v)| invisible(v)))
+        );
+        if default || sampled {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
 /// What the import reads before it traverses anything: the index stage's
 /// render settings and products, and the stage-wide choices made from them.
 /// The settings carry the products' resolution, region and motion blur, and
@@ -1226,8 +1412,13 @@ struct IndexRead {
     working: crate::color::Space,
     wanted_camera: Option<CameraChoice>,
     subdiv: SubdivPolicy,
-    /// The render camera's projection, when it was named (see [`subdiv_policy`]).
+    /// The projection tessellation reads — the dicing camera's — when a
+    /// camera was named (see [`subdiv_policy`]).
     projection: Option<ScreenProjection>,
+    /// `crust:dicingCamera`'s target, when it is a camera ([`Dicer`]).
+    dicing: Option<sdf::Path>,
+    /// The interval motion is measured over ([`read_camera_ahead`]).
+    shutter: Shutter,
 }
 
 /// Reads [`IndexRead`] off the payload-free `index` stage: once by
@@ -1240,11 +1431,18 @@ fn read_index(
     options: &crate::UsdImportOptions,
     valid: &ValidOptions,
 ) -> Result<IndexRead, crate::Error> {
+    // The active pass first: it may choose the settings prim every read
+    // below goes through.
+    let pass = valid.pass.as_ref();
+    if let Some(p) = pass {
+        settings::check_pass(index, p)?;
+        debug!("Rendering pass {p}");
+    }
     // Render settings come first — the camera importer needs the aspect ratio.
-    let mut settings = import_render_settings(index);
+    let mut settings = import_render_settings(index, pass);
     // The products the render writes. The first one's camera and resolution
     // are the render's: the settings' own unless that product overrides them.
-    let products = import_render_products(index);
+    let products = import_render_products(index, pass);
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);
     }
@@ -1259,39 +1457,49 @@ fn read_index(
             debug!("dataWindowNDC: rendering region {region} of the {w}x{h} frame");
         }
     }
-    settings = settings.with_motion_blur(products.motion_blur);
-    let domes_seen_by_camera = dome_light_camera_visibility(index);
-    let exposure_compensation = enable_exposure_compensation(index);
+    settings = settings
+        .with_motion_blur(products.motion_blur)
+        .with_depth_of_field(products.depth_of_field);
+    let domes_seen_by_camera = dome_light_camera_visibility(index, pass);
+    let exposure_compensation = enable_exposure_compensation(index, pass);
     // The working colour space, before any colour is read: every texture
     // request and authored colour is converted into it.
     let working = valid
         .working
-        .unwrap_or_else(|| render_settings_color_space(index));
+        .unwrap_or_else(|| render_settings_color_space(index, pass));
     debug!("Rendering in {} ({})", working.label(), working.name());
     // Geometry, not tracer, settings: every mesh whose scheme is not `none`
     // is refined to this one level, so it must be known before the traversal.
     let subdiv_level = resolve_subdiv_level(
         options.subdivision_level,
-        render_settings_subdiv_level(index),
+        render_settings_subdiv_level(index, pass),
     );
     debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
     // Which camera to render through: the host's explicit choice, else the
     // stage's own `RenderSettings.camera`. Decided here, on the index stage,
     // because the traversal needs it before it meets any camera.
     let wanted_camera =
-        settings::wanted_camera(valid.camera.clone(), products.camera.clone(), index);
+        settings::wanted_camera(valid.camera.clone(), products.camera.clone(), index, pass);
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
     }
-    let (subdiv, projection) = subdiv_policy(
+    // The camera tessellation reads: `crust:dicingCamera` when it names one,
+    // else the render camera. Products do not override it.
+    let (dicer, shutter) = read_camera_ahead(
         index,
         path,
         path_str,
-        options,
-        subdiv_level,
         wanted_camera.as_ref(),
+        render_settings_dicing_camera(index, pass).as_ref(),
         &settings,
+        products.framing,
+        valid.time,
     )?;
+    if let Some((open, close)) = shutter.interval {
+        debug!("Motion is measured over time codes {open} .. {close}");
+    }
+    let dicing = dicer.authored.then(|| dicer.path.clone()).flatten();
+    let (subdiv, projection) = subdiv_policy(index, options, pass, subdiv_level, dicer);
     if let Some(t) = valid.time {
         // The sampler's frame seed follows the frame being rendered, so an
         // image sequence gets independent noise per frame instead of one
@@ -1310,6 +1518,8 @@ fn read_index(
         wanted_camera,
         subdiv,
         projection,
+        dicing,
+        shutter,
     })
 }
 
@@ -1341,59 +1551,287 @@ fn apply_exposure(
     }
 }
 
-/// How this load refines subdivision surfaces — one `subdiv_level` for every
-/// mesh, or, when a target edge length is set, adaptively from the render
-/// camera — and the camera's [`ScreenProjection`], which also sizes implicit
-/// shapes ([`implicit::ImplicitPolicy`]).
+/// The camera tessellation reads, as [`read_camera_ahead`] read it: the
+/// dicing camera.
+struct Dicer {
+    /// `crust:dicingCamera`'s target when it is a camera, else the render
+    /// camera's path when one is named; `None` when neither is.
+    path: Option<sdf::Path>,
+    /// Its screen projection; `None` when `path` is not a camera on the stage.
+    projection: Option<camera::ScreenProjection>,
+    /// Whether `path` is `crust:dicingCamera`'s target.
+    authored: bool,
+}
+
+/// The cameras as the import reads them before the traversal: the dicing
+/// camera's screen projection ([`Dicer`]), and the render camera's shutter.
 ///
-/// The projection is read whenever the camera is named, with or without an
-/// edge length: from the index stage when the camera is composed there, else
-/// from a stage population-masked to its path with payloads loaded (a shot
-/// camera under a payload is the production case). Without a named camera, or
-/// when the path is not a camera, there is none: adaptive mode then warns once
-/// and the uniform level applies, and implicit shapes take their fixed count,
-/// silently. Finding the first camera would take a traversal of its own.
-fn subdiv_policy(
+/// A named camera — the render camera, or the `dicing` target — is read from
+/// the index stage when it is composed there, else from a stage
+/// population-masked to its path with payloads loaded (a shot camera under a
+/// payload is the production case). A `dicing` target that is not a camera
+/// warns, and the render camera dices. With no render camera named, or a named
+/// path that is not a camera, the shutter comes from the first camera of a
+/// walk over the index stage ([`first_camera`]), and without a dicing camera
+/// there is no projection; the traversal may still settle on another camera,
+/// which [`check_shutter_camera`] reports.
+#[allow(clippy::too_many_arguments)]
+fn read_camera_ahead(
     index: &Stage,
     path: &Path,
     path_str: &str,
-    options: &crate::UsdImportOptions,
-    subdiv_level: u32,
     wanted_camera: Option<&CameraChoice>,
+    dicing: Option<&sdf::Path>,
     settings: &RenderSettings,
-) -> Result<(SubdivPolicy, Option<ScreenProjection>), crate::Error> {
+    framing: products::Framing,
+    frame: Option<f64>,
+) -> Result<(Dicer, Shutter), crate::Error> {
+    let read_on = |stage: &Stage, at: &sdf::Path| {
+        let prim = prim_at(stage, at.clone());
+        shutter_offsets(stage, &prim)
+            .map(|s| (screen_projection(stage, &prim, settings, framing), s))
+    };
+    let read = |camera_path: &sdf::Path| -> Result<_, crate::Error> {
+        Ok(match read_on(index, camera_path) {
+            Some(r) => Some(r),
+            None => {
+                let started = Instant::now();
+                let stage = open_stage(path, path_str, Some(camera_path.clone()))?;
+                let r = read_on(&stage, camera_path);
+                release_stage(stage, false);
+                debug!(
+                    "Read {camera_path} ahead of the traversal from a stage masked to it in {:?}",
+                    started.elapsed()
+                );
+                r
+            }
+        })
+    };
+    let named = match wanted_camera {
+        Some(choice) => read(choice.path())?.map(|r| (choice.path().clone(), r)),
+        None => None,
+    };
+    // Only a prim path names a camera: a property path would be read as its
+    // prim (the schema lookup takes the prim part) and cannot be masked to.
+    let diced = match dicing {
+        Some(target) => match target
+            .is_prim()
+            .then(|| read(target))
+            .transpose()?
+            .flatten()
+        {
+            Some((projection, _)) => Some(Dicer {
+                path: Some(target.clone()),
+                projection,
+                authored: true,
+            }),
+            None => {
+                warning!(
+                    CameraDicingNotCamera,
+                    at = target,
+                    "crust:dicingCamera targets {target}, which is not a camera on this stage — \
+                     tessellation reads the render camera"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    let shutter = match &named {
+        Some((camera_path, (_, offsets))) => {
+            Shutter::new(Some(camera_path.clone()), *offsets, frame)
+        }
+        None => {
+            let first = first_camera(index);
+            let offsets = first
+                .as_ref()
+                .and_then(|p| shutter_offsets(index, &prim_at(index, p.clone())))
+                .unwrap_or_default();
+            Shutter::new(first, offsets, frame)
+        }
+    };
+    let dicer = diced.unwrap_or_else(|| Dicer {
+        path: wanted_camera.map(|c| c.path().clone()),
+        projection: named.and_then(|(_, (projection, _))| projection),
+        authored: false,
+    });
+    Ok((dicer, shutter))
+}
+
+/// The first camera the traversal would meet, on the payload-free `index`:
+/// the same walk order (a stack, so the last child first), the same pruning,
+/// an invisible subtree still walked, instances and `PointInstancer`s not
+/// entered, and one top-level subtree after another when the import streams.
+/// A camera inside an unloaded payload is not seen.
+fn first_camera(index: &Stage) -> Option<sdf::Path> {
+    let chunks = stream_roots(index);
+    let roots = if chunks.is_empty() {
+        vec![sdf::Path::abs_root()]
+    } else {
+        chunks
+    };
+    for root in roots {
+        let mut stack = vec![(prim_at(index, root), false)];
+        while let Some((prim, parent_hidden)) = stack.pop() {
+            let pruned = prune_reason(&prim, WalkScope::Stage);
+            if pruned.is_some_and(|r| r != Prune::Invisible) {
+                continue;
+            }
+            let hidden = parent_hidden || pruned == Some(Prune::Invisible);
+            if prim.is_instance().unwrap_or(false) {
+                continue;
+            }
+            if UsdCamera::get(index, prim.path().clone())
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                return Some(prim.path().clone());
+            }
+            if !hidden
+                && PointInstancer::get(index, prim.path().clone())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                continue;
+            }
+            if let Ok(children) = prim.children() {
+                stack.extend(children.into_iter().map(|c| (c, hidden)));
+            }
+        }
+    }
+    None
+}
+
+/// Whether the import asks prims whether their transform varies over time:
+/// when the shutter's offsets open an interval, or a `motionvector` var
+/// would report zero for what does ([`TransformMotion`]).
+fn asks_about_time(shutter: &Shutter, products: &products::RenderProducts) -> bool {
+    shutter.offsets.opens() || products.request.asks_for(AovSource::MotionVector)
+}
+
+/// Whether moving placements are posed at the frame rather than at shutter
+/// open: `disableMotionBlur` (not `instantaneousShutter` alone) over a
+/// shutter that opens an interval away from the frame. Opening at the frame,
+/// the two poses are one.
+fn frame_pose(shutter: &Shutter, products: &products::RenderProducts) -> bool {
+    products.sharp_at_frame
+        && !products.motion_blur
+        && shutter.interval.is_some()
+        && shutter.offsets.open != 0.0
+}
+
+/// The summarised warnings for time-varying transforms the render does not
+/// move ([`TransformMotion`]): over a shutter with no frame to place it at,
+/// over an instantaneous shutter while a `motionvector` var is requested, and
+/// on prims that get no motion whatever the shutter.
+fn report_unmoved(motion: &TransformMotion, shutter: &Shutter, motion_vectors: bool) {
+    let n = motion.varying.count;
+    let first = motion.varying.first.as_deref().unwrap_or("");
+    let prims = if n == 1 { "prim's" } else { "prims'" };
+    if n > 0 && shutter.needs_frame() {
+        let camera = shutter
+            .camera
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        warning!(
+            TimeMotionNeedsFrame,
+            at = first,
+            "{camera} opens its shutter ({} .. {}), but no frame was given: {n} drawn {prims} \
+             time-sampled transforms are not evaluated over it and render sharp (the first at \
+             {first}). Render a frame with -f",
+            shutter.offsets.open,
+            shutter.offsets.close
+        );
+    } else if n > 0 && motion_vectors && !shutter.offsets.opens() {
+        warning!(
+            CameraShutterInstantaneous,
+            at = first,
+            "A motionvector var is requested, but the camera's shutter is instantaneous: the \
+             time-sampled transforms of {n} drawn {prims} move nothing and their vectors read \
+             zero (the first at {first}). Author the camera's shutter:open / shutter:close to \
+             measure them"
+        );
+    }
+    let n = motion.ignored.count;
+    if n > 0 {
+        let first = motion.ignored.first.as_deref().unwrap_or("");
+        let one = n == 1;
+        warning!(
+            XformMotionIgnored,
+            at = first,
+            "{n} prim{} whose transform moves over the shutter get{} no motion (curves, lights, \
+             volumes, prims inside a prototype and baked non-invertible meshes are not moved); \
+             {} render{} at shutter open (the first at {first})",
+            if one { "" } else { "s" },
+            if one { "s" } else { "" },
+            if one { "it" } else { "they" },
+            if one { "s" } else { "" },
+        );
+    }
+}
+
+/// Warns when the camera the traversal settled on (`rendered`, `None` for the
+/// procedural one) is not the one the shutter was read from ahead of it, and
+/// the two shutters differ: motion was measured over the other camera's.
+fn check_shutter_camera(
+    shutter: &Shutter,
+    rendered: Option<&str>,
+    rendered_offsets: ShutterOffsets,
+) {
+    let read = shutter.camera.as_ref().map(ToString::to_string);
+    if read.as_deref() == rendered || shutter.offsets == rendered_offsets {
+        return;
+    }
+    let name = |c: Option<&str>| c.unwrap_or("the procedural camera").to_owned();
+    let (read, rendered) = (name(read.as_deref()), name(rendered));
+    let ShutterOffsets { open, close } = shutter.offsets;
+    warning!(
+        CameraShutterMismatch,
+        at = rendered.as_str(),
+        "The render goes through {rendered}, but motion was measured over the shutter of \
+         {read}, the camera found before the traversal ({open} .. {close}): name the camera \
+         with --camera or RenderSettings.camera to measure over its own"
+    );
+}
+
+/// How this load refines subdivision surfaces — one `subdiv_level` for every
+/// mesh, or, when a target edge length is set, adaptively from the dicing
+/// camera — and that camera's [`ScreenProjection`], which also sizes implicit
+/// shapes ([`implicit::ImplicitPolicy`]).
+///
+/// `dicer` is the dicing camera as [`read_camera_ahead`] read it. With no
+/// camera named, neither a dicing nor a render camera, or when the path is
+/// not a camera, there is no projection: adaptive mode then warns once and the
+/// uniform level applies, and implicit shapes take their fixed count,
+/// silently. Finding the first camera's projection would take a traversal of
+/// its own.
+fn subdiv_policy(
+    index: &Stage,
+    options: &crate::UsdImportOptions,
+    pass: Option<&sdf::Path>,
+    subdiv_level: u32,
+    dicer: Dicer,
+) -> (SubdivPolicy, Option<ScreenProjection>) {
     let target = resolve_subdiv_edge_length(
         options.subdivision_edge_length,
-        render_settings_subdiv_edge_length(index),
+        render_settings_subdiv_edge_length(index, pass),
     )
     .filter(|_| crate::config().subdiv);
-    let Some(choice) = wanted_camera else {
+    let Some(camera_path) = dicer.path else {
         if let Some(target) = target {
             warning!(
                 SubdivAdaptiveNeedsCamera,
                 "Adaptive subdivision ({target} px) needs the render camera before the stage \
-                 is read — name it with --camera or RenderSettings.camera. Using the uniform \
-                 level {subdiv_level}"
+                 is read — name it with --camera or RenderSettings.camera, or a dicing camera \
+                 with crust:dicingCamera. Using the uniform level {subdiv_level}"
             );
         }
-        return Ok((SubdivPolicy::new(subdiv_level), None));
+        return (SubdivPolicy::new(subdiv_level), None);
     };
-    let camera_path = choice.path().clone();
-    let camera = match screen_projection(index, &prim_at(index, camera_path.clone()), settings) {
-        Some(p) => Some(p),
-        None => {
-            let started = Instant::now();
-            let stage = open_stage(path, path_str, Some(camera_path.clone()))?;
-            let p = screen_projection(&stage, &prim_at(&stage, camera_path.clone()), settings);
-            release_stage(stage, false);
-            debug!(
-                "Read {camera_path} for the screen projection from a stage masked to it in {:?}",
-                started.elapsed()
-            );
-            p
-        }
-    };
-    let projection = camera.map(|p| ScreenProjection {
+    let projection = dicer.projection.map(|p| ScreenProjection {
         eye: p.eye,
         f_px: p.f_px,
         frustum: crate::config()
@@ -1401,7 +1839,7 @@ fn subdiv_policy(
             .then(|| Frustum::new(p.eye, p.forward, p.up, p.tan_v, p.tan_h)),
     });
     let Some(target) = target else {
-        return Ok((SubdivPolicy::new(subdiv_level), projection));
+        return (SubdivPolicy::new(subdiv_level), projection);
     };
     let Some(projection) = projection else {
         warning!(
@@ -1410,11 +1848,11 @@ fn subdiv_policy(
             "Adaptive subdivision ({target} px): {camera_path} is not a camera on this stage. \
              Using the uniform level {subdiv_level}"
         );
-        return Ok((SubdivPolicy::new(subdiv_level), None));
+        return (SubdivPolicy::new(subdiv_level), None);
     };
     let max = resolve_adaptive_max_level(
         options.subdivision_level,
-        render_settings_subdiv_level(index),
+        render_settings_subdiv_level(index, pass),
     );
     info!(
         "Adaptive subdivision: unshared cage edges refined to at most {target} px through \
@@ -1422,7 +1860,7 @@ fn subdiv_policy(
     );
     // Shared prototypes take the uniform level: the level setting when one is
     // given (it is also the ceiling above), else 0.
-    Ok((
+    (
         SubdivPolicy::adaptive(
             ScreenRate {
                 projection,
@@ -1432,7 +1870,7 @@ fn subdiv_policy(
             subdiv_level,
         ),
         Some(projection),
-    ))
+    )
 }
 
 // -----------------------------------------------------------------------
@@ -1508,6 +1946,8 @@ struct ImportCaches<'a> {
     implicit: ImplicitPolicy,
     /// Geometry prims neither walk reads, for `geom.unsupported_type`.
     unread: UnreadGprims,
+    /// How time-sampled transforms move over the shutter, and what did not.
+    motion: TransformMotion,
     /// The working colour space every texture and authored colour is
     /// converted into ([`crate::color`]).
     pub(super) working: crate::color::Space,
@@ -1590,7 +2030,10 @@ impl<'a> ImportCaches<'a> {
     ) -> Self {
         ImportCaches {
             materials: MaterialCache::default(),
-            meshes: MeshArena::new(subdiv),
+            meshes: MeshArena {
+                working,
+                ..MeshArena::new(subdiv)
+            },
             protos: HashMap::new(),
             groups: HashMap::new(),
             placements: HashMap::new(),
@@ -1604,6 +2047,7 @@ impl<'a> ImportCaches<'a> {
             failed_assets: std::collections::HashSet::new(),
             implicit: ImplicitPolicy::default(),
             unread: UnreadGprims::default(),
+            motion: TransformMotion::default(),
             working,
             luma: crate::color::luma(working),
         }
