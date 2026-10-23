@@ -364,7 +364,22 @@ fn a_panicking_material_during_a_render_is_an_error_and_the_next_apply_renders()
         };
         assert_eq!(status, Status::Panicked);
         assert!(last_error(session).contains("a test texture panicked"));
-        assert_eq!(CONVERGED(session), 0);
+        // Reported once: the host raises an error per failed poll and polls
+        // on every redraw. The stopped render counts as converged, so the
+        // host stops redrawing for it.
+        assert_eq!(
+            SNAPSHOT(
+                session,
+                rgba.as_mut_ptr(),
+                w,
+                h,
+                0,
+                &mut generation,
+                std::ptr::null_mut()
+            ),
+            Status::Busy
+        );
+        assert_eq!(CONVERGED(session), 1);
         // The panic hook sent the panic to the host, not to stderr.
         assert!(
             lines

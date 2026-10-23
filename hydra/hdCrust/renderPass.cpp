@@ -63,6 +63,15 @@ HdCrustRenderPass::_Execute(HdRenderPassStateSharedPtr const &renderPassState,
         }
     }
     if (!color || color->GetWidth() == 0 || color->GetHeight() == 0) {
+        // Nothing crust renders without a color buffer: the other buffers
+        // keep their clear value, and converge, or the task controller
+        // waits on them forever.
+        for (HdRenderPassAovBinding const &aov : renderPassState->GetAovBindings()) {
+            if (auto *buffer = dynamic_cast<HdCrustRenderBuffer *>(aov.renderBuffer)) {
+                buffer->Clear(aov.aovName == HdAovTokens->depth ? 1.0f : 0.0f);
+                buffer->SetConverged(true);
+            }
+        }
         _converged = true;
         return;
     }

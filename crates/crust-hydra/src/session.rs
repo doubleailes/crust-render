@@ -19,6 +19,7 @@ use crust_render::session::{classify_saved, import_kept, loader, open_stage, upd
 use openusd::usd::Stage;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -94,12 +95,19 @@ struct Running {
     finished: Mutex<Option<Arc<Finished>>>,
     /// The message of a panic that ended the render.
     panicked: Mutex<Option<String>>,
+    /// Whether a poll returned the panic already.
+    reported: AtomicBool,
 }
 
 impl Running {
-    /// `Panicked` when a panic ended the render.
+    /// `Panicked` when a panic ended the render, to the first poll only:
+    /// the host raises an error per failed poll, and polls on every redraw.
+    /// Later ones are `Busy` until the next change renders again.
     fn check(&self) -> Result<(), Error> {
         match lock(&self.panicked).clone() {
+            Some(_) if self.reported.swap(true, Ordering::SeqCst) => Err(Error::Busy(
+                "the render panicked; the next change renders again".into(),
+            )),
             Some(message) => Err(Error::Panicked(message)),
             None => Ok(()),
         }
@@ -343,11 +351,16 @@ impl Session {
     }
 
     /// Whether the render returned complete: what Hydra's `IsConverged`
-    /// reports. A cancelled render never converges.
+    /// reports. A cancelled render never converges. One a panic ended has
+    /// stopped for good, and counts as converged so the host stops redrawing
+    /// for it; the viewport keeps its last image.
     pub fn converged(&self) -> bool {
-        self.running()
-            .and_then(|r| lock(&r.finished).clone())
-            .is_some_and(|f| f.outcome == RenderOutcome::Completed)
+        self.running().is_some_and(|r| {
+            lock(&r.panicked).is_some()
+                || lock(&r.finished)
+                    .as_ref()
+                    .is_some_and(|f| f.outcome == RenderOutcome::Completed)
+        })
     }
 
     /// The AOV named `name` (a RenderVar's layer name, as the products
@@ -498,6 +511,7 @@ impl State {
             aovs: scene.aovs.clone(),
             finished: Mutex::new(None),
             panicked: Mutex::new(None),
+            reported: AtomicBool::new(false),
         });
         *lock(&self.shared.running) = Some(running.clone());
         let renderer = scene.renderer.clone();

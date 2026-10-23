@@ -68,7 +68,14 @@ scene index. It reads prims through data sources (`HdMeshSchema`,
 `HdXformSchema`, `HdMaterialSchema`, `HdLightSchema`, `HdInstancerTopologySchema`,
 `HdPrimvarsSchema`, …):
 - `PrimsAdded`, `PrimsRemoved` and `PrimsDirtied` (with locators) drive the
-  layers;
+  layers, except for the host's own prims: usdview's task controller, free
+  camera and default light, all under `/_UsdImaging_<renderer>_<address>`
+  (`UsdImagingGLEngine::_ComputeControllerPath`). Only that prefix is the
+  host's; a stage root that merely starts with `_` (`/_World`) is written;
+- a prim removed or hidden is made inactive in the overs, and active again
+  when the next write of it finds it present and visible. A path reported
+  removed that the scene index still holds (a resync, removal and addition
+  in one sync) is not deactivated;
 - Rprim/Sprim `Sync` calls, if the 26.x interface still makes them, do
   nothing.
 
@@ -172,7 +179,7 @@ rewritten from scratch, which also compacts `edits.usda`.
 | implicit `cube`/`sphere`/`cylinder`/`cone`/`capsule` | the same schema type (crust tessellates as GeomUtil does) |
 | material network (`HdMaterialNetworkSchema`) | `Material` with `Shader` prims, `info:id` from the node type, connections from the network; terminals `surface`, `displacement`, `volume` and `mtlx:*` kept |
 | `HdMaterialBindingsSchema` (resolved), purpose `full`, else all-purpose | direct `material:binding` |
-| lights (`HdLightSchema` + params) | the UsdLux type, `inputs:*` from the params, shaping and textures kept |
+| lights (`HdLightSchema` + params) | the UsdLux type, `inputs:*` from the params, shaping and textures kept; a `domeLight` whose `domeOffset` puts its pole on +Z (a `DomeLight_1` with `poleAxis` `Z`, or `scene` on a Z-up stage) as `DomeLight_1` with `poleAxis = "Z"`, since a `DomeLight` ignores the pole |
 | instancer (`HdInstancerTopologySchema`, `instanceTransforms`) | `PointInstancer` with `protoIndices`, `positions`/`orientations`/`scales` decomposed from the matrices, prototypes as children |
 | camera sprims | `Camera` |
 | `HdRenderSettingsSchema` (if the stage has one) | read for its camera path, which becomes `crust:dicingCamera` |
@@ -199,7 +206,10 @@ rewritten from scratch, which also compacts `edits.usda`.
     with their Hydra matrices, which are relative to the instancer
     (verified on `instancing.usda`);
   - prims marked `instancedBy` are written only there, never at their own
-    path.
+    path;
+  - prototypes are copied 8 instancers deep, as far as crust's import
+    expands them (`MAX_INSTANCE_NESTING`); a deeper one is reported and left
+    unexpanded, rather than copied for the import to refuse.
   A shear in an instance transform cannot be factored, and is reported.
 - **Binding purpose.** The scene index keeps each purpose's binding apart
   and resolves none of them to all-purpose for this delegate (that is
@@ -433,6 +443,10 @@ panic = "unwind"
   `Panicked`.
 - **After a panic,** the session drops its scene, and the next `apply`
   re-imports from the layers (spec "Failures never take the host down").
+  The first poll returns `Panicked`; later ones are `Busy`, and the stopped
+  render counts as converged. The host raises an error per failed poll and
+  redraws while a render is unconverged, so reporting the panic on every
+  poll printed it on every redraw, forever.
 - **The panic hook** forwards to `log_cb` instead of printing to stderr.
 
 The `release` profile keeps `abort`. The cost of unwinding is measured once,

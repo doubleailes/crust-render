@@ -56,6 +56,12 @@ struct HdCrustStageSettings
     SdfPath camera;
 };
 
+/// Whether `path` is the host's rather than the stage's: UsdImagingGLEngine
+/// puts its task controller's prims, the free camera and the default light
+/// among them, under `/_UsdImaging_<renderer>_<address>`. A stage root that
+/// merely starts with `_` (`/_World`) is the stage's.
+bool HdCrustIsHostPath(SdfPath const &path);
+
 /// The active RenderSettings prim's (the scene globals', else
 /// `/Render/settings`) `crust:*` settings and camera; else the scene's
 /// primary camera.

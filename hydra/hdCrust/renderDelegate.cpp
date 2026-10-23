@@ -171,20 +171,12 @@ HdCrustRenderDelegate::SetTerminalSceneIndex(const HdSceneIndexBaseRefPtr &termi
 namespace {
 
 /// Whether a notice about `path` is about the scene rather than Hydra's own
-/// bookkeeping: the task controller's prims and the free camera live under
-/// root names starting with `_` (`/_UsdImaging...`), and a change to them (a
-/// tumble) must not rewrite the scene.
+/// bookkeeping: a change to the task controller's prims or the free camera
+/// (a tumble) must not rewrite the scene.
 bool
 _InScene(SdfPath const &path)
 {
-    if (path.IsAbsoluteRootPath()) {
-        return true;
-    }
-    SdfPath root = path;
-    while (root.GetPathElementCount() > 1) {
-        root = root.GetParentPath();
-    }
-    return !TfStringStartsWith(root.GetName(), "_");
+    return !HdCrustIsHostPath(path);
 }
 
 } // namespace
@@ -315,10 +307,15 @@ HdCrustRenderDelegate::_ApplyChanges(std::set<SdfPath> const &changed,
         return false;
     }
     for (SdfPath const &path : removed) {
-        HdCrustDeactivate(_edits.overs, path);
+        // A resync is a removal and an addition in one sync: a prim the
+        // scene index still has was written above, not removed.
+        if (!_sceneIndex->GetPrim(path).dataSource) {
+            HdCrustDeactivate(_edits.overs, path);
+        }
     }
     for (SdfPath const &path : hidden) {
-        if (_sceneLayer->GetPrimAtPath(path)) {
+        // A prim added since the scene was written is in the overs only.
+        if (_sceneLayer->GetPrimAtPath(path) || _edits.overs->GetPrimAtPath(path)) {
             HdCrustDeactivate(_edits.overs, path);
         }
     }
@@ -328,6 +325,11 @@ HdCrustRenderDelegate::_ApplyChanges(std::set<SdfPath> const &changed,
     _edits.settings = _CrustSettings(_stage);
     if (!_stage.camera.IsEmpty()) {
         _edits.dicingCamera = _stage.camera;
+    } else if (_edits.dicingCamera != HdCrustPaths::Dicing()) {
+        // The stage's camera is gone: the viewing camera dices from here,
+        // as a whole write would have it (D4).
+        _edits.dicingCamera = HdCrustPaths::Dicing();
+        _edits.dicingView = view;
     }
     std::string error;
     if (!HdCrustWriteEdits(_edits, _session->EditsPath(), &error)) {

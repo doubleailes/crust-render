@@ -140,7 +140,7 @@ at 16 spp, bit for bit.
 Adaptive subdivision and the segments of curved implicit shapes are diced for a
 camera. The delegate dices for the stage's render camera, the one its RenderSettings
 name. When the stage names none, it dices for the viewport camera as it was when the
-stage was loaded. Either way the dicing camera does not move when you tumble, so a
+stage was loaded, or, if you deactivate the render camera, as it was then. Either way the dicing camera does not move when you tumble, so a
 camera move never re-tessellates and never re-imports. Seen much closer than the
 dicing camera, diced geometry can look coarse. See
 [`crust:dicingCamera`](@/docs/usd/render-settings.md#crust-dicingcamera).
@@ -182,7 +182,8 @@ rest of the scene renders:
 
 crust's own import warnings reach the console too, once per import, with their code
 and prim (`crust: [material.fallback_default] …`). A panic inside crust is reported
-as an error. usdview keeps running, and the next change renders again.
+once, as an error. usdview keeps running and stops refining, and the next change
+renders again.
 
 ## Troubleshooting
 
@@ -220,7 +221,7 @@ install:
 ```bash
 cd hydra
 pixi run bash hdCrust/test/compare.sh install /tmp/compare          # 8 samples: delegate vs `crust render`, bitwise; and vs the original stage
-pixi run bash hdCrust/test/interaction.sh install /tmp/interact     # camera, edits, time, playback, settings, AOVs
+pixi run bash hdCrust/test/interaction.sh install /tmp/interact     # camera, edits (hide/show, remove/restore), time, playback, settings, AOVs, layer contents
 pixi run bash hdCrust/test/usdc_roundtrip.sh /tmp/roundtrip         # every sample through Pixar-written USDC
 ```
 
