@@ -19,6 +19,7 @@
 #include "pxr/imaging/hd/geomSubsetSchema.h"
 #include "pxr/imaging/hd/instancedBySchema.h"
 #include "pxr/imaging/hd/instancerTopologySchema.h"
+#include "pxr/imaging/hd/light.h"
 #include "pxr/imaging/hd/lightSchema.h"
 #include "pxr/imaging/hd/purposeSchema.h"
 #include "pxr/imaging/hd/renderSettingsSchema.h"
@@ -447,7 +448,32 @@ _WriteLight(UsdStageRefPtr const &stage, SdfPath const &path, TfToken const &hyd
     if (!type.empty()) {
         type[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(type[0])));
     }
+    // A `DomeLight_1` whose pole is +Z (its `poleAxis`, or `scene` on a Z-up
+    // stage) arrives as a `domeLight` whose `domeOffset` turns +90° about X
+    // (UsdImaging's domeLight_1Adapter); a `DomeLight` keeps its pole on +Y
+    // whatever it authors, so the pole is written as the schema that reads it.
+    bool zPole = false;
+    if (hydraType == HdPrimTypeTokens->domeLight) {
+        HdContainerDataSourceHandle const light = HdContainerDataSource::Cast(
+            ds->Get(HdLightSchemaTokens->light));
+        auto const offset = light
+            ? HdTypedSampledDataSource<GfMatrix4d>::Cast(light->Get(HdLightTokens->domeOffset))
+            : nullptr;
+        if (offset) {
+            GfMatrix4d zUp(1.0);
+            zUp.SetRotate(GfRotation(GfVec3d(1.0, 0.0, 0.0), 90.0));
+            zPole = GfIsClose(offset->GetTypedValue(0.0f), zUp, 1e-6);
+        }
+        if (zPole) {
+            type = "DomeLight_1";
+        }
+    }
     UsdPrim prim = stage->DefinePrim(path, TfToken(type));
+    if (zPole) {
+        prim.CreateAttribute(TfToken("poleAxis"), SdfValueTypeNames->Token, false,
+                             SdfVariabilityUniform)
+            .Set(TfToken("Z"));
+    }
     HdMaterialNetworkSchema network = HdMaterialSchema::GetFromParent(ds).GetMaterialNetwork();
     HdMaterialConnectionSchema terminal =
         network.GetTerminals().Get(HdMaterialTerminalTokens->light);
@@ -832,9 +858,8 @@ struct _Writer
         }
         for (SdfPath const &child : si->GetChildPrimPaths(path)) {
             // Hydra's own prims (the task controller's, the host's default
-            // camera light and free camera) live under root names starting
-            // with `_`, and are not the stage's.
-            if (path.IsAbsoluteRootPath() && TfStringStartsWith(child.GetName(), "_")) {
+            // camera light and free camera) are not the stage's.
+            if (path.IsAbsoluteRootPath() && HdCrustIsHostPath(child)) {
                 continue;
             }
             Walk(child);
@@ -938,6 +963,15 @@ struct _Writer
             instancer.GetInvisibleIdsAttr().Set(invisible);
         }
 
+        // As deep as crust's import expands instances (MAX_INSTANCE_NESTING
+        // in usd_import/instancing.rs): deeper ones, or a cycle, would only
+        // be refused by it after this walk had copied them, or never ended.
+        constexpr size_t maxNesting = 8;
+        if (copies.size() >= maxNesting) {
+            Unsupported("instances nested more than 8 deep (not expanded)", src);
+            _WriteXform(instancer.GetPrim(), ds, top);
+            return;
+        }
         SdfPathVector targets;
         for (size_t p = 0; p < prototypes.size(); ++p) {
             SdfPath const root = dst.AppendChild(TfToken("Prototypes"))
@@ -1080,6 +1114,12 @@ HdCrustOverlay(SdfLayerHandle const &scene, SdfLayerHandle const &overs,
             if (before && before->GetTypeName() != prim->GetTypeName()) {
                 return fail(path.GetString() + " changed type");
             }
+            // Written, so visible and present: a prim hidden or removed
+            // before (HdCrustDeactivate) is active again.
+            if (SdfPrimSpecHandle const over = overs->GetPrimAtPath(path);
+                over && over->HasActive()) {
+                over->ClearActive();
+            }
             if (before) {
                 for (SdfPropertySpecHandle const &old : before->GetProperties()) {
                     if (!scratch->GetPropertyAtPath(old->GetPath())) {
@@ -1141,6 +1181,19 @@ HdCrustDeactivate(SdfLayerHandle const &overs, SdfPath const &path)
     }
 }
 
+bool
+HdCrustIsHostPath(SdfPath const &path)
+{
+    if (path.IsAbsoluteRootPath() || !path.IsAbsolutePath()) {
+        return false;
+    }
+    SdfPath root = path;
+    while (root.GetPathElementCount() > 1) {
+        root = root.GetParentPath();
+    }
+    return TfStringStartsWith(root.GetName(), "_UsdImaging_");
+}
+
 HdCrustStageSettings
 HdCrustReadStageSettings(HdSceneIndexBaseRefPtr const &sceneIndex)
 {
@@ -1175,11 +1228,7 @@ HdCrustReadStageSettings(HdSceneIndexBaseRefPtr const &sceneIndex)
     // when the stage names none) is not written, and would leave
     // `crust:dicingCamera` naming nothing.
     if (!result.camera.IsEmpty()) {
-        SdfPath root = result.camera;
-        while (root.GetPathElementCount() > 1) {
-            root = root.GetParentPath();
-        }
-        if (TfStringStartsWith(root.GetName(), "_")
+        if (HdCrustIsHostPath(result.camera)
             || sceneIndex->GetPrim(result.camera).primType != HdPrimTypeTokens->camera) {
             result.camera = SdfPath();
         }

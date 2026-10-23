@@ -10,12 +10,14 @@
 //
 // With an ACTION, the stage is rendered to convergence, the action applied as
 // a host would, and the render run to convergence again; the image written is
-// the second one. Each convergence prints `applied: <class>`, how crust's
-// session took the change (`full`, `settings`, `lights`, `materials`):
+// the last one. Several edit actions apply in order, each run to convergence
+// (a prim hidden, then shown). Each convergence prints `applied: <class>`, how
+// crust's session took the change (`full`, `settings`, `lights`, `materials`):
 //   --move DX,DY,DZ        the viewing camera moves (the stage is not edited)
 //   --set /PRIM.ATTR=V     an attribute edited on the stage (V: one number, or
 //                          comma-separated components)
 //   --deactivate /PRIM     a prim removed
+//   --activate /PRIM       a prim restored
 //   --to-frame F           the current time changed
 //   --setting KEY=V        a renderer setting changed (a number, or a token)
 //   --measure N            the design record's measurements: time to the first
@@ -85,6 +87,8 @@ struct Args
     double frame = 0.0;
     bool hasFrame = false;
     std::string action, operand;
+    /// Every action, in order: `action` and `operand` are the first.
+    std::vector<std::pair<std::string, std::string>> actions;
     /// An AOV bound besides color, written as `<output>.<aov>.exr`.
     std::string aov;
 };
@@ -159,10 +163,14 @@ Parse(int argc, char **argv, Args *args)
             args->hasFrame = true;
         } else if (a == "--aov") {
             args->aov = next();
-        } else if (a == "--move" || a == "--set" || a == "--deactivate" || a == "--to-frame"
-                   || a == "--setting" || a == "--playback" || a == "--measure") {
-            args->action = a;
-            args->operand = next();
+        } else if (a == "--move" || a == "--set" || a == "--deactivate" || a == "--activate"
+                   || a == "--to-frame" || a == "--setting" || a == "--playback"
+                   || a == "--measure") {
+            args->actions.emplace_back(a, next());
+            if (args->action.empty()) {
+                args->action = args->actions.back().first;
+                args->operand = args->actions.back().second;
+            }
         } else {
             positional.push_back(a);
         }
@@ -576,37 +584,40 @@ main(int argc, char **argv)
         if (!converge()) {
             return 1;
         }
-    } else if (!args.action.empty()) {
-        if (args.action == "--move") {
-            std::vector<double> const d = Numbers(args.operand);
-            state->offset.SetTranslate(GfVec3d(d.at(0), d.at(1), d.at(2)));
-        } else if (args.action == "--set") {
-            std::string::size_type const eq = args.operand.find('=');
-            UsdAttribute attr = stage->GetAttributeAtPath(SdfPath(args.operand.substr(0, eq)));
-            if (!attr || !attr.Set(ValueOf(args.operand.substr(eq + 1), attr.GetTypeName()))) {
-                std::fprintf(stderr, "hdCrustTest: cannot set %s\n", args.operand.c_str());
+    } else {
+        for (auto const &[action, operand] : args.actions) {
+            if (action == "--move") {
+                std::vector<double> const d = Numbers(operand);
+                state->offset.SetTranslate(GfVec3d(d.at(0), d.at(1), d.at(2)));
+            } else if (action == "--set") {
+                std::string::size_type const eq = operand.find('=');
+                UsdAttribute attr = stage->GetAttributeAtPath(SdfPath(operand.substr(0, eq)));
+                if (!attr || !attr.Set(ValueOf(operand.substr(eq + 1), attr.GetTypeName()))) {
+                    std::fprintf(stderr, "hdCrustTest: cannot set %s\n", operand.c_str());
+                    return 1;
+                }
+            } else if (action == "--deactivate" || action == "--activate") {
+                UsdPrim prim = stage->GetPrimAtPath(SdfPath(operand));
+                if (!prim || !prim.SetActive(action == "--activate")) {
+                    std::fprintf(stderr, "hdCrustTest: cannot %s %s\n", action.c_str() + 2,
+                                 operand.c_str());
+                    return 1;
+                }
+            } else if (action == "--to-frame") {
+                setTime(UsdTimeCode(std::atof(operand.c_str())));
+            } else if (action == "--setting") {
+                std::string::size_type const eq = operand.find('=');
+                std::string const key = operand.substr(0, eq), text = operand.substr(eq + 1);
+                char *end = nullptr;
+                double const number = std::strtod(text.c_str(), &end);
+                VtValue value = *end == '\0' && !text.empty()
+                    ? (text.find('.') == std::string::npos ? VtValue(int(number)) : VtValue(number))
+                    : VtValue(TfToken(text));
+                delegate->SetRenderSetting(TfToken(key), value);
+            }
+            if (!converge()) {
                 return 1;
             }
-        } else if (args.action == "--deactivate") {
-            UsdPrim prim = stage->GetPrimAtPath(SdfPath(args.operand));
-            if (!prim || !prim.SetActive(false)) {
-                std::fprintf(stderr, "hdCrustTest: cannot deactivate %s\n", args.operand.c_str());
-                return 1;
-            }
-        } else if (args.action == "--to-frame") {
-            setTime(UsdTimeCode(std::atof(args.operand.c_str())));
-        } else if (args.action == "--setting") {
-            std::string::size_type const eq = args.operand.find('=');
-            std::string const key = args.operand.substr(0, eq), text = args.operand.substr(eq + 1);
-            char *end = nullptr;
-            double const number = std::strtod(text.c_str(), &end);
-            VtValue value = *end == '\0' && !text.empty()
-                ? (text.find('.') == std::string::npos ? VtValue(int(number)) : VtValue(number))
-                : VtValue(TfToken(text));
-            delegate->SetRenderSetting(TfToken(key), value);
-        }
-        if (!converge()) {
-            return 1;
         }
     }
 
