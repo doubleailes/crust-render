@@ -709,6 +709,63 @@ fn a_filter_var_wider_than_its_output_is_refused() {
         &wide,
     ));
     assert_eq!(codes(&scene), [WarningCode::AovTypeMismatch]);
+    // One sentence, single-spaced.
+    let message = &scene.warnings[0].message;
+    assert!(!message.contains("  "), "{message:?}");
+}
+
+/// A blur radius past the limit is refused at import and passes its input
+/// through, rather than allocating a kernel that size.
+#[test]
+fn a_huge_blur_radius_is_refused_and_passes_through() {
+    let prims = r#"
+    def Shader "wide"
+    {
+        uniform token info:id = "crust:blur"
+        token inputs:in = "matte"
+        float inputs:radius = 1e9
+    }
+    def RenderVar "wide_out"
+    {
+        uniform token dataType = "float"
+        rel crust:filter = </Render/wide>
+    }
+"#;
+    let scene = load(&stage(
+        "huge_blur",
+        "        rel crust:displayFilters = </Render/wide>",
+        prims,
+    ));
+    assert_eq!(codes(&scene), [WarningCode::PrecompInvalidValue]);
+    let (r, request) = renderer(scene);
+    let (beauty, film) = render(&r, &request, true);
+    assert_eq!(
+        bits(&channels(&film, &beauty, &request, "wide_out")),
+        bits(&channels(&film, &beauty, &request, "matte"))
+    );
+}
+
+/// A kernel scaled past the limit is refused once it is decoded, and the
+/// filter passes its input through.
+#[test]
+fn a_huge_kernel_scale_is_refused_and_passes_through() {
+    let path = stage(
+        "huge_kernel",
+        "        rel crust:displayFilters = </Render/soft>",
+        &CONVOLVE.replace(
+            "asset inputs:kernel = @box.exr@",
+            "asset inputs:kernel = @box.exr@\n        float inputs:kernelScale = 1e6",
+        ),
+    );
+    let scene =
+        Scene::from_usd_with_options(&path, &BoxKernel, &UsdImportOptions::default()).unwrap();
+    assert_eq!(codes(&scene), [WarningCode::PrecompInvalidValue]);
+    let (r, request) = renderer(scene);
+    let (beauty, film) = render(&r, &request, true);
+    assert_eq!(
+        bits(&channels(&film, &beauty, &request, "soft_out")),
+        bits(&channels(&film, &beauty, &request, "matte"))
+    );
 }
 
 #[test]

@@ -150,11 +150,26 @@ impl Precomp {
             if let Operation::Convolve {
                 kernel_path: Some(path),
                 kernel,
+                scale,
                 ..
             } = &mut f.op
             {
                 *kernel = load(path).map(|t| Kernel::from_texture(&t));
-                if kernel.is_none() {
+                if let Some(k) = kernel.as_ref()
+                    && kernel_footprint(k, *scale).is_none()
+                {
+                    crate::warning!(
+                        PrecompInvalidValue,
+                        at = f.path,
+                        "{}: kernel {} ({}x{}) at kernelScale {scale} covers more than \
+                         {MAX_KERNEL_SIDE} pixels a side; the filter passes its input through",
+                        f.path,
+                        path.display(),
+                        k.w,
+                        k.h
+                    );
+                    *kernel = None;
+                } else if kernel.is_none() {
                     crate::warning!(
                         PrecompMissingKernel,
                         at = f.path,
@@ -619,7 +634,7 @@ fn apply(pc: &Precomp, op: &Operation, beauty: &Buffer, film: &AovFilm) -> Plane
                 Field::Vectors(v) => Some(get(v)),
                 _ => None,
             };
-            vector_blur(&src, field, vectors.as_ref(), *taps)
+            vector_blur(&src, field, vectors.as_ref(), *taps, Frame::of(beauty))
         }
         Operation::Merge {
             a,
@@ -641,18 +656,40 @@ fn apply(pc: &Precomp, op: &Operation, beauty: &Buffer, film: &AovFilm) -> Plane
     }
 }
 
-/// Convolves every channel with the kernel's matching channel (its last for
-/// any past three), each texel covering `scale` × `scale` output pixels
-/// (nearest), centred on the pixel. Normalised per channel to sum 1 unless
-/// `normalize` is off or the channel sums to 0. Edges clamp.
-pub(crate) fn convolve(src: &Plane, k: &Kernel, scale: f32, normalize: bool) -> Plane {
+/// The largest side, in pixels, a `crust:convolve` footprint may have: a
+/// kernel scaled past it is refused at import, and `convolve` passes its
+/// input through, so an authored scale can neither exhaust memory nor stall
+/// the render (a 255 × 255 footprint is already 65 025 taps a pixel).
+pub(crate) const MAX_KERNEL_SIDE: usize = 255;
+
+/// The largest `crust:blur` radius, in pixels: refused past it at import,
+/// the input passed through.
+pub(crate) const MAX_BLUR_RADIUS: f32 = 1024.0;
+
+/// The footprint `k` covers at `scale` (a scale that is not a positive
+/// number is 1), or `None` when a side would exceed [`MAX_KERNEL_SIDE`].
+pub(crate) fn kernel_footprint(k: &Kernel, scale: f32) -> Option<(usize, usize)> {
     let s = if scale.is_finite() && scale > 0.0 {
-        scale
+        f64::from(scale)
     } else {
         1.0
     };
-    let fw = ((k.w as f32 * s).round() as usize).max(1);
-    let fh = ((k.h as f32 * s).round() as usize).max(1);
+    let side = |n: usize| {
+        let f = (n as f64 * s).round().max(1.0);
+        (f <= MAX_KERNEL_SIDE as f64).then_some(f as usize)
+    };
+    Some((side(k.w)?, side(k.h)?))
+}
+
+/// Convolves every channel with the kernel's matching channel (its last for
+/// any past three), each texel covering `scale` × `scale` output pixels
+/// (nearest), centred on the pixel. Normalised per channel to sum 1 unless
+/// `normalize` is off or the channel sums to 0. Edges clamp. A footprint past
+/// [`MAX_KERNEL_SIDE`] passes the input through.
+pub(crate) fn convolve(src: &Plane, k: &Kernel, scale: f32, normalize: bool) -> Plane {
+    let Some((fw, fh)) = kernel_footprint(k, scale) else {
+        return src.clone();
+    };
     // The footprint's taps per kernel channel, row-major, top row first.
     let weights: Vec<Vec<f32>> = (0..3)
         .map(|c| {
@@ -693,14 +730,15 @@ pub(crate) fn convolve(src: &Plane, k: &Kernel, scale: f32, normalize: bool) -> 
 }
 
 /// A separable gaussian of standard deviation `radius / 3`, truncated at
-/// `±ceil(radius)` pixels and normalised; edges clamp. A radius of 0 or less
-/// is the identity.
+/// `±ceil(radius)` pixels and normalised; edges clamp. A radius of 0 or less,
+/// one so small its deviation underflows to 0, or one past
+/// [`MAX_BLUR_RADIUS`], is the identity.
 pub(crate) fn blur(src: &Plane, radius: f32) -> Plane {
-    if !(radius.is_finite() && radius > 0.0) {
+    let sigma = radius / 3.0;
+    if !(radius.is_finite() && radius <= MAX_BLUR_RADIUS && sigma > 0.0) {
         return src.clone();
     }
     let n = radius.ceil() as isize;
-    let sigma = radius / 3.0;
     let mut taps: Vec<f32> = (-n..=n)
         .map(|i| (-0.5 * (i as f32 / sigma).powi(2)).exp())
         .collect();
@@ -728,14 +766,52 @@ pub(crate) fn blur(src: &Plane, radius: f32) -> Plane {
     })
 }
 
+/// Where a plane lies in the frame: the frame's size, and the plane's
+/// bottom-left pixel in it (x right, y up), as a region render places it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Frame {
+    pub(crate) size: [f32; 2],
+    pub(crate) origin: [f32; 2],
+}
+
+impl Frame {
+    /// A plane that is the whole frame.
+    #[cfg(test)]
+    pub(crate) fn whole(w: usize, h: usize) -> Self {
+        Frame {
+            size: [w as f32, h as f32],
+            origin: [0.0, 0.0],
+        }
+    }
+
+    /// The frame `beauty` was rendered over, and its region in it.
+    fn of(beauty: &Buffer) -> Self {
+        let (fw, fh) = beauty.frame_size();
+        let r = beauty.region();
+        Frame {
+            size: [fw as f32, fh as f32],
+            origin: [r.x0 as f32, (fh - r.y1) as f32],
+        }
+    }
+}
+
 /// The mean of `taps` bilinear lookups along each pixel's blur vector,
 /// centred on the pixel (from `−v/2` to `+v/2`). A pixel whose vector is zero
-/// keeps its value exactly.
-pub(crate) fn vector_blur(src: &Plane, field: &Field, vectors: Option<&Plane>, taps: u32) -> Plane {
+/// keeps its value exactly. A radial field is measured in the frame's pixels
+/// (`frame`), so a region render blurs its pixels as the full frame does.
+pub(crate) fn vector_blur(
+    src: &Plane,
+    field: &Field,
+    vectors: Option<&Plane>,
+    taps: u32,
+    frame: Frame,
+) -> Plane {
     let taps = taps.max(1);
     let (w, h) = (src.w, src.h);
     let center = match field {
-        Field::Radial { center, .. } => center.unwrap_or([w as f32 * 0.5, h as f32 * 0.5]),
+        Field::Radial { center, .. } => {
+            center.unwrap_or([frame.size[0] * 0.5, frame.size[1] * 0.5])
+        }
         _ => [0.0, 0.0],
     };
     // The blur vector at top-down pixel (x, y), in pixels, x right, y up.
@@ -748,9 +824,9 @@ pub(crate) fn vector_blur(src: &Plane, field: &Field, vectors: Option<&Plane>, t
             }
             Field::Direction(d) => *d,
             Field::Radial { strength, .. } => {
-                // Pixel centre, y up from the bottom row.
-                let px = x as f32 + 0.5;
-                let py = (h - 1 - y) as f32 + 0.5;
+                // Pixel centre in the frame, y up from its bottom row.
+                let px = frame.origin[0] + x as f32 + 0.5;
+                let py = frame.origin[1] + (h - 1 - y) as f32 + 0.5;
                 [(px - center[0]) * strength, (py - center[1]) * strength]
             }
         }
@@ -993,10 +1069,19 @@ mod tests {
             channels: vec![still.channels[0].clone(), still.channels[0].clone()],
         };
         let field = Field::Vectors(Image::Clear);
-        assert_eq!(vector_blur(&src, &field, Some(&vectors), 8), src);
+        assert_eq!(
+            vector_blur(&src, &field, Some(&vectors), 8, Frame::whole(8, 1)),
+            src
+        );
         // Four pixels right: the impulse spreads over its neighbours, and
         // its energy is kept away from the edges.
-        let out = vector_blur(&src, &Field::Direction([4.0, 0.0]), None, 16);
+        let out = vector_blur(
+            &src,
+            &Field::Direction([4.0, 0.0]),
+            None,
+            16,
+            Frame::whole(8, 1),
+        );
         let total: f32 = out.channels[0].iter().sum();
         assert!((total - 1.0).abs() < 1e-5, "{total}");
         assert!(out.channels[0][4] < 1.0 && out.channels[0][3] > 0.0);
@@ -1014,10 +1099,76 @@ mod tests {
             },
             None,
             8,
+            Frame::whole(5, 5),
         );
         // The middle pixel's centre is the image centre: no vector.
         assert_eq!(out.channels[0][12], src.channels[0][12]);
         assert_ne!(out.channels[0][0], src.channels[0][0]);
+    }
+
+    /// A crop is blurred about the frame's centre, not its own: away from
+    /// the crop's edges, its pixels are the full frame's.
+    #[test]
+    fn a_radial_blur_of_a_crop_is_the_full_frames() {
+        let (fw, fh) = (24, 18);
+        let full = plane(fw, fh, |x, y| ((x * 7 + y * 13) % 11) as f32);
+        let field = Field::Radial {
+            center: None,
+            strength: 0.05,
+        };
+        let whole = vector_blur(&full, &field, None, 6, Frame::whole(fw, fh));
+        // Columns 4..20 and rows 3..15 (top-down) of the frame.
+        let (x0, y0, w, h) = (4, 3, 16, 12);
+        let crop = plane(w, h, |x, y| full.channels[0][(y0 + y) * fw + x0 + x]);
+        let frame = Frame {
+            size: [fw as f32, fh as f32],
+            origin: [x0 as f32, (fh - (y0 + h)) as f32],
+        };
+        let part = vector_blur(&crop, &field, None, 6, frame);
+        // Each lookup reaches at most 0.05 × 15 px / 2 < 1 px: one pixel in
+        // from the crop's edge, nothing is clamped. The lookups are taken in
+        // the crop's own coordinates, so they round apart by an ulp or so;
+        // a centre measured in the crop would move every vector by
+        // 0.05 × (4, 3) px, far more.
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let (a, b) = (
+                    part.channels[0][y * w + x],
+                    whole.channels[0][(y0 + y) * fw + x0 + x],
+                );
+                assert!(
+                    (a - b).abs() <= 1e-5 * b.abs().max(1.0),
+                    "({x}, {y}): {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    /// Radii whose deviation underflows, and radii past the limit, are the
+    /// identity rather than NaN or an unbounded kernel.
+    #[test]
+    fn a_degenerate_or_huge_blur_radius_is_the_identity() {
+        let src = plane(4, 3, |x, y| (x + y) as f32);
+        for r in [f32::from_bits(1), MAX_BLUR_RADIUS * 2.0, 1e9, f32::INFINITY] {
+            assert_eq!(blur(&src, r), src, "radius {r}");
+        }
+        assert_ne!(blur(&src, MAX_BLUR_RADIUS), src);
+    }
+
+    /// A kernel scaled past the limit passes the input through instead of
+    /// allocating its footprint.
+    #[test]
+    fn a_huge_kernel_footprint_passes_through() {
+        let k = Kernel {
+            w: 3,
+            h: 3,
+            taps: vec![[1.0; 3]; 9],
+        };
+        assert_eq!(kernel_footprint(&k, 85.0), Some((255, 255)));
+        assert_eq!(kernel_footprint(&k, 86.0), None);
+        assert_eq!(kernel_footprint(&k, 1e30), None);
+        let src = plane(4, 3, |x, y| (x * y) as f32);
+        assert_eq!(convolve(&src, &k, 1e30, true), src);
     }
 
     #[test]
@@ -1032,7 +1183,13 @@ mod tests {
             vec![
                 blur(p, 2.5),
                 convolve(p, &k, 1.5, true),
-                vector_blur(p, &Field::Direction([3.0, -2.0]), None, 7),
+                vector_blur(
+                    p,
+                    &Field::Direction([3.0, -2.0]),
+                    None,
+                    7,
+                    Frame::whole(37, 23),
+                ),
                 vector_blur(
                     p,
                     &Field::Radial {
@@ -1041,6 +1198,7 @@ mod tests {
                     },
                     None,
                     5,
+                    Frame::whole(37, 23),
                 ),
             ]
         };

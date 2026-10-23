@@ -142,6 +142,7 @@ Sample and display filters ([render settings](@/docs/usd/render-settings.md#prec
 | `precomp.unknown_filter` | skipped | A RenderVar's crust:filter targets a prim that is not in the settings' filter lists, or names an output it does not have; no channel is written. | Add the filter to `crust:sampleFilters` or `crust:displayFilters`, and check `crust:filter:output`. |
 | `precomp.cycle` | refused | A filter input names a filter that runs after it; the input reads its clear value. | Reorder the filter lists so every filter comes after what it reads. |
 | `precomp.missing_kernel` | skipped | A crust:convolve kernel image could not be read; the filter passes its input through. | Check the `kernel` asset path. |
+| `precomp.invalid_value` | refused | A display filter's blur radius or scaled kernel is past crust's limit (1024 pixels, 255 pixels a side); the filter passes its input through. | Use a smaller `radius` or `kernelScale`; a blur that wide is a constant colour anyway. |
 | `precomp.unknown_display` | refused | crust:display names no RenderVar of the render; the beauty is shown. | Name a RenderVar of one of the settings' products. |
 | `precomp.black_beauty` | approximated | A stage with a precomp has no light, so its beauty is black and adaptive sampling stops every pixel at its minimum. | Author `crust:minSamplesPerPixel` equal to `crust:samplesPerPixel`. |
 

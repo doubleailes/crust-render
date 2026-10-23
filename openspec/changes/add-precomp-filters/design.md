@@ -362,6 +362,18 @@ departs from them.
   covering `kernelScale` pixels, and uses the kernel's matching channel (its last past
   three).
 
+- **Limits** (review on #382). A `crust:blur` radius past 1024 px and a `crust:convolve`
+  footprint past 255 px a side are refused (`precomp.invalid_value`, a tenth code) and
+  pass their input through, so an authored value cannot exhaust memory; a radius whose
+  deviation underflows is the identity. A radial `crust:vectorBlur` measures its centre
+  and pixels in the frame (`precomp::Frame`), so a crop blurs toward the full frame's
+  centre. A multioutput root's width is its selected output's (one evaluation over the
+  defaults), and a dangling nodegraph output refuses the graph.
+- **EXR kernels are read by base channel name.** `crust-assets`' `decode_exr_pixels`
+  (environment maps, light textures, kernels) now goes through `read_exr_channels`, so
+  `rgb.R` / `rgb.G` / `rgb.B` or one `Y` channel decode as bare `R`, `G`, `B` do; the RGBA
+  convenience reader refused them.
+
 ### Measurements
 
 - **Goldens.** `scripts/check_images.sh check` against the goldens of task 1.1 (`f958a80`,
