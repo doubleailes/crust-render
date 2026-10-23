@@ -1392,7 +1392,7 @@ mod tests {
 
     fn build(text: &str, root: &str) -> (Vec<Val>, Closures) {
         let doc = Doc::parse(text).unwrap();
-        let loader = |_: &str, _: Option<&str>| None;
+        let loader = |_: &str, _: crate::TexelSpace<'_>| None;
         let mut c = Compiler::new(&doc, &Host::new(&loader));
         let node = doc.find("", root).unwrap().clone();
         let mut out = Closures::default();
@@ -1656,7 +1656,7 @@ mod tests {
     /// Compiles `volume` as a volume terminal (no surface) and evaluates it.
     fn build_volume(text: &str, volume: &str) -> (Vec<Val>, Closures) {
         let doc = Doc::parse(text).unwrap();
-        let loader = |_: &str, _: Option<&str>| None;
+        let loader = |_: &str, _: crate::TexelSpace<'_>| None;
         let host = crate::Host::new(&loader);
         let mut c = Compiler::new(&doc, &host);
         let node = doc.find("", volume).unwrap().clone();
@@ -1782,7 +1782,7 @@ mod tests {
              </materialx>"#
         );
         let doc = Doc::parse(&doc).unwrap();
-        let loader = |_: &str, _: Option<&str>| None;
+        let loader = |_: &str, _: crate::TexelSpace<'_>| None;
         let loader = crate::Host::new(&loader);
         let surface = doc.find("", "l").unwrap();
         let volume = doc.find("", "vol_haze").unwrap();

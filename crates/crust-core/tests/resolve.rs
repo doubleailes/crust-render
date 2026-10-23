@@ -284,7 +284,7 @@ fn materials() -> Vec<(String, Arc<dyn Material>)> {
             )),
         ),
     ];
-    let decline = |_: &str, _: Option<&str>| -> Option<TextureRef> { None };
+    let decline = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> { None };
     for (file, node) in [
         ("materialx_basic.mtlx", "mtlx_ceramic"),
         ("materialx_basic.mtlx", "mtlx_metal"),

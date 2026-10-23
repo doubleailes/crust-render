@@ -864,11 +864,11 @@ fn the_microcache_allowance_comes_out_of_the_budget() {
 /// file is admitted the moment there is no chain to get wrong.
 ///
 /// **This is the refusal itself, and it is the project's standing rule rather
-/// than a new one.** A `.tx` records the space its levels were reduced in
-/// (`crust:mipspace`) and a mismatch is refused outright, because the failure
-/// mode is invisible: level 0 stays perfectly correct and every coarser level
-/// is wrong, which under minification looks exactly like a filtering bug. A
-/// `.ptx` carries no such marker and needs none — crust decodes Ptex by 2.2
+/// than a new one.** A mip chain reduced in another encoding than the one it
+/// is read in is refused outright, because the failure mode is invisible:
+/// level 0 stays perfectly correct and every coarser level is wrong, which
+/// under minification looks exactly like a filtering bug. A `.ptx` carries
+/// no marker of its encoding and needs none — crust decodes Ptex by 2.2
 /// and the file reduced its levels before that, so the mismatch is
 /// unconditional. `chain_is_exact` is the question `FileAssets` asks, and it
 /// has to answer *no* for a real texture or the gate is decorative.

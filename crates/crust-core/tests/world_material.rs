@@ -1297,7 +1297,9 @@ fn an_hdr_texture_drives_emission_above_one() {
            </surface>"#,
     );
     let hdr = Vec3A::new(16.0, 8.0, 4.0);
-    let load = |_: &str, _: Option<&str>| Some(crust_core::TextureRef(Arc::new(HdrTexture(hdr))));
+    let load = |_: &str, _: crust_mtlx::TexelSpace<'_>| {
+        Some(crust_core::TextureRef(Arc::new(HdrTexture(hdr))))
+    };
     let loaded = materialx::load(&path, Some("emitter"), &crust_core::mtlx::Host::new(&load))
         .expect("loads");
     assert_eq!(loaded.textures, 1);

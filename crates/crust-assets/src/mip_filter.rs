@@ -4,7 +4,8 @@
 //! streamed UV textures, preloaded and streamed Ptex — and the streamed copies
 //! described themselves as "line-for-line equivalent" to the preloaded ones,
 //! which is exactly the promise a copy stops keeping. The streamed ↔ preloaded
-//! pairs are pinned bit for bit (`streaming_and_preloading_agree_bit_for_bit`,
+//! pairs are pinned against each other (UV textures within a tolerance,
+//! `a_converted_tx_streams_what_its_source_preloads`; Ptex bit for bit,
 //! `streamed_and_preloaded_agree_texel_for_texel`), so the selection they
 //! share lives here once, generic over the mip chain it reads and
 //! monomorphised per backend: no dispatch is added to a texel fetch.

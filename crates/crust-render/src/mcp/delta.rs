@@ -173,6 +173,12 @@ pub fn classify(
     let mut applied = Applied::Settings;
     let mut change = Change::default();
     let full = |why: String| (Applied::Full, Change::default(), Some(why));
+    // A transform on the render camera is a settings edit — the rebuild
+    // re-reads the camera, and refuses when it moves what tessellation read —
+    // unless an imported prim lies below the camera: the rebuild does not
+    // move that.
+    let carries = std::cell::OnceCell::new();
+    let camera_carries = |camera: &str| *carries.get_or_init(|| provenance.any_below(camera));
     for c in changes {
         let attr = match c {
             LayerChange::Value(p) => p,
@@ -186,7 +192,7 @@ pub fn classify(
         let is_xform = name.starts_with("xformOp") || name == "xformOpOrder";
         let input = name.starts_with("inputs:");
         if provenance.render_settings() == Some(prim_str)
-            || (provenance.camera() == Some(prim_str) && !is_xform)
+            || (provenance.camera() == Some(prim_str) && !(is_xform && camera_carries(prim_str)))
         {
             change.settings = true;
         } else if input && provenance.light(prim_str).is_some() && !SHAPE_INPUTS.contains(&name) {

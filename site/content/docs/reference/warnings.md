@@ -92,6 +92,7 @@ plain text and are not counted.
 | `camera.invalid_meters_per_unit` | refused | The stage's metersPerUnit is not finite, not positive, or so small that the lens diameter overflows; the lens reads it as 0.01, a centimetre. | Author the stage's `metersPerUnit` as a positive length in metres (0.01 for centimetres, 1 for metres). |
 | `camera.shutter_instantaneous` | approximated | A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero. | Author `shutter:open` / `shutter:close` on the render camera (with `disableMotionBlur` for a sharp beauty). |
 | `camera.shutter_mismatch` | approximated | The render goes through another camera than the one whose shutter motion was measured over. | Name the render camera with `--camera` or `RenderSettings.camera`. |
+| `camera.dicing_not_a_camera` | approximated | `crust:dicingCamera` on the RenderSettings prim targets a prim that is not a camera, or no prim; adaptive subdivision and implicit shapes are diced for the render camera. | Point `crust:dicingCamera` at a camera; `crust ls camera` lists them. |
 
 ## Products and AOVs
 
@@ -254,6 +255,6 @@ plain text and are not counted.
 | `asset.unsupported_by_host` | skipped | The host's asset loader does not decode this type of asset. | Use a host that decodes assets (the `crust` CLI does). |
 | `texture.unreadable` | skipped | A texture could not be loaded; the input reads its fallback. | Check the file path and format; the message gives the loader's reason. |
 | `texture.udim_tile_missing` | skipped | A tile of a UDIM set does not decode; the set is used without it. | Fix or remove the tile the message names. |
-| `texture.tx_stale` | approximated | A .tx is older than its source and is used anyway. | Rerun with `--auto-tx` to reconvert. |
+| `texture.tx_stale` | approximated | A .tx's modification time is not its source's; it is used anyway. | Rerun with `--auto-tx` to reconvert. |
 | `texture.tx_convert_failed` | approximated | --auto-tx could not convert a texture; its source is read instead. | Check that the directory is writable and the source decodes. |
-| `texture.stream_fallback` | approximated | A texture could not be streamed and is preloaded instead. | Nothing to do; it renders the same, using more memory. If the message says an older crust wrote the `.tx`, rerun with `--auto-tx` to reconvert it. |
+| `texture.stream_fallback` | approximated | A texture could not be streamed and is preloaded instead. | Nothing to do; it renders the same, using more memory. |

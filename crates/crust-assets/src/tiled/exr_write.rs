@@ -1,188 +1,138 @@
-//! Writing a tiled, mip-mapped OpenEXR — the HDR half of `.tx`.
+//! Writing a tiled, mip-mapped OpenEXR — a `.tx` as OIIO's `maketx` writes one
+//! for a half or float source, or for an 8-bit one bound in a curved space
+//! (Arnold 7.5's auto-tx).
 //!
 //! Unlike the TIFF writer next door, almost none of this is hand-rolled: the
 //! `exr` crate writes tiles and mip levels through its ordinary public API
-//! (`Blocks::Tiles` plus `Levels::Mip`), so what is left here is the pyramid,
-//! the de-interleaving, and the provenance attributes.
-//!
-//! **The samples stored are linear.** An EXR has no 8-bit type and no transfer
-//! curve, so a display-encoded source is decoded **once, at conversion**, and
-//! the file records which encoding it came from. That is a different division
-//! of labour from the TIFF path — which stores encoded texels and decodes per
-//! lookup — and it is the reason [`super::TiledFile::mip_space_matches`] is
-//! phrased as "the space this file is meant to be bound with" rather than "the
-//! space its levels were averaged in". Both are true of a `.tx`; only the
-//! former is true of both backings.
-//!
-//! **`half`, not `f32`.** It is what `maketx --format exr` writes, what every
-//! other streaming texture format stores, and the reason a streamed HDR tile
-//! costs twice a `u8` one rather than four times. A texture is shading input,
-//! not a render target; `half`'s ~3 decimal digits are past what a BSDF
-//! evaluation preserves.
+//! (`Blocks::Tiles` plus `Levels::Mip`), so what is left here is the
+//! de-interleaving and OIIO's attributes, as Arnold's own files carry them
+//! (`tests/data/arnold_tx`): `Software` and `Exif:ImageHistory`, `autotx`,
+//! `fovcot`, `textureformat`, `wrapmodes`, `oiio:AverageColor`, `oiio:SHA-1`,
+//! `oiio:ConstantColor` for a constant image, and the levels rounded down.
 
-use super::write::space_name;
-use crate::uv_texture::{channels, reduce_half_linear};
-use crust_core::ResolvedColorSpace;
+use super::TILE_EDGE;
+use super::maketx::{Image, SampleType};
+use super::write::TxMeta;
 use exr::math::RoundingMode;
+use exr::meta::attribute::AttributeValue;
 use exr::prelude::{
-    AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, Image, Layer,
+    AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, Image as ExrImage, Layer,
     LayerAttributes, LevelMaps, Levels, LineOrder, Text, Vec2, WritableImage,
 };
 use half::f16;
 use std::io;
 use std::path::Path;
 
-/// Writes `src` (row-major **linear** RGB, `f32`) as a tiled, mip-mapped EXR,
-/// returning each level's `(width, height)` in order.
-///
-/// `space` does not change a single sample — the data is already linear. It is
-/// recorded so the renderer can refuse a file whose source encoding is not the
-/// one the material binds it with, which would mean applying a curve to values
-/// that already had one removed.
-pub fn write_tx_exr(
-    path: &Path,
-    src: &[f32],
-    width: usize,
-    height: usize,
-    space: ResolvedColorSpace,
-) -> io::Result<Vec<(usize, usize)>> {
-    write_exr(path, src, width, height, false, space)
-}
+/// The DWAA level `maketx` writes, `openexr:dwaCompressionLevel`.
+const DWA_LEVEL: f32 = 45.0;
 
-/// [`write_tx_exr`] for row-major RGBA, the alpha written as an `A` channel
-/// beside the colour and reduced with it, as the coverage it is.
-pub fn write_tx_exr_rgba(
+/// Writes `levels` (level 0 first) as a tiled EXR of `depth` samples, `half`
+/// or `float`, DWAA-compressed when `dwaa` and zipped otherwise, with `meta`.
+pub(crate) fn write_exr(
     path: &Path,
-    src: &[f32],
-    width: usize,
-    height: usize,
-    space: ResolvedColorSpace,
-) -> io::Result<Vec<(usize, usize)>> {
-    write_exr(path, src, width, height, true, space)
-}
-
-/// [`write_tx_exr`] and [`write_tx_exr_rgba`]: RGB, or RGBA when `alpha`.
-fn write_exr(
-    path: &Path,
-    src: &[f32],
-    width: usize,
-    height: usize,
-    alpha: bool,
-    space: ResolvedColorSpace,
-) -> io::Result<Vec<(usize, usize)>> {
-    if width == 0 || height == 0 {
+    levels: &[Image],
+    depth: SampleType,
+    dwaa: bool,
+    meta: &TxMeta,
+) -> io::Result<()> {
+    let Some(first) = levels.first() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no levels"));
+    };
+    if first.width == 0 || first.height == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "refusing to write a zero-sized texture",
         ));
     }
-    let n = channels(alpha);
-    let want = width * height * n;
-    if src.len() < want {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "expected {want} floats of {}, got {}",
-                if alpha { "RGBA" } else { "RGB" },
-                src.len()
-            ),
-        ));
-    }
-
-    // The same chain the TIFF writer builds, reduced by the same rule — halving
-    // with `div_ceil` so every level spans the whole `[0, 1]` domain — but with
-    // no decode/encode around the average, because the samples are already
-    // light.
-    let mut levels: Vec<(Vec<f32>, usize, usize)> = vec![(src[..want].to_vec(), width, height)];
-    while {
-        let (_, w, h) = levels.last().expect("level 0 always exists");
-        *w > 1 || *h > 1
-    } {
-        let (pixels, w, h) = {
-            let (p, w, h) = levels.last().expect("level 0 always exists");
-            reduce_half_linear(p, *w, *h, alpha)
-        };
-        levels.push((pixels, w, h));
-    }
-
-    // EXR is planar per channel, so the interleaved source is split once here
-    // rather than per tile at write time.
-    let mut planes: [LevelMaps<FlatSamples>; 4] = Default::default();
-    for (pixels, w, h) in &levels {
-        for (k, plane) in planes.iter_mut().take(n).enumerate() {
-            let samples: Vec<f16> = (0..w * h)
-                .map(|i| f16::from_f32(pixels[i * n + k]))
-                .collect();
-            plane.push(FlatSamples::F16(samples));
+    let n = first.nchannels();
+    // EXR is planar per channel, so the interleaved levels are split once
+    // here rather than per tile at write time.
+    let mut planes: Vec<LevelMaps<FlatSamples>> = vec![LevelMaps::default(); n];
+    for level in levels {
+        for (c, plane) in planes.iter_mut().enumerate() {
+            let samples = level.pixels.iter().skip(c).step_by(n).copied();
+            plane.push(match depth {
+                SampleType::Half => FlatSamples::F16(samples.map(f16::from_f32).collect()),
+                SampleType::Float => FlatSamples::F32(samples.collect()),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("an EXR .tx holds half or float samples, not {other:?}"),
+                    ));
+                }
+            });
         }
     }
-    let [r, g, b, a] = planes;
-    let mip = |level_data: LevelMaps<FlatSamples>| Levels::Mip {
-        // `div_ceil`, which is what `reduce_half_linear` does and what the
-        // reader will recompute the level sizes with. `ROUND_DOWN` — the more
-        // common choice, and what `maketx` writes — would describe a different
-        // pyramid than the one actually stored.
-        rounding_mode: RoundingMode::Up,
-        level_data,
-    };
     // Sorted, because EXR stores channels alphabetically and the reader finds
     // them by name — an unsorted list is a malformed file, not a reordered one.
-    let mut list = vec![
-        AnyChannel::new("R", mip(r)),
-        AnyChannel::new("G", mip(g)),
-        AnyChannel::new("B", mip(b)),
-    ];
-    if alpha {
-        list.push(AnyChannel::new("A", mip(a)));
-    }
-    let channels = AnyChannels::sort(list.into_iter().collect());
+    let channels = AnyChannels::sort(
+        first
+            .channels
+            .iter()
+            .zip(planes)
+            .map(|(&name, level_data)| {
+                AnyChannel::new(
+                    name,
+                    Levels::Mip {
+                        // `maketx`'s: each level half the one above, rounded
+                        // down.
+                        rounding_mode: RoundingMode::Down,
+                        level_data,
+                    },
+                )
+            })
+            .collect(),
+    );
 
-    let mut attributes = LayerAttributes::default();
-    let put = |attributes: &mut LayerAttributes, key: &str, value: &str| {
-        if let (Some(k), Some(v)) = (Text::new_or_none(key), Text::new_or_none(value)) {
-            attributes
-                .other
-                .insert(k, exr::meta::attribute::AttributeValue::Text(v));
-        }
+    let mut attributes = LayerAttributes {
+        wrap_mode_name: Text::new_or_none("black,black"),
+        capture_date: Text::new_or_none(meta.date.as_str()),
+        ..LayerAttributes::default()
     };
-    put(
-        &mut attributes,
-        super::exr_read::MIP_SPACE_KEY,
-        space_name(space),
-    );
-    put(
-        &mut attributes,
-        super::TX_VERSION_KEY,
-        &super::TX_VERSION.to_string(),
-    );
-    // OIIO's own "this is a texture, not a picture" marker, as a first-class
-    // attribute rather than smuggled through a description string the way TIFF
-    // forces. Its companion `wrapmodes` is deliberately absent: OpenEXR
-    // reserves that name for a standard attribute, `exr` refuses to write a
-    // reserved name as a custom one, and it exposes no typed field for it — so
-    // the choice is to omit it or to hand-write the header, and nothing reads
-    // it back here. The `black,black` crust would have written is the default a
-    // reader assumes anyway.
-    put(&mut attributes, "textureformat", "Plain Texture");
-    attributes.software_name = Text::new_or_none("crust-render");
+    let text = |v: &str| Text::new_or_none(v).map(AttributeValue::Text);
+    // `Software`, capitalised as OIIO writes it: the reserved `software` is
+    // another attribute.
+    let entries = [
+        ("Software", text(&meta.software)),
+        ("Exif:ImageHistory", text(&meta.software)),
+        ("textureformat", text("Plain Texture")),
+        ("oiio:AverageColor", text(&meta.average)),
+        ("oiio:SHA-1", text(&meta.sha1)),
+        (
+            "oiio:ConstantColor",
+            meta.constant.as_deref().and_then(text),
+        ),
+        ("autotx", Some(AttributeValue::I32(1))),
+        (
+            "fovcot",
+            Some(AttributeValue::F32(
+                first.width as f32 / first.height as f32,
+            )),
+        ),
+    ];
+    for (key, value) in entries {
+        if let (Some(k), Some(v)) = (Text::new_or_none(key), value) {
+            attributes.other.insert(k, v);
+        }
+    }
 
     let layer = Layer::new(
-        (width, height),
+        (first.width, first.height),
         attributes,
         Encoding {
-            // ZIP16 is what `maketx` defaults to for EXR, lossless, and the one
-            // the tile reader is fastest at: a 64-row tile is four zip blocks.
-            compression: Compression::ZIP16,
-            blocks: Blocks::Tiles(Vec2(super::TILE_EDGE, super::TILE_EDGE)),
+            compression: if dwaa {
+                Compression::DWAA(Some(DWA_LEVEL))
+            } else {
+                // OpenEXR's `zip`, 16 scanlines a block.
+                Compression::ZIP16
+            },
+            blocks: Blocks::Tiles(Vec2(TILE_EDGE, TILE_EDGE)),
             line_order: LineOrder::Increasing,
         },
         channels,
     );
-
-    Image::from_layer(layer)
+    ExrImage::from_layer(layer)
         .write()
         .to_file(path)
-        .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
-
-    Ok(levels.iter().map(|(_, w, h)| (*w, *h)).collect())
+        .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))
 }

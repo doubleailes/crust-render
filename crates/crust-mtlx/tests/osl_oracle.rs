@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 const FIXTURE: &str = include_str!("data/osl_oracle.txt");
 
-fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn decline(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     None
 }
 

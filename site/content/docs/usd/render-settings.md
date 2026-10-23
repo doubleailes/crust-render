@@ -517,8 +517,9 @@ the near part of a mesh is refined and its far part keeps its cage.
 - Only geometry used once is adaptive. A prototype placed several times is refined to
   `crust:subdivisionLevel` (else 0) everywhere.
 - Faces outside the camera's view are not refined.
-- The camera must be named by `rel camera` on this prim or by `--camera`. Otherwise a
-  warning is logged and the uniform level applies.
+- The camera must be named by `rel camera` on this prim, by `--camera`, or by
+  [`crust:dicingCamera`](#crust-dicingcamera). Otherwise a warning is logged and the
+  uniform level applies.
 - A value that is not a positive number is ignored with a warning.
 
 ```usda
@@ -531,6 +532,46 @@ def RenderSettings "settings"
 
 `samples/subdivision_adaptive.usda` places one cube five times at growing distances,
 refined to levels 3, 3, 2, 1 and 0.
+
+### crust:dicingCamera
+
+`rel`, unset by default. No CLI flag.
+
+The camera that geometry is tessellated for, when it is not the camera the image is seen
+through. It sets:
+
+- the levels and per-edge rates of
+  [adaptive subdivision](#crust-subdivisionedgelength), and which faces count as in view;
+- [how many segments](@/docs/usd/geometry.md#how-many-segments-a-curved-shape-gets) a
+  cylinder, cone or capsule is cut into around its axis.
+
+Unset, the render camera dices, as it always has. The render's resolution and framing
+apply to the dicing camera as they do to the render camera. A render product's own
+`camera` replaces the render camera, not the dicing camera.
+
+Use it when the render camera moves but the geometry should not, for example:
+
+- a fly-through of a static set, diced once from a camera that sees all of it;
+- a Hydra viewport or an interactive session, where the stage's shot camera dices and
+  the camera that tumbles only looks. Moving a render camera that does not dice is then
+  an [in-place edit](@/docs/help/claude-desktop.md) rather than a re-import.
+
+Geometry is diced for the dicing camera's view. Seen from a render camera that is much
+closer, it can look coarse, and faces outside the dicing camera's view are not refined
+at all.
+
+A target that is not a camera, or no prim, is ignored with a
+[`camera.dicing_not_a_camera`](@/docs/reference/warnings.md) warning, and the render
+camera dices.
+
+```usda
+def RenderSettings "settings"
+{
+    rel camera = </World/ShotCam>
+    rel crust:dicingCamera = </World/LayoutCam>
+    float crust:subdivisionEdgeLength = 2
+}
+```
 
 ## Camera depth of field
 

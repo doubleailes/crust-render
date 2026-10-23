@@ -73,12 +73,36 @@ pub use value::{Val, arity_of, parse_literal};
 
 /// Resolves an `image` node's `file` input — as authored, relative to the
 /// document — into a sampler. The second argument is the colour space the
-/// texels are in: the `file` input's effective `colorspace` when the image
-/// outputs a `color3` / `color4`, and `None` for a non-colour image (data,
-/// never converted) or a colour one no scope declares a space for. `None`
-/// from the loader declines the texture, and the node falls back to its
-/// `default` input.
-pub type TextureLoader<'a> = &'a dyn Fn(&str, Option<&str>) -> Option<TextureRef>;
+/// texels are in ([`TexelSpace`]). `None` from the loader declines the
+/// texture, and the node falls back to its `default` input.
+pub type TextureLoader<'a> = &'a dyn Fn(&str, TexelSpace<'_>) -> Option<TextureRef>;
+
+/// The colour space an `image` node's texels are in, as its document states
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TexelSpace<'a> {
+    /// A non-colour image (`float`, `vector2/3/4`): data, never converted,
+    /// whatever any scope declares.
+    Data,
+    /// A colour image (`color3` / `color4`) no scope declares a space for.
+    /// MaterialX reads that as the working space; the host decides (crust
+    /// reads it as `auto`, as Arnold does).
+    Unset,
+    /// A colour image's effective `colorspace`, verbatim. Empty for an
+    /// explicit `colorspace=""`, which declares that nothing is converted.
+    Named(&'a str),
+}
+
+impl<'a> TexelSpace<'a> {
+    /// The declared name, when there is one: `None` for data and for a
+    /// colour image no scope declares a space for.
+    pub fn name(self) -> Option<&'a str> {
+        match self {
+            TexelSpace::Named(name) => Some(name),
+            TexelSpace::Data | TexelSpace::Unset => None,
+        }
+    }
+}
 
 /// Converts an RGB value authored in the named colour space into the
 /// renderer's working space. Called at compile time, once per authored

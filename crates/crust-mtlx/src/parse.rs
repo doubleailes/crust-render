@@ -277,6 +277,19 @@ impl Doc {
     /// deciding that is the caller's half (see
     /// `is_color_type`).
     pub fn colorspace_of<'a>(&'a self, node: &'a Node, input: &'a Input) -> Option<&'a str> {
+        self.declared_colorspace_of(node, input)
+            .filter(|cs| !cs.is_empty())
+    }
+
+    /// [`Doc::colorspace_of`] before an empty declaration is read as none:
+    /// `Some("")` for an explicit `colorspace=""`, `None` when no scope
+    /// declares anything. An image's loader tells the two apart (see
+    /// `TexelSpace`).
+    pub fn declared_colorspace_of<'a>(
+        &'a self,
+        node: &'a Node,
+        input: &'a Input,
+    ) -> Option<&'a str> {
         input
             .colorspace
             .as_deref()
@@ -286,7 +299,6 @@ impl Doc {
                 self.graph_colorspaces.get(g).map(String::as_str)
             })
             .or(self.colorspace.as_deref())
-            .filter(|cs| !cs.is_empty())
     }
 
     /// Every node of a given category, in document order.

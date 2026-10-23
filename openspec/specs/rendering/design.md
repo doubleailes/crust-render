@@ -783,12 +783,42 @@ inside one branch per camera ray, 460,800 of them), the images bit-identical; an
 `scripts/check_images.sh check` against goldens recorded by the binary before the change
 reported every checked-in sample identical.
 
-Two passes that hold each other out split the samples between them, so their beauties
-**add** to the render with no pass: measured on `samples/render_passes.usda` at 48×27,
-`--indirect-clamp 0`, RMS 3.5e-9 at 16 spp and 8.2e-9 at 64 (float rounding). `over`
-instead plateaus at 4.5e-2 at both counts: it attenuates the background a second time
-at edge pixels, a bias rather than noise
-(`passes_that_hold_each_other_out_add_up_to_the_whole`).
+Two passes that hold each other out split the samples between them, so their beauty,
+alpha and light path expressions **add** to the render with no pass. Measured on
+`samples/render_passes.usda` at 48×27, `--indirect-clamp 0`
+(`crust-core/tests/render_passes.rs`, § Compositing):
+
+- **plus, holding each other out** (`passes_that_hold_each_other_out_add_up_to_the_whole`):
+  colour RMS 3.2e-9 at 16 spp and 7.9e-9 at 64, alpha exactly 0, `C<RD>.*[LO]` 1.4e-9
+  and 2.6e-9 (float rounding; it grows to 4e-7 at 4096 spp as the sums get longer).
+  `over` on the same pair is a bias at edge pixels: RMS 3.9e-2 at 16 spp, 3.7e-2 at 64,
+  3.3e-2 at 4096. It takes the foreground's share away from the background a second time.
+- **double counting** (`a_dome_visible_in_both_passes_is_counted_twice`): with the dome
+  visible in both passes, the sum minus the no-pass render is the dome alone (a pass
+  holding out every geometry) to 4.1e-9 at 16 spp. Escaped samples carry no alpha, so
+  the alpha still adds up and the error is in colour only.
+- **hidden in back** (`a_back_pass_that_hides_the_character_goes_under_it`): the back
+  pass leaves the hero out of `cameraVisibility`, so `char over back` is the merge. Away
+  from edges it is exact (0). At an edge pixel of coverage α its error is
+  `α(1 − α)·(B̄ behind − B̄ beside)`: the background's mean over the samples the hero
+  covers against its mean over the rest. It therefore depends on the background:
+  - against the sky (40 of the 84 edge pixels at 16 spp), the background is one colour
+    and the error is rounding (1.5e-8);
+  - where the background is independent of the silhouette, it is the noise between two
+    sample subsets and falls as 1/√N: 4 floor pixels go 1.4e-3 → 1.3e-4 from 64 to
+    4096 spp, a factor of 10 for √64 = 8;
+  - against the floor, the background is not independent: it darkens under the hero's
+    contact shadow, and the crate's edges cross the silhouette. That error is a bias.
+    RMS 7.2e-3 at 16 spp, 6.0e-3 at 256 and 5.2e-3 at 4096 (max 2.4e-2, mean pixel
+    0.24), where noise would have fallen by 16.
+
+  So `over` is the right merge for a back pass that hides the front object, but not an
+  exact one at edges. Plus is exact only for passes that hold each other out.
+
+These tests read the alpha through `Film::var_channels`, which is top-down like
+`Buffer::get_rgb`. `Buffer::get_pixel` is bottom-up, and pairing it with that alpha
+put each pixel's colour beside the alpha of its mirrored row. The first `over`
+measurement (4.5e-2) was taken that way.
 
 ## Known gaps: the sampler setting
 

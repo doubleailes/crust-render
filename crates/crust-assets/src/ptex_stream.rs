@@ -134,7 +134,7 @@ fn level_count(res: ptex::Res) -> u8 {
 /// streamed chain is therefore the *darker* of the two at every level above
 /// the base.
 ///
-/// This is the same defect `crust:mipspace` guards against for `.tx`, and
+/// This is the defect crust's earlier `.tx` marker guarded against, and
 /// there it is **refused** rather than described — a mismatched chain reads
 /// as perfectly correct at level 0 and wrong only under minification, which
 /// by eye is indistinguishable from a filtering bug. So it is refused here

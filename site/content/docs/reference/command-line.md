@@ -84,6 +84,7 @@ The flags of `crust render`:
 | [`--display`](#display) | display | `sRGB - Display` | — |
 | [`--view`](#view) | view | `Un-tone-mapped` | — |
 | [`--auto-tx`](#auto-tx) | flag | off | — |
+| [`--tx-color-space`](#tx-color-space) | colour space | `ACEScg` | — |
 | [`--scanline`](#scanline) | flag | off (tiles) | — |
 | [`--checkpoint`](#checkpoint) | seconds | off | — |
 | [`--stats`](#stats) | flag | off | — |
@@ -585,16 +586,40 @@ crust render -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nit
 `--auto-tx`
 
 The first time a UV texture is used, convert it to a tiled, mip-mapped `.tx` file beside
-the original (same path, `.tx` extension). A texture is converted when its `.tx` is
-missing or older than the source, or when an older Crust Render wrote it without the
-alpha channel the source has.
+the original, the way Arnold's auto-tx does. Crust Render names and writes the file as
+Arnold 7.5 would for the same binding:
+- `<stem>_raw.<ext>.tx` when nothing is converted;
+- otherwise `<stem>_<source space>_<target>.<ext>.tx`, where the target is
+  [`--tx-color-space`](#tx-color-space).
+
+So the two renderers share the file. A texture is converted when its `.tx` is missing or
+its modification time differs from the source's.
 
 Crust Render always streams from a `.tx` when one exists beside a texture. This flag only
 creates the missing ones. The run prints one line saying how many textures it converted,
 and a texture that fails to convert is loaded fully into memory instead.
 
-The conversion records the colour space of its mip levels in the file (see
-[Materials and textures](@/docs/usd/materials.md#tx-files)).
+See [Materials and textures](@/docs/usd/materials.md#tx-files) for how a `.tx` is named,
+converted and read.
+
+### tx-color-space
+
+`--tx-color-space <SPACE>`
+
+The colour space a `.tx` converts to, and so the one its name records. Any name or alias
+of the OCIO config is accepted. The default, `ACEScg`, is Arnold's rendering space, so
+Crust Render finds and writes the files Arnold uses. It is independent of
+[`--working-space`](#working-space): a render in `lin_rec709` still reads the `ACEScg`
+files and converts their values into its working space.
+
+A name you give that the OCIO config does not define is refused before anything is
+loaded. Without the flag, a config that has no `ACEScg` still renders: every `.tx` is
+then looked for and written as `_raw`. Set it to the rendering space your Arnold scenes
+use when that is not ACEScg.
+
+```bash
+crust render -i scene.usda --auto-tx --tx-color-space "Linear Rec.709 (sRGB)"
+```
 
 ## Rendering mode
 
@@ -883,8 +908,8 @@ values and defaults: [`-i`](#input) (required), [`-f`](#frame), [`--camera`](#ca
 [`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
 [`--filter-radius`](#filter-radius), [`--variance-threshold`](#variance-threshold),
 [`--min-samples`](#min-samples), [`--neighbour-tolerance`](#neighbour-tolerance),
-[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
-[`--auto-tx`](#auto-tx). The rest of
+[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length),
+[`--auto-tx`](#auto-tx) and [`--tx-color-space`](#tx-color-space). The rest of
 `render`'s flags (`-s`, `-o`, the colour and statistics flags) are refused. Its own flags:
 
 | flag | value | default | what it does |
@@ -1027,8 +1052,8 @@ and defaults as `render`, so a suggestion made as a flag can be passed straight 
 [`--indirect-clamp`](#indirect-clamp), [`--filter`](#filter),
 [`--filter-radius`](#filter-radius), [`--variance-threshold`](#variance-threshold),
 [`--min-samples`](#min-samples), [`--neighbour-tolerance`](#neighbour-tolerance),
-[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
-[`--auto-tx`](#auto-tx).
+[`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length),
+[`--auto-tx`](#auto-tx) and [`--tx-color-space`](#tx-color-space).
 
 With `--region`, that region is the only crop the trials render. `--auto-tx` is the one
 flag that writes beside the stage: the `.tx` files it creates, as a render would.
@@ -1094,8 +1119,8 @@ same names, values and defaults: [`-i`](#input) (required), [`-f`](#frame),
 [`--light-samples-indirect`](#light-samples-indirect), [`--indirect-clamp`](#indirect-clamp),
 [`--filter`](#filter), [`--filter-radius`](#filter-radius),
 [`--variance-threshold`](#variance-threshold), [`--min-samples`](#min-samples),
-[`--neighbour-tolerance`](#neighbour-tolerance), [`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length) and
-[`--auto-tx`](#auto-tx); and `render`'s [`-s`](#samples), so it reproduces a render made
+[`--neighbour-tolerance`](#neighbour-tolerance), [`--subdiv-level`](#subdiv-level), [`--subdiv-edge-length`](#subdiv-edge-length),
+[`--auto-tx`](#auto-tx) and [`--tx-color-space`](#tx-color-space); and `render`'s [`-s`](#samples), so it reproduces a render made
 at that count. The rest of `render`'s flags (`-o`, the colour and statistics flags,
 `--scanline`, `--log-file`) are refused. Its own flags:
 

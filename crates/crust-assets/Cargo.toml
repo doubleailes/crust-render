@@ -28,3 +28,6 @@ tracing.workspace = true
 # `std` for `tracing::subscriber::with_default`, which the WARN-once test
 # counts events through.
 tracing = { workspace = true, features = ["std"] }
+# Reads `tests/data/arnold_tx/cases.json`, what Arnold's auto-tx wrote
+# (`scripts/arnold_tx_oracle.py`). Already in the workspace through crust-core.
+serde_json = "1.0.151"

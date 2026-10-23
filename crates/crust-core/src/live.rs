@@ -18,9 +18,9 @@
 //!   geometries it owns, or move it to or from infinity, and a light the
 //!   scene's light links took out of the list (it is no longer one);
 //! - a settings change that would move the working colour space, the
-//!   subdivision level, what tessellation read from the camera (adaptive
-//!   subdivision, implicit shapes sized on screen), the dome's camera
-//!   visibility or the render camera;
+//!   subdivision level, the dicing camera or what tessellation read from it
+//!   (adaptive subdivision, implicit shapes sized on screen), the dome's
+//!   camera visibility or the render camera;
 //! - any rebuild that raises a warning about the rebuilt prim, or a scene
 //!   whose warnings already name it: the warnings list must stay the one a
 //!   fresh import reports.
@@ -62,6 +62,9 @@ pub struct Provenance {
     /// run as owning every id up to the next run's, as light linking does;
     /// [`Provenance::geometry_of`] reads the ids the prim emitted.
     pub(crate) geometry: Vec<(Range<u32>, String)>,
+    /// The prims that emitted a volume region, in traversal order. Volumes
+    /// are not geometry runs, but they are placed by their prim's transform.
+    pub(crate) volumes: Vec<String>,
     /// What the import decided once for the whole stage.
     pub(crate) stage: StageFacts,
 }
@@ -95,15 +98,19 @@ pub(crate) struct StageFacts {
     /// The `RenderSettings` prim the import read, when one.
     pub(crate) render_settings: Option<String>,
     pub(crate) subdiv_level: u32,
-    /// What adaptive subdivision read from the render camera (its projection,
+    /// What adaptive subdivision read from the dicing camera (its projection,
     /// target and ceiling), as bits; `None` for uniform subdivision.
     pub(crate) adaptive: Option<ScreenKey>,
     pub(crate) domes_seen_by_camera: bool,
     pub(crate) working: Option<crate::color::Space>,
     /// The camera rendered through, `None` for the procedural one.
     pub(crate) camera: Option<String>,
-    /// The camera projection an implicit shape took its radial count from,
-    /// as bits; `None` when no count came from it.
+    /// The camera `crust:dicingCamera` named, when it is one: tessellation
+    /// read it rather than the render camera. `None` when the render camera
+    /// dices.
+    pub(crate) dicing: Option<String>,
+    /// The dicing camera's projection an implicit shape took its radial count
+    /// from, as bits; `None` when no count came from it.
     pub(crate) on_screen_shapes: Option<ScreenKey>,
     /// Whether an unshared curved implicit shape took the fixed radial count
     /// because no camera was named: naming one then moves geometry.
@@ -207,6 +214,23 @@ impl Provenance {
             })
             .map(|(ids, _)| ids.clone())
             .collect()
+    }
+
+    /// Whether a prim the scene imported — a material, a light, or a prim
+    /// that emitted geometry or a volume region — lies strictly below `path`,
+    /// matched by whole path components: a transform edit at `path` then
+    /// moves what the scene holds. A scan of every material, light, geometry
+    /// run and volume.
+    pub fn any_below(&self, path: &str) -> bool {
+        let path = path.trim_end_matches('/');
+        let below = |prim: &str| {
+            prim.strip_prefix(path)
+                .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/'))
+        };
+        self.materials.keys().any(|p| below(p))
+            || self.lights.keys().any(|p| below(p))
+            || self.geometry.iter().any(|(_, p)| below(p))
+            || self.volumes.iter().any(|p| below(p))
     }
 
     /// The `RenderSettings` prim the import read, when one.
@@ -379,5 +403,58 @@ impl Update {
             scene.stats.image = (&scene.settings).into();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mesh under the camera is below it; a sibling, a prim whose name
+    /// only extends the camera's, and the camera itself are not.
+    #[test]
+    fn any_below_matches_whole_components_strictly_below() {
+        let prov = Provenance {
+            geometry: vec![
+                (0..1, "/World/cam/rig/mesh".into()),
+                (1..2, "/World/box".into()),
+            ],
+            ..Default::default()
+        };
+        assert!(prov.any_below("/World/cam"));
+        assert!(prov.any_below("/World/cam/"));
+        assert!(
+            !prov.any_below("/World/box"),
+            "the prim itself is not below it"
+        );
+        assert!(
+            !prov.any_below("/World/ca"),
+            "a name prefix is not an ancestor"
+        );
+        assert!(!prov.any_below("/World/sibling"));
+
+        let mut lit = Provenance::default();
+        lit.lights.insert(
+            "/World/cam/key".into(),
+            LightOrigin {
+                index: 0,
+                geoms: 0..0,
+            },
+        );
+        lit.materials
+            .insert("/World/other/mtl".into(), MaterialOrigin::default());
+        assert!(lit.any_below("/World/cam"));
+        assert!(lit.any_below("/World/other"));
+        assert!(!lit.any_below("/World/cam/key"));
+
+        let fog = Provenance {
+            volumes: vec!["/World/cam/fog".into()],
+            ..Default::default()
+        };
+        assert!(
+            fog.any_below("/World/cam"),
+            "a volume region is imported too"
+        );
+        assert!(!fog.any_below("/World/cam/fog"));
     }
 }

@@ -12,7 +12,7 @@ use glam::Vec3A;
 
 const FIXTURE: &str = include_str!("data/hair_helpers.txt");
 
-fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn decline(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     None
 }
 

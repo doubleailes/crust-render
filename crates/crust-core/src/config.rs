@@ -80,13 +80,12 @@ impl From<TriPackets> for crust_rt::PacketLayout {
 /// (`CRUST_PTEX_STREAM_MIPSPACE`).
 ///
 /// **The chain is where the two backends part company, and the project's own
-/// standard for that is refusal rather than a footnote.** A `.tx` records
-/// the colour space its levels were reduced in (`crust:mipspace`) and a
-/// mismatch is refused outright, for the reason the mismatch is dangerous:
-/// level 0 stays perfectly correct and every coarser level is wrong, so it
-/// shows up only under minification and looks exactly like a filtering bug.
+/// standard for that is refusal rather than a footnote.** A chain reduced
+/// in one encoding and read in another is dangerous because level 0 stays
+/// perfectly correct and every coarser level is wrong, so it shows up only
+/// under minification and looks exactly like a filtering bug.
 ///
-/// A `.ptx` has no such marker and needs none — the answer is known. Crust
+/// A `.ptx` has no marker of its encoding and needs none — the answer is known. Crust
 /// binds Ptex colour as display-encoded and decodes it by 2.2, while a
 /// `.ptx`'s stored levels were reduced in the file's own encoding. That is the
 /// mismatch, always.
