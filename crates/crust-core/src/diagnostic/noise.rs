@@ -158,6 +158,7 @@ pub fn rows(groups: &Groups) -> Vec<(String, String)> {
 /// The engine-built request: a value and a variance var per row.
 pub fn request(rows: &[(String, String)]) -> AovRequest {
     AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/crust/diagnostic".into(),
             name: String::new(),

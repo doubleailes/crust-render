@@ -322,6 +322,70 @@ Each display filter is a `Shader` prim:
 - **Crop edges.** Display filters on a `--region` crop clamp at the crop (D4), so a
   crop is not a bitwise sub-image of the full frame once a neighbourhood operation runs.
 
+## As built
+
+What the implementation settled that the decisions above left open, and where it
+departs from them.
+
+- **The precomp rides on `AovRequest`, not `RenderSettings`.** `RenderSettings` is
+  `Copy`, and a compiled filter (programs, JIT builds, kernels) is not; the precomp is
+  `AovRequest::precomp: Option<Arc<Precomp>>`, read with the products
+  (`import_render_products`, which the full import, the in-place settings update and
+  `crust check` share). It reaches the renderer through the layout
+  (`AovLayout::precomp`), as every other AOV does.
+- **Interface inputs are `crust_mtlx::Source::Interface`.** The USD translation
+  (`mtlx_network::translate_value_graph`) turns a connection to the graph's own
+  `inputs:<name>` into that source, and the compiler lowers it to an `Op::Primvar`
+  channel, the op `geompropvalue` already emits; `compile_value_graph` (crust-mtlx)
+  walks the graph first and refuses textures, `geompropvalue`, geometry nodes, closures
+  and unknown categories. No op was added; the JIT test
+  `value_graphs_over_interface_inputs_match` pins JIT ↔ interpreter on such a program.
+- **`hsvadjust` is not available.** D2 lists it among the allowed nodes, but crust-mtlx
+  has no operator for it, so a graph using it is refused like any unknown node.
+  `rgbtohsv` / `hsvtorgb` and `colorcorrect` are there.
+- **A ninth code, `precomp.unknown_filter`.** A var whose `crust:filter` targets a prim in
+  neither list, or names an output the filter does not have, writes no channel; none of
+  D9's eight codes fit it.
+- **`precomp.black_beauty` is "no light".** The import cannot know what a stage's
+  surfaces emit, so the check is that the stage has a precomp with filters and an empty
+  light list.
+- **The unit's filters are boxed** (`UnitAov::filters: Option<Box<UnitFilters>>`), so a
+  unit without them keeps its size.
+- **`probe` reads the beauty.** An MCP job answers with `Job::shown` (the displayed
+  output), while `Job::image` and `RenderControl::beauty_snapshot` keep returning the
+  beauty for `probe`.
+- **Display operation details.** `crust:blur`'s σ is `radius / 3`, truncated at the
+  radius. `crust:vectorBlur` averages `taps` bilinear lookups centred on the pixel, from
+  `−v/2` to `+v/2`, and leaves a pixel with a zero vector exactly as it was; its radial
+  `center` is in pixels from the image's bottom-left (default its centre). `crust:merge`'s
+  `over` is `b + a·(1 − alpha)`. `crust:convolve` samples its kernel nearest, each texel
+  covering `kernelScale` pixels, and uses the kernel's matching channel (its last past
+  three).
+
+### Measurements
+
+- **Goldens.** `scripts/check_images.sh check` against the goldens of task 1.1 (`f958a80`,
+  `--indirect-clamp 0`): every one of the 43 scenes bit-identical.
+- **Callgrind, `cornellbox.usda -s 2`, one thread.** `advance_pixel::<Sobol, false, …>`
+  (the beauty-only per-sample path) is 3,816,397,660 instructions inclusive before and
+  after, to the instruction; the parallel work over the units is 3,846,840,001 before and
+  3,846,839,938 after (rayon's scheduling moves a few dozen). The process total moved from
+  4,276,302,705 to 4,276,658,838 (+0.008%), all of it once per render or per work unit:
+  the import reading the three settings attributes (`element_cmp`, about +64k), the three
+  stamp attributes in the EXR header (about +40k), and `Unit::new` and the drop of its
+  `Option<UnitAov>` (+44 and +28 instructions per unit over 920 units: codegen, not work).
+  The per-sample hook is free, so it did not become a const generic (D7); the total is not
+  equal to the instruction, which task 6.2 asked for.
+- **Sample filter cost.** `scripts/bench_ab.sh -n 10 -x "-s 64"` on `samples/precomp.usda`,
+  A its AOVs only, B the same with the `look` sample filter (12 ops, four inputs), both
+  without display filters, one binary: A 1.140 s min / 1.228 s mean, B 1.301 s min /
+  1.418 s mean, **+14.1% min, +15.5% mean**. The scene is cheap per sample (four bounces,
+  three objects), so the filter's evaluation and its four input reads are a visible share
+  of a sample; a production path would dilute it.
+- **Display chain.** The sample's three display filters (a radius-9 blur, a merge and a
+  24-tap vector blur) over 320×180: 4.9 to 8.5 ms per render (`--stats`' `precomp` line,
+  five runs at 64 spp), against a 1.2 to 1.4 s render.
+
 ## Migration Plan
 
 - **Stages:** nothing changes for a stage that authors no filter (D7).

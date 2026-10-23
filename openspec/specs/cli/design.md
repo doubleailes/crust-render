@@ -565,7 +565,10 @@ how many prims that bring geometry in the pass holds out and hides from the came
 the stage's — or `null` when no settings prim is there and the render uses the defaults;
 the provenance keeps the fallback path itself, so an edit authoring settings there is
 still classified as a settings edit); `products[]` (`prim` — `null` for
-the default beauty — `file`, `channels`);
+the default beauty — `file`, `channels`); `precomp` (`null` without one, else
+`sample_filters` and `display_filters`, the prim paths in order, `display`, the
+displayed output's name, and `filters`, one line per filter saying what each input
+reads — an added key, so the format stays `crust-check/2`);
 `effective_settings[]` (`name`, `value`, `flag`, `usd_attribute`, from the one
 `diagnostic::effective_settings`); `import[]` (`crust-stats/1`'s phase objects:
 `name`, `depth`, `time_s`, `rss_end_bytes`, `peak_end_bytes`); `counts`

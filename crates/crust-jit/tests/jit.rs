@@ -513,3 +513,135 @@ fn programs_can_be_built_and_dropped_repeatedly() {
         );
     }
 }
+
+/// A value graph — a precomp's sample filter — whose interface inputs are
+/// host channels: the JIT runs it bit for bit as the interpreter does, with
+/// every channel supplied, some missing (their defaults), and none.
+#[test]
+fn value_graphs_over_interface_inputs_match() {
+    use crust_mtlx::{Input, Node, Source, compile_value_graph};
+    let input = |name: &str, type_name: &str, source: Source| Input {
+        name: name.into(),
+        type_name: type_name.into(),
+        source,
+        colorspace: None,
+        text: None,
+    };
+    let port = |name: &str, type_name: &str, interface: &str, default: Option<Val>| {
+        input(
+            name,
+            type_name,
+            Source::Interface {
+                name: interface.into(),
+                default,
+            },
+        )
+    };
+    let link = |name: &str, type_name: &str, from: &str| {
+        input(
+            name,
+            type_name,
+            Source::Node {
+                name: from.into(),
+                output: None,
+            },
+        )
+    };
+    let node = |category: &str, name: &str, type_name: &str, inputs: Vec<Input>| Node {
+        category: category.into(),
+        name: name.into(),
+        type_name: type_name.into(),
+        inputs,
+        graph: None,
+        version: None,
+        colorspace: None,
+    };
+    let doc = Doc::from_nodes(vec![
+        node(
+            "ifgreater",
+            "pick",
+            "color3",
+            vec![
+                port("value1", "float", "matte", None),
+                input("value2", "float", Source::Value(Val::float(0.5))),
+                port("in1", "color3", "key", None),
+                port("in2", "color3", "fill", Some(Val::vec3(0.1, 0.2, 0.3))),
+            ],
+        ),
+        node(
+            "mix",
+            "blend",
+            "color3",
+            vec![
+                link("fg", "color3", "pick"),
+                port("bg", "color3", "beauty", None),
+                port("mix", "float", "depth", Some(Val::float(0.25))),
+            ],
+        ),
+        node(
+            "clamp",
+            "clamped",
+            "color3",
+            vec![link("in", "color3", "blend")],
+        ),
+        node(
+            "rgbtohsv",
+            "hsv",
+            "color3",
+            vec![link("in", "color3", "clamped")],
+        ),
+        node(
+            "hsvtorgb",
+            "graded",
+            "color3",
+            vec![link("in", "color3", "hsv")],
+        ),
+        node(
+            "luminance",
+            "lum",
+            "color3",
+            vec![link("in", "color3", "graded")],
+        ),
+        node(
+            "divide",
+            "ratio",
+            "float",
+            vec![
+                port("in1", "float", "matte", None),
+                port("in2", "float", "depth", None),
+            ],
+        ),
+    ]);
+    let g = compile_value_graph(&doc, &[("graded", None), ("lum", None), ("ratio", None)]);
+    assert!(g.refused.is_empty(), "{:?}", g.refused);
+    let names = g.program.primvars.clone();
+    let points: Vec<Vec<Option<Val>>> = (0..64)
+        .map(|i| {
+            let t = i as f32 / 64.0;
+            names
+                .iter()
+                .enumerate()
+                .map(|(k, n)| {
+                    // Every fifth channel goes missing, so defaults are read.
+                    if (i + k) % 5 == 0 {
+                        return None;
+                    }
+                    Some(match n.as_str() {
+                        "matte" | "depth" => Val::float((t * 9.1).sin() * 1.5),
+                        _ => Val::vec3(t * 2.0 - 0.5, (t * 3.7).cos(), 1.0 - t),
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    let base = shading_points()[0];
+    let ctxs: Vec<ShadeCtx<'_>> = points
+        .iter()
+        .map(|p| ShadeCtx {
+            primvars: p,
+            ..base
+        })
+        .chain(std::iter::once(base))
+        .collect();
+    same_at(&g.program, "value graph", &ctxs);
+}

@@ -146,7 +146,7 @@ impl<'a> Compiler<'a> {
         let producer = match &input.source {
             Source::Node { name, .. } => self.doc.find(&scope, name),
             Source::Graph { graph, output } => self.doc.graph_output(graph, output).map(|c| c.node),
-            Source::Value(_) => None,
+            Source::Value(_) | Source::Interface { .. } => None,
         };
         match producer {
             Some(p) if p.type_name != "multioutput" => arity_of(&p.type_name),
@@ -179,6 +179,30 @@ impl<'a> Compiler<'a> {
                 }
                 None => self.constant(Val::ZERO),
             },
+            Source::Interface { name, default } => {
+                let arity = arity_of(&input.type_name);
+                let fallback = match default {
+                    Some(v) => self.managed(node, input, *v).broadcast_to(arity),
+                    None => Val::ZERO.broadcast_to(arity),
+                };
+                let channel = self.primvar_channel(name);
+                self.emit(Op::Primvar {
+                    channel,
+                    arity,
+                    fallback,
+                })
+            }
+        }
+    }
+
+    /// The [`Program::primvars`] channel holding `name`, added on first use.
+    fn primvar_channel(&mut self, name: &str) -> u32 {
+        match self.program.primvars.iter().position(|p| p == name) {
+            Some(i) => i as u32,
+            None => {
+                self.program.primvars.push(name.to_string());
+                (self.program.primvars.len() - 1) as u32
+            }
         }
     }
 
@@ -490,15 +514,9 @@ impl<'a> Compiler<'a> {
                 return self.constant(fallback);
             }
             other => {
-                let channel = match self.program.primvars.iter().position(|p| p == other) {
-                    Some(i) => i,
-                    None => {
-                        self.program.primvars.push(other.to_string());
-                        self.program.primvars.len() - 1
-                    }
-                };
+                let channel = self.primvar_channel(other);
                 return self.emit(Op::Primvar {
-                    channel: channel as u32,
+                    channel,
                     arity,
                     fallback,
                 });

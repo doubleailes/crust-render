@@ -31,6 +31,13 @@ pub enum Source {
     },
     /// A nodegraph's output, reached as `nodegraph="G" output="out"`.
     Graph { graph: String, output: String },
+    /// An interface input of the graph being compiled, whose value the host
+    /// supplies per evaluation by `name` — lowered, like a `geompropvalue`,
+    /// to a [`Program::primvars`](crate::Program::primvars) channel, and
+    /// reading `default` (zero when `None`) where the host supplies none.
+    /// Never produced by the XML parser: a host building a value graph
+    /// ([`crate::compile_value_graph`]) writes it.
+    Interface { name: String, default: Option<Val> },
 }
 
 /// One input of one node.

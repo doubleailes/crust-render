@@ -30,7 +30,8 @@ use openusd_schemas::render::{
 use tracing::debug;
 
 use crate::aov::{
-    Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision, PrimvarRole, PrimvarSource,
+    Accumulation, AovProduct, AovRequest, AovSource, AovVar, FilterSource, Precision, PrimvarRole,
+    PrimvarSource,
 };
 use crate::region::PixelRect;
 
@@ -57,6 +58,9 @@ pub(super) struct Framing {
 #[derive(Debug)]
 pub(super) struct RenderProducts {
     pub(super) request: AovRequest,
+    /// What each filter var's `crust:filter` targets, by the var's prim
+    /// path: resolved into its [`AovSource::Filter`] by the precomp import.
+    pub(super) filter_targets: HashMap<String, FilterTarget>,
     /// The primvars the request's primvar vars read, which the geometry
     /// import keeps (and nothing else for them).
     pub(super) primvars: PrimvarKeep,
@@ -93,6 +97,7 @@ impl Default for RenderProducts {
     fn default() -> Self {
         RenderProducts {
             request: AovRequest::default(),
+            filter_targets: HashMap::new(),
             primvars: PrimvarKeep::default(),
             camera: None,
             resolution: None,
@@ -393,21 +398,46 @@ impl PrimvarKeep {
 /// Resolves the render settings prim's products. Empty when the stage has no
 /// settings prim or the prim authors no `products` — the "write the single
 /// beauty EXR" case.
-pub(super) fn import_render_products(stage: &Stage, pass: Option<&sdf::Path>) -> RenderProducts {
+///
+/// The precomp is read too when `stage_path` (the stage's file, which its
+/// kernel asset paths resolve against) is given; a reader that only wants
+/// the products' camera and framing (`crust ls`) passes `None`.
+pub(super) fn import_render_products(
+    stage: &Stage,
+    stage_path: Option<&std::path::Path>,
+    pass: Option<&sdf::Path>,
+) -> RenderProducts {
     let Some(path) = render_settings_path(stage, pass) else {
         return RenderProducts::default();
     };
     let Some(settings) = UsdRenderSettings::get(stage, path.clone()).ok().flatten() else {
         return RenderProducts::default();
     };
+    let mut out = read_products(stage, &path, &settings);
+    if let Some(stage_path) = stage_path {
+        out.request.precomp = super::precomp::import_precomp(
+            stage,
+            stage_path,
+            &path,
+            &mut out.request,
+            &out.filter_targets,
+        );
+    }
+    out
+}
+
+/// The products of the settings prim `path`, before the precomp is read.
+fn read_products(stage: &Stage, path: &sdf::Path, settings: &UsdRenderSettings) -> RenderProducts {
+    let path = path.clone();
     let targets = settings
         .products_rel()
         .forwarded_targets()
         .unwrap_or_default();
-    let base = Base::resolve(&settings, &Base::unauthored());
+    let base = Base::resolve(settings, &Base::unauthored());
     if targets.is_empty() {
         return RenderProducts {
             request: AovRequest::default(),
+            filter_targets: HashMap::new(),
             primvars: PrimvarKeep::default(),
             motion_blur: base.motion_blur(),
             sharp_at_frame: base.sharp_at_frame(),
@@ -422,6 +452,7 @@ pub(super) fn import_render_products(stage: &Stage, pass: Option<&sdf::Path>) ->
 
     let mut out = RenderProducts {
         request: AovRequest::default(),
+        filter_targets: HashMap::new(),
         primvars: PrimvarKeep::default(),
         camera: base.camera.clone(),
         resolution: base.resolution,
@@ -563,7 +594,9 @@ pub(super) fn import_render_products(stage: &Stage, pass: Option<&sdf::Path>) ->
             seen.push(var_path.clone());
             let var = vars
                 .entry(var_path.clone())
-                .or_insert_with(|| resolve_var(stage, &var_path, &mut out.primvars))
+                .or_insert_with(|| {
+                    resolve_var(stage, &var_path, &mut out.primvars, &mut out.filter_targets)
+                })
                 .clone();
             // One DFA holds every expression of the render, each accepting
             // as one bit of a u64 and all sharing a bounded number of
@@ -821,7 +854,7 @@ pub(super) fn parse_data_type(name: &str) -> Option<(usize, Precision)> {
 fn type_fits(source: AovSource, components: usize, precision: Precision) -> bool {
     let components_fit = match source {
         AovSource::Color | AovSource::Lpe => components == 3 || components == 4,
-        AovSource::Primvar(_) => (1..=3).contains(&components),
+        AovSource::Primvar(_) | AovSource::Filter(_) => (1..=3).contains(&components),
         s => components == s.components(),
     };
     let precision_fits = precision != Precision::Uint
@@ -881,7 +914,12 @@ fn authored_accumulation(prim: &Prim) -> Option<Accumulation> {
 
 /// One RenderVar as a channel layer, or `None` (warned) when crust cannot
 /// honour it.
-fn resolve_var(stage: &Stage, path: &sdf::Path, keep: &mut PrimvarKeep) -> Option<AovVar> {
+fn resolve_var(
+    stage: &Stage,
+    path: &sdf::Path,
+    keep: &mut PrimvarKeep,
+    filters: &mut HashMap<String, FilterTarget>,
+) -> Option<AovVar> {
     if RenderVar::get(stage, path.clone()).ok().flatten().is_none() {
         warning!(
             AovNotARenderVar,
@@ -898,6 +936,15 @@ fn resolve_var(stage: &Stage, path: &sdf::Path, keep: &mut PrimvarKeep) -> Optio
     let channel_prefix = custom_token(&prim, "driver:parameters:aov:channel_prefix")
         .or_else(|| custom_token(&prim, "driver:parameters:aov:husk:channel_prefix"));
 
+    // A filter output: its `sourceType` and `sourceName` are ignored.
+    if let Some(target) = prim
+        .relationship("crust:filter")
+        .targets()
+        .ok()
+        .and_then(|t| t.into_iter().next())
+    {
+        return resolve_filter_var(&prim, path, name, channel_prefix, target, filters);
+    }
     let source_type = custom_token(&prim, "sourceType").unwrap_or_else(|| "raw".to_owned());
     let source_name = custom_token(&prim, "sourceName").unwrap_or_default();
     let mut expression = None;
@@ -1140,6 +1187,79 @@ fn resolve_var(stage: &Stage, path: &sdf::Path, keep: &mut PrimvarKeep) -> Optio
     })
 }
 
+/// What a filter var's `crust:filter` names: the filter prim, and the output
+/// (`crust:filter:output`, `None` for the filter's only one). Whether it is
+/// radiance rides in the var's placeholder source.
+#[derive(Debug, Clone)]
+pub(super) struct FilterTarget {
+    pub(super) filter: sdf::Path,
+    pub(super) output: Option<String>,
+}
+
+/// A RenderVar authoring `rel crust:filter`: a filtered layer of one to three
+/// float or half channels, whose filter the precomp import resolves. Its
+/// source is a placeholder until then.
+fn resolve_filter_var(
+    prim: &Prim,
+    path: &sdf::Path,
+    name: String,
+    channel_prefix: Option<String>,
+    target: sdf::Path,
+    filters: &mut HashMap<String, FilterTarget>,
+) -> Option<AovVar> {
+    let type_name = custom_token(prim, "driver:parameters:aov:format")
+        .or_else(|| custom_token(prim, "dataType"))
+        .unwrap_or_else(|| "color3f".to_owned());
+    let radiance = custom_bool(prim, "crust:filter:radiance").unwrap_or(true);
+    let placeholder = |components: usize| {
+        AovSource::Filter(FilterSource {
+            display: false,
+            filter: u16::MAX,
+            output: 0,
+            components: components as u8,
+            radiance,
+        })
+    };
+    let fits = parse_data_type(&type_name).filter(|(c, p)| type_fits(placeholder(*c), *c, *p));
+    let Some((components, precision)) = fits else {
+        warning!(
+            AovTypeMismatch,
+            at = path,
+            "{path}: a filter output cannot be written as {type_name:?} (one to three float or              half channels); no channel written"
+        );
+        return None;
+    };
+    if let Some(mode) = authored_accumulation(prim)
+        && mode != Accumulation::Filtered
+    {
+        warning!(
+            AovAccumulationIgnored,
+            at = path,
+            "{path}: a filter output is accumulated as its filter defines it and cannot be              {mode:?}; using Filtered"
+        );
+    }
+    filters.insert(
+        path.to_string(),
+        FilterTarget {
+            filter: target,
+            output: custom_token(prim, "crust:filter:output").filter(|o| !o.is_empty()),
+        },
+    );
+    Some(AovVar {
+        prim_path: path.to_string(),
+        name,
+        channel_prefix,
+        source: placeholder(components),
+        components,
+        precision,
+        accumulation: Accumulation::Filtered,
+        clear: custom_number(prim, "driver:parameters:aov:clearValue").unwrap_or(0.0),
+        expression: None,
+        raw: false,
+        variance: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1159,7 +1279,7 @@ mod tests {
             .open(path.to_str().unwrap())
             .expect("stage opens");
         let scope = crate::WarningScope::enter();
-        let products = import_render_products(&stage, None);
+        let products = import_render_products(&stage, Some(&path), None);
         (products, scope.finish())
     }
 

@@ -94,10 +94,13 @@ crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list
  │           per pass in render_pass; materials take the numbers, never the sampler (BsdfDraw)
  │         forward walk: intersect, resolve material (ShadingPoint), NEE, scatter
  │         backward gather: MIS-weighted radiance, guiding training samples
- │         AOV instantiation only: the first hit → the unit's AOV planes;
+ │         AOV instantiation only: the first hit → the unit's AOV planes, and the
+ │           precomp's sample filters over the sample's values → their planes;
  │           an inspection's sample → Route::fold → the unit's record store
+ │   └─ after exposure: precomp::run, the display filters over the film
  └─ write EXR (linear) + PNG (tone-mapped) — crust-render only
        no products: write_rgb_file at -o; products: one scanline EXR each (main.rs, products.rs)
+       the PNG is precomp::displayed (crust:display's var) when authored, else the beauty
        --checkpoint: a scoped thread rewrites the PNG from the control's snapshots meanwhile;
        Ctrl-C (ctrlc) cancels the control, the partial outputs are written, exit 130
 ```
@@ -168,7 +171,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | `Material` | `crust-core/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
 | `Light`, `LightShape` | `crust-core/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
 | `ProgressCallback` | `crust-core/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
-| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage, `max_samples_reached` the most any pass has reached (a new pass, such as a guided render's next training pass, resets the first, not the second); a cancelled render returns what it traced and `Cancelled` |
+| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty (the precomp's displayed output, its display chain run on read over the units published so far, when `crust:display` is authored; `beauty_snapshot` is always the beauty) at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage, `max_samples_reached` the most any pass has reached (a new pass, such as a guided render's next training pass, resets the first, not the second); a cancelled render returns what it traced and `Cancelled` |
 | `mcp::session::Session` | `crust-render/src/mcp/session.rs` | the tools in `mcp/mod.rs` | commands are closures run one at a time on the session thread, in the order sent; nothing the thread owns (the `Stage`) ever leaves it |
 | `RenderStats`, `profile::Section` | `crust-core/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
 
@@ -179,7 +182,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/usd_import/implicit.rs` (`Cube`, `Plane`, `Cylinder`, `Cone`, `Capsule` and the `_1` variants tessellated as OpenUSD's GeomUtil does, pinned point for point by `tests/geomutil_oracle.rs`, their radial count chosen from the screen when a camera is named); `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `strands.rs` (`StrandTable`, `CurveHit`), `primvars.rs` (`PrimvarTable`, `MeshHit`), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
-| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
+| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`, the sample filters' unit evaluation and planes); products resolved in `scene/usd_import/products.rs`; `precomp.rs` (the precomp: sample filters compiled by `crust_mtlx::compile_value_graph`, the five display operations, `run`, `displayed`), read by `scene/usd_import/precomp.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render; the lobe events it matches are the materials' `material/lobe.rs`); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule, the per-pass sampler dispatch), `path.rs` (`trace_path<S: SamplerImpl, …>`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `sampler.rs` (`SamplerKind`: the six OpenQMC samplers by token), `filter.rs` (pixel filter importance sampling), `buffer.rs` (and `var_of_mean`, the one variance estimator), `region.rs` (`PixelRect`) |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`), `lobe.rs` (the lobe vocabulary: `Scatter`, `LobeLabel`, `LobeEvent`, `LobeSplit`, which `lpe` re-exports) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection, `learned.rs` and `neural.rs` the frozen tables the learned selections pick with), `tracer/light_cache.rs` (`learned`'s training pre-pass, and the walk both learned selections share), `tracer/light_visibility.rs` (`neural`'s training over `crust-nn`), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
@@ -202,7 +205,7 @@ stays a mechanical move. From the bottom:
 | materials | `material/` (with the lobe vocabulary `lpe` matches, and `SubsurfaceEntry`), `lpe/` |
 | world | `rt_world` (with the material `Signature` an in-place edit is checked against, and `EVERY_CLASS`) |
 | lights | `light/` (with the learned selections' frozen tables), `environment` |
-| integrator | `tracer/` (with the learned selections' training and the inspection's per-unit store), `aov`, `camera`, `filter`, `sampler`, `guiding`, `volume`, `subsurface` |
+| integrator | `tracer/` (with the learned selections' training and the inspection's per-unit store), `aov`, `precomp`, `camera`, `filter`, `sampler`, `guiding`, `volume`, `subsurface` |
 | import | `scene/`, `world.rs`, `live`, `place` |
 | tools | `diagnostic/`, `inspect/`, `compare`, `stamp`, `check` |
 
@@ -385,6 +388,14 @@ other. The pairs:
   (`blend_weights`); change either side alone and an AOV stops matching the
   image it was rendered with. AOV planes are per pixel, in the pixel's own
   sample order, so tiles ↔ scanlines stays bit-identical for every channel.
+  The precomp's filters are AOVs here: a sample filter reads the sample's
+  values at the same seam (`UnitAov::add`, the beauty sample read, never
+  written) and accumulates with the same weights, and the display chain runs
+  on copies after exposure, each output pixel a sum in a fixed order, so the
+  beauty, the samples taken and every channel are the same with any filter,
+  any thread count, tiles or scanlines (the same test, and `tests/precomp.rs`).
+  A stage without a precomp builds no filter slot: the per-sample hook is one
+  branch in the AOV instantiation only.
 - **Light path expressions route the beauty, not a copy of it.** The AOV
   gather (`tracer/route.rs`) re-evaluates the beauty's backward recurrence
   per expression and reuses its totals wherever the lobes agree for that

@@ -30,6 +30,31 @@ pub struct ProductInfo {
     pub channels: Vec<String>,
 }
 
+/// The render settings' precomp: its filters, what they read, and the
+/// output a host shows (`crate::precomp`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PrecompInfo {
+    /// The sample filters' prim paths, in evaluation order.
+    pub sample_filters: Vec<String>,
+    /// The display filters' prim paths, in evaluation order.
+    pub display_filters: Vec<String>,
+    /// The displayed output's name: a RenderVar's, or `beauty`.
+    pub display: String,
+    /// One line per filter: what it is and what each of its inputs reads.
+    pub filters: Vec<String>,
+}
+
+impl From<&crate::precomp::Precomp> for PrecompInfo {
+    fn from(p: &crate::precomp::Precomp) -> Self {
+        PrecompInfo {
+            sample_filters: p.sample_filter_paths(),
+            display_filters: p.display_filter_paths(),
+            display: p.display_name().to_owned(),
+            filters: p.describe(),
+        }
+    }
+}
+
 /// The active render pass and what it did to the scene.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PassInfo {
@@ -62,6 +87,8 @@ pub struct CheckReport {
     /// else the stage's); `null` for a scene not imported from a stage.
     pub settings: Option<String>,
     pub products: Vec<ProductInfo>,
+    /// The settings' precomp; `null` when they author none.
+    pub precomp: Option<PrecompInfo>,
     pub effective_settings: Vec<Setting>,
     /// The import's phases, as `crust-stats/1` writes them.
     pub import: Vec<Phase>,
@@ -144,6 +171,12 @@ fn to_text(r: &CheckReport) -> String {
             p.file,
             p.channels.join(" ")
         );
+    }
+    if let Some(p) = &r.precomp {
+        let _ = writeln!(o, "  displays    {}", p.display);
+        for f in &p.filters {
+            let _ = writeln!(o, "  precomp     {f}");
+        }
     }
     let _ = writeln!(o);
 
@@ -313,6 +346,12 @@ mod tests {
                 file: "output.exr".into(),
                 channels: vec!["R".into(), "G".into(), "B".into()],
             }],
+            precomp: Some(PrecompInfo {
+                sample_filters: vec!["/Render/Precomp/look".into()],
+                display_filters: Vec::new(),
+                display: "look".into(),
+                filters: vec!["sample /Render/Precomp/look".into()],
+            }),
             effective_settings: vec![Setting {
                 name: "light_selection".into(),
                 value: "power".into(),
@@ -382,6 +421,7 @@ mod tests {
                 "pass",
                 "settings",
                 "products",
+                "precomp",
                 "effective_settings",
                 "import",
                 "counts",
@@ -406,6 +446,10 @@ mod tests {
             "products[].prim",
             "products[].file",
             "products[].channels",
+            "precomp.sample_filters",
+            "precomp.display_filters",
+            "precomp.display",
+            "precomp.filters",
             "effective_settings[].name",
             "effective_settings[].value",
             "effective_settings[].flag",

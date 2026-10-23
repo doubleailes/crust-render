@@ -641,6 +641,21 @@ impl Renderer {
         instruments: Instruments,
         control: Option<&RenderControl>,
     ) -> Measured {
+        // A host watching a render with a displayed output sees that output
+        // in its snapshots: the units publish their AOVs into a film the
+        // control runs the display chain over on read.
+        if let (Some(control), Some(pc)) = (
+            control.filter(|c| c.takes_snapshots()),
+            layout.and_then(|l| l.precomp.as_ref()),
+        ) && pc.displayed_var().is_some()
+        {
+            let layout = layout.expect("a precomp comes with its layout");
+            control.attach_precomp(crate::precomp::Snapshot {
+                film: AovFilm::new(layout, self.settings.raster_region()),
+                precomp: pc.clone(),
+                exposure: self.settings.exposure_scale,
+            });
+        }
         let mut m = if self.settings.guiding {
             self.render_guided(tiled, progress, layout, instruments, control)
         } else {
@@ -653,6 +668,14 @@ impl Renderer {
         let scale = self.settings.exposure_scale;
         if scale != 1.0 {
             m.apply_exposure(scale);
+        }
+        // The display chain runs on the exposed image, once, after every
+        // pass: its operations read neighbouring pixels, so they cannot run
+        // before the film is whole.
+        if let (Some(film), Some(pc)) = (&mut m.film, layout.and_then(|l| l.precomp.as_ref()))
+            && !pc.display.is_empty()
+        {
+            crate::precomp::run(pc, &m.buffer, film);
         }
         m
     }
@@ -1306,10 +1329,18 @@ impl Renderer {
         let exposure = self.settings.exposure_scale;
         let publish = |unit: &Unit| {
             if let Some(control) = display {
-                control.publish(w, h, rect, |display| {
+                control.publish(w, h, rect, |display, film| {
                     unit.for_each_pixel_ref(|i, j, st| {
                         display.set_pixel(i, j, st.estimate().0 * exposure)
                     });
+                    // With a displayed output, the unit's AOVs too, as the
+                    // film gathers them at the end of the pass.
+                    if let (Some(film), Some(aov)) = (film, unit.work.aov.as_ref()) {
+                        unit.for_each_pixel_ref(|i, j, st| {
+                            let p = (j - unit.tile.y) * unit.tile.width + (i - unit.tile.x);
+                            film.store(aov, p, i, j, st.weight_sum, st.taken, st.estimate().1);
+                        });
+                    }
                 });
             }
         };
@@ -1842,7 +1873,7 @@ impl Renderer {
                     time,
                     primvars: &scratch.primvars,
                 };
-                planes.add(&scratch.first, &extras, fx, fy, wx * wy);
+                planes.add(&scratch.first, &extras, fx, fy, wx * wy, radiance);
             }
             if AOV && let Some(store) = unit.inspect.as_deref_mut() {
                 // Every emission-ending term of the sample, as its records;

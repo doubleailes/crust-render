@@ -1270,7 +1270,7 @@ pub(crate) fn connected_node_in(doc: &crate::Doc, node: &Node, name: &str) -> Op
     match &input.source {
         Source::Node { name, .. } => doc.find(&scope, name).cloned(),
         Source::Graph { graph, output } => doc.graph_output(graph, output).map(|g| g.node.clone()),
-        Source::Value(_) => None,
+        Source::Value(_) | Source::Interface { .. } => None,
     }
 }
 

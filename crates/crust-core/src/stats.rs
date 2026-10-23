@@ -455,6 +455,20 @@ pub struct RenderStats {
     /// Scalar displacement applied at import; all zero (and not reported)
     /// for a scene without displacement.
     pub displacement: DisplacementCounters,
+    /// The precomp's filters and what its display chain cost; all zero (and
+    /// not reported) for a render without one.
+    pub precomp: PrecompCounters,
+}
+
+/// What a render's precomp ran: its filters, and the display chain's time
+/// over the final image (`crate::precomp`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct PrecompCounters {
+    pub sample_filters: u64,
+    pub display_filters: u64,
+    /// Wall-clock time of the display chain over the final image.
+    #[serde(rename = "display_time_s", serialize_with = "seconds")]
+    pub display_time: Duration,
 }
 
 /// What the displacement pass did over a load.
@@ -755,6 +769,7 @@ impl Serialize for RenderStats {
             profile,
             subdivision,
             displacement,
+            precomp,
             peak_memory_bytes,
         } = self;
         let render_s = self
@@ -771,6 +786,7 @@ impl Serialize for RenderStats {
             light_kinds: Kinds(light_kinds),
             subdivision,
             displacement,
+            precomp,
             rays: RaysJson {
                 counters: rays,
                 total_rays: rays.total_rays(),
@@ -812,6 +828,7 @@ struct StatsJson<'a> {
     light_kinds: Kinds<'a>,
     subdivision: &'a SubdivisionCounters,
     displacement: &'a DisplacementCounters,
+    precomp: &'a PrecompCounters,
     rays: RaysJson<'a>,
     textures: TexturesJson<'a>,
     ptex: PtexJson<'a>,
@@ -1214,6 +1231,14 @@ impl RenderStats {
             if !bins.is_empty() {
                 writeln!(f, "    {:<26} {}", "edge rates", bins.join(" · "))?;
             }
+        }
+        let p = &self.precomp;
+        if p.sample_filters + p.display_filters > 0 {
+            writeln!(
+                f,
+                "  {:<28} {} sample / {} display filters, {:.2?} display",
+                "precomp", p.sample_filters, p.display_filters, p.display_time
+            )?;
         }
         let d = &self.displacement;
         if d.meshes > 0 {
@@ -2333,6 +2358,10 @@ mod tests {
             "phases[].peak_end_bytes",
             "phases[].rss_end_bytes",
             "phases[].time_s",
+            "precomp",
+            "precomp.display_filters",
+            "precomp.display_time_s",
+            "precomp.sample_filters",
             "ptex",
             "ptex.below_threshold",
             "ptex.budget_bytes",

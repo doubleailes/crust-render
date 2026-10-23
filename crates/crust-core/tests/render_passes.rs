@@ -887,6 +887,7 @@ fn render_stage(path: &Path, pass: Option<&str>, spp: u32) -> Vec<Px> {
     let alpha = var("a", AovSource::Alpha, 1, None);
     let diffuse = var("diffuse", AovSource::Lpe, 3, Some(DIFFUSE_LPE));
     let request = AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/Render/p".into(),
             name: "p.exr".into(),

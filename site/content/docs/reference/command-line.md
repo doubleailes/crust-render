@@ -652,12 +652,15 @@ image.)
 The final EXR and PNG are the same files a render without the flag writes, and without
 the flag nothing is written before the render ends. Each rewrite goes to a file beside the
 PNG (`<name>.png.partial`) that is then renamed over it, so a viewer reloading the PNG
-never reads half an image. Only the beauty is previewed: AOVs are written when the render
-ends.
+never reads half an image. Only the beauty is previewed, or the
+[displayed output](@/docs/usd/render-settings.md#crust-display) when the render settings
+author one: AOVs are written when the render ends.
 
-With [render products](@/docs/usd/aovs.md), the preview is the first product's beauty. When
-the first product has no beauty var, a warning says no preview will be written, and the
-render goes on.
+With [render products](@/docs/usd/aovs.md), the preview is the first product's beauty. A
+[precomp](@/docs/usd/render-settings.md#precomp) with a displayed output previews that
+output instead, its display filters run over the part of the image rendered so far. When
+the first product has no beauty var and the settings author no `crust:display`, a warning
+says no preview will be written, and the render goes on.
 
 ```bash
 crust render -i scene.usda -s 4096 --checkpoint 10 -o out.exr

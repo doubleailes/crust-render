@@ -3017,3 +3017,75 @@ def Scope "Render" {{ def RenderSettings "settings" {{ uniform int2 resolution =
         );
     }
 }
+
+/// A session render of a stage with a displayed output (`crust:display`)
+/// answers with that output, as `crust render`'s PNG shows it — its
+/// snapshots while it runs, and its image once returned — while `probe`
+/// still reads the beauty.
+#[test]
+fn a_session_shows_the_precomps_displayed_output() {
+    let dir = work_dir("precomp_display");
+    let layer = dir.join("lookdev.usda");
+    let mut state = State::default();
+    state
+        .open_session(
+            samples().join("precomp.usda").to_str().unwrap(),
+            layer.to_str().unwrap(),
+            None,
+        )
+        .expect("opened");
+    let open = state.session().expect("open");
+    let (job, _) = open
+        .start_render(Some([90, 40, 250, 130]), Some(4))
+        .expect("started");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(job.wait(Duration::from_secs(3600)));
+    let finished = job.finished().expect("finished");
+    let film = finished.film.as_ref().expect("a film");
+    let shown = job.shown().expect("an image");
+    let displayed =
+        crust_core::precomp::displayed(job.aovs.precomp.as_deref(), &finished.buffer, film)
+            .expect("a displayed output");
+    let pixels = |b: &crust_core::Buffer| {
+        let (w, h) = b.size();
+        (0..w * h)
+            .map(|i| {
+                let (r, g, b) = b.get_rgb(i % w, i / w);
+                [r.to_bits(), g.to_bits(), b.to_bits()]
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pixels(&shown), pixels(&displayed));
+    assert_ne!(
+        pixels(&shown),
+        pixels(&finished.buffer),
+        "the look, not the beauty"
+    );
+    // The beauty is still what `probe` reads.
+    assert_eq!(pixels(&job.image().unwrap()), pixels(&finished.buffer));
+    // The last snapshot is the displayed output of the units it holds: all
+    // of them, so the image returned.
+    let (_, snapshot) = job.control.snapshot().expect("published");
+    assert_eq!(pixels(&snapshot), pixels(&displayed));
+    // The answer's image is the displayed output's PNG.
+    let png = render::png(&displayed, job.working_space).unwrap();
+    let answer = serde_json::to_value(render::answer(&job, json!({}))).unwrap();
+    let data = answer["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == "image")
+        .and_then(|c| c["data"].as_str())
+        .expect("an image")
+        .to_owned();
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap(),
+        png
+    );
+}
