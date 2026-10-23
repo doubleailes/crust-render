@@ -33,6 +33,7 @@ opened with — `usd_import::stage_builder()`). Do not add loaders for any other
 | `crust diagnostic`: probe conditions, crops, trials and verdicts, the budget, the `crust-diagnostic/1` report, `--baseline`, the clamp counter's cost | `diagnostics` | `site/content/docs/help/diagnosing-a-render.md` |
 | `crust light-paths`: the inspection fold over a path's `Route` (one record per emission-ending term), the inspection alphabet and lights by index, dominant-lobe labels, the per-unit record store and its groups, what reproduces the frame, the `crust-light-paths/1` report and its hints, the MCP `light_paths` tool | `light-path-inspection` | `site/content/docs/help/light-paths.md` |
 | `crust mcp`: the session (the override layer is the session), the session thread, edits as USDA merged into the layer, undo, progressive renders, probe / diff, `render_final` | `mcp-session` | `site/content/docs/help/claude-desktop.md` |
+| `hdCrust` / `crust-hydra`: the Hydra render delegate, its scene index observer, the layers it writes (`scene.usdc`, `edits.usda` with overs), the `crust:*` UsdImaging adapter, the C ABI, panics, AOVs, `hdCrustTest` | `hydra-delegate` | `site/content/docs/help/usdview.md` |
 
 Before changing a feature, read its design record: most sections end in a trap that was
 already fallen into once. When a change moves a measurement or retires a gap, update the
@@ -52,6 +53,10 @@ cargo run --release -- ls camera -i scene.usda                         # cameras
 cargo run --release -- check -i scene.usda --json -                    # what a render would use + the import's warnings (crust-check/2)
 cargo run --release -- diagnostic -i scene.usda --budget 2m > r.md     # which settings make it faster/cleaner (+ crust-diagnostic.json)
 cargo run --release -- mcp                                             # MCP server on stdio for Claude Desktop (feature `mcp`)
+cargo build --profile hydra -p crust-hydra                             # crust for the Hydra delegate (panic = unwind)
+cd hydra && pixi install && pixi run cmake -S hdCrust -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    && pixi run cmake --build build && pixi run cmake --install build --prefix install   # hdCrust (MSVC prompt on Windows)
+pixi run bash hdCrust/test/compare.sh install <dir>                    # delegate vs `crust render`, bitwise (also interaction.sh, usdc_roundtrip.sh)
 
 cargo test                                          # integration tests load samples/*.usda
 cargo test -p crust-core loads_cornellbox_usda      # one test by name
@@ -84,6 +89,11 @@ cargo deny --locked check                           # advisories, licences, sour
 cargo +nightly-2026-09-26 clippy --workspace --all-targets -- -D warnings
 RUSTFLAGS='-D warnings -C target-cpu=x86-64-v3' CARGO_TARGET_DIR=target/nightly-v3 \
     cargo +nightly-2026-09-26 test -p crust-rt --features bvh8
+# ...and .github/workflows/hydra.yml, not a required check: hdCrust built against
+# OpenUSD 26 from hydra/pixi.toml (cached on pixi.lock) and compare.sh, interaction.sh,
+# usdc_roundtrip.sh run headless, on changes to crust-hydra, hydra/, the session core
+# or `live`, and nightly; nightly also prints the release vs hydra profile callgrind
+# totals (the cost of panic = "unwind").
 ```
 
 The probe examples (`mtlx_shade`, `tex_probe`, `ptex_verify`, `ptex_seams`,
@@ -97,19 +107,24 @@ verifies shading **in numbers, not by eye**.
 
 ## Workspace
 
-Eight crates under `crates/` (ownership table in `docs/architecture.md`):
+Nine crates under `crates/` (ownership table in `docs/architecture.md`):
 `crust-rt` (intersection kernel, no crust deps), `crust-mtlx` (MaterialX reader, no crust
 deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-nn`
 (tiny bit-deterministic networks — hash grid, dense layers, Adam — for `neural` light
 selection; no dependencies at all, the caller brings threads and random numbers), `crust-core`
 (the engine library: import, integrator, materials, lights, volumes, guiding, stats),
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
-`crust-render` (the CLI, binary `crust`; it drives a render, a diagnosis or a comparison and
-writes their files — the images, the reports — while the engine writes nothing: `main.rs`,
-`products.rs`, `logging.rs`) and `utils` (stateless math:
+`crust-render` (lib + the CLI, binary `crust`; it drives a render, a diagnosis or a comparison
+and writes their files — the images, the reports — while the engine writes nothing. The
+library, `lib.rs` + `products.rs`, is how a stage is imported and checked under the scene
+flags, and with feature `session` (openusd only) the live session's core, `session/`, which
+`crust mcp` and the Hydra delegate share; the binary is `main.rs`, `logging.rs`, `mcp/`)
+and `utils` (stateless math:
 warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
-`opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
-re-exports the public surface.
+`opensubdiv-rs` / `ptex-rs` are external. `crust-hydra` (a `staticlib` with a C ABI)
+is crust for `hdCrust`, the C++ Hydra render delegate in `hydra/hdCrust`, which is built
+with CMake against OpenUSD 26 from `hydra/pixi.toml`, outside `cargo build`. Import from
+`crust_core::` roots; `lib.rs` re-exports the public surface.
 
 ## Rules
 
@@ -117,7 +132,8 @@ re-exports the public surface.
 
 - Safe Rust everywhere: crates are `forbid(unsafe_code)` (`crust-nn` included) except `crust-core` (`deny`, one
   test-only `GlobalAlloc` and, behind the `mmap` feature, the import's memory-mapped USD
-  reads, `mapping_resolver` in `usd_import/mod.rs`) and `crust-jit` (`deny`, five audited blocks). Adding `unsafe`,
+  reads, `mapping_resolver` in `usd_import/mod.rs`), `crust-jit` (`deny`, five audited blocks) and
+  `crust-hydra` (`deny`, five audited blocks, all the C ABI's pointers, in `ffi.rs`). Adding `unsafe`,
   or a dependency that carries it on the hot path, is a project decision, not a local one.
 - **crust-core decodes no assets.** Every image, Ptex or IES byte crosses `AssetLoader`
   into `crust-assets`; a loader returning `None` means "fall back", never an error.

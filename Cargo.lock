@@ -619,6 +619,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crust-hydra"
+version = "0.8.0"
+dependencies = [
+ "crust-assets",
+ "crust-core",
+ "crust-render",
+ "openusd",
+ "tracing",
+]
+
+[[package]]
 name = "crust-jit"
 version = "0.8.0"
 dependencies = [

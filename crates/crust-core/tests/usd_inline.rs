@@ -759,6 +759,32 @@ fn f_stop_gives_the_camera_a_lens() {
     assert!(b.at(1.0).abs_diff_eq(Vec3A::ZERO, 1e-3), "{}", b.at(1.0));
 }
 
+#[test]
+fn a_pinhole_with_zero_focus_distance_still_looks_down_its_axis() {
+    // USD's "no focus": what GfCamera writes and a DCC camera with focus off
+    // exports (the Hydra delegate's viewing camera, among them). Built as a
+    // focus plane on the eye, every ray had no direction and hit nothing.
+    let scene = load(
+        "camera_zero_focus",
+        r#"
+    def Camera "Cam"
+    {
+        float focalLength = 50
+        float fStop = 0
+        float focusDistance = 0
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
+    );
+    let ray = scene.camera.get_ray(0.5, 0.5, [0.5, 0.5], 0.0);
+    let direction = ray.direction().normalize();
+    assert!(
+        direction.abs_diff_eq(Vec3A::new(0.0, 0.0, -1.0), 1e-5),
+        "{direction}"
+    );
+    assert!(ray.origin().abs_diff_eq(Vec3A::new(0.0, 0.0, 5.0), 1e-6));
+}
+
 /// A stage authoring `metadata` (e.g. `metersPerUnit = 1`) whose only
 /// prim is a camera at the origin looking down −Z with `lens` authored, and
 /// `render` (prims under `/Render`, which must hold `settings`) when not

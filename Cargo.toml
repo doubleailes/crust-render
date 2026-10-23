@@ -107,7 +107,8 @@ openusd-schemas = { version = "0.8", default-features = false }
 [profile.release]
 lto = "fat"
 codegen-units = 1
-# No `catch_unwind` and no `should_panic` anywhere in the workspace, and
+# No `catch_unwind` outside `crust-hydra` (which builds under `hydra` below)
+# and no `should_panic` anywhere in the workspace, and
 # crust-core's "return `Error`, never exit" contract is about *recoverable*
 # errors — those are `Result` values, not panics — so nothing depends on
 # unwinding. Dropping it removes the landing pads around the `expect()`s and
@@ -130,6 +131,16 @@ panic = "abort"
 [profile.bench]
 lto = "fat"
 codegen-units = 1
+
+# The Hydra delegate's build (`crust-hydra`, linked into a host such as
+# usdview): `release` with unwinding, so a crust panic is caught at the C ABI
+# and reported as an error instead of aborting the host. `crust` keeps
+# `release`'s `abort`, so its goldens and instruction counts do not move; the
+# landing pads' cost is measured in the hydra-delegate design record (D8).
+#     cargo build --profile hydra -p crust-hydra
+[profile.hydra]
+inherits = "release"
+panic = "unwind"
 
 # openusd tracks its GitHub `main` rather than the 0.8.0 release, to take its
 # fixes as they land. A patch rather than a `git =` in `[workspace.dependencies]`,

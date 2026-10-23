@@ -166,7 +166,15 @@ report converged exactly when it has completed.
 
 - **WHEN** usdview displays the `depth` AOV
 - **THEN** after the render completes, the buffer holds crust's `depth` AOV for the
-  frame
+  frame, in Hydra's convention: projected to normalized device depth in [0, 1],
+  1 where nothing was hit, which is what the host composites the image with
+
+#### Scenario: Other AOVs
+
+- **WHEN** the host binds `normal`, `Neye` or `Peye`
+- **THEN** after the render completes, the buffer holds the values of crust's
+  matching AOV (`N`, `Neye`, `Peye`) exactly as `crust render` of the layers writes
+  them
 
 ### Requirement: Render settings are exposed to the host
 

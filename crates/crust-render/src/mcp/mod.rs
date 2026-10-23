@@ -7,15 +7,11 @@
 //! nothing else, on one thread: the session's stage lives on a thread of its
 //! own ([`session`]), and renders on the rayon pool.
 
-mod delta;
 mod edit;
-mod layer;
 mod place;
 mod query;
 mod render;
-mod scene;
 mod session;
-mod sources;
 #[cfg(test)]
 mod tests;
 

@@ -9,22 +9,25 @@
 //! caller's commands run in the order it sent them, however many callers
 //! interleave theirs.
 
-use super::delta::{Applied, classify, layer_diff};
 use super::edit::{
     Snippet, active_snippet, attribute_snippet, binding_snippet, reanchor, variant_snippet,
 };
-use super::layer::{StageMetrics, absolute, new_layer_text, same_file};
 use super::query::{prim_at, variant_sets};
 use super::render::{Job, Renders};
-use super::scene::{Imported, import};
-use super::sources::Sources;
 use crate::{Cli, Command, RenderRun, render_and_write};
 use clap::Parser;
 use crust_assets::FileAssets;
 use crust_core::inspect::{self, GroupBy};
 use crust_core::{PixelRect, RenderControl, RenderOutcome};
+use crust_render::session::delta::Applied;
+use crust_render::session::layer::{StageMetrics, absolute, new_layer_text, same_file};
+use crust_render::session::scene::Imported;
+use crust_render::session::sources::Sources;
+use crust_render::session::{
+    classify_saved, import_kept, loader, open_stage, replace_file, update_or_import,
+};
 use openusd::sdf;
-use openusd::usd::{InitialLoadSet, Stage};
+use openusd::usd::Stage;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,61 +79,9 @@ pub struct Open {
     pub(super) restage: bool,
 }
 
-/// The loader for the session's next import or update: the session's own,
-/// its decodes revalidated against the files on disk, or a fresh one under
-/// `CRUST_SCENE_DELTAS=0`; and how many kept decodes changed on disk.
-fn loader(kept: Option<&Arc<FileAssets>>) -> (Arc<FileAssets>, usize) {
-    match kept {
-        Some(assets) => {
-            let dropped = assets.revalidate();
-            if dropped > 0 {
-                debug!("{dropped} decoded asset(s) changed on disk and will be read again");
-            }
-            (assets.clone(), dropped)
-        }
-        None => (Arc::new(FileAssets::new()), 0),
-    }
-}
-
-/// Imports the saved layer at `layer` through `assets`, rendering `pass`,
-/// then lets go of the kept decodes the new scene does not use.
-fn import_kept(
-    layer: &Path,
-    pass: Option<&str>,
-    assets: Arc<FileAssets>,
-) -> Result<Imported, String> {
-    let scene = import(layer, pass, assets.clone())?;
-    let unused = assets.sweep();
-    if unused > 0 {
-        debug!("{unused} decoded asset(s) the scene no longer uses let go");
-    }
-    Ok(scene)
-}
-
-/// Opens `path`'s layer as the authoring stage, payloads unloaded: they load
-/// only for the prims a query reaches (design, Risks).
-fn open_stage(path: &Path) -> Result<Stage, String> {
-    let id = path.to_str().ok_or("the layer path is not UTF-8")?;
-    // The import's schema registry, not its resolver: a declared attribute
-    // then has its schema type and fallback here, as in the render.
-    Stage::builder()
-        .schema_registry(crust_core::usd_schema_registry())
-        .load(InitialLoadSet::LoadNone)
-        .open(id)
-        .map_err(|e| format!("cannot open {}: {e}", path.display()))
-}
-
-/// Replaces the file at `path` with `bytes` by writing a sibling and renaming
-/// it over `path`, as openusd's `Layer::save` does. A reader that still maps
-/// the old file keeps the bytes it mapped: the rename gives `path` a new file,
-/// where writing in place would change the mapped one under it.
-fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let staged = path.with_file_name(format!(".{name}.crust-restore"));
-    std::fs::write(&staged, bytes)?;
-    std::fs::rename(&staged, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&staged);
-    })
+/// The session's kept loader as the session core takes it.
+fn kept(assets: Option<&Arc<FileAssets>>) -> Option<Arc<dyn crust_render::Assets>> {
+    assets.map(|a| a.clone() as Arc<dyn crust_render::Assets>)
 }
 
 /// `stage`'s composition errors, as messages.
@@ -578,7 +529,7 @@ impl Open {
     /// still hold its old decode, so only a full import gives what a fresh one
     /// would.
     fn apply_change(&mut self, before: &[u8]) -> Result<(), String> {
-        let (assets, changed_on_disk) = loader(self.assets.as_ref());
+        let (assets, changed_on_disk) = loader(kept(self.assets.as_ref()).as_ref());
         if changed_on_disk > 0 {
             debug!("Edit applied as full: {changed_on_disk} asset file(s) changed on disk");
         } else if let Some(changed) = &self.stale {
@@ -586,22 +537,21 @@ impl Open {
                 "Applied as full: the sources changed on disk ({} layer(s)), or a reload",
                 changed.len()
             );
-        } else if self.assets.is_some()
-            && let Some((applied, change)) = self.classify(before)
-        {
-            match self
-                .scene
-                .update(&self.output, self.pass.as_deref(), &change, applied)
-            {
-                Ok(()) => return Ok(()),
-                // One per edit batch that falls back.
-                Err(why) => debug!("{applied} edit applied as full instead: {why}"),
-            }
         }
-        let before = self.sources.now();
-        self.scene = import_kept(&self.output, self.pass.as_deref(), assets)?;
-        self.sources = Sources::of(&self.scene.layers, &self.output, &before);
-        self.stale = None;
+        let change = (changed_on_disk == 0 && self.stale.is_none() && self.assets.is_some())
+            .then(|| self.classify(before))
+            .flatten();
+        let sources = self.sources.now();
+        if update_or_import(
+            &mut self.scene,
+            &self.output,
+            self.pass.as_deref(),
+            change,
+            assets,
+        )? {
+            self.sources = Sources::of(&self.scene.layers, &self.output, &sources);
+            self.stale = None;
+        }
         Ok(())
     }
 
@@ -609,20 +559,7 @@ impl Open {
     /// rebuilds, `None` when it needs a full import.
     fn classify(&self, before: &[u8]) -> Option<(Applied, crust_core::live::Change)> {
         let provenance = self.scene.provenance()?;
-        let after = std::fs::read(&self.output).ok()?;
-        let parse = |bytes: &[u8]| {
-            std::str::from_utf8(bytes)
-                .ok()
-                .and_then(|text| openusd::usda::parse(text).ok())
-        };
-        let (before, after) = (parse(before)?, parse(&after)?);
-        let changes = layer_diff(&before, &after);
-        let (applied, change, full) = classify(&changes, &self.stage, provenance);
-        if let Some(why) = full {
-            debug!("Edit applied as full: {why}");
-            return None;
-        }
-        Some((applied, change))
+        classify_saved(before, &self.output, &self.stage, provenance)
     }
 
     /// `path`, an existing prim of the stage, which an edit may target: not
@@ -845,7 +782,7 @@ impl State {
         let assets = crust_core::config()
             .scene_deltas
             .then(|| Arc::new(FileAssets::new().keep_decoded()));
-        let imported = import_kept(&output, pass, loader(assets.as_ref()).0);
+        let imported = import_kept(&output, pass, loader(kept(assets.as_ref()).as_ref()).0);
         let scene = match restoring(&output, before_metrics.as_deref(), imported) {
             Ok(scene) => scene,
             Err(e) => {

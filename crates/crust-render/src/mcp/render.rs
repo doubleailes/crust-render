@@ -8,7 +8,6 @@
 //! render cancels it, or `cancel` does. The latest [`RETAINED`] renders are
 //! kept, their images and AOVs, for `snapshot`, `probe` and `diff`.
 
-use super::scene::Imported;
 use crate::{OutputColor, tone_map};
 use base64::Engine;
 use crust_core::Precision;
@@ -18,6 +17,7 @@ use crust_core::{
     AovFilm, AovRequest, Buffer, Camera, RayStats, RenderControl, RenderOutcome, RenderSettings,
     Renderer,
 };
+use crust_render::session::scene::Imported;
 use exr::prelude::f16;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
@@ -357,7 +357,7 @@ pub fn planes(
         .iter()
         .map(|product| {
             let mut channels = BTreeMap::new();
-            for (var, names) in crate::products::product_channels(product) {
+            for (var, names) in crust_render::products::product_channels(product) {
                 for (name, plane) in names
                     .into_iter()
                     .zip(film.var_channels(&finished.buffer, var))
@@ -499,7 +499,7 @@ pub fn probe(job: &Job, scene: &Imported, x: usize, y: usize) -> Result<Value, S
     {
         for product in &job.aovs.products {
             let mut values = serde_json::Map::new();
-            for (var, names) in crate::products::product_channels(product) {
+            for (var, names) in crust_render::products::product_channels(product) {
                 // One pixel, not the planes: a probe reads one value each.
                 let pixel = film.var_pixel(&f.buffer, var, lx, ly);
                 for (name, value) in names.into_iter().zip(pixel) {

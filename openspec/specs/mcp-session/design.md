@@ -19,7 +19,7 @@
 - **The layer carries the input's units** (`physical-depth-of-field`). A stage reads
   its metadata from its root layer only, and a session's root layer is the override
   layer. So `open_session` copies the input root layer's `metersPerUnit` and `upAxis`
-  into the layer it creates (`StageMetrics`, `mcp/layer.rs`), and a resumed layer that
+  into the layer it creates (`StageMetrics`, `session/layer.rs`), and a resumed layer that
   lacks one the input authors gets it added, keeping any value it authors itself. A
   resume that is then refused (the addition cannot be saved, or the import fails) puts
   the layer's earlier bytes back (`restoring`), so a refused `open_session` leaves the
@@ -134,7 +134,7 @@ streams opened from it.
 
 ### Classification: an allow-list over a layer diff
 
-After an edit batch is merged and saved (or an undo restored), `mcp/delta.rs` compares
+After an edit batch is merged and saved (or an undo restored), `session/delta.rs` compares
 the layer's bytes before and after — both parsed with `openusd::usda::parse` — spec by
 spec and field by field (`layer_diff`), and `classify` puts the changes into the
 cheapest class that can follow all of them:
@@ -293,7 +293,7 @@ carries a warning of a family a setting can move (`settings.`, `product.`, `aov.
   light's new `Emissive` goes into its emitter's slot in the same update, so the light
   and its geometry keep one `Emissive` and `radiance_toward` stays one answer
   (`a_replaced_light_and_its_geometry_share_one_emissive`).
-- The session (`mcp/scene.rs`, `Imported::update`) checks first, then takes its
+- The session (`session/scene.rs`, `Imported::update`) checks first, then takes its
   renderer apart into a `Scene`, applies, re-runs `check_scene` (the report, the product
   selection and its warnings) and builds a new renderer with `Renderer::new` around the
   same committed world. *Trap:* `retune` keeps the light selection when the strategy,
@@ -359,10 +359,11 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
     settings' (`value_at`'s own list of these readers).
   Closing it means either the import honouring UsdLux's per-type fallbacks (a render
   change) or `query` reporting crust's default where the import substitutes one.
-- **A Hydra render delegate** (`crust-hydra`: a C++ `HdRenderDelegate` over a C ABI
-  into the engine) would reuse the provenance and the `live` entry points, which take
-  paths and built values for that reason. It adds Pixar's C++ USD as a build dependency
-  and `unsafe` FFI, which `CLAUDE.md` makes a project decision.
+- **The Hydra delegate shares this session's core, not its server.** `hdCrust`
+  (`hydra-delegate`) writes an override layer as this session does and applies it
+  through the same `crust_render::session` code (diff, classify, in-place update,
+  kept decodes), so a light edit in usdview is a `lights` update here too. It has its
+  own session thread and render thread in `crust-hydra`, not `Session` in `mcp/`.
 - **Transforms, topology and namespace edits re-import**, except the render camera's
   own transform. Re-traversing only the changed subtree, and BVH refit, are not done: a
   refit tree is not the tree a fresh build gives. A light with no geometry (distant,
@@ -441,7 +442,7 @@ Before this change the session saw none of it:
 
 ### How a change is seen and applied
 
-- **Stamps.** `mcp/sources.rs` stamps each watched layer, other than the override layer,
+- **Stamps.** `session/sources.rs` stamps each watched layer, other than the override layer,
   with its length and modification time, as `kept.rs` stamps decodes.
   `Sources::changed()` re-stats every layer and re-stamps the ones that moved, so each
   change is reported once.
