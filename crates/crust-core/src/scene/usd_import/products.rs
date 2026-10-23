@@ -1225,7 +1225,8 @@ fn resolve_filter_var(
         warning!(
             AovTypeMismatch,
             at = path,
-            "{path}: a filter output cannot be written as {type_name:?} (one to three float or              half channels); no channel written"
+            "{path}: a filter output cannot be written as {type_name:?} (one to three float or \
+             half channels); no channel written"
         );
         return None;
     };
@@ -1235,7 +1236,8 @@ fn resolve_filter_var(
         warning!(
             AovAccumulationIgnored,
             at = path,
-            "{path}: a filter output is accumulated as its filter defines it and cannot be              {mode:?}; using Filtered"
+            "{path}: a filter output is accumulated as its filter defines it and cannot be \
+             {mode:?}; using Filtered"
         );
     }
     filters.insert(

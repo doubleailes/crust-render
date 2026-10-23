@@ -98,11 +98,17 @@ pub fn compile_value_graph(doc: &Doc, outputs: &[(&str, Option<&str>)]) -> Value
         for input in &node.inputs {
             match &input.source {
                 Source::Node { name, .. } => stack.push((scope.clone(), name.clone())),
-                Source::Graph { graph, output } => {
-                    if let Some(c) = doc.graph_output(graph, output) {
-                        stack.push((graph.clone(), c.node.name.clone()));
+                Source::Graph { graph, output } => match doc.graph_output(graph, output) {
+                    Some(c) => stack.push((graph.clone(), c.node.name.clone())),
+                    // The compiler would read it as zero: refused, never run
+                    // on a value nobody authored.
+                    None => {
+                        refused.insert(format!(
+                            "{}.{}: nodegraph \"{graph}\" has no output \"{output}\"",
+                            node.name, input.name
+                        ));
                     }
-                }
+                },
                 Source::Value(_) | Source::Interface { .. } => {}
             }
         }
@@ -114,12 +120,15 @@ pub fn compile_value_graph(doc: &Doc, outputs: &[(&str, Option<&str>)]) -> Value
     let host = crate::Host::new(&no_textures);
     let mut c = Compiler::new(doc, &host);
     let mut roots = Vec::with_capacity(outputs.len());
-    let mut widths = Vec::with_capacity(outputs.len());
+    // A node's declared type is its output's width, except a multioutput
+    // node's: its selected output's width is the one its op computes.
+    let mut widths: Vec<Option<u8>> = Vec::with_capacity(outputs.len());
     for (name, output) in outputs {
         roots.push(c.compile_named("", name, *output));
         widths.push(
             doc.find("", name)
-                .map_or(1, |n| arity_of(&n.type_name).clamp(1, 4)),
+                .filter(|n| n.type_name != "multioutput")
+                .map(|n| arity_of(&n.type_name).clamp(1, 4)),
         );
     }
     refused.extend(c.unsupported.iter().map(|u| format!("{u}: not supported")));
@@ -133,15 +142,48 @@ pub fn compile_value_graph(doc: &Doc, outputs: &[(&str, Option<&str>)]) -> Value
         refused.insert("reads the shading point or a texture".into());
     }
     let (program, remap) = c.program.optimize(&roots);
-    let outputs = roots
+    let slots: Vec<u32> = roots
+        .iter()
+        .map(|r| remap[*r as usize].unwrap_or(0))
+        .collect();
+    // The width of an op's value does not depend on its operands' values,
+    // so one evaluation over the defaults gives the multioutput widths.
+    let computed = widths.iter().any(Option::is_none).then(|| {
+        let mut values = Vec::new();
+        program.eval(&default_ctx(), &mut values);
+        values
+    });
+    let outputs = slots
         .iter()
         .zip(widths)
-        .map(|(r, w)| (remap[*r as usize].unwrap_or(0), w))
+        .map(|(s, w)| {
+            let w = w.unwrap_or_else(|| {
+                computed
+                    .as_ref()
+                    .and_then(|v| v.get(*s as usize))
+                    .map_or(1, |v| v.arity.clamp(1, 4))
+            });
+            (*s, w)
+        })
         .collect();
     ValueGraph {
         program,
         outputs,
         refused: refused.into_iter().collect(),
+    }
+}
+
+/// A shading context with nothing in it: every channel reads its default.
+fn default_ctx() -> crate::ShadeCtx<'static> {
+    crate::ShadeCtx {
+        uv: (0.0, 0.0),
+        normal: glam::Vec3A::Z,
+        tangent: glam::Vec3A::ZERO,
+        view: -glam::Vec3A::Z,
+        position: glam::Vec3A::ZERO,
+        uv_width: 0.0,
+        curve: None,
+        primvars: &[],
     }
 }
 
@@ -333,6 +375,45 @@ mod tests {
                 g.refused
             );
         }
+    }
+
+    /// `artistic_ior` is a multioutput node: the selected output's width,
+    /// three lanes for `extinction`, not the node's generic type's.
+    #[test]
+    fn a_selected_multioutput_output_keeps_its_width() {
+        let doc = Doc::from_nodes(vec![node("artistic_ior", "ior", "multioutput", Vec::new())]);
+        let g = compile_value_graph(&doc, &[("ior", Some("extinction")), ("ior", Some("ior"))]);
+        assert!(g.is_accepted(), "{:?}", g.refused);
+        assert_eq!(g.outputs[0].1, 3);
+        assert_eq!(g.outputs[1].1, 3);
+    }
+
+    /// An input wired to a nodegraph output that does not exist would read 0;
+    /// the graph is refused instead.
+    #[test]
+    fn a_dangling_graph_output_is_refused() {
+        let doc = Doc::from_nodes(vec![node(
+            "add",
+            "a",
+            "float",
+            vec![Input {
+                name: "in1".into(),
+                type_name: "float".into(),
+                source: Source::Graph {
+                    graph: "missing".into(),
+                    output: "out".into(),
+                },
+                colorspace: None,
+                text: None,
+            }],
+        )]);
+        let g = compile_value_graph(&doc, &[("a", None)]);
+        assert!(!g.is_accepted());
+        assert!(
+            g.refused.iter().any(|r| r.contains("missing")),
+            "{:?}",
+            g.refused
+        );
     }
 
     #[test]

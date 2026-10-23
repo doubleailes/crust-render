@@ -434,10 +434,22 @@ fn read_display(
             scale: custom_f32(&prim, "inputs:kernelScale").unwrap_or(1.0),
             normalize: input_bool(&prim, "inputs:normalize").unwrap_or(true),
         },
-        "crust:blur" => Operation::Blur {
-            input: image("in"),
-            radius: custom_f32(&prim, "inputs:radius").unwrap_or(1.0),
-        },
+        "crust:blur" => {
+            let radius = custom_f32(&prim, "inputs:radius").unwrap_or(1.0);
+            if radius.is_nan() || radius > crate::precomp::MAX_BLUR_RADIUS {
+                warning!(
+                    PrecompInvalidValue,
+                    at = path,
+                    "{path}: crust:blur radius {radius} is past {} pixels; the filter passes its \
+                     input through",
+                    crate::precomp::MAX_BLUR_RADIUS
+                );
+            }
+            Operation::Blur {
+                input: image("in"),
+                radius,
+            }
+        }
         "crust:vectorBlur" => {
             let field = if authored(&prim, "inputs:motion") {
                 Field::Vectors(image("motion"))

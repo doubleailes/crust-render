@@ -843,8 +843,8 @@ later in the list cannot be read (`precomp.cycle`).
 
 | `info:id` | inputs | does |
 |-----------|--------|------|
-| `crust:blur` | `in`, `float radius` (pixels, default 1) | a gaussian of standard deviation `radius / 3`, truncated at the radius |
-| `crust:convolve` | `in`, `asset kernel`, `float kernelScale` (default 1), `bool normalize` (default true) | convolves `in` with an image, each texel covering `kernelScale` pixels; the kernel is normalised to sum 1 per channel unless `normalize` is false |
+| `crust:blur` | `in`, `float radius` (pixels, default 1, at most 1024) | a gaussian of standard deviation `radius / 3`, truncated at the radius |
+| `crust:convolve` | `in`, `asset kernel`, `float kernelScale` (default 1), `bool normalize` (default true) | convolves `in` with an image (any format a light texture reads; an EXR's `R`, `G`, `B` matched by base name, so `rgb.R` works), each texel covering `kernelScale` pixels, at most 255 pixels a side; the kernel is normalised to sum 1 per channel unless `normalize` is false |
 | `crust:vectorBlur` | `in`, then one of: `token motion` (a vector var), `float2 direction`, or `float2 center` and `float strength`; `int taps` (default 8) | averages `taps` lookups along each pixel's vector, centred on the pixel: the motion vectors, one direction for every pixel, or a radial blur away from `center` (pixels from the bottom-left of the image, default its centre) of `strength` times the distance to it. A pixel whose vector is zero is unchanged |
 | `crust:merge` | `a`, `b`, `token operation` (`over`, `plus`, `multiply`, `screen`; default `over`), `alpha`, `float mix` (default 1) | per pixel: `over` is `b + a·(1 − alpha)` with `alpha` an image (1 when unconnected), the others as named; `mix` fades from `a` to the result |
 | `crust:grade` | `in`, `color3f lift` (0), `gain` (1), `gamma` (1), `offset` (0) | Nuke's `Grade`: `(gain − lift)·x + offset + lift`, raised to `1/gamma` where positive |
@@ -856,7 +856,11 @@ near the crop's border.
 
 An unknown `info:id` passes its `in` through
 ([`precomp.unknown_operation`](@/docs/reference/warnings.md#precomp)), and so does a
-`crust:convolve` whose kernel cannot be read (`precomp.missing_kernel`).
+`crust:convolve` whose kernel cannot be read (`precomp.missing_kernel`), and a blur
+radius or scaled kernel past the limits above (`precomp.invalid_value`). A radial
+`crust:vectorBlur`'s `center` is in the frame's pixels, so a
+[region](@/docs/usd/render-settings.md#datawindowndc) render blurs toward the same point
+as the full frame.
 
 Each operation is one pass over the image, independent of the sample count. The result
 is bitwise the same for any number of threads, and in tiles or scanlines. `--stats`

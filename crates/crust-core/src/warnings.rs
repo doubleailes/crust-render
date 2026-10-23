@@ -260,6 +260,8 @@ warning_codes! {
         "A filter input names a filter that runs after it; the input reads its clear value.";
     PrecompMissingKernel => "precomp.missing_kernel", Skipped, Each,
         "A crust:convolve kernel image could not be read; the filter passes its input through.";
+    PrecompInvalidValue => "precomp.invalid_value", Refused, Each,
+        "A display filter's blur radius or scaled kernel is past crust's limit (1024 pixels, 255 pixels a side); the filter passes its input through.";
     PrecompUnknownDisplay => "precomp.unknown_display", Refused, Each,
         "crust:display names no RenderVar of the render; the beauty is shown.";
     PrecompBlackBeauty => "precomp.black_beauty", Approximated, Each,

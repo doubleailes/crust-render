@@ -83,23 +83,12 @@ fn decode_pixels(
     Ok((w, h, pixels))
 }
 
-/// An EXR's first RGBA layer as interleaved RGB, as stored.
+/// An EXR's first layer as interleaved RGB, as stored: [`read_exr_rgb`]'s
+/// channels, matched by base name, so a layer-prefixed `rgb.R` / `rgb.G` /
+/// `rgb.B` (or one `Y` channel) reads as the bare names do. Environment maps,
+/// light textures and precomp kernels all decode through it.
 fn decode_exr_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<f32>), AssetError> {
-    let image = read_first_rgba_layer_from_file(
-        path,
-        |resolution, _| {
-            let (w, h) = (resolution.width(), resolution.height());
-            (w, h, vec![0.0f32; w * h * 3])
-        },
-        |(w, _h, pixels): &mut (usize, usize, Vec<f32>),
-         pos,
-         (r, g, b, _a): (f32, f32, f32, f32)| {
-            let o = (pos.y() * *w + pos.x()) * 3;
-            pixels[o..o + 3].copy_from_slice(&[r, g, b]);
-        },
-    )
-    .map_err(AssetError::exr(path))?;
-    Ok(image.layer_data.channel_data.pixels)
+    read_exr_channels(path, false).map(|(pixels, w, h, _)| (w, h, pixels))
 }
 
 /// An EXR's RGB samples, interleaved, row-major, linear — nothing else.
@@ -257,6 +246,42 @@ mod tests {
     /// back as pixels the engine can build a map from, with the geometry
     /// and values intact. `crust-core` cannot test this — it has no
     /// decoder, which is the whole point of the split.
+    /// A light texture or precomp kernel with layer-prefixed channels decodes
+    /// as one with bare `R`, `G`, `B` does; the RGBA convenience reader
+    /// refused it.
+    #[test]
+    fn a_layer_prefixed_exr_decodes_its_rgb() {
+        use exr::prelude::{
+            AnyChannel, AnyChannels, Encoding, FlatSamples, Image, Layer, LayerAttributes,
+            WritableImage,
+        };
+        let dir = std::env::temp_dir().join("crust_env_prefixed");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("kernel.exr");
+        let channels = AnyChannels::sort(
+            [("rgb.R", 1.0f32), ("rgb.G", 2.0), ("rgb.B", 3.0)]
+                .iter()
+                .map(|(n, v)| AnyChannel::new(*n, FlatSamples::F32(vec![*v, v * 10.0])))
+                .collect(),
+        );
+        Image::from_layer(Layer::new(
+            (2, 1),
+            LayerAttributes::default(),
+            Encoding::UNCOMPRESSED,
+            channels,
+        ))
+        .write()
+        .to_file(&path)
+        .expect("write exr");
+        let (w, h, px) = try_read_rgb_image(&path, ColorSpace::AUTO).expect("decodes");
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(
+            px,
+            vec![Vec3A::new(1.0, 2.0, 3.0), Vec3A::new(10.0, 20.0, 30.0)]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn exr_environment_round_trips() {
         let dir = std::env::temp_dir().join("crust_env_round_trip");
