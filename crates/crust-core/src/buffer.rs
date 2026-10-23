@@ -112,6 +112,17 @@ impl Buffer {
         }
     }
 
+    /// A black buffer of the same frame and region.
+    pub(crate) fn black_like(&self) -> Buffer {
+        Buffer::for_raster_rect(self.width, self.height, self.rect)
+    }
+
+    /// Sets the pixel [`get_rgb`](Self::get_rgb) reads at `(x, y)`: counted
+    /// from the top-left of the buffer's region.
+    pub(crate) fn set_rgb(&mut self, x: usize, y: usize, color: Vec3A) {
+        self.set_pixel(self.rect.x0 + x, self.rect.y1 - 1 - y, color);
+    }
+
     /// Retrieves the RGB values of a specific pixel in the buffer.
     ///
     /// # Parameters

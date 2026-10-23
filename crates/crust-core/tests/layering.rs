@@ -47,6 +47,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "camera",
             "filter",
             "guiding",
+            "precomp",
             "sampler",
             "subsurface",
             "tracer",

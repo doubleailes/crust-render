@@ -50,6 +50,7 @@ mod parse;
 mod surface;
 mod texture;
 mod value;
+mod values;
 
 pub use bsdf::{
     Bsdf, Closure, Closures, DiffuseModel, Emission, Leaf, NodeId, ScatterMode, SheenMode, Slot,
@@ -70,6 +71,7 @@ pub use parse::{Doc, Input, MtlxError, Node, Source};
 pub use surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
 pub use texture::{Texture, TextureRef};
 pub use value::{Val, arity_of, parse_literal};
+pub use values::{ValueGraph, compile_value_graph};
 
 /// Resolves an `image` node's `file` input — as authored, relative to the
 /// document — into a sampler. The second argument is the colour space the

@@ -102,6 +102,10 @@ pub(crate) struct StageFacts {
     /// target and ceiling), as bits; `None` for uniform subdivision.
     pub(crate) adaptive: Option<ScreenKey>,
     pub(crate) domes_seen_by_camera: bool,
+    /// Whether the settings authored a precomp: its compiled filters and
+    /// kernels are the import's, so an edit while one is authored (or one
+    /// that authors one) re-imports.
+    pub(crate) precomp: bool,
     pub(crate) working: Option<crate::color::Space>,
     /// The camera rendered through, `None` for the procedural one.
     pub(crate) camera: Option<String>,

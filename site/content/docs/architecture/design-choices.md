@@ -2,7 +2,7 @@
 title = "Design choices"
 description = "The architectural decisions behind Crust Render, why each was made, and what it costs."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-14T08:00:00+00:00
+updated = 2026-10-23T08:00:00+00:00
 draft = false
 weight = 20
 sort_by = "weight"
@@ -180,6 +180,29 @@ that returns nothing means "use the constant value", never an error.
 **Why.** The engine library has no codec dependencies, and a host can supply its own
 loader (a test passes a loader that decodes nothing). The diagnostic example programs
 decode through the same code, so what they report is exactly what the renderer sees.
+
+## The comp preview runs in the renderer
+
+**Decision.** A look built in compositing can be previewed by the renderer itself: a
+[precomp](@/docs/usd/render-settings.md#precomp), authored on the render settings.
+Its sample filters are MaterialX graphs run on every camera sample, from that sample's
+AOVs, and accumulated with the beauty's pixel-filter weights. Its display filters are
+five fixed image operations (blur, convolve, vector blur, merge, grade) run on the
+finished image. Their outputs are new channels; `crust:display` names the one the PNG,
+`--checkpoint` and an MCP session show. The beauty never changes.
+
+**Why.** Running in the renderer, the preview is the same in every host that drives it,
+the CLI, an MCP session and later a Hydra viewport, and the recipe travels with the
+stage. Per-sample recombination is antialiased like the beauty, which a comp of finished
+pixels cannot be. MaterialX is the vocabulary other tools read, and Crust already
+compiles and JIT-compiles it. The image operations are fixed rather than programmable
+because each is plain, testable code whose result does not depend on the thread count; a
+neighbourhood language is a later step.
+
+**Cost.** A sample filter costs one graph evaluation per camera sample, and the display
+chain one pass per operation over the image, again at every snapshot read. Nothing is
+paid by a stage that authors no precomp: the same code runs, with the same instruction
+count.
 
 ## Memory scales with caches, not with the scene
 

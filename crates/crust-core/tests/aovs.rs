@@ -31,6 +31,7 @@ fn var(name: &str, source: AovSource) -> AovVar {
 
 fn request(vars: Vec<AovVar>) -> AovRequest {
     AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/Render/p".into(),
             name: "p.exr".into(),
@@ -153,6 +154,45 @@ fn the_beauty_is_bit_identical_with_and_without_aovs() {
         assert!(
             bits(&plain) == bits(&with_aovs),
             "variance {variance}, guiding {guiding}"
+        );
+    }
+    // A precomp's filters observe as AOVs do: the sample stage's one sample
+    // filter and three display filters, over a crop, adaptive on and off.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/precomp.usda");
+    let scene = crust_core::Scene::from_usd(&path).expect("loads");
+    let request = scene.aovs.clone();
+    assert!(request.precomp.as_ref().is_some_and(|p| p.has_filters()));
+    let base = scene.settings;
+    let mut r = Renderer::new(scene.camera, scene.world, scene.lights, base);
+    for variance in [0.0, 0.05] {
+        let settings = base
+            .with_samples_per_pixel(8)
+            .with_adaptive_sampling(4, variance)
+            .with_region(crust_core::PixelRect::new(100, 50, 140, 80))
+            .expect("inside the frame");
+        r.reconfigure(settings);
+        let (plain, plain_rays) = r.render_with_stats(true, &|_, _| {});
+        let (with_filters, _, rays) = r.render_with_aovs(true, &|_, _| {}, &request);
+        let (w, h) = plain.size();
+        let region_bits = |b: &Buffer| -> Vec<[u32; 3]> {
+            (0..w * h)
+                .map(|i| {
+                    let (r, g, b) = b.get_rgb(i % w, i / w);
+                    [r.to_bits(), g.to_bits(), b.to_bits()]
+                })
+                .collect()
+        };
+        assert!(
+            region_bits(&plain) == region_bits(&with_filters),
+            "precomp, variance {variance}"
+        );
+        assert_eq!(
+            (
+                plain_rays.spp_min,
+                plain_rays.spp_max,
+                plain_rays.camera_rays
+            ),
+            (rays.spp_min, rays.spp_max, rays.camera_rays)
         );
     }
 }

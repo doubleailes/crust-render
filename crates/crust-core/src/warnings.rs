@@ -245,6 +245,26 @@ warning_codes! {
     LpeInvalid => "lpe.invalid", Skipped, Each,
         "A light path expression does not parse or compile; no channel is written.";
 
+    // Precomp (sample and display filters)
+    PrecompUnsupportedNode => "precomp.unsupported_node", Skipped, Each,
+        "A sample filter holds a node a camera sample cannot evaluate (a texture, a geometry node, a closure, an unknown node); its outputs read their clear value.";
+    PrecompUnboundInput => "precomp.unbound_input", Refused, Each,
+        "A filter input names no RenderVar, filter output or earlier display filter of the render; it reads its authored default or its clear value.";
+    PrecompUnbindableInput => "precomp.unbindable_input", Refused, Each,
+        "A sample filter input names a RenderVar with no per-sample value (a variance, the sample count); it reads its authored default.";
+    PrecompUnknownOperation => "precomp.unknown_operation", Skipped, Each,
+        "A display filter's info:id is not one of crust's image operations; the filter passes its input through.";
+    PrecompUnknownFilter => "precomp.unknown_filter", Skipped, Each,
+        "A RenderVar's crust:filter targets a prim that is not in the settings' filter lists, or names an output it does not have; no channel is written.";
+    PrecompCycle => "precomp.cycle", Refused, Each,
+        "A filter input names a filter that runs after it; the input reads its clear value.";
+    PrecompMissingKernel => "precomp.missing_kernel", Skipped, Each,
+        "A crust:convolve kernel image could not be read; the filter passes its input through.";
+    PrecompUnknownDisplay => "precomp.unknown_display", Refused, Each,
+        "crust:display names no RenderVar of the render; the beauty is shown.";
+    PrecompBlackBeauty => "precomp.black_beauty", Approximated, Each,
+        "A stage with a precomp has no light, so its beauty is black and adaptive sampling stops every pixel at its minimum.";
+
     // Transforms
     XformUnknownOp => "xform.unknown_op", Approximated, Each,
         "xformOpOrder lists an op that is not a UsdGeomXformOp kind; it reads as identity.";

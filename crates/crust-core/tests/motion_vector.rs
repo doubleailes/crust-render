@@ -532,6 +532,7 @@ fn tiles_scanlines_and_the_beauty_are_unchanged_by_a_motion_vector_var() {
 #[test]
 fn a_motion_vector_var_alone_needs_the_film() {
     let request = AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/p".into(),
             name: "p.exr".into(),

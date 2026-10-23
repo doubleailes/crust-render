@@ -85,7 +85,7 @@ pub(crate) fn list_records(
     // What the import reads before it meets a camera: the settings (the
     // image's aspect, which the vertical aperture defaults through) and the
     // camera it was told to use.
-    let products = import_render_products(&index, None);
+    let products = import_render_products(&index, None, None);
     let mut settings = import_render_settings(&index, None);
     if let Some((w, h)) = products.resolution {
         settings = settings.with_resolution(w, h);

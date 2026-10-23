@@ -405,7 +405,7 @@ impl Op {
 
     /// Whether the result depends on nothing but the operands — no shading
     /// point, no texture. Such an op over constant operands is a constant.
-    fn is_pure(&self) -> bool {
+    pub(crate) fn is_pure(&self) -> bool {
         match self {
             Op::Texture { tex, .. } => tex.is_none(),
             Op::TexCoord { .. }

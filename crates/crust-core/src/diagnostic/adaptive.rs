@@ -68,6 +68,7 @@ pub(super) fn count_and_variance() -> crate::AovRequest {
         variance: false,
     };
     AovRequest {
+        precomp: None,
         products: vec![AovProduct {
             prim_path: "/Render/Products/adaptive".into(),
             name: "adaptive.exr".into(),

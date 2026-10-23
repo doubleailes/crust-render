@@ -192,6 +192,11 @@ pub struct SamplingStamp {
     /// scene.
     pub layer_stack: Vec<StampedLayer>,
     pub invisible_overrides: Option<u32>,
+    /// The precomp's sample and display filters, by prim path in evaluation
+    /// order (empty without one), and the displayed output's name.
+    pub sample_filters: Vec<String>,
+    pub display_filters: Vec<String>,
+    pub display: String,
     pub version: String,
 }
 
@@ -238,8 +243,22 @@ impl SamplingStamp {
             motion_blur: false,
             layer_stack: Vec::new(),
             invisible_overrides: None,
+            sample_filters: Vec::new(),
+            display_filters: Vec::new(),
+            display: "beauty".to_owned(),
             version: crate::report::CRUST_VERSION.to_owned(),
         }
+    }
+
+    /// This stamp with the precomp the image was made with: its filters and
+    /// its displayed output, so an image says which recipe produced it.
+    pub fn with_precomp(mut self, precomp: Option<&crate::precomp::Precomp>) -> Self {
+        if let Some(pc) = precomp {
+            self.sample_filters = pc.sample_filter_paths();
+            self.display_filters = pc.display_filter_paths();
+            self.display = pc.display_name().to_owned();
+        }
+        self
     }
 
     /// This stamp with what the import recorded of `source`; `hash` returns
@@ -329,6 +348,9 @@ impl SamplingStamp {
         if let Some(n) = self.invisible_overrides {
             out.push(("crust:invisibleOverrides", int(n)));
         }
+        out.push(("crust:sampleFilters", Text(self.sample_filters.join(","))));
+        out.push(("crust:displayFilters", Text(self.display_filters.join(","))));
+        out.push(("crust:display", Text(self.display.clone())));
         out.push(("crust:version", Text(self.version.clone())));
         out
     }

@@ -1405,6 +1405,7 @@ fn check_scene(
         pass: scene.pass.as_ref().map(Into::into),
         settings: scene.settings_prim.clone(),
         products,
+        precomp: scene.aovs.precomp.as_deref().map(Into::into),
         effective_settings: effective_settings(&settings, &flags),
         import: scene.stats.phases.clone(),
         counts: scene.stats.scene,
@@ -2107,13 +2108,18 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         progress_bar.set_position(done);
     };
     // `--checkpoint`'s preview: where the final PNG goes, if anywhere.
+    let displays = aovs
+        .precomp
+        .as_ref()
+        .is_some_and(|p| p.displayed_var().is_some());
     let checkpoint = cli.checkpoint.and_then(|every| {
         let path = match aovs.products.first() {
             None => preview_png(beauty_path),
-            Some(first) if first.beauty().is_some() => preview_png(&first.name),
+            Some(first) if first.beauty().is_some() || displays => preview_png(&first.name),
             Some(first) => {
                 warn!(
-                    "--checkpoint: {} has no beauty var, so no preview will be written",
+                    "--checkpoint: {} has no beauty var and the settings author no \
+                     crust:display, so no preview will be written",
                     first.prim_path
                 );
                 return None;
@@ -2184,7 +2190,17 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
     // How the pixels were sampled, recorded in every EXR written.
     let sampling = SamplingStamp::new(&settings, &ray_stats, camera_path.as_deref(), time)
         .for_outcome(rendered.outcome, &ray_stats)
-        .with_source(&source, |layer| layer_hashes.get(layer).copied().flatten());
+        .with_source(&source, |layer| layer_hashes.get(layer).copied().flatten())
+        .with_precomp(aovs.precomp.as_deref());
+    if let Some(pc) = &aovs.precomp {
+        stats.precomp = crust_core::PrecompCounters {
+            sample_filters: pc.sample_filter_paths().len() as u64,
+            display_filters: pc.display_filter_paths().len() as u64,
+            display_time: Duration::from_secs_f64(
+                film.as_ref().map_or(0.0, |f| f.display_seconds()),
+            ),
+        };
+    }
     let output_start = Instant::now();
     let mut files = Vec::new();
     if let Some(film) = &film {
@@ -2214,9 +2230,12 @@ fn render_and_write(cli: &RenderArgs, run: &RenderRun) -> std::result::Result<Wr
         }
         info!("Products written: {}", written.join(", "));
         let first = &aovs.products[0];
-        if first.beauty().is_some() {
+        // The displayed output, when the precomp authors one; the beauty
+        // otherwise.
+        let shown = crust_core::precomp::displayed(aovs.precomp.as_deref(), &buffer, film);
+        if first.beauty().is_some() || shown.is_some() {
             let png_path = preview_png(&first.name);
-            match write_png(&buffer, &png_path, &output_color) {
+            match write_png(shown.as_ref().unwrap_or(&buffer), &png_path, &output_color) {
                 Ok(_) => info!("Image written to: {:?}", png_path),
                 Err(e) => {
                     error!("Error writing PNG: {}", e);

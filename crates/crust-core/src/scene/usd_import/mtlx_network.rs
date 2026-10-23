@@ -63,6 +63,7 @@ pub(super) fn translate(
         names: HashMap::new(),
         active: HashSet::new(),
         reported: Vec::new(),
+        interface: None,
     };
     let surface = surface.and_then(|p| b.node(p));
     let volume = volume.and_then(|p| b.node(p));
@@ -83,6 +84,87 @@ struct Builder<'s> {
     /// Shader prims being translated, for cycle detection.
     active: HashSet<String>,
     reported: Vec<String>,
+    /// The value graph being translated ([`translate_value_graph`]), whose
+    /// own interface inputs are the host's channels rather than literals.
+    interface: Option<String>,
+}
+
+/// A translated value graph: its document, and each of the graph prim's
+/// `outputs:<name>` as `(name, node, node output)`.
+pub(super) struct ValueNetwork {
+    pub(super) doc: Doc,
+    pub(super) outputs: Vec<(String, String, Option<String>)>,
+    /// What could not be translated, for one warning per graph.
+    pub(super) reported: Vec<String>,
+}
+
+/// Translates the `NodeGraph` prim `graph` as a value graph: its shaders
+/// node for node, as [`translate`] does, except that a connection to one of
+/// the graph's own interface inputs becomes a [`Source::Interface`] of that
+/// name — a channel the host supplies per evaluation — carrying the input's
+/// authored value as its default.
+pub(super) fn translate_value_graph(
+    stage: &Stage,
+    stage_path: &Path,
+    graph: &Prim,
+) -> ValueNetwork {
+    let path = graph.path().as_str().to_string();
+    let mut b = Builder {
+        stage,
+        stage_path,
+        nodes: Vec::new(),
+        names: HashMap::new(),
+        active: HashSet::new(),
+        reported: Vec::new(),
+        interface: Some(path.clone()),
+    };
+    let mut outputs = Vec::new();
+    let mut attrs = graph.attributes().unwrap_or_default();
+    attrs.sort_by(|a, b| a.path().as_str().cmp(b.path().as_str()));
+    for attr in attrs {
+        let full = attr.path().split_property().map(|(_, n)| n.to_string());
+        let Some(name) = full.as_deref().and_then(|n| n.strip_prefix("outputs:")) else {
+            continue;
+        };
+        let usd_type = attr
+            .type_name()
+            .ok()
+            .flatten()
+            .map(|t| t.as_str().to_string())
+            .unwrap_or_default();
+        let resolved = b.resolve(&attr, 0);
+        match resolved {
+            Some(Resolved::Node { name: node, output }) => {
+                outputs.push((name.to_string(), node, output));
+            }
+            Some(other) => {
+                // An output wired straight to an interface input, or holding
+                // a value: a `constant` node forwards it.
+                let node = format!("{path}.outputs:{name}");
+                let mtype = mtlx_type(&usd_type);
+                if let Some(input) = b.resolved_input("value", &usd_type, other) {
+                    b.nodes.push(Node {
+                        category: "constant".into(),
+                        name: node.clone(),
+                        type_name: mtype.to_string(),
+                        inputs: vec![input],
+                        graph: None,
+                        version: None,
+                        colorspace: None,
+                    });
+                    outputs.push((name.to_string(), node, None));
+                }
+            }
+            None => b
+                .reported
+                .push(format!("{path}.outputs:{name}: connects to nothing")),
+        }
+    }
+    ValueNetwork {
+        doc: Doc::from_nodes(b.nodes),
+        outputs,
+        reported: b.reported,
+    }
 }
 
 impl Builder<'_> {
@@ -150,7 +232,48 @@ impl Builder<'_> {
             .flatten()
             .map(|t| t.as_str().to_string())
             .unwrap_or_default();
-        match self.resolve(attr, 0)? {
+        let resolved = self.resolve(attr, 0)?;
+        self.resolved_input(name, &usd_type, resolved)
+    }
+
+    /// The input `name` (of USD type `usd_type`) as where its connection
+    /// ended.
+    fn resolved_input(&mut self, name: &str, usd_type: &str, resolved: Resolved) -> Option<Input> {
+        let usd_type = usd_type.to_string();
+        match resolved {
+            Resolved::Interface {
+                attr,
+                name: channel,
+            } => {
+                let ty = attr
+                    .type_name()
+                    .ok()
+                    .flatten()
+                    .map(|t| t.as_str().to_string())
+                    .unwrap_or(usd_type);
+                let mtype = mtlx_type(&ty);
+                let default = attr
+                    .get_at::<sdf::Value>(eval_time())
+                    .ok()
+                    .flatten()
+                    .and_then(|_| self.literal_text(&attr, mtype))
+                    .and_then(|text| literal_value(&text, mtype));
+                let colorspace = attr
+                    .metadata::<sdf::Value>("colorSpace")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(str::to_owned));
+                Some(Input {
+                    name: name.to_string(),
+                    type_name: mtype.to_string(),
+                    source: Source::Interface {
+                        name: channel,
+                        default,
+                    },
+                    colorspace,
+                    text: None,
+                })
+            }
             Resolved::Node { name: node, output } => {
                 let type_name = self
                     .nodes
@@ -220,6 +343,17 @@ impl Builder<'_> {
             return None;
         }
         let (prim_path, prop) = target.split_property()?;
+        // An interface input of the value graph being translated: the
+        // host's channel, whatever value it authors.
+        if self.interface.as_deref() == Some(prim_path.as_str())
+            && let Some(channel) = prop.strip_prefix("inputs:")
+        {
+            let attr = prim_at(self.stage, prim_path.clone()).attribute(prop);
+            return Some(Resolved::Interface {
+                attr,
+                name: channel.to_string(),
+            });
+        }
         let prim = prim_at(self.stage, prim_path);
         let is_shader = prim
             .type_name()
@@ -292,6 +426,10 @@ enum Resolved {
     },
     /// The attribute whose value the input takes.
     Value(Attribute),
+    /// An interface input of the value graph being translated
+    /// ([`translate_value_graph`]): the channel `name`, and the attribute
+    /// whose value is its default.
+    Interface { attr: Attribute, name: String },
 }
 
 /// The MaterialX type tokens a nodedef name spells its signature with.

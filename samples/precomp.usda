@@ -1,0 +1,316 @@
+#usda 1.0
+(
+    doc = """A precomp: a look rebuilt from AOVs inside the renderer.
+
+The surfaces are plain grey; what the look is made of reaches the precomp
+through AOVs: three light groups (`key`, `fill`, `rim`, light path
+expressions over the lights' crust:light:lpeTag), a per-object `matte` (a
+primvar the two objects author) and the `motion` vector of the object that
+moves.
+
+- The sample filter `look` (a MaterialX NodeGraph) runs on every camera
+  sample: on the matte, the key is tinted warm, the fill cool and the rim is
+  boosted; off it, the fill alone, darkened. It runs per sample, so the
+  matte's edge is antialiased like the beauty.
+- The display filters run on the finished image: `glow` blurs the look,
+  `bloom` adds the glow back over it, and `speed` smears the result along
+  the motion vectors — speed lines behind the moving object.
+
+`crust:display = "look_final"` makes the last one the image the PNG (and
+--checkpoint, and an MCP session) shows; the EXR's beauty stays the beauty.
+
+    cargo run --release -- render -i samples/precomp.usda
+
+writes renders/precomp.exr (beauty, the five AOVs, `look` and `look_final`)
+and renders/precomp.png (the tone-mapped `look_final`)."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 28
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.1, 7)
+        float3 xformOp:rotateXYZ = (-6, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    # On the matte, still: a subdivided cube, whose primvars the `matte`
+    # var reads.
+    def Mesh "Hero"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 5, 4, 7, 6, 4, 0, 3, 7, 1, 5, 6, 2, 3, 2, 6, 7, 4, 5, 1, 0]
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        float primvars:matte = 1 (
+            interpolation = "constant"
+        )
+        double3 xformOp:translate = (-1.1, 0.75, 0)
+        float3 xformOp:rotateXYZ = (0, 30, 0)
+        float3 xformOp:scale = (0.75, 0.75, 0.75)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+
+    # On the matte, moving right over the shutter: its motion vectors drive
+    # the speed lines. Motion blur is off, so it renders sharp.
+    def Mesh "Runner"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 5, 4, 7, 6, 4, 0, 3, 7, 1, 5, 6, 2, 3, 2, 6, 7, 4, 5, 1, 0]
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        float primvars:matte = 1 (
+            interpolation = "constant"
+        )
+        float3 crust:motion:translate = (1.4, 0, 0)
+        double3 xformOp:translate = (1.3, 0.5, 0.6)
+        float3 xformOp:scale = (0.5, 0.5, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # Off the matte: it authors no `matte`, so it reads the var's clear
+    # value, 0.
+    def Mesh "Floor"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, 0, -6), (6, 0, -6), (6, 0, 6), (-6, 0, 6)]
+    }
+
+    def RectLight "Key"
+    {
+        float inputs:width = 2
+        float inputs:height = 2
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 6
+        token crust:light:lpeTag = "key"
+        double3 xformOp:translate = (-3, 4, 3)
+        float3 xformOp:rotateXYZ = (-45, -40, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def SphereLight "Fill"
+    {
+        float inputs:radius = 1
+        float inputs:intensity = 1.5
+        token crust:light:lpeTag = "fill"
+        double3 xformOp:translate = (4, 2, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Behind and above the two, grazing their edges toward the camera.
+    def RectLight "Rim"
+    {
+        float inputs:width = 4
+        float inputs:height = 1
+        float inputs:intensity = 12
+        token crust:light:lpeTag = "rim"
+        double3 xformOp:translate = (0, 3, -4)
+        float3 xformOp:rotateXYZ = (-145, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (320, 180)
+        rel products = [</Render/Products/precomp>]
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 4
+        int crust:subdivisionLevel = 3
+        uniform bool disableMotionBlur = 1
+
+        # The precomp: one sample filter, three display filters, run in
+        # list order, and the output shown as the image.
+        rel crust:sampleFilters = [</Render/Precomp/look>]
+        rel crust:displayFilters = [
+            </Render/Precomp/glow>,
+            </Render/Precomp/bloom>,
+            </Render/Precomp/speed>,
+        ]
+        token crust:display = "look_final"
+    }
+
+    def Scope "Precomp"
+    {
+        # Per camera sample. Each interface input reads the sample's value of
+        # the RenderVar of that name; `matte`'s 0 is what it reads where no
+        # var supplies one.
+        def NodeGraph "look"
+        {
+            color3f inputs:key
+            color3f inputs:fill
+            color3f inputs:rim
+            float inputs:matte = 0
+            color3f outputs:out.connect = </Render/Precomp/look/select.outputs:out>
+
+            def Shader "warm"
+            {
+                uniform token info:id = "ND_multiply_color3"
+                color3f inputs:in1.connect = </Render/Precomp/look.inputs:key>
+                color3f inputs:in2 = (1, 0.72, 0.42)
+                color3f outputs:out
+            }
+
+            def Shader "cool"
+            {
+                uniform token info:id = "ND_multiply_color3"
+                color3f inputs:in1.connect = </Render/Precomp/look.inputs:fill>
+                color3f inputs:in2 = (0.3, 0.5, 1.2)
+                color3f outputs:out
+            }
+
+            def Shader "edge"
+            {
+                uniform token info:id = "ND_multiply_color3"
+                color3f inputs:in1.connect = </Render/Precomp/look.inputs:rim>
+                color3f inputs:in2 = (3, 2.6, 1.8)
+                color3f outputs:out
+            }
+
+            def Shader "lit"
+            {
+                uniform token info:id = "ND_add_color3"
+                color3f inputs:in1.connect = </Render/Precomp/look/warm.outputs:out>
+                color3f inputs:in2.connect = </Render/Precomp/look/cool.outputs:out>
+                color3f outputs:out
+            }
+
+            def Shader "shade"
+            {
+                uniform token info:id = "ND_add_color3"
+                color3f inputs:in1.connect = </Render/Precomp/look/lit.outputs:out>
+                color3f inputs:in2.connect = </Render/Precomp/look/edge.outputs:out>
+                color3f outputs:out
+            }
+
+            def Shader "ground"
+            {
+                uniform token info:id = "ND_multiply_color3"
+                color3f inputs:in1.connect = </Render/Precomp/look.inputs:fill>
+                color3f inputs:in2 = (0.25, 0.3, 0.45)
+                color3f outputs:out
+            }
+
+            def Shader "select"
+            {
+                uniform token info:id = "ND_ifgreater_color3"
+                float inputs:value1.connect = </Render/Precomp/look.inputs:matte>
+                float inputs:value2 = 0.5
+                color3f inputs:in1.connect = </Render/Precomp/look/shade.outputs:out>
+                color3f inputs:in2.connect = </Render/Precomp/look/ground.outputs:out>
+                color3f outputs:out
+            }
+        }
+
+        # On the finished, exposed image.
+        def Shader "glow"
+        {
+            uniform token info:id = "crust:blur"
+            token inputs:in = "look"
+            float inputs:radius = 9
+        }
+
+        def Shader "bloom"
+        {
+            uniform token info:id = "crust:merge"
+            token inputs:a = "look"
+            token inputs:b = "glow"
+            token inputs:operation = "plus"
+            float inputs:mix = 0.5
+        }
+
+        def Shader "speed"
+        {
+            uniform token info:id = "crust:vectorBlur"
+            token inputs:in = "bloom"
+            token inputs:motion = "motion"
+            int inputs:taps = 24
+        }
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "precomp"
+        {
+            token productName = "renders/precomp.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/C>,
+                </Render/Products/Vars/key>,
+                </Render/Products/Vars/fill>,
+                </Render/Products/Vars/rim>,
+                </Render/Products/Vars/matte>,
+                </Render/Products/Vars/motion>,
+                </Render/Products/Vars/look>,
+                </Render/Products/Vars/look_final>,
+            ]
+        }
+
+        def Scope "Vars"
+        {
+            def RenderVar "C"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "color"
+            }
+
+            def RenderVar "key"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C.*<L.'key'>"
+                uniform token sourceType = "lpe"
+            }
+
+            def RenderVar "fill"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C.*<L.'fill'>"
+                uniform token sourceType = "lpe"
+            }
+
+            def RenderVar "rim"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C.*<L.'rim'>"
+                uniform token sourceType = "lpe"
+            }
+
+            def RenderVar "matte"
+            {
+                uniform token dataType = "float"
+                uniform string sourceName = "matte"
+                uniform token sourceType = "primvar"
+            }
+
+            def RenderVar "motion"
+            {
+                uniform token dataType = "float2"
+                uniform string sourceName = "motionvector"
+            }
+
+            # The sample filter's output, accumulated like the beauty.
+            def RenderVar "look"
+            {
+                uniform token dataType = "color3f"
+                rel crust:filter = </Render/Precomp/look>
+            }
+
+            # The last display filter's output: what the PNG shows.
+            def RenderVar "look_final"
+            {
+                uniform token dataType = "color3f"
+                rel crust:filter = </Render/Precomp/speed>
+            }
+        }
+    }
+}
