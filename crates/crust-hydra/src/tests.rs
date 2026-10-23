@@ -168,9 +168,17 @@ fn a_layer_that_does_not_import_is_an_error_and_the_next_one_renders() {
 /// the equality below is with the CLI itself, not with a copy of its path.
 fn crust_binary() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary");
-    // target/<profile dir>/deps/<test>: the profile dir holds the binaries.
+    // The profile dir holds the binaries, and the test binary is below it:
+    // `target/<profile>/deps/<test>`, or with nightly cargo's build-dir
+    // layout `target/<profile>/build/<crate>/<hash>/out/<test>`.
     let profile_dir = exe
-        .parent()
+        .ancestors()
+        .find(|dir| {
+            matches!(
+                dir.file_name().and_then(|n| n.to_str()),
+                Some("deps" | "build")
+            )
+        })
         .and_then(Path::parent)
         .expect("target/<profile>");
     let crust = profile_dir.join(format!("crust{}", std::env::consts::EXE_SUFFIX));
