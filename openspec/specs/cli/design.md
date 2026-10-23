@@ -70,7 +70,11 @@ cargo test -p crust-render --test mcp # the server driven over its pipes, tool b
 # --stats (per-phase profile + scene statistics),
 # --profile (implies --stats; adds a Guerilla-style per-section render profile),
 # --stats-json PATH|- (the same statistics as crust-stats/1 JSON; `-` moves the log to stderr),
-# --auto-tx (convert UV textures to a .tx beside the original on first use),
+# --auto-tx (convert UV textures to a .tx beside the original on first use, named and
+#   written as Arnold 7.5's auto-tx names and writes it),
+# --tx-color-space SPACE (the space a .tx converts to and its name records; default
+#   ACEScg, Arnold's rendering space; independent of --working-space; shared with
+#   diagnostic, check and light-paths; a name the OCIO config lacks is a usage error),
 # --checkpoint SECONDS (rewrite the PNG preview from the render's snapshots while it runs)
 
 # Keep a full record of a render. The file gets the same events as the terminal

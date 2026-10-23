@@ -15,7 +15,7 @@ use std::sync::Arc;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn decline(_: &str, _: Option<&str>) -> Option<TextureRef> {
+fn decline(_: &str, _: crust_mtlx::TexelSpace<'_>) -> Option<TextureRef> {
     None
 }
 
@@ -1031,9 +1031,9 @@ fn a_declined_image_falls_back_to_its_default() {
 
 #[test]
 fn a_loaded_image_is_sampled_and_counted() {
-    let loader = |file: &str, cs: Option<&str>| -> Option<TextureRef> {
+    let loader = |file: &str, cs: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         assert_eq!(file, "albedo.png");
-        assert_eq!(cs, Some("srgb_texture"));
+        assert_eq!(cs, crust_mtlx::TexelSpace::Named("srgb_texture"));
         Some(TextureRef(Arc::new(Flat([0.6, 0.7, 0.8, 1.0]))))
     };
     let doc = r#"<materialx><image name="n" type="color3">
@@ -1057,7 +1057,7 @@ fn a_loaded_image_is_sampled_and_counted() {
 
 #[test]
 fn a_float_image_reads_one_lane() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.3, 0.9, 0.9, 1.0]))))
     };
     let v = run_with(
@@ -1074,8 +1074,9 @@ fn a_float_image_reads_one_lane() {
 
 #[test]
 fn image_lookups_use_the_context_uv() {
-    let loader =
-        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Echo)))
+    };
     let v = run_with(
         r#"<materialx><image name="n" type="vector2">
              <input name="file" type="filename" value="e.png" />
@@ -1089,8 +1090,9 @@ fn image_lookups_use_the_context_uv() {
 
 #[test]
 fn tiledimage_scales_and_offsets_the_uv() {
-    let loader =
-        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Echo)))
+    };
     let v = run_with(
         r#"<materialx><tiledimage name="n" type="vector2">
              <input name="file" type="filename" value="e.png" />
@@ -1115,8 +1117,9 @@ fn tiledimage_scales_and_offsets_the_uv() {
 /// the checker rendered untiled; a connection that folds is its constant.
 #[test]
 fn a_connected_uvtiling_that_folds_is_applied() {
-    let loader =
-        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Echo)))
+    };
     let at = |tiling: &str| {
         run_with(
             &format!(
@@ -1139,7 +1142,7 @@ fn a_connected_uvtiling_that_folds_is_applied() {
 
 #[test]
 fn a_flat_normal_map_returns_the_geometric_normal() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.5, 0.5, 1.0, 1.0]))))
     };
     let c = ctx();
@@ -1162,7 +1165,7 @@ fn a_flat_normal_map_returns_the_geometric_normal() {
 #[test]
 fn a_tilted_normal_map_leans_along_the_tangent() {
     // Red > 0.5 encodes a +tangent tilt.
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.9, 0.5, 0.6, 1.0]))))
     };
     let c = ctx();
@@ -1188,7 +1191,7 @@ fn a_tilted_normal_map_leans_along_the_tangent() {
 
 #[test]
 fn a_normal_map_without_a_tangent_passes_the_normal_through() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.9, 0.2, 0.6, 1.0]))))
     };
     let mut c = ctx();
@@ -1678,11 +1681,11 @@ fn sample_first_material_is_used_when_none_is_named() {
 #[test]
 fn sample_textures_are_requested_with_their_colorspace() {
     let asked = std::sync::Mutex::new(Vec::new());
-    let loader = |file: &str, cs: Option<&str>| -> Option<TextureRef> {
+    let loader = |file: &str, cs: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         asked
             .lock()
             .unwrap()
-            .push((file.to_string(), cs.map(str::to_string)));
+            .push((file.to_string(), cs.name().map(str::to_string)));
         Some(TextureRef(Arc::new(Flat([0.5, 0.5, 1.0, 1.0]))))
     };
     let c = compile(&sample_mtlx(), Some("mtlx_ceramic"), &Host::new(&loader)).expect("compiles");
@@ -2555,7 +2558,7 @@ fn an_image_at_a_named_uv_set_reads_the_chart() {
            </materialx>"#,
     )
     .unwrap();
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+    let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
         Some(TextureRef(Arc::new(Flat([0.5; 4]))))
     };
     let mut c = Compiler::new(&d, &Host::new(&loader));
@@ -2586,7 +2589,7 @@ fn an_image_at_a_curve_property_reads_it_with_or_without_the_prefix() {
                </materialx>"#
         ))
         .unwrap();
-        let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+        let loader = |_: &str, _: crust_mtlx::TexelSpace<'_>| -> Option<TextureRef> {
             Some(TextureRef(Arc::new(Flat([0.5; 4]))))
         };
         let mut c = Compiler::new(&d, &Host::new(&loader));

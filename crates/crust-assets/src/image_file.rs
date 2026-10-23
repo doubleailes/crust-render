@@ -28,13 +28,26 @@ pub(crate) fn decode(path: &Path) -> Result<image::DynamicImage, AssetError> {
 /// [`declare_unspecified_extra_sample_as_alpha`] said so, and an unspecified
 /// sample is not coverage, so a texture reads 1.0 there as it would without it.
 pub(crate) fn decode_with_alpha(path: &Path) -> Result<(image::DynamicImage, bool), AssetError> {
+    decode_with_alpha_kind(path).map(|(image, alpha, _)| (image, alpha))
+}
+
+/// [`decode_with_alpha`], and whether that alpha is **associated**: a TIFF
+/// whose `ExtraSamples` is 1 stores its colour already premultiplied. Every
+/// other format this reads stores straight colour (PNG by its specification),
+/// which the texture convention premultiplies at load (see
+/// [`crate::premultiply_u8`]).
+pub(crate) fn decode_with_alpha_kind(
+    path: &Path,
+) -> Result<(image::DynamicImage, bool, bool), AssetError> {
     let mut magic = [0u8; 4];
     let n = std::fs::File::open(path)
         .and_then(|mut f| f.read(&mut magic))
         .map_err(AssetError::io(path))?;
     let mut unspecified = false;
+    let mut associated = false;
     let decoded = if tiff_byte_order(&magic[..n]).is_some() {
         let mut bytes = std::fs::read(path).map_err(AssetError::io(path))?;
+        associated = first_extra_sample(&bytes) == Some(1);
         unspecified = declare_unspecified_extra_sample_as_alpha(&mut bytes);
         let mut reader =
             image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Tiff);
@@ -50,22 +63,60 @@ pub(crate) fn decode_with_alpha(path: &Path) -> Result<(image::DynamicImage, boo
     };
     let image = decoded.map_err(AssetError::image(path))?;
     let alpha = image.color().has_alpha() && !unspecified;
-    Ok((image, alpha))
+    Ok((image, alpha, alpha && associated))
 }
 
-/// Whether an image's header declares an alpha channel, without decoding a
-/// pixel — what [`decode_with_alpha`] would report as authored, for every
-/// format but EXR (which `image` does not read here; see
-/// `crate::tiled::exr_declares_alpha`). A TIFF whose extra sample is
-/// unspecified declares none: `tiff` reads it as RGB. `false` for a file that
-/// cannot be read.
-pub(crate) fn declares_alpha(path: &Path) -> bool {
+/// The first value of a classic TIFF's first-IFD `ExtraSamples`, when it is
+/// inline (one or two shorts): 0 unspecified, 1 associated alpha, 2
+/// unassociated alpha. `None` for anything else.
+fn first_extra_sample(bytes: &[u8]) -> Option<u16> {
+    let le = tiff_byte_order(bytes)?;
+    let u16_at = |o: usize| -> Option<u16> {
+        let v: [u8; 2] = bytes.get(o..o + 2)?.try_into().ok()?;
+        Some(if le {
+            u16::from_le_bytes(v)
+        } else {
+            u16::from_be_bytes(v)
+        })
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        let v: [u8; 4] = bytes.get(o..o + 4)?.try_into().ok()?;
+        Some(if le {
+            u32::from_le_bytes(v)
+        } else {
+            u32::from_be_bytes(v)
+        })
+    };
+    let ifd = u32_at(4)? as usize;
+    (0..usize::from(u16_at(ifd)?))
+        .map(|e| ifd + 2 + e * 12)
+        .find(|&entry| u16_at(entry) == Some(338))
+        .filter(|&entry| u16_at(entry + 2) == Some(3) && matches!(u32_at(entry + 4), Some(1 | 2)))
+        .and_then(|entry| u16_at(entry + 8))
+}
+
+/// Whether `color` holds integer samples (8- or 16-bit) rather than floats —
+/// what `auto` resolves on (see [`crust_core::ColorSpace::resolve_auto`]).
+pub(crate) fn is_integer(color: image::ColorType) -> bool {
+    !matches!(color, image::ColorType::Rgb32F | image::ColorType::Rgba32F)
+}
+
+/// [`is_integer`] from the header alone, without decoding a pixel: `None`
+/// for a file that cannot be read. A Radiance `.hdr` is float whatever
+/// `image` reports for it.
+pub(crate) fn header_is_integer(path: &Path) -> Option<bool> {
     use image::ImageDecoder;
-    image::ImageReader::open(path)
-        .ok()
-        .and_then(|r| r.with_guessed_format().ok())
-        .and_then(|r| r.into_decoder().ok())
-        .is_some_and(|d| d.color_type().has_alpha())
+    let hdr = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("hdr"));
+    let decoder = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    Some(!hdr && is_integer(decoder.color_type()))
 }
 
 /// `Some(little_endian)` for a classic TIFF header, `None` for anything else.

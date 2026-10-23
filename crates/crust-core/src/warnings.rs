@@ -180,6 +180,8 @@ warning_codes! {
         "A motionvector var is requested over an instantaneous shutter; time-sampled transforms read zero.";
     CameraShutterMismatch => "camera.shutter_mismatch", Approximated, Each,
         "The render goes through another camera than the one whose shutter motion was measured over.";
+    CameraDicingNotCamera => "camera.dicing_not_a_camera", Approximated, Each,
+        "crust:dicingCamera targets no camera; tessellation reads the render camera.";
 
     // Products, AOVs and light path expressions
     ProductNotARenderProduct => "product.not_a_render_product", Skipped, Each,
@@ -401,7 +403,7 @@ warning_codes! {
     TextureUdimTileMissing => "texture.udim_tile_missing", Skipped, Each,
         "A tile of a UDIM set does not decode; the set is used without it.";
     TextureTxStale => "texture.tx_stale", Approximated, Each,
-        "A .tx is older than its source and is used anyway.";
+        "A .tx's modification time is not its source's; it is used anyway.";
     TextureTxConvertFailed => "texture.tx_convert_failed", Approximated, Each,
         "--auto-tx could not convert a texture; its source is read instead.";
     TextureStreamFallback => "texture.stream_fallback", Approximated, Each,

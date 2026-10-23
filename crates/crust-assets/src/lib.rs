@@ -52,8 +52,19 @@ pub use ptex_texture::{
     DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
 };
 /// Offline `.tx` conversion: what `maketx` and `--auto-tx` write.
-pub use tiled::{MadeTx, TxFormat, make_tx, make_tx_atomic};
+pub use tiled::{MadeTx, TxName, make_tx, make_tx_atomic, stamp_as_source, tx_name};
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
+
+/// The space a `.tx` converts to unless the host says otherwise
+/// (`--tx-color-space`): Arnold's default rendering space, so the files are
+/// the ones Arnold writes and reads.
+pub const DEFAULT_TX_COLOR_SPACE: &str = "ACEScg";
+
+/// [`DEFAULT_TX_COLOR_SPACE`] in the OCIO config in use, or its data space
+/// for a config that does not define it (where every `.tx` is then `_raw`).
+pub fn default_tx_color_space() -> crust_core::color::Space {
+    crust_core::color::Space::named(DEFAULT_TX_COLOR_SPACE).unwrap_or(crust_core::color::Space::RAW)
+}
 
 /// The files a texture path names: every `<UDIM>` / `<UVTILE>` tile on
 /// disk (the 10x10 UDIM sweep every texture reader shares), or the one image
@@ -137,7 +148,7 @@ impl TransferCurve for ResolvedColorSpace {
 /// A filtered RGBA lookup brought to the working space: the change of
 /// primaries a texture stored on its own primaries applies after filtering
 /// ([`crust_core::color::apply_gamut`]); alpha is untouched. One function for
-/// the preloaded and the streamed sampler, so the two stay bit-identical.
+/// the preloaded and the streamed sampler, so the two apply it alike.
 #[inline]
 pub(crate) fn to_working(gamut: Option<&crust_core::Mat3A>, rgba: [f32; 4]) -> [f32; 4] {
     match gamut {
@@ -186,6 +197,38 @@ pub(crate) const ALPHA_STEPS: [f32; 255] = {
     }
     steps
 };
+
+/// Premultiplies interleaved RGBA bytes stored in a colour space's encoding
+/// by their alpha, **in linear light**: each colour byte decoded through
+/// `to_linear`, scaled by `a / 255`, and re-encoded through `steps` (see
+/// [`TransferCurve`]). A texel whose alpha is 255 is left as it is, so a byte
+/// round-trips exactly where nothing is transparent.
+///
+/// The texture convention (`tx-arnold-convention` design decision 9): every
+/// lookup returns colour premultiplied by alpha, as Arnold's textures do, so a
+/// source that stores straight colour is premultiplied once, here, before its
+/// pyramid is built.
+pub(crate) fn premultiply_u8(rgba: &mut [u8], to_linear: &[f32; 256], steps: &[f32; 255]) {
+    for t in rgba.as_chunks_mut::<4>().0 {
+        if t[3] == u8::MAX {
+            continue;
+        }
+        let a = ALPHA_U8[usize::from(t[3])];
+        for c in &mut t[..3] {
+            *c = quantize(steps, to_linear[usize::from(*c)] * a);
+        }
+    }
+}
+
+/// [`premultiply_u8`] for linear interleaved RGBA floats.
+pub(crate) fn premultiply_f32(rgba: &mut [f32]) {
+    for t in rgba.as_chunks_mut::<4>().0 {
+        let a = t[3];
+        for c in &mut t[..3] {
+            *c *= a;
+        }
+    }
+}
 
 /// Interleaved RGBA as RGB when its alpha is `opaque` at every texel, and
 /// whether an alpha was kept.
@@ -253,6 +296,12 @@ pub struct FileAssets {
     /// ([`tiled::tx_staleness`]) before looking for it. See
     /// [`FileAssets::with_auto_tx`].
     auto_tx: bool,
+    /// `--tx-color-space`: the space a `.tx` converts to, which its name
+    /// records ([`tiled::tx_name`]). ACEScg unless the host says otherwise
+    /// ([`FileAssets::with_tx_color_space`]); independent of the working
+    /// space, so a render in `lin_rec709` still finds the files Arnold
+    /// rendering in ACEScg wrote.
+    tx_target: crust_core::color::Space,
     /// Conversions `--auto-tx` performed and failed, and the time they took,
     /// for the one summary line the CLI prints (see [`FileAssets::tx_report`]).
     tx_converted: std::sync::atomic::AtomicUsize,
@@ -430,6 +479,7 @@ impl FileAssets {
             cache: std::sync::Arc::new(tiled::TileCache::new(budget, max_open_files)),
             streaming,
             auto_tx: false,
+            tx_target: default_tx_color_space(),
             tx_converted: std::sync::atomic::AtomicUsize::new(0),
             tx_failed: std::sync::atomic::AtomicUsize::new(0),
             tx_nanos: std::sync::atomic::AtomicU64::new(0),
@@ -460,9 +510,8 @@ impl FileAssets {
     /// counters, which then count this import's textures as a fresh loader's
     /// would. Returns how many decodes were let go.
     ///
-    /// Residency cannot change a pixel (streamed and preloaded textures, and
-    /// capped Ptex, are pinned bit-identical), so a kept decode renders
-    /// exactly as a fresh one.
+    /// A kept decode is the decode a fresh import would make of the same
+    /// files, so it renders exactly as a fresh one.
     pub fn revalidate(&self) -> usize {
         use std::sync::atomic::Ordering::Relaxed;
         self.preloaded_textures.store(0, Relaxed);
@@ -537,11 +586,10 @@ impl FileAssets {
     }
 
     /// Converts textures on first use: before a UV texture is opened, every
-    /// tile whose `.tx` sibling is missing, older than its source, or written
-    /// by an older crust without the alpha its source has
-    /// ([`tiled::tx_staleness`]) is converted beside it
-    /// (`foo.1001.exr` → `foo.1001.tx`), the way Arnold's `autotx` does. The
-    /// next render finds them current and converts nothing.
+    /// tile whose `.tx` is missing or stale ([`tiled::tx_staleness`]) is
+    /// converted beside it under the name Arnold gives it ([`tiled::tx_name`]),
+    /// the way Arnold's auto-tx does. The next render finds them current and
+    /// converts nothing.
     ///
     /// The conversion is [`tiled::make_tx_atomic`] with
     /// [`tiled::TxFormat::FromSampleType`]: float sources keep `half` tiles,
@@ -558,6 +606,18 @@ impl FileAssets {
         }
         self.auto_tx = on && self.streaming;
         self
+    }
+
+    /// Converts `.tx` files to `target` and looks for the ones named for it
+    /// (`--tx-color-space`), instead of [`DEFAULT_TX_COLOR_SPACE`].
+    pub fn with_tx_color_space(mut self, target: crust_core::color::Space) -> FileAssets {
+        self.tx_target = target;
+        self
+    }
+
+    /// The space `.tx` files convert to and are named for.
+    pub fn tx_color_space(&self) -> crust_core::color::Space {
+        self.tx_target
     }
 
     /// `(converted, failed, seconds)` for the `--auto-tx` conversions so far.
@@ -578,11 +638,7 @@ impl FileAssets {
     /// converted UDIM set would stream with black holes where the missing
     /// tiles are. Such a set preloads instead. Without `--auto-tx` a `.tx`
     /// older than its source is still used — it is what was converted — but
-    /// warned about, since the image then shows the old texture. A `.tx` an
-    /// older crust wrote without the alpha its source declares
-    /// ([`tiled::TxStaleness::PredatesAlpha`]) is not: its cutouts would be
-    /// opaque, which is no texture anybody converted, so the set preloads,
-    /// with a warning, as a `.tx` with the wrong mip space does.
+    /// warned about, since the image then shows the old texture.
     fn prepare_tx(&self, path: &Path, space: ColorSpace) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         let is_tx = path
@@ -598,7 +654,10 @@ impl FileAssets {
         }
         let staleness: Vec<_> = sources
             .iter()
-            .filter_map(|s| tiled::tx_staleness(s, &tiled::tx_sibling(s)).map(|why| (s, why)))
+            .filter_map(|s| {
+                let tx = tiled::tx_name(s, space, self.tx_target)?.path;
+                tiled::tx_staleness(s, &tx).map(|why| (s, why))
+            })
             .collect();
         let stale: Vec<_> = staleness.iter().map(|(s, _)| (*s).clone()).collect();
         if stale.is_empty() {
@@ -619,21 +678,10 @@ impl FileAssets {
                 }
                 return false;
             }
-            let predates_alpha = count(tiled::TxStaleness::PredatesAlpha);
-            if predates_alpha > 0 {
-                warning!(
-                    TextureStreamFallback,
-                    "{}: {predates_alpha} .tx tile(s) written by an older crust without \
-                     the alpha their source has — preloading the texture instead; rerun \
-                     with --auto-tx to reconvert",
-                    path.display()
-                );
-                return false;
-            }
             warning!(
                 TextureTxStale,
-                "{}: {} .tx tile(s) older than their source, used anyway — rerun with \
-                 --auto-tx to reconvert",
+                "{}: {} .tx tile(s) whose modification time is not their source's, used \
+                 anyway — rerun with --auto-tx to reconvert",
                 path.display(),
                 stale.len()
             );
@@ -655,7 +703,7 @@ impl FileAssets {
                 let failures = &failures;
                 scope.spawn(move || {
                     for src in part {
-                        match tiled::make_tx_atomic(src, space, tiled::TxFormat::FromSampleType) {
+                        match tiled::make_tx_atomic(src, space, self.tx_target) {
                             Ok(m) => debug!(
                                 "--auto-tx: {} -> {} [{}, {:?}]",
                                 src.display(),
@@ -884,17 +932,26 @@ impl FileAssets {
     /// hunt for a sibling. Both candidates are only *tried* — an ordinary
     /// scanline EXR declines at open and falls through to the sibling, and then
     /// to preloading.
-    fn stream_candidates(path: &Path) -> Vec<std::path::PathBuf> {
+    ///
+    /// The sibling is the one Arnold names ([`tiled::tx_name`]): for the
+    /// binding's space, converting to the `.tx` target space.
+    fn stream_candidates(&self, path: &Path, space: ColorSpace) -> Vec<std::path::PathBuf> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let sibling = path.with_extension("tx");
+        let sibling = || {
+            tiled::tx_name(path, space, self.tx_target)
+                .map(|n| n.path)
+                .into_iter()
+        };
         match ext.as_str() {
             "tx" => vec![path.to_path_buf()],
-            "exr" => vec![path.to_path_buf(), sibling],
-            _ => vec![sibling],
+            "exr" => std::iter::once(path.to_path_buf())
+                .chain(sibling())
+                .collect(),
+            _ => sibling().collect(),
         }
     }
 
@@ -904,12 +961,22 @@ impl FileAssets {
         space: ColorSpace,
         which: Candidates,
     ) -> Option<std::sync::Arc<dyn Texture2D>> {
-        let candidates = Self::stream_candidates(path)
+        let candidates = self
+            .stream_candidates(path, space)
             .into_iter()
             .filter(|c| (c.as_path() == path) == (which == Candidates::Source));
         for candidate in candidates {
             let started = Instant::now();
-            let Some(tex) = tiled::StreamingTexture::open(&candidate, space, self.cache.clone())
+            // The space the values are read in: the binding's for the file
+            // itself, the one its name records for an Arnold-named sibling.
+            let read_as = match which {
+                Candidates::Source => space,
+                Candidates::Sibling => match tiled::tx_name(path, space, self.tx_target) {
+                    Some(name) => name.read_as,
+                    None => continue,
+                },
+            };
+            let Some(tex) = tiled::StreamingTexture::open(&candidate, read_as, self.cache.clone())
             else {
                 continue;
             };
@@ -1147,16 +1214,14 @@ impl FileAssets {
                     } else if self.ptex_mip_space == ptex_stream::MipSpace::Linear
                         && !tex.chain_is_exact()
                     {
-                        // **The correctness gate, and the project's own
-                        // standard for it.** A `.tx` whose levels were
-                        // reduced in the wrong colour space is refused
-                        // (`crust:mipspace`) rather than described, because
-                        // the failure is invisible: level 0 stays right and
-                        // every coarser level is wrong, which by eye is a
-                        // filtering bug. A `.ptx`'s stored chain is reduced
-                        // in the file's encoding while crust decodes Ptex by
-                        // 2.2, so it is that same mismatch every time — and
-                        // gets the same answer. Preloading rebuilds the
+                        // **The correctness gate.** A chain reduced in one
+                        // encoding and read in another is refused rather
+                        // than described, because the failure is invisible:
+                        // level 0 stays right and every coarser level is
+                        // wrong, which by eye is a filtering bug. A `.ptx`'s
+                        // stored chain is reduced in the file's encoding
+                        // while crust decodes Ptex by 2.2, so it is that
+                        // mismatch every time. Preloading rebuilds the
                         // pyramid in linear light from the decoded base.
                         //
                         // Checked after the size test on purpose: on a
@@ -1259,7 +1324,11 @@ impl AssetLoader for FileAssets {
                 texture: texture.clone(),
                 preloaded: *preloaded,
             },
-            || kept::texture_stamp_files(path),
+            || {
+                kept::texture_stamp_files(path, |f| {
+                    tiled::tx_name(f, space, self.tx_target).map(|n| n.path)
+                })
+            },
             || self.decode_texture(path, space),
         )
         .map(|(texture, _)| texture)

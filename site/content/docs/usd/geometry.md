@@ -73,7 +73,9 @@ true curve, between 16 and 256 segments. A capsule's end caps get a quarter as m
 and at least two.
 
 This needs the render camera before the stage is read, so it applies only when the camera
-is named with `--camera` or `RenderSettings.camera`. It doesn't need adaptive subdivision
+is named with `--camera` or `RenderSettings.camera`. When
+[`crust:dicingCamera`](@/docs/usd/render-settings.md#crust-dicingcamera) names a camera,
+the size on screen is read through that camera instead, named or not. It doesn't need adaptive subdivision
 to be turned on. Without a named camera, every curved shape gets 48 segments. So does a
 shape inside a prototype that is placed more than once, since one mesh serves every
 placement. A prototype placed once is sized for its placement only when

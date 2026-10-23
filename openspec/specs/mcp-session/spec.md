@@ -505,14 +505,17 @@ and apply the change without a re-import when every changed field belongs to one
 these classes:
 
 - `settings`: attribute values on the `RenderSettings` prim the render uses, or on
-  the render camera;
+  the render camera, its `xformOp:*` and `xformOpOrder` values included when no
+  prim the scene imported (geometry, a volume region, a light, a material) lies below
+  the camera;
 - `lights`: `inputs:*` values on existing UsdLux light prims;
 - `materials`: `inputs:*` values on existing shaders, or interface inputs, of
   materials the scene already uses, when the change does not move the material's
   opacity, transmission or emission class.
 
 Any other change SHALL be applied as `full`, a re-import of the saved layer. This
-includes a spec added or removed, a relationship, connection, transform, visibility,
+includes a spec added or removed, a relationship, connection, a transform other than
+the render camera's own, visibility,
 primvar, variant selection, activation or composition arc. A batch with changes in
 several classes SHALL be applied as the most expensive of them, in the order
 `settings` < `materials` < `lights` < `full`. A render after an edit applied in place
@@ -525,10 +528,12 @@ Three properties of a production stage SHALL NOT, on their own, make a confined 
 
 - **Tessellation that reads the camera.** When the scene uses adaptive subdivision or
   implicit shapes sized on screen, a `settings` edit SHALL stay in place unless the
-  camera projection that tessellation reads changes: the camera's position,
+  camera projection that tessellation reads changes. That projection is the dicing
+  camera's (`crust:dicingCamera`, else the render camera): its position,
   orientation, focal length, aperture, or the image resolution, or the
   adaptive-subdivision target or level ceiling. Exposure, focus distance, f-stop,
-  shutter, sampling settings and render products do not move it.
+  shutter, sampling settings and render products do not move it, and neither does
+  moving a render camera that is not the dicing camera.
 - **Light linking.** When the scene authors `collection:lightLink` or
   `collection:shadowLink`, a `lights` edit SHALL stay in place, and the resolved links
   SHALL be kept. An edit to a light that the links leave illuminating nothing (a light
@@ -591,6 +596,34 @@ Three properties of a production stage SHALL NOT, on their own, make a confined 
   payload, and the agent sets an `inputs:roughness` on that material's shader
 - **THEN** the result reports `applied = materials`, and a 16 spp render is
   bit-identical to the same render after a `full` application of the layer
+
+#### Scenario: Moving the render camera
+
+- **WHEN** the scene uses neither adaptive subdivision nor implicit shapes sized on
+  screen, and the agent sets `xformOp:translate` on the render camera
+- **THEN** the result reports `applied = settings`, and a 16 spp render is
+  bit-identical to the same render after a `full` application of the layer
+
+#### Scenario: Moving the render camera past a dicing camera
+
+- **WHEN** the scene sets `crust:subdivisionEdgeLength` and `crust:dicingCamera` to
+  a camera other than the render camera, and the agent sets `xformOp:rotateXYZ` on
+  the render camera
+- **THEN** the result reports `applied = settings`, the tessellation is unchanged,
+  and a 16 spp render is bit-identical to the same render after a `full`
+  application of the layer
+
+#### Scenario: Moving the dicing camera
+
+- **WHEN** the scene sets `crust:subdivisionEdgeLength`, and the agent sets
+  `xformOp:translate` on the camera `crust:dicingCamera` names
+- **THEN** the result reports `applied = full`
+
+#### Scenario: A camera with prims below it
+
+- **WHEN** a mesh is authored as a child of the render camera, and the agent sets
+  `xformOp:translate` on the camera
+- **THEN** the result reports `applied = full`
 
 ### Requirement: Assets persist across edits
 
@@ -822,3 +855,29 @@ author it.
 
 - **WHEN** the agent queries `/scene/Sky.inputs:nonsense`
 - **THEN** the call fails, naming `set_attribute` with an explicit `type`
+
+### Requirement: A session renders one pass
+
+`open_session` SHALL accept an optional `pass`, the path of a `RenderPass` prim,
+with the meaning `--pass` has for `crust render`. Every render, probe and final
+render of the session SHALL use that pass. Without it, the session has no active
+pass. An edit to the active pass's collections SHALL take effect on the next
+render, as an edit to any other prim does.
+
+#### Scenario: A lookdev session on the character pass
+
+- **WHEN** `open_session` is called with `pass = /Render/Passes/char`
+- **THEN** the session's renders hold out what that pass's `matte` names, and
+  `render_final` writes what `crust render --pass /Render/Passes/char` of the
+  session layer writes
+
+#### Scenario: Editing the matte collection
+
+- **WHEN** a session on `/Render/Passes/char` authors a new include on its
+  `collection:matte`
+- **THEN** the next render holds out the newly included geometry too
+
+#### Scenario: A pass that does not exist
+
+- **WHEN** `open_session` names a `pass` that is not a `RenderPass` on the stage
+- **THEN** the call fails, naming the path

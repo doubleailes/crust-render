@@ -91,10 +91,14 @@ fn main() {
     // In `lin_rec709`, the default working space, exactly as the importer
     // loads textures and converts literal colours.
     let working = crust_core::color::Space::LIN_REC709;
-    let loader = |asset: &str, space: Option<&str>| -> Option<crust_core::TextureRef> {
-        let tex = assets.load_texture(&dir.join(asset), ColorSpace::from_mtlx(space, working))?;
-        Some(crust_core::TextureRef(tex))
-    };
+    let loader =
+        |asset: &str, space: crust_core::mtlx::TexelSpace<'_>| -> Option<crust_core::TextureRef> {
+            let tex = assets.load_texture(
+                &dir.join(asset),
+                ColorSpace::from_mtlx_image(space, working),
+            )?;
+            Some(crust_core::TextureRef(tex))
+        };
     let convert = |space: &str, rgb: [f32; 3]| -> [f32; 3] {
         ColorSpace::from_mtlx(Some(space), working)
             .resolved()

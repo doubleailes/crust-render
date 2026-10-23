@@ -193,6 +193,9 @@ incrementally, under fixed budgets:
 - **UV textures stream from `.tx` files** (tiled, mip-mapped TIFF or EXR) in 64×64 tiles,
   through a cache with a byte budget
   ([`CRUST_TEX_CACHE_MB`](@/docs/reference/environment-variables.md#crust-tex-cache-mb)).
+  The files follow Arnold 7.5's convention — its names, its conversion to ACEScg, its
+  file types and metadata — so a studio converts each texture once for both renderers
+  (see [`.tx` files](@/docs/usd/materials.md#tx-files)).
 - **Large Ptex files stream** through the `ptex-rs` reader's own cache
   ([`CRUST_PTEX_STREAM`](@/docs/reference/environment-variables.md#crust-ptex-stream)).
   Below the per-face cap, the mip levels are the ones a loaded texture builds in linear
@@ -219,9 +222,6 @@ already in it. When Crust Render
 can't do something correctly, it refuses it and says so, rather than rendering something
 plausible but wrong:
 
-- A `.tx` whose mip levels were reduced in a different colour space is refused (see
-  [`.tx` files](@/docs/usd/materials.md#tx-files)): its full-resolution level would look
-  right while its coarser levels were wrong, which looks exactly like a filtering bug.
 - MaterialX nodes Crust can't represent, such as `conical_edf`, are reported rather than
   approximated.
 - Every refusal, approximation or skipped input is a `WARN` line. `INFO` stays a few lines
