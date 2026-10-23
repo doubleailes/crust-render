@@ -482,6 +482,11 @@
       a thin-walled leaf that transmits (its straight-through delta has no
       BSDL counterpart) samples the full VNDF, and leaf *selection* stays
       `∝ lum(w)·lum(Ê)`.
+      Cost (callgrind, `-s 2`, against the VNDF build): `cornellbox`
+      4 276 033 387 → 4 276 091 761 (+0.001%, bit-identical image),
+      `materialx_basic` 2 763 512 676 → 2 762 675 754 (−0.03%),
+      `materialx_surfaces` 5 440 988 714 → 5 515 381 081 (+1.37%: the rough
+      glass and its refractions); only MaterialX scenes change.
     - **Diffuse and translucent.** BSDL's QON (no compensation) and EON
       (compensation, Portsmouth) and Burley are MaterialX's GLSL lobes to
       rounding; translucent is `color/π` below the plane.
