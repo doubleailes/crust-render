@@ -432,6 +432,17 @@ fn lens_camera(
     let vfov_deg = 2.0 * frame.tan_half_vfov().atan().to_degrees();
     let (aperture, refused_meters_per_unit) =
         lens_diameter(stage, frame.focal_length, f_stop, settings.depth_of_field());
+    // A pinhole has no focus plane, and USD's `focusDistance = 0` (what
+    // GfCamera writes, and a DCC camera with focus off) would put the image
+    // plane on the eye: every ray would have no direction. A pinhole's rays
+    // do not depend on the plane's distance, so it goes at unit distance; a
+    // positive, finite focus keeps its own, bit for bit.
+    let focus_distance = if aperture == 0.0 && !(focus_distance > 0.0 && focus_distance.is_finite())
+    {
+        1.0
+    } else {
+        focus_distance
+    };
     let aspect = frame.aspect();
     let lookfrom = Vec3A::from(frame.eye);
     let lookat = Vec3A::from(frame.eye + frame.forward * focus_distance);

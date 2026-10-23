@@ -1,0 +1,154 @@
+#usda 1.0
+(
+    doc = "Purpose-only material bindings, as ALab authors them: `material:binding:full` and `material:binding:preview`, never all-purpose, bound on the asset's GEO group, with each asset's materials inside it. The red towers are natively instanced (their materials are copied with the prototype), the green one is not. A render resolves `full`; `preview` (blue) must never show."
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        float inputs:angle = 2
+        float xformOp:rotateX = -50
+        float xformOp:rotateY = 30
+        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.3
+    }
+
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        float verticalAperture = 11.787
+        double3 xformOp:translate = (0, 1.5, 9)
+        float xformOp:rotateX = -6
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # One asset: its geometry under GEO, bound by purpose on GEO, and its
+    # materials under MATERIAL, inside the asset (so inside the prototype).
+    class Xform "_Asset"
+    {
+        def Xform "GEO" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding:full = </World/_Asset/MATERIAL/full>
+            rel material:binding:preview = </World/_Asset/MATERIAL/preview>
+
+            def Mesh "block"
+            {
+                uniform token subdivisionScheme = "none"
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [0,1,3,2, 4,6,7,5, 0,4,5,1, 2,3,7,6, 0,2,6,4, 1,5,7,3]
+                point3f[] points = [
+                    (-0.5,0,-0.5), (-0.5,0,0.5), (-0.5,2,-0.5), (-0.5,2,0.5),
+                    (0.5,0,-0.5), (0.5,0,0.5), (0.5,2,-0.5), (0.5,2,0.5)
+                ]
+            }
+        }
+
+        def Scope "MATERIAL"
+        {
+            def Material "full"
+            {
+                token outputs:surface.connect = </World/_Asset/MATERIAL/full/surface.outputs:surface>
+                def Shader "surface"
+                {
+                    uniform token info:id = "UsdPreviewSurface"
+                    color3f inputs:diffuseColor = (0.8, 0.1, 0.05)
+                    float inputs:roughness = 0.6
+                    token outputs:surface
+                }
+            }
+
+            def Material "preview"
+            {
+                token outputs:surface.connect = </World/_Asset/MATERIAL/preview/surface.outputs:surface>
+                def Shader "surface"
+                {
+                    uniform token info:id = "UsdPreviewSurface"
+                    color3f inputs:diffuseColor = (0.05, 0.1, 0.8)
+                    token outputs:surface
+                }
+            }
+        }
+    }
+
+    def Xform "TowerA" (
+        instanceable = true
+        prepend references = </World/_Asset>
+    )
+    {
+        double3 xformOp:translate = (-2.5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "TowerB" (
+        instanceable = true
+        prepend references = </World/_Asset>
+    )
+    {
+        double3 xformOp:translate = (2.5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # The same binding pattern, not instanced, in green.
+    def Xform "Plain"
+    {
+        def Xform "GEO" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding:full = </World/Plain/MATERIAL/full>
+            rel material:binding:preview = </World/Plain/MATERIAL/preview>
+
+            def Mesh "block"
+            {
+                uniform token subdivisionScheme = "none"
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [0,1,3,2, 4,6,7,5, 0,4,5,1, 2,3,7,6, 0,2,6,4, 1,5,7,3]
+                point3f[] points = [
+                    (-0.5,0,-0.5), (-0.5,0,0.5), (-0.5,2,-0.5), (-0.5,2,0.5),
+                    (0.5,0,-0.5), (0.5,0,0.5), (0.5,2,-0.5), (0.5,2,0.5)
+                ]
+            }
+        }
+
+        def Scope "MATERIAL"
+        {
+            def Material "full"
+            {
+                token outputs:surface.connect = </World/Plain/MATERIAL/full/surface.outputs:surface>
+                def Shader "surface"
+                {
+                    uniform token info:id = "UsdPreviewSurface"
+                    color3f inputs:diffuseColor = (0.1, 0.7, 0.1)
+                    float inputs:roughness = 0.6
+                    token outputs:surface
+                }
+            }
+
+            def Material "preview"
+            {
+                token outputs:surface.connect = </World/Plain/MATERIAL/preview/surface.outputs:surface>
+                def Shader "surface"
+                {
+                    uniform token info:id = "UsdPreviewSurface"
+                    color3f inputs:diffuseColor = (0.05, 0.1, 0.8)
+                    token outputs:surface
+                }
+            }
+        }
+    }
+
+    def Mesh "Ground"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-20, 0, -20), (-20, 0, 20), (20, 0, 20), (20, 0, -20)]
+    }
+}

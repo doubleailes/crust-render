@@ -1,0 +1,27 @@
+[package]
+name = "crust-hydra"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crust behind a C ABI for the hdCrust Hydra render delegate: a live session on the delegate's layers, rendered progressively."
+
+# `staticlib` is what hdCrust links (hydra/hdCrust, built with CMake, which
+# runs `cargo build --profile hydra -p crust-hydra`); `rlib` is what the
+# workspace's tests drive through the safe Rust API.
+[lib]
+name = "crust_hydra"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# The session core and the CLI's import policy, without the MCP server: a
+# scene seen through the delegate is the scene `crust render` imports from
+# the same layers, and an edit classifies as it does in `crust mcp`.
+crust-render = { path = "../crust-render", default-features = false, features = ["session", "jit", "mmap"] }
+crust-core = { path = "../crust-core" }
+crust-assets = { path = "../crust-assets" }
+# The session thread keeps the authoring stage the classifier reads.
+openusd.workspace = true
+tracing.workspace = true

@@ -21,3 +21,8 @@ __pycache__/
 
 # Zola build output of the user documentation (site/)
 /site/public/
+
+# hdCrust's pixi environment (hydra/pixi.toml; pixi.lock is committed)
+hydra/.pixi/
+hydra/build/
+hydra/install/

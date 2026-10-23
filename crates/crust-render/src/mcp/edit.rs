@@ -583,7 +583,7 @@ pub fn reanchor(path: &str, input_dir: &Path, layer_dir: &Path) -> String {
     }
     let target = input_dir.join(path);
     let target = normalize(&target);
-    super::layer::anchored(&target, layer_dir)
+    crust_render::session::layer::anchored(&target, layer_dir)
 }
 
 /// `path` with its `.` and `..` components folded, without touching the

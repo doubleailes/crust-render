@@ -230,6 +230,20 @@ render.
 - **Guiding is suggested as an attribute.** `crust render` has no guiding flag, so a
   guiding suggestion is authored on the stage (`crust:pathGuiding`).
 
+## Hydra (usdview)
+
+- **Only usdview on OpenUSD 26.08 is tested**, on Linux and Windows. Houdini Solaris,
+  Maya-USD and Omniverse are not. macOS is not built.
+- **Light linking, volume fields (UsdVol), motion blur and points are not carried**
+  to crust through Hydra. Each is reported once and the rest renders. See
+  [Rendering in usdview](@/docs/help/usdview.md#what-it-does-not-carry-yet).
+- **The scene is written to disk.** The delegate writes the stage as USD layers and
+  crust imports them. Memory holds Hydra's copy of the scene and crust's.
+- **AOVs fill at completion**, not while the render refines. Only `depth`, `normal`,
+  `Neye` and `Peye` are rendered.
+- **Playback shows each frame's first pass**, which is not real time on a large
+  viewport or stage. Every frame is a full import.
+
 ## MCP sessions
 
 - **Structural edits import the whole stage again.** An edit confined to values of the

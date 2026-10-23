@@ -313,7 +313,7 @@ pub fn write_product(
     product: &AovProduct,
     beauty: &Buffer,
     film: &AovFilm,
-    color: &super::OutputColor,
+    color: &crate::OutputColor,
     sampling: &SamplingStamp,
     interrupted: bool,
 ) -> io::Result<Vec<String>> {
