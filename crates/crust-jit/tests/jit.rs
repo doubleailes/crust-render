@@ -526,6 +526,7 @@ fn value_graphs_over_interface_inputs_match() {
         source,
         colorspace: None,
         text: None,
+        interface: None,
     };
     let port = |name: &str, type_name: &str, interface: &str, default: Option<Val>| {
         input(

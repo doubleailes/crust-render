@@ -232,6 +232,7 @@ mod tests {
             },
             colorspace: None,
             text: None,
+            interface: None,
         }
     }
 
@@ -245,6 +246,7 @@ mod tests {
             },
             colorspace: None,
             text: None,
+            interface: None,
         }
     }
 
@@ -258,6 +260,7 @@ mod tests {
             },
             colorspace: None,
             text: None,
+            interface: None,
         }
     }
 
@@ -289,6 +292,7 @@ mod tests {
                     source: Source::Value(Val::float(0.5)),
                     colorspace: None,
                     text: None,
+                    interface: None,
                 },
                 port("in1", "color3", "key"),
                 port("in2", "color3", "fill"),
@@ -405,6 +409,7 @@ mod tests {
                 },
                 colorspace: None,
                 text: None,
+                interface: None,
             }],
         )]);
         let g = compile_value_graph(&doc, &[("a", None)]);
@@ -436,6 +441,7 @@ mod tests {
                     source: Source::Value(Val::float(1.0)),
                     colorspace: None,
                     text: None,
+                    interface: None,
                 },
                 Input {
                     name: "in2".into(),
@@ -443,6 +449,7 @@ mod tests {
                     source: Source::Value(Val::float(2.0)),
                     colorspace: None,
                     text: None,
+                    interface: None,
                 },
             ],
         )]);

@@ -477,7 +477,7 @@ impl<'a> Compiler<'a> {
                     name = "value".into();
                 }
                 Source::Value(_) => return input.text.as_deref().and_then(parse),
-                Source::Graph { .. } => return None,
+                Source::Graph { .. } | Source::Interface { .. } => return None,
             }
         }
         None
@@ -500,7 +500,7 @@ impl<'a> Compiler<'a> {
                     Source::Graph { graph, output } => {
                         self.doc.graph_output(graph, output).map(|g| g.node)
                     }
-                    Source::Value(_) => None,
+                    Source::Value(_) | Source::Interface { .. } => None,
                 };
                 let Some(up) = up else { continue };
                 let key = (up.graph.clone().unwrap_or_default(), up.name.clone());
