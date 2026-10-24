@@ -121,9 +121,13 @@ pub(super) fn translate_value_graph(
     graph: &Prim,
 ) -> ValueNetwork {
     let path = graph.path().as_str().to_string();
+    // A sample filter reads standard nodes only: no custom nodedef is
+    // resolved, so the document needs no expansion.
+    let library = Library::default();
     let mut b = Builder {
         stage,
         stage_path,
+        library: &library,
         nodes: Vec::new(),
         names: HashMap::new(),
         active: HashSet::new(),
@@ -290,6 +294,7 @@ impl Builder<'_> {
                     },
                     colorspace,
                     text: None,
+                    interface: None,
                 })
             }
             Resolved::Node { name: node, output } => {
