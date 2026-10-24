@@ -138,7 +138,7 @@ layer_text() {
 SCENARIOS=(
     "camera_move|subdivision_adaptive.usda|/World/Cam|settings|--move 0.3,0.1,-0.5"
     "light_intensity|cornellbox.usda|/scene/camera1|lights|--set /scene/Sky.inputs:intensity=0.5"
-    "mesh_transform|cornellbox.usda|/scene/camera1|full|--set /scene/pCube2.xformOp:translate=0.6,0.5,0.3"
+    "mesh_transform|cornellbox.usda|/scene/camera1|geometry|--set /scene/pCube2.xformOp:translate=0.6,0.5,0.3"
     "prim_removed|cornellbox.usda|/scene/camera1|full|--deactivate /scene/pSphere1"
     "frame_1|animation.usda|/World/Cam|full|--frame 1"
     "time_change|animation.usda|/World/Cam|full|--frame 1 --to-frame 10"
