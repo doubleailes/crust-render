@@ -66,3 +66,24 @@ A node whose category is defined by a `<nodedef>` with a `<nodegraph nodedef=…
 - **WHEN** `PXR_MTLX_PLUGIN_SEARCH_PATHS` names a directory whose `.mtlx`
   defines a node as a `<nodegraph>` over standard nodes, and a material uses it
 - **THEN** it renders as that graph, with no `mtlx.*` warning
+
+#### Scenario: A versioned instance
+
+- **WHEN** an instance authors a `version` and its category has nodedefs of
+  several versions
+- **THEN** it renders as the graph of the nodedef of that version, and an
+  instance of a version no nodedef has is reported, not rendered with the
+  default version's graph
+
+#### Scenario: An instance of another type
+
+- **WHEN** an instance's type is one no nodedef of its category declares
+- **THEN** it is reported and left unsupported, not expanded with another
+  type's graph
+
+#### Scenario: A definition that instantiates itself
+
+- **WHEN** a nodedef's graph reaches an instance of that nodedef, directly or
+  through other definitions
+- **THEN** the cycle is reported once and refused at its first re-entry, and
+  the import neither hangs nor grows the document past a fixed node budget

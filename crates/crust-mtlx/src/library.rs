@@ -23,7 +23,7 @@
 use super::MtlxError;
 use super::parse::{Node, parse_node};
 use super::value::{Val, parse_literal};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// One input a nodedef declares: its type and default.
@@ -131,8 +131,9 @@ impl Library {
         let mut lib = Library::default();
         let mut errors = Vec::new();
         let mut files = Vec::new();
+        let mut walked = HashSet::new();
         for p in paths {
-            collect_mtlx(p, &mut files, &mut errors);
+            collect_mtlx(p, &mut files, &mut walked, &mut errors);
         }
         for file in files {
             match std::fs::read_to_string(&file) {
@@ -209,17 +210,32 @@ impl Library {
     /// The nodedef a node of `category` written with type `type_name`
     /// instantiates: among the nodedefs for that category whose
     /// [`NodeDef::instance_type`] is `type_name` (any, when `None`), the one
-    /// marked the default version, else the first read.
-    pub fn for_node(&self, category: &str, type_name: Option<&str>) -> Option<&NodeDef> {
+    /// whose `version` is `version` when the node authors one — none, if no
+    /// nodedef has it — else the one marked the default version, else the
+    /// first read.
+    pub fn for_node(
+        &self,
+        category: &str,
+        type_name: Option<&str>,
+        version: Option<&str>,
+    ) -> Option<&NodeDef> {
         let mut candidates = self
             .defs
             .iter()
             .filter(|d| d.node == category && type_name.is_none_or(|t| d.instance_type() == t));
+        if let Some(v) = version {
+            return candidates.find(|d| d.version.as_deref() == Some(v));
+        }
         let first = candidates.next()?;
         if first.default_version {
             return Some(first);
         }
         Some(candidates.find(|d| d.default_version).unwrap_or(first))
+    }
+
+    /// Whether any nodedef is for `category`, whatever its type or version.
+    pub fn defines(&self, category: &str) -> bool {
+        self.defs.iter().any(|d| d.node == category)
     }
 
     /// How many nodedefs have a graph implementation.
@@ -261,8 +277,15 @@ impl Library {
 
 /// Appends the `.mtlx` files under `path` to `out`, sorted within each
 /// directory so the read order — and so which duplicate wins — does not
-/// depend on the file system.
-fn collect_mtlx(path: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<(PathBuf, MtlxError)>) {
+/// depend on the file system. Each directory is walked once, by its
+/// canonical path in `walked`, so a link back to an ancestor (or two search
+/// paths naming one directory) reads nothing twice.
+fn collect_mtlx(
+    path: &Path,
+    out: &mut Vec<PathBuf>,
+    walked: &mut HashSet<PathBuf>,
+    errors: &mut Vec<(PathBuf, MtlxError)>,
+) {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
@@ -272,6 +295,10 @@ fn collect_mtlx(path: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<(PathBuf, 
     };
     if meta.is_file() {
         out.push(path.to_path_buf());
+        return;
+    }
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !walked.insert(canonical) {
         return;
     }
     let entries = match std::fs::read_dir(path) {
@@ -285,7 +312,7 @@ fn collect_mtlx(path: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<(PathBuf, 
     entries.sort();
     for entry in entries {
         if entry.is_dir() {
-            collect_mtlx(&entry, out, errors);
+            collect_mtlx(&entry, out, walked, errors);
         } else if entry
             .extension()
             .is_some_and(|x| x.eq_ignore_ascii_case("mtlx"))
@@ -446,14 +473,15 @@ mod tests {
     fn a_nodedef_is_found_by_name_and_by_category() {
         let l = lib();
         // The name breaks `ND_<category>_<type>`; the category is the `node`.
-        let by_cat = l.for_node("studio_layer", Some("multioutput"));
+        let by_cat = l.for_node("studio_layer", Some("multioutput"), None);
         assert_eq!(
             by_cat.map(|d| d.name.as_str()),
             Some("ND_studio_layer_color3")
         );
-        assert!(l.for_node("studio_layer", Some("color3")).is_none());
+        assert!(l.for_node("studio_layer", Some("color3"), None).is_none());
         assert_eq!(
-            l.for_node("studio_texture", None).map(|d| d.name.as_str()),
+            l.for_node("studio_texture", None, None)
+                .map(|d| d.name.as_str()),
             Some("studio_texture")
         );
         // A string default is kept as text; an input with no value has none.
@@ -468,6 +496,26 @@ mod tests {
                 .text
                 .is_none()
         );
+    }
+
+    /// An authored `version` names its nodedef, and only that one: a version
+    /// no nodedef has finds nothing rather than the default.
+    #[test]
+    fn a_version_selects_its_nodedef() {
+        let mut l = Library::default();
+        l.merge_text(
+            r#"<materialx>
+                 <nodedef name="ND_v1" node="n" version="1.0" isdefaultversion="true"><output name="out" type="float" /></nodedef>
+                 <nodedef name="ND_v2" node="n" version="2.0"><output name="out" type="float" /></nodedef>
+               </materialx>"#,
+        )
+        .unwrap();
+        let name = |v: Option<&str>| l.for_node("n", Some("float"), v).map(|d| d.name.clone());
+        assert_eq!(name(None).as_deref(), Some("ND_v1"));
+        assert_eq!(name(Some("2.0")).as_deref(), Some("ND_v2"));
+        assert_eq!(name(Some("1.0")).as_deref(), Some("ND_v1"));
+        assert_eq!(name(Some("3.0")), None);
+        assert!(l.defines("n") && !l.defines("m"));
     }
 
     #[test]
@@ -525,6 +573,31 @@ mod tests {
         // The walk's failures first, then the files that would not parse.
         let failed: Vec<_> = errors.iter().map(|(p, _)| p.clone()).collect();
         assert_eq!(failed, [missing, dir.join("broken.mtlx")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory link back to an ancestor is walked once: the files under
+    /// it are read once, and the walk ends. Skipped where the link cannot be
+    /// made (Windows without the symlink privilege).
+    #[test]
+    fn a_link_to_an_ancestor_reads_each_file_once() {
+        let dir = std::env::temp_dir().join(format!("crust_mtlx_loop_{}", std::process::id()));
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("studio.mtlx"), LIB).unwrap();
+        let link = nested.join("up");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&dir, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&dir, &link);
+        if made.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // Both search paths name one tree, the second through the link.
+        let (l, errors) = Library::load(&[dir.clone(), link.clone()]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(l.files, [nested.join("studio.mtlx")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

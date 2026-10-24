@@ -52,9 +52,14 @@ altogether, which `MIN_STREAM_CHUNKS` (a count of subtrees) does not see. Reject
 "one `/Looks` scope beside N geometry chunks" layout would pay per chunk; walking
 the index stage up front composes everything outside payloads, which on ALab is the
 whole stage. A chunk with nothing bound from outside pays nothing: the walk runs at
-the first miss. Gap: only the material's own subtree is masked in, so a material
-whose network connects to a prim outside itself (a node graph shared from another
-scope) still finds that prim missing.
+the first miss. A material whose network connects to a prim outside itself (a node
+graph shared from another scope) needs that prim too, whether the material is in the
+chunk or not: `connected_outside` follows its connections (and theirs, through each
+reached prim's subtree) on whichever stage holds it, and any target the mask lacks
+sends the material to the side stage with the target masked in beside it — one more
+open per hop of a chain of shared graphs, at most `MAX_SIDE_STAGE_OPENS` (8) per
+material. The mask moves only with a stage opened to it, so a failed open leaves the
+stage and its mask in step.
 The subtlety is cache keying: prototype paths (`/__Prototype_N`) are **numbered per
 composition**, so every masked stage has its own `/__Prototype_0`. Anything keyed on
 such a path must be scoped per stage, or one chunk's data is silently handed to the

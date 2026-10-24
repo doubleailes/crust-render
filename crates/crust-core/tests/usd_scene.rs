@@ -4189,3 +4189,95 @@ def Scope "Looks"
     assert_eq!(fallbacks.len(), 1, "{:#?}", scene.warnings);
     assert_eq!(fallbacks[0].prims, ["/Looks/Missing"]);
 }
+
+/// A material whose network connects outside itself, into a node shared from
+/// another top-level subtree, resolves in a streamed import as on one stage:
+/// the prims its connections reach are masked in beside it. That holds for a
+/// material in a sibling subtree (`/Looks/Red`, resolved on the side stage)
+/// and for one inside the very chunk that binds it (`/B/Looks/Inner`).
+#[test]
+fn a_streamed_material_reads_a_shared_node_outside_its_subtree() {
+    use crust_core::MASK_CAMERA;
+
+    let dir = std::env::temp_dir().join("crust_shared_network");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let material = |name: &str, root: &str| {
+        format!(
+            r#"
+    def Material "{name}"
+    {{
+        token outputs:mtlx:surface.connect = <{root}/{name}/S.outputs:out>
+        def Shader "S"
+        {{
+            uniform token info:id = "ND_UsdPreviewSurface_surfaceshader"
+            color3f inputs:diffuseColor.connect = </Shared/Tint.outputs:out>
+            float inputs:roughness = 1
+            token outputs:out
+        }}
+    }}"#
+        )
+    };
+    let quad = |name: &str, x: f32, mat: &str, looks: &str| {
+        format!(
+            r#"
+def Xform "{name}"
+{{{looks}
+    def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
+        rel material:binding = <{mat}>
+    }}
+}}"#,
+            x0 = x,
+            x1 = x + 1.0
+        )
+    };
+    let inner = format!(
+        "\n    def Scope \"Looks\"\n    {{{}\n    }}",
+        material("Inner", "/B/Looks")
+    );
+    let stage = format!(
+        r#"#usda 1.0
+def Scope "Looks"
+{{{}
+}}
+def Scope "Shared"
+{{
+    def Shader "Tint"
+    {{
+        uniform token info:id = "ND_constant_color3"
+        color3f inputs:value = (0.8, 0.1, 0.1)
+        color3f outputs:out
+    }}
+}}{}{}{}
+"#,
+        material("Red", "/Looks"),
+        quad("A", -3.0, "/Looks/Red", ""),
+        quad("B", -1.0, "/B/Looks/Inner", &inner),
+        quad("C", 1.0, "/Looks/Red", ""),
+    );
+    let path = dir.join("shared.usda");
+    std::fs::write(&path, stage).expect("write stage");
+    let scene = Scene::from_usd(&path).expect("stage opens");
+
+    for x in [-2.5, -0.5, 1.5] {
+        let r =
+            Ray::new(Vec3A::new(x, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene
+            .world
+            .intersect(&r, 0.001, f32::INFINITY)
+            .expect("hits the quad");
+        let f = hit.mat.eval(&r, &hit.rec, Vec3A::Z).expect("a lobe").0;
+        assert!(f.x > 4.0 * f.y && f.x > 4.0 * f.z, "red at x = {x}: {f}");
+    }
+    // The stage has no camera; nothing else is refused or approximated.
+    let other: Vec<_> = scene
+        .warnings
+        .iter()
+        .filter(|w| w.code != crust_core::WarningCode::CameraMissing)
+        .collect();
+    assert!(other.is_empty(), "{other:#?}");
+}

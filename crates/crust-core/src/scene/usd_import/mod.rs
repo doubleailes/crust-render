@@ -110,7 +110,7 @@ use lights::{
 };
 pub(crate) use listing::{list_prims, list_records};
 pub(crate) use live::{prim_frames, rebuild};
-use materials::{MaterialCache, resolve_bound, resolve_material};
+use materials::{MaterialCache, mtlx_library, resolve_bound, resolve_material};
 use mesh::{
     MeshArena, MeshPlace, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes, place_mesh_source,
     with_constant_primvars,
@@ -1123,7 +1123,7 @@ pub(crate) fn load_scene(
                 frame_posed,
                 asks_time,
             ),
-            ..ImportCaches::new(assets, path, subdiv, working)
+            ..ImportCaches::new(assets, path, subdiv, working, mtlx_library())
         },
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
@@ -1335,6 +1335,7 @@ pub(crate) fn load_scene(
             unsized_shapes: ctx.caches.implicit.fixed_unshared,
             primvars: ctx.caches.meshes.primvars.key(),
             shutter: shutter.key(asks_time, frame_posed),
+            mtlx_library: ctx.caches.materials.library.clone(),
         },
     });
     Ok(scene)
@@ -2050,9 +2051,10 @@ impl<'a> ImportCaches<'a> {
         stage_path: &'a Path,
         subdiv: SubdivPolicy,
         working: crate::color::Space,
+        library: Arc<crust_mtlx::Library>,
     ) -> Self {
         ImportCaches {
-            materials: MaterialCache::new(),
+            materials: MaterialCache::new(library),
             meshes: MeshArena {
                 working,
                 ..MeshArena::new(subdiv)

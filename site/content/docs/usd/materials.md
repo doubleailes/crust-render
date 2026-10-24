@@ -91,7 +91,12 @@ An instance of such a node, in a `.mtlx` or as a `Shader` whose `info:id` names 
 nodedef, renders as its graph: each input bound to the graph's interface
 takes the instance's input, or the nodedef's default when the instance leaves it
 unauthored, and an instance's named outputs are the graph's.
-Custom nodes inside custom nodes expand too, up to 16 levels deep. A node inside a graph
+An instance that authors a `version` uses the nodedef of that version. One whose type
+or version no nodedef of its category has is named in the `mtlx.incomplete` warning
+rather than rendered with another nodedef's graph.
+Custom nodes inside custom nodes expand too, up to 16 levels deep. A definition that
+instantiates itself, directly or through others, is reported as a cycle and not
+expanded. A node inside a graph
 that Crust Render doesn't implement is named in the `mtlx.incomplete` warning, and the
 inputs it drives keep their defaults. A definition never replaces one of Crust Render's
 own nodes: a library's `mix` is ignored in favour of the built-in one.

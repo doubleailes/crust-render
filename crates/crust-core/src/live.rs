@@ -123,6 +123,11 @@ pub(crate) struct StageFacts {
     /// `(name, components)`: a product that asks for others needs geometry
     /// read again.
     pub(crate) primvars: Vec<(String, u8)>,
+    /// The custom MaterialX node library the import read from
+    /// `PXR_MTLX_PLUGIN_SEARCH_PATHS`: an in-place rebuild resolves against
+    /// it rather than reading every file again, and raises none of the
+    /// import's `mtlx.library_unreadable` warnings a second time.
+    pub(crate) mtlx_library: std::sync::Arc<crust_mtlx::Library>,
     /// The shutter motion was measured over: geometry was placed at its
     /// ends, so another shutter is another scene.
     pub(crate) shutter: ShutterKey,

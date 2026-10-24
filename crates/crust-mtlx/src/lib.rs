@@ -62,7 +62,9 @@ pub use eval::{
     BinOp, CmpOp, Compiler, CurveCtx, CurveProp, Op, Program, ShadeCtx, UnOp, perturb_normal,
     reflectivity_from_ior,
 };
-pub use expand::{BUILTIN_CATEGORIES, MAX_DEPTH as MAX_EXPANSION_DEPTH, compiles};
+pub use expand::{
+    BUILTIN_CATEGORIES, MAX_DEPTH as MAX_EXPANSION_DEPTH, MAX_EXPANDED_NODES, compiles,
+};
 /// The nodedef input tables the hair nodes and the surface-shader expansions
 /// are built from, transcribed from MaterialX's own `stdlib` / `pbrlib`
 /// definitions (pinned against them by `tests/nodedefs.rs`).

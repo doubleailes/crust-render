@@ -12,10 +12,16 @@
 //!
 //! `OCIO` is not a switch: it is OpenColorIO's own variable naming the config
 //! every OCIO application uses, read here so the environment is still read in
-//! one place. Nor is `PXR_MTLX_PLUGIN_SEARCH_PATHS`, USD's `usdMtlx` variable
-//! naming the directories of custom MaterialX node definitions. Only the CLI obeys it, as the fallback for `--ocio-config`; the
+//! one place. Only the CLI obeys it, as the fallback for `--ocio-config`; the
 //! library keeps its builtin config unless a host installs another, so a
 //! test's colours never depend on the shell it runs in.
+//!
+//! Nor is `PXR_MTLX_PLUGIN_SEARCH_PATHS` a switch: it is USD's `usdMtlx`
+//! variable naming the directories of custom MaterialX node definitions.
+//! Unlike `OCIO`, every USD import obeys it, the library's included, as
+//! `usdMtlx` does in any USD application: a shell that sets it (a studio's
+//! does) loads that library into every import a test runs, so a test that
+//! must not see one runs with the variable unset.
 //!
 //! The process-wide value is [`config()`], read from the environment on first
 //! use. Code that wants a different setting — a test comparing both sides of

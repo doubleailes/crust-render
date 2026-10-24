@@ -119,10 +119,11 @@ impl OutsideMaterials {
 
 impl MaterialCache {
     /// An empty cache for one import, holding that import's MaterialX node
-    /// library ([`mtlx_library`]).
-    pub(super) fn new() -> Self {
+    /// library ([`mtlx_library`], read once by the import and kept in its
+    /// provenance for the in-place rebuilds after it).
+    pub(super) fn new(library: Arc<crust_mtlx::Library>) -> Self {
         MaterialCache {
-            library: mtlx_library(),
+            library,
             ..MaterialCache::default()
         }
     }
@@ -469,55 +470,119 @@ fn cached_material(
     Some((key, mat_path))
 }
 
+/// How many times one material may widen the side stage while following its
+/// network's connections out of the prims already masked in: one more prim
+/// subtree per hop of a chain of shared node graphs.
+const MAX_SIDE_STAGE_OPENS: usize = 8;
+
 /// The stage to resolve the material at `mat_path` on: `stage` itself when
-/// its population mask holds the material's whole subtree — always, outside
-/// a streamed import — and otherwise the stage [`OutsideMaterials`] keeps,
-/// masked to it.
+/// its population mask holds the material's whole subtree and every prim its
+/// network connects to — always, outside a streamed import — and otherwise
+/// the stage [`OutsideMaterials`] keeps, masked to them.
 ///
 /// That stage is opened at the first miss it cannot answer, masked to every
-/// binding target outside the chunk ([`outside_binding_targets`]) and to all
-/// it was masked to before, so one chunk costs at most one open, and a chunk
-/// binding nothing new none. A material that reads a prim outside itself (a
-/// connection into a shared node graph elsewhere) still finds it missing
-/// there: only the material's own subtree is masked in.
+/// binding target outside the chunk ([`outside_binding_targets`]), to the
+/// material and the prims its connections reach ([`connected_outside`]), and
+/// to all it was masked to before, so one chunk costs at most one open per
+/// hop into a shared node graph, and a chunk binding nothing new none.
 fn material_stage(stage: &Stage, mat_path: &sdf::Path, caches: &mut ImportCaches<'_>) -> Stage {
-    let mask = stage.mask();
     // Prototypes are populated whatever the mask; their paths are not in it.
-    if mask.includes_subtree(mat_path) || mat_path.as_str().starts_with("/__Prototype") {
+    if mat_path.as_str().starts_with("/__Prototype") {
         return stage.clone();
     }
-    let outside = &mut caches.materials.outside;
-    let covered = outside.mask.iter().any(|p| mat_path.has_prefix(p));
-    if let (true, Some(side)) = (covered, &outside.stage) {
-        return side.clone();
+    let mask = stage.mask();
+    let mut need = vec![mat_path.clone()];
+    if mask.includes_subtree(mat_path) {
+        let reached: Vec<_> = connected_outside(stage, mat_path)
+            .into_iter()
+            .filter(|t| !mask.includes_subtree(t))
+            .collect();
+        if reached.is_empty() {
+            return stage.clone();
+        }
+        need.extend(reached);
     }
     let Some(path_str) = caches.stage_path.to_str() else {
         return stage.clone();
     };
-    let started = Instant::now();
-    let mut paths = std::mem::take(&mut outside.mask);
-    paths.extend(outside_binding_targets(stage));
-    paths.push(mat_path.clone());
-    paths.sort();
-    paths.dedup();
-    match super::open_stage_masked(caches.stage_path, path_str, Some(paths.clone())) {
-        Ok(side) => {
-            debug!(
-                "Opened a stage for {} material path(s) bound from outside the chunk in {:?}",
-                paths.len(),
-                started.elapsed()
-            );
-            outside.mask = paths;
-            outside.stage = Some(side.clone());
-            side
+    let mut bound: Option<Vec<sdf::Path>> = None;
+    for _ in 0..MAX_SIDE_STAGE_OPENS {
+        let outside = &mut caches.materials.outside;
+        let covered = |p: &sdf::Path| outside.mask.iter().any(|m| p.has_prefix(m));
+        if let Some(side) = &outside.stage
+            && need.iter().all(covered)
+        {
+            // What the masked-in prims connect to, followed on the stage
+            // that holds them.
+            let more: Vec<_> = connected_outside(side, mat_path)
+                .into_iter()
+                .filter(|t| !covered(t))
+                .collect();
+            if more.is_empty() {
+                return side.clone();
+            }
+            need.extend(more);
         }
-        // Resolved on the chunk, the material reports itself unresolvable,
-        // as it did before this stage existed.
-        Err(e) => {
-            debug!("Could not open a stage for materials outside the chunk: {e}");
-            stage.clone()
+        let started = Instant::now();
+        // The mask moves only with a stage opened to it.
+        let mut paths = outside.mask.clone();
+        paths.extend(
+            bound
+                .get_or_insert_with(|| outside_binding_targets(stage))
+                .iter()
+                .cloned(),
+        );
+        paths.extend(need.iter().cloned());
+        paths.sort();
+        paths.dedup();
+        match super::open_stage_masked(caches.stage_path, path_str, Some(paths.clone())) {
+            Ok(side) => {
+                debug!(
+                    "Opened a stage for {} material path(s) outside the chunk in {:?}",
+                    paths.len(),
+                    started.elapsed()
+                );
+                let outside = &mut caches.materials.outside;
+                outside.mask = paths;
+                outside.stage = Some(side);
+            }
+            // Resolved on the chunk, the material reports itself
+            // unresolvable, as it did before this stage existed.
+            Err(e) => {
+                debug!("Could not open a stage for materials outside the chunk: {e}");
+                return stage.clone();
+            }
         }
     }
+    match &caches.materials.outside.stage {
+        Some(side) => side.clone(),
+        None => stage.clone(),
+    }
+}
+
+/// The prims outside the material at `mat_path` that its network's
+/// connections reach on `stage`, followed through each reached prim's own
+/// subtree as far as `stage` populates it: a material wired into a shared
+/// node graph, and that graph into another.
+fn connected_outside(stage: &Stage, mat_path: &sdf::Path) -> Vec<sdf::Path> {
+    let mut roots = vec![mat_path.clone()];
+    let mut next = 0;
+    while next < roots.len() {
+        let mut stack = vec![prim_at(stage, roots[next].clone())];
+        next += 1;
+        while let Some(prim) = stack.pop() {
+            for attr in prim.authored_attributes().unwrap_or_default() {
+                for target in attr.connections().unwrap_or_default() {
+                    let target = target.prim_path();
+                    if !roots.iter().any(|r| target.has_prefix(r)) {
+                        roots.push(target);
+                    }
+                }
+            }
+            stack.extend(prim.children().unwrap_or_default());
+        }
+    }
+    roots.split_off(1)
 }
 
 /// The prim paths every `material:binding*` relationship on `stage` targets

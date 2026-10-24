@@ -24,9 +24,18 @@
 //!
 //! The expansion repeats until no custom node is left, so an implementation
 //! that instantiates another custom node (a layering node built from several
-//! instances of a blending node) expands in turn. A chain deeper than
-//! [`MAX_DEPTH`] is a cycle in practice; it is cut there and reported, and the
-//! node left behind is the compiler's unsupported category.
+//! instances of a blending node) expands in turn. Each copy remembers the
+//! nodedefs it was expanded through, so a definition that reaches itself is a
+//! cycle: it is refused at its first re-entry and reported, and the node left
+//! behind is the compiler's unsupported category. A chain deeper than
+//! [`MAX_DEPTH`], or an expansion past [`MAX_EXPANDED_NODES`] nodes in all,
+//! is cut the same way: a graph holding k instances of the next definition
+//! grows as k to the depth, so the depth alone does not bound the work.
+//!
+//! An instance names its nodedef by category, output type and, when it
+//! authors one, `version` ([`Library::for_node`]). A category a library
+//! defines, but not for that type or version, is reported rather than
+//! expanded with another signature.
 //!
 //! The compiler's own operators always win over a definition of the same
 //! category ([`compiles`]): a library that ships a node-graph `place2d` must
@@ -35,10 +44,13 @@
 use super::library::{Implementation, Library, NodeDef};
 use super::parse::{Doc, Input, Node, Source};
 use super::value::Val;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// How many levels of custom nodes inside custom nodes are expanded.
 pub const MAX_DEPTH: usize = 16;
+
+/// How many nodes one document's expansion may create in all.
+pub const MAX_EXPANDED_NODES: usize = 262_144;
 
 /// The categories the compiler has an operator for: `compile_node`'s pattern
 /// nodes, the closure nodes `bsdf.rs` reads, and the surface builders. A
@@ -164,10 +176,9 @@ impl Doc {
         }
         let own = std::mem::take(&mut self.library);
         let libs = [&own, extra];
-        let mut depth: HashMap<(String, String), usize> = HashMap::new();
-        let mut cut: Vec<String> = Vec::new();
+        let mut state = Expansion::default();
         loop {
-            let expanded = self.expand_once(&libs, &mut depth, &mut cut);
+            let expanded = self.expand_once(&libs, &mut state);
             if expanded == 0 {
                 break;
             }
@@ -175,41 +186,95 @@ impl Doc {
         self.library = own;
     }
 
+    /// Reports `message` about the node called `name`, once per name.
+    fn note(&mut self, state: &mut Expansion, name: &str, message: String) {
+        if state.noted.insert(name.to_string()) {
+            self.reported.push(message);
+        }
+    }
+
     /// One pass: expands every custom node present now, then redirects the
     /// references to them. Returns how many were expanded.
-    fn expand_once(
-        &mut self,
-        libs: &[&Library; 2],
-        depth: &mut HashMap<(String, String), usize>,
-        cut: &mut Vec<String>,
-    ) -> usize {
+    fn expand_once(&mut self, libs: &[&Library; 2], state: &mut Expansion) -> usize {
         let mut out = Vec::with_capacity(self.nodes.len());
         let mut done: HashMap<(String, String), Expanded> = HashMap::new();
         for node in std::mem::take(&mut self.nodes) {
             let scope = node.graph.clone().unwrap_or_default();
             let key = (scope, node.name.clone());
-            let Some((def, imp, lib)) = definition(libs, &node) else {
-                out.push(node);
-                continue;
-            };
-            let level = depth.get(&key).copied().unwrap_or(0);
-            if level >= MAX_DEPTH {
-                if !cut.contains(&node.name) {
-                    cut.push(node.name.clone());
-                    self.reported.push(format!(
-                        "{}: custom nodes nested past {MAX_DEPTH} levels (a cycle?) — {} not expanded",
-                        node.name, node.category
-                    ));
+            let (def, imp, lib) = match definition(libs, &node) {
+                Lookup::Found(def, imp, lib) => (def, imp, lib),
+                Lookup::Builtin => {
+                    out.push(node);
+                    continue;
                 }
+                Lookup::Mismatch => {
+                    let version = node
+                        .version
+                        .as_deref()
+                        .map(|v| format!(" version {v:?}"))
+                        .unwrap_or_default();
+                    self.note(
+                        state,
+                        &node.name,
+                        format!(
+                            "{}: no {} nodedef of type {}{version} — not expanded",
+                            node.name, node.category, node.type_name
+                        ),
+                    );
+                    out.push(node);
+                    continue;
+                }
+            };
+            let chain = state.chains.get(&key).cloned().unwrap_or_default();
+            if let Some(at) = chain.iter().position(|d| *d == def.name) {
+                let through = chain[at..].join(" → ");
+                // Once per definition: every copy that re-enters it is the
+                // same defect.
+                self.note(
+                    state,
+                    &format!("cycle {}", def.name),
+                    format!(
+                        "{}: {} instantiates itself ({through} → {}), a cycle — not expanded",
+                        node.name, def.name, def.name
+                    ),
+                );
                 out.push(node);
                 continue;
             }
+            if chain.len() >= MAX_DEPTH {
+                self.note(
+                    state,
+                    &node.name,
+                    format!(
+                        "{}: custom nodes nested past {MAX_DEPTH} levels — {} not expanded",
+                        node.name, node.category
+                    ),
+                );
+                out.push(node);
+                continue;
+            }
+            if state.created + imp.nodes.len() > MAX_EXPANDED_NODES {
+                self.note(
+                    state,
+                    "",
+                    format!(
+                        "custom nodes expand past {MAX_EXPANDED_NODES} nodes — {} and the \
+                         instances after it not expanded",
+                        node.name
+                    ),
+                );
+                out.push(node);
+                continue;
+            }
+            state.created += imp.nodes.len();
+            let mut inner = chain;
+            inner.push(def.name.clone());
             let defaults = lib.inputs(def);
             let prefix = node.name.clone();
             for m in &imp.nodes {
                 let copy = instantiate(&node, &prefix, m, imp, &defaults);
                 let copy_key = (copy.graph.clone().unwrap_or_default(), copy.name.clone());
-                depth.insert(copy_key, level + 1);
+                state.chains.insert(copy_key, inner.clone());
                 out.push(copy);
             }
             done.insert(
@@ -285,23 +350,56 @@ impl Doc {
     }
 }
 
+/// What [`Doc::expand`] carries from one pass to the next.
+#[derive(Default)]
+struct Expansion {
+    /// Each copy's key → the nodedefs it was expanded through, outermost
+    /// first.
+    chains: HashMap<(String, String), Vec<String>>,
+    /// The names already reported, so a node left behind is reported once.
+    noted: HashSet<String>,
+    /// How many nodes the expansion has created so far.
+    created: usize,
+}
+
+/// What [`definition`] found for a node.
+enum Lookup<'l> {
+    Found(&'l NodeDef, &'l Implementation, &'l Library),
+    /// A category the compiler implements, or one no library defines: not
+    /// this pass's business.
+    Builtin,
+    /// A category a library defines, but not for the node's type or version.
+    Mismatch,
+}
+
 /// `node`'s nodedef and graph implementation, from the first library that
-/// defines its category — `None` for a category the compiler implements, or
-/// one no library implements as a graph.
-fn definition<'l>(
-    libs: &[&'l Library; 2],
-    node: &Node,
-) -> Option<(&'l NodeDef, &'l Implementation, &'l Library)> {
+/// defines it for the node's type and version.
+fn definition<'l>(libs: &[&'l Library; 2], node: &Node) -> Lookup<'l> {
     if compiles(&node.category) {
-        return None;
+        return Lookup::Builtin;
     }
-    libs.iter().find_map(|lib| {
-        let def = lib
-            .for_node(&node.category, Some(&node.type_name))
-            .or_else(|| lib.for_node(&node.category, None))?;
-        let imp = lib.implementation(&def.name)?;
-        Some((def, imp, *lib))
-    })
+    let def_in = |lib: &'l Library| {
+        lib.for_node(
+            &node.category,
+            Some(&node.type_name),
+            node.version.as_deref(),
+        )
+    };
+    let found = libs.iter().find_map(|lib| {
+        let def = def_in(lib)?;
+        Some(Lookup::Found(def, lib.implementation(&def.name)?, lib))
+    });
+    if let Some(found) = found {
+        return found;
+    }
+    // A nodedef implemented by source code, not a graph, is left to the
+    // compiler, which names it unsupported; so is a category nobody defines.
+    if libs.iter().any(|lib| def_in(lib).is_some())
+        || !libs.iter().any(|lib| lib.defines(&node.category))
+    {
+        return Lookup::Builtin;
+    }
+    Lookup::Mismatch
 }
 
 /// The copy of `m`, a node of `imp`, for the instance `inst`.
