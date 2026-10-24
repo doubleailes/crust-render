@@ -1220,7 +1220,12 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   most in `layer` (GLSL hides a base under any opaque leaf whatever its
   weight; testrender lets `1 − w` through), in the energy compensation of
   refracting dielectrics, and in a `zeltner` sheen, which BSDL reads at
-  `max(√roughness, 0.02)` where GLSL's fits read `roughness`.
+  `max(√roughness, 0.02)` where GLSL's fits read `roughness`. Pattern nodes
+  follow genosl for the same reason, and one differs from GLSL in kind:
+  `transformmatrix` of a `vector3` by a `matrix44` is a direction (no
+  translation), where GLSL translates it as a point. A node library that
+  places a projection that way, authored against a GLSL viewer, needs the
+  point lifted to a `vector4` with `w = 1` to translate in crust.
 - **A rough refracting dielectric's value is not its sampler's.** BSDL
   renormalises a refracting lobe by `DielectricBothFront` / `BothBack`, baked
   from its bounded-VNDF sampler (`use_bvn_refraction`, on by default), which
@@ -1483,17 +1488,21 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   literal, a `constant` node's value through any chain of them, or the
   identity): `Val` holds four lanes and a projection's matrix is in practice a
   constant, so each row becomes a constant and the product is
-  `((x·r0 + y·r1) + z·r2) + r3`. Any other matrix is reported and the input
-  passes through. **GLSL wins over genosl here**: `mx_transformmatrix_vector3M4`
-  multiplies `(v, 1)`, so the last row translates a point, while genosl's
-  `transform(matrix, vector)` drops the translation of a `vector`;
-  placing a point needs the former. The matrix is row-major with the
+  `(x·r0 + y·r1) + z·r2`. Any other matrix is reported and the input
+  passes through. **genosl, not GLSL**, as everywhere else: a `vector3` by a
+  `matrix44` is `transform(matrix, vector)`, a direction, so the last row is
+  not read and nothing translates; only a `vector2` by a `matrix33`
+  (`mx_transformmatrix_vector2M3`, `point(x, y, 1)`) adds its last row.
+  MaterialX's GLSL (`mx_transformmatrix_vector3M4`) multiplies `(v, 1)` and
+  translates; it was followed at first, and dropped to keep one reference
+  (Known gaps). The matrix is row-major with the
   translation in the last row, which is USD's `Gf` order too, so an inline
   `matrix4d` is its 16 values as authored. `position` reads world space; any
   other `space` is reported (it would silently read world otherwise). Pinned
   by `crust-mtlx/tests/stdlib_nodes.rs` against the stdlib's expressions;
-  `scripts/osl_oracle.py` lists all but `transformmatrix`, whose fixture cases
-  wait for a regeneration on an exact-math OSL build.
+  `scripts/osl_oracle.py` lists them all (it generates `transformmatrix`'s
+  matrix literals too), and their fixture cases wait for a regeneration on an
+  exact-math OSL build.
 - **HSV, conditionals and random nodes.** `rgbtohsv` / `hsvtorgb` are ops over
   the `hsvadjust` transcriptions of OSL's `transformc` (Foley & van Dam); a
   `color4` keeps its alpha. `ifgreater` / `ifgreatereq` / `ifequal` are one

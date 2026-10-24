@@ -36,14 +36,21 @@ A MaterialX `UsdPreviewSurface` node (`ND_UsdPreviewSurface_surfaceshader`, inli
 
 ### Requirement: transformmatrix by a constant matrix
 
-`transformmatrix` SHALL compute as MaterialX's GLSL does: a row vector times the authored row-major matrix, a `vector3` by a `matrix44` (and a `vector2` by a `matrix33`) homogeneous, so the last row translates. Its matrix SHALL be a compile-time constant; any other is reported and the input passes through. A `position` whose `space` is not `world` SHALL be reported.
+`transformmatrix` SHALL compute as MaterialX's genosl does: a row vector times the authored row-major matrix. A `vector3` by a `matrix44` is a direction (`transform(matrix, vector)`), so the last row does not translate; a `vector2` by a `matrix33` is homogeneous (`point(x, y, 1)`), so its last row translates. Its matrix SHALL be a compile-time constant; any other is reported and the input passes through. A `position` whose `space` is not `world` SHALL be reported.
 
-#### Scenario: A camera projection
+#### Scenario: A vector3 by a matrix44 with a translation
 
-- **WHEN** a `transformmatrix` of type `vector3` multiplies a point by a
+- **WHEN** a `transformmatrix` of type `vector3` multiplies a vector by a
   constant `matrix44` whose last row is a translation
-- **THEN** the result is the point, as a row vector `(x, y, z, 1)`, times the
-  matrix, translation included
+- **THEN** the result is the row vector `(x, y, z, 0)` times the matrix, as
+  genosl's `transform(matrix, vector)` gives: the translation is not applied
+
+#### Scenario: A vector2 by a matrix33
+
+- **WHEN** a `transformmatrix` of type `vector2` multiplies a vector by a
+  constant `matrix33`
+- **THEN** the result is `(x, y, 1)` times the matrix, its first two lanes:
+  the last row translates
 
 #### Scenario: A varying matrix
 

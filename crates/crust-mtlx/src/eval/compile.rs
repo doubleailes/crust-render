@@ -399,14 +399,14 @@ impl<'a> Compiler<'a> {
     /// `transformmatrix` by a matrix that is a compile-time constant: a
     /// literal, a `constant` node's value, or the nodedef's identity. The
     /// input is a row vector times the authored (row-major) matrix, as
-    /// MaterialX's GLSL computes it; a `vector3` by a `matrix44` and a
-    /// `vector2` by a `matrix33` are homogeneous, `(v, 1)`, so the last row
-    /// translates (`mx_transformmatrix_vector3M4`). genosl's
-    /// `transform(matrix, vector)` drops that translation; the GLSL is
-    /// followed, since placing a point is what the `M4` signature is for.
-    /// Each component is `((x·r0 + y·r1) + z·r2) + r3`, the GLSL product's
-    /// order. A matrix that is not a constant is reported, and the input
-    /// passes through (the nodedef's `defaultinput`).
+    /// MaterialX's genosl computes it. A `vector3` by a `matrix44` is
+    /// `transform(matrix, vector)`, a direction: the last row is not read,
+    /// so nothing translates. Only a `vector2` by a `matrix33`
+    /// (`mx_transformmatrix_vector2M3`, `point(x, y, 1)`) is homogeneous, so
+    /// there the last row translates. Each component is
+    /// `((x·r0 + y·r1) + z·r2) + r3`, OSL's order. A matrix that is not a
+    /// constant is reported, and the input passes through (the nodedef's
+    /// `defaultinput`).
     fn compile_transformmatrix(&mut self, node: &Node) -> u32 {
         let v = self.input_or(node, "in", Val::ZERO);
         let width = arity_of(&node.type_name) as usize;
@@ -433,7 +433,7 @@ impl<'a> Compiler<'a> {
             });
         }
         let mut out = out.unwrap_or(v);
-        if width < n {
+        if width == 2 && n == 3 {
             let t = self.constant(row(n - 1));
             out = self.bin_op(BinOp::Add, out, t);
         }
