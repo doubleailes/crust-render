@@ -472,8 +472,9 @@ instance or a PointInstancer names the instance or the instancer prim, not the p
 fn hit_names(job: &Job, scene: &Imported, x: usize, y: usize) -> (Value, Value, Value, String) {
     if scene.geometry != job.geometry {
         let note = format!(
-            "the scene was imported again since render {} (an edit or an undo that is not \
-             applied in place): render again to name what a pixel hits",
+            "the scene's geometry was imported again or moved since render {} (an edit or an \
+             undo that is applied as `full` or `geometry`): render again to name what a pixel \
+             hits",
             job.id
         );
         return (Value::Null, Value::Null, Value::Null, note);

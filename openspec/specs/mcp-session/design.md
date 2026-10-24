@@ -144,10 +144,11 @@ cheapest class that can follow all of them:
 | attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera, its `xformOp:*` / `xformOpOrder` included unless an imported prim lies below it (`Provenance::any_below`) | `settings` |
 | `inputs:*` value on a light the scene has, other than `width`, `height`, `radius`, `length`, `treatAsPoint`, `treatAsLine` (the BVH holds its shape) | `lights` |
 | `inputs:*` value on a `Shader` under a material the scene uses, or on that `Material`, when no other material reads it | `materials` |
-| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform other than the render camera's own, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
+| attribute `default` / `timeSamples` of `xformOp:*` / `xformOpOrder` on a prim whose subtree places only direct meshes, static spheres and lights (`Provenance::movable`); of a mesh's points, topology, subdivision tags or primvars when it is baked and placed once (`Provenance::reshapable`); of an area light's shape inputs (`live-geometry-edits`) | `geometry` |
+| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform the row above does not cover, `visibility`, `purpose`, a variant, a composition arc, layer metadata | `full` |
 
 A batch is applied as its most expensive class, `settings` < `materials` < `lights` <
-`full`, and rebuilds every part it names. Namespace bookkeeping is not a change: an
+`geometry` < `full`, and rebuilds every part it names. Namespace bookkeeping is not a change: an
 `over` prim spec that only names children (what an edit authors to reach an attribute,
 and what an undo removes) and the `primChildren` / `propertyChildren` lists. An
 attribute spec that only declares and sets a value (`typeName`, `variability`,
@@ -368,13 +369,18 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   the same `LiveSession`, over a root and sublayers it owns: an edit in any owned
   layer classifies as an override-layer edit does, since a sublayer of the root
   layer stack composes in the stage's namespace.
-- **Transforms, topology and namespace edits re-import**, except the render camera's
-  own transform. Re-traversing only the changed subtree, and BVH refit, are not done: a
-  refit tree is not the tree a fresh build gives. A light with no geometry (distant,
-  dome) could move without touching the BVH; it is `full` until the simpler classes
-  have proved themselves. A render camera that dices (no `crust:dicingCamera`, on a
-  scene tessellated from the camera) still re-imports when it moves, and so does an
-  edit to one of the camera's ancestors.
+- **Namespace edits re-import, and so do the transforms and reshapes `geometry` does
+  not cover** (`live-geometry-edits`): a subtree holding curves, volumes, instancers,
+  native instances, implicit shapes baked once or a camera; a mesh shared with another
+  prim or becoming identical to one; adaptive subdivision, displacement, shutter motion
+  or primvar AOVs. Re-traversing only the changed subtree is not done. A geometry edit
+  rebuilds the whole top-level tree (D1 of that change: never a refit), which on a
+  stage of mostly baked geometry is most of the BVH share of an import. A render camera
+  that dices (no `crust:dicingCamera`, on a scene tessellated from the camera) still
+  re-imports when it moves, and so does an edit to one of the camera's ancestors.
+- **A session keeps its top-level geometry twice** (`UsdImportOptions::keep_geometry`):
+  the baked triangles a second time, for `geometry` edits. `CRUST_SCENE_DELTAS=0`
+  turns it off with every other in-place class.
 - **A camera move re-opens the stage.** The settings rebuild opens the index stage and
   a stage masked to the camera per move. On the Cornell box at 640×480 it costs
   6.64 / 8.31 ms (min / mean of 20) against 12.53 / 17.34 ms as `full`, measured by

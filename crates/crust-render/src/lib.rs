@@ -85,6 +85,11 @@ pub struct SceneArgs {
     /// defines. A path that is not a `RenderPass` stops the render.
     #[arg(long, value_name = "PRIM_PATH")]
     pub pass: Option<String>,
+    /// Keep the top-level geometry for in-place geometry edits
+    /// (`UsdImportOptions::keep_geometry`): a live session's import, never a
+    /// command-line flag.
+    #[arg(skip)]
+    pub keep_geometry: bool,
     /// Subdivision refinement level for every mesh whose `subdivisionScheme`
     /// is not `none` (unauthored means USD's fallback, `catmullClark`).
     /// Overrides the scene's `crust:subdivisionLevel` render setting
@@ -407,6 +412,7 @@ pub fn load_scene(
             subdivision_edge_length: cli.subdiv_edge_length,
             skip_stage_teardown: keep_stage,
             working_space: working_space.cloned(),
+            keep_geometry: cli.keep_geometry,
         };
         match Scene::from_usd_with_options(input_path, assets, &options) {
             Ok(scene) => scene,

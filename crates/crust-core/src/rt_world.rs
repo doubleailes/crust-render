@@ -694,6 +694,9 @@ pub struct WorldBuilder {
     /// ([`MotionRecord::Unresolved`]), sorted; warned about once at commit.
     /// A set, not a count: a slot given a geometry twice is one id.
     unresolved: Vec<u32>,
+    /// Whether [`WorldBuilder::commit`] keeps a copy of the top-level
+    /// geometries, for [`World::replace_geometry`] ([`WorldBuilder::keep_inputs`]).
+    keep: bool,
     /// The `geom_id` ranges that forwarding instances
     /// (`InstanceHitId::As` / `Offset`) report their inner hits under. A hit
     /// carrying such an id may lie in the forwarding placement rather than
@@ -973,6 +976,41 @@ impl WorldBuilder {
         self.materials.len()
     }
 
+    /// Makes [`WorldBuilder::commit`] keep a copy of every top-level
+    /// geometry, so the committed world can replace some of them and commit
+    /// its tree again ([`World::replace_geometry`]): what a live session asks
+    /// for. The copy costs the baked triangles' memory a second time; a
+    /// render that commits once never asks.
+    pub fn keep_inputs(&mut self) {
+        self.keep = true;
+    }
+
+    /// The geometry at `id` and its side tables, as a [`GeometryEdit`] that
+    /// would put them into another world at the same id: how an in-place
+    /// rebuild hands the geometry a scratch import built to the scene's
+    /// world.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub(crate) fn edit_of(&self, id: u32) -> GeometryEdit {
+        let t = &self.faces[id as usize];
+        let aov = self
+            .primvars
+            .binary_search_by_key(&id, |(i, ..)| *i)
+            .ok()
+            .map(|i| (self.primvars[i].1.clone(), self.primvars[i].2));
+        GeometryEdit {
+            geom_id: id,
+            geometry: self.rt.geometry(id).clone(),
+            map: t.map.clone(),
+            uv: t.uv.clone(),
+            shading: t.shading.clone(),
+            swapped: t.swapped,
+            aov,
+            scale: t.scale,
+        }
+    }
+
     /// The material bound to `id`.
     ///
     /// # Panics
@@ -1055,8 +1093,10 @@ impl WorldBuilder {
                 if one { "it" } else { "them" },
             );
         }
+        let inputs = self.keep.then(|| self.rt.clone());
         World {
             scene: self.rt.commit_with(crate::commit_options()),
+            inputs,
             materials: self.materials,
             faces: self.faces,
             cutouts,
@@ -1147,9 +1187,31 @@ pub struct WorldHit<'a> {
     pub placement: u32,
 }
 
+/// One top-level geometry replaced in a committed [`World`]
+/// ([`World::replace_geometry`]): the geometry and every side table the
+/// import gives it, exactly as [`WorldBuilder`]'s setters would leave them.
+pub(crate) struct GeometryEdit {
+    pub(crate) geom_id: u32,
+    pub(crate) geometry: Geometry,
+    pub(crate) map: Option<Arc<FaceMap>>,
+    pub(crate) uv: Option<Arc<UvMap>>,
+    /// The primvar table the material reads ([`PrimvarTable::shades`]).
+    pub(crate) shading: Option<Arc<PrimvarTable>>,
+    /// The side tables' mirrored-winding flag.
+    pub(crate) swapped: bool,
+    /// The primvar table the AOVs read, and its own mirrored flag.
+    pub(crate) aov: Option<(Arc<PrimvarTable>, bool)>,
+    /// The placement's uniform scale ([`WorldBuilder::set_placement_scale`]).
+    pub(crate) scale: f32,
+}
+
 /// The committed scene geometry the renderer traces against.
 pub struct World {
     scene: crust_rt::Scene,
+    /// Every top-level geometry, when the builder kept them
+    /// ([`WorldBuilder::keep_inputs`]): what [`World::replace_geometry`]
+    /// commits again.
+    inputs: Option<SceneBuilder>,
     materials: Vec<Arc<dyn Material>>,
     faces: Vec<SideTables>,
     /// Whether any material has a cutout ([`Material::has_cutout`]).
@@ -1178,6 +1240,117 @@ pub struct World {
 }
 
 impl World {
+    /// Whether the world kept its top-level geometries
+    /// ([`WorldBuilder::keep_inputs`]), so [`World::replace_geometry`] can
+    /// change them.
+    pub fn keeps_inputs(&self) -> bool {
+        self.inputs.is_some()
+    }
+
+    /// The geometry at `id` as the world was committed with it, when it kept
+    /// its inputs.
+    pub(crate) fn input(&self, id: u32) -> Option<&Geometry> {
+        self.inputs
+            .as_ref()
+            .filter(|_| (id as usize) < self.materials.len())
+            .map(|b| b.geometry(id))
+    }
+
+    /// Refuses edits [`World::replace_geometry`] cannot take: a world that
+    /// kept no inputs, an id it does not hold, or a geometry that moves (or
+    /// would) over the shutter.
+    pub(crate) fn check_geometry(&self, edits: &[GeometryEdit]) -> Result<(), Structural> {
+        if edits.is_empty() {
+            return Ok(());
+        }
+        if self.inputs.is_none() {
+            return Err(Structural("the world kept no geometry to replace".into()));
+        }
+        for e in edits {
+            let id = e.geom_id;
+            if id as usize >= self.materials.len() {
+                return Err(Structural(format!("geometry {id} is not in the world")));
+            }
+            if self.motion.iter().any(|&(lo, hi, _)| lo <= id && id <= hi) {
+                return Err(Structural(format!("geometry {id} moves over the shutter")));
+            }
+            if MotionRecord::of(&e.geometry, InstanceHitId::Own, id) != MotionRecord::None {
+                return Err(Structural(format!(
+                    "geometry {id} would move over the shutter"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The side tables of `id` as a [`GeometryEdit`] carrying `geometry`:
+    /// what moving an instance keeps of the geometry it replaces.
+    pub(crate) fn edit_with(&self, id: u32, geometry: Geometry, scale: f32) -> GeometryEdit {
+        let t = &self.faces[id as usize];
+        let aov = self
+            .primvars
+            .binary_search_by_key(&id, |(i, ..)| *i)
+            .ok()
+            .map(|i| (self.primvars[i].1.clone(), self.primvars[i].2));
+        GeometryEdit {
+            geom_id: id,
+            geometry,
+            map: t.map.clone(),
+            uv: t.uv.clone(),
+            shading: t.shading.clone(),
+            swapped: t.swapped,
+            aov,
+            scale,
+        }
+    }
+
+    /// The material bound to `id`.
+    pub(crate) fn material_of(&self, id: u32) -> &Arc<dyn Material> {
+        &self.materials[id as usize]
+    }
+
+    /// Replaces each edit's geometry and side tables, keeping its material
+    /// and ray mask, and commits the top-level tree again from every
+    /// geometry. The build is deterministic in its input, so the tree is the
+    /// one a builder holding the same geometries would commit: never a refit.
+    /// Refused when the world kept no inputs, or an id is not one of its
+    /// static geometries.
+    pub(crate) fn replace_geometry(&mut self, edits: Vec<GeometryEdit>) -> Result<(), Structural> {
+        self.check_geometry(&edits)?;
+        let Some(inputs) = self.inputs.as_mut() else {
+            return Err(Structural("the world kept no geometry to replace".into()));
+        };
+        for e in edits {
+            let id = e.geom_id;
+            let t = &mut self.faces[id as usize];
+            t.vertices = WorldBuilder::vertex_source(&e.geometry, InstanceHitId::Own);
+            let tabled = e.map.is_some() || e.uv.is_some() || e.shading.is_some();
+            t.map = e.map;
+            t.uv = e.uv;
+            t.shading = e.shading;
+            t.swapped = tabled && e.swapped;
+            t.plain =
+                t.map.is_none() && t.uv.is_none() && t.strands.is_none() && t.shading.is_none();
+            t.scale = if e.scale.is_finite() && e.scale > 0.0 {
+                e.scale
+            } else {
+                1.0
+            };
+            let at = self.primvars.binary_search_by_key(&id, |(i, ..)| *i);
+            match (at, e.aov) {
+                (Ok(i), Some((table, swapped))) => self.primvars[i] = (id, table, swapped),
+                (Err(i), Some((table, swapped))) => self.primvars.insert(i, (id, table, swapped)),
+                (Ok(i), None) => {
+                    self.primvars.remove(i);
+                }
+                (Err(_), None) => {}
+            }
+            inputs.set_geometry(id, e.geometry);
+        }
+        self.scene = inputs.clone().commit_with(crate::commit_options());
+        Ok(())
+    }
+
     /// The kept primvars on primitive `prim_id` of geometry `geom_id`, by
     /// keep-set index, into `out`: at the kernel's barycentrics `bary` on a
     /// triangle, at `curve_u` along a curve span; `None` for each one the

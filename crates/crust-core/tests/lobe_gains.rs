@@ -304,7 +304,13 @@ fn a_multiplier_edit_applies_in_place_as_a_reimport_would() {
         .provenance
         .as_ref()
         .expect("provenance")
-        .rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+        .rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world,
+        )
         .expect("a light edit applies in place");
     update.apply(&mut scene).expect("applies");
     assert!(scene.lights.has_lobe_gains());

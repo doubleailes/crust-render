@@ -62,6 +62,16 @@ pub struct Provenance {
     /// run as owning every id up to the next run's, as light linking does;
     /// [`Provenance::geometry_of`] reads the ids the prim emitted.
     pub(crate) geometry: Vec<(Range<u32>, String)>,
+    /// Every direct mesh placement (a `Mesh` prim or an implicit shape
+    /// outside a prototype), sorted by `geom_id`: whether it was baked into
+    /// the top level or instances its distinct mesh.
+    pub(crate) meshes: Vec<MeshOrigin>,
+    /// Every distinct mesh the import interned, by slot (what
+    /// [`MeshOrigin::slot`] indexes).
+    pub(crate) mesh_slots: Vec<MeshSlotFacts>,
+    /// The static analytic spheres, by `geom_id`, sorted: placed in world
+    /// space by their prim's transform.
+    pub(crate) spheres: Vec<u32>,
     /// The prims that emitted a volume region, in traversal order. Volumes
     /// are not geometry runs, but they are placed by their prim's transform.
     pub(crate) volumes: Vec<String>,
@@ -77,6 +87,46 @@ pub struct MaterialOrigin {
     pub slots: Vec<u32>,
     /// Whether a mesh displaced by it: its geometry depends on its inputs.
     pub displaced: bool,
+}
+
+/// One direct mesh placement: its geometry, its distinct mesh, and how it
+/// was placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MeshOrigin {
+    pub(crate) geom_id: u32,
+    /// Its distinct mesh: an index into [`Provenance::mesh_slots`].
+    pub(crate) slot: u32,
+    /// Baked into world-space triangles in the top level (the distinct mesh
+    /// is placed once), rather than an instance of it.
+    pub(crate) baked: bool,
+    /// Its transform moves over the shutter.
+    pub(crate) moving: bool,
+}
+
+/// One distinct mesh: what the import deduplicated placements by, and what
+/// decided between baking and instancing them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MeshSlotFacts {
+    /// Its content key; `None` for a slot the arena no longer keys.
+    pub(crate) key: Option<MeshKeyFacts>,
+    /// Its direct placements.
+    pub(crate) placements: u32,
+    /// Whether a prototype or an instancer placed it too.
+    pub(crate) shared: bool,
+    /// Whether its triangles were displaced.
+    pub(crate) displaced: bool,
+}
+
+/// A distinct mesh's content key, its material as a group number: two
+/// placements dedupe exactly when their keys are equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MeshKeyFacts {
+    pub(crate) geo_hash: u64,
+    pub(crate) n_points: usize,
+    pub(crate) n_indices: usize,
+    pub(crate) n_uvs: Option<usize>,
+    pub(crate) smooth: bool,
+    pub(crate) material: u32,
 }
 
 /// One light's place in the scene.
@@ -237,6 +287,116 @@ impl Provenance {
             || self.volumes.iter().any(|p| below(p))
     }
 
+    /// The direct mesh placement of `geom_id`, when it is one.
+    pub(crate) fn mesh(&self, geom_id: u32) -> Option<&MeshOrigin> {
+        self.meshes
+            .binary_search_by_key(&geom_id, |m| m.geom_id)
+            .ok()
+            .map(|i| &self.meshes[i])
+    }
+
+    /// Why a transform edit at `path` cannot move what it places in place,
+    /// `None` when it can: every geometry at or below `path` is a static
+    /// direct mesh placement (a baked one undisplaced), no volume or camera
+    /// the render reads lies there, and the scene was imported with no
+    /// motion over the shutter. Lights at or below `path` are rebuilt as
+    /// light edits ([`Provenance::lights_at`]). The rebuild checks again.
+    pub fn movable(&self, path: &str) -> Option<String> {
+        let path = path.trim_end_matches('/');
+        let at = |prim: &str| {
+            prim.strip_prefix(path)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        };
+        if self.stage.shutter.interval.is_some() {
+            return Some("the scene was imported with motion over the shutter".into());
+        }
+        if let Some(v) = self.volumes.iter().find(|v| at(v)) {
+            return Some(format!("{v} is a volume region"));
+        }
+        for camera in [&self.stage.camera, &self.stage.dicing]
+            .into_iter()
+            .flatten()
+        {
+            if at(camera) {
+                return Some(format!("{camera} is a camera the render reads"));
+            }
+        }
+        for ids in self.geometry_of(path) {
+            for id in ids {
+                let Some(m) = self.mesh(id) else {
+                    if self.lights.values().any(|l| l.geoms.contains(&id))
+                        || self.spheres.binary_search(&id).is_ok()
+                    {
+                        continue;
+                    }
+                    return Some(format!("geometry {id} under {path} is not a placed mesh"));
+                };
+                if m.moving {
+                    return Some(format!("geometry {id} under {path} moves"));
+                }
+                let slot = self.mesh_slots.get(m.slot as usize);
+                if m.baked && slot.is_none_or(|s| s.displaced) {
+                    return Some(format!("geometry {id} under {path} is displaced"));
+                }
+            }
+        }
+        None
+    }
+
+    /// The lights at or below `path`.
+    pub fn lights_at<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        let path = path.trim_end_matches('/');
+        self.lights
+            .keys()
+            .filter(move |prim| {
+                prim.strip_prefix(path)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+            .map(String::as_str)
+    }
+
+    /// Why a points, topology or primvar edit of the mesh prim `path` cannot
+    /// be applied in place, `None` when it can: the prim placed exactly one
+    /// geometry, baked (its distinct mesh placed once, by nothing else), not
+    /// displaced and static. Whether the new mesh would dedupe with another
+    /// is the rebuild's to check.
+    pub fn reshapable(&self, path: &str) -> Option<String> {
+        if self.stage.adaptive.is_some() {
+            return Some("subdivision is adaptive".into());
+        }
+        let runs: Vec<_> = self
+            .geometry
+            .iter()
+            .filter(|(_, prim)| prim == path)
+            .map(|(ids, _)| ids.clone())
+            .collect();
+        let [ids] = runs.as_slice() else {
+            return Some(format!("{path} placed no geometry of its own"));
+        };
+        if ids.len() != 1 {
+            return Some(format!("{path} placed {} geometries", ids.len()));
+        }
+        let Some(m) = self.mesh(ids.start) else {
+            return Some(format!("{path} is not a placed mesh"));
+        };
+        let Some(slot) = self.mesh_slots.get(m.slot as usize) else {
+            return Some(format!("{path}'s mesh is unknown"));
+        };
+        if !m.baked || slot.placements != 1 || slot.shared {
+            return Some(format!("{path}'s mesh is shared"));
+        }
+        if slot.displaced || m.moving {
+            return Some(format!("{path} is displaced or moving"));
+        }
+        None
+    }
+
+    /// Whether `path` is a light whose emitter geometry the world could
+    /// replace: one with emitter geometry needs a world that kept its inputs.
+    pub fn light_geometry(&self, path: &str) -> bool {
+        self.lights.contains_key(path)
+    }
+
     /// The `RenderSettings` prim the import read, when one.
     pub fn render_settings(&self) -> Option<&str> {
         self.stage.render_settings.as_deref()
@@ -251,14 +411,18 @@ impl Provenance {
     /// that built this scene would build it now, without touching the scene.
     /// `warnings` are the scene's own: a rebuild about a prim they name is
     /// refused. Apply the result with [`Update::apply`].
+    ///
+    /// `world` is the scene's: a geometry rebuild reads the materials and
+    /// committed meshes it holds.
     pub fn rebuild(
         &self,
         layer: &std::path::Path,
         assets: &dyn crate::AssetLoader,
         warnings: &[crate::Warning],
         change: &Change,
+        world: &World,
     ) -> Result<Update, Structural> {
-        crate::scene::rebuild(self, layer, assets, warnings, change)
+        crate::scene::rebuild(self, layer, assets, warnings, change, world)
     }
 
     /// Each prim of `paths` on the stage at `layer` as the import that built
@@ -313,11 +477,32 @@ pub struct Change {
     pub shaders: Vec<String>,
     /// Light prims whose inputs changed.
     pub lights: Vec<String>,
+    /// Lights of [`Change::lights`] whose geometry may have changed too (their
+    /// transform, or an input that shapes an area light's emitter): the
+    /// rebuild replaces their emitters' geometry
+    /// ([`Provenance::light_geometry`]).
+    pub light_geometry: Vec<String>,
+    /// Prims whose transform changed, each moving the meshes it and its
+    /// descendants placed ([`Provenance::movable`]).
+    pub moved: Vec<String>,
+    /// Mesh prims whose points, topology or primvars changed
+    /// ([`Provenance::reshapable`]).
+    pub reshaped: Vec<String>,
 }
 
 impl Change {
     pub fn is_empty(&self) -> bool {
-        !self.settings && self.materials.is_empty() && self.lights.is_empty()
+        !self.settings
+            && self.materials.is_empty()
+            && self.lights.is_empty()
+            && self.moved.is_empty()
+            && self.reshaped.is_empty()
+    }
+
+    /// Whether the change replaces geometry: the top-level tree is committed
+    /// again.
+    pub fn moves_geometry(&self) -> bool {
+        !self.moved.is_empty() || !self.reshaped.is_empty() || !self.light_geometry.is_empty()
     }
 }
 
@@ -352,6 +537,8 @@ pub struct Update {
     /// Each rebuilt material and the slots it goes into.
     pub(crate) materials: Vec<(Vec<u32>, Arc<dyn Material>)>,
     pub(crate) lights: Vec<LightUpdate>,
+    /// Geometry replaced in the world, which then commits its tree again.
+    pub(crate) geometry: Vec<crate::rt_world::GeometryEdit>,
 }
 
 impl Update {
@@ -363,6 +550,7 @@ impl Update {
     /// Refuses an update the scene's world and lights cannot take without a
     /// re-import (see [`World::check_materials`], [`LightList::check_replace`]).
     pub fn check(&self, world: &World, lights: &LightList) -> Result<(), Structural> {
+        world.check_geometry(&self.geometry)?;
         world.check_materials(&self.swaps())?;
         for l in &self.lights {
             lights.check_replace(l.index, &l.light)?;
@@ -392,6 +580,14 @@ impl Update {
     pub fn apply(self, scene: &mut Scene) -> Result<(), Structural> {
         self.check(&scene.world, &scene.lights)?;
         scene.world.replace_materials(&self.swaps());
+        if !self.geometry.is_empty() {
+            scene.world.replace_geometry(self.geometry)?;
+            let counters = &mut scene.stats.scene;
+            counters.top_level = scene.world.primitive_breakdown().into();
+            counters.unique = scene.world.unique_primitive_breakdown().into();
+            counters.footprint = scene.world.memory_footprint();
+            counters.primvar_tables_bytes = scene.world.primvar_table_bytes();
+        }
         for l in self.lights {
             scene.lights.replace(l.index, l.light);
             scene.lights.set_lobe_gains(l.index, l.gains);
