@@ -489,3 +489,31 @@ fn a_foreign_change_whose_import_failed_is_imported_later() {
     assert_ne!(first, edited, "the foreign change shows");
     assert!(edited == fresh(&root, &[graph]));
 }
+
+#[test]
+fn a_snapshot_names_the_space_its_image_is_in() {
+    use crust_core::color::Space;
+    let dir = work_dir("snapshot_working_space");
+    let root = write_root(&dir, &[]);
+    let session = LiveSession::new(Default::default()).expect("a session");
+    session.load_owned(&root, &[]).expect("the layers import");
+    converged(&session);
+    let snapshot = session.snapshot().expect("a converged render");
+    assert_eq!(snapshot.working_space, Space::LIN_REC709, "the default");
+
+    let text = std::fs::read_to_string(&root).expect("the root");
+    let acescg = text.replace(
+        "int crust:samplesPerPixel = 4",
+        "int crust:samplesPerPixel = 4\n        uniform token renderingColorSpace = \"acescg\"",
+    );
+    assert_ne!(text, acescg);
+    write(&root, &acescg);
+    session.apply().expect("the edit applies");
+    converged(&session);
+    let snapshot = session.snapshot().expect("a converged render");
+    assert_eq!(
+        Some(snapshot.working_space),
+        Space::named("acescg"),
+        "an authored renderingColorSpace"
+    );
+}
