@@ -6,8 +6,7 @@
 //!
 //! These are not yet in the OSL oracle's fixture (`scripts/osl_oracle.py`
 //! lists them; regenerating needs an exact-math OSL build), so they are
-//! pinned here by hand. `transformmatrix` never will be: genosl's
-//! `transform(matrix, vector)` drops the translation its GLSL applies.
+//! pinned here by hand.
 
 use crust_mtlx::{Compiler, Doc, Host, ShadeCtx, TextureRef, Val};
 use glam::Vec3A;
@@ -265,8 +264,10 @@ fn m44() -> Vec<f32> {
     M44.split(',').map(|x| x.trim().parse().unwrap()).collect()
 }
 
+/// genosl's `transform(matrix, vector)`: a direction, so the matrix's last
+/// row (its translation) is not read.
 #[test]
-fn a_vector3_by_a_matrix44_is_a_point_translated_by_the_last_row() {
+fn a_vector3_by_a_matrix44_is_a_direction_the_last_row_does_not_translate() {
     let doc = format!(
         r#"<constant name="cam" type="matrix44"><input name="value" type="matrix44" value="{M44}" /></constant>
            <transformmatrix name="t" type="vector3">
@@ -274,7 +275,7 @@ fn a_vector3_by_a_matrix44_is_a_point_translated_by_the_last_row() {
              <input name="mat" type="matrix44" nodename="cam" />
            </transformmatrix>"#
     );
-    let want = row_times(&[4.0, 2.0, -6.0, 1.0], &m44(), 4);
+    let want = row_times(&[4.0, 2.0, -6.0, 0.0], &m44(), 4);
     let got = eval(&doc, "t");
     for i in 0..3 {
         assert!((got[i] - want[i]).abs() < 1e-3, "{got:?} vs {want:?}");
@@ -302,7 +303,8 @@ fn the_other_signatures_and_the_identity_default() {
         &eval(&v4, "t"),
         &row_times(&[1.0, 2.0, 3.0, 0.0], &m44(), 4),
     );
-    // vector3 by matrix33, and vector2 by matrix33 (homogeneous).
+    // vector3 by matrix33, and vector2 by matrix33 (homogeneous: genosl's
+    // `point(x, y, 1)`, so the last row translates).
     let m33 = [0.0f32, 1.0, 0.0, -1.0, 0.0, 0.0, 0.5, 0.25, 1.0];
     let text = m33.map(|x| x.to_string()).join(", ");
     let v3 = format!(

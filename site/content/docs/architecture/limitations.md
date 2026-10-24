@@ -102,7 +102,9 @@ render.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. A
   MaterialX BSDFs follow BSDL, the library OSL's reference renderer shades with, not
-  MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. A very
+  MaterialX's GLSL shaders, so a document can look different in a GLSL viewer. Pattern
+  nodes follow MaterialX's OSL too: a `transformmatrix` of a `vector3` by a `matrix44`
+  does not apply the matrix's translation, where a GLSL viewer does. A very
   rough refracting `dielectric_bsdf` lit by a sampled light returns about 2% more light
   than it receives, as it does in OSL's reference renderer. A coat over glass, seen from
   inside within a degree or two past the critical angle, returns up to 6% more than it

@@ -75,9 +75,12 @@ Both the `.mtlx` path and the inline-USD path go through this pass.
 
 `Val` holds four lanes, and a projection's matrix is in practice a constant, so
 `transformmatrix` folds its matrix into an affine op. A matrix from a varying
-source is reported, not approximated. MaterialX's GLSL (`(v, 1)` times the
-matrix, so the last row translates) is followed over genosl, whose
-`transform(matrix, vector)` drops the translation.
+source is reported, not approximated. The product is genosl's, the reference
+the rest of crust-mtlx is checked against (the OSL oracle, BSDL): a `vector3`
+by a `matrix44` is `transform(matrix, vector)`, a direction, so the last row
+does not translate; a `vector2` by a `matrix33` is `point(x, y, 1)`, so it
+does. MaterialX's GLSL translates the `vector3` too (`(v, 1)` times the
+matrix); it was followed at first, and dropped to keep one reference.
 
 ## Risks
 
@@ -86,3 +89,6 @@ matrix, so the last row translates) is followed over genosl, whose
   changes from "not resolvable" to "has no surface shader".
 - The OSL oracle fixture does not cover the new nodes until it is regenerated
   on an exact-math OSL build; they are pinned by hand meanwhile.
+- A custom node that places a point with `transformmatrix` (`vector3` by
+  `matrix44`), authored against a GLSL viewer, renders without the
+  translation, as it does under OSL.

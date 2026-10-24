@@ -61,12 +61,8 @@ CATEGORIES = [
     "combine2", "combine3", "normalmap", "artistic_ior", "rgbtohsv", "hsvtorgb",
     "ifgreater", "ifgreatereq", "ifequal", "cellnoise2d", "randomfloat", "randomcolor",
     "separate2", "separate3", "separate4", "switch", "over", "in", "out",
-    "difference", "premult", "place2d",
+    "difference", "premult", "place2d", "transformmatrix",
 ]
-# Not `transformmatrix`: genosl writes `transform(matrix, vector)`, which drops
-# the translation of a `vector3` by a `matrix44` that MaterialX's GLSL applies
-# (`mx_transformmatrix_vector3M4`), and crust follows the GLSL. Its cases are
-# in `crates/crust-mtlx/tests/stdlib_nodes.rs`.
 
 # Categories whose signatures may take `integer` inputs (the conditionals'
 # `...I` variants, the random nodes' `seed`) or give `integer` / `boolean`
@@ -91,9 +87,14 @@ COMPARE_POOL = ["0", "1", "0.5", "-1"]
 GEOMPROP_INPUTS = {"normal", "tangent", "bitangent", "texcoord"}
 
 # The value types crust-mtlx models (`value::arity_of`). A signature using any
-# other type (matrix, string, closures; integer and boolean outside
-# `INTEGER_CATEGORIES`) is not generated.
+# other type (string, closures; integer and boolean outside
+# `INTEGER_CATEGORIES`, matrices outside `MATRIX_CATEGORIES`) is not generated.
 ARITY = {"float": 1, "vector2": 2, "vector3": 3, "color3": 3, "vector4": 4, "color4": 4}
+
+# Matrix inputs, by lane count, for the categories that take one. crust reads a
+# matrix only as a compile-time constant, which a literal is.
+MATRIX_CATEGORIES = {"transformmatrix"}
+MATRIX = {"matrix33": 9, "matrix44": 16}
 
 # Every literal is drawn from here. Each has at most three decimals, so the
 # `%f` text genosl prints into the shader parses to the same f32 that crust
@@ -154,6 +155,7 @@ def signatures(lib):
         ins = [(i.getName(), i.getType()) for i in nd.getInputs()]
         outs = [o.getType() for o in nd.getOutputs()]
         allowed = set(ARITY) | ({"integer"} if cat in INTEGER_CATEGORIES else set())
+        allowed |= set(MATRIX) if cat in MATRIX_CATEGORIES else set()
         outputs = set(ARITY) | (set(SCALAR_OUTPUTS) if cat in INTEGER_CATEGORIES else set())
         if any(t not in allowed for _, t in ins) or any(t not in outputs for t in outs):
             continue
@@ -168,7 +170,7 @@ def random_value(rng, cat, name, ty, arity_of_in):
         return rng.choice(INT_POOL)
     if cat in ("ifgreater", "ifgreatereq", "ifequal") and name in ("value1", "value2"):
         return rng.choice(COMPARE_POOL)
-    lanes = [rng.choice(POOL) for _ in range(ARITY[ty])]
+    lanes = [rng.choice(POOL) for _ in range(MATRIX.get(ty) or ARITY[ty])]
     if cat == "normalmap" and name == "in":
         # An encoded normal lives in [0, 1]; its z must stay positive for the
         # decoded vector to face out of the surface.

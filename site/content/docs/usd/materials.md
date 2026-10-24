@@ -105,7 +105,7 @@ defines them:
 | `switch` | `in1` when `which` is below 1, `in2` below 2, … `in10` below 10, and zero from 10 on |
 | `over`, `in`, `out`, `difference`, `premult` | `color4` compositing, `fg` over (inside, outside, the difference with) `bg`, blended with `bg` by `mix` |
 | `place2d` | moves a texture coordinate: scale, rotate (in degrees) and offset about a pivot, in SRT or TRS order |
-| `transformmatrix` | a vector times a matrix. A `vector3` by a `matrix44` is a point: the matrix's last row translates it, as in MaterialX's GLSL |
+| `transformmatrix` | a vector times a matrix, as in MaterialX's OSL. A `vector3` by a `matrix44` is a direction: the matrix's translation is not applied (MaterialX's GLSL applies it). A `vector2` by a `matrix33` is translated by its last row |
 
 `transformmatrix` takes its matrix only as a constant: a value, or a `constant` node's
 value. A matrix computed from anything else is reported, and the vector passes through
