@@ -84,6 +84,9 @@ pub struct Snapshot {
     pub spp: u32,
     /// Whether this is the final image of a render that completed.
     pub completed: bool,
+    /// The scene-linear space `rgba` is in (the scene's
+    /// `crust:workingColorSpace`): what a host encodes the image from.
+    pub working_space: crust_core::color::Space,
 }
 
 /// One AOV of a completed render.
@@ -125,6 +128,8 @@ struct Running {
     control: RenderControl,
     /// The products the scene asks for: the AOVs a completed render holds.
     aovs: Arc<AovRequest>,
+    /// The space the render's images are in.
+    working_space: crust_core::color::Space,
     finished: Mutex<Option<Arc<Finished>>>,
     /// The message of a panic that ended the render.
     panicked: Mutex<Option<String>>,
@@ -408,6 +413,7 @@ impl LiveSession {
             rgba,
             spp,
             completed,
+            working_space: running.working_space,
         })
     }
 
@@ -652,6 +658,7 @@ impl State {
             id: self.renders,
             control: RenderControl::new(),
             aovs: scene.aovs.clone(),
+            working_space: scene.working_space,
             finished: Mutex::new(None),
             panicked: Mutex::new(None),
             reported: AtomicBool::new(false),

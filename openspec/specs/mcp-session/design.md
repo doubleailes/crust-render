@@ -368,7 +368,10 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   (`live-session-host`), not `Session` in `mcp/`. Mantle's IPR delegate runs on
   the same `LiveSession`, over a root and sublayers it owns: an edit in any owned
   layer classifies as an override-layer edit does, since a sublayer of the root
-  layer stack composes in the stage's namespace.
+  layer stack composes in the stage's namespace. A `Snapshot` names the
+  working space its pixels are in (`renderingColorSpace`, else `lin_rec709`), so a
+  host that writes or displays the image encodes it from that space as `crust
+  render` does, rather than assuming Rec.709.
 - **Namespace edits re-import, and so do the transforms and reshapes `geometry` does
   not cover** (`live-geometry-edits`): a subtree holding curves, volumes, instancers,
   native instances, implicit shapes baked once or a camera; a prim the scene placed
