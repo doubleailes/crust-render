@@ -134,9 +134,9 @@ HdCrustSession::IsConverged() const
 std::string
 HdCrustSession::Applied() const
 {
-    static char const *const names[] = {"settings", "materials", "lights", "full"};
+    static char const *const names[] = {"settings", "materials", "lights", "full", "geometry"};
     int32_t const applied = _handle ? crust_hydra_applied(_handle) : -1;
-    return applied >= 0 && applied < 4 ? names[applied] : std::string();
+    return applied >= 0 && applied < 5 ? names[applied] : std::string();
 }
 
 bool

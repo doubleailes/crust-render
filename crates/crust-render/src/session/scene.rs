@@ -68,9 +68,10 @@ pub struct Imported {
     pub layers: Vec<PathBuf>,
     /// How the layer's last change was applied to give this scene.
     pub applied: Applied,
-    /// Which import built the scene's geometry: new with every full import,
-    /// kept by an in-place update, which moves no geometry. A render's hits
-    /// are named against the scene only while it is the one it rendered.
+    /// Which import built the scene's geometry: new with every full import
+    /// and every `geometry` update, kept by the other in-place updates, which
+    /// move no geometry. A render's hits are named against the scene only
+    /// while it is the one it rendered.
     pub geometry: u64,
     /// `World` slot (a hit's `geom_id`) → the material prim filling it: the
     /// provenance's per-material slot lists turned around once per scene,
@@ -159,7 +160,13 @@ impl Imported {
             .provenance
             .as_ref()
             .ok_or_else(|| Structural("the scene has no provenance".into()))?;
-        let update = provenance.rebuild(layer, &*self._assets, &self.rest.warnings, change)?;
+        let update = provenance.rebuild(
+            layer,
+            &*self._assets,
+            &self.rest.warnings,
+            change,
+            self.renderer.world(),
+        )?;
         update.check(self.renderer.world(), self.renderer.lights())?;
         let args = check_args(layer, pass).map_err(Structural)?;
         // Past the checks nothing refuses: take the renderer apart into the
@@ -206,7 +213,14 @@ impl Imported {
             "Session update ({applied}) of {} in {took:.2?}",
             layer.display()
         );
-        *self = Imported::of(checked, self._assets.clone(), took, applied, self.geometry);
+        // A geometry update moves what a render's hits landed on: it is new
+        // geometry, as an import's is.
+        let geometry = if applied == Applied::Geometry {
+            GEOMETRY.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.geometry
+        };
+        *self = Imported::of(checked, self._assets.clone(), took, applied, geometry);
         self.rest.stats = import_stats;
         Ok(())
     }
@@ -288,7 +302,10 @@ pub fn import(
     pass: Option<&str>,
     assets: Arc<dyn Assets>,
 ) -> Result<Imported, String> {
-    let args = check_args(layer, pass)?;
+    let mut args = check_args(layer, pass)?;
+    // Geometry edits apply in place only over kept geometry; a session that
+    // re-imports every edit has no use for the copy.
+    args.scene.keep_geometry = crust_core::config().scene_deltas;
     let started = Instant::now();
     // The session imports once per edit batch and lives on: each stage is
     // freed, and with it any mapping of the layer it read.

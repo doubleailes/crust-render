@@ -320,8 +320,9 @@ pub unsafe extern "C" fn crust_hydra_snapshot(
 }
 
 /// How the last `load` or `apply` reached the scene: 0 `settings`, 1
-/// `materials`, 2 `lights` (each in place), 3 `full` (an import); -1 before
-/// the first.
+/// `materials`, 2 `lights`, 4 `geometry` (each in place), 3 `full` (an
+/// import); -1 before the first. `geometry` came after `full` was numbered,
+/// so the codes are not in cost order.
 ///
 /// # Safety
 /// `session` is a live handle.
@@ -337,6 +338,7 @@ pub unsafe extern "C" fn crust_hydra_applied(session: *mut CrustHydraSession) ->
             Some(Applied::Materials) => 1,
             Some(Applied::Lights) => 2,
             Some(Applied::Full) => 3,
+            Some(Applied::Geometry) => 4,
         };
         Status::Ok
     });

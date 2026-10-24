@@ -135,25 +135,6 @@ fn an_edit_in_the_root_and_in_a_sublayer_classify_together() {
 }
 
 #[test]
-fn a_transform_in_an_owned_sublayer_is_full_and_renders_as_a_fresh_import() {
-    let dir = work_dir("transform_in_sublayer");
-    let graph = dir.join("graph.usda");
-    write(&graph, &graph_layer(&sky(1.0)));
-    let root = write_root(&dir, &["graph.usda"]);
-    let session = LiveSession::new(Default::default()).expect("a session");
-    session
-        .load_owned(&root, std::slice::from_ref(&graph))
-        .expect("imports");
-    converged(&session);
-    let moved =
-        "    over \"pCube2\"\n    {\n        double3 xformOp:translate = (0.5, 0.5, 0)\n    }";
-    write(&graph, &graph_layer(moved));
-    session.apply().expect("applies");
-    assert_eq!(session.applied(), Some(Applied::Full));
-    assert!(converged(&session) == fresh(&root, &[graph]));
-}
-
-#[test]
 fn a_change_to_a_sublayer_the_session_does_not_own_is_full() {
     let dir = work_dir("foreign_sublayer");
     let (graph, other) = (dir.join("graph.usda"), dir.join("other.usda"));
@@ -225,4 +206,180 @@ fn cancel_render_stops_the_render_without_waiting_for_the_session_thread() {
         Some(crust_core::RenderOutcome::Cancelled)
     );
     assert!(!session.converged());
+}
+
+/// Loads `root` owning `graph`, whose body starts as `before`, converges,
+/// rewrites the body as `after`, applies, and checks the class and that the
+/// render is bitwise a fresh session's of the same files.
+fn edit_applies_as(test: &str, before: &str, after: &str, class: Applied) {
+    let dir = work_dir(test);
+    let graph = dir.join("graph.usda");
+    write(&graph, &graph_layer(before));
+    let root = write_root(&dir, &["graph.usda"]);
+    let session = LiveSession::new(Default::default()).expect("a session");
+    session
+        .load_owned(&root, std::slice::from_ref(&graph))
+        .expect("imports");
+    let first = converged(&session);
+    write(&graph, &graph_layer(after));
+    session.apply().expect("applies");
+    assert_eq!(session.applied(), Some(class), "{test}");
+    let edited = converged(&session);
+    assert_ne!(first, edited, "{test}: the edit shows");
+    assert!(
+        edited == fresh(&root, &[graph]),
+        "{test}: as a fresh import"
+    );
+}
+
+fn over_prim(prim: &str, body: &str) -> String {
+    format!("    over \"{prim}\"\n    {{\n        {body}\n    }}")
+}
+
+/// pCube2 is placed once: baked into the top level.
+#[test]
+fn moving_a_baked_mesh_applies_as_geometry() {
+    edit_applies_as(
+        "move_baked",
+        "",
+        &over_prim("pCube2", "double3 xformOp:translate = (0.5, 0.5, 0)"),
+        Applied::Geometry,
+    );
+}
+
+/// pSphere1 and pSphere2 are one mesh placed twice: instanced.
+#[test]
+fn moving_an_instanced_mesh_applies_as_geometry() {
+    edit_applies_as(
+        "move_instanced",
+        "",
+        &over_prim(
+            "pSphere1",
+            "double3 xformOp:translate = (-0.8, 0.4, -0.2)\n        float3 xformOp:scale = (0.25, 0.3, 0.25)",
+        ),
+        Applied::Geometry,
+    );
+}
+
+/// A mirroring scale flips a baked mesh's winding.
+#[test]
+fn mirroring_a_baked_mesh_applies_as_geometry() {
+    edit_applies_as(
+        "mirror_baked",
+        "",
+        &over_prim("pTorus1", "float3 xformOp:scale = (-0.25, 0.25, 0.25)"),
+        Applied::Geometry,
+    );
+}
+
+/// `prim`'s authored points in the Cornell box, every coordinate times `s`.
+fn scaled_points(prim: &str, s: f32) -> String {
+    let text = std::fs::read_to_string(sample("cornellbox.usda")).unwrap();
+    let at = text.find(&format!("def Mesh \"{prim}\"")).unwrap();
+    let start = text[at..].find("point3f[] points = ").unwrap() + at;
+    let start = start + "point3f[] points = ".len();
+    let end = text[start..].find('\n').unwrap() + start;
+    let mut out = String::from("point3f[] points = ");
+    let mut number = String::new();
+    let flush = |number: &mut String, out: &mut String| {
+        if !number.is_empty() {
+            let v: f32 = number.parse().unwrap();
+            out.push_str(&format!("{}", v * s));
+            number.clear();
+        }
+    };
+    for c in text[start..end].chars() {
+        if c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' {
+            number.push(c);
+        } else {
+            flush(&mut number, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut number, &mut out);
+    out
+}
+
+/// The torus is placed once: its points can be read again.
+#[test]
+fn new_points_on_a_baked_mesh_apply_as_geometry() {
+    edit_applies_as(
+        "reshape_baked",
+        "",
+        &over_prim("pTorus1", &scaled_points("pTorus1", 1.15)),
+        Applied::Geometry,
+    );
+}
+
+/// Reshaping one of two placements of a mesh splits it: a fresh import
+/// would bake both.
+#[test]
+fn new_points_on_an_instanced_mesh_are_full() {
+    edit_applies_as(
+        "reshape_instanced",
+        "",
+        &over_prim("pSphere1", &scaled_points("pSphere1", 1.2)),
+        Applied::Full,
+    );
+}
+
+/// A reshaped mesh that becomes another's would share it in a fresh import.
+#[test]
+fn new_points_equal_to_another_mesh_are_full() {
+    let box_mesh = |name: &str, scale: f32, x: f32| {
+        let s = 0.3 * scale;
+        format!(
+            "    def Mesh \"{name}\"\n    {{\n        uniform token subdivisionScheme = \"none\"\n        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]\n        int[] faceVertexIndices = [0, 1, 3, 2, 4, 6, 7, 5, 0, 4, 5, 1, 2, 3, 7, 6, 0, 2, 6, 4, 1, 5, 7, 3]\n        point3f[] points = [(-{s}, 0, -{s}), (-{s}, 0, {s}), (-{s}, {s}, -{s}), (-{s}, {s}, {s}), ({s}, 0, -{s}), ({s}, 0, {s}), ({s}, {s}, -{s}), ({s}, {s}, {s})]\n        double3 xformOp:translate = ({x}, 0, 1)\n        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }}"
+        )
+    };
+    let before = format!("{}\n{}", box_mesh("A", 1.0, -0.5), box_mesh("B", 1.5, 0.5));
+    let after = format!("{}\n{}", box_mesh("A", 1.5, -0.5), box_mesh("B", 1.5, 0.5));
+    edit_applies_as("reshape_into_another", &before, &after, Applied::Full);
+}
+
+/// A transform above the render camera moves the camera: full.
+#[test]
+fn a_transform_above_the_camera_is_full() {
+    edit_applies_as(
+        "above_camera",
+        "",
+        "    double3 xformOp:translate = (0, 0.1, 0)\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]",
+        Applied::Full,
+    );
+}
+
+fn rect_light(xf: &str, width: f32) -> String {
+    format!(
+        "    def RectLight \"Panel\"\n    {{\n        float inputs:width = {width}\n        float inputs:height = 0.6\n        float inputs:intensity = 8\n        double3 xformOp:translate = {xf}\n        float xformOp:rotateX = -90\n        uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n    }}"
+    )
+}
+
+#[test]
+fn moving_an_area_light_applies_as_geometry() {
+    edit_applies_as(
+        "move_area_light",
+        &rect_light("(0, 3.5, 0)", 0.6),
+        &rect_light("(0.6, 3.4, 0.3)", 0.6),
+        Applied::Geometry,
+    );
+}
+
+#[test]
+fn resizing_an_area_light_applies_as_geometry() {
+    edit_applies_as(
+        "resize_area_light",
+        &rect_light("(0, 3.5, 0)", 0.6),
+        &rect_light("(0, 3.5, 0)", 1.4),
+        Applied::Geometry,
+    );
+}
+
+#[test]
+fn turning_a_distant_light_applies_as_lights() {
+    let sun = |angle: f32| {
+        format!(
+            "    def DistantLight \"Sun\"\n    {{\n        float inputs:intensity = 2\n        float xformOp:rotateX = {angle}\n        uniform token[] xformOpOrder = [\"xformOp:rotateX\"]\n    }}"
+        )
+    };
+    edit_applies_as("turn_sun", &sun(-60.0), &sun(-20.0), Applied::Lights);
 }

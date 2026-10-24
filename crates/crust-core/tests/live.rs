@@ -277,22 +277,40 @@ fn a_settings_change_reimports_shapes_sized_on_screen() {
     let rebuild = |path: &Path| {
         let scene = Scene::from_usd(path).expect("load");
         let prov = scene.provenance.as_ref().expect("provenance");
-        prov.rebuild(path, &crust_core::NoAssets, &scene.warnings, &change)
-            .map(|_| ())
+        prov.rebuild(
+            path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world,
+        )
+        .map(|_| ())
     };
     let cylinder = shape_stage("live_cylinder", "Cylinder");
     let scene = Scene::from_usd(&cylinder).expect("load");
     let prov = scene.provenance.as_ref().expect("provenance");
     // The same projection: in place.
     assert_eq!(
-        prov.rebuild(&cylinder, &crust_core::NoAssets, &scene.warnings, &change)
-            .map(|_| ()),
+        prov.rebuild(
+            &cylinder,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world
+        )
+        .map(|_| ()),
         Ok(())
     );
     // The edit: another resolution, so another pixel rate.
     let text = std::fs::read_to_string(&cylinder).expect("read stage");
     std::fs::write(&cylinder, text.replace("(64, 32)", "(128, 64)")).expect("write stage");
-    match prov.rebuild(&cylinder, &crust_core::NoAssets, &scene.warnings, &change) {
+    match prov.rebuild(
+        &cylinder,
+        &crust_core::NoAssets,
+        &scene.warnings,
+        &change,
+        &scene.world,
+    ) {
         Err(crust_core::live::Structural(why)) => assert!(why.contains("implicit"), "{why}"),
         Ok(_) => panic!("a cylinder sized for another projection was updated in place"),
     }
@@ -320,13 +338,25 @@ fn naming_the_camera_reimports_shapes_sized_without_one() {
     let prov = scene.provenance.as_ref().expect("provenance");
     // Unchanged, the settings still update in place.
     assert_eq!(
-        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
-            .map(|_| ()),
+        prov.rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world
+        )
+        .map(|_| ()),
         Ok(())
     );
     // The edit: the same layer, now naming that camera.
     shape_stage_naming("live_cylinder_unnamed", "Cylinder", true);
-    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+    match prov.rebuild(
+        &path,
+        &crust_core::NoAssets,
+        &scene.warnings,
+        &change,
+        &scene.world,
+    ) {
         Err(crust_core::live::Structural(why)) => assert!(why.contains("implicit"), "{why}"),
         Ok(_) => panic!("a cylinder sized without a camera was updated in place"),
     }
@@ -571,12 +601,24 @@ fn a_settings_change_asking_for_new_primvars_reimports() {
     assert!(!scene.world.has_primvars());
     let prov = scene.provenance.as_ref().expect("provenance");
     assert_eq!(
-        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
-            .map(|_| ()),
+        prov.rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world
+        )
+        .map(|_| ()),
         Ok(())
     );
     primvar_stage("</Render/withRest>");
-    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+    match prov.rebuild(
+        &path,
+        &crust_core::NoAssets,
+        &scene.warnings,
+        &change,
+        &scene.world,
+    ) {
         Err(crust_core::live::Structural(why)) => assert!(why.contains("primvars"), "{why}"),
         Ok(_) => panic!("a product asking for a primvar the geometry never kept updated in place"),
     }
@@ -585,8 +627,14 @@ fn a_settings_change_asking_for_new_primvars_reimports() {
     // And with the primvar kept, the same products update in place.
     let prov = fresh.provenance.as_ref().expect("provenance");
     assert_eq!(
-        prov.rebuild(&path, &crust_core::NoAssets, &fresh.warnings, &change)
-            .map(|_| ()),
+        prov.rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &fresh.warnings,
+            &change,
+            &fresh.world
+        )
+        .map(|_| ()),
         Ok(())
     );
 }
@@ -625,8 +673,14 @@ fn a_primvar_warning_does_not_block_a_settings_edit() {
     assert!(codes.contains(&"primvar.mismatch"), "{codes:?}");
     let prov = scene.provenance.as_ref().expect("provenance");
     assert_eq!(
-        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
-            .map(|_| ()),
+        prov.rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world
+        )
+        .map(|_| ()),
         Ok(())
     );
 }
@@ -718,7 +772,13 @@ fn a_conform_policy_edit_applies_in_place_as_a_reimport_would() {
         .provenance
         .as_ref()
         .expect("provenance")
-        .rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+        .rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world,
+        )
         .expect("a policy edit applies in place");
     assert!(update.has_settings());
     update.apply(&mut scene).expect("applies");
@@ -742,12 +802,24 @@ fn a_conform_policy_edit_reimports_adaptive_subdivision() {
     assert!(scene.stats.subdivision.adaptive.is_some(), "adaptive");
     let prov = scene.provenance.as_ref().expect("provenance");
     assert_eq!(
-        prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
-            .map(|_| ()),
+        prov.rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world
+        )
+        .map(|_| ()),
         Ok(())
     );
     framing_stage("live_framing_adaptive", HEIGHT_FIT, true);
-    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+    match prov.rebuild(
+        &path,
+        &crust_core::NoAssets,
+        &scene.warnings,
+        &change,
+        &scene.world,
+    ) {
         Err(crust_core::live::Structural(why)) => {
             assert!(why.contains("another camera projection"), "{why}")
         }
@@ -799,7 +871,13 @@ fn a_dicing_camera_keeps_a_render_camera_move_in_place() {
     dicing_stage(name, Some("/W/Dicer"), 7.0);
     let prov = scene.provenance.clone().expect("provenance");
     let update = prov
-        .rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change)
+        .rebuild(
+            &path,
+            &crust_core::NoAssets,
+            &scene.warnings,
+            &change,
+            &scene.world,
+        )
         .expect("a render camera move applies in place");
     update.apply(&mut scene).expect("applies");
     assert_ne!(format!("{:?}", scene.camera), before, "the camera moved");
@@ -812,7 +890,13 @@ fn a_dicing_camera_keeps_a_render_camera_move_in_place() {
     let scene = Scene::from_usd(&path).expect("load");
     dicing_stage("live_dicing_none", None, 7.0);
     let prov = scene.provenance.as_ref().expect("provenance");
-    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+    match prov.rebuild(
+        &path,
+        &crust_core::NoAssets,
+        &scene.warnings,
+        &change,
+        &scene.world,
+    ) {
         Err(crust_core::live::Structural(why)) => {
             assert!(why.contains("another camera projection"), "{why}")
         }
@@ -824,7 +908,13 @@ fn a_dicing_camera_keeps_a_render_camera_move_in_place() {
     let scene = Scene::from_usd(&path).expect("load");
     dicing_stage("live_dicing_retarget", Some("/W/Cam"), 10.0);
     let prov = scene.provenance.as_ref().expect("provenance");
-    match prov.rebuild(&path, &crust_core::NoAssets, &scene.warnings, &change) {
+    match prov.rebuild(
+        &path,
+        &crust_core::NoAssets,
+        &scene.warnings,
+        &change,
+        &scene.world,
+    ) {
         Err(crust_core::live::Structural(why)) => {
             assert!(why.contains("the dicing camera changed"), "{why}")
         }

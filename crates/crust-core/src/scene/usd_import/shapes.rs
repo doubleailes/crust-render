@@ -46,7 +46,7 @@ pub(super) fn emit_sphere(
     span: Span,
     material: Arc<dyn Material>,
     working: crate::color::Space,
-) {
+) -> Option<u32> {
     // The constant primvars its material reads, the only kind a sphere has.
     let primvars = super::mesh::constant_table(prim, &*material, working).map(Arc::new);
     let radius = sphere_radius(sphere);
@@ -88,12 +88,14 @@ pub(super) fn emit_sphere(
             if let Some(table) = primvars {
                 world.set_primvars(id, table, false);
             }
+            None
         }
         None => {
             let id = world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
             if let Some(table) = primvars {
                 world.set_primvars(id, table, false);
             }
+            Some(id)
         }
     }
 }

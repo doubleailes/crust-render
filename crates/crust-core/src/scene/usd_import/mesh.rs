@@ -19,6 +19,7 @@ use openusd_schemas::geom::{
 use rayon::prelude::*;
 use tracing::debug;
 
+use crate::live::{MeshKeyFacts, MeshOrigin, MeshSlotFacts};
 use crate::material::{Displacement, Material};
 use crate::primvars::{PrimvarChannel, PrimvarTable};
 use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
@@ -168,6 +169,9 @@ pub(super) struct MeshSlot {
     /// placements (a non-invertible transform) are not counted: they never
     /// reference the slot again.
     pub(super) n_place: u32,
+    /// Whether the triangles were displaced: they then depend on the
+    /// material's inputs as well as the prim's.
+    pub(super) displaced: bool,
 }
 
 /// Distinct meshes seen so far, and the index of each by content.
@@ -458,6 +462,7 @@ impl MeshArena {
             primvars,
             committed: None,
             n_place: 0,
+            displaced: displacement.is_some(),
         });
         self.by_key.insert(key, slot);
         Some(slot)
@@ -827,14 +832,21 @@ pub(super) fn place_mesh_source(
 /// behaviour. That is the A/B switch: with it set the output must be
 /// bit-identical, which is what separates "the deferral is wrong" from "the
 /// baking changed something".
+///
+/// Returns where each placement went and what each distinct mesh is, for
+/// the provenance ([`crate::live::Provenance`]).
 pub(super) fn flush_meshes(
     world: &mut WorldBuilder,
     meshes: &mut MeshArena,
     pending: Vec<MeshPlacement>,
-) {
+) -> (Vec<MeshOrigin>, Vec<MeshSlotFacts>) {
     let bake_enabled = crate::config().mesh_bake;
     let mut baked = 0usize;
     let mut instanced = 0usize;
+    // A slot a prototype or an instancer committed before any direct
+    // placement was decided is shared beyond the direct placements.
+    let shared: Vec<bool> = meshes.slots.iter().map(|s| s.committed.is_some()).collect();
+    let mut origins = Vec::with_capacity(pending.len());
 
     for p in pending {
         let slot = &meshes.slots[p.slot as usize];
@@ -848,6 +860,12 @@ pub(super) fn flush_meshes(
         let uvs = slot.uvs.clone();
         let primvars = slot.primvars.clone();
         let mirrored = p.l2w.matrix3.determinant() < 0.0;
+        origins.push(MeshOrigin {
+            geom_id: p.geom_id,
+            slot: p.slot,
+            baked: bake,
+            moving: p.l2w_end.is_some(),
+        });
         if bake {
             let geom = meshes.slots[p.slot as usize]
                 .local
@@ -922,10 +940,47 @@ pub(super) fn flush_meshes(
             meshes.slots.len()
         );
     }
+    (origins, slot_facts(meshes, &shared))
+}
+
+/// What each distinct mesh of `meshes` is, by slot: its key with the
+/// material as a group number (the `Arc`s of one material are one group, in
+/// slot order), its placement count, whether more than the direct
+/// placements share it, and whether it was displaced.
+fn slot_facts(meshes: &MeshArena, shared: &[bool]) -> Vec<MeshSlotFacts> {
+    let mut keys: Vec<Option<&MeshKey>> = vec![None; meshes.slots.len()];
+    for (key, &slot) in &meshes.by_key {
+        keys[slot as usize] = Some(key);
+    }
+    let mut groups: HashMap<usize, u32> = HashMap::new();
+    keys.iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let slot = &meshes.slots[i];
+            let key = key.map(|k| {
+                let next = groups.len() as u32;
+                let material = *groups.entry(k.material).or_insert(next);
+                MeshKeyFacts {
+                    geo_hash: k.geo_hash,
+                    n_points: k.n_points,
+                    n_indices: k.n_indices,
+                    n_uvs: k.n_uvs,
+                    smooth: k.smooth,
+                    material,
+                }
+            });
+            MeshSlotFacts {
+                key,
+                placements: slot.n_place,
+                shared: shared.get(i).copied().unwrap_or(true),
+                displaced: slot.displaced,
+            }
+        })
+        .collect()
 }
 
 /// Local-space vertices into world space.
-fn bake_verts(verts: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
+pub(super) fn bake_verts(verts: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
     verts
         .iter()
         .map(|v| l2w.transform_point3a(Vec3A::from_array(*v)).to_array())
@@ -936,7 +991,7 @@ fn bake_verts(verts: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
 /// exactly the matrix the kernel's instance path applies (`w2l`'s linear part
 /// transposed, in `crust-rt`), so a baked placement shades identically to an
 /// instanced one, mirrors included.
-fn bake_normals(normals: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
+pub(super) fn bake_normals(normals: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
     let m = l2w.matrix3.inverse().transpose();
     normals
         .iter()
@@ -957,7 +1012,7 @@ fn bake_normals(normals: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
 /// (This also swaps the roles of the barycentric `u`/`v` a hit reports.
 /// Nothing reads them today — `HitRecord` carries no UVs — but whoever adds
 /// texture coordinates needs to know.)
-fn bake_indices(mut tris: Vec<[u32; 3]>, l2w: &Affine3A) -> Vec<[u32; 3]> {
+pub(super) fn bake_indices(mut tris: Vec<[u32; 3]>, l2w: &Affine3A) -> Vec<[u32; 3]> {
     if l2w.matrix3.determinant() < 0.0 {
         for t in &mut tris {
             t.swap(1, 2);

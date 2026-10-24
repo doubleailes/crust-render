@@ -26,6 +26,9 @@ pub enum Applied {
     Materials,
     /// Lights rebuilt and the light selection re-run; the BVH kept.
     Lights,
+    /// Geometry placed or read again, and the top-level BVH committed again
+    /// from it; everything else kept.
+    Geometry,
     /// The saved layer imported again.
     Full,
 }
@@ -36,6 +39,7 @@ impl Applied {
             Applied::Settings => "settings",
             Applied::Materials => "materials",
             Applied::Lights => "lights",
+            Applied::Geometry => "geometry",
             Applied::Full => "full",
         }
     }
@@ -146,6 +150,27 @@ pub fn layer_diff(before: &dyn AbstractData, after: &dyn AbstractData) -> Vec<La
     out
 }
 
+/// Mesh attributes whose change reads the mesh again: its points, topology,
+/// subdivision tags and primvars.
+const MESH_SHAPE: &[&str] = &[
+    "points",
+    "normals",
+    "extent",
+    "faceVertexCounts",
+    "faceVertexIndices",
+    "holeIndices",
+    "cornerIndices",
+    "cornerSharpnesses",
+    "creaseIndices",
+    "creaseLengths",
+    "creaseSharpnesses",
+    "subdivisionScheme",
+    "interpolateBoundary",
+    "faceVaryingLinearInterpolation",
+    "triangleSubdivisionRule",
+    "orientation",
+];
+
 /// A light input that shapes the light's geometry: the BVH holds it.
 const SHAPE_INPUTS: &[&str] = &[
     "inputs:width",
@@ -195,11 +220,49 @@ pub fn classify(
             || (provenance.camera() == Some(prim_str) && !(is_xform && camera_carries(prim_str)))
         {
             change.settings = true;
-        } else if input && provenance.light(prim_str).is_some() && !SHAPE_INPUTS.contains(&name) {
-            if !change.lights.iter().any(|l| l == prim_str) {
-                change.lights.push(prim_str.to_owned());
+        } else if input && let Some(light) = provenance.light(prim_str) {
+            push(&mut change.lights, prim_str);
+            if SHAPE_INPUTS.contains(&name) && !light.geoms.is_empty() {
+                // The emitter's geometry follows the input.
+                push(&mut change.light_geometry, prim_str);
+                applied = applied.max(Applied::Geometry);
+            } else {
+                applied = applied.max(Applied::Lights);
             }
-            applied = applied.max(Applied::Lights);
+        } else if is_xform && provenance.camera() != Some(prim_str) {
+            if let Some(why) = provenance.movable(prim_str) {
+                return full(format!("{attr}: {why}"));
+            }
+            let mut emits = false;
+            for light in provenance.lights_at(prim_str) {
+                push(&mut change.lights, light);
+                if provenance.light(light).is_some_and(|l| !l.geoms.is_empty()) {
+                    push(&mut change.light_geometry, light);
+                    emits = true;
+                }
+            }
+            let meshes = provenance
+                .geometry_of(prim_str)
+                .into_iter()
+                .flatten()
+                .any(|id| !provenance.lights().any(|(_, l)| l.geoms.contains(&id)));
+            if meshes {
+                push(&mut change.moved, prim_str);
+            }
+            applied = applied.max(if meshes || emits {
+                Applied::Geometry
+            } else if provenance.lights_at(prim_str).next().is_some() {
+                Applied::Lights
+            } else {
+                // Nothing the scene holds moves: an empty Xform.
+                Applied::Settings
+            });
+        } else if MESH_SHAPE.contains(&name) || name.starts_with("primvars:") {
+            if let Some(why) = provenance.reshapable(prim_str) {
+                return full(format!("{attr}: {why}"));
+            }
+            push(&mut change.reshaped, prim_str);
+            applied = applied.max(Applied::Geometry);
         } else if let Some((material, typed)) = input
             .then(|| owning_material(stage, &prim, provenance))
             .flatten()
@@ -219,6 +282,13 @@ pub fn classify(
         }
     }
     (applied, change, None)
+}
+
+/// Adds `path` to `list` once.
+fn push(list: &mut Vec<String>, path: &str) {
+    if !list.iter().any(|p| p == path) {
+        list.push(path.to_owned());
+    }
 }
 
 /// The material an input at `prim` belongs to: `prim` itself when it is a

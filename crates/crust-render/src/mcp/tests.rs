@@ -472,17 +472,9 @@ fn unconfined_edits_are_full() {
     let (mut state, _dir) = lookdev_session("full");
     let cases = [
         (
-            "a transform",
-            r#"over "World" { over "Ball" { double3 xformOp:translate = (0, 2, 0) } }"#,
-        ),
-        (
             "an emission",
             r#"over "World" { over "Looks" { over "Std" { over "Surface" {
                 float inputs:emission = 1 } } } }"#,
-        ),
-        (
-            "a light's shape",
-            r#"over "World" { over "Key" { float inputs:width = 3 } }"#,
         ),
         ("a new prim", r#"over "World" { def Sphere "Other" { } }"#),
         (
@@ -497,6 +489,32 @@ fn unconfined_edits_are_full() {
     let mixed = r#"over "World" { over "Cam" { float exposure = 0.5 }
         over "Key" { float inputs:intensity = 4 } }"#;
     assert_eq!(author(&mut state, mixed), "lights");
+}
+
+/// A mesh's transform and an area light's shape replace their geometry in
+/// the world and commit its tree again (`geometry`), and render as a full
+/// import of the same layer, after the edit and after its undo.
+#[test]
+fn geometry_edits_render_as_a_full_import() {
+    let (mut state, dir) = lookdev_session("geometry");
+    let cases = [
+        (
+            "a transform",
+            r#"over "World" { over "Ball" { double3 xformOp:translate = (0, 2, 0) } }"#,
+        ),
+        (
+            "a light's shape",
+            r#"over "World" { over "Key" { float inputs:width = 3 } }"#,
+        ),
+    ];
+    for (what, usda) in cases {
+        assert_eq!(author(&mut state, usda), "geometry", "{what}");
+        same_as_full_import(&mut state, &dir, what);
+    }
+    for (what, _) in cases.iter().rev() {
+        assert_eq!(undo(&mut state), "geometry", "undo {what}");
+        same_as_full_import(&mut state, &dir, &format!("undo {what}"));
+    }
 }
 
 /// `CRUST_SCENE_DELTAS=0`: a session without kept assets imports every
@@ -520,8 +538,9 @@ fn a_full_edit_decodes_no_texture_again() {
     };
     let before = decodes(&mut state);
     assert!(before > 0, "the stage decodes its texture");
-    let moved = r#"over "World" { over "Ball" { double3 xformOp:translate = (0, 1.5, 0) } }"#;
-    assert_eq!(author(&mut state, moved), "full");
+    // A binding is `full`.
+    let rebound = r#"over "World" { over "Ball" { rel material:binding = </World/Looks/Tex> } }"#;
+    assert_eq!(author(&mut state, rebound), "full");
     assert_eq!(decodes(&mut state), before);
 }
 
@@ -652,8 +671,9 @@ fn probe_names_the_prim_and_material_a_pixel_hits() {
     assert_eq!(author(&mut state, colour), "materials");
     assert_eq!(probe_names(&mut state, &job, 24, 16), ball);
 
+    // A move is applied in place, but moves what the render's hits landed on.
     let moved = r#"over "World" { over "Ball" { double3 xformOp:translate = (0, 1.5, 0) } }"#;
-    assert_eq!(author(&mut state, moved), "full");
+    assert_eq!(author(&mut state, moved), "geometry");
     let open = state.session().expect("open");
     let stale = render::probe(&job, &open.scene, 24, 16).expect("probed");
     assert_eq!(stale["prim"], Value::Null);
@@ -661,7 +681,7 @@ fn probe_names_the_prim_and_material_a_pixel_hits() {
         stale["prim_note"]
             .as_str()
             .unwrap()
-            .contains("imported again"),
+            .contains("imported again or moved"),
         "{stale}"
     );
     let job = finished_render(&mut state);
@@ -2267,7 +2287,7 @@ fn layer_field(layer: &Path, path: &str, field: &str) -> Option<openusd::sdf::Va
 
 #[test]
 fn drops_rest_on_the_rendered_surface_and_undo_restores_them() {
-    let (mut state, _dir) = placement_session("drop_basic");
+    let (mut state, dir) = placement_session("drop_basic");
     let layer = state.session().unwrap().output.clone();
     let before_bytes = std::fs::read(&layer).unwrap();
     let before_render = render_planes(&mut state);
@@ -2276,7 +2296,9 @@ fn drops_rest_on_the_rendered_surface_and_undo_restores_them() {
     // Vase onto the shelf, the highest surface beneath it; the sunk cube up
     // onto the floor; the cup-like vase passes nothing else.
     let result = drop(&mut state, &["/World/vase", "/World/sunk"], None, false);
-    assert_eq!(result["applied"], "full", "{result:#}");
+    // A placement moves meshes: their geometry is replaced in place.
+    assert_eq!(result["applied"], "geometry", "{result:#}");
+    same_as_full_import(&mut state, &dir, "drop");
     assert_eq!(result["undo_depth"], 1);
     assert_eq!(result["prims"][0]["status"], "placed", "{result:#}");
     let after = session_vertices(&mut state, "/World/vase");

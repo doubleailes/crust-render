@@ -85,8 +85,8 @@ crust_hydra_status crust_hydra_snapshot(CrustHydraSession *session, float *rgba,
                                         uint64_t *generation, uint32_t *spp);
 
 /* How the last load or apply reached the scene: 0 settings, 1 materials,
-   2 lights (each applied in place), 3 full (an import); -1 before the
-   first. */
+   2 lights, 4 geometry (each applied in place), 3 full (an import); -1
+   before the first. */
 int32_t crust_hydra_applied(CrustHydraSession *session);
 
 /* 1 once the render completed (Hydra's IsConverged), else 0. A cancelled

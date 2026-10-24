@@ -152,6 +152,7 @@ pub struct CubicCurveSegment {
 /// committed scene. Instances nest:
 /// an instanced scene may itself contain instances, and transforms,
 /// normals and ray masks compose correctly through every level.
+#[derive(Clone)]
 pub enum Geometry {
     /// Unpadded `[f32; 3]` arrays, which is how the committed scene stores
     /// them: a `Vec3A` is 16 bytes for 12 of data, and these arrays are
@@ -276,8 +277,10 @@ pub enum InstanceHitId {
 }
 
 /// Accumulates geometries, then builds the acceleration structure once in
-/// [`SceneBuilder::commit`] (Embree's `rtcCommitScene`).
-#[derive(Default)]
+/// [`SceneBuilder::commit`] (Embree's `rtcCommitScene`). A clone is a copy of
+/// every attached geometry (instances share their committed scenes): what a
+/// host keeps to commit the same scene again with a few geometries changed.
+#[derive(Clone, Default)]
 pub struct SceneBuilder {
     geoms: Vec<(Geometry, RayMask, InstanceHitId)>,
 }
@@ -352,6 +355,14 @@ impl SceneBuilder {
     /// If `id` was never attached.
     pub fn set_geometry(&mut self, id: u32, geometry: Geometry) {
         self.geoms[id as usize].0 = geometry;
+    }
+
+    /// The geometry attached at `id`.
+    ///
+    /// # Panics
+    /// If `id` was never attached.
+    pub fn geometry(&self, id: u32) -> &Geometry {
+        &self.geoms[id as usize].0
     }
 
     /// The ray mask the geometry at `id` was attached with.

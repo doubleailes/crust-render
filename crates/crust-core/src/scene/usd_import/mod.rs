@@ -271,6 +271,8 @@ struct ImportCtx<'a> {
     /// the decision needs every chunk's placement counts, so it cannot be
     /// made while walking. Holds ~88 bytes per mesh prim, not per triangle.
     pending_meshes: Vec<MeshPlacement>,
+    /// The `geom_id`s of the static analytic spheres the traversal placed.
+    spheres: Vec<u32>,
     /// Receivers seen and lights whose `collection:lightLink` restricts
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
@@ -423,14 +425,16 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             ctx.caches.motion.drawn(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
-            emit_sphere(
+            if let Some(id) = emit_sphere(
                 &mut ctx.world,
                 &prim,
                 &sphere,
                 span,
                 mat,
                 ctx.caches.working,
-            );
+            ) {
+                ctx.spheres.push(id);
+            }
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             ctx.caches.motion.unmoved(&prim, &timing);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
@@ -1095,7 +1099,13 @@ pub(crate) fn load_scene(
     let frame_posed = frame_pose(&shutter, &products);
 
     let mut ctx = ImportCtx {
-        world: WorldBuilder::new(),
+        world: {
+            let mut world = WorldBuilder::new();
+            if options.keep_geometry {
+                world.keep_inputs();
+            }
+            world
+        },
         lights: {
             let mut lights = LightList::new();
             lights.set_luma(crate::color::luma(working));
@@ -1122,6 +1132,7 @@ pub(crate) fn load_scene(
             ..ImportCaches::new(assets, path, subdiv, working)
         },
         pending_meshes: Vec::new(),
+        spheres: Vec::new(),
         links: LightLinks::default(),
         pass: pass.map(|p| ActivePass::read(&index, p)),
         light_origins: Vec::new(),
@@ -1236,7 +1247,7 @@ pub(crate) fn load_scene(
     }
 
     let pending = std::mem::take(&mut ctx.pending_meshes);
-    flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
+    let (mesh_origins, mesh_slots) = flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
 
     let commit_start = Instant::now();
     let committed = ctx.world.commit();
@@ -1311,6 +1322,9 @@ pub(crate) fn load_scene(
         material_reads: ctx.caches.materials.reads(),
         lights: ctx.light_origins.into_iter().collect(),
         geometry: geometry_runs,
+        meshes: mesh_origins,
+        mesh_slots,
+        spheres: std::mem::take(&mut ctx.spheres),
         volumes: volume_paths,
         stage: StageFacts {
             options: options.clone(),
