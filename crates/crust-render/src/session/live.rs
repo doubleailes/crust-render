@@ -84,8 +84,10 @@ pub struct Snapshot {
     pub spp: u32,
     /// Whether this is the final image of a render that completed.
     pub completed: bool,
-    /// The scene-linear space `rgba` is in (the scene's
-    /// `crust:workingColorSpace`): what a host encodes the image from.
+    /// The scene's working space (`renderingColorSpace`): what a host
+    /// encodes `rgba` from, as `crust render` encodes its PNG preview. That
+    /// holds for a displayed precomp output too, which the preview encodes
+    /// from the same space.
     pub working_space: crust_core::color::Space,
 }
 
