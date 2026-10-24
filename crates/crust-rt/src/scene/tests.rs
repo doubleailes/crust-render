@@ -1143,3 +1143,62 @@ fn visit_skips_the_slots_an_offset_reserves() {
     scene.visit(reserved..reserved + 1, MASK_CAMERA, |_, _| none += 1);
     assert_eq!(none, 0);
 }
+
+/// A borrowed commit is the owning commit: every geometry kind, every hit
+/// the same bits, and the builder left whole to commit again.
+#[test]
+fn commit_ref_builds_the_scene_commit_builds() {
+    let mut b = SceneBuilder::new();
+    let mut verts = Vec::new();
+    let mut tris = Vec::new();
+    for i in 0..40u32 {
+        let x = i as f32 * 0.25 - 5.0;
+        verts.extend([[x, -1.0, 2.0], [x + 0.2, -1.0, 2.0], [x, 1.0, 2.5]]);
+        tris.push([3 * i, 3 * i + 1, 3 * i + 2]);
+    }
+    let normals = Some(vec![[0.0, 0.0, -1.0]; verts.len()]);
+    b.attach(Geometry::TriangleMesh {
+        vertices: verts,
+        indices: tris,
+        normals,
+    });
+    b.attach(Geometry::Sphere {
+        center: Vec3A::new(1.0, 0.5, 4.0),
+        radius: 0.7,
+    });
+    b.attach(Geometry::Instance {
+        scene: unit_sphere_scene(),
+        transform: Affine3A::from_translation(glam::Vec3::new(-1.5, 0.0, 5.0)),
+        transform_end: None,
+    });
+    b.attach(Geometry::RoundCurves {
+        segments: vec![CurveSegment {
+            p0: Vec3A::new(-2.0, -0.5, 3.0),
+            p1: Vec3A::new(2.0, 0.5, 3.0),
+            r0: 0.05,
+            r1: 0.08,
+        }],
+    });
+    let borrowed = b.commit_ref(CommitOptions::default());
+    let again = b.commit_ref(CommitOptions::default());
+    let owned = b.commit_with(CommitOptions::default());
+    for i in 0..64 {
+        for j in 0..48 {
+            let dir = Vec3A::new(i as f32 / 32.0 - 1.0, j as f32 / 24.0 - 1.0, 1.0);
+            let ray = crate::Ray::new(Vec3A::ZERO, dir);
+            let key = |s: &Scene| {
+                s.intersect(&ray, 1e-4, f32::INFINITY).map(|h| {
+                    (
+                        h.t.to_bits(),
+                        h.geom_id,
+                        h.prim_id,
+                        h.normal.to_array().map(f32::to_bits),
+                    )
+                })
+            };
+            assert_eq!(key(&borrowed), key(&owned), "ray ({i}, {j})");
+            assert_eq!(key(&again), key(&owned), "ray ({i}, {j}) again");
+        }
+    }
+    assert_eq!(borrowed.primitive_count(), owned.primitive_count());
+}

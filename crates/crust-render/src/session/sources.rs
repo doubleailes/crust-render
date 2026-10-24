@@ -19,7 +19,7 @@ fn meta(path: &Path) -> Meta {
 }
 
 /// The session's source layers, each with its stamp as last seen.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sources {
     stamps: Vec<(PathBuf, Meta)>,
 }

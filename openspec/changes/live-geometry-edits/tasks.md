@@ -28,3 +28,17 @@
 - [x] 4.1 `cargo fmt`, `clippy -D warnings`, `cargo test --workspace`.
 - [x] 4.2 `scripts/check_images.sh` against goldens of the parent commit (6905b29):
       all 45 samples in the checkout bit-identical.
+
+## 5. Review (Qodo, #384)
+
+- [x] 5.1 A transform the runs show nothing for, or at an arc source or
+      instancer prototype, is `full` (`Provenance::arc_sources`). Tests:
+      `moving_a_point_instancer_prototype_part_is_full`,
+      `moving_a_mesh_another_prim_references_is_full`.
+- [x] 5.2 Reshape keys follow in-place reshapes, within and across batches.
+      Test: `a_second_reshape_onto_a_reshaped_mesh_is_full`.
+- [x] 5.3 Foreign-layer stamps advance only after the import they trigger
+      succeeds. Test: `a_foreign_change_whose_import_failed_is_imported_later`.
+- [x] 5.4 A sphere rebuild is emitted at id 0 and re-addressed (no padding).
+- [x] 5.5 `SceneBuilder::commit_ref`; `World::replace_geometry` uses it. Test:
+      `commit_ref_builds_the_scene_commit_builds`.

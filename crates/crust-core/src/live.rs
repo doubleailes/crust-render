@@ -55,6 +55,11 @@ pub struct Provenance {
     /// network reads, through a composition arc or a connection — every
     /// material the import resolved, prototype-scoped ones included.
     pub(crate) material_reads: Vec<(String, String)>,
+    /// The prims other prims compose from (arc sites, `PointInstancer`
+    /// prototypes), sorted; recorded only by an import that kept its
+    /// geometry. A geometry edit at, above or below one moves more than the
+    /// geometry runs say.
+    pub(crate) arc_sources: Vec<String>,
     /// Light prim path → its place in the light list and its geometry.
     pub(crate) lights: HashMap<String, LightOrigin>,
     /// `(geom_ids, prim path)` per prim that emitted geometry, in traversal
@@ -310,6 +315,15 @@ impl Provenance {
         if self.stage.shutter.interval.is_some() {
             return Some("the scene was imported with motion over the shutter".into());
         }
+        if let Some(why) = self.read_through_arcs(path) {
+            return Some(why);
+        }
+        if self.geometry_of(path).is_empty() && self.lights_at(path).next().is_none() {
+            // A prim the traversal placed nothing from, as far as the runs
+            // say: an instancer's prototype, an arc's source, an empty
+            // Xform. Not provably inert.
+            return Some(format!("nothing the scene placed lies at {path}"));
+        }
         if let Some(v) = self.volumes.iter().find(|v| at(v)) {
             return Some(format!("{v} is a volume region"));
         }
@@ -341,6 +355,21 @@ impl Provenance {
             }
         }
         None
+    }
+
+    /// Why a geometry edit at `path` would reach prims through an arc,
+    /// `None` when no prim composes from `path`, an ancestor or a
+    /// descendant of it. Refused, too, when the import recorded no sources
+    /// at all: it did not keep its geometry.
+    fn read_through_arcs(&self, path: &str) -> Option<String> {
+        let related = |a: &str, b: &str| {
+            a.strip_prefix(b)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        };
+        self.arc_sources
+            .iter()
+            .find(|source| related(source, path) || related(path, source))
+            .map(|source| format!("{source} is composed into other prims"))
     }
 
     /// The lights at or below `path`.
@@ -388,7 +417,7 @@ impl Provenance {
         if slot.displaced || m.moving {
             return Some(format!("{path} is displaced or moving"));
         }
-        None
+        self.read_through_arcs(path)
     }
 
     /// Whether `path` is a light whose emitter geometry the world could
@@ -539,6 +568,9 @@ pub struct Update {
     pub(crate) lights: Vec<LightUpdate>,
     /// Geometry replaced in the world, which then commits its tree again.
     pub(crate) geometry: Vec<crate::rt_world::GeometryEdit>,
+    /// The content keys reshaped meshes now have, by slot: written into the
+    /// scene's provenance, so a later reshape compares against them.
+    pub(crate) mesh_keys: Vec<(u32, MeshKeyFacts)>,
 }
 
 impl Update {
@@ -580,6 +612,13 @@ impl Update {
     pub fn apply(self, scene: &mut Scene) -> Result<(), Structural> {
         self.check(&scene.world, &scene.lights)?;
         scene.world.replace_materials(&self.swaps());
+        if let Some(prov) = scene.provenance.as_mut() {
+            for (slot, key) in self.mesh_keys {
+                if let Some(s) = prov.mesh_slots.get_mut(slot as usize) {
+                    s.key = Some(key);
+                }
+            }
+        }
         if !self.geometry.is_empty() {
             scene.world.replace_geometry(self.geometry)?;
             let counters = &mut scene.stats.scene;

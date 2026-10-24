@@ -1347,7 +1347,7 @@ impl World {
             }
             inputs.set_geometry(id, e.geometry);
         }
-        self.scene = inputs.clone().commit_with(crate::commit_options());
+        self.scene = inputs.commit_ref(crate::commit_options());
         Ok(())
     }
 

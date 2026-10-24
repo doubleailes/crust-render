@@ -383,3 +383,109 @@ fn turning_a_distant_light_applies_as_lights() {
     };
     edit_applies_as("turn_sun", &sun(-60.0), &sun(-20.0), Applied::Lights);
 }
+
+/// A 0.3-unit box mesh, `name`, its size times `scale`, at `x`.
+fn box_mesh(name: &str, scale: f32, x: f32) -> String {
+    let s = 0.3 * scale;
+    format!(
+        "    def Mesh \"{name}\"\n    {{\n        uniform token subdivisionScheme = \"none\"\n        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]\n        int[] faceVertexIndices = [0, 1, 3, 2, 4, 6, 7, 5, 0, 4, 5, 1, 2, 3, 7, 6, 0, 2, 6, 4, 1, 5, 7, 3]\n        point3f[] points = [(-{s}, 0, -{s}), (-{s}, 0, {s}), (-{s}, {s}, -{s}), (-{s}, {s}, {s}), ({s}, 0, -{s}), ({s}, 0, {s}), ({s}, {s}, -{s}), ({s}, {s}, {s})]\n        double3 xformOp:translate = ({x}, 0, 1)\n        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }}"
+    )
+}
+
+/// Moving a prim inside a PointInstancer's prototypes moves every instance,
+/// though the provenance records no geometry under it: full, not an empty
+/// in-place update.
+#[test]
+fn moving_a_point_instancer_prototype_part_is_full() {
+    let instancer = |x: f32| {
+        format!(
+            "    def PointInstancer \"Scatter\"\n    {{\n        rel prototypes = [<Protos/Box>]\n        int[] protoIndices = [0, 0, 0]\n        point3f[] positions = [(-1, 0, 0), (0, 0, 0.5), (1, 0, 0)]\n        def Scope \"Protos\"\n        {{\n            def Xform \"Box\"\n            {{\n{}\n            }}\n        }}\n    }}",
+            box_mesh("Part", 0.6, x)
+                .replace("\n    ", "\n            ")
+                .replacen("    def", "            def", 1)
+        )
+    };
+    edit_applies_as(
+        "instancer_prototype",
+        &instancer(0.0),
+        &instancer(0.3),
+        Applied::Full,
+    );
+}
+
+/// A group another prim references: moving a mesh in it moves the copy the
+/// reference composes too, which no geometry run says. Full.
+#[test]
+fn moving_a_mesh_another_prim_references_is_full() {
+    let scene = |x: f32| {
+        format!(
+            "    def Xform \"Grp\"\n    {{\n{}\n    }}\n    def \"Copy\" (references = </scene/Grp>)\n    {{\n        double3 xformOp:translate = (0, 1.2, 0)\n        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }}",
+            box_mesh("M", 1.0, x)
+                .replace("\n    ", "\n        ")
+                .replacen("    def", "        def", 1)
+        )
+    };
+    edit_applies_as(
+        "referenced_source",
+        &scene(-0.5),
+        &scene(0.2),
+        Applied::Full,
+    );
+}
+
+/// A reshape that makes a mesh identical to another's *reshaped* content is
+/// full: the provenance keeps the keys in-place reshapes give.
+#[test]
+fn a_second_reshape_onto_a_reshaped_mesh_is_full() {
+    let dir = work_dir("second_reshape");
+    let graph = dir.join("graph.usda");
+    let both = |a: f32, b: f32| {
+        graph_layer(&format!(
+            "{}\n{}",
+            box_mesh("A", a, -0.5),
+            box_mesh("B", b, 0.5)
+        ))
+    };
+    write(&graph, &both(1.0, 1.5));
+    let root = write_root(&dir, &["graph.usda"]);
+    let session = LiveSession::new(Default::default()).expect("a session");
+    session
+        .load_owned(&root, std::slice::from_ref(&graph))
+        .expect("imports");
+    converged(&session);
+    write(&graph, &both(1.0, 2.0));
+    session.apply().expect("applies");
+    assert_eq!(session.applied(), Some(Applied::Geometry));
+    converged(&session);
+    // A now becomes what B became: a fresh import shares one mesh.
+    write(&graph, &both(2.0, 2.0));
+    session.apply().expect("applies");
+    assert_eq!(session.applied(), Some(Applied::Full));
+    assert!(converged(&session) == fresh(&root, &[graph]));
+}
+
+/// A change to a layer the session does not own, whose import then fails,
+/// is imported by the next apply once the stage loads again, not forgotten.
+#[test]
+fn a_foreign_change_whose_import_failed_is_imported_later() {
+    let dir = work_dir("failed_foreign");
+    let (graph, other) = (dir.join("graph.usda"), dir.join("other.usda"));
+    write(&graph, &graph_layer(""));
+    write(&other, &graph_layer(&sky(1.0)));
+    let root = write_root(&dir, &["graph.usda", "other.usda"]);
+    let session = LiveSession::new(Default::default()).expect("a session");
+    session
+        .load_owned(&root, std::slice::from_ref(&graph))
+        .expect("imports");
+    let first = converged(&session);
+    let root_text = std::fs::read_to_string(&root).unwrap();
+    write(&other, &graph_layer(&sky(3.0)));
+    write(&root, "#usda 1.0\nthis does not parse {");
+    assert!(session.apply().is_err(), "the root does not open");
+    write(&root, &root_text);
+    session.apply().expect("applies");
+    assert_eq!(session.applied(), Some(Applied::Full));
+    let edited = converged(&session);
+    assert_ne!(first, edited, "the foreign change shows");
+    assert!(edited == fresh(&root, &[graph]));
+}

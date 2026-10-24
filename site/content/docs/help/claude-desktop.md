@@ -154,7 +154,7 @@ these:
 | `materials` | an `inputs:*` value on a shader of a material the scene uses, or one of the material's own inputs | rebuilds those materials |
 | `lights` | an `inputs:*` value on a light, or the transform of a light with no shape (distant, dome) | rebuilds those lights and the light selection |
 | `geometry` | the transform of a prim whose subtree holds only meshes, spheres and lights; the points, topology or primvars of a mesh placed once; an area light's transform or size | places or reads that geometry again and rebuilds the top-level BVH |
-| `full` | anything else: a prim added or removed, a binding, a connection, visibility, a variant, a transform above the camera or a volume, a mesh shared with another prim | imports the saved file again |
+| `full` | anything else: a prim added or removed, a binding, a connection, visibility, a variant, a transform above the camera or a volume, a mesh shared with another prim, a prim another prim references, inherits or instances | imports the saved file again |
 
 An edit with changes of several kinds is applied as the most expensive of them, in the
 order of the table. A `geometry` edit keeps a copy of the scene's top-level geometry, its

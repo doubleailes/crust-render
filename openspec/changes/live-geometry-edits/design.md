@@ -54,7 +54,31 @@ whole stage. A geometry edit is refused when it could move that decision:
   provenance keeps every slot's key with its material as a group number,
   since material `Arc`s are per import (`MeshSlotFacts`);
 - adaptive subdivision, displacement, shutter motion and primvar AOVs are
-  refused: each makes the geometry depend on more than the prim.
+  refused: each makes the geometry depend on more than the prim;
+- an in-place reshape writes its slot's new key into the provenance
+  (`Update::mesh_keys`), and reshapes in one batch are checked against each
+  other's new keys, so a later reshape compares against the meshes as they are
+  (Qodo review of #384).
+
+### D6. Edits the geometry runs cannot see are refused
+
+The geometry runs name the prim that *emitted* geometry. A prim can also be
+read by others: through an `inherits`, `references` or `specializes` arc, or as
+a `PointInstancer`'s prototype, whose geometry is attributed to the instancer.
+Moving such a prim in place would move its own geometry and leave every
+composed copy behind. So an import that keeps its geometry records every prim
+site other than a prim's own path, and every instancer's prototype targets
+(`Provenance::arc_sources`), and a geometry edit at, above or below one is
+`full`. A transform on a prim whose subtree the runs show nothing for (an
+instancer's prototype part, an empty Xform) is `full` too: it cannot be proven
+inert. A path in a referenced layer's namespace may coincide with an edited
+one; that costs a full import, never a stale render.
+
+### D7. The kept geometry is committed by reference
+
+`SceneBuilder::commit_ref` builds from borrowed geometries, through the same
+expansion as the owning `commit_with` (which drops each geometry once
+expanded), so a geometry edit pays no copy of the kept builder.
 
 ### D5. The provenance says what was placed how
 
