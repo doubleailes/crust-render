@@ -26,4 +26,5 @@
 ## 4. Gates
 
 - [x] 4.1 `cargo fmt`, `clippy -D warnings`, `cargo test --workspace`.
-- [ ] 4.2 `scripts/check_images.sh` against goldens of the parent commit.
+- [x] 4.2 `scripts/check_images.sh` against goldens of the parent commit (6905b29):
+      all 45 samples in the checkout bit-identical.
