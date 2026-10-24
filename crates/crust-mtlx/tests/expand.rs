@@ -371,19 +371,149 @@ fn a_self_instantiating_definition_is_cut_and_reported() {
         &lib,
     );
     assert_eq!(d.reported.len(), 1, "{:?}", d.reported);
-    assert!(d.reported[0].contains("nested past"), "{:?}", d.reported);
-    // What is left is one unexpanded `loop`, which the compiler names.
-    let deepest = d
-        .nodes
-        .iter()
-        .find(|n| n.category == "loop")
-        .expect("cut node");
-    let (_, unsupported) = eval_at(&d, &deepest.name, None, 0.0, 0.0);
+    assert!(d.reported[0].contains("a cycle"), "{:?}", d.reported);
+    // What is left is one unexpanded `loop`, refused at its first re-entry,
+    // which the compiler names.
+    let left: Vec<_> = d.nodes.iter().filter(|n| n.category == "loop").collect();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].name, "l/again");
+    let (_, unsupported) = eval_at(&d, &left[0].name, None, 0.0, 0.0);
     assert_eq!(unsupported, ["loop"]);
-    assert_eq!(
-        deepest.name.matches('/').count(),
-        crust_mtlx::MAX_EXPANSION_DEPTH
+}
+
+/// Two definitions that instantiate each other three times over would grow
+/// as 3 to the depth cut (43 million nodes at 16); the cycle is refused at
+/// its first re-entry instead, after 3 + 9 copies.
+#[test]
+fn a_cycle_through_two_definitions_is_refused_before_it_grows() {
+    let lib = library(
+        r#"<materialx>
+             <nodedef name="ND_ping" node="ping"><output name="out" type="float" /></nodedef>
+             <nodegraph name="NG_ping" nodedef="ND_ping">
+               <pong name="a" type="float" /><pong name="b" type="float" /><pong name="c" type="float" />
+               <output name="out" type="float" nodename="a" />
+             </nodegraph>
+             <nodedef name="ND_pong" node="pong"><output name="out" type="float" /></nodedef>
+             <nodegraph name="NG_pong" nodedef="ND_pong">
+               <ping name="a" type="float" /><ping name="b" type="float" /><ping name="c" type="float" />
+               <output name="out" type="float" nodename="a" />
+             </nodegraph>
+           </materialx>"#,
     );
+    let d = expanded(
+        r#"<materialx><ping name="p" type="float" /></materialx>"#,
+        &lib,
+    );
+    assert_eq!(
+        d.nodes.len(),
+        9,
+        "{:?}",
+        d.nodes.iter().map(|n| &n.name).collect::<Vec<_>>()
+    );
+    assert!(d.nodes.iter().all(|n| n.category == "ping"));
+    assert_eq!(d.reported.len(), 1, "{:?}", d.reported);
+    assert!(
+        d.reported[0].contains("ND_ping → ND_pong → ND_ping"),
+        "{:?}",
+        d.reported
+    );
+}
+
+/// Without a cycle, a graph holding k instances of the next definition still
+/// grows as k to the depth; past `MAX_EXPANDED_NODES` the expansion stops
+/// and says so once.
+#[test]
+fn an_expansion_past_the_node_budget_stops() {
+    // Eight levels of eight instances each: 8^8 = 16.7 million nodes.
+    let mut text = String::from("<materialx>");
+    for level in 0..8 {
+        text += &format!(
+            r#"<nodedef name="ND_l{level}" node="l{level}"><output name="out" type="float" /></nodedef>
+               <nodegraph name="NG_l{level}" nodedef="ND_l{level}">"#
+        );
+        for i in 0..8 {
+            if level == 7 {
+                text += &format!(
+                    r#"<constant name="k{i}" type="float"><input name="value" type="float" value="1" /></constant>"#
+                );
+            } else {
+                text += &format!(r#"<l{} name="n{i}" type="float" />"#, level + 1);
+            }
+        }
+        let first = if level == 7 { "k0" } else { "n0" };
+        text += &format!(r#"<output name="out" type="float" nodename="{first}" /></nodegraph>"#);
+    }
+    text += "</materialx>";
+    let d = expanded(
+        r#"<materialx><l0 name="root" type="float" /></materialx>"#,
+        &library(&text),
+    );
+    assert!(
+        d.nodes.len() <= crust_mtlx::MAX_EXPANDED_NODES,
+        "{}",
+        d.nodes.len()
+    );
+    let budget: Vec<_> = d
+        .reported
+        .iter()
+        .filter(|r| r.contains("expand past"))
+        .collect();
+    assert_eq!(
+        budget.len(),
+        1,
+        "{:?}",
+        &d.reported[..d.reported.len().min(4)]
+    );
+}
+
+/// An instance's `version` picks its nodedef's graph; a version no nodedef
+/// has is reported, not expanded with the default version's graph.
+#[test]
+fn a_versioned_instance_expands_its_own_version() {
+    let lib = library(
+        r#"<materialx>
+             <nodedef name="ND_k_v1" node="k" version="1" isdefaultversion="true"><output name="out" type="float" /></nodedef>
+             <nodegraph name="NG_k_v1" nodedef="ND_k_v1">
+               <constant name="c" type="float"><input name="value" type="float" value="1" /></constant>
+               <output name="out" type="float" nodename="c" />
+             </nodegraph>
+             <nodedef name="ND_k_v2" node="k" version="2"><output name="out" type="float" /></nodedef>
+             <nodegraph name="NG_k_v2" nodedef="ND_k_v2">
+               <constant name="c" type="float"><input name="value" type="float" value="2" /></constant>
+               <output name="out" type="float" nodename="c" />
+             </nodegraph>
+           </materialx>"#,
+    );
+    let d = expanded(
+        r#"<materialx>
+             <k name="plain" type="float" />
+             <k name="two" type="float" version="2" />
+             <k name="three" type="float" version="3" />
+             <convert name="o1" type="float"><input name="in" type="float" nodename="plain" /></convert>
+             <convert name="o2" type="float"><input name="in" type="float" nodename="two" /></convert>
+           </materialx>"#,
+        &lib,
+    );
+    assert_eq!(eval(&d, "o1").x(), 1.0);
+    assert_eq!(eval(&d, "o2").x(), 2.0);
+    assert_eq!(d.reported.len(), 1, "{:?}", d.reported);
+    assert!(d.reported[0].contains("three") && d.reported[0].contains("\"3\""));
+    assert!(d.find("", "three").is_some(), "left in place");
+}
+
+/// A category the library defines only for another output type is not
+/// expanded with that type's graph: it is reported and left unsupported.
+#[test]
+fn an_instance_of_another_type_is_reported_not_expanded() {
+    let d = expanded(
+        r#"<materialx><studio_mix name="b" type="float" /></materialx>"#,
+        &library(BLEND),
+    );
+    assert_eq!(d.reported.len(), 1, "{:?}", d.reported);
+    assert!(d.reported[0].contains("no studio_mix nodedef of type float"));
+    assert!(d.find("", "b").is_some(), "left in place");
+    let (_, unsupported) = eval_at(&d, "b", None, 0.0, 0.0);
+    assert_eq!(unsupported, ["studio_mix"]);
 }
 
 /// The compiler's operators always win: a library's node-graph `mix` does

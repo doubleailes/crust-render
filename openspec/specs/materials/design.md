@@ -867,7 +867,17 @@
     `crust_mtlx::Library` holds `<nodedef>`s and their `<nodegraph nodedef=…>`
     implementations: a document's own (`Doc::library`) and those under
     `PXR_MTLX_PLUGIN_SEARCH_PATHS` (`MaterialCache::library`, read once per
-    import, `materials::mtlx_library`). `Doc::expand` replaces each instance
+    import, `materials::mtlx_library`, each directory walked once by its
+    canonical path so a link back to an ancestor reads nothing twice). The
+    import keeps that `Arc` in its provenance (`StageFacts::mtlx_library`):
+    an in-place rebuild resolves against it rather than reading the files
+    again, which would also raise `mtlx.library_unreadable` with no prims and
+    so force a full re-import. An instance names its nodedef by category,
+    output type and, when it authors one, `version` (`Library::for_node`); an
+    inline shader whose `info:id` names a library nodedef carries that
+    nodedef's version. A category a library defines, but not for that type or
+    version, is reported and left unsupported rather than expanded with
+    another signature. `Doc::expand` replaces each instance
     with a copy of its graph whose nodes are renamed `instance/node` in the
     instance's scope; an `interfacename` input takes the instance's input as
     authored, else the nodedef default, else stays unauthored; every reference
@@ -875,8 +885,13 @@
     terminal (`Doc::find_node`) — is redirected to the graph output it selects,
     keeping that output's own `output=`. It runs in passes, so a graph that
     instantiates another custom node (a layering node built from several
-    instances of a blending node) expands in turn, cut at `MAX_DEPTH` (16) and
-    reported. Both ways MaterialX arrives go through it: `compile_with` for a
+    instances of a blending node) expands in turn. Each copy remembers the
+    nodedefs it was expanded through: a definition that reaches itself is a
+    cycle, refused at its first re-entry and reported once. A chain past
+    `MAX_DEPTH` (16), or an expansion past `MAX_EXPANDED_NODES` (262 144) in
+    all, is cut and reported too. **Trap:** the depth alone bounds nothing —
+    a graph holding k instances of the next definition grows as k to the
+    depth, 43 million nodes for k = 3 at 16. Both ways MaterialX arrives go through it: `compile_with` for a
     `.mtlx`, `mtlx_network::translate` for an inline network, whose shader ids
     are looked up in the library before `nodedef_category` parses them (a
     studio nodedef's name need not follow `ND_<category>_<type>`). **The compiler's operators

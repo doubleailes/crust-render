@@ -203,6 +203,7 @@ impl Rebuilding<'_> {
             self.layer,
             SubdivPolicy::new(self.prov.stage.subdiv_level),
             self.working,
+            self.prov.stage.mtlx_library.clone(),
         )
     }
 
@@ -780,4 +781,35 @@ pub(crate) fn prim_frames(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An in-place rebuild resolves against the node library the import
+    /// read, the very `Arc`: it reads no `.mtlx` file again, so it cannot
+    /// raise the import's `mtlx.library_unreadable` a second time.
+    #[test]
+    fn a_rebuild_reuses_the_imports_node_library() {
+        let mut library = crust_mtlx::Library::default();
+        library
+            .merge_text(r#"<materialx><nodedef name="ND_k" node="k"><output name="out" type="float" /></nodedef></materialx>"#)
+            .expect("library parses");
+        let mut prov = Provenance::default();
+        prov.stage.mtlx_library = Arc::new(library);
+        let rebuilding = Rebuilding {
+            prov: &prov,
+            layer: Path::new("unused.usda"),
+            path_str: "unused.usda",
+            working: crate::color::Space::LIN_REC709,
+            assets: &crate::NoAssets,
+            warnings: &[],
+        };
+        let caches = rebuilding.caches();
+        assert!(Arc::ptr_eq(
+            &caches.materials.library,
+            &prov.stage.mtlx_library
+        ));
+    }
 }

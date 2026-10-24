@@ -212,12 +212,18 @@ impl Builder<'_> {
             self.active.remove(&path);
             return None;
         };
-        let (category, type_name) = match self.library.nodedef(&id) {
-            Some(def) => (def.node.clone(), def.instance_type().to_string()),
+        // A library nodedef is named exactly, version included, so the
+        // expansion instantiates that one and not its category's default.
+        let (category, type_name, version) = match self.library.nodedef(&id) {
+            Some(def) => (
+                def.node.clone(),
+                def.instance_type().to_string(),
+                def.version.clone(),
+            ),
             None => {
                 let (category, nd_type) = nodedef_category(&id);
                 let type_name = node_type(&category, nd_type, prim);
-                (category, type_name)
+                (category, type_name, None)
             }
         };
 
@@ -239,7 +245,7 @@ impl Builder<'_> {
             type_name,
             inputs,
             graph: None,
-            version: None,
+            version,
             colorspace: None,
         });
         Some(path)
@@ -663,5 +669,50 @@ mod tests {
         // Text-valued types keep the XML parser's zero beside their text.
         assert_eq!(literal_value("linear", "string").map(|v| v.x()), Some(0.0));
         assert_eq!(literal_value("a.png", "filename").map(|v| v.x()), Some(0.0));
+    }
+
+    /// A shader whose `info:id` names a library nodedef expands that nodedef,
+    /// version included — not its category's default version.
+    #[test]
+    fn a_shader_naming_a_versioned_nodedef_expands_that_version() {
+        let mut library = Library::default();
+        library
+            .merge_text(
+                r#"<materialx>
+                     <nodedef name="ND_k_v1" node="k" version="1" isdefaultversion="true"><output name="out" type="float" /></nodedef>
+                     <nodegraph name="NG_k_v1" nodedef="ND_k_v1">
+                       <constant name="c" type="float"><input name="value" type="float" value="1" /></constant>
+                       <output name="out" type="float" nodename="c" />
+                     </nodegraph>
+                     <nodedef name="ND_k_v2" node="k" version="2"><output name="out" type="float" /></nodedef>
+                     <nodegraph name="NG_k_v2" nodedef="ND_k_v2">
+                       <constant name="c" type="float"><input name="value" type="float" value="2" /></constant>
+                       <output name="out" type="float" nodename="c" />
+                     </nodegraph>
+                   </materialx>"#,
+            )
+            .expect("library parses");
+        let dir = std::env::temp_dir().join("crust_mtlx_network_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("versioned.usda");
+        std::fs::write(
+            &path,
+            "#usda 1.0\ndef Shader \"S\"\n{\n    uniform token info:id = \"ND_k_v2\"\n    float outputs:out\n}\n",
+        )
+        .expect("write stage");
+        let stage = super::super::stage_builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        let prim = super::super::prim_at(&stage, openusd::sdf::path("/S").unwrap());
+        let net = translate(&stage, &path, &library, Some(&prim), None);
+        assert!(net.doc.reported.is_empty(), "{:?}", net.doc.reported);
+        let c = net
+            .doc
+            .find("", "/S/c")
+            .expect("the version 2 graph's node");
+        let Some(Source::Value(v)) = c.input("value").map(|i| &i.source) else {
+            panic!("{:?}", c.inputs)
+        };
+        assert_eq!(v.x(), 2.0);
     }
 }

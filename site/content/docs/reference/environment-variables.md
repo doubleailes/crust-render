@@ -466,7 +466,10 @@ OCIO=/studio/config.ocio crust render -i scene.usda --working-space acescg
 USD's own variable for custom MaterialX node definitions, as its `usdMtlx` plugin reads
 it: a list of directories, separated by `;` on Windows and `:` elsewhere. Crust Render
 reads every `.mtlx` file under them, subdirectories included, once per import, and
-keeps each file's `<nodedef>`s and the `<nodegraph>`s that implement them. A path or
+keeps each file's `<nodedef>`s and the `<nodegraph>`s that implement them. A directory
+reached twice, through a link or two entries naming it, is read once. An edit in a
+[Claude Desktop session](@/docs/help/claude-desktop.md) reuses the library its import
+read: change a library file, and reopen the session to see it. A path or
 file that can't be read logs a
 [`mtlx.library_unreadable`](@/docs/reference/warnings.md#materials) warning naming it,
 and the rest still loads. Unset, nothing is read.
