@@ -402,6 +402,21 @@ pub trait Material: Send + Sync {
         self.emitted_directional(cos_theta_o)
     }
 
+    /// The emission when it is one constant over the whole surface and
+    /// toward every viewer: `Some(c)` only when [`Material::emitted_at`]
+    /// returns exactly `c`, bit for bit, at every hit and every angle (pinned
+    /// for every material by `crust-core/tests/resolve.rs`). `None`, the
+    /// default, when it can vary or the material cannot tell — a textured or
+    /// primvar-driven glow, or one faded by a coat or a fuzz.
+    ///
+    /// Stricter than [`Material::emitted`], which a coated `OpenPBR` answers
+    /// with its uncoated emission. What a `MeshLightAPI` mesh is lit by under
+    /// `materialGlowTintsLight`: only a uniform glow can be a light's one
+    /// radiance.
+    fn uniform_emission(&self) -> Option<Vec3A> {
+        None
+    }
+
     /// Whether this material can emit anywhere — known when it is built.
     /// Defaults to a non-zero [`Material::emitted`]; a material that emits
     /// only through [`Material::emitted_at`] must override it. An in-place

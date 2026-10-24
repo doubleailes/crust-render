@@ -276,6 +276,15 @@ other. The pairs:
   reads the receiver's normal and opacity as well as its position, so
   `PrevBounce` carries the whole `Receiver` NEE picked from; build a receiver
   anywhere else and the two halves disagree.
+  The light density at a point also takes the primitive it lies on
+  (`Light::pdf_at_point(from, point, prim)`, `LightShape::normal_at(p, prim)`):
+  a mesh light's normal is its triangle's, and a shared edge names two. NEE
+  passes the triangle `sample_point_on` drew, the bounce side the hit's
+  `prim_id` (`bounce_emission_weight_at`, a `Crossing`), `found_along` the one
+  `ShapeHits` carries; the analytic shapes ignore it. Pass a different
+  primitive on one side and a mesh light's two halves weigh different cosines.
+  A mesh light's emission is its geometry's `MeshLightMaterial`, over the same
+  `Arc<Emissive>` its `AreaLight` holds, never the bound material's own glow.
 - **Hidden light sources.** A source the camera does not see is invisible to
   shadow rays (`light_ray_mask`) *and* crossed by bounce rays, which collect its
   emission and continue (`World::is_transparent_emitter`, `pass_cutouts`,

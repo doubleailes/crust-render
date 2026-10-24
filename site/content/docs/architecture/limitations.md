@@ -150,15 +150,23 @@ render.
 
 ## Lights
 
-- **Not supported:** mesh lights, portal lights, light filters, and shaping on distant and
-  dome lights.
+- **Not supported:** portal lights, `GeometryLight`, `VolumeLightAPI`, light filters, and
+  shaping on distant and dome lights.
 - **Diffuse and specular multipliers are averaged in the lobe AOVs.** The part of a light
   with `inputs:diffuse` or `inputs:specular` that a surface receives through a bounce is
   shared between its lobes' AOVs at the multipliers' average for that bounce
   ([details](@/docs/usd/lights.md#diffuse-and-specular-multipliers)). The beauty is exact.
-- **Emissive surfaces aren't sampled as lights.** An emissive MaterialX surface, emissive
-  curves, instances or volumes are found only by rays that hit them. Use UsdLux lights for
-  a scene's main light sources.
+- **Emissive surfaces aren't sampled as lights unless they ask.** An emissive mesh is
+  found only by rays that hit it unless it applies
+  [`MeshLightAPI`](@/docs/usd/lights.md#mesh-lights); emissive curves, instances and
+  volumes are always found that way. Use mesh lights or UsdLux lights for a scene's main
+  light sources.
+- **Mesh lights are sampled by area, as one light.** A large card close to what it lights
+  is noisier than an equal `RectLight`; the light tree ranks a whole mesh, not its parts.
+  Only a flat, uncoated glow can be a light under the default
+  `light:materialSyncMode`; a cutout, instanced or moving mesh cannot be one. Crust reads
+  `light:materialSyncMode` as one radiance for every ray rather than the schema's split
+  ([details](@/docs/usd/lights.md#what-a-mesh-light-emits)).
 - **The light tree can't see walls.** `tree` light selection ranks lights by power,
   distance, orientation and the surface's horizon, not by whether anything is in the way;
   `learned` is the visibility-aware selection. It treats the receiving surface as diffuse,

@@ -35,6 +35,9 @@ pub const FIREFLY_SHARE: f64 = 0.20;
 pub const MIN_REACH: f64 = 0.90;
 pub const REACH_Z: f64 = 4.0;
 
+/// The most emissive prims `unlit_emitters` names.
+pub const UNLIT_NAMED: usize = 5;
+
 /// Why no setting fixes energy only BSDF sampling finds.
 const NO_SETTING_REACHES: &str = "no crust setting makes these paths reachable by light \
      sampling; the indirect clamp (--indirect-clamp, crust:indirectClamp) trades this energy \
@@ -55,6 +58,9 @@ pub struct Facts {
     /// Mean luminance of emission from emitters outside the light list
     /// (`C.*O`) in the baseline.
     pub unlit_emission: Option<f64>,
+    /// The emissive prims outside the light list ([`unlit_prims`]), each
+    /// with the `light.mesh_light_*` code that refused it as a mesh light.
+    pub unlit_prims: Vec<(String, Option<&'static str>)>,
     pub guiding: bool,
     /// Whether any indirect, glossy or volume row dominates the noise.
     pub indirect_dominant: Option<bool>,
@@ -91,12 +97,52 @@ impl Facts {
             auto_tx,
             textures_without_tx,
             guiding: scene.settings.guiding(),
+            unlit_prims: unlit_prims(scene),
             peak_mem_bytes: import_peak,
             machine_mem_bytes: crate::machine_memory_bytes(),
             strategy: scene.settings.sampling_strategy(),
             ..Facts::default()
         }
     }
+}
+
+/// The prims whose geometry emits but is no light-list entry, so only BSDF
+/// sampling finds it: by prim path, in geometry order, each once, then every
+/// prim a `light.mesh_light_*` warning refused that the geometry does not
+/// name already (a prototype's mesh, whose geometry is its instance's). Each
+/// carries the code that refused it as a mesh light, if one did. Empty for a
+/// scene not imported from a stage, which has no prim paths.
+pub fn unlit_prims(scene: &crate::Scene) -> Vec<(String, Option<&'static str>)> {
+    let Some(prov) = &scene.provenance else {
+        return Vec::new();
+    };
+    let refused: Vec<(&str, &'static str)> = scene
+        .warnings
+        .iter()
+        .filter(|w| w.code.as_str().starts_with("light.mesh_light_"))
+        .flat_map(|w| w.prims.iter().map(move |p| (p.as_str(), w.code.as_str())))
+        .collect();
+    let code_of = |path: &str| refused.iter().find(|(p, _)| *p == path).map(|(_, c)| *c);
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, Option<&'static str>)> = Vec::new();
+    for geom_id in 0..scene.world.count() as u32 {
+        if !scene.world.material(geom_id).may_emit()
+            || scene.lights.index_of_geom(geom_id).is_some()
+        {
+            continue;
+        }
+        if let Some(path) = prov.prim_of_geometry(geom_id)
+            && seen.insert(path)
+        {
+            out.push((path.to_owned(), code_of(path)));
+        }
+    }
+    for (path, code) in refused {
+        if seen.insert(path) {
+            out.push((path.to_owned(), Some(code)));
+        }
+    }
+    out
 }
 
 type Check = fn(&Facts) -> Option<Finding>;
@@ -213,23 +259,52 @@ fn ptex_cache_hit_rate(f: &Facts) -> Option<Finding> {
 }
 
 /// Emissive geometry outside the light list is reached only by BSDF
-/// sampling, never by next-event estimation.
+/// sampling, never by next-event estimation. The remedy is an authoring one,
+/// not a setting: `MeshLightAPI` on the emitting mesh, so the action stays
+/// `none` and its reason names the API and the prims.
 fn unlit_emitters(f: &Facts) -> Option<Finding> {
     let lum = f.unlit_emission?;
     if lum.is_nan() || lum <= 0.0 {
         return None;
     }
+    let named: Vec<String> = f
+        .unlit_prims
+        .iter()
+        .take(UNLIT_NAMED)
+        .map(|(path, code)| match code {
+            Some(c) => format!("{path} (refused as a mesh light: {c})"),
+            None => path.clone(),
+        })
+        .collect();
+    let more = f.unlit_prims.len().saturating_sub(UNLIT_NAMED);
+    let prims = if named.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ": {}{}",
+            named.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        )
+    };
     finding(
         "unlit_emitters",
         FindingKind::Noise,
         "emissive geometry outside the light list lights the scene: only BSDF sampling can \
          find it, never a shadow ray"
             .into(),
-        Evidence::new().with("mean_luminance", lum),
+        Evidence::new()
+            .with("mean_luminance", lum)
+            .with("prims", f.unlit_prims.len() as f64),
         Action::None {
-            none: "crust has no setting that makes emissive geometry a light \
-                   (MeshLightAPI is not supported); a UsdLux light authored in its place is"
-                .into(),
+            none: format!(
+                "no render setting makes emissive geometry a light; applying UsdLuxMeshLightAPI \
+                 to an emissive mesh does (it is then sampled like a UsdLux light), as does a \
+                 UsdLux light authored in its place{prims}"
+            ),
         },
     )
 }
@@ -484,6 +559,59 @@ mod tests {
         );
     }
 
+    fn unlit_reason(f: &Facts) -> (String, f64) {
+        let found = run(f);
+        let finding = found
+            .iter()
+            .find(|x| x.id == "unlit_emitters")
+            .expect("found");
+        let Action::None { none } = &finding.action else {
+            panic!("no action");
+        };
+        (none.clone(), finding.evidence.get("prims").expect("prims"))
+    }
+
+    /// "An emissive card without the API": one prim counted, and the reason
+    /// names it and `MeshLightAPI`.
+    #[test]
+    fn unlit_emitters_name_the_prims_and_the_api() {
+        let (reason, prims) = unlit_reason(&Facts {
+            unlit_emission: Some(0.3),
+            unlit_prims: vec![("/set/card".into(), None)],
+            ..Facts::default()
+        });
+        assert_eq!(prims, 1.0);
+        assert!(reason.contains("/set/card"), "{reason}");
+        assert!(reason.contains("MeshLightAPI"), "{reason}");
+    }
+
+    /// "A refused mesh light": named with the code that refused it; at most
+    /// five prims are named, the rest counted.
+    #[test]
+    fn unlit_emitters_name_a_refused_mesh_light_with_its_code() {
+        let mut unlit_prims: Vec<(String, Option<&'static str>)> = vec![(
+            "/set/sign".into(),
+            Some("light.mesh_light_varying_emission"),
+        )];
+        unlit_prims.extend((0..6).map(|i| (format!("/set/lamp{i}"), None)));
+        let (reason, prims) = unlit_reason(&Facts {
+            unlit_emission: Some(0.3),
+            unlit_prims,
+            ..Facts::default()
+        });
+        assert_eq!(prims, 7.0);
+        assert!(
+            reason
+                .contains("/set/sign (refused as a mesh light: light.mesh_light_varying_emission)"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("/set/lamp3") && !reason.contains("/set/lamp4"),
+            "{reason}"
+        );
+        assert!(reason.contains("and 2 more"), "{reason}");
+    }
+
     #[test]
     fn many_lights_picked_uniformly_suggest_power() {
         let f = Facts {
@@ -690,6 +818,7 @@ mod tests {
             texture_lookups: Some((10, 1)),
             ptex_lookups: Some((10, 1)),
             unlit_emission: Some(1.0),
+            unlit_prims: vec![("/set/card".into(), None)],
             guiding: true,
             indirect_dominant: Some(false),
             peak_mem_bytes: Some(10),

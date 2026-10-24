@@ -791,8 +791,9 @@ paths, for direct-light variance falling about as 1/N.
     lets an area-light renderer ignore).
   The source geometry is camera-invisible by default (`light_ray_mask`), and then a
   transparent emitter — see the `crust:rayMask` bullet above for the opt-ins. Sample: `samples/light_visibility.usda`.
-  `PortalLight`, `GeometryLight` / `MeshLightAPI`, `VolumeLightAPI` and light filters
-  are not read. Light and shadow linking are, as below.
+  `MeshLightAPI` on a `Mesh` is read ("Mesh lights" below); `PortalLight`,
+  `GeometryLight`, `VolumeLightAPI` and light filters are not. Light and shadow linking
+  are, as below.
 - **Camera visibility of lights at infinity.** A dome or distant light is visible to
   camera rays by default. `crust:light:cameraVisible`, else
   `primvars:ri:attributes:visibility:camera`, hides it (`infinite_light_escape_mask`),
@@ -1009,6 +1010,114 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
   `surface_visibility`, so the shadow side is consistent; only the placement of its
   receivers differs, which steers selection and moves no expectation.
 
+## Mesh lights
+
+A `UsdGeomMesh` with `UsdLuxMeshLightAPI` applied is a light-list entry: NEE samples
+its triangles and a bounce that hits it is MIS-weighted against that, like every other
+area light. It is opt-in, as Arnold's `mesh_light` and RenderMan's `PxrMeshLight` are:
+emissive geometry without the API keeps its BSDF-only emission, and there is no
+setting that turns every emissive mesh into a light. Typhoon / hdEmbree does not read
+the API (its `lightSamplerCommon.h` records only the intent of a shared emitter
+sampler), so there is no reference implementation; the decisions below are crust's.
+Sample: `samples/mesh_light.usda` (and its API-less twin, `mesh_light_no_api.usda`).
+
+- **One `AreaShape::Mesh` per mesh.** `MeshShape` (`light/mesh.rs`) holds the world-space
+  triangles of one placement (36 bytes a triangle) and the CDF of their areas (4 bytes
+  a triangle). `sample_point_on(u, v)` picks a triangle by `u`, rescales `u` within
+  its share so one pair of numbers drives both choices, and draws a uniform point on
+  it (the square-root map). With a uniform radiance, picking by area is picking by
+  power, and the area density is `1 / A` everywhere, so `inv_pdf_area` keeps the
+  default `area()`. `solid_angle_sampler` is `None`, and the existing `AreaLight` code
+  handles NEE, the bounce density, the refusal of an edge-on point and `power()`
+  unchanged; `kind()` is `"mesh"`. *Rejected:* one light per triangle (pbrt-v4), which
+  breaks `by_geom`'s one geometry to one light, multiplies the light list, the power
+  table, the tree and `learned`'s grid by the triangle count, and dilutes the
+  defensive shares; a separate `Light` implementation, which would duplicate
+  `sample_li` / `pdf_at_point` / `bounds`.
+- **The triangle reaches the density through the hit's `prim_id`.** A mesh has no normal
+  at a bare point, and a point on a shared edge names two triangles. So
+  `Light::pdf_at_point` and `LightShape::normal_at` take the primitive the point lies
+  on: the bounce side passes `WorldHit::prim_id` (`bounce_emission_weight_at`, and a
+  hidden-light `Crossing`), NEE the triangle `sample_point_on` drew, and
+  `ShapeHits` carries one per hit for `found_along`. `MeshShape::normal_at` recomputes
+  that triangle's geometric normal from its own table, so both halves compute one
+  cosine; the analytic shapes ignore the argument. The triangles are copied in the
+  kernel's order — a baked placement's world vertices are the ones `flush_meshes`
+  bakes (`transform_point3a` of the same local vertices), an instanced one's are its
+  local triangles through its transform — so `prim_id` indexes the light's table.
+  Adding the argument changed no image and no instruction of the render (callgrind,
+  `cornellbox -s 2`: every tracer function's count identical; the whole run's
+  4,278,949,105 → 4,279,039,068, the difference in the import's hashing and rayon's
+  scheduling). NEE on a mesh goes through its own `AreaLight::sample_mesh`, out of
+  line: threading the triangle through the analytic shapes' `sample_li` (a
+  `(point, prim)` from the shape, a fourth dispatch arm) cost `veach_mis`, which has
+  no mesh light, 2.3% of `sample_li`'s instructions; split, what is left is the one
+  variant test, +1.0% of `sample_li` and +0.047% of the run (callgrind, `-s 2`).
+  *Rejected:* passing the hit's geometric normal, which the kernel and the light
+  compute by different code; looking the triangle up from the point, a spatial query
+  per bounce hit and ambiguous on edges.
+- **One radiance for every ray, through a wrapper material.** The mesh's geometry is
+  bound to `MeshLightMaterial { inner, emission }` (`material/mesh_light.rs`), which
+  forwards everything to the bound material but emission: `emitted`,
+  `emitted_directional`, `emitted_at` and the `Resolution`'s emission all answer the
+  light's `Emissive`, the same `Arc` the `AreaLight` holds, so camera, bounce and NEE
+  read `Emissive::radiance_toward`. An `inner` that is a plain `OpenPBR` is resolved
+  to its parameters as they stand (`ResolvedOpenPBR::of_plain`) instead of queried in
+  place, where its own emission would answer; the `resolve.rs` pin covers the wrapper
+  over six kinds of material. Under `noMaterialResponse` the geometry is bound to the
+  `Emissive` itself, as a UsdLux light's is. It is two-sided (`Emissive::new`), as
+  material emission is. The wrapper costs one virtual call per hit on mesh-light
+  geometry only, and is per placement: a material shared with prims that are not
+  lights is not wrapped there.
+- **`light:materialSyncMode`, read as one radiance.** The schema has camera and other
+  rays see the material's glow and "light rays" the light's inputs. Read literally,
+  NEE and the bounce would see two radiances for one emitter, and the image would
+  depend on the MIS weights. Crust reads each mode as one radiance seen alike by every
+  ray, with `L = color · 2^exposure · intensity` (times the blackbody under
+  `enableColorTemperature`, divided by the world area under `normalize`):
+  `materialGlowTintsLight` (the fallback) is `glow · L`, where glow is
+  `Material::uniform_emission` (materials design record); `independent` is `L`, the
+  material still reflecting; `noMaterialResponse` is `L` and no surface response.
+  With the inputs unauthored `L = 1`, so applying the API to an emissive mesh changes
+  its noise, not its brightness. An unknown token is refused (`light.unknown_token`)
+  and read as the fallback. *Comparison:* RenderMan's `PxrMeshLight` follows the
+  schema's split.
+- **What cannot be a mesh light** is refused with a `skipped` warning and keeps
+  BSDF-only emission: a glow that is not uniform under `materialGlowTintsLight`
+  (`light.mesh_light_varying_emission`: textured, primvar-driven, coated or fuzzed); a
+  cutout material (`light.mesh_light_cutout`); a mesh inside a native instance's or a
+  `PointInstancer`'s prototype (`light.mesh_light_instanced`), whose hits report a
+  forwarded id that does not name the placement; a mesh that moves over the shutter
+  (`light.mesh_light_moving`); the API on a prim that is not a `Mesh`
+  (`light.mesh_light_not_a_mesh`); and a zero radiance (`light.mesh_light_no_emission`).
+  A mesh whose triangles enclose no area is `light.degenerate_shape`.
+- **Built on the traversal, after the placement.** `mesh_light::plan` reads the inputs
+  and the refusals before the mesh is placed; `place_mesh_source` then hands back the
+  placement's `geom_id` and its world triangles (the interned slot's local triangles,
+  or a committed slot's through `Scene::triangle_vertices`, under the placement's
+  transform — subdivision and displacement already applied), and `mesh_light::emit`
+  builds the shape, divides by its area under `normalize`, rebinds the slot's material
+  (`WorldBuilder::set_material`) and adds the light. The change's design placed this
+  at `flush_meshes`; it is on the traversal instead because the light is then added
+  while its prim is the one being visited, as every UsdLux light is, so its linking
+  collections, its render-pass membership and its live-edit origin follow without a
+  second path. The triangles are the same either way.
+- **Visibility: solid geometry, with the light's camera rules.** A mesh light is
+  visible to camera rays and solid by default, being scene geometry. `crust:rayMask`
+  decides outright; otherwise `crust:light:cameraVisible`, then RenderMan's
+  `primvars:ri:attributes:visibility:camera`, can hide it from the camera only
+  (`mesh_light_ray_mask`). It is never a transparent emitter — that path intersects
+  the analytic shape — so a hidden mesh light still occludes, as a masked UsdLux
+  light does.
+- **Light tree bounds.** `MeshShape::extent()` is the triangles' world box with no
+  single normal, so a two-sided mesh is bounded with `θo = π` (as a sphere is) and its
+  flux is `Emissive::peak_flux(area)`, doubled for two sides. A flat card is bounded
+  no tighter than a sphere would be; per-triangle leaves are the gap below.
+- **Live edits.** Applying or removing the API, or editing a mesh light's inputs or
+  its material, falls back to the full re-import: `emit_light` does not rebuild a mesh,
+  and the slot's `MeshLight` kind fails the material `Signature` check, so the
+  "edit in place ↔ re-import" pair is not widened.
+
 ## Known gaps: light sampling
 
 - **Light sampling is the main source of 16 spp noise**, and `docs/light_sampling.md`
@@ -1072,8 +1181,23 @@ events before it, and `C.*[LO]` stays the beauty bit for bit.
 
 ## Known gaps: lighting
 
-- **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
-  light filters and `ShadowAPI` are not read. Light and shadow linking are read, with
+- **Mesh lights, phase 1.** Triangles are sampled by area, not by the solid angle
+  they subtend (Arvo 1995's spherical triangles are the follow-up), so a large card
+  close to a receiver is noisier than an equal `RectLight`, which samples its
+  spherical rectangle: 7.2× at equal time with a 1 × 1 quad two units from the floor,
+  26× at a quarter (`docs/light_sampling.md` §3.16, which also has what the API buys:
+  5% noise at ≈16 spp instead of ≈750 on `samples/mesh_light.usda`). A mesh is one light-list entry under every selection, bounded
+  as a whole: the tree ranks a flat card by a loose box, and a per-triangle power
+  table or triangles as tree leaves would tighten it. Only a uniform glow can be a
+  light under `materialGlowTintsLight` (a textured one needs the material evaluated
+  at the NEE sample: a synthetic hit with interpolated primvars). Cutouts, instanced
+  and moving meshes, `GeometryLight`, `VolumeLightAPI` and emissive curves are not
+  lights. `light:materialSyncMode` is one radiance for every ray, not the schema's
+  split. The light copies its triangles (40 bytes each) beside the kernel's, which is
+  nothing for a card and a second copy for a dense mesh light. A shadow-linked mesh
+  light's bounce-side estimate (`found_along`) scans its triangles per bounce.
+- **Lighting caveats.** `GeometryLight`, `PortalLight`, light filters and `ShadowAPI`
+  are not read. Light and shadow linking are read, with
   these gaps: membership is judged on the prim that brought the geometry in, so a
   collection target inside a native instance's prototype, or one `PointInstancer`
   instance, cannot be told apart from its siblings (warned per collection);

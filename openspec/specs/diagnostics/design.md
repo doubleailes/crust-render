@@ -248,6 +248,19 @@ are (the `aovs` spec's partition with glossy and singular reflection merged;
 every `[LO]` row already ends on `O` too. Rows report their own relative error
 and their error against the beauty; never shares of the beauty's variance.
 
+The `unlit_emitters` *finding* fires on that row's luminance and keeps the action
+`none`: no render setting makes emissive geometry a light. The remedy is an
+authoring one, and the reason says which: `UsdLuxMeshLightAPI` on the emitting mesh
+(lighting design record, "Mesh lights"), or a UsdLux light in its place. It names up
+to five of the prims (`UNLIT_NAMED`), read off the scene by `checks::unlit_prims`:
+every emitting geometry with no light-list entry, by prim path through the import's
+`Provenance`, then every prim a `light.mesh_light_*` warning refused that the geometry
+does not name (a prototype's mesh); each refused one carries the code that refused it,
+so a mesh that applies the API and is still unlit says why. Its evidence gains
+`prims`, how many there are. The report format is unchanged — evidence is a list of
+named numbers. With the API applied the card is a light, `C.*O` reads nothing of it,
+and the finding is gone.
+
 Light groups: one `C.*<L.'tag'>` per authored `crust:light:lpeTag`; with none
 and at most 8 lights, the diagnostic labels its own copy of the light list by
 prim path. `LightList` now keeps each light's name (`set_name` / `name`, set by

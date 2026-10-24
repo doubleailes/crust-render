@@ -4,8 +4,8 @@
 //! encoding with its NEE-only rule.
 
 use crust_core::{
-    Buffer, EVERY_CLASS, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayMask, Renderer, Scene,
-    Vec3A,
+    Buffer, EVERY_CLASS, Light, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayMask, Renderer,
+    Scene, Vec3A,
 };
 use std::path::PathBuf;
 
@@ -950,4 +950,46 @@ fn a_hidden_light_source_is_no_caster_under_shadow_linking() {
         blocked(30.0, free),
         "the excluded occluder still blocks others"
     );
+}
+
+/// A mesh light honours the light controls (`lighting` spec, "Mesh lights
+/// honour the light controls"): its `collection:lightLink` excludes a
+/// sphere, which then gets nothing from it while its own surface is still
+/// lit, and its `inputs:specular` / `inputs:diffuse` are its lobe gains.
+#[test]
+fn a_mesh_light_is_linked_and_gained_like_any_light() {
+    let body = r#"
+    def Material "Glow"
+    {
+        token outputs:surface.connect = </World/Glow/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "crust:openpbr"
+            float inputs:emissionLuminance = 2
+            token outputs:surface
+        }
+    }
+    def Mesh "Card" (prepend apiSchemas = ["MaterialBindingAPI", "MeshLightAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-20, 20, -1), (20, 20, -1), (20, 20, 1), (-20, 20, 1)]
+        rel material:binding = </World/Glow>
+        float inputs:specular = 0
+        prepend rel collection:lightLink:excludes = </World/Hero>
+    }
+"#
+    .to_owned()
+        + &sphere("Hero", 0.0, "");
+    let scene = load("mesh_light_linked", &body, "");
+    assert_eq!(scene.lights.count(), 1);
+    let card = scene.lights.light(0).geom_id().expect("the card");
+    let hero = scene.world.light_class(geom_at(&scene, 0.0, 0.0));
+    assert!(!scene.lights.illuminates(0, hero), "the hero is excluded");
+    assert!(
+        scene.lights.illuminates(0, scene.world.light_class(card)),
+        "what the collection keeps is lit"
+    );
+    let gains = scene.lights.lobe_gains(0);
+    assert_eq!((gains.diffuse, gains.specular), (1.0, 0.0));
 }

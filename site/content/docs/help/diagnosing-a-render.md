@@ -48,7 +48,8 @@ The stage is imported once. Then, until the budget is spent:
    spent in each 16×16 tile, what the clamp would remove, path statistics and cache hit
    rates.
 2. **Findings**, from the import, the baseline and tier 3: textures without a `.tx`, a
-   cache that misses, emissive geometry no shadow ray can find, many lights picked
+   cache that misses, emissive geometry no shadow ray can find (`unlit_emitters`, which
+   names the prims and the remedy below), many lights picked
    uniformly, guiding on where direct light dominates, memory near the machine's — and
    what makes the picture fragile: a clamp that removes a visible share of the image, a
    few pixels holding much of the energy, light that only BSDF sampling finds, a
@@ -306,6 +307,14 @@ list still loads as `--baseline`, with `adaptive` read as `null`.
 | `transmission` | `C<T.>.*[LO]` | first goes through a surface |
 | `volume` | `C<V.>.*[LO]` | first scatters in a volume |
 | `unlit_emitters` | `C.*O` | ends on emissive geometry that is not a light — overlaps the rows above |
+
+When `unlit_emitters` lights the scene, the finding of the same name lists up to five
+of the emissive prims outside the light list (`prims` counts them all). No render
+setting turns them into lights: apply
+[`MeshLightAPI`](@/docs/usd/lights.md#mesh-lights) to an emitting mesh so light sampling
+finds it, or author a UsdLux light in its place. A mesh that applies `MeshLightAPI` but
+could not be made a light is listed with the warning that says why (for example
+`light.mesh_light_varying_emission` for a textured glow).
 
 The first seven rows add up to the image. Each row gives its **own** relative error
 (`var / mean²`) and its error against the image (`var / image²`), never a share of the

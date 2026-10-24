@@ -461,6 +461,84 @@ impl Closures {
         Some(self.push(Closure::Mix { fg, bg, mix }))
     }
 
+    /// The emitted radiance at the evaluated `slots`: the EDF terms summed,
+    /// each `weight · color` per channel.
+    ///
+    /// Neither factor is clamped above — `multiply(uniform_edf, 100)` is how
+    /// a document authors a bright emitter — but each is sanitised before the
+    /// product, per channel: a non-finite or negative channel contributes
+    /// nothing, and clamping the product instead would let two negative
+    /// channels multiply into positive light. The weight is read with
+    /// `Val::rgb`, because a `multiply` by a `color3` tints an emitter per
+    /// channel; taking lane 0 would turn `(0, 0.6, 0.9)` into black.
+    ///
+    /// A `generalized_schlick_edf` over a term scales it by
+    /// `mix(color0, color90, (1 − cosθ)^exponent)` toward the viewer at
+    /// `cos_theta_o` — how OpenPBR and Standard Surface fade emission seen
+    /// through their coat's Fresnel. Where `color0` and `color90` are equal
+    /// the factor is `color0` itself, taken as is: the `mix` would round to
+    /// a value that depends on the angle by an ulp, and
+    /// [`Closures::constant_emission`] promises the same bits at every angle.
+    pub fn emission(&self, slots: &[Val], cos_theta_o: f32) -> Vec3A {
+        let x = (1.0 - cos_theta_o).clamp(0.0, 1.0);
+        self.emission
+            .iter()
+            .map(|e| {
+                let mut r =
+                    clean(slots[e.weight as usize].rgb()) * clean(slots[e.color as usize].rgb());
+                if let Some(fo) = e.falloff {
+                    let c0 = clean(slots[fo.color0 as usize].rgb());
+                    let c90 = clean(slots[fo.color90 as usize].rgb());
+                    if c0 == c90 {
+                        r *= c0;
+                    } else {
+                        let k = slots[fo.exponent as usize].x().max(0.0);
+                        r *= c0.lerp(c90, x.powf(k));
+                    }
+                }
+                r
+            })
+            .sum()
+    }
+
+    /// The emission as a compile-time constant: what [`Closures::emission`]
+    /// gives at every shading point and every angle, bit for bit, or `None`
+    /// when it can vary. Zero for a surface that emits nothing.
+    ///
+    /// Each term's `weight` and `color` must fold ([`Compiler::fold`]: no
+    /// texture, primvar, curve property or shading-point input), and its
+    /// `generalized_schlick_edf`, when it has one, must fold to equal `color0`
+    /// and `color90` — a neutral falloff, up to a tint. The folded values are
+    /// then run through [`Closures::emission`] itself, so the sanitising and
+    /// the order of the sum are the runtime's. `fold` evaluates with the
+    /// interpreter's own operators, and the optimiser and the JIT keep every
+    /// slot's bits, so the constant is what a hit computes.
+    ///
+    /// Computed on the program as compiled, before [`crate::Compiled::optimize`]
+    /// renumbers its slots.
+    pub fn constant_emission(&self, c: &Compiler<'_>) -> Option<[f32; 3]> {
+        let mut slots = vec![Val::ZERO; c.program.len()];
+        let mut fold = |slot: Slot| -> Option<()> {
+            slots[slot as usize] = c.fold(slot)?;
+            Some(())
+        };
+        for e in &self.emission {
+            fold(e.weight)?;
+            fold(e.color)?;
+            if let Some(fo) = e.falloff {
+                fold(fo.color0)?;
+                fold(fo.color90)?;
+            }
+        }
+        // Compared as `emission` compares them, sanitised.
+        let neutral = self.emission.iter().all(|e| {
+            e.falloff.is_none_or(|fo| {
+                clean(slots[fo.color0 as usize].rgb()) == clean(slots[fo.color90 as usize].rgb())
+            })
+        });
+        neutral.then(|| self.emission(&slots, 1.0).to_array())
+    }
+
     /// Number of BSDF leaves reachable from the root — what a shading point
     /// has to hold. The arena may also carry leaves a builder made and then
     /// pruned the branch of; those are never visited.
@@ -587,6 +665,13 @@ impl Closures {
             Closure::Empty => {}
         }
     }
+}
+
+/// An emission factor sanitised per channel: a non-finite or negative
+/// channel is 0 ([`Closures::emission`]).
+fn clean(v: Vec3A) -> Vec3A {
+    let f = |x: f32| if x.is_finite() { x.max(0.0) } else { 0.0 };
+    Vec3A::new(f(v.x), f(v.y), f(v.z))
 }
 
 /// Which closure tree is being walked.

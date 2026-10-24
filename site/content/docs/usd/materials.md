@@ -384,7 +384,8 @@ seen on the back of a surface that is not thin-walled, as cloth usually is.
 
 The surface emits `emissionColor × emissionLuminance`, in the same linear units as the
 image. An emissive surface is only found by rays that hit it, not sampled like a light,
-so use a UsdLux light for a scene's main light sources.
+unless its mesh applies [`MeshLightAPI`](@/docs/usd/lights.md#mesh-lights). Use that, or a
+UsdLux light, for a scene's main light sources.
 
 ### Geometry
 

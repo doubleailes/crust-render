@@ -530,3 +530,39 @@ def Scope "Render"
         [("/Render/b", Some("/Render/settings")), ("/Render/a", None)]
     );
 }
+
+/// A `Mesh` applying `MeshLightAPI` is listed as a light of kind `mesh`, with
+/// its `LightAPI` inputs; a mesh without the API is not.
+#[test]
+fn a_mesh_light_is_listed_with_kind_mesh() {
+    let path = stage(
+        "mesh_light.usda",
+        r#"#usda 1.0
+def Xform "World"
+{
+    def Mesh "Card" (prepend apiSchemas = ["MeshLightAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        float inputs:intensity = 5
+    }
+    def Mesh "Plain"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
+}
+"#,
+    );
+    let listed = lights(&path, None);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].path, "/World/Card");
+    assert_eq!(listed[0].kind, "mesh");
+    assert_eq!(listed[0].intensity, 5.0);
+    assert_eq!(
+        Scene::list_usd(&path, ListKind::Light).expect("lists"),
+        ["/World/Card"]
+    );
+}

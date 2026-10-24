@@ -33,7 +33,7 @@ use super::attrs::{
 use super::{ImportCaches, ImportCtx};
 
 /// The `LightAPI` quantities every UsdLux light shares.
-struct LuxParams {
+pub(super) struct LuxParams {
     /// `L_Color` in the spec's notation, in nits:
     /// `intensity · 2^exposure · color`, times the colour temperature's
     /// blackbody when `enableColorTemperature` is on. Before `normalize`.
@@ -102,7 +102,7 @@ pub(super) fn light_inputs(prim: &Prim, light: &LightAPI) -> LightInputs {
 }
 
 /// Reads the shared `LightAPI` inputs.
-fn lux_params(prim: &Prim, light: &LightAPI, working: Space) -> LuxParams {
+pub(super) fn lux_params(prim: &Prim, light: &LightAPI, working: Space) -> LuxParams {
     let LightInputs {
         intensity,
         exposure,
@@ -903,7 +903,7 @@ pub(super) fn emit_dome_light(
 /// — the label a light group `<L.'tag'>` selects. Other renderers' tag
 /// attributes are not read yet: their exact names are still to be checked
 /// against real exports.
-fn tag_last(lights: &mut LightList, prim: &Prim, gains: LobeGains) {
+pub(super) fn tag_last(lights: &mut LightList, prim: &Prim, gains: LobeGains) {
     let index = lights.count() - 1;
     lights.set_name(index, &prim.path().to_string());
     if gains != LobeGains::ONE {

@@ -180,6 +180,11 @@ pub struct Compiled {
     ///
     /// [`roots`]: Compiled::roots
     pub displacement: Option<DisplacementRoots>,
+    /// The surface's emission when it is the same at every shading point and
+    /// toward every viewer ([`Closures::constant_emission`]): what a host can
+    /// know about the material without a hit. `None` when it can vary. Plain
+    /// numbers rather than slots, so [`Compiled::optimize`] leaves it be.
+    pub constant_emission: Option<[f32; 3]>,
 }
 
 /// Where a `displacement` node's two inputs land in [`Compiled::program`]:
@@ -368,6 +373,7 @@ pub fn compile_terminals(
         .collect::<std::collections::HashSet<_>>()
         .len();
     let unsupported: Vec<String> = c.unsupported.iter().cloned().collect();
+    let constant_emission = closures.constant_emission(&c);
     let root_name = surface
         .or(volume)
         .map(|n| n.name.clone())
@@ -381,5 +387,6 @@ pub fn compile_terminals(
         unsupported,
         textures,
         displacement: displaced,
+        constant_emission,
     }
 }

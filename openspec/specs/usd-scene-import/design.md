@@ -632,6 +632,46 @@ Schema mapping:
   transforms for the `motionvector` AOV (the `aovs` design record, "Motion vector AOV").
   Sample: `samples/motionvector.usda`.
 
+## Mesh lights (`MeshLightAPI`)
+
+A `UsdGeomMesh` applying `UsdLuxMeshLightAPI` is imported as any mesh and then made a
+light over the triangles it was placed with; the light itself (its shape, sampling and
+radiance) is the `lighting` record's "Mesh lights". The import's part:
+
+- **Detection.** `prim.has_api_schema("MeshLightAPI")` on every `Mesh` prim the
+  traversal dispatches (`mesh_light::applies`), and on spheres, curves and implicit
+  shapes only to refuse it (`light.mesh_light_not_a_mesh`). The inputs are read through
+  `LightAPI::get`, which the API's built-in `LightAPI` answers, with the same
+  `light_inputs` / `lux_params` every UsdLux light uses; `light:materialSyncMode` is a
+  custom token, fallback `materialGlowTintsLight`, an unknown one refused
+  (`light.unknown_token`).
+- **Two steps around the placement.** `mesh_light::plan` runs before `emit_mesh` and
+  makes every refusal — moving (`Span::moves` or `crust:motion:translate`), cutout,
+  non-uniform glow, zero radiance — so a refused mesh is placed exactly as without the
+  API. `emit_mesh` / `place_mesh_source` then hand back the placement (`Placed::at`):
+  its `geom_id` and its world triangles in kernel order, which `MeshArena::world_triangles`
+  reads from the interned slot's local geometry (each vertex through
+  `transform_point3a`, the arithmetic `flush_meshes` bakes with) or, once a prototype
+  committed the slot, from its scene's `triangle_vertices`. Subdivision and displacement
+  are applied by then. The non-invertible branch, which bakes at once, hands back its
+  world vertices. `mesh_light::emit` builds the `MeshShape`, divides by its area under
+  `normalize`, rebinds the reserved slot's material (`WorldBuilder::set_material`: the
+  wrapper, or the bare `Emissive` under `noMaterialResponse`), sets its ray mask
+  (`mesh_light_ray_mask`) and adds the light with `tag_last`.
+- **On the traversal, not at `flush_meshes`.** The change proposing this placed it at
+  flush; it runs on the traversal so the light is added while its prim is the one being
+  visited, which is what every per-light bookkeeping keys on: `LightLinks::light_added`
+  reads its collections, the active pass its membership, `light_origins` its live-edit
+  origin. The triangles are the same either way: the slot's local geometry is what
+  flush bakes or instances.
+- **Prototypes.** `collect_proto_parts` warns `light.mesh_light_instanced` for a mesh
+  that applies the API inside a native instance's or a `PointInstancer`'s prototype,
+  and imports it as plain geometry: a prototype's hits report a forwarded id that does
+  not name the placement. The prototype's own source prim, when it is also a direct
+  placement (a referenced `Xform` outside any instance), is a light like any mesh.
+- **Listing.** `crust ls light` lists a `MeshLightAPI` mesh with kind `mesh`
+  (`listing::is_mesh_light`), refused or not — the listing reads no material.
+
 ## Implicit shapes
 
 `Cube`, `Plane`, `Cylinder`, `Cylinder_1`, `Cone`, `Capsule` and `Capsule_1` render as

@@ -543,6 +543,8 @@ struct Crossing {
     t: f32,
     geom_id: u32,
     p: Vec3A,
+    /// The hit's `prim_id`: where on the source `p` lies.
+    prim: u32,
     /// What the source emits toward the ray there, unattenuated.
     emitted: Vec3A,
     /// How many pass-throughs (cutouts, thin walls) the segment passed
@@ -561,6 +563,7 @@ impl Crossing {
             t: h.rec.t,
             geom_id: h.geom_id,
             p: h.rec.p,
+            prim: h.prim_id,
             emitted: h.mat.emitted_at(ray, &h.rec, cos_o),
             passes: passes.min(u16::MAX as usize) as u16,
             reach: None,
@@ -686,17 +689,20 @@ fn bounce_emission_weight(
     hit: &WorldHit,
     strategy: SamplingStrategy,
 ) -> f32 {
-    bounce_emission_weight_at(prev, lights, hit.geom_id, hit.rec.p, strategy)
+    bounce_emission_weight_at(prev, lights, hit.geom_id, hit.rec.p, hit.prim_id, strategy)
 }
 
-/// [`bounce_emission_weight`] for the emitter `geom_id`, reached at `p`: what
-/// a hidden light source the bounce crossed ([`Crossing`]) is weighted by.
+/// [`bounce_emission_weight`] for the emitter `geom_id`, reached at `p` on
+/// its primitive `prim` (the hit's `prim_id`, which a mesh light's density
+/// there needs): what a hidden light source the bounce crossed ([`Crossing`])
+/// is weighted by.
 #[inline(always)]
 fn bounce_emission_weight_at(
     prev: &PrevVertex,
     lights: &LightList,
     geom_id: u32,
     point: Vec3A,
+    prim: u32,
     strategy: SamplingStrategy,
 ) -> f32 {
     // The receiver is the vertex the bounce left, and its links apply
@@ -744,7 +750,7 @@ fn bounce_emission_weight_at(
         // No pdf is a point NEE refuses to sample (an edge-on point of
         // an area-sampled light, say): nothing competes for it, exactly
         // as for a light NEE never picks.
-        let Some(point_pdf) = light.pdf_at_point(from.p, point) else {
+        let Some(point_pdf) = light.pdf_at_point(from.p, point, prim) else {
             return strategy.unopposed_weight();
         };
         let light_pdf = lights.density(point_pdf, pmf, nee_count).max(1e-6);
@@ -1946,7 +1952,7 @@ fn collect_crossings(
             e *= bounce_gain_of_geom(prev.as_ref(), lights, c.geom_id);
         }
         let w = prev.as_ref().map_or(1.0, |p| {
-            bounce_emission_weight_at(p, lights, c.geom_id, c.p, strategy)
+            bounce_emission_weight_at(p, lights, c.geom_id, c.p, c.prim, strategy)
         });
         last.crossed += e * w;
         last.crossed_raw += e;

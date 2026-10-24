@@ -527,6 +527,28 @@ impl MeshArena {
     /// The slot's geometry as a committed local-space kernel scene, built on
     /// first demand and shared thereafter. Once this is called the slot can
     /// no longer be baked — see [`MeshSlot::local`].
+    /// Slot `slot`'s triangles under `l2w`, in the order the kernel numbers
+    /// them: from its local geometry, where each vertex goes through
+    /// `transform_point3a` exactly as [`flush_meshes`] bakes it, or from its
+    /// committed scene's own table once a prototype has committed it.
+    pub(super) fn world_triangles(&self, slot: u32, l2w: &Affine3A) -> Vec<[[f32; 3]; 3]> {
+        let s = &self.slots[slot as usize];
+        let at = |v: Vec3A| l2w.transform_point3a(v).to_array();
+        if let Some(g) = &s.local {
+            g.tris
+                .iter()
+                .map(|t| t.map(|i| at(Vec3A::from_array(g.verts[i as usize]))))
+                .collect()
+        } else if let Some(scene) = &s.committed {
+            (0..)
+                .map_while(|i| scene.triangle_vertices(0, i))
+                .map(|t| t.map(at))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(super) fn committed_scene(&mut self, slot: u32) -> Arc<RtScene> {
         let s = &mut self.slots[slot as usize];
         if let Some(scene) = &s.committed {
@@ -613,7 +635,9 @@ fn commit_mesh(geom: MeshGeom) -> RtScene {
 }
 
 /// Reads a direct `UsdGeomMesh` prim placed over `span` and places it
-/// ([`place_mesh_source`]), which says whether its motion was dropped.
+/// ([`place_mesh_source`], whose answer it returns: whether its motion was
+/// dropped, and, when `want_tris`, where it was placed).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_mesh(
     world: &mut WorldBuilder,
     prim: &Prim,
@@ -622,7 +646,8 @@ pub(super) fn emit_mesh(
     bound: BoundMaterial,
     meshes: &mut MeshArena,
     pending: &mut Vec<MeshPlacement>,
-) -> bool {
+    want_tris: bool,
+) -> Placed {
     let BoundMaterial {
         material,
         displacement,
@@ -645,7 +670,7 @@ pub(super) fn emit_mesh(
             "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
             prim.path()
         );
-        return false;
+        return Placed::default();
     };
     place_mesh_source(
         world,
@@ -658,7 +683,20 @@ pub(super) fn emit_mesh(
         },
         meshes,
         pending,
+        want_tris,
     )
+}
+
+/// What [`place_mesh_source`] did with a prim's mesh.
+#[derive(Default)]
+pub(super) struct Placed {
+    /// The placement's transform moves over the shutter but it was baked, so
+    /// that motion is dropped (`xform.motion_ignored`).
+    pub(super) baked_moving: bool,
+    /// When asked for: the placement's `geom_id` and its world-space
+    /// triangles in the order the kernel numbers them (a hit's `prim_id`) —
+    /// what a mesh light samples. `None` when nothing was placed.
+    pub(super) at: Option<(u32, Vec<[[f32; 3]; 3]>)>,
 }
 
 /// Places a direct prim's mesh, read already: everything after the read that
@@ -668,8 +706,10 @@ pub(super) fn emit_mesh(
 /// It starts the shutter at `span.open` and ends it at [`Span::end`]. A
 /// non-invertible placement is baked now, at `span.open`; any other is
 /// interned and recorded, its representation decided by [`flush_meshes`].
-/// `true` when the placement's transform moves over the shutter but it was
-/// baked, so that motion is dropped (`xform.motion_ignored`).
+/// With `want_tris` the answer carries the placement and its world
+/// triangles ([`Placed::at`]): the vertices `flush_meshes` bakes, or the
+/// local ones through the transform an instance applies.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_mesh_source(
     world: &mut WorldBuilder,
     prim: &Prim,
@@ -678,7 +718,8 @@ pub(super) fn place_mesh_source(
     bound: BoundMaterial,
     meshes: &mut MeshArena,
     pending: &mut Vec<MeshPlacement>,
-) -> bool {
+    want_tris: bool,
+) -> Placed {
     let world_xf = span.open;
     let BoundMaterial {
         material,
@@ -733,6 +774,11 @@ pub(super) fn place_mesh_source(
             src.uvs.as_ref().filter(|_| want_uvs),
         ) {
             Some((tris, faces, uvs)) => {
+                let light_tris = want_tris.then(|| {
+                    tris.iter()
+                        .map(|t| t.map(|i| verts[i as usize]))
+                        .collect::<Vec<_>>()
+                });
                 // A singular transform has no inverse-transpose to push the
                 // prototype's normals through, but the smooth normals of the
                 // *transformed* mesh are still well-defined — recompute them.
@@ -777,10 +823,17 @@ pub(super) fn place_mesh_source(
                 if let Some(table) = primvars {
                     world.set_primvars(geom_id, Arc::new(table), false);
                 }
+                return Placed {
+                    baked_moving: span.moves(),
+                    at: light_tris.map(|t| (geom_id, t)),
+                };
             }
             None => debug!("Mesh at {} produced no triangles", prim.path()),
         }
-        return span.moves();
+        return Placed {
+            baked_moving: span.moves(),
+            at: None,
+        };
     }
 
     // Record the placement rather than attaching it. Whether this mesh is
@@ -789,18 +842,22 @@ pub(super) fn place_mesh_source(
     // until the whole stage has been walked — so claim the `geom_id` now (it
     // must keep its traversal order) and decide in `flush_meshes`.
     let Some(slot) = meshes.intern(prim, src, &material, displacement.as_deref()) else {
-        return false;
+        return Placed::default();
     };
     meshes.slots[slot as usize].n_place += 1;
 
     let geom_id = world.reserve_slot(material, mask);
+    let l2w = Affine3A::from_mat4(world_xf);
     pending.push(MeshPlacement {
         geom_id,
         slot,
-        l2w: Affine3A::from_mat4(world_xf),
+        l2w,
         l2w_end: span.end(motion),
     });
-    false
+    Placed {
+        baked_moving: false,
+        at: want_tris.then(|| (geom_id, meshes.world_triangles(slot, &l2w))),
+    }
 }
 
 /// Turns the deferred [`MeshPlacement`]s into real geometry, now that every

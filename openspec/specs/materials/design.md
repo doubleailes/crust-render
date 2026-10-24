@@ -64,6 +64,18 @@
   A material that emits only through `emitted_at` must therefore never become a
   light-list entry, or NEE would sample it at zero radiance while the bounce side saw
   the real value.
+  **`uniform_emission() -> Option<Vec3A>`** is the stricter hit-free question: `Some(c)`
+  only when `emitted_at` returns exactly `c`, bit for bit, at every hit and every
+  angle. `OpenPBR` answers its uncoated emission when no coat or fuzz fades it
+  (`emitted_directional`'s own early return); a preview surface its constants' under
+  the same condition, unless a texture drives its emission or its clearcoat; an
+  `Emissive` its colour when unshaped, untextured and two-sided; `MtlxMaterial` its
+  folded constant (below). Everything else answers `None`. It is not `emitted()`,
+  which a coated `OpenPBR` answers with its uncoated value while `emitted_at` fades
+  it. A `MeshLightAPI` mesh under `materialGlowTintsLight` is lit by it (lighting
+  design record, "Mesh lights"); `crust-core/tests/resolve.rs` runs every material
+  that answers `Some` through `emitted_at` and its resolution at random hits and
+  angles, with and without the `jit` feature.
   **`resolve(r_in, rec, cos_theta_o) -> Option<Resolution>`** is the shade-once hook:
   a material with per-hit work (a MaterialX graph, `UsdUVTexture`s, a Ptex lookup)
   returns the fully resolved `OpenPBR`, the record carrying its shading normal, and
@@ -1568,6 +1580,24 @@ NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
   a function of the shading point. So such a surface is found by BSDF/bounce
   sampling only, at full weight — as emissive curves, instances and volumes
   already are — which means no NEE and a firefly risk near a small bright emitter.
-  That is also why `MtlxMaterial` leaves `emitted()` at zero and answers through
-  `emitted_at`: the light list reads the hit-free one, and the two must agree for
-  anything it samples.
+  That is also why `MtlxMaterial` answers through `emitted_at`: the light list reads
+  the hit-free `emitted()`, and the two must agree for anything it samples.
+  **The constant fold.** Where the emission cannot vary, it is known at compile time:
+  after the closure tree is built, `crust-mtlx` folds each EDF term's `weight` and
+  `color` with `Compiler::fold` (literals and pure operators over them — no texture,
+  primvar, curve property or shading-point input), and accepts a
+  `generalized_schlick_edf` only when its `color0` and `color90` fold equal (a neutral
+  falloff, up to its tint). If every term folds, `Compiled::constant_emission` is the
+  folded slots run through `Closures::emission` itself — the one function the runtime
+  evaluates emission with, so the per-channel sanitising and the order of the sum are
+  the runtime's — and `MtlxMaterial::emitted` / `uniform_emission` report it (zero for
+  a surface with no EDF); otherwise `emitted()` is zero and `uniform_emission` `None`.
+  `fold` evaluates with the interpreter's own operators and the optimiser and the JIT
+  keep every slot's bits, so the constant is what each hit computes. One trap, met
+  writing it: glam's `lerp` is `a·(1−s) + b·s`, which for `a = b` rounds to a value
+  that moves with `s` by an ulp, so a falloff with equal colours was not constant in
+  the bits. `Closures::emission` takes `color0` as is when the two are equal — the
+  only change to a rendered value, and only for a hand-authored equal-coloured
+  falloff (no surface node builds one). Rendering is otherwise unchanged: the light
+  list builds nothing from a material's emission unless its mesh applies
+  `MeshLightAPI`.

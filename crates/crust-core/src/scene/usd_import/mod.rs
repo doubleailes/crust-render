@@ -81,6 +81,7 @@ mod listing;
 mod live;
 mod materials;
 mod mesh;
+mod mesh_light;
 mod mtlx_network;
 mod passes;
 mod precomp;
@@ -418,7 +419,11 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             ctx.caches.motion.drawn(&prim, &timing);
             let mat = resolve_bound(stage, &prim, &mut ctx.caches);
-            let baked_moving = emit_mesh(
+            // A `MeshLightAPI` mesh is placed as any mesh, then made a light
+            // over the triangles it was placed with (`mesh_light`).
+            let light = mesh_light::plan(stage, &prim, &mat.material, &span, ctx.caches.working)
+                .map(|plan| (plan, mat.material.clone()));
+            let placed = emit_mesh(
                 &mut ctx.world,
                 &prim,
                 &mesh,
@@ -426,12 +431,17 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 mat,
                 &mut ctx.caches.meshes,
                 &mut ctx.pending_meshes,
+                light.is_some(),
             );
-            if baked_moving {
+            if placed.baked_moving {
                 ctx.caches.motion.ignored.saw(&prim);
+            }
+            if let (Some((plan, inner)), Some((geom_id, tris))) = (light, placed.at) {
+                mesh_light::emit(ctx, &prim, plan, geom_id, tris, inner);
             }
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             ctx.caches.motion.drawn(&prim, &timing);
+            mesh_light::refuse_not_a_mesh(&prim);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             if let Some(id) = emit_sphere(
                 &mut ctx.world,
@@ -445,25 +455,28 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             }
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             ctx.caches.motion.unmoved(&prim, &timing);
+            mesh_light::refuse_not_a_mesh(&prim);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             let request = StrandRequest::of(&*mat, ctx.caches.working, &ctx.caches.meshes.primvars);
             let imported = curve_segments(&prim, &curves, request.as_ref());
             emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Ok(Some(curves)) = UsdNurbsCurves::get(stage, prim.path().clone()) {
             ctx.caches.motion.unmoved(&prim, &timing);
+            mesh_light::refuse_not_a_mesh(&prim);
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             let request = StrandRequest::of(&*mat, ctx.caches.working, &ctx.caches.meshes.primvars);
             let imported = nurbs_curve_segments(&prim, &curves, request.as_ref());
             emit_curves(&mut ctx.world, &prim, imported, this_world, mat);
         } else if let Some(shape) = Shape::read(&prim) {
             ctx.caches.motion.drawn(&prim, &timing);
+            mesh_light::refuse_not_a_mesh(&prim);
             let bound = undisplaced(&prim, resolve_bound(stage, &prim, &mut ctx.caches));
             let src = ctx
                 .caches
                 .implicit
                 .source(prim.path(), &shape, MeshPlace::World(&span.open));
             let src = with_constant_primvars(src, &prim, &*bound.material, ctx.caches.working);
-            let baked_moving = place_mesh_source(
+            let placed = place_mesh_source(
                 &mut ctx.world,
                 &prim,
                 src,
@@ -471,8 +484,9 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 bound,
                 &mut ctx.caches.meshes,
                 &mut ctx.pending_meshes,
+                false,
             );
-            if baked_moving {
+            if placed.baked_moving {
                 ctx.caches.motion.ignored.saw(&prim);
             }
         } else if visit_camera(stage, &prim, ctx) {

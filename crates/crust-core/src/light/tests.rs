@@ -62,7 +62,7 @@ fn sphere_shape_samples_lie_on_surface() {
         let p = shape.sample_point(u, v);
         let d = (p - shape.center).length();
         assert!((d - shape.radius).abs() < 1e-5, "sample off surface: {d}");
-        let n = shape.normal_at(p);
+        let n = shape.normal_at(p, 0);
         assert!((n.length() - 1.0).abs() < 1e-5);
     }
 }
@@ -78,7 +78,7 @@ fn rect_shape_samples_lie_in_rect() {
     assert!((shape.area() - 8.0).abs() < 1e-5);
     let p = shape.sample_point(0.5, 0.5);
     assert!((p - Vec3A::new(0.0, 5.0, 0.0)).length() < 1e-5);
-    assert_eq!(shape.normal_at(p), Vec3A::new(0.0, -1.0, 0.0));
+    assert_eq!(shape.normal_at(p, 0), Vec3A::new(0.0, -1.0, 0.0));
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn area_light_pdf_is_positive_facing_side() {
     );
     // Nearest point on the sphere as seen from below.
     let pdf = light
-        .pdf_at_point(Vec3A::ZERO, Vec3A::new(0.0, 4.0, 0.0))
+        .pdf_at_point(Vec3A::ZERO, Vec3A::new(0.0, 4.0, 0.0), 0)
         .map_or(0.0, |p| p.get());
     assert!(pdf.is_finite() && pdf > 0.0);
 
@@ -112,7 +112,7 @@ fn area_light_pdf_is_positive_facing_side() {
     // strategy and must agree on the density of the same direction.
     let point = Vec3A::ZERO + s.direction * s.distance;
     let from_point = light
-        .pdf_at_point(Vec3A::ZERO, point)
+        .pdf_at_point(Vec3A::ZERO, point, 0)
         .map_or(0.0, |p| p.get());
     assert!(
         (s.pdf.get() - from_point).abs() <= 1e-3 * s.pdf.get().max(from_point),
@@ -158,7 +158,9 @@ fn area_pdf_has_no_epsilon() {
             s.pdf.get(),
             expected
         );
-        let bounce = light.pdf_at_point(Vec3A::ZERO, p).map_or(0.0, |p| p.get());
+        let bounce = light
+            .pdf_at_point(Vec3A::ZERO, p, 0)
+            .map_or(0.0, |p| p.get());
         assert!((bounce - s.pdf.get()).abs() <= 1e-4 * s.pdf.get());
     }
 }
@@ -191,7 +193,7 @@ fn area_samples_are_refused_only_edge_on() {
         assert_eq!(b.radiance, Vec3A::ONE);
         let p = behind + b.direction * b.distance;
         assert!(
-            (light.pdf_at_point(behind, p).map_or(0.0, |p| p.get()) - b.pdf.get()).abs()
+            (light.pdf_at_point(behind, p, 0).map_or(0.0, |p| p.get()) - b.pdf.get()).abs()
                 <= 1e-4 * b.pdf.get()
         );
     }
@@ -201,7 +203,7 @@ fn area_samples_are_refused_only_edge_on() {
     assert!(light.sample_li(edge_on, 0.5, 0.5).is_none());
     assert_eq!(
         light
-            .pdf_at_point(edge_on, on_disk)
+            .pdf_at_point(edge_on, on_disk, 0)
             .map_or(0.0, |p| p.get()),
         0.0
     );
@@ -311,7 +313,7 @@ fn distant_light_has_no_geometry() {
     assert_eq!(light.geom_id(), None);
     assert_eq!(
         light
-            .pdf_at_point(Vec3A::ZERO, Vec3A::Y)
+            .pdf_at_point(Vec3A::ZERO, Vec3A::Y, 0)
             .map_or(0.0, |p| p.get()),
         0.0
     );
@@ -751,7 +753,7 @@ fn check_density(name: &str, light: &AreaLight, from: Vec3A, bin: impl Fn(Vec3A)
             };
             let to = from - p;
             let r2 = to.length_squared();
-            let cos = shape.normal_at(p).dot(to / r2.sqrt()).abs();
+            let cos = shape.normal_at(p, 0).dot(to / r2.sqrt()).abs();
             expected[bin(p)] += pdf.get() as f64 * (cos * shape.inv_pdf_area(p).get() / r2) as f64;
         }
     }
@@ -864,7 +866,7 @@ fn tube_samples_face_the_shading_point() {
                         continue;
                     };
                     let p = from + s.direction * s.distance;
-                    let facing = shape.normal_at(p).dot(-s.direction);
+                    let facing = shape.normal_at(p, 0).dot(-s.direction);
                     assert!(facing > -1e-4, "{tube}: a back-facing sample, cos {facing}");
                     assert_ne!(s.radiance, Vec3A::ZERO, "{tube}: a dark sample");
                 }
@@ -982,7 +984,7 @@ fn round_lights_fall_back_to_area_sampling_bit_for_bit() {
             assert_eq!(sa.map(|s| s.radiance), sb.map(|s| s.radiance));
             if let Some(s) = sa {
                 let p = from + s.direction * s.distance;
-                assert_eq!(a.pdf_at_point(from, p), b.pdf_at_point(from, p));
+                assert_eq!(a.pdf_at_point(from, p, 0), b.pdf_at_point(from, p, 0));
             }
         }
     };
@@ -1131,4 +1133,133 @@ fn far_end_on_tube_samples_stay_equiangular() {
             );
         }
     }
+}
+
+/// Two triangles of unequal areas folded into a tent over the origin — not a
+/// plane — so the per-triangle normal matters on both MIS sides.
+fn tent() -> MeshShape {
+    MeshShape::new(vec![
+        [[-1.0, 2.0, -1.0], [1.0, 2.0, -1.0], [0.0, 3.0, 1.0]],
+        [[-1.0, 2.0, -1.0], [0.0, 3.0, 1.0], [-3.0, 2.5, 2.0]],
+    ])
+    .expect("the tent has area")
+}
+
+fn tent_light() -> AreaLight {
+    AreaLight::new(
+        tent(),
+        Arc::new(Emissive::new(Vec3A::new(2.0, 1.0, 0.5))),
+        7,
+    )
+}
+
+/// A mesh's area samples pick each triangle by its share of the area, and
+/// its solid-angle density — what both MIS halves use — integrates to 1 over
+/// the directions that reach it, summed over every crossing.
+#[test]
+fn a_mesh_lights_density_integrates_to_one() {
+    let shape = tent();
+    let areas: Vec<f32> = [0, 1]
+        .map(|i| {
+            let [a, b, c] = shape_tri(i);
+            0.5 * (b - a).cross(c - a).length()
+        })
+        .to_vec();
+    assert!((areas[0] - areas[1]).abs() > 0.1, "unequal areas");
+    assert!((shape.area() - areas[0] - areas[1]).abs() < 1e-5);
+
+    const N: usize = 256;
+    let mut on = [0usize; 2];
+    for i in 0..N {
+        for j in 0..N {
+            let (u, v) = ((i as f32 + 0.5) / N as f32, (j as f32 + 0.5) / N as f32);
+            let (p, prim) = shape.sample_point_on(u, v);
+            on[prim as usize] += 1;
+            // The point lies on its triangle: the ray toward it meets that
+            // triangle there.
+            let from = Vec3A::new(0.1, 0.0, 0.2);
+            let dir = (p - from).normalize();
+            let hit = shape
+                .hits(from, dir)
+                .iter_on()
+                .find(|&(_, k)| k == prim)
+                .expect("the sampled triangle is hit");
+            assert!(((from + hit.0 * dir) - p).length() < 1e-4);
+        }
+    }
+    let share = on[0] as f32 / (N * N) as f32;
+    assert!(
+        (share - areas[0] / shape.area()).abs() < 2e-3,
+        "share {share}"
+    );
+
+    // ∫ Σ_crossings pdf(ω) dω over the sphere of directions = 1.
+    let light = tent_light();
+    let from = Vec3A::new(0.1, 0.0, 0.2);
+    let mut sum = 0.0f64;
+    const M: usize = 1024;
+    for i in 0..M {
+        for j in 0..M {
+            let (u, v) = ((i as f32 + 0.5) / M as f32, (j as f32 + 0.5) / M as f32);
+            let z = 1.0 - 2.0 * u;
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let phi = 2.0 * std::f32::consts::PI * v;
+            let dir = Vec3A::new(r * phi.cos(), r * phi.sin(), z);
+            for (t, prim) in light.shape().hits(from, dir).iter_on() {
+                if let Some(pdf) = light.pdf_at_point(from, from + t * dir, prim) {
+                    sum += pdf.get() as f64;
+                }
+            }
+        }
+    }
+    let integral = sum * 4.0 * std::f64::consts::PI / (M * M) as f64;
+    assert!((integral - 1.0).abs() < 0.01, "∫ pdf dω = {integral}");
+}
+
+/// Triangle `i` of [`tent`].
+fn shape_tri(i: usize) -> [Vec3A; 3] {
+    [
+        [[-1.0, 2.0, -1.0], [1.0, 2.0, -1.0], [0.0, 3.0, 1.0]],
+        [[-1.0, 2.0, -1.0], [0.0, 3.0, 1.0], [-3.0, 2.5, 2.0]],
+    ][i]
+        .map(Vec3A::from_array)
+}
+
+/// NEE's density for the point it sampled is, bit for bit, what the bounce
+/// side computes for a hit on the same point of the same triangle.
+#[test]
+fn a_mesh_lights_sample_pdf_is_its_bounce_pdf() {
+    let light = tent_light();
+    for from in [Vec3A::new(0.1, 0.0, 0.2), Vec3A::new(-2.0, 5.0, 1.0)] {
+        for k in 0..64 {
+            let (u, v) = (
+                (k as f32 * 0.618_034).fract(),
+                (k as f32 * 0.414_213).fract(),
+            );
+            let (p, prim) = light.shape().sample_point_on(u, v);
+            let Some(s) = light.sample_li(from, u, v) else {
+                continue;
+            };
+            let bounce = light.pdf_at_point(from, p, prim).expect("NEE sampled it");
+            assert_eq!(s.pdf.get().to_bits(), bounce.get().to_bits(), "sample {k}");
+            assert_eq!(s.radiance, Vec3A::new(2.0, 1.0, 0.5), "two-sided, uniform");
+        }
+    }
+}
+
+/// A two-sided mesh of area A and radiance L emits 2πAL, whatever its shape.
+#[test]
+fn a_mesh_lights_power_is_two_pi_a_l() {
+    let light = tent_light();
+    let luma = utils::Luma::REC709;
+    let expected =
+        2.0 * std::f32::consts::PI * light.shape().area() * luma.of(Vec3A::new(2.0, 1.0, 0.5));
+    let got = light.power(luma).unwrap();
+    assert!((got / expected - 1.0).abs() < 1e-5, "{got} vs {expected}");
+    assert_eq!(light.kind(), "mesh");
+    let b = light.bounds(luma).expect("bounded");
+    assert_eq!(
+        (b.min, b.max),
+        (Vec3A::new(-3.0, 2.0, -1.0), Vec3A::new(1.0, 3.0, 2.0))
+    );
 }

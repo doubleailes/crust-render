@@ -113,8 +113,9 @@ pub use hittable::{FaceHit, HitPart, HitRecord};
 pub use light::{
     AffineShape, AreaLight, AreaShape, DistantLight, DomeLight, EVERY_CLASS, FoundAlong, Light,
     LightBounds, LightKind, LightLinks, LightList, LightSample, LightSelection, LightShape,
-    LightTree, LobeGains, Receiver, RectShape, ShapeExtent, ShapeHits, SolidAngleSampler,
-    SolidAngleSampling, SphereShape, TREE_DEFENSIVE_SHARE, UnitShape, projected_cone_solid_angle,
+    LightTree, LobeGains, MeshShape, Receiver, RectShape, ShapeExtent, ShapeHits,
+    SolidAngleSampler, SolidAngleSampling, SphereShape, TREE_DEFENSIVE_SHARE, UnitShape,
+    projected_cone_solid_angle,
 };
 pub use lux::{
     IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_in, blackbody_rgb,

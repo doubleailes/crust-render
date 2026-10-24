@@ -39,14 +39,15 @@ pub use crust_mtlx::MtlxError;
 /// A surface whose closure tree comes from a MaterialX graph, its parameters
 /// re-evaluated at every shading point.
 ///
-/// Emission reaches the integrator through [`Material::emitted_at`] and
-/// **not** through `emitted()`, which stays at the trait default of zero. That
-/// is deliberate rather than an omission: a graph's emission is a function of
-/// the shading point, `emitted()` is the hit-free radiance the *light list*
-/// reads, and the two must agree for anything the light list samples. So a
-/// MaterialX emitter is never an `AreaLight` — it is found by BSDF/bounce
-/// sampling only, at full weight, exactly as emissive curves, instances and
-/// volumes already are.
+/// Emission reaches the integrator through [`Material::emitted_at`]. A graph's
+/// emission is in general a function of the shading point (an `image`, a
+/// primvar, the coat's Fresnel toward the viewer), which the hit-free
+/// `emitted()` cannot see. Where it folds to a constant at compile time
+/// ([`crust_mtlx::Closures::constant_emission`]) that constant is what
+/// `emitted()` and [`Material::uniform_emission`] report, bit for bit what
+/// `emitted_at` gives at every hit; otherwise `emitted()` is zero and
+/// `uniform_emission` `None`. Either way a MaterialX emitter is found by
+/// BSDF/bounce sampling only, unless its mesh applies `MeshLightAPI`.
 pub struct MtlxMaterial {
     program: Program,
     /// `program` compiled to machine code, when the `jit` feature is on and
@@ -67,6 +68,9 @@ pub struct MtlxMaterial {
     /// The working colour space's luminance weights, which lobe selection
     /// weighs each leaf by ([`load_in`]).
     luma: utils::Luma,
+    /// The emission, when it is the same at every hit and angle
+    /// ([`crust_mtlx::Compiled::constant_emission`]).
+    constant_emission: Option<Vec3A>,
 }
 
 /// What [`Material::opacity`] runs: the opacity's own slice of the program.
@@ -203,42 +207,11 @@ impl MtlxMaterial {
         run(&self.program, jit, r_in, rec, f)
     }
 
-    /// The emitted radiance: the EDF terms summed, each `weight · color` per
-    /// channel.
-    ///
-    /// Neither factor is clamped above — `multiply(uniform_edf, 100)` is how
-    /// a document authors a bright emitter — but each is sanitised before the
-    /// product, per channel: a non-finite or negative channel contributes
-    /// nothing, and clamping the product instead would let two negative
-    /// channels multiply into positive light. The weight is read with
-    /// `Val::rgb`, because a `multiply` by a `color3` tints an emitter per
-    /// channel; taking lane 0 would turn `(0, 0.6, 0.9)` into black.
-    ///
-    /// A `generalized_schlick_edf` over a term scales it by
-    /// `mix(color0, color90, (1 − cosθ)^exponent)` toward the viewer at
-    /// `cos_theta_o` — how OpenPBR and Standard Surface fade emission seen
-    /// through their coat's Fresnel.
+    /// The emitted radiance at the evaluated `slots`, toward `cos_theta_o`
+    /// ([`crust_mtlx::Closures::emission`], which the constant emission is
+    /// folded through too).
     fn emission(&self, slots: &[Val], cos_theta_o: f32) -> Vec3A {
-        let clean = |v: Vec3A| {
-            let f = |x: f32| if x.is_finite() { x.max(0.0) } else { 0.0 };
-            Vec3A::new(f(v.x), f(v.y), f(v.z))
-        };
-        let x = (1.0 - cos_theta_o).clamp(0.0, 1.0);
-        self.closures
-            .emission
-            .iter()
-            .map(|e| {
-                let mut r =
-                    clean(slots[e.weight as usize].rgb()) * clean(slots[e.color as usize].rgb());
-                if let Some(fo) = e.falloff {
-                    let c0 = clean(slots[fo.color0 as usize].rgb());
-                    let c90 = clean(slots[fo.color90 as usize].rgb());
-                    let k = slots[fo.exponent as usize].x().max(0.0);
-                    r *= c0.lerp(c90, x.powf(k));
-                }
-                r
-            })
-            .sum()
+        self.closures.emission(slots, cos_theta_o)
     }
 
     fn resolved(&self, r_in: &Ray, rec: &HitRecord) -> PooledClosure {
@@ -488,6 +461,16 @@ impl Material for MtlxMaterial {
         self.can_emit()
     }
 
+    /// The folded constant, zero when it does not fold: the hit-free answer
+    /// the trait asks for, and never more than `emitted_at` gives.
+    fn emitted(&self) -> Vec3A {
+        self.constant_emission.unwrap_or(Vec3A::ZERO)
+    }
+
+    fn uniform_emission(&self) -> Option<Vec3A> {
+        self.constant_emission
+    }
+
     fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
         if !self.can_emit() {
             return Vec3A::ZERO;
@@ -674,6 +657,7 @@ pub fn from_compiled(mut c: crust_mtlx::Compiled, luma: utils::Luma) -> Result<L
         volume_only: c.volume_only,
         name: c.root_name,
         luma,
+        constant_emission: c.constant_emission.map(Vec3A::from_array),
     };
     let summary = format!("{material:?}");
     Ok(Loaded {

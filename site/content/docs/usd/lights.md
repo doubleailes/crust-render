@@ -1,15 +1,15 @@
 +++
 title = "Lights"
-description = "Camera visibility and light groups of UsdLux lights."
+description = "UsdLux lights, mesh lights, camera visibility and light groups."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-10T08:00:00+00:00
+updated = 2026-10-22T08:00:00+00:00
 draft = false
 weight = 40
 sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Lights are standard UsdLux prims. Crust attributes only decide whether the camera sees a light’s surface.'
+lead = 'Lights are standard UsdLux prims, and meshes with MeshLightAPI. Crust attributes only decide whether the camera sees a light’s surface.'
 toc = true
 top = false
 +++
@@ -81,8 +81,10 @@ Area lights also read `ShapingAPI`: the cone (`inputs:shaping:cone:angle`,
 Light linking and shadow linking use the standard `collection:lightLink` and
 `collection:shadowLink` collections. See `samples/light_linking.usda`.
 
-Not supported: mesh lights (`MeshLightAPI`), portal lights, light filters, and shaping on
-distant and dome lights.
+A `Mesh` with `MeshLightAPI` applied is a light too: see [Mesh lights](#mesh-lights).
+
+Not supported: portal lights, `GeometryLight`, `VolumeLightAPI`, light filters, and
+shaping on distant and dome lights.
 
 ## Diffuse and specular multipliers
 
@@ -217,8 +219,82 @@ def RectLight "Key"
 Other renderers' light-group attributes (Karma's, RenderMan's, Arnold's) are not read
 yet.
 
+## Mesh lights
+
+Apply `MeshLightAPI` to a `Mesh` to make it a light. Crust then samples its triangles
+directly, as it samples a `RectLight`, instead of waiting for a reflected ray to hit it
+by chance. A fire card, a screen, a sign or a lamp modelled as geometry lights the scene
+with far less noise. The mesh keeps its material and stays in the picture:
+
+```usda
+def Mesh "FireCard" (
+    prepend apiSchemas = ["MeshLightAPI"]
+)
+{
+    rel material:binding = </Looks/FireGlow>
+    # points, faceVertexCounts, faceVertexIndices ...
+}
+```
+
+The mesh is the surface it renders with, after subdivision and displacement, and it
+emits from both sides. Light linking, shadow linking, `inputs:diffuse`,
+`inputs:specular`, `inputs:enableColorTemperature` and `crust:light:lpeTag` apply as for
+any light. `crust ls light` lists the mesh with the kind `mesh`.
+
+### What a mesh light emits
+
+`light:materialSyncMode` decides the light's radiance. With `L` the light's own inputs,
+`inputs:color` × 2^`inputs:exposure` × `inputs:intensity` (divided by the mesh's area
+under `inputs:normalize = 1`):
+
+| `light:materialSyncMode` | radiance | the material |
+|--------------------------|----------|--------------|
+| `materialGlowTintsLight` (the default) | the material's glow × `L` | reflects and emits |
+| `independent` | `L` | reflects; its own glow is ignored |
+| `noMaterialResponse` | `L` | ignored: the mesh only emits |
+
+With the light's inputs unauthored, `L` is 1. So applying `MeshLightAPI` to an emissive
+mesh changes how noisy it is, not how bright it is.
+
+Crust gives the camera, reflections and light sampling one radiance. The USD schema lets
+"light rays" see the light's inputs while the camera sees the material's glow. Crust
+does not split them, because an image would then depend on how it is sampled rather
+than on the scene. RenderMan follows the schema's split, so a mesh light that authors
+inputs far from its glow can look different there.
+
+### Visibility
+
+A mesh light is scene geometry, so the camera sees it and it casts shadows by default,
+unlike a UsdLux light. `crust:light:cameraVisible = 0` (or RenderMan's
+`primvars:ri:attributes:visibility:camera = 0`) hides it from the camera only. It keeps
+lighting the scene, appears in reflections and still casts shadows. An authored
+`crust:rayMask` decides outright, as on any geometry.
+
+### What cannot be a mesh light
+
+These meshes keep emitting through the path tracer only, as without the API, each with a
+[warning](@/docs/reference/warnings.md):
+
+- A glow that varies over the surface or with the view (a texture, a primvar, a coat or a
+  fuzz) under `materialGlowTintsLight`. Author `light:materialSyncMode = "independent"`
+  and the light's inputs to light it with a flat colour.
+- A cutout material.
+- A mesh inside an instance prototype (a native instance or a `PointInstancer`).
+- A mesh that moves during the shutter.
+- `MeshLightAPI` on anything but a `Mesh`.
+- A mesh light that emits nothing.
+
+### Limits
+
+Crust picks points on the mesh by area. A large card very close to what it lights is
+noisier than an equal `RectLight`, which crust samples by the solid angle it covers. A
+mesh is one light, so `--light-selection tree` ranks the whole mesh rather than its
+parts. Crust keeps its own copy of the light's triangles, about 40 bytes each.
+
 ## Emissive materials
 
 An emissive material (for example a `crust:openpbr` shader with
-`inputs:emissionLuminance` above 0) lights the scene through the path tracer. It is not
-sampled like a UsdLux light, so use a UsdLux light for a scene's main light sources.
+`inputs:emissionLuminance` above 0) lights the scene through the path tracer. Without
+`MeshLightAPI` it is not sampled like a light: only rays that happen to hit it find it,
+so a small or distant bright emitter is noisy. Apply [`MeshLightAPI`](#mesh-lights) to
+its mesh, or use a UsdLux light for a scene's main light sources.

@@ -67,8 +67,9 @@ land at `/`.
      selection and light samples; indirect rows (`indirect_diffuse`, `indirect_glossy`)
      at guiding and indirect light samples; `transmission` / `volume` at what the camera
      sees through. `unlit_emitters` overlaps the rest: large means emissive geometry
-     that is not a light, which only BSDF bounces reach. Light groups, when present,
-     say which light.
+     that is not a light, which only BSDF bounces reach; the finding of that name lists
+     the prims (and, for a mesh that applies `MeshLightAPI` but was refused, the warning
+     code that says why). Light groups, when present, say which light.
    - **The picture findings**: `firefly_energy` (the top 0.1% of pixels hold ≥ 20% of the
      luminance), `light_sampling_misses` (light sampling reaches < 90% of a crop's
      energy), `clamp_bias` (the clamp removes ≥ 5%), `visualization_strategy`. Their
@@ -147,7 +148,7 @@ land at `/`.
    | `target_reached: false` | no adaptive setting up to `spp_recorded` reaches the target: more samples (`sample_budget.spp_to_target`) or a looser `--target-mrse`, the user's call |
    | direct rows dominate, many lights, no suggestion | `--light-selection` / `--light-samples` are already measured: report their verdicts, not a guess |
    | a rare path through a specular or refractive vertex ending on a light (caustic), with `light_sampling_misses` | no setting makes it reachable by light sampling. Options, all the user's call: more samples (`sample_budget`), the `--indirect-clamp` trade (state the energy `clamp_removed_share` / `luma_share_clamped` say it removes), or a scene change (roughen the specular surface, light-link the light) |
-   | `O` paths / large `unlit_emitters` | emissive geometry no shadow ray can find: author a UsdLux light in its place (e.g. a `RectLight` / `SphereLight` of the same shape and power) so NEE samples it — `MeshLightAPI` is not supported |
+   | `O` paths / large `unlit_emitters` | emissive geometry no shadow ray can find: apply `UsdLuxMeshLightAPI` to the emitting mesh the finding names (`prepend apiSchemas = ["MeshLightAPI"]`; with its light inputs unauthored the picture is unchanged and NEE samples it), or author a UsdLux light in its place. A prim listed with a `light.mesh_light_*` code was refused: a textured or coated glow needs `light:materialSyncMode = "independent"` and the light's inputs; a cutout, instanced or moving mesh cannot be a mesh light — use a UsdLux light |
    | `clamp_hides_path` | the clamp is hiding the firefly; the picture without it is the real one. Say how much light it removes |
    | path guiding trial `better` on indirect rows | `crust:pathGuiding = true` (no flag; author it on the stage) |
 

@@ -2605,3 +2605,127 @@ fn an_image_at_a_curve_property_reads_it_with_or_without_the_prefix() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Constant emission
+// ---------------------------------------------------------------------------
+
+/// `root` of `doc` compiled whole, its images answered by `loader`.
+fn compiled(doc: &str, root: &str, loader: crust_mtlx::TextureLoader<'_>) -> crust_mtlx::Compiled {
+    let d = Doc::parse(doc).unwrap();
+    let root = d.find("", root).expect("root node").clone();
+    crust_mtlx::compile_terminals(&d, Some(&root), None, &Host::new(loader))
+}
+
+/// The emission `c` computes at a shading point seen at `cos` — the
+/// interpreter's slots through [`Closures::emission`], as a host runs it.
+fn emission_at(c: &crust_mtlx::Compiled, ctx: &ShadeCtx, cos: f32) -> [f32; 3] {
+    let mut slots = Vec::new();
+    c.program.eval(ctx, &mut slots);
+    c.closures.emission(&slots, cos).to_array()
+}
+
+/// An `open_pbr_surface` of `inputs` (each `name="…" type="…" value="…"`).
+fn open_pbr(inputs: &str) -> String {
+    format!(
+        r#"<materialx>
+             <open_pbr_surface name="s" type="surfaceshader">{inputs}</open_pbr_surface>
+           </materialx>"#
+    )
+}
+
+/// The `materials` spec, "A flat emissive card": a literal OpenPBR emission
+/// folds, and the constant is what every shading point computes, bit for
+/// bit, at every angle — before and after the optimiser.
+#[test]
+fn a_literal_open_pbr_emission_folds_to_its_constant() {
+    let doc = open_pbr(
+        r#"<input name="emission_luminance" type="float" value="5" />
+           <input name="emission_color" type="color3" value="1, 0.5, 0.25" />"#,
+    );
+    let mut c = compiled(&doc, "s", &decline);
+    let k = c.constant_emission.expect("a literal emission folds");
+    assert_eq!(k, [5.0, 2.5, 1.25]);
+    let views = [
+        (Vec3A::new(0.3, -0.2, 0.7), 0.05),
+        (Vec3A::new(-0.1, 0.0, 0.2), 0.5),
+        (Vec3A::ZERO, 1.0),
+    ];
+    for (position, cos) in views {
+        let at = ShadeCtx {
+            position,
+            uv: (position.x, position.y),
+            ..ctx()
+        };
+        assert_eq!(emission_at(&c, &at, cos), k);
+    }
+    c.optimize();
+    assert_eq!(c.constant_emission, Some(k), "kept through the optimiser");
+    assert_eq!(emission_at(&c, &ctx(), 0.3), k);
+}
+
+/// A surface with no emission has a constant one: zero.
+#[test]
+fn a_surface_without_emission_folds_to_zero() {
+    let c = compiled(&open_pbr(""), "s", &decline);
+    assert_eq!(c.constant_emission, Some([0.0; 3]));
+}
+
+/// "A textured emission": an `image` feeding `emission_color` depends on the
+/// shading point, so nothing folds.
+#[test]
+fn an_image_driven_emission_does_not_fold() {
+    let doc = r#"<materialx>
+      <image name="tex" type="color3">
+        <input name="file" type="filename" value="glow.png" />
+      </image>
+      <standard_surface name="s" type="surfaceshader">
+        <input name="emission" type="float" value="1" />
+        <input name="emission_color" type="color3" nodename="tex" />
+      </standard_surface>
+    </materialx>"#;
+    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
+        Some(TextureRef(Arc::new(Flat([0.6, 0.7, 0.8, 1.0]))))
+    };
+    let c = compiled(doc, "s", &loader);
+    assert!(!c.closures.emission.is_empty());
+    assert_eq!(c.constant_emission, None);
+}
+
+/// "Emission under a coat": the coat's Fresnel fades the emission with the
+/// viewing angle, so it does not fold.
+#[test]
+fn a_coated_emission_does_not_fold() {
+    let doc = open_pbr(
+        r#"<input name="emission_luminance" type="float" value="5" />
+           <input name="coat_weight" type="float" value="1" />"#,
+    );
+    let c = compiled(&doc, "s", &decline);
+    assert!(!c.closures.emission.is_empty());
+    assert_eq!(c.constant_emission, None);
+}
+
+/// A `generalized_schlick_edf` whose two colours are equal is a neutral
+/// falloff, up to its tint: it folds, and the emission is that tint at every
+/// angle — exactly, not through a `mix` that rounds by the angle.
+#[test]
+fn an_equal_coloured_schlick_falloff_folds() {
+    let doc = r#"<materialx>
+      <uniform_edf name="u" type="EDF">
+        <input name="color" type="color3" value="2, 3, 4" />
+      </uniform_edf>
+      <generalized_schlick_edf name="e" type="EDF">
+        <input name="color0" type="color3" value="0.3, 0.3, 0.3" />
+        <input name="color90" type="color3" value="0.3, 0.3, 0.3" />
+        <input name="base" type="EDF" nodename="u" />
+      </generalized_schlick_edf>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="e" />
+      </surface>
+    </materialx>"#;
+    let c = compiled(doc, "s", &decline);
+    let k = c.constant_emission.expect("a neutral falloff folds");
+    for cos in [0.0, 0.1, 0.37, 0.9, 1.0] {
+        assert_eq!(emission_at(&c, &ctx(), cos), k, "at cos {cos}");
+    }
+}

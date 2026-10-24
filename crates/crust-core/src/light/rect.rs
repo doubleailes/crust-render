@@ -270,7 +270,7 @@ impl LightShape for RectShape {
         self.origin + u * self.edge_u + v * self.edge_v
     }
 
-    fn normal_at(&self, _p: Vec3A) -> Vec3A {
+    fn normal_at(&self, _p: Vec3A, _prim: u32) -> Vec3A {
         self.normal
     }
 

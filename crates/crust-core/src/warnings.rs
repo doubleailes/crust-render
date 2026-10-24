@@ -372,6 +372,20 @@ warning_codes! {
         "A light's or dome's texture could not be loaded; it emits its uniform colour.";
     IesUnreadable => "ies.unreadable", Skipped, Each,
         "An IES profile could not be loaded; the light renders without it.";
+    LightUnknownToken => "light.unknown_token", Refused, Each,
+        "A light's token input names no value the schema defines; its fallback is used.";
+    LightMeshLightVaryingEmission => "light.mesh_light_varying_emission", Skipped, Each,
+        "A mesh light's glow varies over its surface or with the view under materialGlowTintsLight; the mesh is not a light.";
+    LightMeshLightCutout => "light.mesh_light_cutout", Skipped, Each,
+        "A mesh light's material is a cutout; the mesh is not a light.";
+    LightMeshLightInstanced => "light.mesh_light_instanced", Skipped, Each,
+        "A mesh light lies inside an instance prototype; no placement is a light.";
+    LightMeshLightMoving => "light.mesh_light_moving", Skipped, Each,
+        "A mesh light moves over the shutter; the mesh is not a light.";
+    LightMeshLightNotAMesh => "light.mesh_light_not_a_mesh", Skipped, Each,
+        "MeshLightAPI is applied to a prim that is not a Mesh; it is not a light.";
+    LightMeshLightNoEmission => "light.mesh_light_no_emission", Skipped, Each,
+        "A mesh light emits nothing; it is not a light.";
     LightLinkMembershipExpression => "light_link.membership_expression", Approximated, Each,
         "A light-link collection authors membershipExpression, which is not read; it includes every prim.";
     LightLinkUnreadableCollection => "light_link.unreadable_collection", Refused, Each,

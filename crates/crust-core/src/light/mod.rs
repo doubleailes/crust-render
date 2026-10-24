@@ -8,6 +8,7 @@ mod infinite;
 mod kind;
 pub(crate) mod learned;
 mod list;
+mod mesh;
 pub(crate) mod neural;
 mod rect;
 mod shape;
@@ -19,6 +20,7 @@ pub use kind::LightKind;
 pub use list::{
     EVERY_CLASS, LightLinks, LightList, LightSelection, LobeGains, TREE_DEFENSIVE_SHARE,
 };
+pub use mesh::MeshShape;
 pub use rect::RectShape;
 pub use shape::{
     AffineShape, LightShape, ShapeExtent, ShapeHits, SolidAngleSampler, SolidAngleSampling,
@@ -92,10 +94,12 @@ pub trait Light: Send + Sync {
 
     /// Solid-angle pdf, as seen from `from`, of [`Light::sample_li`] having
     /// produced `light_point` — the bounce side of MIS for a light whose
-    /// geometry a ray hit. `None` means `sample_li` never delivers that point
-    /// (and is the default, for lights at infinity, which have no such
-    /// point): nothing competes there, so the bounce keeps full weight.
-    fn pdf_at_point(&self, _from: Vec3A, _light_point: Vec3A) -> Option<PdfSolidAngle> {
+    /// geometry a ray hit. `prim` is the primitive the point lies on: the
+    /// hit's `prim_id`, which a mesh light's normal there needs
+    /// ([`LightShape::normal_at`]). `None` means `sample_li` never delivers
+    /// that point (and is the default, for lights at infinity, which have no
+    /// such point): nothing competes there, so the bounce keeps full weight.
+    fn pdf_at_point(&self, _from: Vec3A, _light_point: Vec3A, _prim: u32) -> Option<PdfSolidAngle> {
         None
     }
 

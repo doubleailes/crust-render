@@ -256,6 +256,17 @@ pub(super) fn collect_proto_parts(
                 prim.path()
             );
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+            // A prototype's hits report a forwarded id that does not name the
+            // placement, so no placement can be a light's geometry.
+            if super::mesh_light::applies(&prim) {
+                warning!(
+                    LightMeshLightInstanced,
+                    at = prim.path(),
+                    "{}: a mesh light inside an instance prototype cannot be sampled — every \
+                     placement is emissive geometry only",
+                    prim.path()
+                );
+            }
             let bound = resolve_bound(stage, &prim, caches);
             let material = bound.material;
             let displacement = super::mesh::prim_displacement(&prim, bound.displacement);

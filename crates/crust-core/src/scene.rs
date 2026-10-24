@@ -328,7 +328,8 @@ pub struct CameraRecord {
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct LightRecord {
     pub path: String,
-    /// `sphere`, `rect`, `disk`, `cylinder`, `distant` or `dome`.
+    /// `sphere`, `rect`, `disk`, `cylinder`, `distant`, `dome`, or `mesh` for a
+    /// `Mesh` applying `MeshLightAPI`.
     #[serde(rename = "type")]
     pub kind: &'static str,
     #[serde(serialize_with = "crate::report::finite_or_null")]

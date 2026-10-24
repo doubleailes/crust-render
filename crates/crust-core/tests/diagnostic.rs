@@ -305,3 +305,62 @@ fn import_only_findings_match_the_diagnostics() {
         );
     }
 }
+
+/// What `unlit_emitters` names, read off real stages: the emissive card of
+/// `mesh_light_no_api.usda`; nothing once `mesh_light.usda` applies the API;
+/// and a refused mesh light with the code that refused it.
+#[test]
+fn unlit_prims_are_the_emissive_prims_outside_the_light_list() {
+    use diagnostic::checks;
+    let sample = |name: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples")
+            .join(name);
+        Scene::from_usd(&path).unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    let without = sample("mesh_light_no_api.usda");
+    assert_eq!(without.lights.count(), 0);
+    assert_eq!(
+        checks::unlit_prims(&without),
+        [("/World/Card".to_owned(), None)]
+    );
+    let with = sample("mesh_light.usda");
+    assert_eq!(with.lights.count(), 1);
+    assert!(checks::unlit_prims(&with).is_empty());
+
+    let text = r#"#usda 1.0
+def Xform "World"
+{
+    def Material "Coated"
+    {
+        token outputs:surface.connect = </World/Coated/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "crust:openpbr"
+            float inputs:emissionLuminance = 3
+            float inputs:coatWeight = 1
+            token outputs:surface
+        }
+    }
+    def Mesh "Sign" (prepend apiSchemas = ["MaterialBindingAPI", "MeshLightAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </World/Coated>
+    }
+}
+"#;
+    let dir = std::env::temp_dir().join("crust_diagnostic_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("refused_mesh_light.usda");
+    std::fs::write(&path, text).unwrap();
+    let refused = Scene::from_usd(&path).expect("loads");
+    assert_eq!(
+        checks::unlit_prims(&refused),
+        [(
+            "/World/Sign".to_owned(),
+            Some("light.mesh_light_varying_emission")
+        )]
+    );
+}
