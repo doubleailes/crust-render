@@ -7,6 +7,7 @@
 
 pub mod delta;
 pub mod layer;
+pub mod live;
 pub mod scene;
 pub mod sources;
 
@@ -122,3 +123,6 @@ pub fn update_or_import(
     *scene = import_kept(layer, pass, assets)?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod live_tests;
