@@ -6,7 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# The package keeps the repository's name; the executable is `crust`.
+# The library is the CLI's import-and-check policy and, with `session`, the
+# live session's core: what `crust mcp` and `crust-hydra` share with `crust
+# render`. The package keeps the repository's name; the executable is `crust`.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "crust"
 path = "src/main.rs"
@@ -26,15 +31,21 @@ jit = ["crust-core/jit"]
 # that never maps a file and copies each one into memory, with no `unsafe`
 # opt-in compiled.
 mmap = ["crust-core/mmap"]
+# The live session's core (`session`): an override layer followed on disk,
+# each change classified and applied in place or by a re-import. Needs only
+# openusd, which authors and diffs the layer: no MCP SDK, no async runtime.
+# `crust-hydra` builds the library with it alone.
+session = ["dep:openusd"]
 # `crust mcp`: a Model Context Protocol server over stdio for an agent's
 # live session (the `mcp-session` capability). It brings in the MCP SDK and
 # an async runtime, which carry only the protocol: the session itself runs
 # on its own thread and the renders on rayon. `--no-default-features`
 # builds the CLI without either.
 mcp = [
+    "session",
     "dep:rmcp",
     "dep:tokio",
-    "dep:openusd",
+    "openusd/serde",
     "dep:serde",
     "dep:schemars",
     "dep:serde_json",
@@ -62,11 +73,11 @@ ctrlc = "3.4"
 # HTTP transport, no auth), and the current-thread tokio runtime it runs on.
 rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io"], optional = true }
 tokio = { version = "1.52", default-features = false, features = ["rt", "macros", "io-std", "sync", "time"], optional = true }
-# `mcp`: the session authors its override layer through openusd, the same
-# crate (and version) crust-core imports with.
-# With `serde`, so a queried value reaches the client as the JSON of its
+# `session`: the session authors and diffs its override layer through
+# openusd, the same crate (and version) crust-core imports with. `mcp` adds
+# `serde`, so a queried value reaches the client as the JSON of its
 # `sdf::Value`.
-openusd = { workspace = true, features = ["serde"], optional = true }
+openusd = { workspace = true, optional = true }
 # `mcp`: the tools' parameters and results. `schemars` is the version rmcp
 # derives its input schemas with.
 serde = { version = "1.0", features = ["derive"], optional = true }

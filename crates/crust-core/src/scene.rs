@@ -463,6 +463,11 @@ pub struct UsdImportOptions {
     /// whatever passes the stage defines. A path that is not a `RenderPass`
     /// on the stage is an error ([`crate::Error::PassNotFound`]).
     pub pass: Option<String>,
+    /// Keep a copy of the top-level geometry in the scene's world
+    /// ([`crate::WorldBuilder::keep_inputs`]), so a live session can move or
+    /// reshape a mesh in place ([`crate::live`]). Costs the baked triangles'
+    /// memory a second time; the image is the same either way.
+    pub keep_geometry: bool,
 }
 
 /// How the engine asks its host to decode an image.

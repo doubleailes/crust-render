@@ -616,6 +616,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crust-hydra"
+version = "0.8.0"
+dependencies = [
+ "crust-assets",
+ "crust-core",
+ "crust-render",
+ "openusd",
+ "tracing",
+]
+
+[[package]]
 name = "crust-jit"
 version = "0.8.0"
 dependencies = [
@@ -1380,7 +1391,7 @@ source = "git+https://github.com/doubleailes/OpenSubdiv-rs?tag=0.5.0#c672796f958
 [[package]]
 name = "openusd"
 version = "0.8.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#bb9058e8d47d44f983caabf1e663401f59e3c7f0"
+source = "git+https://github.com/mxpv/openusd?branch=main#68a867a69f3fb429a30f9e1155a0a30a3d2cdf9f"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -1402,7 +1413,7 @@ dependencies = [
 [[package]]
 name = "openusd-build"
 version = "0.8.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#bb9058e8d47d44f983caabf1e663401f59e3c7f0"
+source = "git+https://github.com/mxpv/openusd?branch=main#68a867a69f3fb429a30f9e1155a0a30a3d2cdf9f"
 dependencies = [
  "openusd",
  "prettyplease",
@@ -1417,7 +1428,7 @@ dependencies = [
 [[package]]
 name = "openusd-schemas"
 version = "0.8.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#bb9058e8d47d44f983caabf1e663401f59e3c7f0"
+source = "git+https://github.com/mxpv/openusd?branch=main#68a867a69f3fb429a30f9e1155a0a30a3d2cdf9f"
 dependencies = [
  "bitflags 2.13.2",
  "derive_more",
@@ -2315,7 +2326,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

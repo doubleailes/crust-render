@@ -22,10 +22,16 @@ See proposal.md for the motivation. The state this design builds on:
   a render camera move a `settings` update and adds `crust:dicingCamera`.
   This change depends on it.
 - **The release profile aborts on panic** (`Cargo.toml` `[profile.release]`).
-- **OpenUSD 26.** The scene index is UsdImaging's default path, and
-  delegates written for the scene delegate run behind an
-  `HdRenderDelegateAdapterRenderer`. Exactly which interface a native 2.0
-  renderer implements on 26.x was not verified while planning (task 1.1).
+- **OpenUSD 26.** The scene index is UsdImaging's default path, and a
+  render delegate runs behind an `HdRenderDelegateAdapterRenderer`, which
+  hands it the terminal scene index. Task 1.1 settled what a renderer
+  implements on 26.x (D1).
+- **The OpenUSD `hdCrust` builds against comes from pixi.** It is the
+  `openusd` package (26.08, with usdview, headers and `pxrConfig.cmake`) from
+  Anders Langlands' ASWF channel (`hydra/pixi.toml`). The plugin must be
+  built against the OpenUSD the host runs, and this gives both from one
+  environment, on Linux and on Windows. `build_usd.py` stays the fallback
+  (cookbook).
 
 ## Goals / Non-Goals
 
@@ -47,8 +53,9 @@ See proposal.md for the motivation. The state this design builds on:
 - **Other hosts:** Houdini Solaris, Maya-USD, Omniverse and `husk` are
   untested. Nothing here is usdview-specific on purpose, but only usdview is
   verified.
-- **Other platforms:** macOS and Windows builds are not attempted. The CMake
-  is written portably, and CI is Linux only.
+- **Other platforms:** macOS is not attempted. Linux (CI) and Windows (the
+  development host, MSVC with pixi's OpenUSD) are built. The CMake is
+  written portably.
 - **Reading Hydra data without going through a layer**: option (C) from the
   exploration, kept as the fallback if memory proves (D) too costly (Risks).
 
@@ -61,16 +68,59 @@ scene index. It reads prims through data sources (`HdMeshSchema`,
 `HdXformSchema`, `HdMaterialSchema`, `HdLightSchema`, `HdInstancerTopologySchema`,
 `HdPrimvarsSchema`, …):
 - `PrimsAdded`, `PrimsRemoved` and `PrimsDirtied` (with locators) drive the
-  layers;
+  layers, except for the host's own prims: usdview's task controller, free
+  camera and default light, all under `/_UsdImaging_<renderer>_<address>`
+  (`UsdImagingGLEngine::_ComputeControllerPath`). Only that prefix is the
+  host's; a stage root that merely starts with `_` (`/_World`) is written;
+- a prim removed or hidden is made inactive in the overs, and active again
+  when the next write of it finds it present and visible. A path reported
+  removed that the scene index still holds (a resync, removal and addition
+  in one sync) is not deactivated;
 - Rprim/Sprim `Sync` calls, if the 26.x interface still makes them, do
   nothing.
 
-Task 1.1 settles the exact entry point:
-- implement the native 2.0 renderer interface if 26.x has a public one;
-- otherwise implement `HdRenderDelegate` and attach the observer to
-  `GetRenderIndex()->GetTerminalSceneIndex()`;
-- either way, declare the prim types crust reads as supported, so the render
-  index does not filter them out before the terminal scene index.
+**The entry point (task 1.1, read from the 26.08 headers that pixi's
+`openusd` package installs, and from the v26.08 and v26.11.1 sources):**
+
+- **26.x has no usable native 2.0 renderer interface.** `HdRenderer`
+  (`pxr/imaging/hd/renderer.h`) is a stub ("TODO: Add API here"). Its only
+  surface is `GetLegacyRenderControl()`, which returns the "transitory"
+  `HdLegacyRenderControlInterface` (`hd/legacyRenderControlInterface.h`).
+  That interface takes over task execution, AOV buffers, render settings,
+  commands and pause/stop. A plugin overriding
+  `HdRendererPlugin::_CreateRenderer` (`hd/rendererPlugin.h`) would have to
+  reimplement usdview's whole Hdx task graph. No renderer in Pixar's tree
+  overrides it, in 26.08 or 26.11.
+- **`HdRenderDelegate` is the entry point, and it already sits on the scene
+  index.** usdview's engine (`usdImagingGL/engine.cpp`, scene index mode, the
+  default) calls `plugin->CreateRenderer(terminalSceneIndex, args)`. For a
+  plugin without `_CreateRenderer`, the base class builds an
+  `HdRenderDelegateAdapterRenderer` (`hd/renderDelegateAdapterRenderer.h`).
+  That adapter creates the delegate through `CreateRenderDelegate()`, and
+  then a render index through `HdRenderIndex::NewForBackendEmulation`
+  (`hd/renderIndex.h`). The render index then:
+  - calls `HdRenderDelegate::SetTerminalSceneIndex(terminalSceneIndex)`
+    (`hd/renderDelegate.h`, "Hydra 2.0 API") once the scene index graph
+    exists. `hdCrust` registers its observer there;
+  - calls `HdRenderDelegate::Update()` at the start of every `SyncAll`,
+    before any prim sync. `hdCrust` drains its collected changes there.
+- **No deprecation notice.** The only deprecation warning on this path is
+  `USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX_DEPRECATION_WARNING`. It fires
+  only when the scene index is turned *off* (the `UsdImagingDelegate`
+  path). The adapter renderer prints nothing.
+- **Supported prim types filter the render index, not the scene index.**
+  The observer sees the terminal scene index whole. Only the emulation
+  (`HdSceneIndexAdapterSceneDelegate`) consults `GetSupported{R,S,B}primTypes`
+  when it inserts prims into the render index. So `hdCrust` declares:
+  - no rprims, which saves a no-op `HdRprim` per mesh;
+  - the sprim `camera`, which the render pass state's `HdCamera` needs;
+  - the bprim `renderBuffer`, for AOV bindings.
+
+  It reads every geometry, material, light and instancer prim from the
+  scene index.
+
+Implementing `HdRenderer` directly is revisited once 26.x gives it an API
+that does not assume the Hdx task graph.
 
 **Alternative rejected:** the `HdRprim::Sync` path. It is deprecated on 26,
 it gives per-prim callbacks with no locators, and it would be rewritten
@@ -129,11 +179,41 @@ rewritten from scratch, which also compacts `edits.usda`.
 | implicit `cube`/`sphere`/`cylinder`/`cone`/`capsule` | the same schema type (crust tessellates as GeomUtil does) |
 | material network (`HdMaterialNetworkSchema`) | `Material` with `Shader` prims, `info:id` from the node type, connections from the network; terminals `surface`, `displacement`, `volume` and `mtlx:*` kept |
 | `HdMaterialBindingsSchema` (resolved) | direct `material:binding` |
-| lights (`HdLightSchema` + params) | the UsdLux type, `inputs:*` from the params, shaping and textures kept |
+| lights (`HdLightSchema` + params) | the UsdLux type, `inputs:*` from the params, shaping and textures kept; a `domeLight` whose `domeOffset` puts its pole on +Z (a `DomeLight_1` with `poleAxis` `Z`, or `scene` on a Z-up stage) as `DomeLight_1` with `poleAxis = "Z"`, since a `DomeLight` ignores the pole |
 | instancer (`HdInstancerTopologySchema`, `instanceTransforms`) | `PointInstancer` with `protoIndices`, `positions`/`orientations`/`scales` decomposed from the matrices, prototypes as children |
 | camera sprims | `Camera` |
 | `HdRenderSettingsSchema` (if the stage has one) | read for its camera path, which becomes `crust:dicingCamera` |
 
+- **crust's own prim attributes.** Hydra carries schema data and primvars
+  only, never arbitrary attributes, so `crust:volume:*` (fog, smoke),
+  `crust:light:*`, `crust:rayMask`, `crust:subdivisionLevel` and
+  `crust:motion:*` would never reach the delegate. Nor can the delegate
+  reach the stage: `UsdImagingStageSceneIndex` has no `GetStage()`. So
+  `hdCrust` registers a *keyless* UsdImaging API schema adapter
+  (`apiSchemaName ""` in its `plugInfo.json`), which UsdImaging consults
+  for every prim. It publishes every authored `crust:*` attribute under a
+  `crust` container, as UsdImaging attribute data sources, so time samples
+  and invalidation behave as for UsdImaging's own attributes. The writer
+  puts them back on the prim it writes. A prim it writes for nothing else
+  (an Xform carrying an inherited `crust:*`) is written typeless with them.
+  The adapter is host-side UsdImaging code: it serves any UsdImaging host,
+  and is inert for renderers that ignore the container.
+- **Instances.** Instancer prims become `PointInstancer`s:
+  - each instance's Hydra transform (`instanceTransform × scale × rotate
+    × translate`) is factored into positions, orientations and scales;
+  - masked instances become `invisibleIds`;
+  - each prototype's prims are copied under `<instancer>/Prototypes/p<i>`
+    with their Hydra matrices, which are relative to the instancer
+    (verified on `instancing.usda`);
+  - prims marked `instancedBy` are written only there, never at their own
+    path;
+  - prototypes are copied 8 instancers deep, as far as crust's import
+    expands them (`MAX_INSTANCE_NESTING`); a deeper one is reported and left
+    unexpanded, rather than copied for the import to refuse.
+  A shear in an instance transform cannot be factored, and is reported.
+- **Light links** arrive as the light's `lightLink` / `shadowLink`
+  collections. An unlinked light's membership is `//`, or `~//*.*` as
+  UsdCollectionAPI expands its default; anything else is reported once.
 - **Visibility and purpose.** Hydra resolves both. Only visible prims whose
   render tag the render pass includes are written (spec).
 - **Unsupported data.** Data with no row above is skipped, and one warning
@@ -147,7 +227,16 @@ rewritten from scratch, which also compacts `edits.usda`.
 ### D4. The viewing camera is a prim in `edits.usda`; the stage's camera dices
 
 `HdRenderPass::_Execute` receives the viewing camera and framing through the
-render pass state. Each execution, `hdCrust` turns the view and projection
+render pass state (`hd/renderPassState.h`, 26.08):
+- `GetWorldToViewMatrix()` and `GetProjectionMatrix()` (the framing and
+  window policy applied);
+- `GetCamera()`, the `HdCamera` sprim (`hd/camera.h`), for its clipping
+  range and lens;
+- `GetFraming()` (`CameraUtilFraming`), whose data window is the viewport
+  size;
+- `GetAovBindings()`, the render buffers to fill.
+
+Each execution, `hdCrust` turns the view and projection
 matrices into `/__hdCrust/camera`:
 - the inverse view matrix becomes `xformOp:transform`;
 - `focalLength`, apertures and offsets come from the projection, at the
@@ -186,8 +275,52 @@ Each `_Execute`:
    4. starts a fresh render with a fresh `RenderControl`.
 2. Otherwise, poll `crust_hydra_snapshot`. When its `generation` moved, copy
    the beauty into the color `HdRenderBuffer`.
+
+   After a restart (step 1), `_Execute` instead waits, capped at 2 s, for
+   the new render's first full pass (every pixel at 1 spp), and shows that.
+   usdview's player redraws once per frame without waiting for
+   convergence. Returning at once left the previous frame on screen until
+   playback paused (found in usdview). Waiting for a first publish instead
+   would show one tile on black. `hdCrustTest --playback` pins it: every
+   frame of `animation.usda` shows its own image, about 45 ms per frame at
+   320×180.
+
+   Convergence is read *before* the snapshot. Read after, a render
+   finishing between the two calls reported converged over its last
+   published image, one tile short of the final one (seen as 256 pixels
+   off in `compare.sh`).
 3. Report `IsConverged` exactly when the render returned `Completed`. At that
    point, read every bound AOV once into its buffer.
+
+Crust renders only the AOVs a RenderProduct asks for. So the viewport's
+bindings besides color become one product, `/__hdCrust/aovs`, in
+`edits.usda`, with one RenderVar per AOV crust renders. Each var is named
+after Hydra's AOV (`driver:parameters:aov:name`):
+
+| Hydra AOV | crust source | type |
+|-----------|--------------|------|
+| `depth` | `depth`, converted to Hydra's convention (below) | `float` |
+| `normal` | `N` | `normal3f` |
+| `Neye` | `Neye` | `normal3f` |
+| `Peye` | `Peye` | `point3f` |
+
+Any other AOV (`primId`, `instanceId`, ...) is reported once and keeps its
+clear value. A change in the bound set is an edit of the override layer,
+classified `full` (it adds or removes prims). `crust render -i edits.usda`
+writes the same product, so the AOVs are as reproducible as the beauty.
+`interaction.sh` pins `Peye` bitwise.
+
+**`depth` is Hydra's normalized device depth, not crust's camera depth.**
+The plan copied crust's camera-space depth (5.0, or +inf for a miss) into
+the buffer, and every image in usdview turned black (found in usdview).
+The host composites the renderer's color with its depth: HgiInterop writes
+the depth to `gl_FragDepth` under a depth test (`hgiInterop/opengl.cpp`),
+which only [0, 1] can pass. So the copy projects each depth `d` with the
+pass's projection, as hdEmbree's `_ComputeDepth` does:
+`0.5 · (−d·P₂₂ + P₃₂) / (−d·P₂₃ + P₃₃) + 0.5`, clamped, and misses become
+1. `crust render`'s own `depth` AOV stays camera-space. The headless
+harness binds no depth unless asked, which is why it missed the black
+image. `hdCrustTest --aov depth` now fails on any value outside [0, 1].
 
 Many drag events between two executions collapse into one camera write, so
 the rebuild runs at most once per displayed frame.
@@ -209,6 +342,16 @@ The features:
 
 This is a move, not a rewrite. Every MCP test keeps passing, and `crust`'s
 output does not change (verified by `check_images.sh`).
+
+One seam was added: the session core takes its loader as `Arc<dyn
+crust_render::Assets>`, not as `crust-assets`' concrete `FileAssets`.
+- `Assets` is `AssetLoader` plus what an import and a kept-decode session
+  need: the preloaded-texture count, `revalidate` and `sweep`.
+- `FileAssets` is its only production implementation. `crust mcp` and
+  `crust-hydra` both use it.
+- It exists so a test can bring its own loader. `crust-hydra`'s D8 test
+  loads a scene through a loader whose UV textures panic when a material
+  samples them.
 
 **Alternatives considered (asked and decided):**
 - *A new `crust-session` crate.* It has the cleanest boundary, but it moves
@@ -265,6 +408,10 @@ panic = "unwind"
   `Panicked`.
 - **After a panic,** the session drops its scene, and the next `apply`
   re-imports from the layers (spec "Failures never take the host down").
+  The first poll returns `Panicked`; later ones are `Busy`, and the stopped
+  render counts as converged. The host raises an error per failed poll and
+  redraws while a render is unconverged, so reporting the panic on every
+  poll printed it on every redraw, forever.
 - **The panic hook** forwards to `log_cb` instead of printing to stderr.
 
 The `release` profile keeps `abort`. The cost of unwinding is measured once,
@@ -285,8 +432,9 @@ No Corrosion or other CMake module is added.
 - **Triggers:** runs on changes to `crates/crust-hydra/`, `hydra/`,
   `crates/crust-render/src/{lib.rs,session/}`, `crates/crust-core/src/live.rs`
   and `scene/usd_import/live.rs`, and nightly.
-- **OpenUSD:** builds OpenUSD 26 with `build_usd.py --no-python --no-usdview`
-  and GL support off, cached by tag.
+- **OpenUSD:** `pixi install` in `hydra/` (the same `openusd` package as a
+  local build, D9's environment), cached on `pixi.lock`. No OpenUSD build
+  runs in CI.
 - **Steps:** builds the plugin and runs `hdCrustTest`, a headless C++
   executable:
   1. it builds UsdImaging's scene indices for a sample stage;
@@ -308,8 +456,12 @@ No Corrosion or other CMake module is added.
   option (C) (crust builders fed from Hydra values) replaces D2/D3, with
   D3's table as its specification.
 - [**openusd misreads a Pixar-written USDC** (a type, a list op, a newer
-  crate version)] → Task 3.x round-trips every `samples/*.usda` through
-  `SdfLayer::Export` to USDC and renders both with `crust render`, bitwise.
+  crate version)] → Task 4.6 round-trips every `samples/*.usda` through
+  `SdfLayer::Export` to USDC and renders both with `crust render`, bitwise
+  (`usdc_roundtrip.sh`). Measured with OpenUSD 26.08: 42 of 43 identical.
+  The 43rd, `cornellbox_guided`, renders one of two images from run to run
+  from its own USDA too (path guiding is not deterministic), so it is no
+  USDC difference.
 - [**A settings rebuild per drag is too slow on production stages**: it
   re-opens the stage, 18–60 ms on ALab] → D5's coalescing bounds it to once
   per frame. `live-camera-update` records the number. A camera fast path in
@@ -325,12 +477,66 @@ No Corrosion or other CMake module is added.
 - [**A panic leaves rayon workers mid-render**] → the render returns through
   the cancelled path only when the panic is on the driving thread. A panic
   on a worker propagates through rayon's join to the driving thread, which
-  `catch_unwind` catches. Covered by a test with a panicking material under
-  `[profile.hydra]`.
+  `catch_unwind` catches. Covered by a test under `[profile.hydra]`
+  (`tests_ffi.rs`). Its scene is `usdpreview_textured.usda`, imported
+  through a test-only loader whose UV textures panic in `Texture::eval`:
+  a material bug, met on a rayon worker mid-render. The test then checks:
+  - the C ABI returns `Panicked`;
+  - the panic reaches the host's callback;
+  - with the texture fixed, the next `apply` re-imports and renders to
+    convergence.
 - [**`unsafe` and a C++ build enter the project**] → confined to one crate
   and one optional job. `cargo build`, `cargo test --workspace` and the
   required CI never compile `hdCrust`. `crust-hydra` itself compiles and is
   tested with the workspace, through its Rust API.
+
+### Measured (task 5.6)
+
+`hdCrustTest --measure 5` on ALab 2.3 (`entry.usda`, `renderCam`) at
+1920×1080, Windows, 16 cores, OpenUSD 26.08, session directory on a separate
+disk. The per-redraw costs are the delegate's `crust:syncMs`,
+`crust:firstPassMs` and `crust:copyMs` render stats:
+
+| measure | ALab | cornellbox (for scale) |
+|---------|------|------------------------|
+| stage open (UsdStage) | 0.6 s | 0.04 s |
+| first redraw: `scene.usdc` written + crust's import | 57.0 s | 0.07 s |
+| … then the first full pass | 2.0 s, capped (the image is partial) | 0.68 s |
+| time to first image, from process start | 63.2 s | 0.93 s |
+| a drag: settings rebuild | 2.0 s mean, 2.2 s max | 0.11 s |
+| a drag: redraw, first pass included | 4.1 s | 0.80 s |
+| snapshot copy at 1920×1080, per redraw | 133 ms | 124 ms |
+| host process peak memory | 11.1 GiB | 0.38 GiB |
+| `crust render` of the same layers: peak working set | 4.1 GiB | — |
+| `crust render` of the same layers: import | 20.4 s | — |
+| `scene.usdc` on disk | 2.2 GB | 20 KB |
+
+What these say, risk by risk:
+
+- **Memory is the wall the design expected.** The host holds 2.7× what
+  `crust render` of the same layers needs: UsdImaging's stage and scene
+  indices, the in-memory scene layer the overlay diffs against, and
+  crust's import. Dropping the in-memory scene layer (diffing against the
+  file instead) is the first saving. Option (C) is the structural one.
+- **Disk:** the flattened layer is 2.2 GB. Under the default session
+  directory (the system temp, on the system disk) it filled the disk. A
+  failed write was then retried on every redraw, until the delegate learned
+  to wait for the next change. Production stages need the session
+  directory set to a disk with room (documented in the usdview help).
+- **Writing the layer costs about twice crust's import of it** (57 s
+  against 20 s). The flattened write is the first-image bottleneck, not
+  crust.
+- **The settings rebuild per drag is 2 s on ALab**, as the risk feared. It
+  re-opens the 2.2 GB layer's stage to classify the edit. A camera fast path
+  in `live`, or classifying a camera-only `edits.usda` change without
+  opening the stage, is the follow-up.
+- **The 2 s first-pass cap is reached on ALab**, so a drag shows a partial
+  first pass that then fills in.
+- **The snapshot copy is about 130 ms per redraw at 1080p** on either scene.
+  The image is copied four times: crust's buffer, the RGBA vector, the C
+  buffer, and Hydra's, with a per-pixel format switch and a flip. That caps
+  progressive refresh near 8 Hz. A region- or tile-dirty snapshot, written
+  straight into the host's format, is the follow-up.
 
 ## Migration Plan
 

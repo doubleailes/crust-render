@@ -371,6 +371,27 @@ scripts/check_images.sh check  <dir>           # re-render and diff; exits non-z
 scripts/bench_ab.sh -a <binA> -b <binB> [scenes...]   # interleaved A/B of two binaries
 scripts/bench_ab.sh -a A -b B -p "Parse USD stage" -x "-s 1" scene.usda  # ...of an import phase
 
+# --- OpenUSD 26 for the Hydra delegate (hdCrust; hydra-delegate design) ------
+# The plugin must be built against the OpenUSD the host runs, so usdview and
+# the SDK come from one pixi environment: hydra/pixi.toml pins the `openusd`
+# package (26.08: libraries, headers, pxrConfig.cmake, usdview) from Anders
+# Langlands' channel (https://github.com/anderslanglands/aswf-pixi), on
+# linux-64 and win-64. Nothing here touches `cargo build`.
+cd hydra && pixi install                      # .pixi/envs/default
+pixi run cmake -S <project> -B <build>       # find_package(pxr) needs no pxr_DIR under
+#   `pixi run` (the env prefix is searched): "pxr 2608", targets hd, usdImaging, sdf.
+# Outside pixi, pxr_DIR is the directory holding pxrConfig.cmake:
+#   Linux .pixi/envs/default, Windows .pixi\envs\default\Library. On Windows the
+#   compiler is MSVC: configure from a vcvars64 shell ("...\VC\Auxiliary\Build\vcvars64.bat").
+pixi run usdview ../samples/cornellbox.usda   # the host, same OpenUSD
+# Fallback without pixi: Pixar's script, no Python, no usdview, GL off
+# (`find_package(pxr)` then takes pxr_DIR=<install>):
+git clone --depth 1 --branch v26.08 https://github.com/PixarAnimationStudios/OpenUSD
+python OpenUSD/build_scripts/build_usd.py --no-python --no-usdview --no-examples \
+    --no-tutorials --no-docs --build-args USD,"-DPXR_ENABLE_GL_SUPPORT=OFF" <install>
+# (~25 min on 16 cores with MSVC 14.41; on Windows run it from a vcvars64 shell, and in
+# a path without spaces: C:\usd26, not the user profile.)
+
 # CI runs (toolchain pinned, RUSTFLAGS=-D warnings), as three parallel jobs:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

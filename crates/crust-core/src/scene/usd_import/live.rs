@@ -15,18 +15,30 @@ use std::sync::Arc;
 use openusd::sdf;
 use openusd::usd::{InitialLoadSet, Prim, Stage};
 
+use std::collections::{BTreeMap, HashMap};
+
+use crust_rt::Geometry;
+use glam::Affine3A;
+use openusd_schemas::geom::{Mesh as UsdMesh, Sphere as UsdSphere};
+
 use crate::light::LightList;
-use crate::live::{LightUpdate, PrimFrame, Provenance, SettingsUpdate, Structural, Update};
+use crate::live::{
+    LightUpdate, MeshKeyFacts, PrimFrame, Provenance, SettingsUpdate, Structural, Update,
+};
 use crate::material::Material;
-use crate::rt_world::WorldBuilder;
+use crate::rt_world::{GeometryEdit, World, WorldBuilder};
 use crate::{AssetLoader, Warning};
 
 use super::camera::{build_camera, local_to_world};
 use super::light_links::LightLinks;
 use super::materials::{resolve_displacement, resolve_fresh};
-use super::mesh::SubdivPolicy;
+use super::mesh::{
+    MeshKey, MeshNeeds, MeshPlace, SubdivPolicy, bake_indices, bake_normals, bake_verts,
+    mesh_source, placement_scale,
+};
+use super::shapes::emit_sphere;
 use super::time::EvalTimeScope;
-use super::xform::compose_with_parent;
+use super::xform::{Span, compose_with_parent};
 use super::{
     ImportCaches, ImportCtx, ValidOptions, apply_exposure, asks_about_time, emit_light, frame_pose,
     invisible_overrides, open_stage, open_stage_masked, prim_at, read_index, stage_builder,
@@ -53,6 +65,7 @@ pub(crate) fn rebuild(
     assets: &dyn AssetLoader,
     warnings: &[Warning],
     change: &crate::live::Change,
+    world: &World,
 ) -> Result<Update, Structural> {
     let facts = &prov.stage;
     let path_str = layer
@@ -80,7 +93,15 @@ pub(crate) fn rebuild(
             .push(rebuilding.material(path, &change.shaders)?);
     }
     for path in &change.lights {
-        update.lights.push(rebuilding.light(path)?);
+        let shaped = change.light_geometry.iter().any(|l| l == path);
+        let (light, emitters) = rebuilding.light(path, shaped)?;
+        update.lights.push(light);
+        update.geometry.extend(emitters);
+    }
+    if !change.moved.is_empty() || !change.reshaped.is_empty() {
+        let (edits, keys) = rebuilding.geometry(&change.moved, &change.reshaped, world)?;
+        update.geometry.extend(edits);
+        update.mesh_keys = keys;
     }
     Ok(update)
 }
@@ -163,6 +184,9 @@ fn is_shader(stage: &Stage, path: &sdf::Path) -> bool {
         .is_some_and(|t| t.as_str() == "Shader")
 }
 
+/// A distinct mesh's slot and the content key it has now.
+type SlotKey = (u32, MeshKeyFacts);
+
 struct Rebuilding<'a> {
     prov: &'a Provenance,
     layer: &'a Path,
@@ -233,8 +257,13 @@ impl Rebuilding<'_> {
     }
 
     /// The light at `path`, emitted as the traversal emitted it, its
-    /// geometry ids the ones it had.
-    fn light(&self, path: &str) -> Result<LightUpdate, Structural> {
+    /// geometry ids the ones it had; with `shaped`, its emitters' geometry
+    /// too, to replace the world's.
+    fn light(
+        &self,
+        path: &str,
+        shaped: bool,
+    ) -> Result<(LightUpdate, Vec<GeometryEdit>), Structural> {
         let origin = self
             .prov
             .light(path)
@@ -261,22 +290,276 @@ impl Rebuilding<'_> {
             if ctx.lights.count() != 1 || geoms != origin.geoms {
                 return Err(Structural(format!("{path} would emit other geometry")));
             }
+            let shapes: Vec<GeometryEdit> = if shaped {
+                geoms.clone().map(|id| ctx.world.edit_of(id)).collect()
+            } else {
+                Vec::new()
+            };
             let emitters = geoms
                 .map(|id| (id, ctx.world.material(id).clone()))
                 .collect();
             let gains = ctx.lights.lobe_gains(0);
             let (light, _) = ctx.lights.remove(0);
-            Ok(LightUpdate {
-                index: origin.index,
-                light,
-                gains,
-                emitters,
-            })
+            Ok((
+                LightUpdate {
+                    index: origin.index,
+                    light,
+                    gains,
+                    emitters,
+                },
+                shapes,
+            ))
         })();
         let raised = scope.finish();
         let light = built?;
         same_warnings(&raised, self.warnings, path)?;
         Ok(light)
+    }
+}
+
+impl Rebuilding<'_> {
+    /// The meshes the prims of `moved` and their descendants placed, placed
+    /// again at their transforms now, and the meshes of `reshaped` read
+    /// again: each by the import's own reading, interning and baking, so the
+    /// geometry and side tables are the ones a fresh import gives.
+    ///
+    /// An instance keeps its committed mesh and takes the new transform. A
+    /// baked mesh is read again and baked at the new transform; its key must
+    /// be the one it had (a move does not change the mesh), or, reshaped,
+    /// must equal no other distinct mesh's (a fresh import would then share
+    /// one mesh between them and instance both).
+    fn geometry(
+        &self,
+        moved: &[String],
+        reshaped: &[String],
+        world: &World,
+    ) -> Result<(Vec<GeometryEdit>, Vec<SlotKey>), Structural> {
+        let prov = self.prov;
+        if !world.keeps_inputs() {
+            return Err(Structural("the world kept no geometry to replace".into()));
+        }
+        if !prov.stage.primvars.is_empty() {
+            return Err(Structural(
+                "the products keep primvars the geometry would read again".into(),
+            ));
+        }
+        // geom_id → (the root whose stage reads it, whether it is reshaped).
+        let mut todo: BTreeMap<u32, (String, bool)> = BTreeMap::new();
+        for root in moved {
+            if let Some(why) = prov.movable(root) {
+                return Err(Structural(why));
+            }
+            for ids in prov.geometry_of(root) {
+                for id in ids.filter(|&id| {
+                    prov.mesh(id).is_some() || prov.spheres.binary_search(&id).is_ok()
+                }) {
+                    todo.entry(id).or_insert_with(|| (root.clone(), false));
+                }
+            }
+        }
+        for prim in reshaped {
+            if let Some(why) = prov.reshapable(prim) {
+                return Err(Structural(why));
+            }
+            for ids in prov.geometry_of(prim) {
+                for id in ids {
+                    todo.entry(id).or_insert_with(|| (prim.clone(), true)).1 = true;
+                }
+            }
+        }
+        let mut stages: HashMap<String, Stage> = HashMap::new();
+        let mut edits = Vec::with_capacity(todo.len());
+        // The keys this batch's reshapes give their slots, which later
+        // reshapes in the batch compare against instead of the import's.
+        let mut keys: Vec<SlotKey> = Vec::new();
+        for (id, (root, reshape)) in todo {
+            let prim_str = prov
+                .prim_of_geometry(id)
+                .ok_or_else(|| Structural(format!("geometry {id} has no prim")))?
+                .to_owned();
+            unwarned(self.warnings, &prim_str)?;
+            if !stages.contains_key(&root) {
+                let stage = self.masked(&prim_path(&root)?)?;
+                stages.insert(root.clone(), stage);
+            }
+            let stage = &stages[&root];
+            let scope = crate::WarningScope::enter();
+            let built = match prov.mesh(id) {
+                Some(&origin) => self.placed_mesh(stage, &prim_str, origin, reshape, world, &keys),
+                None => self
+                    .placed_sphere(stage, &prim_str, id, world)
+                    .map(|edit| (edit, None)),
+            };
+            let raised = scope.finish();
+            let (edit, key) = built?;
+            same_warnings(&raised, self.warnings, &prim_str)?;
+            edits.push(edit);
+            keys.extend(key);
+        }
+        Ok((edits, keys))
+    }
+
+    /// A static analytic sphere at its prim's transform on `stage`, placed
+    /// by the traversal's own `emit_sphere` into a scratch world.
+    fn placed_sphere(
+        &self,
+        stage: &Stage,
+        prim_str: &str,
+        id: u32,
+        world: &World,
+    ) -> Result<GeometryEdit, Structural> {
+        let prim = prim_at(stage, prim_path(prim_str)?);
+        let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) else {
+            return Err(Structural(format!("{prim_str} is not a Sphere")));
+        };
+        let world_xf = local_to_world(stage, &prim);
+        // Emitted alone, at id 0: a sphere's geometry and tables do not
+        // depend on its id, so the edit is re-addressed rather than the
+        // scratch world padded up to the id, which made a batch of spheres
+        // quadratic.
+        let mut scratch = WorldBuilder::new();
+        let placed = emit_sphere(
+            &mut scratch,
+            &prim,
+            &sphere,
+            Span::fixed(world_xf),
+            world.material_of(id).clone(),
+            self.working,
+        );
+        if placed != Some(0) {
+            return Err(Structural(format!(
+                "{prim_str} would not be a static sphere"
+            )));
+        }
+        let mut edit = scratch.edit_of(0);
+        edit.geom_id = id;
+        Ok(edit)
+    }
+
+    /// One placement of a direct mesh at its prim's transform on `stage`.
+    fn placed_mesh(
+        &self,
+        stage: &Stage,
+        prim_str: &str,
+        origin: crate::live::MeshOrigin,
+        reshape: bool,
+        world: &World,
+        batch: &[SlotKey],
+    ) -> Result<(GeometryEdit, Option<SlotKey>), Structural> {
+        let id = origin.geom_id;
+        let prim = prim_at(stage, prim_path(prim_str)?);
+        let world_xf = local_to_world(stage, &prim);
+        // A singular placement is baked at attach time, with no slot: a
+        // fresh import would build it another way.
+        if world_xf.determinant().abs() < 1e-12 {
+            return Err(Structural(format!(
+                "{prim_str} would have a singular transform"
+            )));
+        }
+        let l2w = Affine3A::from_mat4(world_xf);
+        let scale = placement_scale(&l2w);
+        if !origin.baked && !reshape {
+            let Some(Geometry::Instance {
+                scene,
+                transform_end: None,
+                ..
+            }) = world.input(id)
+            else {
+                return Err(Structural(format!(
+                    "geometry {id} is not a static instance"
+                )));
+            };
+            let geometry = Geometry::Instance {
+                scene: scene.clone(),
+                transform: l2w,
+                transform_end: None,
+            };
+            return Ok((world.edit_with(id, geometry, scale), None));
+        }
+        let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) else {
+            return Err(Structural(format!("{prim_str} is not a Mesh")));
+        };
+        let slot_facts = self
+            .prov
+            .mesh_slots
+            .get(origin.slot as usize)
+            .ok_or_else(|| Structural(format!("{prim_str}'s mesh is unknown")))?;
+        let old_key = slot_facts
+            .key
+            .as_ref()
+            .ok_or_else(|| Structural(format!("{prim_str}'s mesh is unknown")))?;
+        let material = world.material_of(id).clone();
+        let mut caches = self.caches();
+        let meshes = &mut caches.meshes;
+        let needs = MeshNeeds::of(&*material, None, &meshes.primvars, meshes.working);
+        let src = mesh_source(
+            &prim,
+            &mesh,
+            needs,
+            &mut meshes.subdiv,
+            MeshPlace::World(&world_xf),
+        )
+        .ok_or_else(|| Structural(format!("{prim_str} no longer reads as a mesh")))?;
+        let key = MeshKey::new(&src, &material);
+        let key = MeshKeyFacts {
+            geo_hash: key.geo_hash,
+            n_points: key.n_points,
+            n_indices: key.n_indices,
+            n_uvs: key.n_uvs,
+            smooth: key.smooth,
+            material: old_key.material,
+        };
+        if !reshape && key != *old_key {
+            return Err(Structural(format!("{prim_str}'s mesh changed too")));
+        }
+        // Every other slot's key as it is now: this batch's for a slot it
+        // reshaped already, else the provenance's (which in-place reshapes
+        // keep current, `Update::mesh_keys`).
+        let current = |i: usize| {
+            batch
+                .iter()
+                .find(|(slot, _)| *slot as usize == i)
+                .map(|(_, k)| k)
+                .or(self.prov.mesh_slots[i].key.as_ref())
+        };
+        if reshape
+            && (0..self.prov.mesh_slots.len())
+                .any(|i| i != origin.slot as usize && current(i) == Some(&key))
+        {
+            return Err(Structural(format!(
+                "{prim_str}'s mesh would share another prim's"
+            )));
+        }
+        let slot = meshes
+            .intern(&prim, src, &material, None)
+            .ok_or_else(|| Structural(format!("{prim_str} produces no triangles")))?;
+        let s = &mut meshes.slots[slot as usize];
+        let geom = s
+            .local
+            .take()
+            .ok_or_else(|| Structural(format!("{prim_str}'s mesh was committed")))?;
+        // As `flush_meshes` bakes a placement, tables and all.
+        let mirrored = l2w.matrix3.determinant() < 0.0;
+        let geometry = Geometry::TriangleMesh {
+            vertices: bake_verts(&geom.verts, &l2w),
+            indices: bake_indices(geom.tris, &l2w),
+            normals: geom.normals.map(|ns| bake_normals(&ns, &l2w)),
+        };
+        let primvars = s.primvars.clone();
+        let new_key = reshape.then_some((origin.slot, key));
+        let edit = GeometryEdit {
+            geom_id: id,
+            geometry,
+            map: s.faces.clone(),
+            uv: s.uvs.clone(),
+            shading: primvars.clone().filter(|t| t.shades()),
+            swapped: mirrored,
+            aov: primvars
+                .filter(|t| t.channels.iter().any(Option::is_some))
+                .map(|t| (t, mirrored)),
+            scale,
+        };
+        Ok((edit, new_key))
     }
 }
 
@@ -295,6 +578,8 @@ fn scratch_ctx<'a>(r: &'a Rebuilding<'a>, world: WorldBuilder) -> ImportCtx<'a> 
         cameras_seen: Vec::new(),
         caches: r.caches(),
         pending_meshes: Vec::new(),
+        spheres: Vec::new(),
+        arc_sources: None,
         links: LightLinks::default(),
         pass: None,
         light_origins: Vec::new(),

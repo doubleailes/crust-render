@@ -19,7 +19,7 @@ fn meta(path: &Path) -> Meta {
 }
 
 /// The session's source layers, each with its stamp as last seen.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sources {
     stamps: Vec<(PathBuf, Meta)>,
 }
@@ -69,11 +69,13 @@ impl Sources {
         }
         moved
     }
+}
 
-    /// Feeds the layers' stamps as last seen into `hasher`: beside the
-    /// override layer's bytes, which sources a render rendered (design D5).
-    /// [`Sources::now`]'s hash is what is on disk now.
-    pub fn hash(&self, hasher: &mut impl Hasher) {
+/// The layers' stamps as last seen: beside the override layer's bytes, which
+/// sources a render rendered (design D5). [`Sources::now`]'s hash is what is
+/// on disk now.
+impl Hash for Sources {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
         self.stamps.hash(hasher);
     }
 }

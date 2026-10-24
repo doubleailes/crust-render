@@ -5,9 +5,9 @@
 //! (`live-stage-scene-deltas`, [`Imported::update`]).
 
 use super::delta::Applied;
-use crate::{CheckArgs, Checked, Cli, Command};
+use crate::Assets;
+use crate::{CheckArgs, Checked};
 use clap::Parser;
-use crust_assets::FileAssets;
 use crust_core::check::CheckReport;
 use crust_core::live::{Change, Provenance, Structural};
 use crust_core::{AovRequest, LightList, RenderSettings, Renderer, Scene, WorldBuilder};
@@ -56,7 +56,7 @@ pub struct Imported {
     pub report: CheckReport,
     /// The loader the scene was imported with: held, never read, because it
     /// owns the texture caches the scene's textures stream through.
-    pub _assets: Arc<FileAssets>,
+    pub _assets: Arc<dyn Assets>,
     /// The scene-linear space the scene renders in, which its images are
     /// encoded from.
     pub working_space: crust_core::color::Space,
@@ -68,9 +68,10 @@ pub struct Imported {
     pub layers: Vec<PathBuf>,
     /// How the layer's last change was applied to give this scene.
     pub applied: Applied,
-    /// Which import built the scene's geometry: new with every full import,
-    /// kept by an in-place update, which moves no geometry. A render's hits
-    /// are named against the scene only while it is the one it rendered.
+    /// Which import built the scene's geometry: new with every full import
+    /// and every `geometry` update, kept by the other in-place updates, which
+    /// move no geometry. A render's hits are named against the scene only
+    /// while it is the one it rendered.
     pub geometry: u64,
     /// `World` slot (a hit's `geom_id`) → the material prim filling it: the
     /// provenance's per-material slot lists turned around once per scene,
@@ -159,7 +160,13 @@ impl Imported {
             .provenance
             .as_ref()
             .ok_or_else(|| Structural("the scene has no provenance".into()))?;
-        let update = provenance.rebuild(layer, &*self._assets, &self.rest.warnings, change)?;
+        let update = provenance.rebuild(
+            layer,
+            &*self._assets,
+            &self.rest.warnings,
+            change,
+            self.renderer.world(),
+        )?;
         update.check(self.renderer.world(), self.renderer.lights())?;
         let args = check_args(layer, pass).map_err(Structural)?;
         // Past the checks nothing refuses: take the renderer apart into the
@@ -206,7 +213,14 @@ impl Imported {
             "Session update ({applied}) of {} in {took:.2?}",
             layer.display()
         );
-        *self = Imported::of(checked, self._assets.clone(), took, applied, self.geometry);
+        // A geometry update moves what a render's hits landed on: it is new
+        // geometry, as an import's is.
+        let geometry = if applied == Applied::Geometry {
+            GEOMETRY.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.geometry
+        };
+        *self = Imported::of(checked, self._assets.clone(), took, applied, geometry);
         self.rest.stats = import_stats;
         Ok(())
     }
@@ -214,7 +228,7 @@ impl Imported {
     /// The session's scene from a checked import.
     fn of(
         checked: Checked,
-        assets: Arc<FileAssets>,
+        assets: Arc<dyn Assets>,
         took: Duration,
         applied: Applied,
         geometry: u64,
@@ -262,33 +276,40 @@ impl Imported {
     }
 }
 
-/// The arguments `crust <args>` would parse to for `check`, with `--pass`
-/// when the session renders a pass: the session imports with the CLI's own
-/// defaults, by construction.
+/// `crust check`'s own arguments, parsed alone: what [`check_args`] parses
+/// with, so a session imports with the CLI's defaults by construction.
+#[derive(Parser)]
+#[command(name = "crust check")]
+struct CheckCommand {
+    #[command(flatten)]
+    args: CheckArgs,
+}
+
+/// The arguments `crust check <args>` would parse to, with `--pass` when the
+/// session renders a pass: the session imports with the CLI's own defaults,
+/// by construction.
 fn check_args(layer: &Path, pass: Option<&str>) -> Result<CheckArgs, String> {
     let layer = layer.to_str().ok_or("the layer path is not UTF-8")?;
     let pass = pass.into_iter().flat_map(|p| ["--pass", p]);
-    match Cli::try_parse_from(["crust", "check", "-i", layer].into_iter().chain(pass)) {
-        Ok(Cli {
-            command: Command::Check(args),
-            ..
-        }) => Ok(*args),
-        Ok(_) => unreachable!("parsed as check"),
-        Err(e) => Err(e.to_string()),
-    }
+    CheckCommand::try_parse_from(["crust check", "-i", layer].into_iter().chain(pass))
+        .map(|c| c.args)
+        .map_err(|e| e.to_string())
 }
 
 /// Imports the saved layer at `layer` through `assets`, rendering `pass`.
 pub fn import(
     layer: &Path,
     pass: Option<&str>,
-    assets: Arc<FileAssets>,
+    assets: Arc<dyn Assets>,
 ) -> Result<Imported, String> {
-    let args = check_args(layer, pass)?;
+    let mut args = check_args(layer, pass)?;
+    // Geometry edits apply in place only over kept geometry; a session that
+    // re-imports every edit has no use for the copy.
+    args.scene.keep_geometry = crust_core::config().scene_deltas;
     let started = Instant::now();
     // The session imports once per edit batch and lives on: each stage is
     // freed, and with it any mapping of the layer it read.
-    let checked = crate::import_checked(&args, false, &assets)?;
+    let checked = crate::import_checked(&args, false, &*assets)?;
     let took = started.elapsed();
     // One per edit batch: a count that grows with the session.
     debug!("Session import of {} in {took:.2?}", layer.display());

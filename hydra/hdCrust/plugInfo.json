@@ -1,0 +1,28 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdCrustRendererPlugin": {
+                        "bases": [
+                            "HdRendererPlugin"
+                        ],
+                        "displayName": "Crust",
+                        "priority": 99
+                    },
+                    "HdCrust_CrustAttributesAdapter": {
+                        "bases": [
+                            "UsdImagingAPISchemaAdapter"
+                        ],
+                        "apiSchemaName": ""
+                    }
+                }
+            },
+            "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",
+            "Name": "hdCrust",
+            "ResourcePath": "@PLUG_INFO_RESOURCE_PATH@",
+            "Root": "@PLUG_INFO_ROOT@",
+            "Type": "library"
+        }
+    ]
+}

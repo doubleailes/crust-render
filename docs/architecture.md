@@ -12,7 +12,8 @@ the page to read first.
 
 ```mermaid
 graph TD
-    render["crust-render<br/><i>CLI binary <code>crust</code></i>"]
+    hydra["crust-hydra<br/><i>C ABI for hdCrust, the Hydra delegate</i>"]
+    render["crust-render<br/><i>lib + CLI binary <code>crust</code></i>"]
     assets["crust-assets<br/><i>file decoders, texture streaming</i>"]
     core["crust-core<br/><i>engine: import, integrator, materials, lights</i>"]
     rt["crust-rt<br/><i>intersection kernel</i>"]
@@ -26,6 +27,7 @@ graph TD
     osd["opensubdiv-rs"]
     ocio["ocio<br/><i>OpenColorIO port</i>"]
 
+    hydra --> render
     render --> core
     render --> assets
     assets --> core
@@ -50,7 +52,8 @@ graph TD
 | `crust-nn` | tiny, bit-deterministic networks: the multi-resolution hash grid, dense layers, sigmoid cross-entropy, Adam, gradient checking (what `neural` light selection learns visibility with) | crust types, threads (the caller maps a batch's chunks) and random numbers (the caller draws them) |
 | `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile, the diagnostic (`diagnostic/`: phases, trials, the `crust-diagnostic/1` report and its Markdown), the light path inspector (`inspect/`: the `crust-light-paths/1` report) | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
-| `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's and the light path inspector's reports; `crust mcp`, the MCP session server (`mcp/`, cargo feature `mcp`, on by default) | decoding anything |
+| `crust-render` | lib + bin. The library (`lib.rs`): the scene flags and the CLI's import-and-check policy (`load_scene`, `apply_scene_overrides`, `check_scene`, `select_products`), the product writer (`products.rs`), and with cargo feature `session` (openusd only) the live session's core (`session/`: the override layer diffed, classified, updated in place or re-imported). The binary (`main.rs`): argument parsing, logging, progress bar, writing EXR + PNG, printing and saving the diagnostic's and the light path inspector's reports, exit codes; `crust mcp`, the MCP server (`mcp/`, cargo feature `mcp`, implies `session`, on by default) | decoding anything |
+| `crust-hydra` | crust behind a C ABI (`include/crust_hydra.h`) for `hdCrust`, the C++ Hydra render delegate in `hydra/hdCrust` (built with CMake against OpenUSD 26, outside `cargo build`): a `Session` on the layers the delegate writes (the `crust-render` session core), a render thread polled for snapshots, AOVs at completion, panics caught at every entry point under `[profile.hydra]` (`panic = "unwind"`), `tracing` and import warnings forwarded to the host. `deny(unsafe_code)` with five audited blocks, all in `ffi.rs` | Hydra and C++ (the plugin speaks them) |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance` / `Luma`, `align_to_normal` | everything |
 
 Two properties of this graph are deliberate and worth keeping:
@@ -134,7 +137,7 @@ saved override layer, read by the unchanged `load_scene`, so the streaming impor
 masked stages see every edit with no special case. Nothing else is written but the
 final render's files and the `.tx` files `--auto-tx` creates. An edit confined to the
 render settings, light inputs or material inputs is applied in place
-(`mcp/delta.rs` classifies it, `crust_core::live` rebuilds it), and gives the
+(`session/delta.rs` classifies it, `crust_core::live` rebuilds it), and gives the
 scene a full re-import would; anything else re-imports, with the session's kept
 decodes. Behaviour:
 `openspec/specs/mcp-session/spec.md`. Design: the archived changes
@@ -171,8 +174,9 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | `Material` | `crust-core/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
 | `Light`, `LightShape` | `crust-core/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
 | `ProgressCallback` | `crust-core/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
-| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders; later a Hydra delegate | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty (the precomp's displayed output, its display chain run on read over the units published so far, when `crust:display` is authored; `beauty_snapshot` is always the beauty) at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage, `max_samples_reached` the most any pass has reached (a new pass, such as a guided render's next training pass, resets the first, not the second); a cancelled render returns what it traced and `Cancelled` |
+| `RenderControl`, `RenderOutcome` | `crust-core/src/tracer/control.rs` | the CLI (Ctrl-C, `--checkpoint`), an MCP session's renders, the Hydra delegate (`crust-hydra`'s session, polled by `hdCrust`'s render pass) | one per render, owned by the host, `Sync`: `cancel` from any thread is sticky; `snapshot` is `None` before the first publish, then the region-sized beauty (the precomp's displayed output, its display chain run on read over the units published so far, when `crust:display` is authored; `beauty_snapshot` is always the beauty) at a monotonic `generation`; `samples_reached` is the first sweep's last completed stage, `max_samples_reached` the most any pass has reached (a new pass, such as a guided render's next training pass, resets the first, not the second); a cancelled render returns what it traced and `Cancelled` |
 | `mcp::session::Session` | `crust-render/src/mcp/session.rs` | the tools in `mcp/mod.rs` | commands are closures run one at a time on the session thread, in the order sent; nothing the thread owns (the `Stage`) ever leaves it |
+| `session::live::LiveSession` | `crust-render/src/session/live.rs` | `crust-hydra`'s `Session`, Mantle's IPR delegate | a host's live session: a session thread and a render thread per render; follows the root and the sublayers the host owns (`load_owned`), classifying their diffs together; `cancel_render` stops the render without waiting behind an import |
 | `RenderStats`, `profile::Section` | `crust-core/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
 
 ## `crust-core` module map

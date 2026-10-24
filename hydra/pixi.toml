@@ -1,0 +1,32 @@
+# The environment hdCrust is built and run in: OpenUSD 26 with usdview, its
+# headers and CMake package (`pxrConfig.cmake`), from Anders Langlands'
+# ASWF channel (https://github.com/anderslanglands/aswf-pixi). The plugin
+# must be built against the OpenUSD the host runs, so usdview comes from
+# here too. MSVC on Windows comes from the system (vcvars64).
+[workspace]
+name = "hdcrust"
+channels = ["https://conda.anaconda.org/anderslanglands", "conda-forge"]
+platforms = ["linux-64", "win-64"]
+
+[dependencies]
+openusd = "26.08.*"
+python = "3.12.*"
+cmake = ">=3.26"
+ninja = "*"
+
+# Linux: conda-forge's C++ toolchain, so the plugin uses the libstdc++ the
+# OpenUSD package was built with. Windows uses the system MSVC (vcvars64).
+# The package's libraries need glibc 2.38 (its metadata says 2.17), so the
+# toolchain links against a 2.39 sysroot: with the default 2.28 one, linking
+# hdCrustTest fails on `fmod@GLIBC_2.38` and the like.
+[target.linux-64.dependencies]
+cxx-compiler = "*"
+sysroot_linux-64 = ">=2.38"
+
+# Without this, a stage referencing a .mtlx segfaults on open: see the script.
+[target.linux-64.activation]
+scripts = ["hide_mtlx_stdlib.sh"]
+
+# What that sysroot needs of the machine (ubuntu-latest has 2.39). Linux only.
+[system-requirements]
+libc = "2.39"

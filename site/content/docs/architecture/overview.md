@@ -2,14 +2,14 @@
 title = "Overview"
 description = "The crates that make up Crust Render, and how a render flows through them."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-14T08:00:00+00:00
+updated = 2026-10-23T08:00:00+00:00
 draft = false
 weight = 10
 sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Crust Render is a Rust workspace of eight crates. Each owns one job and knows nothing about the others’ internals.'
+lead = 'Crust Render is a Rust workspace of nine crates. Each owns one job and knows nothing about the others’ internals.'
 toc = true
 top = false
 +++
@@ -26,8 +26,8 @@ in the repository.
 ## The crates
 
 ```text
-                    crust-render  (the CLI; binary `crust`)
-                     │         │
+     crust-hydra ──► crust-render  (library + the CLI; binary `crust`)
+   (Hydra delegate)  │         │
                      │         ▼
                      │    crust-assets ──► ptex-rs
                      │    (file decoders, texture caches)
@@ -48,7 +48,8 @@ in the repository.
 | `crust-nn` | small neural networks — a hash-grid encoding, dense layers, their training — that `neural` light selection learns visibility with | any Crust type |
 | `crust-core` | USD import, the scene, the integrator, materials, lights, volumes, path guiding, statistics, the diagnostic and its report | decoding images, textures or IES files |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the texture tile caches, `.tx` conversion | the integrator |
-| `crust-render` | the command line, logging, the progress bar, writing the EXR and PNG, printing and saving the diagnostic's report | decoding anything |
+| `crust-render` | a library, which is how a stage is imported and checked under the scene flags, and, with the `session` feature, a live session's core shared by `crust mcp` and the Hydra delegate; and the command line, logging, the progress bar, writing the EXR and PNG, printing and saving the diagnostic's report | decoding anything |
+| `crust-hydra` | crust behind a C interface for [`hdCrust`](@/docs/help/usdview.md), the Hydra render delegate: a session on the layers the delegate writes, rendered progressively | Hydra (the C++ plugin in `hydra/hdCrust` speaks it) |
 | `utils` | stateless math: sampling warps, MIS heuristics, luminance | everything |
 
 Three libraries come from outside the workspace, all pure Rust:

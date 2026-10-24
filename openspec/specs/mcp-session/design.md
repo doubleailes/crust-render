@@ -19,7 +19,7 @@
 - **The layer carries the input's units** (`physical-depth-of-field`). A stage reads
   its metadata from its root layer only, and a session's root layer is the override
   layer. So `open_session` copies the input root layer's `metersPerUnit` and `upAxis`
-  into the layer it creates (`StageMetrics`, `mcp/layer.rs`), and a resumed layer that
+  into the layer it creates (`StageMetrics`, `session/layer.rs`), and a resumed layer that
   lacks one the input authors gets it added, keeping any value it authors itself. A
   resume that is then refused (the addition cannot be saved, or the import fails) puts
   the layer's earlier bytes back (`restoring`), so a refused `open_session` leaves the
@@ -134,7 +134,7 @@ streams opened from it.
 
 ### Classification: an allow-list over a layer diff
 
-After an edit batch is merged and saved (or an undo restored), `mcp/delta.rs` compares
+After an edit batch is merged and saved (or an undo restored), `session/delta.rs` compares
 the layer's bytes before and after — both parsed with `openusd::usda::parse` — spec by
 spec and field by field (`layer_diff`), and `classify` puts the changes into the
 cheapest class that can follow all of them:
@@ -144,10 +144,11 @@ cheapest class that can follow all of them:
 | attribute `default` / `timeSamples` on the `RenderSettings` prim the import read, or on the render camera, its `xformOp:*` / `xformOpOrder` included unless an imported prim lies below it (`Provenance::any_below`) | `settings` |
 | `inputs:*` value on a light the scene has, other than `width`, `height`, `radius`, `length`, `treatAsPoint`, `treatAsLine` (the BVH holds its shape) | `lights` |
 | `inputs:*` value on a `Shader` under a material the scene uses, or on that `Material`, when no other material reads it | `materials` |
-| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform other than the render camera's own, `visibility`, `purpose`, a primvar, a variant, a composition arc, layer metadata | `full` |
+| attribute `default` / `timeSamples` of `xformOp:*` / `xformOpOrder` on a prim whose subtree places only direct meshes, static spheres and lights (`Provenance::movable`); of a mesh's points, topology, subdivision tags or primvars when it is baked and placed once (`Provenance::reshapable`); of an area light's shape inputs (`live-geometry-edits`) | `geometry` |
+| anything else: a spec defined or removed, a relationship, a connection, metadata, a transform the row above does not cover, `visibility`, `purpose`, a variant, a composition arc, layer metadata | `full` |
 
 A batch is applied as its most expensive class, `settings` < `materials` < `lights` <
-`full`, and rebuilds every part it names. Namespace bookkeeping is not a change: an
+`geometry` < `full`, and rebuilds every part it names. Namespace bookkeeping is not a change: an
 `over` prim spec that only names children (what an edit authors to reach an attribute,
 and what an undo removes) and the `primChildren` / `propertyChildren` lists. An
 attribute spec that only declares and sets a value (`typeName`, `variability`,
@@ -293,7 +294,7 @@ carries a warning of a family a setting can move (`settings.`, `product.`, `aov.
   light's new `Emissive` goes into its emitter's slot in the same update, so the light
   and its geometry keep one `Emissive` and `radiance_toward` stays one answer
   (`a_replaced_light_and_its_geometry_share_one_emissive`).
-- The session (`mcp/scene.rs`, `Imported::update`) checks first, then takes its
+- The session (`session/scene.rs`, `Imported::update`) checks first, then takes its
   renderer apart into a `Scene`, applies, re-runs `check_scene` (the report, the product
   selection and its warnings) and builds a new renderer with `Renderer::new` around the
   same committed world. *Trap:* `retune` keeps the light selection when the strategy,
@@ -359,17 +360,34 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
     settings' (`value_at`'s own list of these readers).
   Closing it means either the import honouring UsdLux's per-type fallbacks (a render
   change) or `query` reporting crust's default where the import substitutes one.
-- **A Hydra render delegate** (`crust-hydra`: a C++ `HdRenderDelegate` over a C ABI
-  into the engine) would reuse the provenance and the `live` entry points, which take
-  paths and built values for that reason. It adds Pixar's C++ USD as a build dependency
-  and `unsafe` FFI, which `CLAUDE.md` makes a project decision.
-- **Transforms, topology and namespace edits re-import**, except the render camera's
-  own transform. Re-traversing only the changed subtree, and BVH refit, are not done: a
-  refit tree is not the tree a fresh build gives. A light with no geometry (distant,
-  dome) could move without touching the BVH; it is `full` until the simpler classes
-  have proved themselves. A render camera that dices (no `crust:dicingCamera`, on a
-  scene tessellated from the camera) still re-imports when it moves, and so does an
-  edit to one of the camera's ancestors.
+- **The Hydra delegate shares this session's core, not its server.** `hdCrust`
+  (`hydra-delegate`) writes an override layer as this session does and applies it
+  through the same `crust_render::session` code (diff, classify, in-place update,
+  kept decodes), so a light edit in usdview is a `lights` update here too. Its
+  session thread and render thread are `session::live::LiveSession`
+  (`live-session-host`), not `Session` in `mcp/`. Mantle's IPR delegate runs on
+  the same `LiveSession`, over a root and sublayers it owns: an edit in any owned
+  layer classifies as an override-layer edit does, since a sublayer of the root
+  layer stack composes in the stage's namespace. A `Snapshot` names the
+  working space its pixels are in (`renderingColorSpace`, else `lin_rec709`), so a
+  host that writes or displays the image encodes it from that space as `crust
+  render` does, rather than assuming Rec.709.
+- **Namespace edits re-import, and so do the transforms and reshapes `geometry` does
+  not cover** (`live-geometry-edits`): a subtree holding curves, volumes, instancers,
+  native instances, implicit shapes baked once or a camera; a prim the scene placed
+  nothing from (an instancer's prototype, an empty Xform); a prim another prim composes
+  from, or under or above one (an `inherits` / `references` / `specializes` site or a
+  `PointInstancer` prototype, recorded by the import as `Provenance::arc_sources`); a
+  mesh shared with another prim or becoming identical to one, including to a mesh an
+  earlier in-place reshape changed (the provenance's keys follow reshapes); adaptive
+  subdivision, displacement, shutter motion or primvar AOVs. Re-traversing only the changed subtree is not done. A geometry edit
+  rebuilds the whole top-level tree (D1 of that change: never a refit), which on a
+  stage of mostly baked geometry is most of the BVH share of an import. A render camera
+  that dices (no `crust:dicingCamera`, on a scene tessellated from the camera) still
+  re-imports when it moves, and so does an edit to one of the camera's ancestors.
+- **A session keeps its top-level geometry twice** (`UsdImportOptions::keep_geometry`):
+  the baked triangles a second time, for `geometry` edits. `CRUST_SCENE_DELTAS=0`
+  turns it off with every other in-place class.
 - **A camera move re-opens the stage.** The settings rebuild opens the index stage and
   a stage masked to the camera per move. On the Cornell box at 640×480 it costs
   6.64 / 8.31 ms (min / mean of 20) against 12.53 / 17.34 ms as `full`, measured by
@@ -441,7 +459,7 @@ Before this change the session saw none of it:
 
 ### How a change is seen and applied
 
-- **Stamps.** `mcp/sources.rs` stamps each watched layer, other than the override layer,
+- **Stamps.** `session/sources.rs` stamps each watched layer, other than the override layer,
   with its length and modification time, as `kept.rs` stamps decodes.
   `Sources::changed()` re-stats every layer and re-stamps the ones that moved, so each
   change is reported once.

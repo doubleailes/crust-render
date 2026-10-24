@@ -11,8 +11,8 @@ use glam::Vec3A;
 use openusd::sdf;
 use openusd::usd::{CollectionAPI, Prim, PrimPredicate, Stage};
 use openusd_schemas::shade::{
-    BindingStrength, Connectable, Material as UsdMaterial, MaterialBindingAPI, ProducerFilter,
-    Shader, TerminalSource,
+    BindingStrength, CollectionBinding, Connectable, Material as UsdMaterial, MaterialBindingAPI,
+    ProducerFilter, Shader, TerminalSource,
 };
 use tracing::debug;
 
@@ -342,10 +342,13 @@ fn winning_binding_at(
         if binding_purpose != purpose {
             continue;
         }
-        let Ok(Some((collection, target))) = api.collection_binding(binding_name, purpose) else {
+        let Ok(Some(binding)) =
+            CollectionBinding::new(api.collection_binding_rel(binding_name, purpose))
+        else {
             continue;
         };
-        if collection_includes(stage, &collection, queried) {
+        let (collection, target) = (binding.collection_path(), binding.material_path().clone());
+        if collection_includes(stage, collection, queried) {
             let strength = api
                 .path()
                 .append_property(name.as_str())
@@ -359,8 +362,9 @@ fn winning_binding_at(
             return Some((target, strength));
         }
     }
-    let target = api.direct_binding(purpose).ok()??;
-    Some((target, api.binding_strength(purpose).unwrap_or_default()))
+    let binding = api.direct_binding(purpose).ok()??;
+    let strength = binding.strength().unwrap_or_default();
+    Some((binding.material_path().clone(), strength))
 }
 
 /// Whether the collection at `collection` (a `<prim>.collection:<name>`

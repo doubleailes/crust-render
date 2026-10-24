@@ -152,16 +152,21 @@ these:
 |-----------|--------------|-----------------|
 | `settings` | an attribute of the `RenderSettings` prim the render uses, or of the render camera, its transform included unless a prim the scene renders sits below the camera | reads the settings and the camera again |
 | `materials` | an `inputs:*` value on a shader of a material the scene uses, or one of the material's own inputs | rebuilds those materials |
-| `lights` | an `inputs:*` value on a light (not its `width`, `height`, `radius` or `length`) | rebuilds those lights and the light selection |
-| `full` | anything else: a prim added or removed, a binding, a connection, any other transform, visibility, a variant, a light's size | imports the saved file again |
+| `lights` | an `inputs:*` value on a light, or the transform of a light with no shape (distant, dome) | rebuilds those lights and the light selection |
+| `geometry` | the transform of a prim whose subtree holds only meshes, spheres and lights; the points, topology or primvars of a mesh placed once; an area light's transform or size | places or reads that geometry again and rebuilds the top-level BVH |
+| `full` | anything else: a prim added or removed, a binding, a connection, visibility, a variant, a transform above the camera or a volume, a mesh shared with another prim, a prim another prim references, inherits or instances | imports the saved file again |
 
 An edit with changes of several kinds is applied as the most expensive of them, in the
-order of the table. A change that turns out to need more is applied as `full`: a material
+order of the table. A `geometry` edit keeps a copy of the scene's top-level geometry, its
+baked triangles a second time, for as long as the session runs. A change that turns out to
+need more is applied as `full`: a material
 that becomes a cutout, emissive or displaced, a light that stops emitting, a setting that
 changes the working colour space or the subdivision level, a camera or resolution change
 on a scene whose tessellation is sized on screen (below), one whose rebuild would report a
 different warning, a shader another material also uses (through `inherits` or a
-connection), or any edit made after a texture file changed on disk. Either way the render is the same, bit for bit, as after a full import
+connection), a reshaped mesh that becomes identical to another (a full import would share
+one mesh between them), a moved or reshaped mesh on a scene with adaptive subdivision,
+motion blur or primvar AOVs, or any edit made after a texture file changed on disk. Either way the render is the same, bit for bit, as after a full import
 of the same layer. `undo` is applied the same way.
 
 Production shots usually have three things that look-dev stages lack. None of them, on
