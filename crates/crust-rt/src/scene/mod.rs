@@ -420,26 +420,54 @@ impl SceneBuilder {
     /// [`SceneBuilder::commit`] with the build choices made by the caller.
     #[must_use = "the committed scene is the only way to intersect it"]
     pub fn commit_with(self, options: CommitOptions) -> Scene {
-        let n_geoms = self.geoms.len() as u32;
-        let mut sink = Expansion {
-            input: sized_primitives(&self.geoms),
+        let mut sink = Expansion::sized(&self.geoms);
+        // Each geometry is dropped once expanded, so the builder's arrays and
+        // the commit's do not all live at once.
+        for (geom_id, (geom, mask, label)) in self.geoms.into_iter().enumerate() {
+            sink.add(geom_id as u32, &geom, mask, label);
+        }
+        sink.build(options)
+    }
+
+    /// [`SceneBuilder::commit_with`], leaving the builder as it was: the
+    /// same scene, from geometries the builder keeps. What a host that
+    /// commits again after replacing a few geometries calls, instead of
+    /// cloning every geometry to consume the clone.
+    #[must_use = "the committed scene is the only way to intersect it"]
+    pub fn commit_ref(&self, options: CommitOptions) -> Scene {
+        let mut sink = Expansion::sized(&self.geoms);
+        for (geom_id, (geom, mask, label)) in self.geoms.iter().enumerate() {
+            sink.add(geom_id as u32, geom, *mask, *label);
+        }
+        sink.build(options)
+    }
+}
+
+impl Expansion {
+    /// An expansion with every array sized for `geoms`.
+    fn sized(geoms: &[(Geometry, RayMask, InstanceHitId)]) -> Expansion {
+        let n_geoms = geoms.len() as u32;
+        Expansion {
+            input: sized_primitives(geoms),
             has_motion: false,
+            n_geoms,
             // Largest id a hit in this scene can report. Every geometry can
             // report its own id; labels can report more (see `add`).
             max_hit_id: n_geoms.saturating_sub(1),
-        };
-        for (geom_id, (geom, mask, label)) in self.geoms.into_iter().enumerate() {
-            sink.add(geom_id as u32, geom, mask, label);
         }
+    }
+
+    /// The committed scene of everything added.
+    fn build(self, options: CommitOptions) -> Scene {
         let layout = match options.layout {
             PacketLayout::Gathered | PacketLayout::Auto => crate::bvh::Layout::Gathered,
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
         };
         Scene {
-            bvh: Bvh::new(sink.input, layout),
-            n_geoms,
-            has_motion: sink.has_motion,
-            max_hit_id: sink.max_hit_id,
+            bvh: Bvh::new(self.input, layout),
+            n_geoms: self.n_geoms,
+            has_motion: self.has_motion,
+            max_hit_id: self.max_hit_id,
         }
     }
 }
@@ -496,6 +524,7 @@ struct Expansion {
     input: Primitives,
     /// Whether anything placed moves over the shutter.
     has_motion: bool,
+    n_geoms: u32,
     max_hit_id: u32,
 }
 
@@ -506,7 +535,7 @@ impl Expansion {
     /// tables are indexed by `geom_id`, so a missing entry would hand every
     /// later triangle mesh its neighbour's vertex and normal bases, and the
     /// last one an index past the end.
-    fn add(&mut self, geom_id: u32, geom: Geometry, mask: RayMask, label: InstanceHitId) {
+    fn add(&mut self, geom_id: u32, geom: &Geometry, mask: RayMask, label: InstanceHitId) {
         let mut table = GeomTable {
             vertex_base: self.input.vertices.len() as u32,
             tri_base: self.input.tris.len() as u32,
@@ -521,7 +550,7 @@ impl Expansion {
     fn expand(
         &mut self,
         geom_id: u32,
-        geom: Geometry,
+        geom: &Geometry,
         mask: RayMask,
         label: InstanceHitId,
         table: &mut GeomTable,
@@ -540,13 +569,12 @@ impl Expansion {
                 // short of.
                 let n = vertices.len();
                 let vertex_base = table.vertex_base;
-                input.vertices.extend(vertices);
-                if let Some(mut ns) = normals.filter(|ns| ns.len() >= n) {
+                input.vertices.extend_from_slice(vertices);
+                if let Some(ns) = normals.as_ref().filter(|ns| ns.len() >= n) {
                     table.normal_base = input.normals.len() as u32;
-                    ns.truncate(n);
-                    input.normals.extend(ns);
+                    input.normals.extend_from_slice(&ns[..n]);
                 }
-                for (prim_id, [i0, i1, i2]) in indices.into_iter().enumerate() {
+                for (prim_id, &[i0, i1, i2]) in indices.iter().enumerate() {
                     let in_range = (i0 as usize) < n && (i1 as usize) < n && (i2 as usize) < n;
                     let v = if in_range {
                         [vertex_base + i0, vertex_base + i1, vertex_base + i2]
@@ -561,7 +589,7 @@ impl Expansion {
                     });
                 }
             }
-            Geometry::Sphere { center, radius } => {
+            &Geometry::Sphere { center, radius } => {
                 input.push_node(PrimNode::Sphere(SpherePrim {
                     center,
                     radius,
@@ -569,7 +597,7 @@ impl Expansion {
                     mask,
                 }));
             }
-            Geometry::Disk {
+            &Geometry::Disk {
                 center,
                 normal,
                 radius,
@@ -592,7 +620,7 @@ impl Expansion {
                     mask,
                 }));
             }
-            Geometry::Cylinder { p0, p1, radius } => {
+            &Geometry::Cylinder { p0, p1, radius } => {
                 let length = (p1 - p0).length();
                 if !p0.is_finite()
                     || !p1.is_finite()
@@ -614,7 +642,7 @@ impl Expansion {
             }
             Geometry::RoundCurves { segments } => {
                 let joints = curve_joints(segments.iter().map(|s| (s.p0, s.p1, s.r0.min(s.r1))));
-                for (prim_id, (s, joints)) in segments.into_iter().zip(joints).enumerate() {
+                for (prim_id, (s, joints)) in segments.iter().zip(joints).enumerate() {
                     input.push_node(PrimNode::Curve(CurvePrim {
                         p0: s.p0.to_array(),
                         p1: s.p1.to_array(),
@@ -630,7 +658,7 @@ impl Expansion {
             Geometry::CubicCurves { segments } => {
                 let joints =
                     curve_joints(segments.iter().map(|s| (s.cp[0], s.cp[3], s.r0.min(s.r1))));
-                for (prim_id, (s, joints)) in segments.into_iter().zip(joints).enumerate() {
+                for (prim_id, (s, joints)) in segments.iter().zip(joints).enumerate() {
                     input.push_cubic(CubicCurvePrim {
                         cp: s.cp,
                         r0: s.r0,
@@ -651,12 +679,12 @@ impl Expansion {
                     return; // empty instanced scene
                 };
                 let w2l = transform.inverse();
-                let bounds = match &transform_end {
+                let bounds = match transform_end {
                     Some(end) => AABB::surrounding_box(
-                        transformed_aabb(&inner_bounds, &transform),
+                        transformed_aabb(&inner_bounds, transform),
                         transformed_aabb(&inner_bounds, end),
                     ),
-                    None => transformed_aabb(&inner_bounds, &transform),
+                    None => transformed_aabb(&inner_bounds, transform),
                 };
                 // A scene moves if this placement is blurred, or if the
                 // thing being placed already moves. The inner scene
@@ -694,12 +722,12 @@ impl Expansion {
                 };
                 input.push_instance(
                     InstancePrim {
-                        scene,
+                        scene: Arc::clone(scene),
                         w2l,
-                        motion: transform_end.map(|end| {
+                        motion: transform_end.as_ref().map(|end| {
                             Box::new(InstanceMotion {
-                                l2w: transform,
-                                l2w_end: *end,
+                                l2w: *transform,
+                                l2w_end: **end,
                             })
                         }),
                         geom_id,

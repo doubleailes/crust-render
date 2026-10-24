@@ -587,7 +587,11 @@ impl State {
             .iter()
             .map(|(path, _)| read(path))
             .collect::<Result<Vec<_>, _>>()?;
-        let moved = self.sources.changed();
+        // Probed on a copy: the stamps advance only once the change they
+        // report has been imported, so a failed import is retried by the
+        // next apply rather than forgotten.
+        let mut sources = self.sources.clone();
+        let moved = sources.changed();
         // The stage the change is classified against is the root as saved.
         let stage = open_stage(&root).map_err(Error::ImportFailed)?;
         let (assets, changed_on_disk) = loader(self.assets.as_ref());
@@ -619,9 +623,11 @@ impl State {
         for ((_, bytes), now) in owned.layers.iter_mut().zip(after) {
             *bytes = now;
         }
-        if imported {
-            self.sources = sources_of(&scene.layers, owned, &before);
-        }
+        self.sources = if imported {
+            sources_of(&scene.layers, owned, &before)
+        } else {
+            sources
+        };
         *lock(&self.shared.applied) = Some(scene.applied);
         self.stage = Some(stage);
         self.report();

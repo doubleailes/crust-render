@@ -99,9 +99,9 @@ pub(crate) fn rebuild(
         update.geometry.extend(emitters);
     }
     if !change.moved.is_empty() || !change.reshaped.is_empty() {
-        update
-            .geometry
-            .extend(rebuilding.geometry(&change.moved, &change.reshaped, world)?);
+        let (edits, keys) = rebuilding.geometry(&change.moved, &change.reshaped, world)?;
+        update.geometry.extend(edits);
+        update.mesh_keys = keys;
     }
     Ok(update)
 }
@@ -183,6 +183,9 @@ fn is_shader(stage: &Stage, path: &sdf::Path) -> bool {
         .and_then(|p| p.type_name().ok().flatten())
         .is_some_and(|t| t.as_str() == "Shader")
 }
+
+/// A distinct mesh's slot and the content key it has now.
+type SlotKey = (u32, MeshKeyFacts);
 
 struct Rebuilding<'a> {
     prov: &'a Provenance,
@@ -329,7 +332,7 @@ impl Rebuilding<'_> {
         moved: &[String],
         reshaped: &[String],
         world: &World,
-    ) -> Result<Vec<GeometryEdit>, Structural> {
+    ) -> Result<(Vec<GeometryEdit>, Vec<SlotKey>), Structural> {
         let prov = self.prov;
         if !world.keeps_inputs() {
             return Err(Structural("the world kept no geometry to replace".into()));
@@ -365,6 +368,9 @@ impl Rebuilding<'_> {
         }
         let mut stages: HashMap<String, Stage> = HashMap::new();
         let mut edits = Vec::with_capacity(todo.len());
+        // The keys this batch's reshapes give their slots, which later
+        // reshapes in the batch compare against instead of the import's.
+        let mut keys: Vec<SlotKey> = Vec::new();
         for (id, (root, reshape)) in todo {
             let prim_str = prov
                 .prim_of_geometry(id)
@@ -378,20 +384,22 @@ impl Rebuilding<'_> {
             let stage = &stages[&root];
             let scope = crate::WarningScope::enter();
             let built = match prov.mesh(id) {
-                Some(&origin) => self.placed_mesh(stage, &prim_str, id, origin, reshape, world),
-                None => self.placed_sphere(stage, &prim_str, id, world),
+                Some(&origin) => self.placed_mesh(stage, &prim_str, origin, reshape, world, &keys),
+                None => self
+                    .placed_sphere(stage, &prim_str, id, world)
+                    .map(|edit| (edit, None)),
             };
             let raised = scope.finish();
-            let edit = built?;
+            let (edit, key) = built?;
             same_warnings(&raised, self.warnings, &prim_str)?;
             edits.push(edit);
+            keys.extend(key);
         }
-        Ok(edits)
+        Ok((edits, keys))
     }
 
     /// A static analytic sphere at its prim's transform on `stage`, placed
-    /// by the traversal's own `emit_sphere` into a scratch world at the id
-    /// it had.
+    /// by the traversal's own `emit_sphere` into a scratch world.
     fn placed_sphere(
         &self,
         stage: &Stage,
@@ -404,11 +412,11 @@ impl Rebuilding<'_> {
             return Err(Structural(format!("{prim_str} is not a Sphere")));
         };
         let world_xf = local_to_world(stage, &prim);
+        // Emitted alone, at id 0: a sphere's geometry and tables do not
+        // depend on its id, so the edit is re-addressed rather than the
+        // scratch world padded up to the id, which made a batch of spheres
+        // quadratic.
         let mut scratch = WorldBuilder::new();
-        let filler: Arc<dyn Material> = super::materials::default_material();
-        for _ in 0..id {
-            scratch.reserve_slot(filler.clone(), crate::ray::RayMask(0));
-        }
         let placed = emit_sphere(
             &mut scratch,
             &prim,
@@ -417,12 +425,14 @@ impl Rebuilding<'_> {
             world.material_of(id).clone(),
             self.working,
         );
-        if placed != Some(id) {
+        if placed != Some(0) {
             return Err(Structural(format!(
                 "{prim_str} would not be a static sphere"
             )));
         }
-        Ok(scratch.edit_of(id))
+        let mut edit = scratch.edit_of(0);
+        edit.geom_id = id;
+        Ok(edit)
     }
 
     /// One placement of a direct mesh at its prim's transform on `stage`.
@@ -430,11 +440,12 @@ impl Rebuilding<'_> {
         &self,
         stage: &Stage,
         prim_str: &str,
-        id: u32,
         origin: crate::live::MeshOrigin,
         reshape: bool,
         world: &World,
-    ) -> Result<GeometryEdit, Structural> {
+        batch: &[SlotKey],
+    ) -> Result<(GeometryEdit, Option<SlotKey>), Structural> {
+        let id = origin.geom_id;
         let prim = prim_at(stage, prim_path(prim_str)?);
         let world_xf = local_to_world(stage, &prim);
         // A singular placement is baked at attach time, with no slot: a
@@ -462,7 +473,7 @@ impl Rebuilding<'_> {
                 transform: l2w,
                 transform_end: None,
             };
-            return Ok(world.edit_with(id, geometry, scale));
+            return Ok((world.edit_with(id, geometry, scale), None));
         }
         let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) else {
             return Err(Structural(format!("{prim_str} is not a Mesh")));
@@ -500,13 +511,19 @@ impl Rebuilding<'_> {
         if !reshape && key != *old_key {
             return Err(Structural(format!("{prim_str}'s mesh changed too")));
         }
-        if reshape
-            && self
-                .prov
-                .mesh_slots
+        // Every other slot's key as it is now: this batch's for a slot it
+        // reshaped already, else the provenance's (which in-place reshapes
+        // keep current, `Update::mesh_keys`).
+        let current = |i: usize| {
+            batch
                 .iter()
-                .enumerate()
-                .any(|(i, s)| i != origin.slot as usize && s.key.as_ref() == Some(&key))
+                .find(|(slot, _)| *slot as usize == i)
+                .map(|(_, k)| k)
+                .or(self.prov.mesh_slots[i].key.as_ref())
+        };
+        if reshape
+            && (0..self.prov.mesh_slots.len())
+                .any(|i| i != origin.slot as usize && current(i) == Some(&key))
         {
             return Err(Structural(format!(
                 "{prim_str}'s mesh would share another prim's"
@@ -528,7 +545,8 @@ impl Rebuilding<'_> {
             normals: geom.normals.map(|ns| bake_normals(&ns, &l2w)),
         };
         let primvars = s.primvars.clone();
-        Ok(GeometryEdit {
+        let new_key = reshape.then_some((origin.slot, key));
+        let edit = GeometryEdit {
             geom_id: id,
             geometry,
             map: s.faces.clone(),
@@ -539,7 +557,8 @@ impl Rebuilding<'_> {
                 .filter(|t| t.channels.iter().any(Option::is_some))
                 .map(|t| (t, mirrored)),
             scale,
-        })
+        };
+        Ok((edit, new_key))
     }
 }
 
@@ -559,6 +578,7 @@ fn scratch_ctx<'a>(r: &'a Rebuilding<'a>, world: WorldBuilder) -> ImportCtx<'a> 
         caches: r.caches(),
         pending_meshes: Vec::new(),
         spheres: Vec::new(),
+        arc_sources: None,
         links: LightLinks::default(),
         pass: None,
         light_origins: Vec::new(),

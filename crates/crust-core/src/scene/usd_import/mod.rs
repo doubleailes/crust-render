@@ -273,6 +273,11 @@ struct ImportCtx<'a> {
     pending_meshes: Vec<MeshPlacement>,
     /// The `geom_id`s of the static analytic spheres the traversal placed.
     spheres: Vec<u32>,
+    /// With `keep_geometry`, the prims other prims compose from: their arc
+    /// sites (`prim_stack` paths other than their own) and the
+    /// `PointInstancer`s' prototypes. A live geometry edit there would move
+    /// more than the prims that emitted geometry from it.
+    arc_sources: Option<Vec<String>>,
     /// Receivers seen and lights whose `collection:lightLink` restricts
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
@@ -317,6 +322,9 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         }
 
         let this_world = compose_with_parent(&prim, parent_world);
+        if let Some(sources) = &mut ctx.arc_sources {
+            record_arc_sources(stage, &prim, sources);
+        }
 
         // An invisible subtree draws nothing and lights nothing, but is still
         // walked for cameras: a camera's own visibility only hides its gizmo
@@ -521,6 +529,50 @@ fn saw(
         pass.saw(path, geoms.clone(), vols.clone(), &mut ctx.world);
     }
     ctx.links.saw(path, geoms, vols);
+}
+
+/// Adds the prims `prim` composes from to `sources`: the paths of its
+/// `prim_stack` sites other than its own (a site inside one of its variants
+/// is its own), and a `PointInstancer`'s prototype targets.
+fn record_arc_sources(stage: &Stage, prim: &Prim, sources: &mut Vec<String>) {
+    let own = prim.path().as_str();
+    for site in prim.prim_stack().unwrap_or_default() {
+        // Only prim sites: a layer's pseudo-root is no prim another composes.
+        if !site.path.is_prim() {
+            continue;
+        }
+        let path = without_variants(site.path.as_str());
+        if path != own && !path.is_empty() {
+            sources.push(path);
+        }
+    }
+    if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
+        use openusd_schemas::geom::PointInstancerSchema;
+        for target in instancer.prototypes_rel().targets().unwrap_or_default() {
+            sources.push(target.to_string());
+        }
+    }
+}
+
+/// `path` with each variant selection (`{set=name}`) read as a separator, so
+/// a site inside a prim's own variant is its own path.
+fn without_variants(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut depth = 0usize;
+    for c in path.chars() {
+        match c {
+            '{' => {
+                depth += 1;
+                if depth == 1 && !out.ends_with('/') {
+                    out.push('/');
+                }
+            }
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim_end_matches('/').to_owned()
 }
 
 /// Emits `prim` if it is a UsdLux light — the one dispatch the traversal
@@ -1133,6 +1185,7 @@ pub(crate) fn load_scene(
         },
         pending_meshes: Vec::new(),
         spheres: Vec::new(),
+        arc_sources: options.keep_geometry.then(Vec::new),
         links: LightLinks::default(),
         pass: pass.map(|p| ActivePass::read(&index, p)),
         light_origins: Vec::new(),
@@ -1320,6 +1373,12 @@ pub(crate) fn load_scene(
     scene.provenance = Some(Provenance {
         materials: ctx.caches.materials.origins(&scene.world),
         material_reads: ctx.caches.materials.reads(),
+        arc_sources: {
+            let mut sources = ctx.arc_sources.take().unwrap_or_default();
+            sources.sort();
+            sources.dedup();
+            sources
+        },
         lights: ctx.light_origins.into_iter().collect(),
         geometry: geometry_runs,
         meshes: mesh_origins,

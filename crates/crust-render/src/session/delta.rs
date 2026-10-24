@@ -249,13 +249,12 @@ pub fn classify(
             if meshes {
                 push(&mut change.moved, prim_str);
             }
+            // `movable` refused a subtree holding neither geometry nor a
+            // light: what is left places geometry, emitters, or lights only.
             applied = applied.max(if meshes || emits {
                 Applied::Geometry
-            } else if provenance.lights_at(prim_str).next().is_some() {
-                Applied::Lights
             } else {
-                // Nothing the scene holds moves: an empty Xform.
-                Applied::Settings
+                Applied::Lights
             });
         } else if MESH_SHAPE.contains(&name) || name.starts_with("primvars:") {
             if let Some(why) = provenance.reshapable(prim_str) {

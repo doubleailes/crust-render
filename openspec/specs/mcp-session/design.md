@@ -371,9 +371,13 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
   layer stack composes in the stage's namespace.
 - **Namespace edits re-import, and so do the transforms and reshapes `geometry` does
   not cover** (`live-geometry-edits`): a subtree holding curves, volumes, instancers,
-  native instances, implicit shapes baked once or a camera; a mesh shared with another
-  prim or becoming identical to one; adaptive subdivision, displacement, shutter motion
-  or primvar AOVs. Re-traversing only the changed subtree is not done. A geometry edit
+  native instances, implicit shapes baked once or a camera; a prim the scene placed
+  nothing from (an instancer's prototype, an empty Xform); a prim another prim composes
+  from, or under or above one (an `inherits` / `references` / `specializes` site or a
+  `PointInstancer` prototype, recorded by the import as `Provenance::arc_sources`); a
+  mesh shared with another prim or becoming identical to one, including to a mesh an
+  earlier in-place reshape changed (the provenance's keys follow reshapes); adaptive
+  subdivision, displacement, shutter motion or primvar AOVs. Re-traversing only the changed subtree is not done. A geometry edit
   rebuilds the whole top-level tree (D1 of that change: never a refit), which on a
   stage of mostly baked geometry is most of the BVH share of an import. A render camera
   that dices (no `crust:dicingCamera`, on a scene tessellated from the camera) still
