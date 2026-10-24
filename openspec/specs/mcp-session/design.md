@@ -362,8 +362,12 @@ Every checked-in sample renders bit-identical to goldens recorded before the cha
 - **The Hydra delegate shares this session's core, not its server.** `hdCrust`
   (`hydra-delegate`) writes an override layer as this session does and applies it
   through the same `crust_render::session` code (diff, classify, in-place update,
-  kept decodes), so a light edit in usdview is a `lights` update here too. It has its
-  own session thread and render thread in `crust-hydra`, not `Session` in `mcp/`.
+  kept decodes), so a light edit in usdview is a `lights` update here too. Its
+  session thread and render thread are `session::live::LiveSession`
+  (`live-session-host`), not `Session` in `mcp/`. Mantle's IPR delegate runs on
+  the same `LiveSession`, over a root and sublayers it owns: an edit in any owned
+  layer classifies as an override-layer edit does, since a sublayer of the root
+  layer stack composes in the stage's namespace.
 - **Transforms, topology and namespace edits re-import**, except the render camera's
   own transform. Re-traversing only the changed subtree, and BVH refit, are not done: a
   refit tree is not the tree a fresh build gives. A light with no geometry (distant,
