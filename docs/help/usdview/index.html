@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Rendering in usdview | Crust Render</title>
+<meta name="description" content="Pick Crust in usdview&#x27;s renderer menu: hdCrust, the Hydra render delegate, renders the viewport with crust and shows the image as it refines.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/help/usdview/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Rendering in usdview">
+  <meta name="twitter:description" content="Pick Crust in usdview&#x27;s renderer menu: hdCrust, the Hydra render delegate, renders the viewport with crust and shows the image as it refines.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Rendering in usdview">
+  <meta property="og:description" content="Pick Crust in usdview&#x27;s renderer menu: hdCrust, the Hydra render delegate, renders the viewport with crust and shows the image as it refines.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/help/usdview/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-23T08:00:00+00:00">
+  <meta property="og:site_name" content="Rendering in usdview">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Help",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Usdview",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/usdview/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-passes/">Render passes</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/light-paths/">Finding the path behind a firefly</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/help/usdview/">Rendering in usdview</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#what-it-is">What it is</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#building-it">Building it</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#running-usdview">Running usdview</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#what-happens-as-you-work">What happens as you work</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#renderer-settings">Renderer settings</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#the-dicing-camera">The dicing camera</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#aovs">AOVs</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#crust-s-own-attributes">crust&#x27;s own attributes</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#what-it-does-not-carry-yet">What it does not carry yet</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#troubleshooting">Troubleshooting</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/usdview/#testing-it">Testing it</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Rendering in usdview</h1>
+        <p class="lead"><code>hdCrust</code> is a Hydra render delegate. Pick <strong>Crust</strong> in usdview’s renderer menu: the viewport is path traced by crust, refining while you look. The delegate writes what usdview shows as two USD layers, which <code>crust render</code> renders to the same image.</p>
+        <h2 id="what-it-is">What it is</h2>
+<p>usdview, like other Hydra hosts, draws a stage through a <em>render delegate</em>, a plugin
+it loads at startup. <code>hdCrust</code> is crust's. The delegate does not hand crust the scene
+in memory. It writes what Hydra presents as two USD layers in a <em>session directory</em>:</p>
+<table><thead><tr><th>file</th><th>holds</th></tr></thead><tbody>
+<tr><td><code>scene.usdc</code></td><td>the stage, flattened: every mesh, curve, implicit shape, light, material and camera at its world transform, instancers as <code>PointInstancer</code>s, composition and variants already resolved</td></tr>
+<tr><td><code>edits.usda</code></td><td><code>subLayers = [@./scene.usdc@]</code>, the viewport camera, the render settings, and every later change as an <code>over</code></td></tr>
+</tbody></table>
+<p>crust renders <code>edits.usda</code> exactly as <code>crust render -i edits.usda</code> would. Set a session
+directory (below) to keep the layers, and the CLI reproduces the viewport.</p>
+<p>The delegate is <code>hydra/hdCrust</code> in the repository, a C++ plugin built with CMake
+against OpenUSD 26. It links crust itself as a static library (<code>crates/crust-hydra</code>).
+It is built separately from <code>cargo build</code>.</p>
+<h2 id="building-it">Building it</h2>
+<p>The plugin must be built against the OpenUSD the host runs. The repository pins both
+in one <a href="https://pixi.sh">pixi</a> environment, <code>hydra/pixi.toml</code>. That is the <code>openusd</code>
+26.08 package, with usdview, from
+<a href="https://github.com/anderslanglands/aswf-pixi">Anders Langlands' ASWF channel</a>, on
+Linux and Windows. You also need Rust (the toolchain in <code>rust-toolchain.toml</code>) and a
+C++17 compiler: GCC or Clang on Linux, Visual Studio 2022 Build Tools on Windows.</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">cd hydra
+pixi install                                    # OpenUSD 26.08 + usdview + CMake + Ninja
+pixi run cmake -S hdCrust -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+pixi run cmake --build build                    # also runs: cargo build --profile hydra -p crust-hydra
+pixi run cmake --install build --prefix install
+</code></pre>
+<p>On Windows, run these from a Visual Studio <em>x64 Native Tools</em> prompt (or after
+<code>vcvars64.bat</code>), so CMake finds MSVC. The first build compiles crust under the <code>hydra</code>
+profile, which takes several minutes. Later builds are quick.</p>
+<p>The install puts the plugin where OpenUSD's own plugins live:</p>
+<pre data-lang="text" class="language-text "><code class="language-text" data-lang="text">install&#x2F;plugin&#x2F;usd&#x2F;hdCrust.dll (or hdCrust.so)
+install&#x2F;plugin&#x2F;usd&#x2F;hdCrust&#x2F;resources&#x2F;plugInfo.json
+install&#x2F;bin&#x2F;hdCrustTest            the headless test harness
+</code></pre>
+<p>To build against your own OpenUSD 26 instead, point <code>pxr_DIR</code> at the directory that
+holds its <code>pxrConfig.cmake</code>. Run usdview from that same build.</p>
+<h2 id="running-usdview">Running usdview</h2>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">cd hydra
+export PXR_PLUGINPATH_NAME=$PWD&#x2F;install&#x2F;plugin&#x2F;usd&#x2F;hdCrust&#x2F;resources   # PowerShell: $env:PXR_PLUGINPATH_NAME = &quot;$PWD\install\plugin\usd\hdCrust\resources&quot;
+pixi run usdview ..&#x2F;samples&#x2F;cornellbox.usda --renderer Crust
+</code></pre>
+<p>You can also leave out <code>--renderer</code> and pick <strong>Crust</strong> from the renderer menu.</p>
+<p>Open the stage's <code>.usda</code> (or <code>.usdc</code> / <code>.usdz</code>), not a <code>.mtlx</code>. usdview opens a
+MaterialX document as a stage of material definitions, with no geometry, lights or
+camera, and that renders black.</p>
+<h2 id="what-happens-as-you-work">What happens as you work</h2>
+<p>Every change becomes an edit of <code>edits.usda</code>. crust applies it the way a
+<a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Claude Desktop session</a> applies one, in place when it
+can:</p>
+<table><thead><tr><th>you…</th><th>crust…</th></tr></thead><tbody>
+<tr><td>tumble, pan, zoom, resize the viewport</td><td>rebuilds the camera and settings only, and restarts the render</td></tr>
+<tr><td>change a renderer setting</td><td>the same</td></tr>
+<tr><td>change a light's inputs (intensity, colour, texture…)</td><td>rebuilds the lights in place</td></tr>
+<tr><td>change a material's shader inputs</td><td>rebuilds the materials in place</td></tr>
+<tr><td>move a mesh, sphere or light, reshape a mesh placed once, resize an area light</td><td>places that geometry again and rebuilds the top-level BVH</td></tr>
+<tr><td>add, remove or hide a prim, change a binding, move anything else</td><td>imports the scene again</td></tr>
+<tr><td>move the time slider</td><td>rewrites both layers at the new frame and imports them</td></tr>
+</tbody></table>
+<p>After every restart, the viewport waits for the first full pass (every pixel one
+sample, at most two seconds) before showing it. A tumble or a frame of playback
+therefore shows a whole noisy image of its own. The image then refines while nothing
+changes, and the render reports <em>converged</em> when it completes. Playback shows each
+frame's first pass. On a large viewport or a heavy stage that is not real time.</p>
+<h2 id="renderer-settings">Renderer settings</h2>
+<p>The renderer settings in usdview's Hydra settings dialog are crust's:</p>
+<table><thead><tr><th>setting</th><th>written as</th><th>default</th></tr></thead><tbody>
+<tr><td>Samples per pixel</td><td><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/"><code>crust:samplesPerPixel</code></a></td><td>128</td></tr>
+<tr><td>Minimum samples per pixel</td><td><code>crust:minSamplesPerPixel</code></td><td>32</td></tr>
+<tr><td>Variance threshold</td><td><code>crust:varianceThreshold</code></td><td>0.05</td></tr>
+<tr><td>Max depth</td><td><code>crust:maxDepth</code></td><td>32</td></tr>
+<tr><td>Indirect clamp</td><td><code>crust:indirectClamp</code></td><td>10</td></tr>
+<tr><td>Sampling strategy</td><td><code>crust:samplingStrategy</code></td><td><code>power</code></td></tr>
+<tr><td>Sampler</td><td><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-sampler"><code>crust:sampler</code></a></td><td><code>pmjBn</code> (a final render's is <code>sobol</code>)</td></tr>
+<tr><td>Session directory (kept when set)</td><td>(not written)</td><td>a temporary directory</td></tr>
+</tbody></table>
+<p>The stage's own RenderSettings come first, those its <code>renderSettingsPrimPath</code> names
+or else <code>/Render/settings</code>. A setting you change in the dialog overrides only that
+one, and a setting you never touch keeps the stage's value. Every value is written
+as the <code>crust:*</code> attribute on <code>/__hdCrust/settings</code> in <code>edits.usda</code>.</p>
+<p><strong>Sampler.</strong> The viewport draws from PMJ with blue noise across pixels (<code>pmjBn</code>)
+unless the stage authors <code>crust:sampler</code>. At the few samples per pixel a viewport
+mostly shows, its noise reads as a finer grain than Sobol's. <code>crust render</code> of the
+session's <code>edits.usda</code> uses the same sampler, since the delegate writes it there.</p>
+<p><strong>Session directory.</strong> Unset, the layers go to a temporary directory removed with the
+viewport. Set it, and they are written there and kept:</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">cargo run --release -- render -i &lt;session dir&gt;&#x2F;edits.usda
+</code></pre>
+<p>renders the viewport's last state, at the viewport's resolution and camera. For a
+16-spp render, <code>crust render -s 16</code> of the layers gives the image the delegate showed
+at 16 spp, bit for bit.</p>
+<h2 id="the-dicing-camera">The dicing camera</h2>
+<p>Adaptive subdivision and the segments of curved implicit shapes are diced for a
+camera. The delegate dices for the stage's render camera, the one its RenderSettings
+name. When the stage names none, it dices for the viewport camera as it was when the
+stage was loaded, or, if you deactivate the render camera, as it was then. Either way the dicing camera does not move when you tumble, so a
+camera move never re-tessellates and never re-imports. Seen much closer than the
+dicing camera, diced geometry can look coarse. See
+<a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-dicingcamera"><code>crust:dicingCamera</code></a>.</p>
+<h2 id="aovs">AOVs</h2>
+<p>The beauty fills the viewport's colour as the render refines. Other AOVs fill their
+buffers once the render completes:</p>
+<table><thead><tr><th>usdview AOV</th><th>crust</th></tr></thead><tbody>
+<tr><td><code>depth</code></td><td><code>depth</code>, converted to Hydra's normalized depth in [0, 1] (what usdview composites with)</td></tr>
+<tr><td><code>normal</code></td><td><code>N</code></td></tr>
+<tr><td><code>Neye</code>, <code>Peye</code></td><td><code>Neye</code>, <code>Peye</code></td></tr>
+</tbody></table>
+<p>Any other AOV (<code>primId</code>, <code>instanceId</code>, …) is reported once and stays at its clear
+value.</p>
+<h2 id="crust-s-own-attributes">crust's own attributes</h2>
+<p>Hydra carries schema data and primvars, but not arbitrary attributes. So hdCrust also
+registers a small UsdImaging adapter that carries every <code>crust:*</code> attribute of every
+prim (<code>crust:volume:*</code> fog and smoke, <code>crust:light:*</code>, <code>crust:rayMask</code>,
+<code>crust:subdivisionLevel</code>, …) to the delegate, which writes them back. A stage that
+renders a homogeneous fog with <code>crust render</code> renders it in usdview too.</p>
+<h2 id="what-it-does-not-carry-yet">What it does not carry yet</h2>
+<p>Each of these is reported once in usdview's console, naming the first prim, and the
+rest of the scene renders:</p>
+<ul>
+<li><strong>Light linking.</strong> A linked light lights everything.</li>
+<li><strong>Volume fields</strong> (UsdVol <code>Volume</code>, OpenVDB). <code>crust:volume:*</code> volumes are carried.</li>
+<li><strong>Motion over the shutter.</strong> The frame's values are rendered, with no motion blur.</li>
+<li><strong>Points</strong> (<code>UsdGeomPoints</code>). crust does not render them.</li>
+<li><strong>Sheared instance transforms.</strong> A <code>PointInstancer</code> stores position, orientation and
+scale only.</li>
+<li><strong>Any other prim type</strong> crust does not read.</li>
+</ul>
+<p>crust's own import warnings reach the console too, once per import, with their code
+and prim (<code>crust: [material.fallback_default] …</code>). A panic inside crust is reported
+once, as an error. usdview keeps running and stops refining, and the next change
+renders again.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li><strong>"Crust" is not in the renderer menu.</strong> <code>PXR_PLUGINPATH_NAME</code> must point at the
+<code>resources</code> directory that holds <code>plugInfo.json</code>, and usdview must be pixi's (the
+OpenUSD the plugin was built against).</li>
+<li><strong>The viewport is black.</strong> Check that you opened the stage, not its <code>.mtlx</code>, and
+that the stage has lights: crust ignores usdview's default camera light. Set a
+session directory and render <code>edits.usda</code> with the CLI. If that is black too, the
+stage is.</li>
+<li><strong>The scene looks simpler than <code>crust render</code> of it.</strong> usdview draws the
+<code>proxy</code> purpose by default, not <code>render</code>: production assets show their
+stand-in geometry, with their preview materials. Turn on <strong>Display ▸
+Display Purposes ▸ Render</strong> (and off Proxy) to see what a final render
+shows; <code>usdrecord</code> takes <code>--purposes render</code>.</li>
+<li><strong>A production stage fills the disk.</strong> The flattened <code>scene.usdc</code> is about as large
+as the stage's geometry: ALab's is 2.2 GB. Unset, the session directory is in the
+system's temporary directory. For a large stage, start usdview with that pointed at
+a disk with room. That is <code>TMP</code> on Windows (PowerShell: <code>$env:TMP = "D:\tmp"</code>) and
+<code>TMPDIR</code> on Linux. Or set "Session directory" in the settings dialog. When the disk
+fills, the viewport stays black and the console shows <code>Failed writing usdc data</code>. A write that
+fails is reported and retried at the next change, not on every redraw.</li>
+<li><strong>A rebuild changes nothing.</strong> usdview keeps the plugin it loaded. Close every
+usdview window before installing a rebuilt plugin. On Windows the install fails on
+a plugin that is still loaded.</li>
+<li><strong>References with absolute paths</strong> from another machine (for example
+<code>materialx_showcase.usda</code>'s teapot and lion) do not resolve. usdview and crust both
+leave them out.</li>
+</ul>
+<h2 id="testing-it">Testing it</h2>
+<p><code>hydra/hdCrust/test</code> holds three scripts. Each runs in the pixi environment after an
+install:</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">cd hydra
+pixi run bash hdCrust&#x2F;test&#x2F;compare.sh install &#x2F;tmp&#x2F;compare          # 8 samples: delegate vs `crust render`, bitwise; and vs the original stage
+pixi run bash hdCrust&#x2F;test&#x2F;interaction.sh install &#x2F;tmp&#x2F;interact     # camera, edits (hide&#x2F;show, remove&#x2F;restore), time, playback, settings, AOVs, layer contents
+pixi run bash hdCrust&#x2F;test&#x2F;usdc_roundtrip.sh &#x2F;tmp&#x2F;roundtrip         # every sample through Pixar-written USDC
+</code></pre>
+<p>They drive <code>hdCrustTest</code>, which renders a stage through the delegate the way usdview
+does, without a window.</p>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;help&#x2F;usdview.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;limitations&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Limitations
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Look-dev with Claude Desktop | Crust Render</title>
+<meta name="description" content="Keep a USD stage open in a crust session, edit it through composition and render it, from Claude Desktop.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Look-dev with Claude Desktop">
+  <meta name="twitter:description" content="Keep a USD stage open in a crust session, edit it through composition and render it, from Claude Desktop.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Look-dev with Claude Desktop">
+  <meta property="og:description" content="Keep a USD stage open in a crust session, edit it through composition and render it, from Claude Desktop.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-09T08:00:00+00:00">
+  <meta property="og:site_name" content="Look-dev with Claude Desktop">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Help",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Claude Desktop",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/claude-desktop/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-passes/">Render passes</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/light-paths/">Finding the path behind a firefly</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/usdview/">Rendering in usdview</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#the-session-is-a-file">The session is a file</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#what-a-session-writes">What a session writes</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#install">Install</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#the-tools">The tools</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#editing">Editing</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#when-another-program-changes-the-stage">When another program changes the stage</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#placing-things-on-surfaces">Placing things on surfaces</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#rendering">Rendering</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#a-look-dev-session">A look-dev session</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/#limits">Limits</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Look-dev with Claude Desktop</h1>
+        <p class="lead"><code>crust mcp</code> serves a live session to Claude Desktop: the agent opens a stage once, then queries it, edits it and renders it by conversation. The session is an override layer on disk, which any USD tool opens and <code>crust render</code> renders as the session did.</p>
+        <h2 id="the-session-is-a-file">The session is a file</h2>
+<p><code>open_session(input, output)</code> writes a new USD layer at <code>output</code> whose only
+composition arc is a sublayer on <code>input</code>:</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">#usda 1.0
+(
+    subLayers = [
+        @.&#x2F;shot.usda@
+    ]
+)
+</code></pre>
+<p>When the input authors a <code>metersPerUnit</code> or an <code>upAxis</code>, the layer copies them, since
+a stage reads its units and up axis from its root layer: without the copy the session
+would render a camera's <a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#camera-depth-of-field">depth of field</a>,
+or a dome's <code>poleAxis = "scene"</code>, unlike <code>crust render</code> of the input. Resuming a layer that
+lacks them adds them. A layer keeps the value it copied even if the input's changes later:
+edit it in the layer to follow.</p>
+<p>Every edit the agent makes is an opinion in that layer, as an <code>over</code> where the prim
+is defined elsewhere, and the layer is saved after every edit. What is rendered is
+always the saved file, imported exactly as <code>crust render &lt;output&gt;</code> imports it. So:</p>
+<ul>
+<li>the file is the session's result: it opens in any USD tool, and renders in crust
+as it did in the session;</li>
+<li>nothing is lost if the server stops: at most the edit in flight;</li>
+<li>calling <code>open_session</code> again with the same <code>input</code> and <code>output</code> resumes it, with
+every opinion it holds. Undo history does not survive the process.</li>
+</ul>
+<p><code>open_session</code> also takes an optional <code>pass</code>, the path of a <code>RenderPass</code> prim: the
+session then renders that <a href="https://doubleailes.github.io/crust-render/docs/usd/render-passes/">render pass</a> everywhere, as
+<code>crust render &lt;output&gt; --pass &lt;pass&gt;</code> does — its holdouts, its camera visibility and
+the settings its <code>renderSource</code> names, in every render, probe and <code>render_final</code>. The
+pass is not written to the layer, so a resumed session names it again. A path that is
+not a <code>RenderPass</code> on the stage fails the call. An edit to the pass's collections (a
+new <code>collection:matte:includes</code> target, say) takes effect on the next render.</p>
+<p>The output must be a <code>.usda</code>: a session is a small text file of opinions, readable
+and diffable. The sublayer path is written relative to the output's directory
+(absolute when the two are on different drives), so the layer can move with its
+input.</p>
+<h2 id="what-a-session-writes">What a session writes</h2>
+<p>A session writes only:</p>
+<ul>
+<li>its override layer;</li>
+<li>the final render's files (<code>render_final</code>): the EXR and PNG preview, or every
+RenderProduct the stage authors;</li>
+<li>the <code>.tx</code> files <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#auto-tx"><code>--auto-tx</code></a> creates,
+as a render would.</li>
+</ul>
+<p>No tool modifies, saves or creates any other layer. An attribute whose current value
+lives in a referenced asset is overridden in the session's layer; the asset file is
+not touched. <code>open_session</code> refuses an <code>output</code> that is the input or one of the
+layers it composes, and an existing layer that does not sublayer the input, before
+writing anything.</p>
+<h2 id="install">Install</h2>
+<p><code>crust mcp</code> is the server: Claude Desktop launches it and talks to it over stdin and
+stdout.</p>
+<p>The simplest install is the extension bundle the
+<a href="https://github.com/doubleailes/crust-render/releases/tag/nightly">nightly release</a>
+ships for each platform Desktop runs on: <code>crust-nightly-x86_64-pc-windows-msvc.mcpb</code>,
+<code>crust-nightly-aarch64-apple-darwin.mcpb</code> (Apple silicon) or
+<code>crust-nightly-x86_64-apple-darwin.mcpb</code> (Intel). Open it with Claude Desktop, or drag it
+onto <strong>Settings → Extensions</strong>, and confirm: the bundle holds the <code>crust</code> binary and a
+manifest that launches it as <code>crust mcp</code>.</p>
+<p>To use a <code>crust</code> binary of your own instead, point Desktop at it in its
+<code>claude_desktop_config.json</code>, which Desktop opens from <strong>Settings → Developer → Edit
+Config</strong>:</p>
+<ul>
+<li>Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code></li>
+<li>macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code></li>
+</ul>
+<pre data-lang="json" class="language-json "><code class="language-json" data-lang="json">{
+  &quot;mcpServers&quot;: {
+    &quot;crust&quot;: {
+      &quot;command&quot;: &quot;C:\\tools\\crust.exe&quot;,
+      &quot;args&quot;: [&quot;mcp&quot;]
+    }
+  }
+}
+</code></pre>
+<p>On macOS the command is the binary's path, such as <code>/usr/local/bin/crust</code>. Restart
+Desktop, and the crust tools appear in the chat's tool menu. Pass absolute paths to
+<code>open_session</code>: Desktop starts the server in a working directory of its own choosing.</p>
+<p>Add <code>"-l", "debug"</code> to <code>args</code> to record every import and render in Desktop's MCP log.</p>
+<h2 id="the-tools">The tools</h2>
+<table><thead><tr><th>tool</th><th>what it does</th></tr></thead><tbody>
+<tr><td><code>open_session(input, output, pass?)</code></td><td>creates the override layer <code>output</code> on <code>input</code> (or resumes it) and imports it, rendering the render pass <code>pass</code> when given; reports the camera, the resolution and the warnings</td></tr>
+<tr><td><code>query(path)</code></td><td>a prim (type, active, children, variant sets, authored attributes and relationships, the layers that author it) or an attribute (type, value, and <code>source</code>, the layer its value comes from, <code>fallback</code> for a schema's fallback nothing authors, or null when nothing gives it a value)</td></tr>
+<tr><td><code>check()</code></td><td>the <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#check"><code>crust check</code></a> report of the current layer, as <code>crust-check/2</code> JSON</td></tr>
+<tr><td><code>set_attribute(path, value, type?)</code></td><td>authors an attribute value in the layer, typed as the attribute is declared</td></tr>
+<tr><td><code>set_variant(prim, variant_set, variant)</code></td><td>authors a variant selection</td></tr>
+<tr><td><code>set_active(prim, active)</code></td><td>activates or deactivates a prim</td></tr>
+<tr><td><code>bind_material(prim, material)</code></td><td>binds a Material to a prim</td></tr>
+<tr><td><code>author_usda(text)</code></td><td>merges a USDA snippet of <code>over</code>, <code>def</code> and <code>class</code> specs into the layer, as one edit</td></tr>
+<tr><td><code>drop_to_surface(prims, target?, align_to_normal?)</code></td><td>moves each prim down until it rests on the surface beneath it, optionally turned to that surface's normal; one edit</td></tr>
+<tr><td><code>scatter_on_surface(target, prototypes, path, seed, count | density, max_slope?, random_rotation?, scale?)</code></td><td>defines a <code>PointInstancer</code> whose instances lie on the target's surface, by area, from the seed; one edit</td></tr>
+<tr><td><code>undo()</code></td><td>the layer as it was before the last edit</td></tr>
+<tr><td><code>reload()</code></td><td>composes the stage again and imports the layer whole, whether or not a source changed; lists the source layers that did</td></tr>
+<tr><td><code>render(region?, spp?, budget_s?, wait?)</code></td><td>starts a progressive render and answers with the image so far: at 4 samples per pixel by default, at completion with <code>wait="done"</code>, within <code>budget_s</code> (default 10) either way</td></tr>
+<tr><td><code>snapshot(render_id, budget_s?)</code></td><td>the render's latest image and progress, at once, or after waiting at most <code>budget_s</code> for the render to finish</td></tr>
+<tr><td><code>cancel(render_id)</code></td><td>stops a render, keeping what it traced</td></tr>
+<tr><td><code>probe(render_id, x, y)</code></td><td>the beauty and every AOV at a pixel, in the working space, and the prim and material the camera ray hits there</td></tr>
+<tr><td><code>light_paths(render_id, region, group_by?, top?)</code></td><td>the light paths behind up to 100 pixels of a completed render (<code>top</code>: 32 by default, at most 1000), as <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#light-paths"><code>crust light-paths</code></a> reports them: each path's expression, light, contribution and sample, the brightest first, and their groups (see <a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/">Finding the path behind a firefly</a>)</td></tr>
+<tr><td><code>diff(render_a, render_b)</code></td><td>compares two renders as <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#diff"><code>crust diff</code></a> compares two files</td></tr>
+<tr><td><code>render_final()</code></td><td>renders the layer as <code>crust render &lt;output&gt;</code> would, and lists the files written</td></tr>
+</tbody></table>
+<h3 id="editing">Editing</h3>
+<p>Every edit tool authors opinions in the layer, saves it, and brings the scene up to date
+with the saved file, so that it renders exactly as <code>crust render &lt;output&gt;</code> would. Its
+result says which <a href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">warning codes</a> the scene gained or lost,
+how long the update took (<code>import_s</code>), and how it was applied (<code>applied</code>): an edit crust
+does not read is not silent. An edit the import refuses is undone at once, and the layer is
+left as it was.</p>
+<p>Most look-dev edits do not need the whole stage read again. crust compares the layer
+before and after the edit, and applies it in place when every value it changed is one of
+these:</p>
+<table><thead><tr><th><code>applied</code></th><th>what changed</th><th>what crust does</th></tr></thead><tbody>
+<tr><td><code>settings</code></td><td>an attribute of the <code>RenderSettings</code> prim the render uses, or of the render camera, its transform included unless a prim the scene renders sits below the camera</td><td>reads the settings and the camera again</td></tr>
+<tr><td><code>materials</code></td><td>an <code>inputs:*</code> value on a shader of a material the scene uses, or one of the material's own inputs</td><td>rebuilds those materials</td></tr>
+<tr><td><code>lights</code></td><td>an <code>inputs:*</code> value on a light, or the transform of a light with no shape (distant, dome)</td><td>rebuilds those lights and the light selection</td></tr>
+<tr><td><code>geometry</code></td><td>the transform of a prim whose subtree holds only meshes, spheres and lights; the points, topology or primvars of a mesh placed once; an area light's transform or size</td><td>places or reads that geometry again and rebuilds the top-level BVH</td></tr>
+<tr><td><code>full</code></td><td>anything else: a prim added or removed, a binding, a connection, visibility, a variant, a transform above the camera or a volume, a mesh shared with another prim, a prim another prim references, inherits or instances</td><td>imports the saved file again</td></tr>
+</tbody></table>
+<p>An edit with changes of several kinds is applied as the most expensive of them, in the
+order of the table. A <code>geometry</code> edit keeps a copy of the scene's top-level geometry, its
+baked triangles a second time, for as long as the session runs. A change that turns out to
+need more is applied as <code>full</code>: a material
+that becomes a cutout, emissive or displaced, a light that stops emitting, a setting that
+changes the working colour space or the subdivision level, a camera or resolution change
+on a scene whose tessellation is sized on screen (below), one whose rebuild would report a
+different warning, a shader another material also uses (through <code>inherits</code> or a
+connection), a reshaped mesh that becomes identical to another (a full import would share
+one mesh between them), a moved or reshaped mesh on a scene with adaptive subdivision,
+motion blur or primvar AOVs, or any edit made after a texture file changed on disk. Either way the render is the same, bit for bit, as after a full import
+of the same layer. <code>undo</code> is applied the same way.</p>
+<p>Production shots usually have three things that look-dev stages lack. None of them, on
+its own, turns an edit into <code>full</code>:</p>
+<ul>
+<li><strong>Tessellation sized on screen.</strong> With adaptive subdivision
+(<code>crust:subdivisionEdgeLength</code>), or cylinders, cones and capsules sized for the render
+camera, a camera or settings edit stays in place when the view those shapes were
+tessellated for is unchanged: exposure, f-stop, focus distance, samples, AOVs. Moving
+the camera, changing its focal length or aperture, or changing the resolution
+re-tessellates, so it is <code>full</code>. Name another camera with
+<a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-dicingcamera"><code>crust:dicingCamera</code></a> and the
+shapes are tessellated for that one instead: moving the render camera then stays
+<code>settings</code>, and moving the dicing camera is <code>full</code>.</li>
+<li><strong>Light linking.</strong> On a scene whose lights author <code>collection:lightLink</code> or
+<code>collection:shadowLink</code>, a light's <code>inputs:*</code> edit is still <code>lights</code>, and the links stay
+as they were. Editing a link itself is <code>full</code>, and so is editing a light whose
+<code>lightLink</code> includes nothing (the render no longer counts it as a light).</li>
+<li><strong>Looks brought in by payloads.</strong> A shader input is <code>materials</code> whether the material is
+defined in the stage or in a layer a payload loads.</li>
+</ul>
+<p>The decoded textures, Ptex files, light textures and IES profiles stay with the session,
+so even a <code>full</code> edit does not decode them again. A file that changes on disk (a texture
+re-exported mid-session, or a tile added to a UDIM set) is read again by the next
+edit, which is then applied as <code>full</code>. Set
+<a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-scene-deltas"><code>CRUST_SCENE_DELTAS=0</code></a>
+to import every edit whole with nothing kept, as earlier versions did.</p>
+<ul>
+<li><strong>Values take the attribute's type.</strong> <code>set_attribute</code> reads the type the stage declares
+and converts the JSON value to it: a number for <code>float</code>, <code>[r, g, b]</code> for <code>color3f</code>, a
+string for <code>token</code>, <code>string</code> or <code>asset</code>, an array for an array type. A value that does
+not convert is refused, naming the type, and nothing is authored.</li>
+<li><strong>Schema attributes are typed before anything authors them.</strong> The session's stage
+carries the same USD schemas as the render's import, so an attribute a prim's schema
+declares, such as a light's <code>inputs:exposure</code>, has its type and fallback value even
+when no layer authors it: <code>query</code> answers them with <code>source</code> <code>fallback</code>, and
+<code>set_attribute</code> needs no <code>type</code>. A <code>type</code> that contradicts the schema is refused. Only
+a custom attribute no schema declares needs <code>type</code> the first time.</li>
+<li><strong>Asset paths follow the layer.</strong> A relative asset path is read from the <em>input's</em>
+directory, as <code>query</code> shows the input's own paths, and written relative to the layer's,
+so it names the same file wherever the layer is opened from.</li>
+<li><strong><code>author_usda</code> is one edit.</strong> Several opinions, or a new prim (a light, a material),
+go in one snippet: one save, one import, one <code>undo</code> step. Each field it authors replaces
+the layer's; sibling prims and properties stay. Text that does not parse, or that
+authors <code>subLayers</code>, is refused with the layer byte for byte unchanged.</li>
+<li><strong><code>undo</code> lasts for the server process.</strong> It restores the layer's exact bytes before the
+last edit. A resumed session starts with no history.</li>
+</ul>
+<h3 id="when-another-program-changes-the-stage">When another program changes the stage</h3>
+<p>The session watches every USD layer its import composed: the input, its sublayers, and the
+layers behind references and payloads. Another program can rewrite them while the session
+is open, such as a scene-assembly agent running as a second MCP server in the same client.
+Before each <code>query</code>, <code>check</code>, edit, <code>undo</code>, <code>render</code> and <code>light_paths</code>, the session checks
+the length and modification time of each of those files:</p>
+<ul>
+<li>When one changed, <code>query</code> and the next edit read the new composition.</li>
+<li>The next edit, <code>undo</code>, <code>render</code> or <code>check</code> imports the stage whole (<code>applied</code> <code>full</code>).
+An edit's, <code>undo</code>'s and <code>render</code>'s result lists the layers in <code>sources_changed</code>;
+<code>check</code> answers its usual <code>crust-check/2</code> report of the new import. An edit is never applied in place
+over a scene imported from a layer that has since changed.</li>
+<li>A source that no longer imports (a half-written file, a syntax error) fails the call,
+naming the layers that changed. The scene is not rendered stale: the next call tries the
+import again.</li>
+<li><code>light_paths</code> refuses a render made before a source changed, as it refuses one made
+before an edit.</li>
+</ul>
+<p><code>reload()</code> does the same on demand, and imports even when no USD layer changed. Use it
+after changing a file the session does not watch: a MaterialX document a material
+reads, or a USD layer rewritten with exactly the same length and modification time. The
+undo history stays: <code>undo</code> puts back the layer's bytes, composed over the sources as they
+are now.</p>
+<p>The session never writes those layers. Write them by replacing the file (save to a
+temporary file, then rename over the original), as USD's own <code>Save</code> does. A file rewritten
+in place <em>while</em> the session imports it can crash the server when the build reads USD
+through memory mappings
+(<a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-usd-mmap"><code>CRUST_USD_MMAP</code></a>).</p>
+<h3 id="placing-things-on-surfaces">Placing things on surfaces</h3>
+<p><code>drop_to_surface</code> and <code>scatter_on_surface</code> compute placement against the geometry the
+session renders: subdivided, displaced and instanced as the render sees it, at the
+session's frame. Only geometry the camera sees counts. "Up" is the stage's <code>upAxis</code> (Y
+when the stage authors none). When a source layer changed on disk, the session imports
+it before placing anything, so nothing lands on a surface that has since moved. Each call
+is one edit: saved, imported, one <code>undo</code> step, with the usual <code>applied</code>, <code>import_s</code> and
+warnings, plus <code>place_s</code>, the time the placement itself took.</p>
+<ul>
+<li><strong><code>drop_to_surface(prims, target?, align_to_normal?)</code></strong> moves each prim along the down
+axis until no point of its geometry lies below the highest surface beneath it, and one
+rests on it. A prim already sunk into the surface is raised. With <code>target</code>, only those
+prims' geometry counts, so a cup can drop through a shelf onto the table below. A prim's
+own geometry never counts.
+<ul>
+<li>With <code>align_to_normal</code>, the prim is first turned so its up axis follows the surface
+normal under the centre of its footprint: the face's own normal, whatever vertex
+normals the mesh authors.</li>
+<li>The move is one op, <code>xformOp:transform:crustPlace</code>, first in the prim's
+<code>xformOpOrder</code>, after a <code>!resetXformStack!</code> if there is one. The prim's own ops,
+including ones a payload authors, follow it unchanged. Dropping again folds into the
+same op.</li>
+<li>Each prim is reported <code>placed</code> (with its contact point and how far its origin
+moved), <code>no geometry</code>, or <code>nothing below</code>. A prim that is not placed gets no opinion.</li>
+<li>A path inside an instance, one that cannot hold a transform (a <code>Scope</code>, an untyped
+prim), or a prim given together with one of its ancestors, refuses the whole call.</li>
+</ul>
+</li>
+<li><strong><code>scatter_on_surface(...)</code></strong> defines a new <code>PointInstancer</code> at <code>path</code>. Its instances lie
+on <code>target</code>'s triangles in proportion to their area, each prototype's origin on the
+surface, standing upright about the up axis.
+<ul>
+<li><strong>Prototypes</strong> are prim paths of the stage, or USD files (<code>.usd</code>, <code>.usda</code>, <code>.usdc</code>,
+<code>.usdz</code>), absolute or relative to the input stage's directory. Each becomes a child of the instancer's <code>Prototypes</code> scope that
+references it and drops its own placement, so it is instanced at its own origin. The
+prim it references still renders where it is: deactivate it with <code>set_active</code> if it
+should not.</li>
+<li><strong>How many:</strong> <code>count</code> instances, or <code>density</code> instances per square stage unit of
+eligible surface, at most 100 000.</li>
+<li><strong>Options:</strong>
+<ul>
+<li><code>max_slope</code> leaves faces steeper than that many degrees bare;</li>
+<li><code>random_rotation</code> turns each instance about the up axis;</li>
+<li><code>scale: [min, max]</code> draws each instance's uniform scale.</li>
+</ul>
+</li>
+<li><strong>The same seed over the same scene authors the same bytes</strong>, whatever the machine's
+thread count and the stage's sampler setting. To try other settings, <code>undo</code> and
+scatter again: a path that already names a prim is refused, and so is one under an
+instance, where USD would ignore it.</li>
+<li>Curves and implicit shapes in the target are skipped and listed in <code>skipped</code>.</li>
+</ul>
+</li>
+</ul>
+<h3 id="rendering">Rendering</h3>
+<ul>
+<li><strong><code>render</code> answers at the first image.</strong> As soon as every pixel has 4 samples, it
+answers with a PNG of the image so far (at most 1024 pixels on its long side,
+tone-mapped as <code>crust render</code>'s preview), the samples every pixel has reached, <code>done</code>,
+and a <code>render_id</code>. On the Cornell box that is about half a second, where a whole
+render takes ten. A render of 4 samples per pixel or fewer answers when it completes.
+The render goes on refining after the answer.</li>
+<li><strong>Waiting for the finished image.</strong> <code>snapshot(render_id, budget_s)</code> waits for the render
+to finish, for at most <code>budget_s</code>, without restarting it. <code>render(wait="done")</code> waits
+from the start. Either way, nothing waits longer than its budget: <code>render</code>'s defaults
+to 10 s, and a render that needs longer answers with <code>done = false</code>.</li>
+<li><strong><code>progress</code> counts what the progress bar counts.</strong> On a guided render
+(<code>crust:pathGuiding</code>) it counts the final pass only and stays at 0 while guiding
+trains, as <code>crust render</code>'s bar does. <code>spp_reached</code> (each pass's completed stage) and
+<code>generation</code> (bumped with every image update) move through training too.</li>
+<li><strong>One render at a time.</strong> A new render, an edit, <code>undo</code>, <code>reload</code> or <code>open_session</code>
+cancels the one running, and the cancelled render's id is in the result.</li>
+<li><strong>The render settings are opinions.</strong> <code>render</code> takes only a region and a sample count;
+everything else that shapes the render is the stage's <code>RenderSettings</code>, so <code>render_final</code>
+needs no flag to reproduce it. Change them with <code>set_attribute</code> or <code>author_usda</code>.</li>
+<li><strong>Renders are reproducible.</strong> A session render at 16 spp to completion is bit for bit
+the image <code>crust render -i &lt;output&gt; -s 16</code> writes, with the same region.</li>
+<li><strong>The session keeps its 8 latest renders</strong> for <code>snapshot</code>, <code>probe</code>, <code>light_paths</code> and
+<code>diff</code>; a render result lists the ids it evicted.</li>
+<li><strong><code>light_paths</code> inspects the render as it was.</strong> It renders the region again with the
+render's settings and samples, so its pixels are the render's — on the layer that
+render used. It is refused once an edit changed the layer (an <code>undo</code> back to it is
+fine) or a source layer changed on disk, for a render that did not complete, while another render runs, and for a region
+outside the render's or over 100 pixels.</li>
+<li><strong><code>diff</code> compares like with like.</strong> It refuses two renders with different sample counts
+or regions, and a render still running.</li>
+</ul>
+<h2 id="a-look-dev-session">A look-dev session</h2>
+<p>Here is a session on the Cornell box, as the tool calls Claude makes. (Each line is one
+call and the part of its result that matters.)</p>
+<pre data-lang="text" class="language-text "><code class="language-text" data-lang="text">open_session(input=&quot;C:&#x2F;shots&#x2F;cornellbox.usda&quot;, output=&quot;C:&#x2F;shots&#x2F;lookdev&#x2F;cornellbox_lookdev.usda&quot;)
+  → camera &#x2F;scene&#x2F;camera1, 640 × 360, 1 warning (material.fallback_default)
+query(&quot;&#x2F;scene&#x2F;Sky&quot;)
+  → DomeLight, inputs:texture:file = sky_gradient.exr (authored in cornellbox.usda)
+render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait=&quot;done&quot;)
+  → render 1: the crop around the spheres, done
+set_attribute(&quot;&#x2F;scene&#x2F;Sky.inputs:exposure&quot;, -1)
+  → saved, no warning gained
+author_usda(&quot;&quot;&quot;
+  over &quot;scene&quot; {
+      def RectLight &quot;key&quot; {
+          float inputs:intensity = 30
+          float inputs:width = 1
+          float inputs:height = 1
+          double3 xformOp:translate = (0, 3.9, 0)
+          float3 xformOp:rotateXYZ = (-90, 0, 0)
+          uniform token[] xformOpOrder = [&quot;xformOp:translate&quot;, &quot;xformOp:rotateXYZ&quot;]
+      }
+  }&quot;&quot;&quot;)
+  → saved, no warning gained
+render(region=[160, 90, 480, 270], spp=16, budget_s=10, wait=&quot;done&quot;)
+  → render 2: the same crop
+diff(render_a=1, render_b=2)
+  → not identical, relative MSE …
+probe(render_id=2, x=320, y=200)
+  → beauty [r, g, b], prim &#x2F;scene&#x2F;pCube1, material &#x2F;scene&#x2F;Looks&#x2F;initialShadingGroup
+light_paths(render_id=2, region=[315, 195, 325, 205])
+  → summary, groups and the brightest paths: which expression, through which light
+undo()
+  → the key light is gone; the layer is as it was after set_attribute
+render_final()
+  → C:&#x2F;shots&#x2F;lookdev&#x2F;cornellbox_lookdev.exr, …&#x2F;cornellbox_lookdev.png
+</code></pre>
+<p>The session's result is <code>cornellbox_lookdev.usda</code>, a few lines of opinions over the
+Cornell box, and its render. <code>crust render -i cornellbox_lookdev.usda</code> renders it again,
+and any USD tool opens it.</p>
+<h2 id="limits">Limits</h2>
+<ul>
+<li><strong>One session, one client.</strong> The server holds one session at a time, over stdio only.</li>
+<li><strong>Most structural edits import the whole stage again.</strong> A <code>full</code> edit takes seconds on
+a medium stage; each result says how long. Only the edits in the table above are
+applied in place. Decoded textures the scene no longer uses are let go at the next
+<code>full</code> edit.</li>
+<li><strong>A large stage costs more memory than its render.</strong> Between edits the session holds
+the scene it renders, its authoring stage (payloads unloaded) and the textures it
+decoded. A <code>full</code> edit builds the new scene before letting the old one go, so its peak
+is about two scenes; an in-place edit's is not. In-place edits make look-dev cheap, not
+the stage smaller: Moana-scale stages are still out of reach.</li>
+<li><strong><code>probe</code> names the prim the import recorded, not the one you may expect.</strong> It names
+the first surface the camera ray through the pixel's centre meets, before any opacity,
+so a cutout's hole names the surface it cuts. A hit inside a native instance or a
+<code>PointInstancer</code> names the instance or the instancer prim, not the prototype's mesh,
+and the material is null for geometry no Material prim fills (an area light's
+emitter). Once an edit has imported the stage again, a render from before it names
+nothing: render again.</li>
+<li><strong>A schema fallback is not always what renders.</strong> Where crust has its own default for
+an unauthored attribute, the render uses it, not the fallback <code>query</code> shows: a
+DistantLight with no <code>inputs:intensity</code> queries as <code>50000</code> and renders as <code>1</code>, and a
+camera with no <code>verticalAperture</code> queries as <code>15.2908</code> but follows the image's aspect.</li>
+<li><strong>Placement is geometric, not physical.</strong> A drop rests a prim on the surface where its
+vertices meet it: a sharp bump between two vertices can poke through a face, prims
+dropped in one call do not land on each other, and opacity cutouts count as solid. The
+placement is right at the session's frame and subdivision level; an animated parent,
+or a later change to the subdivision, can move the surface away from it. Scattered
+instances stand upright; they are not turned to the surface normal.</li>
+<li><strong>A placed prim's <code>xformOpOrder</code> is the layer's.</strong> The override layer authors the whole
+list, so a later change to the list in a source layer is hidden behind it. <code>undo</code> the
+drop and drop again to pick it up.</li>
+<li><strong><code>render_final</code> blocks the session</strong> until it has written its files.</li>
+</ul>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;help&#x2F;claude-desktop.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;limitations&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Limitations
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

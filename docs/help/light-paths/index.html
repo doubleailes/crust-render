@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Finding the path behind a firefly | Crust Render</title>
+<meta name="description" content="Name the light path that makes a pixel bright with crust light-paths, then see it over the whole frame.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/help/light-paths/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Finding the path behind a firefly">
+  <meta name="twitter:description" content="Name the light path that makes a pixel bright with crust light-paths, then see it over the whole frame.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Finding the path behind a firefly">
+  <meta property="og:description" content="Name the light path that makes a pixel bright with crust light-paths, then see it over the whole frame.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/help/light-paths/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-13T08:00:00+00:00">
+  <meta property="og:site_name" content="Finding the path behind a firefly">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Help",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Light Paths",
+            "item": "https://doubleailes.github.io/crust-render/docs/help/light-paths/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/warnings/">Warnings</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-passes/">Render passes</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/">Diagnosing a render</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/help/light-paths/">Finding the path behind a firefly</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Look-dev with Claude Desktop</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/usdview/">Rendering in usdview</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#from-a-bright-pixel-to-its-path">From a bright pixel to its path</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#1-find-the-pixel">1. Find the pixel</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#2-inspect-the-region">2. Inspect the region</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#3-see-it-over-the-frame">3. See it over the frame</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#what-the-report-holds">What the report holds</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#hints">Hints</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#how-a-path-is-named">How a path is named</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/help/light-paths/#limitations">Limitations</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Finding the path behind a firefly</h1>
+        <p class="lead">A firefly is one sample. <code>crust light-paths</code> re-renders a few pixels exactly as the render did and lists the light paths their samples took — which expression, through which light, from which sample — so the path behind a bright pixel has a name you can act on.</p>
+        <h2 id="from-a-bright-pixel-to-its-path">From a bright pixel to its path</h2>
+<p>The loop has three steps: find the pixel, inspect the region around it, and author the
+path it names as an AOV to see it over the whole frame.</p>
+<h3 id="1-find-the-pixel">1. Find the pixel</h3>
+<p>Open the render in an image viewer and read the coordinates of the bright pixel, from the
+image's top-left corner (as <code>--region</code> and an EXR data window count them). In a
+<a href="https://doubleailes.github.io/crust-render/docs/help/claude-desktop/">Claude Desktop session</a>, <code>probe</code> gives the same: the
+pixel's value, its prim and its material. <a href="https://doubleailes.github.io/crust-render/docs/help/diagnosing-a-render/"><code>crust diagnostic</code></a>
+says <em>whether</em> fireflies matter (its <code>firefly_energy</code> finding); this page is about <em>which
+path</em> they are.</p>
+<h3 id="2-inspect-the-region">2. Inspect the region</h3>
+<p>Ask for a region of at most 100 pixels around it, at the sample count the render used:</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">crust light-paths -i shot.usda -s 256 --region 618,331,628,341
+</code></pre>
+<p>The region is rendered with the render's own settings, so its samples are the frame's:
+every pixel in the report's <code>pixels</code> is the pixel the render wrote, bit for bit, and the
+records are the samples of the firefly you saw, not a lookalike. Two cases change that,
+and the report says so in <code>reproduces_frame_reason</code>: path guiding (it trains on the region
+alone) and adaptive sampling's neighbour hold (a pixel at the region's edge can stop
+earlier than in the frame). Render with <code>crust:adaptiveNeighbourTolerance = -1</code>, or at a
+sample count below the adaptive minimum, when you need the exact samples.</p>
+<p>The Markdown summary opens with one sentence:</p>
+<pre data-lang="text" class="language-text "><code class="language-text" data-lang="text">The top group carries 8% of the region&#x27;s luminance and 98% of its second moment:
+C&lt;RD&#x27;diffuse&#x27;&gt;&lt;RS&#x27;specular&#x27;&gt;L via &#x2F;lights&#x2F;bulb, in 12 of 25600 samples (13610 records in 10 groups).
+</code></pre>
+<p>Read it as: one path — a diffuse bounce off the floor, a mirror ball, then the bulb — takes
+12 samples in 25 600 and holds almost all the variance. That is the firefly: a caustic,
+which light sampling cannot reach through the mirror. Its brightest record has a
+luminance of 56, where the floor's direct light (<code>C&lt;RD'diffuse'&gt;L</code>, 78% of the region's
+light) never exceeds 0.15.</p>
+<h3 id="3-see-it-over-the-frame">3. See it over the frame</h3>
+<p>Every expression in the report is written in crust's
+<a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#light-path-expressions">light path expression</a> grammar, the light named
+by its <code>crust:light:lpeTag</code> when it has one. Pasted into an <code>lpe</code> RenderVar, it routes the
+same paths over the whole frame:</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def RenderVar &quot;caustic&quot;
+{
+    uniform token dataType = &quot;color3f&quot;
+    uniform string sourceName = &quot;C&lt;RD&#x27;diffuse&#x27;&gt;&lt;RS&#x27;specular&#x27;&gt;L&quot;
+    uniform token sourceType = &quot;lpe&quot;
+}
+</code></pre>
+<p>Render with it and look at the channel: where else the path lands, and how much of the
+image it is.</p>
+<h2 id="what-the-report-holds">What the report holds</h2>
+<p><code>--json PATH</code> (or <code>-</code> for stdout) writes <code>crust-light-paths/1</code>. The order is the order to
+read it in:</p>
+<ul>
+<li><strong><code>summary</code></strong>: the sentence above.</li>
+<li><strong><code>groups</code></strong>, best first by <code>second_moment_share</code>, then <code>luma_share</code>. Each has its
+<code>key</code>, <code>expression</code> and <code>light</code>; <code>luma_share</code> (its share of the region's light, as the
+pixels average it) and <code>luma_share_clamped</code> (the same after the
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#indirect-clamp">indirect clamp</a>, over the same total);
+<code>second_moment_share</code> (its share of the sum of every sample's squared luminance: the
+noise); <code>hit_rate</code> (the fraction of samples that took it); <code>max_luma</code>; and
+<code>top_records</code>, its paths among <code>records</code>. <code>--group-by</code> picks the key: <code>expr+light</code>
+(default), <code>expr</code>, <code>light</code> or <code>none</code>.</li>
+<li><strong><code>records</code></strong>, the <code>--top</code> brightest light paths (32 by default, at most 1000): <code>luma</code>,
+<code>contribution</code> and <code>contribution_clamped</code> (RGB), <code>expression</code>, <code>lobe_split</code> (each
+vertex's share per lobe), <code>label_ambiguous</code>, <code>light</code>, <code>pixel</code>, <code>coordinates</code> (where in
+the pixel the sample was taken), <code>sample</code>, <code>depth</code>, <code>camera</code>, and its <code>group</code>.</li>
+<li><strong><code>truncated</code></strong>: how many paths were kept, of how many.</li>
+<li><strong><code>pixels</code></strong>: each pixel's beauty and sample count.</li>
+<li><strong><code>consistency</code></strong>: how exactly the paths add back up to the pixels (<code>max_relative_error</code>)
+and to each sample (<code>max_sample_relative_error</code>) — about 1e-7, rounding. A path is one
+term of the render's own estimate, so they partition it: nothing is counted twice.</li>
+<li><strong><code>clamp_removed_share</code></strong>, <strong><code>ambiguous_luma_share</code></strong>, and <strong><code>hints</code></strong>.</li>
+</ul>
+<h3 id="hints">Hints</h3>
+<p>Each hint is a code, the group it is about, the rule that fired it and a next step:</p>
+<table><thead><tr><th>code</th><th>fires when</th><th>means</th></tr></thead><tbody>
+<tr><td><code>rare_bright_path</code></td><td>a group's <code>hit_rate</code> &lt; 1e-3 and <code>second_moment_share</code> &gt; 0.5</td><td>a firefly: few samples, most of the noise</td></tr>
+<tr><td><code>single_path_dominates</code></td><td>a group's <code>luma_share</code> &gt; 0.8</td><td>the region's light is this one path</td></tr>
+<tr><td><code>clamp_hides_path</code></td><td>a group's <code>luma_share_clamped</code> &lt; half its <code>luma_share</code></td><td>the clamp removes most of the path: inspect with <code>--indirect-clamp 0</code> to see what it carries</td></tr>
+<tr><td><code>labels_ambiguous</code></td><td><code>ambiguous_luma_share</code> &gt; 0.2</td><td>see below</td></tr>
+</tbody></table>
+<p>A hint never changes a setting for you; the clamp and the sample count trade the picture
+for the noise, and are yours to decide.</p>
+<h2 id="how-a-path-is-named">How a path is named</h2>
+<p>A path's expression names, at each vertex, the lobe carrying most of that vertex's light
+toward the path's direction: crust's materials sample one lobe at a time, but every lobe
+contributes to every direction, so the lobe that was drawn is often not the one that
+carried the light. Each vertex's split between its lobes is listed in <code>lobe_split</code>, and a
+path whose named lobe carries less than 60% somewhere is <code>label_ambiguous</code>.
+<code>ambiguous_luma_share</code> says how much of the region's light that is. Grouping by expression
+is exact for the rest; for the exact split of an ambiguous one, author one expression per
+lobe — the AOVs split every sample by lobe.</p>
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li>At most 100 pixels per inspection, and one camera.</li>
+<li><code>prims</code> is <code>null</code> for every path, and <code>--group-by expr+prims+light</code> is refused, until
+crust can resolve a hit to its prim.</li>
+<li>Under path guiding, and under adaptive sampling's neighbour hold, the region's samples
+are the scene's paths but not the frame's samples.</li>
+<li>The hint thresholds are first guesses, to be tuned on real scenes.</li>
+</ul>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;help&#x2F;light-paths.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;limitations&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Limitations
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>
