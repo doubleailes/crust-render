@@ -90,7 +90,8 @@ can:
 | change a renderer setting | the same |
 | change a light's inputs (intensity, colour, texture…) | rebuilds the lights in place |
 | change a material's shader inputs | rebuilds the materials in place |
-| move, add, remove or hide a prim, change topology or a binding | imports the scene again |
+| move a mesh, sphere or light, reshape a mesh placed once, resize an area light | places that geometry again and rebuilds the top-level BVH |
+| add, remove or hide a prim, change a binding, move anything else | imports the scene again |
 | move the time slider | rewrites both layers at the new frame and imports them |
 
 After every restart, the viewport waits for the first full pass (every pixel one
